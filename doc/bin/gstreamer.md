@@ -171,10 +171,14 @@ gets EOS once its track ends. A broadcast that ends or loses its publisher holds
 its pads without EOS until it is announced again, so the pipeline does not end
 on its own. Losing the relay connection also holds the pads: `moqsrc` redials
 without a retry deadline and resumes when the broadcast returns. A first connect
-that reaches no relay posts an error rather than retrying. A refused
-connection, refused path or catalog, malformed input or catalog, or a track its
-publisher ended with an application code posts an error. A session the relay
-closes is redialed, whatever its code. Properties: `url`,
+that reaches no relay posts an error rather than retrying, as does a first
+connection the relay refuses, or a session it closes before the connection has
+stayed up for a second. Once playback has begun, a session the relay closes is
+redialed, whatever its code, and a refused redial is retried like any other
+failure. A refused path or catalog, malformed input or catalog, or a catalog its
+publisher ended with an application code posts an error. A media track its
+publisher ended with an application code logs a warning and leaves its pad idle;
+it posts no error. Properties: `url`,
 `broadcast`, `max-delay`, `connect-version` (comma-separated protocol versions to offer, most
 preferred first; every stable version by default), `tls-disable-verify`,
 `quic-idle-timeout`, `quic-keep-alive`, and `quic-keylog`.

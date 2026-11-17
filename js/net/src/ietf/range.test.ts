@@ -91,7 +91,6 @@ function fixture(version: IetfVersion) {
 							first: previousGroup === undefined && object === 0,
 							previousGroup: object === 0 ? previousGroup : undefined,
 						},
-						undefined,
 						version,
 					);
 				previousGroup = group;
@@ -236,7 +235,6 @@ for (const version of VERSIONS) {
 			await new FetchFrame({ payload: new Uint8Array([42]), priority: 0 }).encode(
 				writer,
 				{ group: 1n, object: 0, first: true },
-				undefined,
 				version,
 			);
 		});
@@ -268,7 +266,6 @@ for (const version of VERSIONS) {
 			await new FetchFrame({ payload: new Uint8Array([42]), priority: 0 }).encode(
 				writer,
 				{ group: 1n, object: 0, first: true },
-				undefined,
 				version,
 			);
 		});
@@ -443,7 +440,6 @@ for (const version of VERSIONS) {
 				await new FetchFrame({ payload: new Uint8Array([value]), priority: 0 }).encode(
 					writer,
 					{ group: 1n, object, first: object === 0 },
-					undefined,
 					version,
 				);
 			await new FetchEndOfRange({ reason: EndOfRange.NonExistent, group: 1n, object: 5n }).encode(

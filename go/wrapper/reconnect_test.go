@@ -82,9 +82,8 @@ func dialWorker(t *testing.T, ctx context.Context, url string) *moq.Client {
 	client, err := moq.Dial(ctx, url, moq.ClientConfig{
 		TLS: moq.ClientTLS{Insecure: true},
 		Backoff: moq.Backoff{
-			Initial: 50 * time.Millisecond,
-			Max:     time.Second,
-			Timeout: moq.RetryForever,
+			Initial: ptr(50 * time.Millisecond),
+			Max:     ptr(time.Second),
 		},
 	})
 	if err != nil {
@@ -360,7 +359,7 @@ func TestFirstDialState(t *testing.T) {
 		Timeout:   ptr(100 * time.Millisecond),
 		TLS:       moq.ClientTLS{Insecure: true},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
-		Backoff:   moq.Backoff{Initial: 50 * time.Millisecond, Max: 50 * time.Millisecond, Timeout: moq.RetryForever},
+		Backoff:   moq.Backoff{Initial: ptr(50 * time.Millisecond), Max: ptr(50 * time.Millisecond)},
 	})
 	if err != nil {
 		t.Fatal(err)

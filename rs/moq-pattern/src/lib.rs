@@ -15,6 +15,11 @@
 //! - `lit*lit`, with one `*` matching bytes inside one segment;
 //! - `**`, matching zero or more complete segments, at most once per pattern.
 //!
+//! Segments are split as [`parts`] splits a path: a `\` escapes the `\` or `/` after it,
+//! so `a\/b` is one literal segment holding a `/`, and any other `\` is refused. A literal
+//! matches the segment spelled the same way, which is how a grant names a moq-transport
+//! namespace field holding a `/`. There is no escape for `*`.
+//!
 //! Patterns are exact: `foo` matches only `foo`, `foo/**` matches its subtree including
 //! `foo`, `**` matches every path, and the empty pattern matches only the current root.
 //! Parse rejects leading, trailing, or repeated `/`, more than one `*` in a segment,
@@ -38,6 +43,7 @@
 //! namespace fields positionally: exact, prefix, or suffix per field, with a trailing
 //! `nil` for exact depth. Without `nil`, longer namespaces that start with the matching
 //! fields are in scope.
+//! A pattern segment is one field, compared by its [`unescape`]d content.
 //!
 //! That common subset is:
 //!
@@ -65,8 +71,10 @@
 #![warn(missing_docs)]
 
 mod index;
+mod parts;
 mod pattern;
 mod patterns;
 
+pub use parts::{Parts, escape, parts, unescape};
 pub use pattern::{IntersectionError, InvalidPattern, Pattern, Segment, Specificity};
 pub use patterns::Patterns;

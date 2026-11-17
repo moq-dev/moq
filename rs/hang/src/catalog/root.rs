@@ -1,5 +1,6 @@
 //! This module contains the structs and functions for the MoQ catalog format
 use crate::Result;
+use crate::catalog::skipped::Probe;
 use crate::catalog::{Audio, Binary, Json, PRIORITY, Text, Video};
 use serde::de::DeserializeOwned;
 use std::str::FromStr;
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `media`
+/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `sync`
 /// section (the broadcast's one wall-clock mapping and join interval), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
@@ -43,10 +44,10 @@ pub struct Catalog<E = ()> {
 	/// wire when it has no renditions.
 	pub audio: Audio,
 
-	/// What applies to every audio and video track: the broadcast's clock and join interval.
+	/// The broadcast's timeline: its clock and join interval.
 	///
-	/// Omitted from the wire when it holds nothing. See [`Media`](crate::catalog::Media).
-	pub media: crate::catalog::Media,
+	/// Omitted from the wire when it holds nothing. See [`Timeline`](crate::catalog::Timeline).
+	pub sync: crate::catalog::Timeline,
 
 	/// Text (caption/subtitle) track information with multiple renditions.
 	///
@@ -77,23 +78,27 @@ pub struct Catalog<E = ()> {
 
 	/// Whole broadcasts listed for explicit, lazy selection, keyed by include ID.
 	///
-	/// Each shares this catalog's PTS timeline and root settings, including `media.clock` and
-	/// `media.join.interval`; its own settings are ignored. Listing one subscribes to nothing;
+	/// Each shares this catalog's PTS timeline and root settings, including `sync.clock` and
+	/// `sync.interval`; its own settings are ignored. Listing one subscribes to nothing;
 	/// see [`Include`](crate::catalog::Include). Omitted from the wire when empty.
 	pub include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
-	/// The root `version` is reserved: serializing computes it from the base sections, and fails if
-	/// the extension names a member `version`.
+	/// The root `version` is reserved: serializing fails if the extension names a member `version`.
 	pub ext: E,
+
+	/// The entries decoding skipped because a newer moq-hang draft defines them.
+	///
+	/// Filled when a catalog is decoded and never written.
+	pub skipped: crate::catalog::Skipped,
 }
 
-/// The newest moq-hang draft this crate reads; a catalog whose `version` is higher is refused.
-const VERSION: u64 = 4;
-
-/// The wire shape of [`Catalog`]: its sections plus the root `version`, the oldest moq-hang draft
-/// that reads the catalog correctly. An absent `version` means 3, the draft before the field.
+/// The wire shape of [`Catalog`]: its sections, without the root `version`.
+///
+/// The root `version` is the oldest moq-hang draft that reads the catalog correctly, absent while
+/// that is 3. [`Probe`] checks it before any section is decoded. No moq-hang-04 field reshapes the
+/// root, so this crate never writes it; a field one entry uses raises that entry's `version`.
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize)]
@@ -101,10 +106,6 @@ const VERSION: u64 = 4;
 #[serde(remote = "Catalog", rename_all = "camelCase")]
 #[serde(bound(serialize = "E: Serialize", deserialize = "E: DeserializeOwned + Default"))]
 struct Wire<E> {
-	// Computed rather than stored, so a republished catalog never claims less than it uses.
-	#[serde(default, getter = "Catalog::min_version", deserialize_with = "deserialize_version")]
-	version: Option<u64>,
-
 	#[serde(
 		default,
 		skip_serializing_if = "Video::is_empty",
@@ -121,10 +122,10 @@ struct Wire<E> {
 
 	#[serde(
 		default,
-		skip_serializing_if = "crate::catalog::Media::is_empty",
+		skip_serializing_if = "crate::catalog::Timeline::is_empty",
 		deserialize_with = "crate::catalog::deserialize_object"
 	)]
-	media: crate::catalog::Media,
+	sync: crate::catalog::Timeline,
 
 	#[serde(
 		default,
@@ -159,16 +160,21 @@ struct Wire<E> {
 	#[serde(
 		default,
 		skip_serializing_if = "std::collections::BTreeMap::is_empty",
-		deserialize_with = "crate::catalog::deserialize_entries"
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
 	)]
 	include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
 	#[serde(flatten, serialize_with = "serialize_ext")]
 	ext: E,
+
+	// Filled from `Probe` by `Catalog::from_value`.
+	#[serde(skip)]
+	skipped: crate::catalog::Skipped,
 }
 
-/// Refuse an extension member named `version`: flattened beside the computed one, it would emit a
-/// duplicate key that a reader resolves to whichever comes last.
+/// Refuse an extension member named `version`: the root `version` is reserved for this
+/// specification, and a reader would refuse a catalog whose extension claimed a newer draft.
 fn serialize_ext<E: Serialize, S: serde::Serializer>(ext: &E, serializer: S) -> std::result::Result<S::Ok, S::Error> {
 	use serde::ser::Error;
 
@@ -187,10 +193,9 @@ fn serialize_ext<E: Serialize, S: serde::Serializer>(ext: &E, serializer: S) -> 
 impl<E> From<Wire<E>> for Catalog<E> {
 	fn from(wire: Wire<E>) -> Self {
 		let Wire {
-			version: _,
 			video,
 			audio,
-			media,
+			sync,
 			text,
 			json,
 			binary,
@@ -199,11 +204,12 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			echo,
 			include,
 			ext,
+			skipped,
 		} = wire;
 		Self {
 			video,
 			audio,
-			media,
+			sync,
 			text,
 			json,
 			binary,
@@ -212,6 +218,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			echo,
 			include,
 			ext,
+			skipped,
 		}
 	}
 }
@@ -223,19 +230,81 @@ impl<E: Serialize> Serialize for Catalog<E> {
 }
 
 impl<'de, E: DeserializeOwned + Default> Deserialize<'de> for Catalog<E> {
+	/// Buffered, so every `version` is read before any section, which a newer draft may have
+	/// reshaped. An entry needing a newer draft is skipped and listed in [`skipped`](Self::skipped).
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-		Wire::deserialize(deserializer)
+		Self::from_value(Strict::deserialize(deserializer)?.0).map_err(serde::de::Error::custom)
 	}
 }
 
-/// Refuse a `version` above [`VERSION`]: the newer draft changed something this reader would
-/// misread, not merely added something it would miss.
-fn deserialize_version<'de, D: serde::Deserializer<'de>>(
-	deserializer: D,
-) -> std::result::Result<Option<u64>, D::Error> {
-	let version = Some(u64::deserialize(deserializer)?);
-	check_version(version).map_err(serde::de::Error::custom)?;
-	Ok(version)
+/// A JSON value that refuses an object repeating a member, which a [`Value`](serde_json::Value)
+/// would silently collapse to its last. Without it, `{"version":5,"version":3}` would read as 3.
+struct Strict(serde_json::Value);
+
+impl<'de> Deserialize<'de> for Strict {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+		struct Visitor;
+
+		impl<'de> serde::de::Visitor<'de> for Visitor {
+			type Value = serde_json::Value;
+
+			fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+				f.write_str("any JSON value")
+			}
+
+			fn visit_bool<E>(self, v: bool) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_f64<E>(self, v: f64) -> std::result::Result<Self::Value, E> {
+				Ok(serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, serde_json::Value::Number))
+			}
+
+			fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_string<E>(self, v: String) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+				Ok(serde_json::Value::Null)
+			}
+
+			fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+				Ok(serde_json::Value::Null)
+			}
+
+			fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+				let mut items = Vec::new();
+				while let Some(Strict(item)) = seq.next_element()? {
+					items.push(item);
+				}
+				Ok(items.into())
+			}
+
+			fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+				let mut object = serde_json::Map::new();
+				while let Some((key, Strict(value))) = map.next_entry::<String, Strict>()? {
+					if object.insert(key.clone(), value).is_some() {
+						return Err(serde::de::Error::custom(format!("duplicate member `{key}`")));
+					}
+				}
+				Ok(object.into())
+			}
+		}
+
+		deserializer.deserialize_any(Visitor).map(Self)
+	}
 }
 
 impl Catalog<()> {
@@ -246,13 +315,14 @@ impl Catalog<()> {
 	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	///
-	/// Keeps moq-net's default zero max age rather than the media one: the catalog is
-	/// snapshot mode, so a join reads the newest snapshot, which never goes stale.
-	/// Timed in milliseconds, so snapshots share the broadcast clock with media, and
+	/// Timed in milliseconds, so snapshots share the broadcast clock with media, fresh for the media's
+	/// [`MAX_AGE`](crate::container::MAX_AGE), so a reader playing behind the live edge still
+	/// receives each update it holds until its timestamp, and
 	/// [compressed](moq_net::track::Info::compression), since catalog JSON is small and repetitive.
 	pub fn default_track_info() -> moq_net::track::Info {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(crate::container::MAX_AGE)
 			.with_priority(PRIORITY.catalog)
 			.with_compression(moq_net::track::Compression::Deflate)
 	}
@@ -289,32 +359,12 @@ impl<E> Catalog<E> {
 		Ok(())
 	}
 
-	/// The oldest moq-hang draft that reads this catalog correctly, or `None` while that is 3.
-	///
-	/// Only a field an older reader would misread raises it; one it would merely ignore does not.
-	fn min_version(&self) -> Option<u64> {
-		use crate::catalog::Reference;
-
-		fn renamed<'a, C: Reference + 'a>(entries: impl IntoIterator<Item = (&'a String, &'a C)>) -> bool {
-			entries.into_iter().any(|(id, config)| config.track(id) != id)
-		}
-
-		// moq-hang-04: a reader that ignores `track` subscribes to the ID, a different track.
-		let renamed = renamed(&self.video.renditions)
-			|| renamed(&self.audio.renditions)
-			|| renamed(&self.text.renditions)
-			|| renamed(&self.json.tracks)
-			|| renamed(&self.binary.tracks);
-
-		renamed.then_some(4)
-	}
-
 	/// Copy the media sections into a catalog with no application extension.
 	pub fn without_ext(&self) -> Catalog<()> {
 		Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
-			media: self.media,
+			sync: self.sync,
 			text: self.text.clone(),
 			..Default::default()
 		}
@@ -334,10 +384,16 @@ impl<E: DeserializeOwned + Default> FromStr for Catalog<E> {
 }
 
 impl<E: DeserializeOwned + Default> Catalog<E> {
-	/// Subscribe to catalog updates on a broadcast.
+	/// Subscribe to catalog updates on a broadcast, reading only the newest.
+	///
+	/// For a reader that applies each update on arrival; one that holds updates until their
+	/// timestamp builds a [`Consumer`](super::Consumer) with its playout delay.
 	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
-		Ok(super::Consumer::new(broadcast.track(Catalog::DEFAULT_NAME)?))
+		Ok(super::Consumer::new(
+			broadcast.track(Catalog::DEFAULT_NAME)?,
+			std::time::Duration::ZERO,
+		))
 	}
 
 	/// Parse a catalog from a slice of bytes.
@@ -345,10 +401,10 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
 	/// needs a newer moq-hang draft than this crate reads.
 	pub fn from_slice(v: &[u8]) -> Result<Self> {
-		// Decoded straight from the bytes rather than via a `Value`, which would keep only the
-		// last of two `version` members instead of refusing them.
-		check_version(serde_json::from_slice::<Probe>(v)?.version)?;
-		Ok(serde_json::from_slice(v)?)
+		// Probed straight from the bytes first, so an unsupported root `version` is reported before
+		// any other fault; `Strict` then refuses a repeated member, which a `Value` would collapse.
+		serde_json::from_slice::<Probe>(v)?.check()?;
+		Self::from_value(serde_json::from_slice::<Strict>(v)?.0)
 	}
 
 	/// Parse a catalog from a reader.
@@ -364,24 +420,19 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Parse a catalog from a JSON value.
 	///
 	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
-	/// needs a newer moq-hang draft than this crate reads.
-	pub(crate) fn from_value(value: serde_json::Value) -> Result<Self> {
-		check_version(value.get("version").and_then(serde_json::Value::as_u64))?;
-		Ok(serde_json::from_value(value)?)
-	}
-}
-
-/// Just the root `version`, read before any section since the newer draft may have reshaped one.
-#[derive(Deserialize)]
-struct Probe {
-	#[serde(default)]
-	version: Option<u64>,
-}
-
-fn check_version(version: Option<u64>) -> Result<()> {
-	match version {
-		Some(version) if version > VERSION => Err(crate::Error::UnsupportedVersion(version)),
-		_ => Ok(()),
+	/// needs a newer moq-hang draft than this crate reads. Every `version` is read before any
+	/// section, which the newer draft may have reshaped; an entry needing a newer draft is
+	/// skipped and reported in [`skipped`](Self::skipped).
+	pub(crate) fn from_value(mut value: serde_json::Value) -> Result<Self> {
+		let probe = Probe::deserialize(&value)?;
+		probe.check()?;
+		// Checked, so taken out of what an extension would otherwise receive.
+		if let Some(root) = value.as_object_mut() {
+			root.remove("version");
+		}
+		let mut catalog: Self = Wire::deserialize(value)?;
+		catalog.skipped = probe.skipped;
+		Ok(catalog)
 	}
 }
 
@@ -428,10 +479,13 @@ mod test {
 		binary: Vec<String>,
 		#[serde(default)]
 		include: Vec<String>,
+		#[serde(default)]
+		skipped: BTreeMap<String, BTreeMap<String, u64>>,
 	}
 
 	/// The corpus `js/hang` also loads: both languages accept the same catalogs and keep the same
-	/// rendition, data track, and include IDs, so a divergence fails CI on whichever side drifts.
+	/// rendition, data track, and include IDs, and skip the same newer entries, so a divergence
+	/// fails CI on whichever side drifts.
 	#[test]
 	fn shared_parity_fixtures() {
 		let cases: Vec<ParityCase> = serde_json::from_str(include_str!("../../fixtures/catalog-parity.json")).unwrap();
@@ -465,6 +519,22 @@ mod test {
 							"{}: kept video {video:?} audio {audio:?} text {text:?} json {json:?} binary {binary:?} include {include:?}",
 							case.name
 						));
+					}
+					let skipped = &catalog.skipped;
+					let skipped: BTreeMap<String, BTreeMap<String, u64>> = [
+						("video", &skipped.video),
+						("audio", &skipped.audio),
+						("text", &skipped.text),
+						("json", &skipped.json),
+						("binary", &skipped.binary),
+						("include", &skipped.include),
+					]
+					.into_iter()
+					.filter(|(_, ids)| !ids.is_empty())
+					.map(|(section, ids)| (section.to_string(), ids.clone()))
+					.collect();
+					if skipped != case.skipped {
+						failures.push(format!("{}: skipped {skipped:?}", case.name));
 					}
 				}
 			}
@@ -1056,27 +1126,27 @@ mod test {
 	}
 
 	#[test]
-	fn media_roundtrips_at_the_root() {
+	fn sync_roundtrips_at_the_root() {
 		let clock =
 			crate::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
 		let mut catalog = Catalog::<()>::default();
-		catalog.media.clock = Some(clock);
-		catalog.media.join = crate::catalog::Join::new(std::time::Duration::from_secs(2));
+		catalog.sync.clock = Some(clock);
+		catalog.sync.interval = Some(std::time::Duration::from_secs(2));
 
 		let json = catalog.to_json().expect("failed to encode");
 		assert_eq!(
 			json,
-			r#"{"media":{"clock":{"wall":1751846400000000,"timescale":1000000},"join":{"interval":2000}}}"#
+			r#"{"sync":{"clock":{"wall":1751846400000000,"timescale":1000000},"interval":2000}}"#
 		);
 		assert_eq!(Catalog::<()>::from_str(&json).expect("failed to decode"), catalog);
 	}
 
-	/// The clock moved under `media`, and records are gone: a root `clock` and a rendition `hls`
-	/// field are someone else's keys, ignored rather than read.
+	/// Retired shapes are someone else's keys, ignored rather than read: the root `clock` and the
+	/// `media` section that each held the clock before `sync`, and a rendition `hls` record.
 	#[test]
-	fn a_retired_root_clock_and_hls_field_are_ignored() {
+	fn a_retired_clock_media_and_hls_field_are_ignored() {
 		let rendition = serde_json::json!({"codec": "avc1.64001f", "container": {"kind": "legacy"}});
-		let media =
+		let plain =
 			Catalog::<()>::from_str(&serde_json::json!({"video": {"renditions": {"video": rendition}}}).to_string())
 				.unwrap();
 		let mut retired = rendition.clone();
@@ -1084,10 +1154,12 @@ mod test {
 		let json = serde_json::json!({
 			"video": {"renditions": {"video": retired}},
 			"clock": {"wall": 1000, "timescale": 1000000},
+			"media": {"clock": {"wall": 1000}, "join": {"interval": 2000}},
 		});
 		let catalog = Catalog::<()>::from_str(&json.to_string()).expect("retired fields must not reject media");
-		assert_eq!(catalog, media);
-		assert_eq!(catalog.to_json().unwrap(), media.to_json().unwrap());
+		assert_eq!(catalog, plain);
+		assert_eq!(catalog.sync, crate::catalog::Timeline::default());
+		assert_eq!(catalog.to_json().unwrap(), plain.to_json().unwrap());
 	}
 
 	/// A section with the wrong shape refuses the catalog rather than reading as absent. The shared
@@ -1118,14 +1190,14 @@ mod test {
 
 	#[test]
 	fn packaged_clock_fixture_decodes() {
-		// The canonical shape: the clock and join interval under `media`. A reader maps media
+		// The canonical shape: the clock and join interval under `sync`. A reader maps media
 		// timestamps through the clock after timescale conversion.
 		let json = include_str!("../../fixtures/catalog-clock.json");
 		let catalog = Catalog::<()>::from_str(json).expect("the packaged fixture must decode");
 
-		let clock = catalog.media.clock.expect("the fixture carries a clock");
+		let clock = catalog.sync.clock.expect("the fixture carries a clock");
 		assert_eq!(clock.wall.scale().map(moq_net::Timescale::as_u64), Some(1_000_000));
-		assert_eq!(catalog.media.interval(), Some(std::time::Duration::from_secs(2)));
+		assert_eq!(catalog.sync.interval, Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.
 		let expected = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
@@ -1394,7 +1466,17 @@ mod test {
 			let err = Catalog::<()>::from_str(json).unwrap_err();
 			assert!(err.to_string().contains("duplicate field `version`"), "{json}: {err}");
 			assert!(Catalog::<()>::from_reader(json.as_bytes()).is_err(), "{json}");
+			// So does plain serde, at the root and in an entry.
+			assert!(serde_json::from_str::<Catalog>(json).is_err(), "{json}");
 		}
+		let entry = r#"{"video":{"renditions":{"hd":{"version":5,"version":3,"codec":"avc1.64001f"}}}}"#;
+		assert!(Catalog::<()>::from_str(entry).is_err(), "{entry}");
+		assert!(serde_json::from_str::<Catalog>(entry).is_err(), "{entry}");
+
+		// Any repeated member, not only `version`.
+		let repeated = r#"{"video":{"renditions":{"hd":{"codec":"avc1.64001f","codec":"vp8"}}}}"#;
+		assert!(Catalog::<()>::from_str(repeated).is_err(), "{repeated}");
+		assert!(serde_json::from_str::<Catalog>(repeated).is_err(), "{repeated}");
 	}
 
 	#[test]
@@ -1448,44 +1530,72 @@ mod test {
 		assert_eq!(ok.to_json().unwrap(), r#"{"scte35":{}}"#);
 	}
 
-	/// Only a field an older reader would misread raises the version; one it would merely ignore
-	/// leaves the catalog readable by moq-hang-03.
+	fn h264() -> VideoConfig {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x64,
+			constraints: 0x00,
+			level: 0x1f,
+			inline: false,
+		});
+		config.container = Container::Legacy;
+		config
+	}
+
+	/// Only a field an older reader would misread raises an entry's version; one it would merely
+	/// ignore leaves the entry readable by moq-hang-03. No moq-hang-04 field raises the root's.
 	#[test]
 	fn the_version_is_written_only_when_needed() {
-		let rendition = || {
-			let mut config = VideoConfig::new(H264 {
-				profile: 0x64,
-				constraints: 0x00,
-				level: 0x1f,
-				inline: false,
-			});
-			config.container = Container::Legacy;
-			config
+		let versions = |catalog: &Catalog| {
+			let value = serde_json::to_value(catalog).unwrap();
+			assert_eq!(value.get("version"), None, "the root version is never written");
+			let mut versions = BTreeMap::new();
+			for (section, map) in [
+				("video", "/video/renditions"),
+				("audio", "/audio/renditions"),
+				("json", "/json/tracks"),
+				("include", "/include"),
+			] {
+				for (id, entry) in value.pointer(map).and_then(|v| v.as_object()).into_iter().flatten() {
+					if let Some(version) = entry.get("version") {
+						versions.insert(format!("{section}.{id}"), version.as_u64().unwrap());
+					}
+				}
+			}
+			versions
 		};
-		let version = |catalog: &Catalog| serde_json::to_value(catalog).unwrap().get("version").cloned();
 
 		let mut catalog = Catalog::<()>::default();
-		catalog.video.renditions.insert("hd".into(), rendition());
+		catalog.video.renditions.insert("hd".into(), h264());
 		let mut audio = AudioConfig::new(Opus, 48_000, 2);
 		audio.warmup = Some(std::time::Duration::from_millis(80));
 		catalog.audio.renditions.insert("en".into(), audio);
-		assert_eq!(version(&catalog), None, "an older reader still plays audio warmup");
+		catalog.include.insert(
+			"extra".into(),
+			crate::catalog::Include::new(moq_net::path::Relative::new("../extra").unwrap()),
+		);
+		assert_eq!(
+			versions(&catalog),
+			BTreeMap::new(),
+			"an older reader still plays audio warmup"
+		);
 
 		// A `track` naming the ID is what an older reader subscribes to anyway.
 		catalog.video.renditions.get_mut("hd").unwrap().track = Some("hd".into());
-		assert_eq!(version(&catalog), None);
+		assert_eq!(versions(&catalog), BTreeMap::new());
 
 		catalog.video.renditions.get_mut("hd").unwrap().track = Some("video".into());
-		assert_eq!(version(&catalog), Some(4.into()));
+		assert_eq!(versions(&catalog), BTreeMap::from([("video.hd".into(), 4)]));
 		let json = catalog.to_json().unwrap();
-		assert!(json.starts_with(r#"{"version":4,"#), "{json}");
+		assert!(json.contains(r#""hd":{"version":4,"#), "{json}");
 		assert_eq!(Catalog::<()>::from_str(&json).unwrap(), catalog);
 
-		let mut data = Catalog::<()>::default();
 		let mut chat = JsonConfig::new(Mode::Stream);
 		chat.track = Some("chat.json".into());
-		data.json.insert("chat", chat).unwrap();
-		assert_eq!(version(&data), Some(4.into()));
+		catalog.json.insert("chat", chat).unwrap();
+		assert_eq!(
+			versions(&catalog),
+			BTreeMap::from([("video.hd".into(), 4), ("json.chat".into(), 4)])
+		);
 	}
 
 	/// moq-hang-04 defines `warmup` for audio only, so a video rendition's is an unknown field: read
@@ -1501,11 +1611,117 @@ mod test {
 		);
 	}
 
-	/// The version is computed, never carried: republishing a catalog that claimed more than it
+	/// Versions are computed, never carried: republishing a catalog that claimed more than it
 	/// uses writes what it actually needs.
 	#[test]
 	fn a_republish_recomputes_the_version() {
-		let catalog = Catalog::<()>::from_str(r#"{"version":4}"#).unwrap();
-		assert_eq!(catalog.to_json().unwrap(), "{}");
+		let json = r#"{"version":4,"video":{"renditions":{"hd":{"version":4,"codec":"avc1.64001f"}}},
+			"json":{"tracks":{"chat":{"version":4,"mode":"stream"}}}}"#;
+		let catalog = Catalog::<()>::from_str(json).unwrap();
+		assert!(
+			catalog.json.tracks["chat"].extra.is_empty(),
+			"the entry version is not an extension"
+		);
+		assert!(!catalog.to_json().unwrap().contains("version"));
+	}
+
+	/// An entry a newer draft defines is skipped and reported, even one this reader would call
+	/// malformed, while the rest of the catalog plays.
+	#[test]
+	fn a_newer_entry_is_skipped() {
+		let json = r#"{
+			"video": {"renditions": {
+				"compat": {"codec": "avc1.64001f"},
+				"next": {"version": 5, "codec": 42}
+			}},
+			"audio": {"renditions": {"next": {"version": 6}}},
+			"text": {"renditions": {"next": {"version": 5}}},
+			"json": {"tracks": {"next": {"version": 5}}},
+			"binary": {"tracks": {"next": {"version": 5, "mode": []}}},
+			"include": {"next": {"version": 5, "broadcast": 7}}
+		}"#;
+
+		let check = |catalog: Catalog| {
+			assert_eq!(catalog.video.renditions.keys().collect::<Vec<_>>(), ["compat"]);
+			assert!(catalog.audio.is_empty() && catalog.text.is_empty() && catalog.include.is_empty());
+			assert!(catalog.json.is_empty() && catalog.binary.is_empty());
+
+			let next = |version| BTreeMap::from([("next".to_string(), version)]);
+			assert_eq!(catalog.skipped.video, next(5));
+			assert_eq!(catalog.skipped.audio, next(6));
+			assert_eq!(catalog.skipped.text, next(5));
+			assert_eq!(catalog.skipped.json, next(5));
+			assert_eq!(catalog.skipped.binary, next(5));
+			assert_eq!(catalog.skipped.include, next(5));
+			assert_eq!(catalog.skipped.version(), Some(6));
+
+			// Never written, so a republish lists only what this reader read.
+			let republished = Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap();
+			assert!(republished.skipped.is_empty());
+			assert_eq!(republished.skipped.version(), None);
+		};
+		check(Catalog::from_str(json).unwrap());
+		check(serde_json::from_str(json).unwrap());
+
+		// The root version still refuses the whole catalog.
+		let root = json.replacen('{', r#"{"version":5,"#, 1);
+		assert!(matches!(
+			Catalog::<()>::from_str(&root),
+			Err(crate::Error::UnsupportedVersion(5))
+		));
+
+		// Even when the newer draft reshaped an entry's own `version`, wherever the root's sits.
+		for entry in [r#"{"version":"new-shape"}"#, r#"{"version":5,"version":3}"#] {
+			for json in [
+				format!(r#"{{"version":5,"video":{{"renditions":{{"hd":{entry}}}}}}}"#),
+				format!(r#"{{"video":{{"renditions":{{"hd":{entry}}}}},"version":5}}"#),
+			] {
+				assert!(
+					matches!(Catalog::<()>::from_str(&json), Err(crate::Error::UnsupportedVersion(5))),
+					"{json}"
+				);
+			}
+		}
+	}
+
+	/// An entry readable by this draft is read whatever version it claims.
+	#[test]
+	fn a_supported_entry_version_is_read() {
+		for version in [0, 3, 4] {
+			let json =
+				format!(r#"{{"video":{{"renditions":{{"hd":{{"version":{version},"codec":"avc1.64001f"}}}}}}}}"#);
+			let catalog = Catalog::<()>::from_str(&json).unwrap();
+			assert!(catalog.video.renditions.contains_key("hd"), "{json}");
+			assert!(catalog.skipped.is_empty(), "{json}");
+		}
+	}
+
+	/// An entry's version is refused, with the catalog, when malformed or repeated, as the root's is:
+	/// otherwise a newer entry could slip past the check by also claiming an old version.
+	#[test]
+	fn a_malformed_entry_version_is_refused() {
+		for version in [r#""5""#, "-1", "4.5", "null", "[]"] {
+			let json = format!(r#"{{"json":{{"tracks":{{"chat":{{"version":{version},"mode":"stream"}}}}}}}}"#);
+			assert!(Catalog::<()>::from_str(&json).is_err(), "{json}");
+			assert!(serde_json::from_str::<Catalog>(&json).is_err(), "{json}");
+		}
+
+		for versions in [r#""version":5,"version":3"#, r#""version":3,"version":3"#] {
+			let json = format!(r#"{{"video":{{"renditions":{{"hd":{{{versions},"codec":"avc1.64001f"}}}}}}}}"#);
+			let err = Catalog::<()>::from_str(&json).unwrap_err();
+			assert!(err.to_string().contains("duplicate field `version`"), "{json}: {err}");
+			assert!(Catalog::<()>::from_reader(json.as_bytes()).is_err(), "{json}");
+		}
+	}
+
+	/// A data track extension member named `version` would sit beside the computed one.
+	#[test]
+	fn an_entry_extension_version_is_refused() {
+		let mut catalog = Catalog::<()>::default();
+		let mut chat = JsonConfig::new(Mode::Stream);
+		chat.extra.insert("version".into(), 3.into());
+		catalog.json.insert("chat", chat).unwrap();
+		let err = catalog.to_json().unwrap_err();
+		assert!(err.to_string().contains("must not carry a member `version`"), "{err}");
 	}
 }

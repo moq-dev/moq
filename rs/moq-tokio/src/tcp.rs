@@ -43,8 +43,7 @@ pub struct Config {
 
 	/// Serve TLS on the TCP listener with the listen certificate, for `tls://`
 	/// dials. It asks for a client certificate as the QUIC listener does: optionally
-	/// under CA roots, required under pinned peers, so a peer on it authenticates
-	/// with mTLS or a token.
+	/// under CA roots, so a peer on it authenticates with mTLS or a token.
 	#[usage(
 		long = "listen-tcp-tls",
 		name = "listen-tcp-tls",
@@ -495,8 +494,8 @@ mod tests {
 	}
 
 	/// A `tls://` listener with no QUIC beside it verifies client certificates
-	/// as QUIC does: CA roots accept a chained certificate or a token-only client,
-	/// pinned peers require a pinned certificate. The request reports the chain
+	/// as QUIC does: CA roots accept a chained certificate or a token-only client.
+	/// The request reports the chain
 	/// and the SNI.
 	#[tokio::test]
 	async fn tls_verifies_a_client_certificate() {
@@ -570,28 +569,6 @@ mod tests {
 		assert_eq!(sni.as_deref(), Some("localhost"));
 		let (_server, identity, _) = mtls_dial(server, None).await.expect("token-only client refused");
 		assert!(identity.is_none());
-
-		// Pinned peers: a certificate is required, and must be pinned.
-		let peers = crate::tls::Peers::new();
-		peers.insert(&fingerprint).unwrap();
-		let server = listen(&|l| l.tls.peers = Some(peers.clone()));
-		let server = server.init(Default::default()).unwrap().listen().await.unwrap();
-		let (server, identity, _) = mtls_dial(server, Some(&cert))
-			.await
-			.expect("pinned certificate refused");
-		assert_eq!(identity.unwrap().fingerprint(), Some(fingerprint.clone()));
-		// A refused dial consumes its listener, so the token-only check gets its own.
-		let token_only = listen(&|l| l.tls.peers = Some(peers.clone()));
-		let token_only = token_only.init(Default::default()).unwrap().listen().await.unwrap();
-		assert!(
-			mtls_dial(token_only, None).await.is_none(),
-			"a token-only client must be refused under pinned peers"
-		);
-		peers.remove(&fingerprint).unwrap();
-		assert!(
-			mtls_dial(server, Some(&cert)).await.is_none(),
-			"an unpinned certificate must be refused"
-		);
 	}
 
 	/// Dial `server` over `tls://localhost`, presenting `cert` (a PEM cert and key)
@@ -639,7 +616,7 @@ mod tests {
 		let url: Url = format!("tls://localhost:{port}/room?jwt=credential").parse().unwrap();
 		let accept = tokio::spawn(async move {
 			let request = server.accept().await.unwrap();
-			assert_eq!(request.transport(), crate::Transport::Tcp);
+			assert_eq!(request.transport(), crate::Transport::Tls);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
 			let session = request.ok().await.unwrap();
@@ -660,10 +637,11 @@ mod tests {
 			matches!(untrusted, Ok(Err(_))),
 			"an untrusted certificate must be refused"
 		);
-		let _session = kio::clock::timeout(Duration::from_secs(5), dial(true).established())
+		let session = kio::clock::timeout(Duration::from_secs(5), dial(true).established())
 			.await
 			.expect("trusted dial timed out")
 			.expect("trusted dial failed");
+		assert_eq!(session.transport(), Some(crate::Transport::Tls));
 		let (_server, _accepted) = kio::clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")

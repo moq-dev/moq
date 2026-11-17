@@ -1,7 +1,6 @@
 use zeroize::Zeroizing;
 
 use crate::endpoint::SecretKey;
-use crate::endpoint::key::ZBASE32;
 
 /// RFC 8032's test 1 seed and the endpoint ID of its public key.
 const SEED: &str = "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
@@ -20,6 +19,8 @@ fn seed_derives_its_endpoint_id() {
 #[test]
 fn key_file_loads_its_seed() {
 	use std::os::unix::fs::PermissionsExt;
+
+	use crate::endpoint::key::ZBASE32;
 	let dir = tempfile::tempdir().unwrap();
 	let path = dir.path().join("endpoint.key");
 	std::fs::write(&path, format!("{}\n", ZBASE32.encode(seed().as_ref()))).unwrap();

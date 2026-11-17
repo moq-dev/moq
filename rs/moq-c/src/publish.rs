@@ -35,8 +35,8 @@ enum Request {
 /// One group of a fill, handed to C as a group request: the frozen ABI answers fills a
 /// group at a time.
 struct GroupRequest {
-	fill: Arc<moq_net::track::Fill>,
-	sequence: u64,
+	fill: Arc<moq_net::track::FillGroups>,
+	start: u64,
 	/// Dropped once the request is answered or freed, so its fill's next group follows.
 	_pending: oneshot::Sender<()>,
 }
@@ -111,12 +111,6 @@ enum Family {
 /// [`State::publish_close`].
 #[derive(Clone)]
 pub struct Children(Arc<std::sync::Mutex<Family>>);
-
-/// One past the newest group's start, or 0 on an empty track: where a group the caller gave
-/// no start for begins, which stands in until every write carries a timestamp.
-fn next_start(track: &moq_net::track::Producer) -> u64 {
-	track.largest().map_or(0, |largest| largest.group.saturating_add(1))
-}
 
 /// The family of a standalone broadcast of its own.
 #[cfg(test)]
@@ -298,15 +292,6 @@ impl Abort for Refreshed<moq_json::window::Producer<serde_json::Value>> {
 impl Abort for Data<moq_mux::json::Stream<serde_json::Value>> {
 	fn abort(self, err: moq_net::Error) {
 		let _ = self.producer.abort(err);
-	}
-}
-
-/// The cause a failed import ends its tracks with, so a reader sees the publisher fail rather than
-/// `Dropped`. Only a moq-net error has a wire code; any other reaches readers as `Internal`.
-fn cause(err: &moq_mux::Error) -> moq_net::Error {
-	match err {
-		moq_mux::Error::Moq(err) => err.clone(),
-		_ => moq_net::StreamError::Internal.into(),
 	}
 }
 
@@ -670,26 +655,53 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
+	/// Draw a group boundary and start the next group at `start`, in the track's timescale.
 	///
 	/// [`media_cut`](Self::media_cut) keyed explicitly rather than at the next frame's time, which
 	/// has to come after every group the track holds.
-	pub fn media_seek(&mut self, media: Id, sequence: u64) -> Result<(), Error> {
+	pub fn media_seek(&mut self, media: Id, start: u64) -> Result<(), Error> {
 		let track = self.media.get_mut(media).ok_or(Error::MediaNotFound)?;
-		track.seek(sequence)?;
+		track.seek(start)?;
 		Ok(())
 	}
 
 	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
-		let mut track = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		if let Err(err) = track.finish() {
-			track.children.forget(Child::Media(media));
-			let cause = cause(&err);
-			track.abort(cause);
-			return Err(err.into());
+		let Kept { inner, children } = self.media.remove(media).ok_or(Error::MediaNotFound)?;
+		match inner.track.finish() {
+			// The broadcast keeps the finished track, so its finish still holds it.
+			Ok(finished) => {
+				children.keep(Child::Media(media), finished);
+				Ok(())
+			}
+			// A failed finish already ended the track with its cause.
+			Err(err) => {
+				children.forget(Child::Media(media));
+				Err(err.into())
+			}
 		}
-		track.keep(Child::Media(media));
-		Ok(())
+	}
+
+	/// Abort a media track with an application error code, but only while nobody wants it.
+	///
+	/// True once the track is closed and its handle released. False leaves both unchanged because
+	/// a reader holds the track.
+	pub fn media_abort_unwanted(&mut self, media: Id, error_code: u16) -> Result<bool, Error> {
+		let Kept { inner, children } = self.media.remove(media).ok_or(Error::MediaNotFound)?;
+		let Media { track, video_priority } = inner;
+		match track.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				children.forget(Child::Media(media));
+				Ok(true)
+			}
+			Err(track) => {
+				let inner = Media {
+					track: Box::new(track),
+					video_priority,
+				};
+				self.media.restore(media, Kept { inner, children });
+				Ok(false)
+			}
+		}
 	}
 
 	/// Write a whole chunk of container bytes.
@@ -712,11 +724,11 @@ impl Publish {
 		Ok(result?)
 	}
 
-	/// Start a new segment whose first group starts at `sequence`, in its track's timescale.
-	pub fn container_seek(&mut self, container: Id, sequence: u64) -> Result<(), Error> {
+	/// Start a new segment whose first group starts at `start`, in its track's timescale.
+	pub fn container_seek(&mut self, container: Id, start: u64) -> Result<(), Error> {
 		let container = self.containers.get_mut(container).ok_or(Error::MediaNotFound)?;
 		container.driver.check()?;
-		let result = container.inner.seek(sequence);
+		let result = container.inner.seek(start);
 		container.driver.check()?;
 		Ok(result?)
 	}
@@ -824,9 +836,9 @@ impl Publish {
 
 	/// Insert or replace a top-level application catalog section by name.
 	///
-	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `media`, `text`,
-	/// `json`, `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, and
-	/// `timeline`) or an MSF root (`version`,
+	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `sync`, `text`,
+	/// `json`, `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`,
+	/// `media`, and `timeline`) or an MSF root (`version`,
 	/// `generatedAt`, `isComplete`, `tracks`, or `initDataList`). The catalog is republished
 	/// automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
@@ -1033,6 +1045,12 @@ impl Publish {
 				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
 				Request::Datagram(request) => State::lock().publish.datagram_request.insert(request)?,
 				Request::Fill(fill) => {
+					// A lookup of a time owes no group, and a request names one: drop it
+					// unanswered, as a handler that can't resolve times does, so the reader
+					// falls back to the groups held.
+					let moq_net::track::Fill::Groups(fill) = fill else {
+						continue;
+					};
 					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
 					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
 					continue;
@@ -1044,25 +1062,20 @@ impl Publish {
 
 	/// Hand `fill` to C a group at a time, each once the one before it reached a reader or
 	/// nobody reads it any more, until every group is answered or nobody waits on the fill.
-	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
-		// A lookup of a time owes no group, and a request names one: drop it unanswered, as a
-		// handler that can't resolve times does, so the reader falls back to the groups held.
-		if fill.time().is_some() {
-			return;
-		}
+	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::FillGroups>) {
 		let mut changes = (*fill).clone();
-		while let Some(sequence) = changes.wanted_changed().await {
+		while let Some(start) = changes.wanted_changed().await {
 			let (pending, answered) = oneshot::channel();
 			let request = GroupRequest {
 				fill: fill.clone(),
-				sequence,
+				start,
 				_pending: pending,
 			};
 			let Ok(id) = State::lock().publish.group_request.insert(request) else {
 				return;
 			};
 			callback.call(id);
-			let unwanted = kio::wait(|waiter| fill.poll_unwanted(sequence, waiter));
+			let unwanted = kio::wait(|waiter| fill.poll_unwanted(start, waiter));
 			tokio::select! {
 				_ = answered => {}
 				// Withdrawn, so answering it fails as not found, and the fill moves on.
@@ -1147,13 +1160,13 @@ impl Publish {
 		Ok(())
 	}
 
-	/// The sequence, priority, and first frame of a requested group.
+	/// The start, priority, and first frame of a requested group.
 	pub fn group_request_info(&self, request: Id) -> Result<(u64, i8, u64), Error> {
 		let request = self.group_request.get(request).ok_or(Error::NotFound)?;
 		Ok((
-			request.sequence,
+			request.start,
 			request.fill.priority(),
-			request.fill.frame_start(request.sequence),
+			request.fill.frame_start(request.start),
 		))
 	}
 
@@ -1163,7 +1176,7 @@ impl Publish {
 	/// indices they have in the group rather than restarting at 0.
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		let group = request.fill.accept(request.sequence, None)?;
+		let group = request.fill.accept(request.start, None)?;
 		self.insert_group(group)
 	}
 
@@ -1178,7 +1191,7 @@ impl Publish {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
 		request
 			.fill
-			.refuse_groups(request.sequence..request.sequence + 1, moq_net::Error::NotFound);
+			.refuse_groups(request.start..request.start + 1, moq_net::Error::NotFound);
 		Ok(())
 	}
 
@@ -1221,18 +1234,17 @@ impl Publish {
 		}
 	}
 
-	/// Append a new group to a raw track, one past the newest group's start, returning a
-	/// group producer.
-	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
+	/// Append the next group to a raw track, starting at `start`, returning a group producer.
+	pub fn track_group(&mut self, track: Id, start: moq_net::Timestamp) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.append_group(next_start(&raw.inner))?;
+		let group = raw.inner.append_group(start)?;
 		self.insert_group(group)
 	}
 
-	/// Create a raw group starting at `sequence`, in the track's timescale, which names it.
-	pub fn track_group_at(&mut self, track: Id, sequence: u64) -> Result<Id, Error> {
+	/// Create a raw group starting at `start`, in the track's timescale, which names it.
+	pub fn track_group_at(&mut self, track: Id, start: u64) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.create_group(moq_net::group::Info { start: sequence })?;
+		let group = raw.inner.create_group(moq_net::group::Info { start })?;
 		self.insert_group(group)
 	}
 
@@ -1273,11 +1285,10 @@ impl Publish {
 		Ok(self.tracks.get(track).ok_or(Error::TrackNotFound)?.inner.largest())
 	}
 
-	/// Declare a raw track's exclusive final group sequence.
-	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
+	/// Declare a raw track's exclusive final group start.
+	pub fn track_finish_at(&mut self, track: Id, final_start: u64) -> Result<(), Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		raw.inner
-			.finish_at(moq_net::track::Position::group(final_sequence), None)?;
+		raw.inner.finish_at(moq_net::track::Position::group(final_start))?;
 		Ok(())
 	}
 
@@ -1289,6 +1300,29 @@ impl Publish {
 		let err = moq_net::Error::App(error_code);
 		raw.inner.abort(err)?;
 		Ok(())
+	}
+
+	/// Abort a raw track with an application error code, but only while nobody wants it.
+	///
+	/// True once the track is closed and its handle released. False leaves both unchanged because
+	/// a reader holds the track.
+	pub fn track_abort_unwanted(&mut self, track: Id, error_code: u16) -> Result<bool, Error> {
+		let id = track;
+		let raw = self.tracks.get(id).ok_or(Error::TrackNotFound)?;
+		// The producer is a handle on the track, so the clone consumed here leaves the kept one
+		// serving when a reader wants it.
+		if raw
+			.inner
+			.clone()
+			.abort_unwanted(moq_net::Error::App(error_code))
+			.is_err()
+		{
+			return Ok(false);
+		}
+		if let Some(raw) = self.tracks.remove(id) {
+			raw.children.forget(Child::Track(id));
+		}
+		Ok(true)
 	}
 
 	/// Create a track on a broadcast and hand it, with the broadcast's catalog, to `publish`, which
@@ -1446,12 +1480,7 @@ impl Publish {
 	/// Not advertised in the catalog, which has no window mode. The track carries a refresh ratio
 	/// of 8: a join after more than eight headers' worth of edits asks for the window restated in a
 	/// fresh group, which a task answers until the track is finished.
-	pub fn json_window(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::window::ProducerConfig,
-	) -> Result<Id, Error> {
+	pub fn json_window(&mut self, broadcast: Id, name: &str, config: moq_json::window::Config) -> Result<Id, Error> {
 		let data = self.data_track(broadcast, name, Some(8), |_, track| {
 			Ok(moq_json::window::Producer::new(track, config))
 		})?;
@@ -1474,7 +1503,7 @@ impl Publish {
 		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.push(moq_json::Timed::new(&value, timestamp))?;
+		window.producer.push(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -1482,7 +1511,7 @@ impl Publish {
 	/// `timestamp` on the broadcast clock.
 	pub fn json_window_pop(&mut self, window: Id, count: u64, timestamp: moq_net::Timestamp) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.pop(moq_json::Timed::new(count, timestamp))?;
+		window.producer.pop(count, timestamp)?;
 		Ok(())
 	}
 
@@ -1544,9 +1573,9 @@ impl Publish {
 		Ok((entry.inner.clone(), entry.ended.subscribe()))
 	}
 
-	/// The sequence (start) of a raw group, which names it: on a scale-less track, the
+	/// The start of a raw group, which names it: on a scale-less track, the
 	/// unscaled key its frames carry.
-	pub fn group_sequence(&self, group: Id) -> Result<u64, Error> {
+	pub fn group_start(&self, group: Id) -> Result<u64, Error> {
 		let group = self.groups.get(group).ok_or(Error::GroupNotFound)?;
 		let group = group.inner.lock();
 		Ok(group.as_ref().ok_or(Error::GroupNotFound)?.start)
@@ -1559,7 +1588,7 @@ impl Publish {
 			.remove(group)
 			.and_then(|group| group.inner.take())
 			.ok_or(Error::GroupNotFound)?;
-		group.close()?;
+		group.finish()?;
 		Ok(())
 	}
 

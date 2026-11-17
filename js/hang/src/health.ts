@@ -6,8 +6,8 @@
  */
 
 import type { Instance, Path } from "@moq/net";
-import type * as Echo from "./echo";
-import type * as Stats from "./stats";
+import type * as Echo from "./echo.ts";
+import type * as Stats from "./stats.ts";
 
 /** A grade, ordered by severity with `unknown` below every graded one. */
 export type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";

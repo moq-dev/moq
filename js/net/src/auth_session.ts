@@ -1,5 +1,5 @@
 import { Duration, type Instant, now, sleep, type Wall, wall, yieldNow } from "@moq/clock";
-import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
@@ -164,29 +164,28 @@ export interface Pending extends Credential {
 	readonly answered: Promise<void>;
 	/** Whether any session holds a grant for it now, a draining one included. */
 	readonly held: boolean;
+	/** Whether a peer granted it in band: false for a token only a request carries, which {@link answered} also resolves for. */
+	readonly inband: boolean;
 }
 
 /** A token the application added to a {@link Handle}, presented on every session of it. */
 class Token implements Pending {
 	readonly grant = new Signal<Grant | undefined>(undefined);
-	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
 	readonly bytes: Uint8Array;
 
 	isAnswered = false;
 	ended = false;
+	inband = false;
 
 	#state: HandleState;
-	#close!: (err: Error | null) => void;
+	#closed = new Once<Error | null>();
 	#answer!: () => void;
 	#refuse!: (err: Error) => void;
 
 	constructor(bytes: Uint8Array, state: HandleState) {
 		this.bytes = bytes;
 		this.#state = state;
-		this.closed = new Promise((resolve) => {
-			this.#close = resolve;
-		});
 		this.answered = new Promise((resolve, reject) => {
 			this.#answer = resolve;
 			this.#refuse = reject;
@@ -209,7 +208,11 @@ class Token implements Pending {
 			this.isAnswered = true;
 			this.#refuse(err ?? new Error("withdrawn"));
 		}
-		this.#close(err);
+		this.#closed.set(err);
+	}
+
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
 	}
 
 	get held(): boolean {
@@ -229,6 +232,8 @@ class HandleState {
 	own = false;
 	/** Set once the handle ends. */
 	closed?: Error;
+	/** The handle's end, for a watcher that outlives its sessions. */
+	readonly end = new Signal<Error | undefined>(undefined);
 	/** Every token the application added that has not ended. */
 	readonly tokens = new Set<Token>();
 	/** Every open session built on this handle, oldest first. */
@@ -307,6 +312,7 @@ class HandleState {
 	abort(err: Error) {
 		if (this.closed) return;
 		this.closed = err;
+		this.end.set(err);
 		for (const token of [...this.tokens]) this.verdict(token, err);
 		if (this.acceptor instanceof RequestQueue) this.acceptor.close();
 	}
@@ -336,6 +342,15 @@ export function vacant(handle: Handle) {
  */
 export function ended(handle: Handle): Error | undefined {
 	return stateOf(handle).closed;
+}
+
+/**
+ * When `handle` ends, with why, for a watcher that outlives its sessions.
+ *
+ * @internal
+ */
+export function ending(handle: Handle): Getter<Error | undefined> {
+	return stateOf(handle).end;
 }
 
 /**
@@ -436,7 +451,7 @@ class PeerRequest implements Request {
 		this.#issued = issued;
 	}
 
-	get closed(): Promise<Error | null> {
+	get closed(): GetPromise<Error | null> {
 		return this.#issued.closed;
 	}
 
@@ -460,8 +475,7 @@ class PeerRequest implements Request {
 
 /** Our side of one of the peer's tokens: the grant we issued and its stream. */
 class IssuedGrant implements Issued {
-	ended = false;
-	readonly closed: Promise<Error | null>;
+	readonly #closed = new Once<Error | null>();
 	#stream: Stream;
 	#wire: AuthWire;
 	#writes = Promise.resolve();
@@ -475,15 +489,19 @@ class IssuedGrant implements Issued {
 		this.#stream = stream;
 		this.#wire = wire;
 		// The presenter withdraws by closing or cancelling its side.
-		this.closed = wire
-			.withdrawn(stream)
-			.then(
-				() => null,
-				(err: unknown) => (err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
-			)
-			.finally(() => {
-				this.ended = true;
-			});
+		void wire.withdrawn(stream).then(
+			() => this.#closed.set(null),
+			(err: unknown) =>
+				this.#closed.set(err instanceof StreamError && err.code === StreamCode.Cancel ? null : error(err)),
+		);
+	}
+
+	get closed(): GetPromise<Error | null> {
+		return this.#closed;
+	}
+
+	get ended(): boolean {
+		return this.#closed.peek() !== undefined;
 	}
 
 	#write(write: () => Promise<void>) {
@@ -597,6 +615,11 @@ export interface AuthSessionProps {
 	handle?: Handle;
 	/** Whether the session is draining after a GOAWAY or a local close, which frees its handle for a successor. */
 	draining?: () => boolean;
+	/**
+	 * Whether the peer's SETUP, still to come, is what accepts the connection credential: a
+	 * session without AUTH that is live before its peer has checked the credential.
+	 */
+	awaiting?: boolean;
 }
 
 /**
@@ -631,6 +654,9 @@ export class AuthSession {
 	// #presented by #recount after every change to it or to an `isAnswered`.
 	#setupPending = new Signal(0);
 	#pending = new Signal(0);
+	// The peer's verdict on the connection credential this session presented: null once accepted,
+	// the refusal, or undefined while it has none.
+	#credential = new Signal<Error | null | undefined>(undefined);
 	#closed = false;
 
 	// Whoever answers the peer's tokens is decided once, after the task that established
@@ -639,7 +665,7 @@ export class AuthSession {
 	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
-	constructor({ wire, requests, peerGrant, handle, draining }: AuthSessionProps) {
+	constructor({ wire, requests, peerGrant, handle, draining, awaiting }: AuthSessionProps) {
 		this.handle = handle ?? ownHandle();
 		this.#state = stateOf(this.handle);
 		this.#wire = wire;
@@ -647,6 +673,8 @@ export class AuthSession {
 		this.#peerGrant = peerGrant;
 		this.#draining = draining ?? (() => false);
 		this.#state.attach(this);
+		// A session without AUTH has the peer's acceptance with its handshake, unless it awaits its SETUP.
+		if (!wire && !awaiting) this.#credential.set(null);
 
 		// Present the connection's own credential right away, so both sides learn their
 		// grant without waiting on the app.
@@ -657,6 +685,20 @@ export class AuthSession {
 	/** Whether the session still takes new work: open, neither closing nor past a GOAWAY. */
 	get active(): boolean {
 		return !this.#closed && !this.#draining();
+	}
+
+	/**
+	 * The peer's verdict on the connection credential this session presented: `null` once it
+	 * accepted it, its refusal, or undefined while it has none, which the session ending leaves
+	 * to the session's own close.
+	 */
+	get credential(): Getter<Error | null | undefined> {
+		return this.#credential;
+	}
+
+	/** The peer's SETUP arrived, so it accepted the connection credential a session without AUTH presented. */
+	accepted(): void {
+		if (!this.#wire) this.#credential.set(null);
 	}
 
 	/** The union of this session's grants, undefined until its peer first answers. */
@@ -917,6 +959,7 @@ export class AuthSession {
 						answered = granted = replied = true;
 						delay = undefined;
 						this.#replied = true;
+						if (presented.setup) this.#credential.set(null);
 						this.#answered(presented);
 						this.#recompute();
 						continue;
@@ -991,6 +1034,13 @@ export class AuthSession {
 
 		// Already ended by the session's close.
 		if (presented.ended) return;
+		// The peer's verdict on the credential: Unsupported is the moq-transport SETUP that
+		// carried it accepting it before the peer declined AUTH. Anything else leaves it to the close.
+		if (presented.setup && !presented.withdrawn && isVerdict(refused, granted, result)) {
+			this.#credential.set(
+				result instanceof Unsupported ? null : (result ?? new Error("the peer ended the credential")),
+			);
+		}
 		presented.ended = true;
 		presented.grant = undefined;
 		// A token that ends unanswered counts as answered for enforcement: its refusal is
@@ -1024,6 +1074,7 @@ export class AuthSession {
 	/** The peer granted `presented`: it counts as answered, and so does the handle's token. */
 	#answered(presented: Presented) {
 		presented.isAnswered = true;
+		if (presented.owner) presented.owner.inband = true;
 		presented.owner?.answer();
 	}
 

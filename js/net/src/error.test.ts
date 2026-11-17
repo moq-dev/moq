@@ -271,7 +271,6 @@ test("stream codes match the draft's Stream Error Codes table", () => {
 		FrameTooLarge: 0x38,
 		TimestampMismatch: 0x39,
 		Unauthorized: 0x3b,
-		Yielded: 0x3c,
 	});
 });
 
@@ -298,7 +297,6 @@ test("the code tables keep their registry ranges", () => {
 		StreamCode.FrameTooLarge,
 		StreamCode.TimestampMismatch,
 		StreamCode.Unauthorized,
-		StreamCode.Yielded,
 	];
 	for (const code of Object.values(StreamCode)) {
 		if (assignedLite.includes(code)) {
@@ -426,7 +424,6 @@ test("toStreamCode and fromTransport agree on what a code means", () => {
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
 		StreamCode.Unauthorized,
-		StreamCode.Yielded,
 		StreamCode(70),
 	]) {
 		expect(toStreamCode(fromTransport(toTransport(code, "reset")))).toBe(code);
@@ -460,7 +457,6 @@ test("toStreamCode: lite-only codes do not reach an IETF peer", () => {
 		StreamCode.GroupTooLarge,
 		StreamCode.Unroutable,
 		StreamCode.FrameTooLarge,
-		StreamCode.Yielded,
 	]) {
 		expect(toStreamCode(new StreamError(code), { version: Version.DRAFT_22 })).toBe(StreamCode.Internal);
 	}

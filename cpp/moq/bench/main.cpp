@@ -104,6 +104,7 @@ void throughput(Case c, double budget, std::vector<Result> &results)
 	std::vector<std::shared_ptr<moq::TrackProducer>> tracks;
 	std::vector<std::shared_ptr<moq::TrackConsumer>> consumers;
 	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
 	info.timescale = 1000000;
 	for (int p = 0; p < c.publishers; ++p) {
 		auto track = ok(broadcast->publish_track(std::to_string(p), info));
@@ -120,7 +121,7 @@ void throughput(Case c, double budget, std::vector<Result> &results)
 			readers.push_back(read(c, consumer, payload, n).completion);
 		}
 		for (auto &track : tracks) {
-			auto group = ok(track->append_group());
+			auto group = ok(track->append_group(moq::Timestamp{n * c.frames(), 1000000}));
 			for (int f = 0; f < c.frames(); ++f)
 				ok(group->write_frame({payload, moq::Timestamp{n * c.frames() + f, 1000000}}));
 			ok(group->finish());
@@ -182,7 +183,7 @@ int main()
 
 	auto broadcast = ok(moq::BroadcastProducer::init());
 	auto track = ok(broadcast->publish_track("calls", {}));
-	auto producer = ok(track->append_group());
+	auto producer = ok(track->append_group(moq::Timestamp{0, std::nullopt}));
 	auto group = ok(producer->consume());
 	auto consumer = ok(track->consume({}));
 	auto call = [&](const char *name, auto fn) {
@@ -195,7 +196,7 @@ int main()
 		} while (seconds(start) < budget);
 		results.push_back({std::string("call/") + name, "ns", seconds(start) * 1e9 / calls});
 	};
-	call("sequence", [&] { group->sequence(); });
+	call("start", [&] { group->start(); });
 	call("info", [&] { (void)consumer->info(); });
 	std::filesystem::create_directories(out);
 	std::ofstream file(std::filesystem::path(out) / "cpp.json");

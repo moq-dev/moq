@@ -288,7 +288,7 @@ func publish(ctx context.Context, url, broadcast string, opts dialOptions, timeo
 // encodes on demand) may announce a rendition in a later update rather than the
 // first snapshot, so wait for a catalog that has both video and audio.
 func catalogWithMedia(ctx context.Context, consumer *moq.BroadcastConsumer) (*moqmedia.Catalog, error) {
-	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -324,7 +324,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer, 0)
 	if err != nil {
 		return err
 	}

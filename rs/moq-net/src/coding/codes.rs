@@ -74,23 +74,23 @@ impl StreamCodes for ietf::Version {
 /// pre-lite-05 session opens.
 impl StreamCodes for crate::Version {
 	fn decode_session_code(&self, code: u32) -> crate::SessionError {
-		match self {
-			Self::Lite(version) => version.decode_session_code(code),
-			Self::Ietf(version) => version.decode_session_code(code),
+		match self.0 {
+			crate::Draft::Lite(version) => version.decode_session_code(code),
+			crate::Draft::Ietf(version) => version.decode_session_code(code),
 		}
 	}
 
 	fn encode_stream_code(&self, err: &StreamError) -> u32 {
-		match self {
-			Self::Lite(version) => version.encode_stream_code(err),
-			Self::Ietf(version) => version.encode_stream_code(err),
+		match self.0 {
+			crate::Draft::Lite(version) => version.encode_stream_code(err),
+			crate::Draft::Ietf(version) => version.encode_stream_code(err),
 		}
 	}
 
 	fn decode_stream_code(&self, code: u32) -> StreamError {
-		match self {
-			Self::Lite(version) => version.decode_stream_code(code),
-			Self::Ietf(version) => version.decode_stream_code(code),
+		match self.0 {
+			crate::Draft::Lite(version) => version.decode_stream_code(code),
+			crate::Draft::Ietf(version) => version.decode_stream_code(code),
 		}
 	}
 }
@@ -104,8 +104,8 @@ mod tests {
 	/// wire, and the same number read back on each wire has to mean what that wire said.
 	#[test]
 	fn the_version_picks_the_registry() {
-		let lite = crate::Version::Lite(lite::Version::Lite05);
-		let ietf = crate::Version::Ietf(ietf::Version::Draft22);
+		let lite = crate::Version::lite(lite::Version::Lite05);
+		let ietf = crate::Version::ietf(ietf::Version::Draft22);
 
 		assert_eq!(lite.encode_stream_code(&StreamError::Old), StreamError::Old.to_code());
 		assert_eq!(ietf.encode_stream_code(&StreamError::Old), ietf::error::INTERNAL_ERROR);

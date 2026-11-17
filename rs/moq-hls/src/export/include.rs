@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
-use hang::catalog::{Include, Media};
+use hang::catalog::Include;
 use moq_mux::{catalog::hang::Catalog, follow};
 
 #[cfg(feature = "server")]
@@ -23,9 +23,9 @@ struct Context {
 	origin: moq_net::origin::Consumer,
 	window: Duration,
 	spawner: driver::Spawner,
-	/// The root catalog's `media`. An include is part of the root broadcast, so its
+	/// The root catalog's `sync`. An include is part of the root broadcast, so its
 	/// renditions share the root's timeline and segment on the root's grid.
-	root: kio::Producer<Media>,
+	root: kio::Producer<hang::catalog::Timeline>,
 }
 
 #[derive(Default)]
@@ -80,11 +80,11 @@ impl Producer {
 
 	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		let Ok(mut state) = self.state.write() else { return };
-		// Republished estimates leave the root media as is, so only a change wakes the children.
-		if *self.context.root.read() != catalog.media
+		// Republished estimates leave the root sync section as is, so only a change wakes the children.
+		if *self.context.root.read() != catalog.sync
 			&& let Ok(mut root) = self.context.root.write()
 		{
-			*root = catalog.media;
+			*root = catalog.sync;
 		}
 		state
 			.entries
@@ -332,7 +332,7 @@ mod tests {
 			.unwrap();
 		let source = crate::resolved(&origin, "room/live").await;
 		let mut catalog = Catalog::default();
-		catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+		catalog.sync.interval = Some(Duration::from_secs(2));
 		let mut video = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		video.coded_width = Some(320);
 		video.coded_height = Some(240);
@@ -342,8 +342,7 @@ mod tests {
 			.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let mut json = moq_json::snapshot::Producer::new(track, Default::default());
-		json.update(moq_json::Timed::new(&catalog, moq_net::Timestamp::ZERO))
-			.unwrap();
+		json.update(&catalog, moq_net::Timestamp::ZERO).unwrap();
 		catalog.video.renditions.clear();
 		catalog.include.insert(
 			"child".into(),

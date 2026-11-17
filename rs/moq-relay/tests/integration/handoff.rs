@@ -36,7 +36,7 @@ fn certificate(dir: &Path) -> (PathBuf, PathBuf) {
 #[derive(Clone, Copy, Debug)]
 enum Backend {
 	Tokio,
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	Uring,
 }
 
@@ -59,7 +59,7 @@ fn config(dir: &Path, cert: &Path, key: &Path, backend: Backend) -> Config {
 	config.handoff.socket = Some(dir.join("handoff.sock"));
 	match backend {
 		Backend::Tokio => {}
-		#[cfg(target_os = "linux")]
+		#[cfg(uring)]
 		Backend::Uring => config.runtime.io_uring = true,
 	}
 	config
@@ -110,9 +110,19 @@ async fn connect(url: &str) -> moq_tokio::Connection {
 	established(dial().init(Default::default()).unwrap().with_reconnect(false), url).await
 }
 
-/// A session that stays through the relay's drain until the relay closes it.
+/// A session that ignores the relay's GOAWAY and stays through its drain until the relay
+/// closes it.
+///
+/// Under [`moq_tokio::Restart::Handoff`] a GOAWAY that drains a session before it is
+/// healthy changes nothing, and this healthy bar outlasts the test.
 async fn stays(url: &str, quic: moq_tokio::quic::Config) -> moq_tokio::Connection {
-	established(dial().init(quic).unwrap().with_restart(moq_tokio::Restart::Wait), url).await
+	let mut config = dial();
+	config.backoff.healthy = Some(Duration::from_secs(3600).into());
+	established(
+		config.init(quic).unwrap().with_restart(moq_tokio::Restart::Handoff),
+		url,
+	)
+	.await
 }
 
 /// Wait for the GOAWAY a draining relay sends `connection`.
@@ -130,7 +140,7 @@ async fn a_new_relay_takes_over_while_the_old_one_drains() {
 	takes_over(Backend::Tokio, Backend::Tokio).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn an_io_uring_relay_takes_over() {
 	if crate::runtime_uring::supported() {
@@ -139,7 +149,7 @@ async fn an_io_uring_relay_takes_over() {
 }
 
 /// Both backends hand on the same group, with connection IDs in the same layout.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn a_relay_takes_over_across_backends() {
 	if crate::runtime_uring::supported() {
@@ -500,7 +510,7 @@ async fn a_killed_relay_s_clients_are_reset_by_the_one_it_replaced() {
 
 	let mut new = relay(dir.path(), &cert, &key, port, &notify_path);
 	ready(&notify).await;
-	let mut orphan = stays(&url, quic).await;
+	let mut orphan = established(dial().init(quic).unwrap(), &url).await;
 	// Past the default healthy bar, so the reset reconnects rather than ending the loop.
 	kio::clock::sleep(Duration::from_secs(1)).await;
 

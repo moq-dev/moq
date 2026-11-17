@@ -121,52 +121,6 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 | `drift` | Gauge, parts per million: the source clock's rate against ours, positive running fast. |
 | `outOfTolerance` | Measurements that found the source clock past the 30 ppm ISO/IEC 13818-1 allows, which the output cannot follow. |
 
-### Health
-
-`hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
-consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
-pair of `.echo` snapshots. Each report names the broadcast it was read from
-(its path and instance), which observed every number in it; the caller states the
-interval between the two and how long ago the newer one arrived. Both
-languages compute the same result from the shared fixtures in
-`rs/hang/fixtures/health.json`.
-
-The result holds the deltas over the interval (frames, bytes, and bitrate per
-rendition; lost bytes and packets for the connection) and a verdict for the
-connection and each rendition: `unknown`, `healthy`, `degraded`, or
-`unhealthy`. Each verdict carries its evidence, every input with its value and
-grade, and is the worst graded input. An input the report cannot show is
-listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
-publisher that knows only its PROBE RTT grades on RTT alone. A report older
-than the stale limit is `unknown` throughout, as is a transport sample whose
-`age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
-path or instance (`replaced`) or a decreasing counter (`decrease`) is a reset:
-the deltas start over, so only gauges are graded until the next pair.
-Container sections such as `mpegts` are not read.
-
-| Input | Role | Value | Degraded | Unhealthy |
-| --- | --- | --- | --- | --- |
-| `rtt` | both | Round-trip time, ms. | 300 | 800 |
-| `loss` | publisher | Transport bytes lost per media byte sent. | 0.02 | 0.1 |
-| `headroom` | publisher | Estimated `rate` over the media bitrate sent. | below 1.5 | below 1 |
-| `skipped` | publisher | Frames skipped, as a share of frames sent or skipped. | 0.01 | 0.05 |
-| `late` | viewer | Late frames per frame received. | 0.01 | 0.05 |
-| `errors` | viewer | Decode errors per frame received. | 0.01 | 0.05 |
-| `stalled` | viewer | The share of the interval spent stalled. | 0.01 | 0.05 |
-
-These are defaults the caller can override, as is the five-second stale limit.
-A viewer's loss counters describe its own uplink, so they are reported but not
-graded. Loss and headroom divide the connection's transport counters by the
-report's own media, so they hold when the broadcast is the only one its
-connection publishes. The transport limits were measured on one paced TS feed
-through a shaped link over five-second intervals. Only `import capture`
-emits `skipped`, and no CLI reporter emits `late`, `errors`, or `stalled`, so
-those limits are not measured.
-
-A publisher whose link falls below its media rate sends no report at all,
-since its report track sits below every media track. Its health goes stale
-and reads `unknown`; only its viewers' playout counters can show the damage.
-
 ## Broadcasts
 
 Each node publishes one broadcast under a prefix, `.stats` by default, which
@@ -379,10 +333,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "inflated": 0,
-    "stale": { "bytes": 0, "frames": 0, "groups": 0 },
-    "announced": 1, "announced_closed": 0,
-    "broadcasts": 3, "broadcasts_closed": 1,
-    "subscriptions": 6, "subscriptions_closed": 2
+    "stale": { "bytes": 0, "frames": 0, "groups": 0 }
   }
 }
 ```
@@ -399,17 +350,12 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
 | `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with `bytes`, `frames`, and `groups`. Disjoint from the top-level payload counters. |
 
-The last six fields are legacy spellings of the `*_started` and `*_ended`
-counters, still written so an older consumer reads a newer relay. A reader
-should prefer the canonical name and fall back to the legacy one.
-
 ### Presence
 
 ```json
 {
   "acme": {
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
-    "sessions": 12, "sessions_closed": 10,
     "sent_bytes": 1048576, "received_bytes": 524288,
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
@@ -422,8 +368,7 @@ should prefer the canonical name and fall back to the legacy one.
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
 or not any data flows: under a stats label on the tier for a bucket's `labels`,
 under the label on each tier for `presence.json`, and under every label in the
-bucket or node on the tier for its totals. `sessions` and `sessions_closed` are their
-legacy spellings. A session moved to a new tier ends on the old one and starts
+bucket or node on the tier for its totals. A session moved to a new tier ends on the old one and starts
 on the new. `sent_bytes` and `received_bytes` count the payload this node sent
 to and received from those sessions and HTTP requests, the same bytes a
 bucket's `paths` count. A changed label moves later presence and bytes; bytes

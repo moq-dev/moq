@@ -68,11 +68,15 @@ export type SyncOutput = {
 	// that only care about the mode don't rerun when the number changes.
 	instant: Signal<boolean>;
 
-	// The earliest time we've received a frame, relative to its timestamp: arrival minus timestamp
-	// in milliseconds, an offset that is negative when the timestamps run ahead of the local clock.
-	// This will keep being updated as we catch up to the live playhead then will be relatively static,
-	// moving later only after a lasting step in path delay (see doc/concept/audio-jitter.md).
-	// Each track holds its own part of it; see `Track.reset()`.
+	/**
+	 * The earliest time we've received a frame, relative to its timestamp: arrival minus timestamp
+	 * in milliseconds, an offset that is negative when the timestamps run ahead of the local clock.
+	 * This will keep being updated as we catch up to the live playhead then will be relatively static,
+	 * moving later only after a lasting step in path delay (see doc/concept/audio-jitter.md).
+	 * Each track holds its own part of it; see `Track.reset()`.
+	 *
+	 * @internal Read by the audio buffer.
+	 */
 	reference: Signal<number | undefined>;
 
 	// The resolved delay from the live edge to the playhead: the configured number, or in "auto" the

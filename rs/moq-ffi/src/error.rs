@@ -325,7 +325,7 @@ pub enum MoqError {
 
 	/// This track or group already committed to another way of reading it.
 	///
-	/// A track is read in arrival order, in sequence order, or by a typed reader such as a
+	/// A track is read in arrival order, in start order, or by a typed reader such as a
 	/// JSON consumer, never two of them, and the first group read picks the order. A group is
 	/// read raw or by a media group consumer, and the first frame read picks raw. Reaching
 	/// for another one afterwards is this error rather than [`Self::Unsupported`]: each works

@@ -41,9 +41,12 @@ export interface Getter<T> {
 
 /** Write side of a signal: replace or transform the current value. */
 export interface Setter<T> {
-	/** Replaces the value. A function is stored as-is; use {@link update} to transform. */
-	set(value: T): void;
-	/** Transforms the value via a function of the previous value. */
+	/**
+	 * Replaces the value, notifying only if it changed unless `force` is passed.
+	 * A function is stored as-is; use {@link update} to transform.
+	 */
+	set(value: T, force?: true): void;
+	/** Replaces the value with `fn(prev)`, notifying only if it changed. */
 	update(fn: (prev: T) => T): void;
 }
 
@@ -94,17 +97,10 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	/**
 	 * Sets the current value, notifying subscribers if it changed.
-	 * Pass `notify` true to always notify or false to never notify.
+	 * Pass `force` to notify even when the value is equal, such as to repeat a command.
 	 * A function is stored as the value; use {@link update} to transform instead.
 	 */
-	set(value: T, notify?: boolean): void {
-		// A silent write captures nothing: a listener that subscribes after it starts from the new
-		// value, so comparing a later write against the value it replaced would hide a change.
-		if (notify === false) {
-			this.#value = value;
-			return;
-		}
-
+	set(value: T, force?: true): void {
 		// Capture old value before the first set in this microtask.
 		if (!this.#hasCapturedOldValue) {
 			this.#oldValue = this.#value;
@@ -113,7 +109,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 		this.#value = value;
 
-		if (notify === true) this.#forceNotify = true;
+		if (force) this.#forceNotify = true;
 
 		// If there are no subscribers, don't queue a microtask.
 		// Drop the capture since no listener saw the old value; a flush already queued finds
@@ -192,19 +188,21 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		}
 	}
 
-	/** Sets the value to the result of `fn(prev)`, notifying subscribers unless `notify` is false. */
-	update(fn: (prev: T) => T, notify = true): void {
-		const value = fn(this.#value);
-		this.set(value, notify);
+	/**
+	 * Sets the value to `fn(prev)`, notifying subscribers only if it changed, exactly like {@link set}.
+	 * Returning `prev` after changing it in place notifies nothing; use {@link mutate} for that.
+	 */
+	update(fn: (prev: T) => T): void {
+		this.set(fn(this.#value));
 	}
 
 	/**
-	 * Mutates the current value in place via `fn`, returning `fn`'s result and
-	 * notifying subscribers unless `notify` is false.
+	 * Changes the current value in place via `fn` and returns `fn`'s result.
+	 * Always notifies subscribers, since an in-place change cannot be compared.
 	 */
-	mutate<R>(fn: (value: T) => R, notify = true): R {
+	mutate<R>(fn: (value: T) => R): R {
 		const r = fn(this.#value);
-		this.set(this.#value, notify);
+		this.set(this.#value, true);
 		return r;
 	}
 
@@ -867,28 +865,6 @@ export class Effect {
 		this.cleanup(() => abort.abort());
 	}
 
-	/**
-	 * Runs `fn` as a nested effect, then closes that effect after `duration` on the installed clock.
-	 *
-	 * Shares {@link run}'s handling of a task that outlived its run: the child is closed at the
-	 * next teardown, not immediately.
-	 */
-	timeout(fn: (effect: Effect) => void, duration: Duration) {
-		if (this.#dispose === undefined) {
-			console.warn("Effect.timeout called when closed, ignoring");
-			return;
-		}
-
-		const effect = new Effect(fn);
-		const abort = new AbortController();
-		void sleep(duration, { signal: abort.signal }).then(() => effect.close(), noop);
-
-		this.#dispose.push(() => {
-			abort.abort();
-			effect.close();
-		});
-	}
-
 	/** Runs `fn` on the next animation frame, unless the effect reruns or closes first. */
 	animate(fn: (now: DOMHighResTimeStamp) => void) {
 		if (this.#dispose === undefined) {
@@ -1192,9 +1168,12 @@ export class Effect {
 		return this.#abort.signal;
 	}
 
-	/** Copies `src` into `dst` and keeps `dst` in sync as `src` changes. */
+	/**
+	 * Copies `src` into `dst` and notifies `dst` each time `src` notifies, so a `src` changed in place
+	 * with {@link Signal.mutate} still reaches `dst`, which holds the same object.
+	 */
 	proxy<T>(dst: Setter<T>, src: Getter<T>): void {
-		this.subscribe(src, (value) => dst.update(() => value));
+		this.subscribe(src, (value) => dst.set(value, true));
 	}
 }
 

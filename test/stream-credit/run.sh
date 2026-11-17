@@ -79,7 +79,7 @@ if harness_probe "$URL/certificate.sha256"; then
     echo "error: something is already listening on 127.0.0.1:$PORT (stale relay?)" >&2
     exit 1
 fi
-# The publisher's scheduling decisions, which show the cap bound and groups yielded.
+# The publisher's scheduling decisions, kept with the run to show the cap bound.
 RUST_LOG="info,moq_net::lite::publisher=debug" harness_spawn relay "$HARNESS_RUN/relay.log" \
     "$RELAY" "$DIR/relay.toml" --listen "127.0.0.1:$PORT" --web-http-listen "127.0.0.1:$PORT"
 RELAY_PID="$HARNESS_PID"

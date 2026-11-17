@@ -1,4 +1,4 @@
-//! The broadcast's join interval: `media.join.interval`, declared once from every media track's
+//! The broadcast's join interval: `sync.interval`, declared once from every media track's
 //! longest group.
 //!
 //! Each video and audio track a catalog mints joins as a [`Member`], carrying its hint (the GOP an
@@ -6,7 +6,7 @@
 //! [`Estimator`](super::Estimator) measured over its first window of a second or a group, whichever
 //! is longer. Nothing is declared before some track has written a whole window, so the tracks a
 //! publisher adds one at a time are all present, and then only once every member present has its
-//! interval: the catalog declares the largest, unless the publisher already set `media.join`
+//! interval: the catalog declares the largest, unless the publisher already set `sync.interval`
 //! itself. The interval is the grid an HLS or DASH export numbers
 //! segments on, so it is never changed once declared: a track that later reports a longer group
 //! overruns it, which the export tolerates, and a warning says so.

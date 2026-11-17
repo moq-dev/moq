@@ -5,17 +5,10 @@ use std::collections::VecDeque;
 
 use serde::de::DeserializeOwned;
 
+use super::consumer::Config;
 use super::encoder::MAX_INDEX;
 use super::op::{Header, Op};
 use crate::{Error, Result};
-
-/// Configuration for a [`Decoder`], and so for the [`Consumer`](super::Consumer) wrapping one.
-///
-/// Empty for now. Build from [`Default`]; the struct is `#[non_exhaustive]`, so new options stay
-/// additive.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct ConsumerConfig {}
 
 /// One change to the window, as the consumer sees it.
 ///
@@ -93,7 +86,7 @@ pub struct Decoder<T> {
 
 impl<T> Decoder<T> {
 	/// Create a decoder that has not yet been positioned by a group header.
-	pub fn new(_config: ConsumerConfig) -> Self {
+	pub fn new(_config: Config) -> Self {
 		Self {
 			front: 0,
 			len: 0,

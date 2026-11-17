@@ -5,6 +5,8 @@ description: Futures and streams for Flutter via the moq package
 
 # Dart and Flutter
 
+**Experimental:** the API may change in any release, and nobody has run it on iOS or in a Flutter application yet.
+
 [![pub.dev](https://img.shields.io/pub/v/moq)](https://pub.dev/packages/moq)
 
 The [`moq`](https://pub.dev/packages/moq) package on pub.dev wraps the
@@ -18,7 +20,7 @@ Import `package:moq/media.dart` with a prefix for catalogs, encoded-media import
 container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
 and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
-Publish JSON tracks with `MoqTrackInfo(compression: MoqCompression.deflate)`; a `package:moq/json.dart` consumer reads one with no option of its own.
+Publish JSON tracks with `TrackInfo(compression: Compression.deflate())`; a `package:moq/json.dart` consumer reads one with no option of its own.
 Every write takes a timestamp, and the library never substitutes zero or now.
 `SnapshotProducer.update`, `StreamProducer.append`, and `WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `package:moq/json.dart` consumers return `Value` (`value`, `timestamp`) from `next()`; a snapshot consumer
@@ -26,7 +28,8 @@ yields each state in order, and `latest()` skips to the newest.
 Media times are exact `Timestamp` records, `value` units at `scale` units per second, so a 90 kHz tick survives a
 read and republish. `Duration.toTimestamp()` converts exactly; `Timestamp.toDuration()` rounds down to a whole microsecond.
 A raw track with a `null` timescale is untimed: each frame carries `Timestamp.unscaled(key)`, its group's key, whose `scale` is `null`.
-`MoqTrackInfo.compression` set to `MoqCompression.deflate` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`TrackInfo`'s `maxAge`, how long a superseded group stays fresh, defaults to zero, which serves only the live edge; an explicit `null` sets no publisher limit, as it does for `Delay.max`. The generated `MoqTrackInfo` leaves an omitted `maxAge` null instead.
+`TrackInfo.compression` set to `Compression.deflate()` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -74,7 +77,7 @@ moq
 // Wait for a publisher at one path. The first call never returns null; call available()
 // again for the next one, or null once the path goes offline.
 final broadcast = (await moq.follow('live/camera').available())!;
-final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
+final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast, delay: Duration.zero);
 print(await catalog.next());
 ```
 
@@ -94,7 +97,7 @@ final encoder = video.Producer(
       framerate: video.FrameRate(numerator: 30000, denominator: 1001),
     ),
     output: video.EncoderOutput(
-      codec: video.Codec.h264,
+      codec: video.Codec.h264(),
       kind: video.AutoEncoder(),
     ),
     track: 'camera',
@@ -110,7 +113,7 @@ encoder.finish();
 import 'package:moq/video.dart' as video;
 
 final remote = (await moq.follow('live/camera').available())!;
-final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
+final renditions = await media.CatalogConsumer.subscribe(broadcast: remote, delay: Duration.zero);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,
   id: 'camera',
@@ -132,8 +135,8 @@ final route = moq.route('live/camera'); // visible at once, under a fresh instan
 print(route.instance());
 final mine = route.broadcast();
 final track = mine.publishTrack(name: 'video', info: null);
-final group = track.appendGroup();
-group.writeFrame(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(group.sequence())));
+final group = track.appendGroup(start: Timestamp.unscaled(0));
+group.writeFrame(frame: Frame(payload: bytes, timestamp: Timestamp.unscaled(group.start())));
 group.finish();
 track.finish();
 mine.close(); // ends the route too
@@ -162,9 +165,10 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ConnectOptions(versions: ...)`), listen to `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects.
 - **Tokens.** Pass `ConnectOptions(tokens: [...])` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set_(tokens: [...])` replaces them before they expire: the next dial presents them, a live AUTH session at once. `await tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `moq.credential(token)` returns a `Credential` that `route.setAuth(credential: credential)` or `claim.setAuth(credential: credential)` names (`null` for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `await credential.answered()` throws the peer's refusal, and `credential.cancel()` withdraws it unless a route or claim still names it.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
+- **Catalog timing.** Each catalog a `CatalogConsumer` yields carries the `timestamp` it takes effect at on the broadcast's media timeline. `CatalogConsumer.subscribe(broadcast: b, delay: Duration.zero)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout delay instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `UnsupportedConfigMoqException` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `Subscription()`, passing no subscription, and `defaultSubscription()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. `Delay` defaults both bounds to zero: pass `max: null` for no subscriber limit, or `min: null` to leave the target latency unstated. Decoders take the same `Delay`.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call the producer's `abortUnwanted(errorCode:)` once `wantedChanged()` returns null rather than releasing it: it returns false and keeps the track for a subscriber that joined since.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call `abortUnwanted(errorCode:)` on its producer (raw, media, audio, video, or JSON) once `wantedChanged()` returns null rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next null on a fresh `demand()`, since one that already returned null misses a subscriber that came and went.
 
 ## Runtime
 

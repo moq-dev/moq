@@ -1,4 +1,4 @@
-import type { Time, Timed } from "@moq/net";
+import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { MAX_FRAME_BYTES } from "../limits.ts";
 import { frameTime, openGroup, startsPast } from "../time.ts";
@@ -115,7 +115,7 @@ export class Producer<T> {
 	 * is {@link Time.Timestamp.unscaled} at a group key instead: a snapshot opens its group there,
 	 * which must pass every group the track holds, and a delta carries the open group's key.
 	 */
-	update({ value, at }: Timed<T>): void {
+	update(value: T, at: Time.Timestamp): void {
 		const frame = this.#encoder.update(value);
 		if (!frame) return;
 
@@ -204,7 +204,7 @@ export class Producer<T> {
 
 		const value = structuredClone(base) as T;
 		fn(value);
-		this.update({ value, at });
+		this.update(value, at);
 	}
 
 	/** Finish the track, closing any open group, and return it as {@link Finished}. */

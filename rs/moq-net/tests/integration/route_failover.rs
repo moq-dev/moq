@@ -152,9 +152,13 @@ impl Feed {
 			let index = self.written.len() as u64;
 			if index.is_multiple_of(FRAMES) {
 				if let Some(group) = self.group.take() {
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
-				self.group = Some(self.track.append_group(index / FRAMES).unwrap());
+				self.group = Some(
+					self.track
+						.append_group(Timestamp::from_millis(index / FRAMES).unwrap())
+						.unwrap(),
+				);
 			}
 			let group = self.group.as_mut().unwrap();
 			let timestamp = Timestamp::from_millis(index * self.step.as_millis() as u64).unwrap();
@@ -1029,7 +1033,7 @@ async fn a_name_announced_back_over_moq_transport_waits_without_retrying() {
 	live.broadcast().create_track("video", timed()).unwrap();
 	live.announce().unwrap();
 	let mut options = links.options("p-r", &p, &r);
-	options.client_subscribe = Some(r.clone().with_preference(origin::Preference::new(-1)));
+	options.client_subscribe = Some(r.clone().with_priority(origin::Priority::new(-1)));
 	let _p_r = connect_mock(options).await;
 	kio::clock::sleep(Duration::from_secs(1)).await;
 	let mut pairs = Vec::new();

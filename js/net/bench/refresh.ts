@@ -33,9 +33,7 @@ for (const retained of [1, 64, 1024])
 				const announcements = destination.announced();
 				while ((await announcements.next())?.kind !== "present") {}
 				const request = destination.request(Path.from("room"));
-				while (!request.active.peek()) await request.active.changed();
-				const remote = request.active.peek();
-				if (!remote) throw new Error("broadcast missing");
+				const remote = await request.broadcast();
 				const consumers = producers.map((_, i) => remote.track(`data${i}`));
 				const baseline = consumers.map((track) => track.subscribe());
 				for (let i = 0; i < tracks; i++) {

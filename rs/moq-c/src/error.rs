@@ -299,7 +299,7 @@ pub enum Error {
 
 	/// Error from the hang media layer.
 	#[error("hang error: {0}")]
-	Hang(#[from] hang::Error),
+	Hang(hang::Error),
 
 	/// Error from the moq-mux consumer layer.
 	#[error("mux error: {0}")]
@@ -346,6 +346,16 @@ pub enum Error {
 	/// The session or peer does not support the requested operation.
 	#[error("unsupported: {0}")]
 	Unsupported(String),
+}
+
+// A lost track reports the transport code every other consumer does, not a hang failure.
+impl From<hang::Error> for Error {
+	fn from(err: hang::Error) -> Self {
+		match err {
+			hang::Error::Moq(e) => Error::Moq(e),
+			e => Error::Hang(e),
+		}
+	}
 }
 
 impl From<moq_json::Error> for Error {
