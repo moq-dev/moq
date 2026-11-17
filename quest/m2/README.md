@@ -58,7 +58,6 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [the hole wait](/quest/m2/delay-hole-wait.md),
   [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
-  [the WebRTC bind](/quest/m2/webrtc-bind.md),
   [the WHEP pull's announcement](/quest/m2/whep-pull-announce.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
