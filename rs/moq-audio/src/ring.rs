@@ -142,11 +142,11 @@ struct Shared {
 	clocked: AtomicBool,
 	target: AtomicUsize,
 	finished: AtomicBool,
-	/// Declared ends, counted. See [`Producer::end`].
+	/// Declared silences, counted. See [`Producer::silence`].
 	ends: AtomicU64,
 	/// The resume the reader has yet to reach, [`PENDING`] set while there is one,
 	/// with the count of ends reaching it clears in the other bits. See
-	/// [`Producer::next`].
+	/// [`Producer::resume`].
 	resume: AtomicU64,
 	/// Where that resume starts, in written frames, and the comfort noise it
 	/// plays there before the next utterance. Written only while none is pending.
@@ -224,7 +224,7 @@ pub(crate) fn channel(channels: usize, input_rate: u32, output_rate: u32, config
 		written: latency,
 		pad: pad.then(|| latency * channels / 4),
 		declared: false,
-		next: false,
+		resuming: false,
 		shared: shared.clone(),
 	};
 	let consumer = Consumer {
@@ -273,19 +273,19 @@ pub(crate) struct Producer {
 	written: usize,
 	/// Pad back up to the latency at or below this many samples.
 	pad: Option<usize>,
-	/// An end was declared and no next utterance pushed since.
+	/// A silence was declared and no next utterance pushed since.
 	declared: bool,
-	/// The next push starts the next utterance. See [`next`](Self::next).
-	next: bool,
+	/// The next push starts the next utterance. See [`resume`](Self::resume).
+	resuming: bool,
 	shared: Arc<Shared>,
 }
 
 impl Producer {
 	/// Declare that what was pushed so far is followed by a silence the writer
 	/// announced. Once it has played, the reader fills with comfort noise rather
-	/// than underflowing, until the utterance [`next`](Self::next) starts plays.
+	/// than underflowing, until the utterance [`resume`](Self::resume) starts plays.
 	/// Pushes before then continue the audio before the silence.
-	pub(crate) fn end(&mut self) {
+	pub(crate) fn silence(&mut self) {
 		self.declared = true;
 		self.shared.ends.fetch_add(1, Ordering::Release);
 	}
@@ -293,21 +293,21 @@ impl Producer {
 	/// Start the next utterance with the next push. It plays one latency after
 	/// that push, behind whatever is still queued, with comfort noise filling the
 	/// wait, as a fresh queue's first push would behind its primed silence.
-	pub(crate) fn next(&mut self) {
-		self.next = true;
+	pub(crate) fn resume(&mut self) {
+		self.resuming = true;
 	}
 
 	/// Carry a declared silence over from the queue this one replaces.
 	pub(crate) fn carry(&mut self, from: &Producer) {
 		if from.declared {
-			self.end();
+			self.silence();
 		}
-		self.next = from.next;
+		self.resuming = from.resuming;
 	}
 
 	/// Queue the comfort noise that starts the next utterance one latency out,
 	/// once the reader reaches what is queued now.
-	fn resume(&mut self) {
+	fn schedule(&mut self) {
 		// The resampler's tail belongs to the audio before the silence.
 		if let Some(convert) = &mut self.convert {
 			let before = convert.emitted;
@@ -360,8 +360,8 @@ impl Producer {
 	}
 
 	fn queue(&mut self, input: &[f32]) -> Push {
-		if input.len() >= self.channels && std::mem::take(&mut self.next) {
-			self.resume();
+		if input.len() >= self.channels && std::mem::take(&mut self.resuming) {
+			self.schedule();
 		}
 
 		let frames = input.len() / self.channels;
@@ -1958,7 +1958,7 @@ mod tests {
 		// Twice the target, so the tail drains through it: without the end it
 		// would expand there, toward a target nothing will refill.
 		assert_eq!(prod.push(&vec![0.25; 4800 * 2]), Push::Ok);
-		prod.end();
+		prod.silence();
 		let mut out = [0.0; 128 * 2];
 		let mut reads = 0;
 		while cons.available() > 0 {
@@ -2070,7 +2070,7 @@ mod tests {
 		assert_eq!(prod.push(&[0.0002; 4800 * STEREO]), Push::Ok);
 		let mut out = vec![0.0; (LATENCY + 4800 - tail) * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Ok);
-		prod.end();
+		prod.silence();
 		(prod, cons)
 	}
 
@@ -2089,7 +2089,7 @@ mod tests {
 		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 0 });
 		assert!(noise(&out));
 
-		prod.next();
+		prod.resume();
 		assert_eq!(prod.push(&[0.5; 960 * STEREO]), Push::Ok);
 		let mut out = vec![0.0; (LATENCY + 960) * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Ok);
@@ -2120,7 +2120,7 @@ mod tests {
 		assert_eq!(prod.push(&[0.0002; 4800 * STEREO]), Push::Ok);
 		let mut out = vec![0.0; (LATENCY + 4800) * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Ok);
-		prod.end();
+		prod.silence();
 		let mut out = vec![1.0; 1000 * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 0 });
 		assert!(out.iter().all(|&sample| sample == 0.0));
@@ -2152,7 +2152,7 @@ mod tests {
 	#[test]
 	fn a_resume_behind_a_queued_tail_starts_one_latency_out() {
 		let (mut prod, mut cons) = ended(1200);
-		prod.next();
+		prod.resume();
 		assert_eq!(prod.push(&[0.5; 960 * STEREO]), Push::Ok);
 		assert_eq!(prod.buffered(), Duration::from_millis(70));
 		let mut out = vec![0.0; (LATENCY + 960) * STEREO];
@@ -2167,10 +2167,10 @@ mod tests {
 	#[test]
 	fn a_second_silence_within_one_latency_clears_with_the_first() {
 		let (mut prod, mut cons) = ended(600);
-		prod.next();
+		prod.resume();
 		assert_eq!(prod.push(&[0.5; 240 * STEREO]), Push::Ok);
-		prod.end();
-		prod.next();
+		prod.silence();
+		prod.resume();
 		assert_eq!(prod.push(&[0.25; 240 * STEREO]), Push::Ok);
 		let mut out = vec![0.0; (LATENCY + 480) * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Ok);
@@ -2183,11 +2183,11 @@ mod tests {
 	#[test]
 	fn an_end_before_any_audio_is_a_silence() {
 		let (mut prod, mut cons) = queue(48_000, 48_000, Duration::from_secs(1));
-		prod.end();
+		prod.silence();
 		let mut out = vec![1.0; 128 * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 0 });
 		assert!(out.iter().all(|&sample| sample == 0.0));
-		prod.next();
+		prod.resume();
 		assert_eq!(prod.push(&[0.5; 960 * STEREO]), Push::Ok);
 		let mut out = vec![0.0; (LATENCY + 960) * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Ok);
@@ -2199,7 +2199,7 @@ mod tests {
 	#[test]
 	fn a_discard_crosses_a_resume() {
 		let (mut prod, mut cons) = ended(1200);
-		prod.next();
+		prod.resume();
 		assert_eq!(prod.push(&[0.5; 960 * STEREO]), Push::Ok);
 		cons.discard(1800);
 		assert_eq!(cons.available(), 600 + 960);
@@ -2218,8 +2218,8 @@ mod tests {
 		let mut out = vec![0.0; 48_000 * STEREO];
 		// The first flush pads nearly a whole chunk, more than the second leaves pending.
 		for (sample, frames) in [(0.25f32, CHUNK + 1), (0.5, CHUNK + 100)] {
-			prod.end();
-			prod.next();
+			prod.silence();
+			prod.resume();
 			assert_eq!(prod.push(&vec![sample; frames * STEREO]), Push::Ok);
 		}
 		assert!(prod.flush());
@@ -2252,7 +2252,7 @@ mod tests {
 		assert_eq!(cons.read(&mut out[..128 * STEREO]), Read::Underflow { frames: 0 });
 		assert_eq!(prod.push(&[0.25; 960 * STEREO]), Push::Ok);
 		assert_eq!(cons.read(&mut out[..128 * STEREO]), Read::Underflow { frames: 0 });
-		prod.end();
+		prod.silence();
 		let mut out = vec![0.0; 1000 * STEREO];
 		assert_eq!(cons.read(&mut out), Read::Comfort { frames: 960 });
 		assert!(out[..960 * STEREO].iter().all(|&sample| sample == 0.25));

@@ -12,7 +12,7 @@ pub(crate) fn depth(config: &VideoConfig) -> crate::Result<Option<usize>> {
 	};
 	let max = crate::codec::video::max_reorder(config);
 	if u32::from(reorder) > max {
-		return Err(ClockError::Depth {
+		return Err(ReorderError::Depth {
 			reorder,
 			max,
 			codec: config.codec.to_string(),
@@ -89,21 +89,21 @@ impl<T> DeclaredClock<T> {
 	/// Hold the group's next frame in decode order, presented at `pts` ticks, read from `source`.
 	pub(crate) fn push(&mut self, item: T, pts: u64, source: moq_net::Timestamp) -> crate::Result<()> {
 		if self.held.len() > self.depth {
-			return Err(ClockError::Undrained.into());
+			return Err(ReorderError::Undrained.into());
 		}
 		let source = source.as_nanos()?;
 		// Only `highest` matters: a frame below all of it reorders past the depth.
 		let mut pts = pts;
 		for &(tick, prior) in &self.highest {
 			if prior < source && tick >= pts {
-				pts = tick.checked_add(1).ok_or(ClockError::Tie)?;
+				pts = tick.checked_add(1).ok_or(ReorderError::Tie)?;
 			}
 		}
 		if (self.highest.iter()).any(|&(tick, prior)| prior >= source && tick <= pts) {
-			return Err(ClockError::Tie.into());
+			return Err(ReorderError::Tie.into());
 		}
 		if self.reorders_past(pts) {
-			return Err(ClockError::Reordered(self.depth).into());
+			return Err(ReorderError::Reordered(self.depth).into());
 		}
 		let at = self.highest.partition_point(|&(prior, _)| prior <= pts);
 		self.highest.insert(at, (pts, source));
@@ -133,31 +133,48 @@ impl<T> DeclaredClock<T> {
 		};
 		let (item, pts) = self.held.pop_front().expect("the held queue is nonempty");
 		if dts > i128::from(pts) || self.last.is_some_and(|last| dts <= last) {
-			return Err(ClockError::Presentation.into());
+			return Err(ReorderError::Presentation.into());
 		}
 		self.last = Some(dts);
 		Ok(Some((item, dts, pts)))
 	}
 }
 
-#[derive(Debug, thiserror::Error)]
-enum ClockError {
+/// Video whose frames do not fit the reorder depth it declares, so no decode clock can be
+/// authored for it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReorderError {
+	/// The declared depth is deeper than the codec and level allow.
 	#[error("video reorder depth {reorder} exceeds the {max} that {codec} can reach")]
-	Depth { reorder: u8, max: u32, codec: String },
+	Depth {
+		/// The declared depth.
+		reorder: u8,
+		/// The deepest the codec and level allow.
+		max: u32,
+		/// The codec string.
+		codec: String,
+	},
+	/// A sequence header declares a deeper reorder than the track already declared.
+	#[error("video reorder depth {reorder} exceeds the {declared} the track declared")]
+	Deepened {
+		/// The depth the track declared.
+		declared: u8,
+		/// The deeper depth the sequence header declares.
+		reorder: u8,
+	},
+	/// A frame presents earlier than the declared depth lets it.
 	#[error("video reorders past its declared depth {0}")]
 	Reordered(usize),
+	/// The presentation slots leave no decode time at or before a frame's presentation.
 	#[error("video presentation slots cannot author increasing DTS at or before PTS")]
 	Presentation,
+	/// Two frames present at one timestamp.
 	#[error("video presents two frames at one timestamp")]
 	Tie,
+	/// A frame was read before the clock released the ones ahead of it.
 	#[error("the decode clock must be drained before reading another frame")]
 	Undrained,
-}
-
-impl From<ClockError> for crate::Error {
-	fn from(err: ClockError) -> Self {
-		anyhow::Error::new(err).into()
-	}
 }
 
 #[cfg(test)]
