@@ -9,7 +9,7 @@ export function readsFrom(active: BroadcastConsumer | undefined, source: Broadca
 	const name = `probe-${probes++}`;
 	const track = source.createTrack(name);
 	const group = track.appendGroup();
-	group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const sub = active.track(name).subscribe();
 	try {

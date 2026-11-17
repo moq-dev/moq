@@ -33,7 +33,7 @@ function publish(track: Track.Producer, sequence: number): void {
 	const group = track.createGroup(BigInt(sequence));
 	const payload = new Uint8Array(PAYLOAD);
 	new DataView(payload.buffer).setUint32(0, sequence);
-	group.writeFrame({ payload, timestamp: Time.Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload, timestamp: Time.Timestamp.unscaled(group.start) });
 	group.finish();
 }
 
@@ -41,7 +41,7 @@ function publish(track: Track.Producer, sequence: number): void {
 function drain(subscriber: Track.Subscriber, count: number): void {
 	let next = 0;
 	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup(), next++) {
-		if (group.sequence !== BigInt(next)) throw new Error(`group ${group.sequence} delivered, expected ${next}`);
+		if (group.start !== BigInt(next)) throw new Error(`group ${group.start} delivered, expected ${next}`);
 		const payload = group.tryReadFrame()?.payload;
 		if (payload?.byteLength !== PAYLOAD || new DataView(payload.buffer, payload.byteOffset).getUint32(0) !== next)
 			throw new Error(`group ${next} payload mismatch`);

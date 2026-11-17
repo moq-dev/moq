@@ -370,8 +370,8 @@ export type Recv =
 
 /** A package-internal frame read as the group stores it. */
 export interface ReadGroupFrame {
-	/** Frame sequence within the group. */
-	sequence: number;
+	/** The frame's index within the group. */
+	index: number;
 	/** The frame, holding its DEFLATE slice on a compressed read. */
 	frame: Frame;
 	/** The stored slice's declared plain size, on compressed reads. */

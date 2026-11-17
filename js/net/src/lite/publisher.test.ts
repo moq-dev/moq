@@ -518,7 +518,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 
 		// Newest-first, so the last group opened is at position 0 and the first is at the back.
 		const expected = groups.map((group) =>
-			sendOrder({ priority: 9, position: count - 1 - Number(group.sequence) }),
+			sendOrder({ priority: 9, position: count - 1 - Number(group.start) }),
 		);
 		await clock.advance(Duration.ZERO);
 

@@ -1409,7 +1409,7 @@ test.each(["off", "all"] as const)(
 			for (let i = 0; i < (onDemand ? 1 : 2); i++) {
 				const group = await ordered.nextGroup();
 				if (!group) throw new Error("expected a group");
-				groups.push(group.sequence);
+				groups.push(group.start);
 				const frame = await group.readFrame();
 				if (!frame) throw new Error("expected a frame");
 				firsts.push(Moq.Varint.decode(frame.payload)[0] / 1000);
@@ -1608,7 +1608,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		await flush();
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
-		expect(siblingTrack.appendGroup().sequence).toBe(0n);
+		expect(siblingTrack.appendGroup().start).toBe(0n);
 		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).not.toBe(false);
 		const live = FakeVideoEncoder.instances.find((instance) => instance.state === "configured");
@@ -1624,7 +1624,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.closed.peek()).toBeUndefined();
-		expect(siblingTrack.appendGroup().sequence).toBe(1n);
+		expect(siblingTrack.appendGroup().start).toBe(1n);
 		const instances = FakeVideoEncoder.instances.length;
 		broadcast.audio("audio/new");
 		estimate.set(20_000_000);
@@ -1667,7 +1667,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
-		expect(siblingTrack.appendGroup().sequence).toBe(2n);
+		expect(siblingTrack.appendGroup().start).toBe(2n);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();

@@ -227,7 +227,7 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 		for (const name of all) {
 			const track = broadcast.createTrack(name);
 			const group = track.appendGroup();
-			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		}
 	}

@@ -20,7 +20,7 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
 	const group = track.createGroup(4n);
-	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload: enc.encode("live 4"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const requests = track.requests();
 	const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null }, order: "ascending" });

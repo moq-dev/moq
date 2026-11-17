@@ -797,7 +797,7 @@ class Reader implements ResumeSource {
 		if (next) {
 			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 			if (recv.kind === "group") {
-				this.#observe(next, recv.group.sequence);
+				this.#observe(next, recv.group.start);
 				return { kind: "group", group: this.#handOut(next, recv.group) };
 			}
 			// The lowest buffered group keeps its place while its copy waits on a hole.
@@ -811,11 +811,11 @@ class Reader implements ResumeSource {
 			for (;;) {
 				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 				if (recv.kind === "group") {
-					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
+					if (!this.#deliverable(copy, recv.group.start, delivered)) {
 						recv.group.close();
 						continue;
 					}
-					this.#observe(copy, recv.group.sequence);
+					this.#observe(copy, recv.group.start);
 					return { kind: "group", group: this.#handOut(copy, recv.group) };
 				}
 				// Drained: the track ended as the copy did, which is not cleanly when its
@@ -1230,7 +1230,7 @@ class Reader implements ResumeSource {
 	}
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
-		this.#newest = max(this.#newest ?? 0n, group.sequence);
+		this.#newest = max(this.#newest ?? 0n, group.start);
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
 		// later route's copy may come to hold it.
@@ -1602,7 +1602,7 @@ class Recover implements GroupRecover {
 	 */
 	constructor(reader: Reader, group: GroupConsumer, copy: Copy) {
 		this.#reader = reader;
-		this.sequence = group.sequence;
+		this.sequence = group.start;
 		this.#copy = copy;
 		copy.lease++;
 		reader.out.add(this);

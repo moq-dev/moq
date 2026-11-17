@@ -637,7 +637,7 @@ class Model {
 			}
 			if (recv.kind === "group") {
 				const group = recv.group;
-				const sequence = Number(group.sequence);
+				const sequence = Number(group.start);
 				if (reader.reading.has(sequence)) {
 					throw fail(index, `group ${sequence} handed out twice: ${reader.handed}`);
 				}
@@ -688,7 +688,7 @@ class Model {
 
 	/** Read a group handed out to its end, checking each frame against the model. */
 	async #read(index: number, reader: Reader, reading: Reading): Promise<void> {
-		const sequence = Number(reading.group.sequence);
+		const sequence = Number(reading.group.start);
 		for (;;) {
 			let frame: Frame | undefined;
 			try {

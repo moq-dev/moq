@@ -213,7 +213,7 @@ export class Producer {
 }
 
 /** @internal */
-export let makeConsumer: (sequence: number, frame: Frame) => Consumer;
+export let makeConsumer: (index: number, frame: Frame) => Consumer;
 // The next chunk without waiting: `undefined` at the end, or `WAIT` until the next write.
 /** @internal */
 export let pollChunk: (consumer: Consumer) => Uint8Array | undefined | typeof WAIT;
@@ -247,8 +247,8 @@ export function joined(parts: Uint8Array[], size: number): Uint8Array {
  * @public
  */
 export class Consumer {
-	/** The frame's sequence number within its group. */
-	readonly sequence: number;
+	/** The frame's index within its group, counting from 0 in write order. */
+	readonly index: number;
 	/** The payload size in bytes. */
 	readonly size: number;
 	/** The frame's presentation timestamp, or on a scale-less track its group's key. */
@@ -256,15 +256,15 @@ export class Consumer {
 	#frame: Frame;
 	#offset = 0;
 
-	private constructor(sequence: number, frame: Frame) {
-		this.sequence = sequence;
+	private constructor(index: number, frame: Frame) {
+		this.index = index;
 		this.#frame = frame;
 		this.size = payloadBytes(frame);
 		this.timestamp = frame.timestamp;
 	}
 
 	static {
-		makeConsumer = (sequence, frame) => new Consumer(sequence, frame);
+		makeConsumer = (index, frame) => new Consumer(index, frame);
 		hooks.readFrameChunk = (consumer, closed) => consumer.#readChunk(closed);
 		pollChunk = (consumer) => consumer.#poll();
 		chunkChanged = (consumer) => {

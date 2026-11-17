@@ -185,13 +185,13 @@ test("path is opaque", async () => {
 test("grouped roundtrip", async () => {
 	const p = await pair("video");
 	const group = p.producer.appendGroup();
-	expect(group.sequence).toBe(0n);
+	expect(group.start).toBe(0n);
 	await group.writeFrame(ms(1), text("frame-zero"));
 	await group.writeFrame(ms(2), text("frame-one"));
 	group.finish();
 
 	const received = await recvGroup(p.consumer);
-	expect(received.sequence).toBe(0n);
+	expect(received.start).toBe(0n);
 	const first = await received.readFrame();
 	expect(decoder.decode(first?.plaintext)).toBe("frame-zero");
 	expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(1);
@@ -213,10 +213,10 @@ test("datagram roundtrip", async () => {
 test("sequences allocate monotonically", async () => {
 	const p = await pair("video");
 	const subscriber = p.dg.net.consume();
-	expect(p.producer.appendGroup().sequence).toBe(0n);
-	expect(p.producer.createGroup(5n).sequence).toBe(5n);
+	expect(p.producer.appendGroup().start).toBe(0n);
+	expect(p.producer.createGroup(5n).start).toBe(5n);
 	expect(await p.dg.producer.append(ms(1), text("x"))).toBe(0n);
-	expect(p.producer.appendGroup().sequence).toBe(6n);
+	expect(p.producer.appendGroup().start).toBe(6n);
 	expect(thrown(() => p.producer.createGroup(6n))).toBe("reuse");
 	expect(thrown(() => p.producer.createGroup(3n))).toBe("reuse");
 	expect(await failure(p.dg.producer.insert(0n, ms(1), text("x")))).toBe("reuse");
@@ -782,7 +782,7 @@ test("aborting a group rejects its pending writes", async () => {
 	await next.writeFrame(ms(4), text("next"));
 	next.finish();
 	const received = await recvGroup(p.consumer);
-	expect(received.sequence).toBe(0n);
+	expect(received.start).toBe(0n);
 	expect(await received.readFrame().catch((err) => err)).toBe(abort);
 	expect(await readText(await recvGroup(p.consumer))).toBe("next");
 });
@@ -844,7 +844,7 @@ test("a refused timestamp does not burn the frame", async () => {
 	const p = await pair("video");
 	await p.net.info();
 	const group = p.producer.appendGroup();
-	await expect(group.writeFrame(Time.Timestamp.unscaled(group.sequence), text("untimed"))).rejects.toThrow(
+	await expect(group.writeFrame(Time.Timestamp.unscaled(group.start), text("untimed"))).rejects.toThrow(
 		"timestamp",
 	);
 	await group.writeFrame(ms(1), text("ok"));
@@ -862,7 +862,7 @@ test("produce waits for an unaccepted track's timescale", async () => {
 
 	// The timescale is known from the start, so mismatches spend neither a sequence nor a frame.
 	const group = producer.createGroup(1n);
-	await expect(group.writeFrame(Time.Timestamp.unscaled(group.sequence), text("untimed"))).rejects.toThrow(
+	await expect(group.writeFrame(Time.Timestamp.unscaled(group.start), text("untimed"))).rejects.toThrow(
 		"timestamp",
 	);
 	await group.writeFrame(ms(2), text("frame"));

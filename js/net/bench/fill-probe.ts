@@ -16,7 +16,7 @@ for (const runs of [250, 1000, 4000, 16000]) {
 		// 2 and 3 are read up front, so the only gaps any fill is asked for are the drops below.
 		for (const sequence of [2n, 3n]) {
 			const live = track.createGroup(sequence);
-			live.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(live.sequence) });
+			live.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(live.start) });
 			live.finish();
 		}
 		const requests = track.requests();
@@ -44,10 +44,10 @@ for (const runs of [250, 1000, 4000, 16000]) {
 			hooks.dropTrackGroups(track, sequence, sequence + 1n, staleHole(60_000));
 			for (const sub of subs) sub.tryRecvGroup();
 			const group = track.createGroup(sequence + 1n);
-			group.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 			for (const sub of subs) {
-				if (sub.tryRecvGroup()?.sequence !== sequence + 1n)
+				if (sub.tryRecvGroup()?.start !== sequence + 1n)
 					throw new Error(`group ${sequence + 1n} not handed out`);
 			}
 		}

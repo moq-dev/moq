@@ -50,7 +50,7 @@ async function measure(readers: number, swaps: number | undefined, fork = false)
 		// Every route's copy holds the same groups under the same sequences.
 		const write = () => {
 			const group = track.createGroup(sequence);
-			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		};
 		sources.push({ broadcast, write });
@@ -146,7 +146,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	const tracks = sources.map((source) => source.createTrack("seq"));
 	const groups = tracks.map((track) => {
 		const group = track.appendGroup();
-		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 		return group;
 	});
 	front.serve(handles[0]);
@@ -194,10 +194,10 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 	const producer = new GroupProducer(0n);
 	const replacement = new GroupProducer(0n);
 	for (let index = 0; index < replayed; index++) {
-		producer.writeFrame({ payload, timestamp: Timestamp.unscaled(producer.sequence) });
-		replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.sequence) });
+		producer.writeFrame({ payload, timestamp: Timestamp.unscaled(producer.start) });
+		replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.start) });
 	}
-	replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.sequence) });
+	replacement.writeFrame({ payload, timestamp: Timestamp.unscaled(replacement.start) });
 	const consumers = Array.from({ length: readers }, () => producer.mirror());
 	for (const consumer of consumers) {
 		for (let index = 0; index < replayed; index++) {
@@ -220,8 +220,8 @@ async function measureReplay(readers: number, replayed: number): Promise<number>
 	await Promise.all(consumers.map((consumer) => consumer.readable()));
 	const elapsed = performance.now() - start;
 	for (const consumer of consumers) {
-		const frame = consumer.tryReadFrameSequence();
-		if (frame?.sequence !== replayed) throw new Error("readiness did not preserve the unread frame");
+		const frame = consumer.tryReadFrameIndex();
+		if (frame?.index !== replayed) throw new Error("readiness did not preserve the unread frame");
 		checksum += frame.payload.byteLength;
 		consumer.close();
 	}

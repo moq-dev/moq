@@ -354,8 +354,8 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		})
 		.ordered();
 	try {
-		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_START_GROUP);
-		expect((await subscriber.nextGroup())?.sequence).toBe(INITIAL_END_GROUP - 1n);
+		expect((await subscriber.nextGroup())?.start).toBe(INITIAL_START_GROUP);
+		expect((await subscriber.nextGroup())?.start).toBe(INITIAL_END_GROUP - 1n);
 
 		// A bounded read ends once its window is read, as in Rust.
 		expect(await subscriber.nextGroup()).toBeUndefined();
@@ -425,7 +425,7 @@ test("integration: lite refuses an empty requested range on open and on update",
 				ranges: [{ start: { absolute: 1n }, end: { absolute: 2n } }],
 			})
 			.ordered();
-		expect((await live.nextGroup())?.sequence).toBe(1n);
+		expect((await live.nextGroup())?.start).toBe(1n);
 		live.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { absolute: 3n }, end: { absolute: 3n } }],
@@ -472,7 +472,7 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 			.ordered();
 		// Covering the ranges ends the subscription upstream, and the read with its window.
 		const got: bigint[] = [];
-		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1n);
+		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.start ?? -1n);
 		expect(got).toEqual([1n, 2n, 7n, 8n]);
 		expect(await reader.nextGroup()).toBeUndefined();
 		reader.close();
@@ -502,7 +502,7 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 	const producer = broadcast.createTrack("video", { maxAge: null });
 	for (let sequence = 0; sequence < 5; sequence++) {
 		const group = producer.appendGroup();
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.unscaled(group.sequence) });
+		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 	}
 	const newest = producer.appendGroup();
@@ -514,11 +514,11 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 	try {
 		// Accepting the track subscribes it upstream, whose answer resolves the start.
 		await reader.info();
-		expect((await sibling.recvGroup())?.sequence).toBe(5n);
+		expect((await sibling.recvGroup())?.start).toBe(5n);
 		expect(await reader.start()).toBe(5n);
-		newest.writeFrame({ payload: new Uint8Array([5]), timestamp: Timestamp.unscaled(newest.sequence) });
+		newest.writeFrame({ payload: new Uint8Array([5]), timestamp: Timestamp.unscaled(newest.start) });
 		newest.finish();
-		expect((await reader.recvGroup())?.sequence).toBe(5n);
+		expect((await reader.recvGroup())?.start).toBe(5n);
 	} finally {
 		sibling.close();
 		reader.close();
@@ -555,7 +555,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 	// Arrival reads, as the Rust test's: an ordered one would wait out the missing group 3.
 	const read = async (reader: ReturnType<typeof bounded>, count: number) => {
 		const got: bigint[] = [];
-		for (let i = 0; i < count; i++) got.push((await reader.recvGroup())?.sequence ?? -1n);
+		for (let i = 0; i < count; i++) got.push((await reader.recvGroup())?.start ?? -1n);
 		return got;
 	};
 	try {
@@ -610,7 +610,7 @@ test("integration: lite-07 serves a time range", async () => {
 			ranges: [{ start: { time: Timestamp.fromMillis(2000) }, end: { time: Timestamp.fromMillis(5000) } }],
 		});
 		const got: bigint[] = [];
-		for (let i = 0; i < 4; i++) got.push((await reader.recvGroup())?.sequence ?? -1n);
+		for (let i = 0; i < 4; i++) got.push((await reader.recvGroup())?.start ?? -1n);
 		expect(got.sort((a, b) => (a < b ? -1 : 1))).toEqual([2000n, 3000n, 4000n, 5000n]);
 		reader.close();
 
@@ -1435,7 +1435,7 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 	group.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const fetched = await remote.track("video").fetchGroup(group.sequence);
+	const fetched = await remote.track("video").fetchGroup(group.start);
 	expect(await fetched.readString()).toBe("hello");
 
 	// The publisher is now serving the still-open group.
@@ -1543,8 +1543,8 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	group.writeFrame(textFrame("hello"));
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const f1 = await remote.track("video").fetchGroup(group.sequence);
-	const f2 = await remote.track("video").fetchGroup(group.sequence);
+	const f1 = await remote.track("video").fetchGroup(group.start);
+	const f2 = await remote.track("video").fetchGroup(group.start);
 	expect(await f1.readString()).toBe("hello");
 	expect(await f2.readString()).toBe("hello");
 	await waitFor(group.demand().wanted, (wanted) => wanted);
@@ -1586,12 +1586,12 @@ test("integration: lite fetch re-armed by a late reader keeps every frame", asyn
 		const group = video.appendGroup(); // open
 		group.writeFrame(textFrame("hello"));
 
-		const f1 = await remote.track("video").fetchGroup(group.sequence);
+		const f1 = await remote.track("video").fetchGroup(group.start);
 		expect(await f1.readString()).toBe("hello");
 
 		f1.close();
 		for (let i = 0; i < delay; i++) await Promise.resolve();
-		const f2 = await remote.track("video").fetchGroup(group.sequence);
+		const f2 = await remote.track("video").fetchGroup(group.start);
 		expect(await f2.readString()).toBe("hello");
 
 		group.writeFrame(textFrame("more"));
@@ -1627,7 +1627,7 @@ test("integration: lite fetch delivers every frame of a finite multi-frame group
 	group.finish(); // finite
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const fetched = await remote.track("video").fetchGroup(group.sequence);
+	const fetched = await remote.track("video").fetchGroup(group.start);
 	for (let i = 0; i < count; i++) {
 		expect(await fetched.readString()).toBe(`f${i}`);
 	}
@@ -3026,14 +3026,14 @@ test("integration: lite-07 drops a group reset to make room, and a FETCH reads i
 		older.writeFrame(textFrame("a"));
 		const reset = await settled(subscriber.recvGroup(), "the older group");
 		if (!reset) throw new Error("no older group");
-		expect(reset.sequence).toBe(0n);
+		expect(reset.start).toBe(0n);
 		expect(await settled(reset.readString(), "its first frame")).toBe("a");
 
 		const newer = producer.appendGroup();
 		newer.writeFrame(textFrame("new"));
 		newer.finish();
 		const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
-		expect(group?.sequence).toBe(1n);
+		expect(group?.start).toBe(1n);
 		expect(await settled(Promise.resolve(reset.closed), "the older group's end")).toMatchObject({
 			code: StreamCode.TooFarBehind,
 		});
@@ -3086,7 +3086,7 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			const at = (sequence: bigint) => Timestamp.fromMillis(1_000 + Number(sequence));
 			const held = producer.createGroup(2n);
 			held.writeFrame(textFrame("held", at(2n)));
-			expect((await settled(subscriber.recvGroup(), "the held group"))?.sequence).toBe(2n);
+			expect((await settled(subscriber.recvGroup(), "the held group"))?.start).toBe(2n);
 
 			// Late and below the held stream: it waits for credit it cannot make room for.
 			const late = producer.createGroup(0n);
@@ -3100,8 +3100,8 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			for (;;) {
 				const group = await settled(subscriber.recvGroup(), "the newer group past the late one");
 				if (!group) throw new Error("the subscription ended");
-				if (group.sequence === 3n) break;
-				expect(group.sequence).toBe(0n);
+				if (group.start === 3n) break;
+				expect(group.start).toBe(0n);
 			}
 		} finally {
 			subscriber.close();

@@ -1770,11 +1770,11 @@ export class Publisher {
 				// Never a second stream for a sequence this subscription already accounted for (served,
 				// sent as a datagram, or dropped, stale or not): a subscriber settles every drop for good,
 				// and a reader wider than a stale one asks for the group with a request of its own.
-				if (record?.told(group.sequence)) {
+				if (record?.told(group.start)) {
 					group.close();
 					continue;
 				}
-				const range = frameRange(bounds, group.sequence);
+				const range = frameRange(bounds, group.start);
 
 				if (emitRange && !startSent) {
 					const source = hooks.sourceStart(track);
@@ -1788,13 +1788,13 @@ export class Publisher {
 					startSent = true;
 					// Newest-first delivery can put a group ahead of where the source's feed
 					// starts. Preserve that start so a resumed subscriber still waits for the backlog.
-					startSequence = min(group.sequence, source ?? group.sequence);
+					startSequence = min(group.start, source ?? group.start);
 					// A group given up cannot be where the feed starts. Adjacent runs given up with
 					// different errors stay separate, so walk them in order.
 					skipped.sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
 					for (const range of skipped) {
 						if (range.start <= startSequence && range.end > startSequence)
-							startSequence = min(range.end, group.sequence);
+							startSequence = min(range.end, group.start);
 					}
 					// A later group above an explicit floor is still delivered, so the cursor stays put.
 					// A pre-06 subscribe that named no group is the exception: an absent
@@ -1812,14 +1812,14 @@ export class Publisher {
 					)
 						return false;
 				}
-				record?.tell(group.sequence, group.sequence + 1n, { kind: "settled" });
+				record?.tell(group.start, group.start + 1n, { kind: "settled" });
 				// Its GROUP passes over the run elided below it, and a drop of it sends the run first.
 				// The run is taken as it was elided, since the cache may have forgotten the skip since.
-				const from = elided.get(group.sequence);
-				elided.delete(group.sequence);
+				const from = elided.get(group.start);
+				elided.delete(group.start);
 				let previous: bigint | undefined;
 				if (hasGroupEnd(this.version)) {
-					const cached = hooks.previousStart(track, group.sequence);
+					const cached = hooks.previousStart(track, group.start);
 					const run = from !== undefined && from > 0n ? from - 1n : undefined;
 					previous = cached === undefined || run === undefined ? (cached ?? run) : min(cached, run);
 				}
@@ -1848,10 +1848,10 @@ export class Publisher {
 					}
 					if (failed && emitRange) {
 						pendingDrops.push({
-							start: group.sequence,
-							end: group.sequence + 1n,
+							start: group.start,
+							end: group.start + 1n,
 							error: failed,
-							passed: passedOver(options.previous, group.sequence),
+							passed: passedOver(options.previous, group.start),
 						});
 						drops.update((revision) => revision + 1);
 					}
@@ -2301,7 +2301,7 @@ export class Publisher {
 			// the link and the peer's credit when there isn't room for both. The place ranks the
 			// open against the subscription's other groups while it waits.
 			// Watch the group while the open waits, and release that watch once it settles.
-			const place = priority.reserve(group.sequence, start);
+			const place = priority.reserve(group.start, start);
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
 			const abandoned = givenUp
@@ -2342,7 +2342,7 @@ export class Publisher {
 	async #serveGroup(stream: Writer, options: RunGroup) {
 		const { sub, group, givenUp, stamp, compress, priority, previous, start: startFrame, end: endFrame } = options;
 		// The header names the requested position, so a copy missing it must be refused.
-		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, previous, frameStart: startFrame });
+		const msg = new GroupMessage({ subscribe: sub, sequence: group.start, previous, frameStart: startFrame });
 		// Lite-07 ends a finished group with GROUP_END and closes, rather than resets, the stream of
 		// a group that expires on it: the stream accounts for the group, so no drop names it.
 		const closes = hasGroupEnd(this.version);
@@ -2365,7 +2365,7 @@ export class Publisher {
 			if (hooks.groupIndex(group) > startFrame) throw new Error(`group lacks frame ${startFrame}`);
 			// A SUBSCRIBE_UPDATE re-ranks the subscription, so a group already on the wire
 			// follows it too rather than keeping a stale rank until it finishes.
-			priority.add(stream, group.sequence, startFrame);
+			priority.add(stream, group.start, startFrame);
 
 			await write(async () => {
 				await stream.u53(0); // stream type
@@ -2392,11 +2392,11 @@ export class Publisher {
 				}
 
 				// A group that ends exactly at the start is a valid, empty range.
-				if (read.sequence + 1 >= startFrame) reached = true;
+				if (read.index + 1 >= startFrame) reached = true;
 				// Frames below the requested start were excluded, and the receiver
 				// numbers what it gets from `startFrame`.
-				if (read.sequence < startFrame) continue;
-				if (endFrame !== undefined && read.sequence > endFrame) break;
+				if (read.index < startFrame) continue;
+				if (endFrame !== undefined && read.index > endFrame) break;
 
 				let delta: bigint | undefined;
 				if (stamp !== undefined) {
@@ -2445,7 +2445,7 @@ export class Publisher {
 					(err: unknown) => error(err),
 				);
 				if (failed === undefined) {
-					console.debug(`closing expired group: subscribe=${sub} sequence=${group.sequence}`);
+					console.debug(`closing expired group: subscribe=${sub} sequence=${group.start}`);
 					stream.close();
 					group.close();
 					return await stream.closed.then(

@@ -55,7 +55,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				if (track) {
 					const grouped = remote.track("audio").subscribe();
 					track.writeFrame({ timestamp: Timestamp.fromMillis(1), payload: new Uint8Array([9]) });
-					expect((await grouped.recvGroup())?.sequence).toBe(0n);
+					expect((await grouped.recvGroup())?.start).toBe(0n);
 					grouped.close();
 				}
 				reader.setPriority(-9);

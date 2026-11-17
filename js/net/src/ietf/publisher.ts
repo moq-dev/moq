@@ -872,8 +872,8 @@ export class Publisher {
 			// The stream serving the highest group, where a widening fill's tail resumes.
 			let live: LiveGroup | undefined;
 			const serveGroup = (group: group.Consumer, slice: GroupSlice) => {
-				const stream: LiveGroup = { sequence: group.sequence, slice, retired: false };
-				if (!live || group.sequence >= live.sequence) live = stream;
+				const stream: LiveGroup = { sequence: group.start, slice, retired: false };
+				if (!live || group.start >= live.sequence) live = stream;
 				const task = this.#runGroup({
 					track,
 					requestId: msg.requestId,
@@ -1006,7 +1006,7 @@ export class Publisher {
 				for (;;) {
 					const group = await servingGroup(track);
 					if (group) {
-						serveGroup(group, groupSlice(range, group.sequence));
+						serveGroup(group, groupSlice(range, group.start));
 						continue;
 					}
 					const pending = updating ?? filling;
@@ -1217,7 +1217,7 @@ export class Publisher {
 		// Set once the FIN is written, which keeps what the stream delivered.
 		let finished = false;
 		const narrowed = () => {
-			if (excludes(bounds.peek(), group.sequence, slice)) {
+			if (excludes(bounds.peek(), group.start, slice)) {
 				if (!finished) live.retired = true;
 				rangeError = new StreamError(StreamCode.Cancel, { message: "group excluded by range update" });
 				hooks.releaseGroupReader(group, rangeError);
@@ -1233,7 +1233,7 @@ export class Publisher {
 			// Opens wait for stream credit in send order, and the place ranks this one against
 			// the subscription's other groups while it waits.
 			// Watch the group while the open waits, and release that watch once it settles.
-			const place = ranking.reserve(group.sequence, slice.skip);
+			const place = ranking.reserve(group.start, slice.skip);
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
 			const abandoned = givenUp
@@ -1259,14 +1259,14 @@ export class Publisher {
 			}
 			streams.opened += 1;
 			// A REQUEST_UPDATE re-ranks the subscription, so a group already on the wire follows it.
-			ranking.add(stream, group.sequence, slice.skip);
+			ranking.add(stream, group.start, slice.skip);
 
 			// Object 0 names the keys just below this group the track declared skipped, a
 			// best-effort drop signal; a stream starting past object 0 carries no object 0.
-			const groupGap = slice.skip === 0 ? hooks.skippedBelow(track, group.sequence) : 0n;
+			const groupGap = slice.skip === 0 ? hooks.skippedBelow(track, group.start) : 0n;
 			const header = new GroupMessage({
 				trackAlias: requestId,
-				groupId: group.sequence,
+				groupId: group.start,
 				subGroupId: 0n,
 				publisherPriority,
 				flags: {
@@ -1336,16 +1336,16 @@ export class Publisher {
 					if (rangeError) throw rangeError;
 					if (read === undefined) ended = true;
 					if (!read) break;
-					next = read.sequence + 1;
-					if (slice.until !== undefined && read.sequence >= slice.until) break;
+					next = read.index + 1;
+					if (slice.until !== undefined && read.index >= slice.until) break;
 
 					// A frame written in pieces streams its payload after the header.
 					const chunks = read.chunks;
-					const gap = read.sequence === 0 ? groupGap : undefined;
+					const gap = read.index === 0 ? groupGap : undefined;
 					const obj = chunks?.size
 						? new Frame({ streamed: chunks.size, groupGap: gap })
 						: new Frame({ payload: chunks ? new Uint8Array(0) : read.frame.payload, groupGap: gap });
-					const delta = first ? read.sequence : 0;
+					const delta = first ? read.index : 0;
 					first = false;
 					await send(() => obj.encode(stream, header.flags, this.#session.version, delta));
 					// Even an empty one: it is an object only once committed, and may still be aborted.
@@ -1355,7 +1355,7 @@ export class Publisher {
 				// The track ends right after this group's last object, so the marker rides this
 				// stream rather than a separate one.
 				const end = hooks.subscriberEnd(track);
-				const marked = end?.group === group.sequence && end.frame === next;
+				const marked = end?.group === group.start && end.frame === next;
 				// A finished group ends with END_OF_GROUP one past its last object, unless the
 				// END_OF_TRACK below marks that place or the range misses it: a filter starting
 				// past the group's end, or one stopping short of it.
@@ -1490,7 +1490,7 @@ export class Publisher {
 				await this.#writeFetchGroup({
 					out,
 					group,
-					slice: groupSlice(fill, group.sequence),
+					slice: groupSlice(fill, group.start),
 					cancelled: given.signal,
 				});
 			} finally {
@@ -1547,9 +1547,9 @@ export class Publisher {
 				cancelled,
 			);
 			if (!frame) break;
-			next = frame.sequence + 1;
-			if (slice.until !== undefined && frame.sequence >= slice.until) break;
-			await out.object(group.sequence, frame, cancelled);
+			next = frame.index + 1;
+			if (slice.until !== undefined && frame.index >= slice.until) break;
+			await out.object(group.start, frame, cancelled);
 		}
 	}
 
@@ -2402,7 +2402,7 @@ class FetchWriter {
 		});
 		const position = {
 			group: sequence,
-			object: read.sequence,
+			object: read.index,
 			first: !this.#written,
 		};
 		await untilAborted(obj.encode(this.stream, position, this.#version), stop);

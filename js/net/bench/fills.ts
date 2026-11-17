@@ -24,7 +24,7 @@ for (const groups of [2, 16, 128]) {
 		const track = publication.broadcast.createTrack("video", { maxAge: Duration.millis(60_000) });
 		for (let i = 0; i < groups; i++) {
 			const group = track.appendGroup();
-			group.writeFrame({ payload: new Uint8Array([i % 256]), timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload: new Uint8Array([i % 256]), timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		}
 		const peers = await Promise.all(

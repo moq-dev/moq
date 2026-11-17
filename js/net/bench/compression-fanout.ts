@@ -24,7 +24,7 @@ export function fanout() {
 				let started = performance.now();
 				for (const group of groups) {
 					for (let index = 0; index < frames; index++)
-						group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+						group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 				}
 				publish += performance.now() - started;
@@ -83,11 +83,11 @@ export function tails() {
 					const started = performance.now();
 					for (let index = 0; index < frames; index++) {
 						for (const [publisher, group] of groups.entries()) {
-							group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+							group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 							for (const consumer of consumers[publisher]) {
-								const frame = consumer.tryReadFrameSequence();
+								const frame = consumer.tryReadFrameIndex();
 								if (
-									frame?.sequence !== index ||
+									frame?.index !== index ||
 									frame.payload.length !== frame_bytes ||
 									frame.payload[0] !== 42
 								)

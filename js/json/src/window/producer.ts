@@ -143,7 +143,7 @@ export class Producer<T> {
 			// Opened before the previous group finishes, so a key at or before the newest group's is
 			// refused with the previous group still open.
 			const group = openGroup(this.#track, at);
-			this.#largest = group.sequence;
+			this.#largest = group.start;
 
 			// The previous group is complete; no more frames will be appended to it.
 			this.#group?.finish();

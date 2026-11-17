@@ -532,7 +532,7 @@ test("a scale-less refresh waits for an update past the open group's key", async
 	const restated: [bigint, unknown][] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const frame = await group.readFrame();
-		restated.push([group.sequence, frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
+		restated.push([group.start, frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
 		while ((await group.readFrame()) !== undefined) {}
 	}
 	expect(restated).toEqual([
@@ -672,8 +672,8 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 
 	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
 	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
-	expect((await subscriber.nextGroup())?.sequence).toBe(0n);
-	expect((await subscriber.nextGroup())?.sequence).toBe(1n);
+	expect((await subscriber.nextGroup())?.start).toBe(0n);
+	expect((await subscriber.nextGroup())?.start).toBe(1n);
 	expect(await subscriber.nextGroup()).toBeUndefined();
 
 	// The newest value is readable with no earlier frame to apply it to.
@@ -738,7 +738,7 @@ test("a scale-less snapshot opens its group at its key, and a delta carries that
 	producer.finish();
 
 	const group = await track.subscribe().ordered().nextGroup();
-	expect(group?.sequence).toBe(5n);
+	expect(group?.start).toBe(5n);
 	expect((await group?.readFrame())?.timestamp).toEqual(Time.Timestamp.unscaled(5n));
 	expect((await group?.readFrame())?.timestamp).toEqual(Time.Timestamp.unscaled(5n));
 });
@@ -756,7 +756,7 @@ test("a scale-less snapshot at a key not past the newest group is refused", asyn
 	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const sequences: bigint[] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup())
-		sequences.push(group.sequence);
+		sequences.push(group.start);
 	expect(sequences).toEqual([5n, 8n]);
 	expect(await drain(track)).toEqual([{ n: 1 }]);
 });

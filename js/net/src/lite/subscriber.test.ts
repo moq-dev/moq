@@ -1408,7 +1408,7 @@ test("a group that beats its track info waits for it", async () => {
 		await answerTrackInfo(streams[0], version, 1000);
 		await receiving;
 		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(0n);
+		expect(group?.start).toBe(0n);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([0]));
 	} finally {
 		track.close();
@@ -1474,7 +1474,7 @@ test.each([
 		first.write(frame);
 		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
 		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(3n);
+		expect(group?.start).toBe(3n);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 
 		first.reset(StreamCode.TooFarBehind);
@@ -2737,8 +2737,8 @@ test.each([0, 5, 9000])("a received group numbers its frames from transport offs
 			for (const reader of [early, late]) {
 				const group = await reader.recvGroup();
 				if (!group) throw new Error("no received group");
-				expect((await group.readFrameSequence())?.sequence).toBe(frameStart);
-				expect(await group.readFrameSequence()).toBeUndefined();
+				expect((await group.readFrameIndex())?.index).toBe(frameStart);
+				expect(await group.readFrameIndex()).toBeUndefined();
 				group.close();
 			}
 		} finally {
@@ -2798,7 +2798,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 		for (let i = 0; i < 3; i++) {
 			const group = await track.recvGroup();
 			const frame = await group?.readFrame();
-			got.push([group?.sequence, frame?.payload.length, frame?.timestamp?.value]);
+			got.push([group?.start, frame?.payload.length, frame?.timestamp?.value]);
 		}
 		expect(got).toEqual([
 			[3n, 1, 2000],
@@ -3152,7 +3152,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			next.kind !== "idle";
 			next = hooks.tryRecvGroup(reader, true)
 		) {
-			if (next.kind === "group") got.push(next.group.sequence);
+			if (next.kind === "group") got.push(next.group.start);
 			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
 			else break;
 		}

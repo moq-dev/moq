@@ -673,18 +673,18 @@ function unlinkMirror(sink: TrackState, mirror: GroupConsumer): void {
 		const i = groups.indexOf(mirror);
 		if (i >= 0) groups.splice(i, 1);
 	});
-	const index = timelineIndex(sink.timeline, mirror.sequence);
+	const index = timelineIndex(sink.timeline, mirror.start);
 	if (sink.timeline[index] === mirror) sink.timeline.splice(index, 1);
-	lose(sink, mirror.sequence);
+	lose(sink, mirror.start);
 }
 
-// The index of the first timeline group at or after `sequence`.
-function timelineIndex(timeline: readonly { sequence: bigint }[], sequence: bigint): number {
+// The index of the first timeline group at or after `key`.
+function timelineIndex(timeline: readonly { start: bigint }[], key: bigint): number {
 	let lo = 0;
 	let hi = timeline.length;
 	while (lo < hi) {
 		const mid = (lo + hi) >>> 1;
-		if (timeline[mid].sequence < sequence) lo = mid + 1;
+		if (timeline[mid].start < key) lo = mid + 1;
 		else hi = mid;
 	}
 	return lo;
@@ -694,12 +694,12 @@ function timelineIndex(timeline: readonly { sequence: bigint }[], sequence: bigi
 // usually arrive in order, so the append is checked first.
 function timelineInsert(timeline: GroupConsumer[], group: GroupConsumer): void {
 	const last = timeline.at(-1);
-	if (!last || last.sequence < group.sequence) {
+	if (!last || last.start < group.start) {
 		timeline.push(group);
 		return;
 	}
-	const index = timelineIndex(timeline, group.sequence);
-	if (timeline[index]?.sequence === group.sequence) timeline[index] = group;
+	const index = timelineIndex(timeline, group.start);
+	if (timeline[index]?.start === group.start) timeline[index] = group;
 	else timeline.splice(index, 0, group);
 }
 
@@ -708,8 +708,8 @@ function timelineInsert(timeline: GroupConsumer[], group: GroupConsumer): void {
 // replayed cache nor a growing backlog re-sorts the buffer on every arrival.
 function bufferInsert(groups: GroupConsumer[], group: GroupConsumer): void {
 	const last = groups.at(-1);
-	if (!last || last.sequence <= group.sequence) groups.push(group);
-	else groups.splice(timelineIndex(groups, group.sequence + 1n), 0, group);
+	if (!last || last.start <= group.start) groups.push(group);
+	else groups.splice(timelineIndex(groups, group.start + 1n), 0, group);
 }
 
 // How many keys just below `key` the publisher declared it never produced: the skip run that
@@ -871,19 +871,22 @@ type CachedGroup = {
 };
 
 // A group's checked start, kept by sequence.
-type Start = { sequence: bigint; start: Timestamp };
+interface Start {
+	start: bigint;
+	first: Timestamp;
+}
 
 // Insert group `sequence`'s start into `starts`, sorted by sequence.
 function insertStart(starts: Start[], sequence: bigint, start: Timestamp): void {
 	const last = starts.at(-1);
-	if (!last || last.sequence < sequence) starts.push({ sequence, start });
-	else starts.splice(timelineIndex(starts, sequence), 0, { sequence, start });
+	if (!last || last.start < sequence) starts.push({ start: sequence, first: start });
+	else starts.splice(timelineIndex(starts, sequence), 0, { start: sequence, first: start });
 }
 
 // Remove group `sequence`'s start from `starts`, if indexed.
 function removeStart(starts: Start[], sequence: bigint): void {
 	const index = timelineIndex(starts, sequence);
-	if (starts[index]?.sequence === sequence) starts.splice(index, 1);
+	if (starts[index]?.start === sequence) starts.splice(index, 1);
 }
 
 // A fresh read handle on a group the producer still caches; assigned in its static block.
@@ -1390,15 +1393,15 @@ export class Producer {
 			return mirror;
 		};
 		reofferCached = (producer, sink, start, end, offer) => {
-			const held = new Set(sink.groups.peek().map((group) => group.sequence));
+			const held = new Set(sink.groups.peek().map((group) => group.start));
 			for (const entry of producer.#cache) {
-				const sequence = entry.group.sequence;
+				const sequence = entry.group.start;
 				if (sequence < start || sequence >= end || held.has(sequence) || !offer(sequence)) continue;
 				producer.#mirror(entry, sink);
 			}
 		};
 		reofferSequences = (producer, sink, sequences) => {
-			const held = new Set(sink.groups.peek().map((group) => group.sequence));
+			const held = new Set(sink.groups.peek().map((group) => group.start));
 			for (const sequence of sequences) {
 				const entry = producer.#cached.get(sequence);
 				if (entry && !held.has(sequence)) producer.#mirror(entry, sink);
@@ -1712,11 +1715,11 @@ export class Producer {
 		hooks.arriveGroup(dst, entry.arrived);
 		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
-		if (sink.reads?.(dst.sequence) === false) hooks.groupReads(dst, false);
+		if (sink.reads?.(dst.start) === false) hooks.groupReads(dst, false);
 		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
-		sink.latest = max(sink.latest ?? 0n, dst.sequence);
-		sink.received.set(max(sink.received.peek(), dst.sequence + 1n));
+		sink.latest = max(sink.latest ?? 0n, dst.start);
+		sink.received.set(max(sink.received.peek(), dst.start + 1n));
 		sink.groups.mutate((groups) => bufferInsert(groups, dst));
 	}
 
@@ -1748,9 +1751,9 @@ export class Producer {
 			sink.groups.mutate((groups) => {
 				groups.splice(index, 1);
 			});
-			const at = timelineIndex(sink.timeline, mirror.sequence);
+			const at = timelineIndex(sink.timeline, mirror.start);
 			if (sink.timeline[at] === mirror) sink.timeline.splice(at, 1);
-			lose(sink, mirror.sequence);
+			lose(sink, mirror.start);
 			entry.mirrors.delete(sink);
 			hooks.releaseGroupReader(mirror, undefined);
 		}
@@ -1766,7 +1769,7 @@ export class Producer {
 	// Take a cached group out of the cache lookups and its track's account.
 	#uncache(entry: CachedGroup, evicted = false): void {
 		this.#cache.delete(entry);
-		this.#cached.delete(entry.group.sequence);
+		this.#cached.delete(entry.group.start);
 		this.#unbound(entry, evicted);
 		this.#account.remove(entry);
 		hooks.chargeGroup(entry.group, undefined);
@@ -1780,14 +1783,14 @@ export class Producer {
 	#admit(sequence: bigint, start: Timestamp): boolean {
 		const bounds = this.#bounds;
 		const index = timelineIndex(bounds, sequence);
-		let floor = bounds[index - 1]?.start;
-		let ceiling = bounds[bounds[index]?.sequence === sequence ? index + 1 : index]?.start;
+		let floor = bounds[index - 1]?.first;
+		let ceiling = bounds[bounds[index]?.start === sequence ? index + 1 : index]?.first;
 		const evicted = this.#evicted;
-		const late = evicted !== undefined && sequence <= evicted.sequence;
+		const late = evicted !== undefined && sequence <= evicted.start;
 		if (evicted && late) {
-			if (ceiling === undefined || evicted.start.isBefore(ceiling)) ceiling = evicted.start;
+			if (ceiling === undefined || evicted.first.isBefore(ceiling)) ceiling = evicted.first;
 		} else if (evicted) {
-			if (floor === undefined || floor.isBefore(evicted.start)) floor = evicted.start;
+			if (floor === undefined || floor.isBefore(evicted.first)) floor = evicted.first;
 		}
 		if ((floor && start.isBefore(floor)) || ceiling?.isBefore(start)) throw new TimestampMismatch();
 		return late;
@@ -1797,7 +1800,7 @@ export class Producer {
 	// indexes where it starts, an unverified one only where a local handler serves the history,
 	// as the Rust `index_start` does.
 	#record(entry: CachedGroup, start: Timestamp, late: boolean): void {
-		const sequence = entry.group.sequence;
+		const sequence = entry.group.start;
 		if (late) {
 			entry.unverified = true;
 			for (const mirror of entry.mirrors.values()) hooks.unverifyGroup(mirror);
@@ -1812,13 +1815,13 @@ export class Producer {
 	// Drop a group's checked start as it leaves the cache, raising the watermark to it when
 	// it was evicted.
 	#unbound(entry: CachedGroup, evicted = false): void {
-		const sequence = entry.group.sequence;
+		const sequence = entry.group.start;
 		removeStart(this.#starts, sequence);
 		const start = entry.bound;
 		if (start === undefined) return;
 		removeStart(this.#bounds, sequence);
-		if (evicted && (this.#evicted === undefined || sequence > this.#evicted.sequence)) {
-			this.#evicted = { sequence, start };
+		if (evicted && (this.#evicted === undefined || sequence > this.#evicted.start)) {
+			this.#evicted = { start: sequence, first: start };
 		}
 	}
 
@@ -1834,7 +1837,7 @@ export class Producer {
 	#protects(entry: CachedGroup): boolean {
 		return (
 			this.#state.closed.peek() === undefined &&
-			entry.group.sequence === this.#state.latest &&
+			entry.group.start === this.#state.latest &&
 			!(entry.group.closed.peek() instanceof Error)
 		);
 	}
@@ -1848,8 +1851,8 @@ export class Producer {
 		let largest: Position | undefined;
 		for (const { group } of this.#cache) {
 			const count = hooks.groupFrameCount(group);
-			if (count > hooks.groupOffset(group) && (largest === undefined || group.sequence > largest.group)) {
-				largest = { group: group.sequence, frame: count - 1 };
+			if (count > hooks.groupOffset(group) && (largest === undefined || group.start > largest.group)) {
+				largest = { group: group.start, frame: count - 1 };
 			}
 		}
 		return largest;
@@ -1902,14 +1905,14 @@ export class Producer {
 		};
 		hooks.chargeGroup(group, entry.charge);
 		if (succeeds) hooks.succeedGroup(group, succeeds.failed);
-		this.#undrop(group.sequence);
+		this.#undrop(group.start);
 		// No reader is handed a failed fill answer (see #withhold), withheld as it aborts so a
 		// read that follows at once cannot take it: its sequence is unknown again, owed while the
 		// feed owes it, else judged by budget or filled again.
 		if (fetched) {
 			hooks.onGroupAbort(group, (error) => {
 				// An eviction takes the mirrors out itself.
-				if (!EVICTED.has(error) && this.#cached.get(group.sequence) === entry) this.#withhold(entry);
+				if (!EVICTED.has(error) && this.#cached.get(group.start) === entry) this.#withhold(entry);
 			});
 		}
 		group.closed.then((closed) => {
@@ -1917,17 +1920,17 @@ export class Producer {
 			if (closed instanceof Error) this.#account.demote(entry);
 			if (!(closed instanceof Error)) return;
 			// A re-created group already replaced this one.
-			const current = this.#cached.get(group.sequence);
+			const current = this.#cached.get(group.start);
 			if (current && current.group !== group) return;
 			// A failed copy holds nothing to read, so each reader's probe misses it again.
-			for (const sink of entry.mirrors.keys()) lose(sink, group.sequence);
+			for (const sink of entry.mirrors.keys()) lose(sink, group.start);
 			// A failed fill answer says nothing of the feed, so it gives nothing up: the track's drops
 			// and arrivals hold only the feed's verdicts, as Rust records nothing for a failed fill.
 			if (fetched) return;
 			if (HOLES.has(toStreamCode(closed))) return;
-			this.#drop(group.sequence, group.sequence + 1n, { error: closed });
+			this.#drop(group.start, group.start + 1n, { error: closed });
 		});
-		const sequence = group.sequence;
+		const sequence = group.start;
 		if (this.#unchecked()) {
 			// Its timestamps may rewind, so they are not checked.
 		} else {
@@ -1937,14 +1940,14 @@ export class Producer {
 			});
 		}
 		this.#cache.add(entry);
-		this.#cached.set(group.sequence, entry);
-		this.#fills.arrived(group.sequence);
-		this.#advance(group.sequence, !fetched);
-		if (!fetched) this.#arrive(group.sequence);
-		this.#produce(group.sequence);
+		this.#cached.set(group.start, entry);
+		this.#fills.arrived(group.start);
+		this.#advance(group.start, !fetched);
+		if (!fetched) this.#arrive(group.start);
+		this.#produce(group.start);
 		// A newer group demotes the live edge to an evictable one.
 		const edge = this.#edgeEntry();
-		this.#state.latest = max(this.#state.latest ?? 0n, group.sequence);
+		this.#state.latest = max(this.#state.latest ?? 0n, group.start);
 		if (edge && edge !== entry && !this.#protects(edge)) this.#account.demote(edge);
 		this.#account.insert(entry);
 		for (const sink of this.#sinks) {
@@ -1959,7 +1962,7 @@ export class Producer {
 		}
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
-			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.sequence, frame: total - 1 });
+			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.start, frame: total - 1 });
 			// A frame can change an owed hole's reach or drift edge without adding a group.
 			for (const sink of this.#sinks)
 				if (sink.waitingOrdered) sink.timelineChanged.update((revision) => revision + 1);
@@ -1968,7 +1971,7 @@ export class Producer {
 			stop();
 			for (const sink of this.#sinks)
 				if (sink.waitingOrdered) sink.timelineChanged.update((revision) => revision + 1);
-			if (closed === null) this.#finishLargest(group.sequence);
+			if (closed === null) this.#finishLargest(group.start);
 			// A failed fill answer holds no end open (see #settled), so the end may settle now, as the
 			// Rust `poll_outcome` judges again once any copy closes.
 			else if (fetched) this.#settle();
@@ -2025,7 +2028,7 @@ export class Producer {
 	// Cap a group the end cuts, so it never holds a frame past the end.
 	#cap(group: GroupProducer): void {
 		const end = this.#state.end.peek()?.at;
-		if (end !== undefined && end.frame !== 0 && end.group === group.sequence) hooks.limitGroup(group, end.frame);
+		if (end !== undefined && end.frame !== 0 && end.group === group.start) hooks.limitGroup(group, end.frame);
 	}
 
 	/**
@@ -2477,7 +2480,7 @@ export class Producer {
 		const final = finalSequence(end.at);
 		if (!reaches(this.#received, this.#state.drops, end) || this.#owes(final)) return false;
 		for (const { group, fetched } of this.#cache) {
-			if (group.sequence >= final) continue;
+			if (group.start >= final) continue;
 			const closed = group.closed.peek();
 			if (closed !== null && !(fetched && closed instanceof Error)) return false;
 		}
@@ -2731,10 +2734,10 @@ export class Subscriber {
 			// stamped group's latest frame: walk back from the cap to the first one.
 			for (let i = (end === undefined ? timeline.length : timelineIndex(timeline, end)) - 1; i >= 0; i--) {
 				const group = timeline[i];
-				if (hooks.groupFailed(group) || !this.#judges(group.sequence)) continue;
+				if (hooks.groupFailed(group) || !this.#judges(group.start)) continue;
 				const timestamp = hooks.groupTimestamp(group);
 				if (timestamp === undefined) continue;
-				presentation = { sequence: group.sequence, timestamp: hooks.groupLatest(group) ?? timestamp };
+				presentation = { sequence: group.start, timestamp: hooks.groupLatest(group) ?? timestamp };
 				break;
 			}
 		}
@@ -2784,8 +2787,8 @@ export class Subscriber {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, sequence + 1n); i < timeline.length; i++) {
 			const successor = timeline[i];
-			if (end !== undefined && successor.sequence >= end) break;
-			if (hooks.groupFailed(successor) || !this.#judges(successor.sequence)) continue;
+			if (end !== undefined && successor.start >= end) break;
+			if (hooks.groupFailed(successor) || !this.#judges(successor.start)) continue;
 			if (counts(successor)) return successor;
 		}
 		return undefined;
@@ -2855,15 +2858,15 @@ export class Subscriber {
 			recorded &&
 			!failed(recorded) &&
 			(drift.end === undefined || recorded.sequence < drift.end) &&
-			(!arrival || arrival.sequence > recorded.sequence)
+			(!arrival || arrival.start > recorded.sequence)
 		) {
 			return recorded.arrived;
 		}
 		if (!arrival || arrived === undefined) {
 			held.successor = undefined;
-		} else if (recorded?.sequence !== arrival.sequence || !recorded.arrived.eq(arrived) || failed(recorded)) {
+		} else if (recorded?.sequence !== arrival.start || !recorded.arrived.eq(arrived) || failed(recorded)) {
 			// Re-recorded only on a change, so judging the same successor again allocates nothing.
-			held.successor = { sequence: arrival.sequence, arrived, fate: hooks.groupFate(arrival) };
+			held.successor = { sequence: arrival.start, arrived, fate: hooks.groupFate(arrival) };
 		}
 		return arrived;
 	}
@@ -2913,10 +2916,10 @@ export class Subscriber {
 		hooks.refreshGroup(group);
 		const held: Superseded = {};
 		hooks.onShedRead(group, () => {
-			if (this.#state.latest === group.sequence && this.#state.producer) hooks.joinProducer(this.#state.producer);
+			if (this.#state.latest === group.start && this.#state.producer) hooks.joinProducer(this.#state.producer);
 		});
 		hooks.expireGroup(group, {
-			expired: () => this.#staleAt(group.sequence, this.#drift(), true, held),
+			expired: () => this.#staleAt(group.start, this.#drift(), true, held),
 			changed: this.#expiryChanged(),
 		});
 		return group;
@@ -3153,16 +3156,16 @@ export class Subscriber {
 			containing: (pts) => {
 				const starts = startsOf(producer);
 				if (starts.length === 0) return "unknown";
-				if (later(starts[0].start, pts)) return "before";
+				if (later(starts[0].first, pts)) return "before";
 				// Checked starts never rewind, so they ascend with the sequence.
 				let lo = 1;
 				let hi = starts.length;
 				while (lo < hi) {
 					const mid = (lo + hi) >>> 1;
-					if (later(starts[mid].start, pts)) hi = mid;
+					if (later(starts[mid].first, pts)) hi = mid;
 					else lo = mid + 1;
 				}
-				return { group: starts[lo - 1].sequence };
+				return { group: starts[lo - 1].start };
 			},
 			nextStart: (from) => {
 				const starts = startsOf(producer);
@@ -3174,11 +3177,11 @@ export class Subscriber {
 				// The start the cache indexed counts too: one accepted unverified, where a local handler
 				// serves the history, starts where its first frame says, as `nextStart` reports.
 				const starts = startsOf(producer);
-				const indexed = starts[timelineIndex(starts, group.sequence)];
+				const indexed = starts[timelineIndex(starts, group.start)];
 				const started =
-					hooks.groupTimestamp(group) ?? (indexed?.sequence === group.sequence ? indexed.start : undefined);
-				if (started) return { sequence: group.sequence, held: { started } };
-				return { sequence: group.sequence, held: hooks.groupStarted(group) ? "never" : "pending" };
+					hooks.groupTimestamp(group) ?? (indexed?.start === group.start ? indexed.first : undefined);
+				if (started) return { sequence: group.start, held: { started } };
+				return { sequence: group.start, held: hooks.groupStarted(group) ? "never" : "pending" };
 			},
 			gone: (sequence) => goneAt(producer, sequence),
 			// Only once the producer is gone: a group held below a reached end may still start.
@@ -3201,7 +3204,7 @@ export class Subscriber {
 			timeline.findLast((g) => !hooks.groupFailed(g) && f(g));
 		const held = (group: GroupConsumer | undefined) => {
 			const at = group ?? timeline.find((g) => !hooks.groupFailed(g));
-			return at && { anchor: { absolute: at.sequence } };
+			return at && { anchor: { absolute: at.start } };
 		};
 		const info = this.#state.info.peek();
 		// Until the track is accepted, whether it is timed at all is unknown.
@@ -3278,7 +3281,7 @@ export class Subscriber {
 			if (
 				answer !== undefined &&
 				producer &&
-				holdings.nextStart(answer)?.sequence !== answer &&
+				holdings.nextStart(answer)?.start !== answer &&
 				cachedMayStart(producer, answer)
 			)
 				continue;
@@ -3325,8 +3328,8 @@ export class Subscriber {
 	// judges a group only once a read reaches it, as there.
 	#judge(start: bigint, end: bigint): void {
 		const groups = this.#state.groups.peek();
-		for (let i = timelineIndex(groups, start); i < groups.length && groups[i].sequence < end; i++) {
-			hooks.groupReads(groups[i], this.#reading(groups[i].sequence));
+		for (let i = timelineIndex(groups, start); i < groups.length && groups[i].start < end; i++) {
+			hooks.groupReads(groups[i], this.#reading(groups[i].start));
 		}
 	}
 
@@ -3434,11 +3437,11 @@ export class Subscriber {
 						let next = open.start;
 						for (let i = timelineIndex(timeline, open.start); i < timeline.length; i++) {
 							const group = timeline[i];
-							if (group.sequence >= open.end) break;
+							if (group.start >= open.end) break;
 							// A failed copy holds nothing to read, so it is missed like an evicted one.
 							if (hooks.groupFailed(group)) continue;
-							this.#askMiss(next, group.sequence, drift, asker);
-							next = group.sequence + 1n;
+							this.#askMiss(next, group.start, drift, asker);
+							next = group.start + 1n;
 						}
 						this.#askMiss(next, open.end, drift, asker);
 					}
@@ -3503,11 +3506,11 @@ export class Subscriber {
 				while (
 					i >= 0 &&
 					(hooks.groupFailed(timeline[i]) ||
-						!this.#judges(timeline[i].sequence) ||
+						!this.#judges(timeline[i].start) ||
 						!hooks.groupStarted(timeline[i]))
 				)
 					i--;
-				insertRun(this.#unjudged, i < 0 ? 0n : timeline[i].sequence + 1n, run.end);
+				insertRun(this.#unjudged, i < 0 ? 0n : timeline[i].start + 1n, run.end);
 			}
 			if (edge > at.edge) insertRun(this.#unjudged, at.edge, edge);
 		}
@@ -3649,7 +3652,7 @@ export class Subscriber {
 	// group outside the window alone never holds a finished track open.
 	#parked(groups: readonly GroupConsumer[]): boolean {
 		const cap = this.#local.end;
-		return cap !== undefined && (groups.at(-1)?.sequence ?? -1n) >= cap;
+		return cap !== undefined && (groups.at(-1)?.start ?? -1n) >= cap;
 	}
 
 	// Whether a held group from `from` on may still start, and so settle a time anchor the window
@@ -3657,7 +3660,7 @@ export class Subscriber {
 	// {@link Holdings.complete} says, the window may still take it in.
 	#starting(groups: readonly GroupConsumer[], from = 0n): boolean {
 		if (this.#window.settled || this.#state.closed.peek() !== undefined) return false;
-		return groups.some((group) => group.sequence >= from && !hooks.groupStarted(group));
+		return groups.some((group) => group.start >= from && !hooks.groupStarted(group));
 	}
 
 	// Take the group at `index` off the ordered buffer, closing the out-of-range ones below it,
@@ -3665,8 +3668,8 @@ export class Subscriber {
 	#pass(groups: GroupConsumer[], index: number): void {
 		const [group] = groups.splice(index, 1);
 		for (const passed of groups.splice(0, index)) passed.close();
-		this.#nextSequence = group.sequence + 1n;
-		this.#judge(group.sequence, this.#nextSequence);
+		this.#nextSequence = group.start + 1n;
+		this.#judge(group.start, this.#nextSequence);
 	}
 
 	// Whether this read ends because its bounded window has nothing left to deliver; see
@@ -3715,7 +3718,7 @@ export class Subscriber {
 					if (open.end > received) return false;
 					// Held, so a read still hands it out, skips it, or waits for the cap to rise.
 					const index = timelineIndex(held, open.start);
-					if (held[index] && held[index].sequence < open.end) return false;
+					if (held[index] && held[index].start < open.end) return false;
 					const owed = producer && owedGroup(producer, open.start, open.end);
 					if (owed) {
 						if (owed.folds !== undefined) this.#wakeAt(owed.folds.since(Instant.ZERO).asNanos());
@@ -3809,9 +3812,9 @@ export class Subscriber {
 				.peek()
 				.some(
 					(group) =>
-						group.sequence >= start &&
-						(end === undefined || group.sequence < end) &&
-						!delivered.has(group.sequence) &&
+						group.start >= start &&
+						(end === undefined || group.start < end) &&
+						!delivered.has(group.start) &&
 						!hooks.groupFailed(group),
 				);
 		hooks.spent = (subscriber, start, end, delivered) =>
@@ -4112,11 +4115,11 @@ export class Subscriber {
 
 		const groups = this.#state.groups.peek();
 		const newest = groups[groups.length - 1];
-		if (!newest || newest.sequence !== latest) return undefined;
+		if (!newest || newest.start !== latest) return undefined;
 
 		for (let i = groups.length - 1; i >= 0; i--) {
 			const count = groups[i].frameCount;
-			if (count > 0) return { group: groups[i].sequence, frame: count - 1 };
+			if (count > 0) return { group: groups[i].start, frame: count - 1 };
 		}
 		return undefined;
 	}
@@ -4179,7 +4182,7 @@ export class Subscriber {
 		if (!this.#left) {
 			const arrivals = this.#state.timeline.filter((group) => !hooks.groupFailed(group));
 			this.#arrivals = arrivals.map((group) => ({
-				sequence: group.sequence,
+				sequence: group.start,
 				arrived: hooks.groupArrived(group),
 			}));
 		}
@@ -4295,9 +4298,9 @@ export class Subscriber {
 			// The buffer is sequence-sorted, so an in-range group that arrives behind a
 			// beyond-cap one sorts in front of it and is never blocked by it.
 			const group = groups[index];
-			if (!group || (end !== undefined && group.sequence >= end)) break;
+			if (!group || (end !== undefined && group.start >= end)) break;
 			// Kept, like a group below the floor: replacing the ranges can take it in.
-			if (!this.#window.contains(group.sequence)) {
+			if (!this.#window.contains(group.start)) {
 				index++;
 				continue;
 			}
@@ -4309,28 +4312,28 @@ export class Subscriber {
 					toStreamCode(failed) === StreamCode.Old
 						? { ...staleHole(drift.budget), error: failed }
 						: { error: failed };
-				const dropped = this.#report(group.sequence, group.sequence + 1n, hole);
+				const dropped = this.#report(group.start, group.start + 1n, hole);
 				if (dropped) return dropped;
 				continue;
 			}
-			if (this.#delivered.has(group.sequence)) {
+			if (this.#delivered.has(group.start)) {
 				group.close();
 				continue;
 			}
-			if (this.#staleAt(group.sequence, drift)) {
+			if (this.#staleAt(group.start, drift)) {
 				group.close();
 				// A re-offered group stale at the bound is final.
-				if (drift.bounded) this.#skipped.delete(group.sequence);
-				else this.#skip(group.sequence, drift.budget);
+				if (drift.bounded) this.#skipped.delete(group.start);
+				else this.#skip(group.start, drift.budget);
 				if (dispositions) {
-					const dropped = this.#report(group.sequence, group.sequence + 1n, staleHole(drift.budget));
+					const dropped = this.#report(group.start, group.start + 1n, staleHole(drift.budget));
 					if (dropped) return dropped;
 				} else if (this.#dropsSeen) {
 					// A cursor #tryDrop reads reports it there.
 					this.#pending = insertDrop(
 						this.#pending,
-						group.sequence,
-						group.sequence + 1n,
+						group.start,
+						group.start + 1n,
 						staleHole(drift.budget),
 					);
 				}
@@ -4338,14 +4341,14 @@ export class Subscriber {
 			}
 			// A group missing its head comes from the fill asked for it, in its turn.
 			if (this.#lacksHead(group)) {
-				if (this.#askHead(group.sequence)) {
+				if (this.#askHead(group.start)) {
 					groups.splice(index++, 0, group);
 					continue;
 				}
 				group.close();
 				continue;
 			}
-			this.#handOut(group.sequence, false);
+			this.#handOut(group.start, false);
 			return { kind: "group", group: this.#guard(group) };
 		}
 
@@ -4491,7 +4494,7 @@ export class Subscriber {
 				this.#queueResumedDrop(recv);
 				continue;
 			}
-			if (recv.kind === "group") this.#handOut(recv.group.sequence, ordered);
+			if (recv.kind === "group") this.#handOut(recv.group.start, ordered);
 			else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
 			return recv;
 		}
@@ -4639,10 +4642,10 @@ export class Subscriber {
 		const start = ordered ? max(cursor.start, this.#nextSequence) : cursor.start;
 		const drift = this.#drift();
 		for (const group of this.#state.groups.peek()) {
-			if (group.sequence < start || !this.#window.contains(group.sequence)) continue;
-			if (cursor.end !== undefined && group.sequence >= cursor.end) return undefined;
-			if (!this.#delivered.has(group.sequence) && !this.#staleAt(group.sequence, drift)) {
-				return group.sequence;
+			if (group.start < start || !this.#window.contains(group.start)) continue;
+			if (cursor.end !== undefined && group.start >= cursor.end) return undefined;
+			if (!this.#delivered.has(group.start) && !this.#staleAt(group.start, drift)) {
+				return group.start;
 			}
 		}
 		return undefined;
@@ -4653,7 +4656,7 @@ export class Subscriber {
 		const recv = this.#resume ? this.#tryResumed(true) : this.#tryNextBuffered();
 		// One cursor: the frame helpers must not keep draining a group this read just
 		// moved past, or interleaved reads would run backwards.
-		if (recv.kind === "group" && this.#frameGroup && this.#frameGroup.sequence < recv.group.sequence) {
+		if (recv.kind === "group" && this.#frameGroup && this.#frameGroup.start < recv.group.start) {
 			this.#frameGroup.close();
 			this.#frameGroup = undefined;
 		}
@@ -4668,22 +4671,22 @@ export class Subscriber {
 		const groups = this.#state.groups.peek();
 		const cursor = this.#cursor.peek();
 		let start = max(cursor.start, this.#nextSequence);
-		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+		while (groups.length > 0 && groups[0].start < start) groups.shift()?.close();
 		// One anchor for the whole pass, so walking a backlog off stays linear.
 		const drift = this.#drift();
 
 		for (let index = 0; ; ) {
 			const group = groups[index];
-			if (!group || (cursor.end !== undefined && group.sequence >= cursor.end)) break;
+			if (!group || (cursor.end !== undefined && group.start >= cursor.end)) break;
 			// Out of range for now, but kept until the cursor passes it: an anchor still
 			// resolving, or an update widening the ranges, may take it in.
-			if (!this.#window.contains(group.sequence)) {
+			if (!this.#window.contains(group.start)) {
 				index++;
 				continue;
 			}
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
-			if (this.#staleAt(group.sequence, drift)) {
+			if (this.#staleAt(group.start, drift)) {
 				const passed = this.#nextSequence;
 				this.#pass(groups, index);
 				// The cursor passed what lies below it, which a fill no longer owes this reader.
@@ -4695,10 +4698,10 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
-			if (this.#waitOwed(start, group.sequence, drift)) return { kind: "idle" };
+			if (this.#waitOwed(start, group.start, drift)) return { kind: "idle" };
 			// A group missing its head comes from the fill asked for it, in its turn.
 			if (this.#lacksHead(group)) {
-				if (this.#askHead(group.sequence)) {
+				if (this.#askHead(group.start)) {
 					// Its staleness deadline wakes the cursor, as for any owed hole.
 					this.#fillWait = true;
 					return { kind: "idle" };
@@ -4713,7 +4716,7 @@ export class Subscriber {
 				continue;
 			}
 			this.#pass(groups, index);
-			this.#handOut(group.sequence, true);
+			this.#handOut(group.start, true);
 			return { kind: "group", group: this.#guard(group) };
 		}
 
@@ -4757,9 +4760,9 @@ export class Subscriber {
 			}
 			const group = this.#frameGroup;
 
-			let next: ({ sequence: number } & Frame) | undefined;
+			let next: ({ index: number } & Frame) | undefined;
 			try {
-				next = await group.readFrameSequence();
+				next = await group.readFrameIndex();
 			} catch (err) {
 				// The group failed underneath us: resync from the next one, surfacing
 				// only what the caller can act on (a gap, or the track's own abort).
@@ -4778,8 +4781,8 @@ export class Subscriber {
 
 			if (next) {
 				return {
-					group: group.sequence,
-					frame: next.sequence,
+					group: group.start,
+					frame: next.index,
 					payload: next.payload,
 					timestamp: next.timestamp,
 				};

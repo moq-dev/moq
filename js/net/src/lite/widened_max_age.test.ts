@@ -20,7 +20,7 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 	while (got.length < count) {
 		const group = await reader.recvGroup();
 		if (!group) throw new Error("the track ended");
-		got.push(group.sequence);
+		got.push(group.start);
 	}
 	return got.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }

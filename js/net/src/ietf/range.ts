@@ -180,7 +180,7 @@ export class RangeFetch {
 					throw new ProtocolViolation("FETCH continued past FETCH_OK's End Location");
 				const producer = this.#current?.producer;
 				if (producer) {
-					const timestamp = objectTime(this.#timescale, producer.sequence);
+					const timestamp = objectTime(this.#timescale, producer.start);
 					if (object.payload) producer.writeFrame({ payload: object.payload, timestamp });
 					else if (
 						!(await untilAborted(

@@ -107,7 +107,7 @@ async function receive(subscriber: TrackSubscriber, count: number): Promise<bigi
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");
-		sequences.push(group.sequence);
+		sequences.push(group.start);
 	}
 	return sequences;
 }

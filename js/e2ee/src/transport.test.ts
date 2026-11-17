@@ -87,7 +87,7 @@ for (const [name, protocol, routed, keyed] of transports) {
 
 		const received = await consumer.recvGroup();
 		if (!received) throw new Error("expected a group");
-		expect(received.sequence).toBe(0n);
+		expect(received.start).toBe(0n);
 		const first = await received.readFrame();
 		expect(decoder.decode(first?.plaintext)).toBe("keyframe");
 		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(keyed ? 0 : 1);
@@ -103,7 +103,7 @@ for (const [name, protocol, routed, keyed] of transports) {
 		await next.writeFrame(ms(4), encoder.encode("next"));
 		next.finish();
 		const second = await consumer.recvGroup();
-		expect(second?.sequence).toBe(1n);
+		expect(second?.start).toBe(1n);
 		expect(decoder.decode((await second?.readFrame())?.plaintext)).toBe("next");
 
 		consumer.close();

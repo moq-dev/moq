@@ -93,7 +93,7 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			const groups = subscription.ordered();
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
 				// The same group, so a scale-less frame's key still names it.
-				const out = video.createGroup(group.sequence);
+				const out = video.createGroup(group.start);
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 				out.finish();
 			}

@@ -65,7 +65,7 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 	const video = copy.createTrack("video", await subscription.info());
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
-			const out = video.createGroup(group.sequence);
+			const out = video.createGroup(group.start);
 			for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 			out.finish();
 		}
@@ -112,16 +112,16 @@ for (const wire of WIRES) {
 			const group = track.createGroup(sequence);
 			group.writeFrame({
 				payload: enc.encode(`first ${sequence}`),
-				timestamp: Timestamp.unscaled(group.sequence),
+				timestamp: Timestamp.unscaled(group.start),
 			});
 			group.writeFrame({
 				payload: enc.encode(`second ${sequence}`),
-				timestamp: Timestamp.unscaled(group.sequence),
+				timestamp: Timestamp.unscaled(group.start),
 			});
 			group.finish();
 
 			const received = await reader.recvGroup();
-			expect(received?.sequence).toBe(sequence);
+			expect(received?.start).toBe(sequence);
 			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`first ${sequence}`);
 			expect(dec.decode((await received?.readFrame())?.payload)).toBe(`second ${sequence}`);
 			expect(await received?.readFrame()).toBeUndefined();
@@ -158,7 +158,7 @@ test("a group sequence that is not a non-negative bigint is refused where a call
 	// A plain JS caller can still pass a number, which would otherwise mix with bigints later.
 	expect(() => track.createGroup(1 as unknown as bigint)).toThrow(TypeError);
 	expect(() => track.createGroup(-1n)).toThrow(RangeError);
-	expect(track.createGroup(MAX_QUIC).sequence).toBe(MAX_QUIC);
+	expect(track.createGroup(MAX_QUIC).start).toBe(MAX_QUIC);
 	const consumer = new BroadcastProducer().consume().track("video");
 	await expect(consumer.fetchGroup(1 as unknown as bigint)).rejects.toThrow(TypeError);
 });

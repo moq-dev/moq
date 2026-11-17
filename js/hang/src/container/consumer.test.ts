@@ -317,8 +317,8 @@ async function readGroups(subscriber: Track.Subscriber, last: bigint) {
 			const [timestamp, payload] = Varint.decode(frame.payload);
 			frames.push([timestamp, payload.byteLength]);
 		}
-		groups.push([group.sequence, frames]);
-		if (group.sequence === last) return groups;
+		groups.push([group.start, frames]);
+		if (group.start === last) return groups;
 	}
 }
 
@@ -390,7 +390,7 @@ test("Legacy Producer discontinuity writes no end estimated from the cadence", a
 test("Legacy Producer discontinuity marks nothing before any frame", async () => {
 	const empty = new Track.Producer("empty");
 	new LegacyProducer(empty, new LegacyFormat("video")).discontinuity();
-	expect(empty.appendGroup().sequence).toBe(0n);
+	expect(empty.appendGroup().start).toBe(0n);
 });
 
 // An empty payload is data on a data track, so its marker is an object with no bytes, which reads

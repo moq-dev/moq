@@ -216,7 +216,7 @@ function settled(recv: Recv | undefined): unknown[] {
 	if (!recv) return ["nothing"];
 	switch (recv.kind) {
 		case "group":
-			return ["group", recv.group.sequence];
+			return ["group", recv.group.start];
 		case "drop":
 			return [recv.skip ? "skip" : "drop", recv.start, recv.end, toStreamCode(recv.error)];
 		case "error":

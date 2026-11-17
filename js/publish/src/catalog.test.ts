@@ -90,7 +90,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	const subscriber = track.subscribe().ordered();
 
 	const first = await subscriber.nextGroup();
-	expect(first?.sequence).toBe(0n);
+	expect(first?.start).toBe(0n);
 	expect(await first?.readJson()).toEqual({ sync: { clock: expect.anything() }, video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
@@ -99,7 +99,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const second = await subscriber.nextGroup();
-	expect(second?.sequence).toBe(1n);
+	expect(second?.start).toBe(1n);
 	expect(await second?.readJson()).toEqual({
 		sync: { clock: expect.anything() },
 		video: { renditions: {} },

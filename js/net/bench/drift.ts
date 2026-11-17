@@ -23,7 +23,7 @@ export async function run(): Promise<void> {
 				for (const ms of timestamps) group.writeFrame({ payload, timestamp: Time.Timestamp.fromMillis(ms) });
 				group.finish();
 			}
-			if ((await reader.recvGroup())?.sequence !== 1n) throw new Error("B-frame tail rewound the drift edge");
+			if ((await reader.recvGroup())?.start !== 1n) throw new Error("B-frame tail rewound the drift edge");
 		} finally {
 			reader.close();
 			check.finish();
@@ -76,7 +76,7 @@ export async function run(): Promise<void> {
 								for (let sequence = 0; sequence < retained; sequence++)
 									for (const reader of ordered) {
 										const group = await reader.nextGroup();
-										if (group?.sequence !== BigInt(sequence)) throw new Error("history missing");
+										if (group?.start !== BigInt(sequence)) throw new Error("history missing");
 										await group.readFrame();
 									}
 								sources.push(track.appendGroup());

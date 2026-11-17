@@ -28,9 +28,9 @@ function pooled(pool: cache.Pool, name = "test"): TrackProducer {
 
 function finished(producer: TrackProducer, size: number): bigint {
 	const group = producer.appendGroup();
-	group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
-	return group.sequence;
+	return group.start;
 }
 
 // The sequences a fresh subscriber is handed: what the track still caches. Its mirrors are
@@ -39,7 +39,7 @@ async function cached(producer: TrackProducer): Promise<bigint[]> {
 	const subscriber = producer.subscribe({ delay: { max: null } });
 	const sequences: bigint[] = [];
 	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup())
-		sequences.push(group.sequence);
+		sequences.push(group.start);
 	subscriber.close();
 	await yieldNow();
 	return sequences;
@@ -57,7 +57,7 @@ test("delivery restarts a group's idle window", async () => {
 
 		await clock.advance(9_000);
 		const reading = subscriber.tryRecvGroup();
-		expect(reading?.sequence).toBe(0n);
+		expect(reading?.start).toBe(0n);
 		// Far beyond the write, inside the delivery. The new group runs the expiry scan.
 		await clock.advance(9_000);
 		finished(producer, 1);
@@ -74,7 +74,7 @@ test("the sweep expires idle groups across tracks without a write", async () => 
 		const tracks = [pooled(pool, "a"), pooled(pool, "b")];
 		const stalled = tracks.map((track) => {
 			const group = track.appendGroup(); // left open
-			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.start) });
 			finished(track, 1); // the live edge
 			return group;
 		});
@@ -182,7 +182,7 @@ test("a forgotten stale run is asked of a fill", async () => {
 			order: "ascending",
 		});
 		// The live group first, in arrival order; the next read asks for what it misses.
-		expect((await reader.recvGroup())?.sequence).toBe(3n);
+		expect((await reader.recvGroup())?.start).toBe(3n);
 		const next = reader.recvGroup();
 		const asked: bigint[][] = [];
 		for (;;) {
@@ -229,9 +229,9 @@ test("a held failed fill answer stays readable", async () => {
 	hooks.receiveTrack(producer);
 	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
 	const answer = hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true });
-	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.sequence) });
+	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.start) });
 	const group = await reader.recvGroup();
-	expect(group?.sequence).toBe(1n);
+	expect(group?.start).toBe(1n);
 	answer.abort(new Error("archive failed"));
 	await yieldNow();
 	expect((await group?.readFrame())?.payload.byteLength).toBe(10_000);

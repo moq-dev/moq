@@ -34,5 +34,5 @@ export function openGroup(track: Moq.Track.Producer, at: Moq.Time.Timestamp): Mo
  * Rust `frame_time`.
  */
 export function frameTime(group: Moq.Group.Producer, at: Moq.Time.Timestamp): Moq.Time.Timestamp {
-	return at.scale === undefined ? Moq.Time.Timestamp.unscaled(group.sequence) : at;
+	return at.scale === undefined ? Moq.Time.Timestamp.unscaled(group.start) : at;
 }

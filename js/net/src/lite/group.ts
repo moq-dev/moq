@@ -191,7 +191,7 @@ export async function readFrames(
 	producer: netGroup.Producer,
 	format: FrameFormat,
 ): Promise<bigint | undefined> {
-	const decode = frameDecoder({ ...format, start: producer.sequence });
+	const decode = frameDecoder({ ...format, start: producer.start });
 
 	for (;;) {
 		// Every frame already buffered is written without an await, so the reader wakes once
@@ -200,7 +200,7 @@ export async function readFrames(
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
 		if (!frame || frame instanceof Error) return undefined;
 		if ("end" in frame) {
-			if (frame.end <= producer.sequence)
+			if (frame.end <= producer.start)
 				throw malformed(`GROUP_END at ${frame.end}, not past the group's start`);
 			// The FIN may never come, so the group's own close, such as an abort or eviction, still
 			// ends the wait.
@@ -212,7 +212,7 @@ export async function readFrames(
 		if (frame.payload)
 			hooks.writeGroupFrame(
 				producer,
-				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.sequence) },
+				{ payload: frame.payload, timestamp: Time.received(frame.timestamp, producer.start) },
 				frame.inflated,
 			);
 		else if (!(await receiveFrame(stream, producer, frame))) return;

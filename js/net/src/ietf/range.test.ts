@@ -157,13 +157,13 @@ for (const version of VERSIONS) {
 		await fx.answer(stream, 4n);
 		await fx.data(request.requestId, [1n, 3n, 4n]);
 		const first = await read;
-		expect(first?.sequence).toBe(1n);
+		expect(first?.start).toBe(1n);
 		if (!first) throw new Error("missing first group");
 		expect(await payloads(first)).toEqual(["1a", "", "1c"]);
 		first.close();
 		for (const sequence of [3n, 4n]) {
 			const group = await ordered.nextGroup();
-			expect(group?.sequence).toBe(sequence);
+			expect(group?.start).toBe(sequence);
 			if (!group) throw new Error("missing group");
 			expect(await payloads(group)).toEqual([`${sequence}a`, "", `${sequence}c`]);
 			group.close();
@@ -177,11 +177,11 @@ for (const version of VERSIONS) {
 		await fx.answer(backfill.stream, 0n);
 		await fx.data(backfill.request.requestId, [0n]);
 		const zero = await missing;
-		expect(zero?.sequence).toBe(0n);
+		expect(zero?.start).toBe(0n);
 		zero?.close();
 		for (const sequence of [1n, 3n, 4n]) {
 			const group = await overlap.nextGroup();
-			expect(group?.sequence).toBe(sequence);
+			expect(group?.start).toBe(sequence);
 			group?.close();
 		}
 		expect(await overlap.nextGroup()).toBeUndefined();
@@ -192,7 +192,7 @@ for (const version of VERSIONS) {
 		await fx.answer(second.stream, 5n);
 		await fx.data(second.request.requestId, [5n]);
 		const group = await more;
-		expect(group?.sequence).toBe(5n);
+		expect(group?.start).toBe(5n);
 		group?.close();
 	});
 
@@ -338,12 +338,12 @@ for (const version of VERSIONS) {
 		expect(await failed).toBeInstanceOf(Error);
 		await fx.data(fetching.request.requestId, [1n, 2n]);
 		const group = await first;
-		expect(group?.sequence).toBe(1n);
+		expect(group?.start).toBe(1n);
 		if (!group) throw new Error("missing history group");
 		expect(await payloads(group)).toEqual(["1a", "", "1c"]);
 		group?.close();
 		const second = await ordered.nextGroup();
-		expect(second?.sequence).toBe(2n);
+		expect(second?.start).toBe(2n);
 		if (!second) throw new Error("missing history group");
 		expect(await payloads(second)).toEqual(["2a", "", "2c"]);
 		second?.close();
@@ -421,7 +421,7 @@ for (const version of VERSIONS) {
 			new Reader(undefined, new Uint8Array([0, payload.byteLength, ...payload]), version),
 		);
 		const group = await first;
-		expect(group?.sequence).toBe(0n);
+		expect(group?.start).toBe(0n);
 		if (!group) throw new Error("missing first group");
 		expect(await payloads(group)).toEqual(["0a"]);
 		group.close();

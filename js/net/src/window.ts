@@ -350,7 +350,7 @@ export interface Holdings {
 	/** Where `pts` falls among the groups with a known start. */
 	containing(pts: Timestamp): Containing;
 	/** The lowest group at or above `from` known to start, with where it starts. */
-	nextStart(from: bigint): { sequence: bigint; start: Timestamp } | undefined;
+	nextStart(from: bigint): { start: bigint; first: Timestamp } | undefined;
 	/** The lowest held group at or above `from`, with what it says about its start. */
 	nextHeld(from: bigint): { sequence: bigint; held: Held } | undefined;
 	/**
@@ -428,9 +428,9 @@ class TimeEnd {
 		// later group known to start inside the end from being read.
 		for (;;) {
 			const next = holdings.nextStart(this.unknown(start));
-			if (!next || (this.after !== undefined && next.sequence >= this.after)) break;
-			if (later(next.start, this.pts)) this.after = next.sequence;
-			else this.known = next.sequence;
+			if (!next || (this.after !== undefined && next.start >= this.after)) break;
+			if (later(next.first, this.pts)) this.after = next.start;
+			else this.known = next.start;
 		}
 
 		// The first sequence above `known` that may still start is the one read on speculation:
@@ -746,7 +746,7 @@ export class Window {
 	found(pts: Timestamp, group: bigint | undefined, holdings: Holdings = UNHELD): boolean {
 		const found = this.#spans.filter((span) => span.looking && sameTime(span.looking.pts, pts));
 		if (found.length === 0) return false;
-		const started = group !== undefined && holdings.nextStart(group)?.sequence === group ? group : undefined;
+		const started = group !== undefined && holdings.nextStart(group)?.start === group ? group : undefined;
 		const containing = holdings.containing(pts);
 		const start = started ?? (containing !== "before" && containing !== "unknown" ? containing.group : undefined);
 		for (const span of found) {
@@ -754,7 +754,7 @@ export class Window {
 			span.looking = undefined;
 			span.start = start ?? 0n;
 			span.floored = start !== undefined;
-			span.reach = start === undefined ? (holdings.nextStart(0n)?.sequence ?? below) : undefined;
+			span.reach = start === undefined ? (holdings.nextStart(0n)?.start ?? below) : undefined;
 			if (span.end !== "open" && "time" in span.end) {
 				const time = new TimeEnd(span.end.time.pts, span.start);
 				// It walks from where the span reaches: a start the history couldn't place asks
@@ -852,7 +852,7 @@ export class Window {
 			return true;
 		}
 		// A time start reaching back past every group held asks no miss below the oldest of them.
-		const reach = pts !== undefined && !start.floored ? holdings.nextStart(0n)?.sequence : undefined;
+		const reach = pts !== undefined && !start.floored ? holdings.nextStart(0n)?.start : undefined;
 		if (end !== "open" && "time" in end) {
 			const settled = end.time.advance(start.group, holdings);
 			if (settled !== undefined) end = { before: settled };
@@ -945,9 +945,9 @@ function startOf(
  */
 function unresolved(start: bigint, floored: boolean, holdings: Holdings): bigint | undefined {
 	if (!holdings.looksUp?.()) return undefined;
-	if (!floored) return holdings.nextStart(0n)?.sequence;
+	if (!floored) return holdings.nextStart(0n)?.start;
 	const next = start + 1n;
-	const after = holdings.nextStart(next)?.sequence;
+	const after = holdings.nextStart(next)?.start;
 	return after !== undefined && after > next ? after : undefined;
 }
 

@@ -2329,7 +2329,7 @@ function fixture(
 function writeGroup(track: TrackProducer, frames: number): void {
 	const group = track.appendGroup();
 	for (let i = 0; i < frames; i++) {
-		group.writeFrame({ payload: new TextEncoder().encode(`${group.sequence}.${i}`), timestamp: Timestamp.now() });
+		group.writeFrame({ payload: new TextEncoder().encode(`${group.start}.${i}`), timestamp: Timestamp.now() });
 	}
 	group.finish();
 }
@@ -3074,7 +3074,7 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 	try {
 		const group = track.createGroup(5n);
 		for (let i = 0; i < 5; i++)
-			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.start) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
@@ -3145,7 +3145,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 	try {
 		const group = track.createGroup(5n);
 		for (let i = 0; i < 5; i++)
-			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.start) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
@@ -4439,7 +4439,7 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 	const group = track.appendGroup();
 	try {
 		expect(ok.largest).toBeUndefined();
-		expect(group.sequence).toBe(0n);
+		expect(group.start).toBe(0n);
 		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
 		group.finish();
 		const stream = await nextUni(fx.uni);

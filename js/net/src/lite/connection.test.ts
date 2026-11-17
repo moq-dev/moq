@@ -1011,8 +1011,8 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 					await writer.write(new Uint8Array([7]));
 					writer.close();
 					const received = await track.recvGroup();
-					expect((await received?.readFrameSequence())?.sequence).toBe(5);
-					expect(await received?.readFrameSequence()).toBeUndefined();
+					expect((await received?.readFrameIndex())?.index).toBe(5);
+					expect(await received?.readFrameIndex()).toBeUndefined();
 					received?.close();
 					const goaway = await Stream.open(pair.server, { version });
 					await goaway.writer.u53(StreamId.Goaway);

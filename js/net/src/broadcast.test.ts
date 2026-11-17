@@ -98,7 +98,7 @@ test("a replacement producer starts over", async () => {
 	if (!secondRequest) throw new Error("expected second request");
 	const second = secondRequest.accept({ timescale: Timescale.MILLI });
 	const appended = second.appendGroup();
-	expect(appended.sequence).toBe(0n);
+	expect(appended.start).toBe(0n);
 	appended.writeFrame(textFrame("b", Timestamp.fromMillis(500)));
 	secondSubscriber.close();
 	second.finish();
@@ -427,7 +427,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 
 	// The track already exists, so subscribe resolves immediately (no requested()).
 	const sub1 = broadcast.track("track1").subscribe().ordered();
-	expect((await sub1.nextGroup())?.sequence).toBe(0n);
+	expect((await sub1.nextGroup())?.start).toBe(0n);
 
 	// No on-demand request was emitted for it.
 	expect(await pendingRequest(broadcast)).toBeUndefined();
@@ -437,7 +437,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 
 	const sub2 = broadcast.track("track2").subscribe().ordered();
 	track2.appendGroup().finish();
-	expect((await sub2.nextGroup())?.sequence).toBe(0n);
+	expect((await sub2.nextGroup())?.start).toBe(0n);
 });
 
 test("two subscribers to one inserted track each get a full copy", async () => {
@@ -522,7 +522,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
 		// was evicted, not still buffered ahead of it.
-		expect((await stalled.recvGroup())?.sequence).toBe(1n);
+		expect((await stalled.recvGroup())?.start).toBe(1n);
 
 		// Nothing else is buffered: a second recvGroup stays pending (the track is open),
 		// proving exactly one group remained in the sink rather than two.
@@ -644,7 +644,7 @@ test("a fetch of a group still to come asks the request handler, and the write a
 	second.finish();
 
 	const group = await pending;
-	expect(group.sequence).toBe(1n);
+	expect(group.start).toBe(1n);
 	expect(await group.readString()).toBe("1");
 
 	requests.close();
@@ -665,7 +665,7 @@ test("fetch maxDelay tightens the publisher's maxAge without changing omission",
 	}
 
 	const omitted = await wireOf(broadcast).fetchGroup("video", 0n);
-	expect(omitted.sequence).toBe(0n);
+	expect(omitted.start).toBe(0n);
 	omitted.close();
 
 	// Stale under its own budget, which says OLD as the Rust `fetch_group` does, so a relay asking

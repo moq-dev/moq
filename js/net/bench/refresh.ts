@@ -38,7 +38,7 @@ for (const retained of [1, 64, 1024])
 				const baseline = consumers.map((track) => track.subscribe());
 				for (let i = 0; i < tracks; i++) {
 					const group = producers[i].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[i].recvGroup();
 					if (!received) throw new Error("baseline group missing");
@@ -49,7 +49,7 @@ for (const retained of [1, 64, 1024])
 				// track grows, so scanning that cache appears independently of fanout.
 				for (let old = 1; old < retained; old++) {
 					const group = producers[0].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("historical group missing");
@@ -60,8 +60,8 @@ for (const retained of [1, 64, 1024])
 				const samples: number[] = [];
 				for (let round = 0; round < 9; round++) {
 					const group = producers[0].appendGroup();
-					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.sequence) });
-					group.writeFrame({ payload: new Uint8Array(4), timestamp: Timestamp.unscaled(group.sequence) });
+					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
+					group.writeFrame({ payload: new Uint8Array(4), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[0].recvGroup();
 					if (!received) throw new Error("measured group missing");
@@ -71,7 +71,7 @@ for (const retained of [1, 64, 1024])
 					const start = performance.now();
 					const joins = Array.from({ length: joined }, () => consumers[0].subscribe());
 					const wanted = producers[0].demand().wanted;
-					while (wanted.peek() !== group.sequence + 1n) await wanted.changed();
+					while (wanted.peek() !== group.start + 1n) await wanted.changed();
 					if (round > 0) samples.push((performance.now() - start) * 1000);
 					for (const join of joins) join.close();
 				}

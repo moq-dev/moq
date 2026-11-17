@@ -203,7 +203,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			// Group 0 has no header, so accounting still waits, and its stream may yet
 			// land behind group 1's. Both readers wait, with the ordered reader holding
 			// group 1 until its budget gives up on the owed hole.
-			expect((await reader.recvGroup())?.sequence).toBe(1n);
+			expect((await reader.recvGroup())?.start).toBe(1n);
 			let ended = false;
 			const held = reader.recvGroup().finally(() => (ended = true));
 			const orderedHeld = ordered.readString();
@@ -239,7 +239,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ finish: new SubscribeFinish(2n) });
 		expect(await reader.finished()).toEqual({ group: 2n, frame: 0 });
 
-		expect((await reader.recvGroup())?.sequence).toBe(1n);
+		expect((await reader.recvGroup())?.start).toBe(1n);
 		// Asked before group 0 lands: a reader that ended early returns nothing.
 		const held = reader.recvGroup();
 
@@ -248,7 +248,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		low.finish();
 		await low.handled;
 		const late = await held;
-		expect(late?.sequence).toBe(0n);
+		expect(late?.start).toBe(0n);
 		expect(await late?.readString()).toBe("0.0");
 		expect(await reader.recvGroup()).toBeUndefined();
 
@@ -269,7 +269,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ finish: new SubscribeFinish(2n) });
 		await fin();
 
-		expect((await reader.recvGroup())?.sequence).toBe(1n);
+		expect((await reader.recvGroup())?.start).toBe(1n);
 		expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
@@ -297,7 +297,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const following = groupStream(subscriber, 1n);
 		following.write("1.0");
 		const next = await reader.recvGroup();
-		expect(next?.sequence).toBe(1n);
+		expect(next?.start).toBe(1n);
 		expect(await next?.readString()).toBe("1.0");
 		subscriber.close();
 	});
@@ -349,7 +349,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		await respond({ finish: new SubscribeFinish(4n) });
 		await fin();
 
-		expect((await reader.recvGroup())?.sequence).toBe(3n);
+		expect((await reader.recvGroup())?.start).toBe(3n);
 		expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 		expect(await reader.closed).toBeNull();
 	});
@@ -395,7 +395,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		for (;;) {
 			const next = await lower.recvGroup();
 			if (!next) break;
-			received.push(next.sequence);
+			received.push(next.start);
 		}
 		expect(received).toContain(1n);
 		expect(received).toContain(2n);
@@ -437,8 +437,8 @@ test("lite-07 settles a skipped group with SUBSCRIBE_DROP", async () => {
 	await respond({ drop: new SubscribeDrop({ start: 1n, end: 2n, error: 0 }) });
 	await fin();
 
-	expect((await reader.recvGroup())?.sequence).toBe(0n);
-	expect((await reader.recvGroup())?.sequence).toBe(2n);
+	expect((await reader.recvGroup())?.start).toBe(0n);
+	expect((await reader.recvGroup())?.start).toBe(2n);
 	expect(await settlesWithin(reader.recvGroup(), clock, Duration.millis(1000))).toBe(true);
 	expect(await reader.closed).toBeNull();
 });
