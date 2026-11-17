@@ -14,10 +14,7 @@ use super::multi::{Best, MultiSim, Tie, Tune};
 use super::*;
 
 /// The rule the epic picked: floor, epoch, batch, drain, and claimed.
-const KEPT: Tune = match Arm::KEPT {
-	Arm::Multi(tune) => tune,
-	Arm::Path(_) => panic!("the picked rule is the prototype's"),
-};
+const KEPT: Tune = Arm::TUNE;
 
 /// More deliveries than any network here needs to settle.
 const LIMIT: usize = 200_000;
@@ -316,4 +313,25 @@ fn an_equal_route_in_use_never_leaves_a_neighbour_without_one() {
 	};
 	assert_eq!(settled(1, 2), (Some(1), true), "the unmarked route first");
 	assert_eq!(settled(2, 1), (Some(1), true), "the marked route first");
+}
+
+/// A request may take any next hop tied with the route in use, and a marked route
+/// does not tie with an unmarked one of the same rank: taking it would carry a copy
+/// between two upstreams, which the route in use never does.
+#[test]
+fn a_marked_route_does_not_tie_with_an_unmarked_one() {
+	let mut net = MultiSim::new(KEPT, 6);
+	net.client(5);
+	net.publish(5, 100);
+	net.link(5, 0, 1, Tie::Peer);
+	net.link(0, 1, 1, Tie::Peer);
+	net.link(0, 2, 1, Tie::Peer);
+	net.link(3, 2, 1, Tie::Up);
+	net.link(3, 1, 1, Tie::Peer);
+	net.claim(5, "live/0", true);
+	assert!(settle(&mut net, &mut Rng(7)));
+	let router = net.router(3).expect("relay 3");
+	let origin = hop(0, 0);
+	assert_eq!(router.candidates(origin).len(), 2, "both routes are heard");
+	assert_eq!(router.ties(origin), vec![1]);
 }
