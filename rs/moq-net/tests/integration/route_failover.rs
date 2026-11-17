@@ -13,7 +13,7 @@
 //! which ran on lite-06 under a hold-down, to the path rule.
 
 use crate::mesh_withdraw::{PRODUCTION, PRODUCTION_LATENCY_MS};
-use crate::path_routes::{DOUBT, HOLD, lite07};
+use crate::path_routes::{DEBOUNCE, HOLD, lite07};
 use crate::route_change::{payload, produce_origin, timed};
 use crate::support;
 
@@ -651,7 +651,7 @@ async fn live_mesh_link_failure_keeps_presence() {
 			cut(links[index].as_ref().unwrap());
 			links[index] = None;
 		}
-		feed.run(((HOLD + DOUBT).as_millis() / MESH_STEP.as_millis()) as u64)
+		feed.run(((HOLD + DEBOUNCE).as_millis() / MESH_STEP.as_millis()) as u64)
 			.await;
 		// The last frames cross the mesh.
 		kio::clock::sleep(Duration::from_secs(1)).await;
@@ -702,7 +702,7 @@ async fn live_mesh_link_failure_keeps_presence() {
 			let latency = Duration::from_millis(PRODUCTION_LATENCY_MS[index]);
 			links[index] = Some(peer_with_latency(version, &nodes[a], &nodes[b], latency).await);
 		}
-		kio::clock::sleep(HOLD + DOUBT).await;
+		kio::clock::sleep(HOLD + DEBOUNCE).await;
 	}
 	println!(
 		"live mesh link failure over {} publishers: {dark_relays} relays went unavailable, {retracting} retracted and \

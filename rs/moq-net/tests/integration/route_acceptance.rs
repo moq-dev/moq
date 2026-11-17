@@ -6,7 +6,7 @@
 //!
 //! The rule's own fixtures live in `path_routes.rs`, whose helpers these share.
 
-use crate::path_routes::{DOUBT, HOLD, Seen, cut, land, lite07, publish, quiesce, record, withdrawn};
+use crate::path_routes::{DEBOUNCE, HOLD, Seen, cut, land, lite07, publish, quiesce, record, withdrawn};
 use crate::route_change::{link, produce_origin};
 use crate::support;
 
@@ -139,24 +139,22 @@ async fn flap(broadcasts: usize) -> Flap {
 	}
 }
 
-/// A link flap with many broadcasts behind one origin costs ROUTE changes per link, not
-/// a message per broadcast. `C` loses its link to `A`, holds its route while it doubts `A`,
-/// moves onto `B`'s, and moves back once the link reopens: on the sessions beside the link,
-/// one broadcast and 64 cost the same messages, and `D` keeps every broadcast throughout.
-/// The router's own count, which also bounds the reopened session's snapshot, is
-/// `route::tests::handoff::a_link_flap_costs_routes_not_broadcasts`.
+/// A link flap with many broadcasts behind one origin ends none of them, and going down
+/// costs the routing session beside it two messages whatever the broadcasts: `C` loses its
+/// link to `A`, names the closed session, and ends the route it offered `B`, whose own it
+/// now follows. `D` never forwards, so it is told claims, each with what it costs to
+/// reach: one update per broadcast each way. Coming back, `C` offers `B` its route again
+/// and tells it the origin's claims with it, one message each and their floor.
 #[kio::test]
-async fn a_link_flap_costs_routes_not_broadcasts() {
-	let one = flap(1).await;
-	let many = flap(64).await;
-	// Going down, each session beside the link carries two route messages (`C` holds,
-	// then moves onto `B`'s route); coming back, one (`C` moves back).
-	let routes = Flap {
-		down: [2, 2],
-		up: [1, 1],
-	};
-	assert_eq!(one, routes, "one broadcast");
-	assert_eq!(many, routes, "the cost does not follow the broadcasts");
+async fn a_link_flap_ends_no_broadcast() {
+	for broadcasts in [1, 64] {
+		let n = broadcasts as u64;
+		let cost = Flap {
+			down: [2, n],
+			up: [n + 2, n],
+		};
+		assert_eq!(flap(broadcasts).await, cost, "{broadcasts} broadcasts");
+	}
 }
 
 /// `R1` publishes in a ring of three, where the link from `R2` to `R3` lags by [`STALE`].
@@ -217,17 +215,16 @@ async fn ring() -> (
 }
 
 /// [`ring`]: the link from `R1` to `R2` closes. `R2` preferred the path through `R1`, of
-/// cost 3, and its backup runs the other way round the ring, of cost 4, which avoids `R1`,
-/// the closed link's far end: it moves there at once (within the origin's update hold,
-/// well before a doubt could lift), the broadcast available throughout. Every other
-/// session stays up.
+/// cost 3, and its backup runs the other way round the ring, of cost 4: it moves there at
+/// once (within the origin's update hold), the broadcast available throughout. Every
+/// other session stays up.
 #[kio::test]
 async fn a_ring_moves_at_once_to_a_backup_avoiding_the_far_end() {
 	let (_p, _live, relays, links, _p_r0) = ring().await;
 	let mut watch = record(&relays[2], "live").await;
 	let start = kio::clock::now();
 	cut(&links[1]);
-	kio::clock::sleep(DOUBT / 2).await;
+	kio::clock::sleep(DEBOUNCE / 2).await;
 	let seen = watch.seen(start);
 	assert!(seen.iter().all(|seen| seen.available && !withdrawn(seen)), "{seen:?}");
 	assert_eq!(seen.last().map(|seen| seen.cost), Some(4), "on the backup: {seen:?}");
@@ -239,19 +236,11 @@ async fn a_ring_moves_at_once_to_a_backup_avoiding_the_far_end() {
 }
 
 /// [`ring`]: the link from `R0` to `R1` closes. Every backup runs the other way round the
-/// ring, through `R0`, the closed link's far end, which `R1` cannot tell from a dead relay
-/// whose news is still on its way, and which `R1`'s DEAD names to `R2`. `R2` holds the
-/// broadcast unavailable, then moves onto its backup, of cost 4, once the doubt lifts, and
-/// `R1` onto `R2`'s, of cost 5. Every session of the backup stays up.
-///
-/// Pinned, against the contract ("while held, the reader sees them unavailable"): `R1`,
-/// whose own session closed, tells `R2` it holds, but its own origin shows the broadcast
-/// offline at once, since a closed stream takes what it served with it
-/// (`route::node::State::close`). Its readers then see it start again, as a new
-/// announcement rather than an update, only once the origin's retraction quarantine ends,
-/// a second after the doubt lifted.
+/// ring, through `R0`, the closed link's far end, on sessions the DEAD does not name: `R2`
+/// moves onto its backup, of cost 4, and `R1` onto `R2`'s, of cost 5, both at once and
+/// available throughout. Every session of the backup stays up.
 #[kio::test]
-async fn a_ring_waits_out_the_doubt_for_a_backup_through_the_far_end() {
+async fn a_ring_moves_at_once_to_a_backup_through_the_far_end() {
 	let (_p, _live, relays, links, _p_r0) = ring().await;
 	let mut far = record(&relays[1], "live").await;
 	let mut near = record(&relays[2], "live").await;
@@ -259,34 +248,26 @@ async fn a_ring_waits_out_the_doubt_for_a_backup_through_the_far_end() {
 	cut(&links[0]);
 	quiesce().await;
 
-	let seen = near.seen(start);
-	assert!(!seen.iter().any(withdrawn), "R2 holds, never withdraws: {seen:?}");
-	let held = seen.iter().find(|seen| !seen.available).expect("R2 holds meanwhile");
-	assert!(held.at < DOUBT, "{seen:?}");
-	let moved = seen.last().expect("R2 moves");
-	assert!(moved.available && moved.cost == 4, "R2 ends on its backup: {seen:?}");
-	assert!(moved.at >= DOUBT, "not before the doubt lifts: {seen:?}");
-
-	let seen = far.seen(start);
-	let kinds: Vec<_> = seen.iter().map(|seen| (seen.kind, seen.available)).collect();
-	assert_eq!(
-		kinds,
-		[(support::Kind::Offline, true), (support::Kind::Start, true)],
-		"pinned: R1 shows its held broadcast offline: {seen:?}"
-	);
-	assert_eq!(seen[0].at, Duration::ZERO, "{seen:?}");
-	assert!(seen[1].at >= 2 * DOUBT && seen[1].cost == 5, "{seen:?}");
+	for (name, watch, cost) in [("R2", &mut near, 4), ("R1", &mut far, 5)] {
+		let seen = watch.seen(start);
+		assert!(
+			seen.iter().all(|seen| seen.available && !withdrawn(seen)),
+			"{name} stays available: {seen:?}"
+		);
+		let moved = seen.last().expect("moved");
+		assert!(moved.cost == cost, "{name} ends on its backup: {seen:?}");
+		assert!(moved.at < DEBOUNCE, "{name} moves at once: {seen:?}");
+	}
 	for (i, pair) in links.iter().enumerate().skip(1) {
 		assert!(!closed(pair), "R{i}-R{} stays up", (i + 1) % 5);
 	}
 }
 
 /// `A` and `B` each reach `P` directly and peer with each other, over a link lagging by
-/// [`LAG`]. `P` dies: each relay's only route left is the other's direct route, which
-/// begins at `P` and so is not doubted, and which the other's own close made stale. Each
-/// moves onto it until the other's DEAD retracts it one lag after the cut, then holds for
-/// the other's answer, a lag later: both let go two lags after the cut, long before a
-/// hold's deadline. The router alone does the same.
+/// [`LAG`]. `P` dies: each relay's only route left is the other's direct route, which the
+/// other's own close made stale. Each moves onto it until the other's DEAD ends it one lag
+/// after the cut, shorter than the origin's update hold, so neither shows the move. Both
+/// show the claim unavailable and let go a debounce after that DEAD.
 #[kio::test]
 async fn two_relays_routing_through_each_other_both_let_go() {
 	const LAG: Duration = Duration::from_millis(200);
@@ -311,11 +292,7 @@ async fn two_relays_routing_through_each_other_both_let_go() {
 		);
 		let ended = seen.last().unwrap();
 		assert!(withdrawn(ended), "{name}: {seen:?}");
-		assert!(
-			ended.at >= 2 * LAG && ended.at < 3 * LAG,
-			"{name}: let go at {:?}: {seen:?}",
-			ended.at
-		);
+		assert_eq!(ended.at, LAG + DEBOUNCE, "{name}: {seen:?}");
 	}
 }
 
@@ -327,20 +304,16 @@ const KEEP_ALIVE: Duration = Duration::from_secs(3);
 /// neighbours notice one at a time, `R1` at once, `R2` half a [`KEEP_ALIVE`] later, `R3` a
 /// whole one later, as keep-alives spaced that far apart would.
 ///
-/// Measured, each move shown 300 ms later through the origin's update hold: no relay moves
-/// onto a route through `X` before its own doubt lifts, but the one-second [`DOUBT`] is
-/// shorter than the three-second spread, so the doubt lifts while a neighbour still
-/// offers a route through the dead relay. `R1` holds from 0 s, moves onto such a route at
-/// 1 s, holds again when `R2`'s DEAD names `X` at 1.5 s, and moves onto `R3`'s at 2.5 s,
-/// as `R2` does. `R3` notices at 3 s, and all three go offline then, once each: the
-/// broadcast is never withdrawn early, but readers on `R1` and `R2` see it turn available
-/// twice and once while nothing can serve it, and a request made then follows a route into
+/// Measured, each move shown 300 ms later through the origin's update hold: nothing keeps
+/// a relay off a route through `X` that a neighbour still offers, so `R1` moves onto
+/// `R2`'s at once and onto `R3`'s when `R2` notices, as `R2` does. `R3` notices at 3 s,
+/// and all three show the claim unavailable then and go offline a debounce later, once
+/// each: the broadcast is never withdrawn early, but readers on `R1` and `R2` see it
+/// available while nothing can serve it, and a request made then follows a route into
 /// the dead relay. Everyone lets go only when the last neighbour notices.
 ///
-/// So the doubt keeps a relay off a dead relay reported one neighbour at a time only when
-/// it outlasts the spread of its neighbours' detection: the doubt must follow the
-/// keep-alive (the idle timeout that detects a silent peer), or relay keep-alives must
-/// shorten below the doubt. Which is the maintainer's to decide; this pins the hunt.
+/// So a dead relay reported one neighbour at a time stays routed for the spread of its
+/// neighbours' detection: relay keep-alives bound it. This pins the hunt.
 #[kio::test]
 async fn a_vanished_relay_is_noticed_a_keep_alive_apart() {
 	let version = lite07();
@@ -382,13 +355,6 @@ async fn a_vanished_relay_is_noticed_a_keep_alive_apart() {
 			"R{}: nothing before it notices: {seen:?}",
 			i + 1
 		);
-		assert!(
-			!seen
-				.iter()
-				.any(|seen| seen.available && !withdrawn(seen) && seen.at < notice + DOUBT),
-			"R{}: no move through X before the doubt lifts: {seen:?}",
-			i + 1
-		);
 		assert_eq!(
 			seen.iter().filter(|seen| withdrawn(seen)).count(),
 			1,
@@ -397,21 +363,21 @@ async fn a_vanished_relay_is_noticed_a_keep_alive_apart() {
 		);
 		let ended = seen.last().unwrap();
 		assert!(
-			withdrawn(ended) && ended.at == KEEP_ALIVE,
-			"R{}: let go when R3 notices: {seen:?}",
+			withdrawn(ended) && ended.at == KEEP_ALIVE + DEBOUNCE,
+			"R{}: let go a debounce after R3 notices: {seen:?}",
 			i + 1
 		);
 	}
-	// Pinned: each move back to available is onto a route through the dead `X`, in
-	// milliseconds after `X` vanished.
+	// Pinned: each move is onto a route through the dead `X`, in milliseconds after `X`
+	// vanished.
 	let moves = |seen: &[Seen]| -> Vec<u128> {
 		(seen.iter())
 			.filter(|seen| seen.available && !withdrawn(seen))
 			.map(|seen| seen.at.as_millis())
 			.collect()
 	};
-	assert_eq!(moves(&seen[0]), [1_300, 2_800], "R1: {:?}", seen[0]);
-	assert_eq!(moves(&seen[1]), [2_800], "R2: {:?}", seen[1]);
+	assert_eq!(moves(&seen[0]), [300, 1_800], "R1: {:?}", seen[0]);
+	assert_eq!(moves(&seen[1]), [1_800], "R2: {:?}", seen[1]);
 	assert_eq!(moves(&seen[2]), [], "R3: {:?}", seen[2]);
 }
 
@@ -477,21 +443,14 @@ async fn a_dispute_wheel_settles() {
 
 /// Prior art (the epic's Plan item 30): `P` reaches `A` over a primary link of cost 1 and
 /// `B` over a backup of cost 4, and `A`, `B` and `C` mesh. The primary fails and returns,
-/// either within the doubt of `P` or after it lifted: every relay ends back on the
-/// primary, at the cost it had before.
+/// either within the debounce or long after: every relay ends back on the primary, at the
+/// cost it had before.
 ///
-/// `A`'s DEAD names `P`, the far end, so `B` and `C` doubt the publisher. The backup begins
-/// at `P`, so the doubt does not keep them off it: both move onto it at once, staying
-/// available, as soon as the cut's news arrives. The returning primary is a session to `P`
-/// opened since the doubt began, so it waits out [`DOUBT`], which damps a flapping link:
-/// no relay moves back before the doubt lifts, however soon the primary returns.
-///
-/// Pinned, against the contract (see
-/// [`a_ring_waits_out_the_doubt_for_a_backup_through_the_far_end`]): `A`, left with no
-/// route, shows the broadcast offline at once rather than held, and starts it again.
+/// `B` and `C` move onto the backup as soon as the cut's news arrives, staying available,
+/// and back as soon as the primary returns. `A` is left with the backup through `B`.
 #[kio::test]
 async fn a_primary_that_fails_and_returns_takes_every_relay_back() {
-	for back in [DOUBT / 2, HOLD + DOUBT] {
+	for back in [DEBOUNCE / 2, HOLD + DEBOUNCE] {
 		let version = lite07();
 		let [p, a, b, c] = [1, 2, 3, 4].map(produce_origin);
 		let _live = publish(&p, "live");
@@ -535,22 +494,21 @@ async fn a_primary_that_fails_and_returns_takes_every_relay_back() {
 				"{name} after {back:?}: {seen:?}"
 			);
 			assert!(
-				seen[0].cost == backup && seen[0].at < DOUBT,
-				"{name} after {back:?}: onto the backup before the doubt lifts: {seen:?}"
+				seen[0].cost == backup && seen[0].at < DEBOUNCE / 2,
+				"{name} after {back:?}: onto the backup at once: {seen:?}"
 			);
 			let returned = seen.iter().position(|seen| seen.cost == 2).expect("returned");
 			assert!(
-				seen[returned].at >= back.max(DOUBT),
-				"{name} after {back:?}: not back before the doubt lifts: {seen:?}"
+				seen[returned].at >= back,
+				"{name} after {back:?}: not back before the primary: {seen:?}"
 			);
 		}
-		let kinds: Vec<_> = seen[0].iter().map(|seen| seen.kind).collect();
-		assert_eq!(
-			kinds[..2],
-			[support::Kind::Offline, support::Kind::Start],
-			"pinned: A shows its held broadcast offline: {:?}",
+		assert!(
+			seen[0].iter().all(|seen| seen.available && !withdrawn(seen)),
+			"A after {back:?}: {:?}",
 			seen[0]
 		);
+		assert_eq!(seen[0][0].cost, 5, "A after {back:?}: onto the backup: {:?}", seen[0]);
 	}
 }
 

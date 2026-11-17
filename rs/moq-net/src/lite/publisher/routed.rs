@@ -258,8 +258,8 @@ impl Answer {
 			let mut keys: Vec<Named> = self.told.keys().cloned().collect();
 			keys.extend(self.live.keys().filter(|key| !self.told.contains_key(key)).cloned());
 			for key in keys {
-				// No longer granted, it is gone for the peer, as if its publisher ended it.
-				self.sync(writer, key, false)?;
+				// No longer granted, it is lost to the peer: its publisher never ended it.
+				self.sync(writer, key, true)?;
 			}
 		}
 		Ok(())

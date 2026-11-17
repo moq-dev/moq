@@ -248,7 +248,8 @@ pub(crate) enum Role {
 /// One side's configuration of a link.
 #[derive(Clone, Debug)]
 pub(crate) struct Port {
-	/// Strictly positive, so extending a route never leaves it as cheap.
+	/// Strictly positive to a forwarding node, so extending a route never leaves it as
+	/// cheap.
 	pub cost: Metric,
 	/// The application's local priority for the link: a path ranks by the lowest on it,
 	/// higher first, before cost.
@@ -666,7 +667,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// A session to `peer` opened. This node asks it at once, and answers nothing until it
 	/// asks in turn.
 	pub fn connect(&mut self, peer: N, port: Port) -> Result<(), Error> {
-		if port.cost == 0 {
+		// An endpoint forwards nothing, so nothing loops through a free link to one.
+		if port.cost == 0 && port.role != Role::Endpoint {
 			return Err(Error::ZeroCost);
 		}
 		if self.peers.contains_key(&peer) {

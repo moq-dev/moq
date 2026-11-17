@@ -3,11 +3,9 @@
 //! Lite-07 routes by their path, on real sessions with time paused.
 //!
 //! A route names every relay it crossed and the session each learned it on. A relay that
-//! loses a session names that hop in one DEAD, every relay drops the routes through it,
-//! and the node at the closed session's far end is doubted for a second, so nobody moves
-//! onto a stale route through it. A relay left without a route holds its claims,
-//! unavailable, until the neighbours that learned the route from it answer, or for
-//! [`HOLD`] at most.
+//! loses a session names that hop in one DEAD, and every relay drops the routes through
+//! it and moves onto what is left at once. A claim left without a route is shown
+//! unavailable for [`DEBOUNCE`], in case a route returns, and goes offline after.
 
 use crate::route_change::{link, next, payload, produce_origin, read, timed};
 use crate::support;
@@ -17,14 +15,13 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 use moq_net::{Error, Pattern, Patterns, Version, auth::Grant, origin};
-use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_with_latency};
+use support::harness::{MockConnectOptions, MockPair, connect_mock, peer};
 
-/// How long a relay holds a route no neighbour answers for, and lets an announce
-/// stream stall before closing its session.
+/// How long a relay lets an announce stream stall before closing its session.
 pub(super) const HOLD: Duration = Duration::from_secs(10);
 
-/// How long a closed session's far end is doubted.
-pub(super) const DOUBT: Duration = Duration::from_secs(1);
+/// How long a claim no route reaches is shown unavailable before it goes offline.
+pub(super) const DEBOUNCE: Duration = Duration::from_millis(800);
 
 /// The wip version the path rule runs on.
 pub(super) fn lite07() -> Version {
@@ -108,19 +105,19 @@ pub(super) fn publish(node: &origin::Producer, path: &str) -> origin::Route {
 	route
 }
 
-/// Wait long enough for every message in flight to land, without reaching the doubt.
+/// Wait long enough for every message in flight to land, well within the debounce.
 pub(super) async fn land() {
 	kio::clock::sleep(Duration::from_millis(100)).await;
 }
 
-/// Let the network settle, doubts and holds included.
+/// Let the network settle, every debounce and stall included.
 pub(super) async fn quiesce() {
-	kio::clock::sleep(HOLD + DOUBT).await;
+	kio::clock::sleep(HOLD + DEBOUNCE).await;
 }
 
 /// `W` reaches `P` through `A`, and through `C` and `D`, which never cross `A`. The session
-/// from `A` to `W` closes: `W` doubts `A`, the far end, and the detour avoids it, so `W`
-/// moves onto it at once and the claim never turns unavailable.
+/// from `A` to `W` closes: `W` moves onto the detour at once and the claim never turns
+/// unavailable.
 #[kio::test]
 async fn a_detour_avoiding_the_far_end_is_taken_at_once() {
 	let version = lite07();
@@ -145,10 +142,10 @@ async fn a_detour_avoiding_the_far_end_is_taken_at_once() {
 }
 
 /// `W` reaches `P` through `A`, and through `B`, whose route crosses `A` too. The session
-/// from `A` to `W` closes: `W` cannot tell `A` from a dead relay whose news is still on its
-/// way, so it moves onto `B`'s route only once the doubt lifts, holding the claim meanwhile.
+/// from `A` to `W` closes, which names a hop `B`'s route never crossed: `W` moves onto it
+/// at once and the claim never turns unavailable.
 #[kio::test]
-async fn a_detour_through_the_far_end_waits_out_the_doubt() {
+async fn a_detour_through_the_far_end_is_taken_at_once() {
 	let version = lite07();
 	let [p, a, b, w] = [1, 2, 3, 4].map(produce_origin);
 	let _live = publish(&p, "live");
@@ -164,23 +161,18 @@ async fn a_detour_through_the_far_end_waits_out_the_doubt() {
 	quiesce().await;
 	let seen = watch.seen(start);
 	assert!(
-		!seen.iter().any(withdrawn),
-		"the claim is held, not withdrawn: {seen:?}"
+		seen.iter().all(|seen| seen.available && !withdrawn(seen)),
+		"B's route serves at once: {seen:?}"
 	);
-	let held = seen.iter().find(|seen| !seen.available).expect("held meanwhile");
-	let usable = seen
-		.iter()
-		.find(|seen| seen.available)
-		.expect("B's route serves in the end");
-	assert!(usable.at >= held.at + DOUBT, "not before the doubt lifts: {seen:?}");
 }
 
 /// `P` is on `A` and `B`, which peer with each other, and `W` is behind both. `P`'s session
-/// to `A` closes and reopens every half doubt. Doubt about `P` keeps no relay off `B`'s
-/// route, which begins at `P`, so `W` shows the claim available throughout and its
-/// subscriber reads each group at once. The reopened session waits out the doubt.
+/// to `A` closes and reopens every half second. `B`'s route never crossed that session,
+/// so `W` shows the claim available throughout and its subscriber reads each group at
+/// once.
 #[kio::test]
 async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
+	const FLAP: Duration = Duration::from_millis(500);
 	let version = lite07();
 	let [p, a, b, w] = [1, 2, 3, 4].map(produce_origin);
 	let live = publish(&p, "live");
@@ -207,8 +199,8 @@ async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
 		group.finish().unwrap();
 		assert_eq!(next(&mut rx).await, (flap, payload(flap, 0)), "flap {flap}");
 		let late = kio::clock::now().saturating_duration_since(sent);
-		assert!(late < DOUBT / 2, "flap {flap}: read {late:?} after it was written");
-		kio::clock::sleep(DOUBT / 2).await;
+		assert!(late < FLAP, "flap {flap}: read {late:?} after it was written");
+		kio::clock::sleep(FLAP).await;
 	}
 	let seen = watch.seen(start);
 	assert!(
@@ -260,46 +252,25 @@ async fn a_dead_relay_reaches_every_neighbour_as_withdrawals() {
 	}
 }
 
-/// What `B` does while `A` holds the route for it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Child {
-	/// Answers, over a link with a one-way [`LAG`].
-	Answers,
-	/// Never answers, and its session closes [`LAG`] after the cut.
-	Closes,
-	/// Never answers.
-	Silent,
-}
-
-/// How long `B` takes in [`hold_behind`].
-const LAG: Duration = Duration::from_secs(2);
-
 /// `P` feeds `A`, which feeds `C`, and peers with `B`, which learned the route from `A` and
-/// offers it back. `P`'s session to `A` closes: `A` holds the route for `B`, so `C` sees the
-/// claim unavailable, then withdrawn once the hold ends. Returns how long after the cut that
-/// was.
-async fn hold_behind(child: Child) -> Duration {
+/// offers it back. `P`'s session to `A` closes: `A` waits for nobody, so `C` sees the claim
+/// unavailable at once and offline when the debounce runs out, with no move onto `B`'s
+/// route between.
+#[kio::test]
+async fn a_claim_without_a_route_goes_offline_after_the_debounce() {
 	let version = lite07();
 	let [p, a, b, c] = [1, 2, 3, 4].map(produce_origin);
 	let _live = publish(&p, "live");
 	let p_a = link(version, &p, &a).await;
-	let lag = if child == Child::Answers { LAG } else { Duration::ZERO };
-	let a_b = peer_with_latency(version, &a, &b, lag).await;
+	let _a_b = peer(version, &a, &b).await;
 	let _a_c = link(version, &a, &c).await;
 	// A reader at `B` asks `A` for its routes.
 	let _reader = record(&b, "live").await;
 	quiesce().await;
 
 	let mut watch = record(&c, "live").await;
-	if child != Child::Answers {
-		a_b.server_transport.hold_writes();
-	}
 	let start = kio::clock::now();
 	cut(&p_a);
-	if child == Child::Closes {
-		kio::clock::sleep(LAG).await;
-		cut(&a_b);
-	}
 	quiesce().await;
 	let seen = watch.seen(start);
 	assert!(
@@ -311,36 +282,13 @@ async fn hold_behind(child: Child) -> Duration {
 				..
 			})
 		),
-		"held first: {seen:?}"
+		"unavailable first: {seen:?}"
 	);
+	assert!(seen.iter().all(|seen| !seen.available), "{seen:?}");
 	assert_eq!(seen.iter().filter(|seen| withdrawn(seen)).count(), 1, "{seen:?}");
 	let ended = seen.last().unwrap();
 	assert!(withdrawn(ended), "{seen:?}");
-	ended.at
-}
-
-/// `A` loses its only route and holds the claim for `B`, which learned it from `A`. `B`
-/// answers once the DEAD reaches it, a round trip later, and the hold ends then.
-#[kio::test]
-async fn a_hold_ends_behind_an_answering_neighbour() {
-	let ended = hold_behind(Child::Answers).await;
-	assert!(ended >= 2 * LAG && ended < 2 * LAG + DOUBT, "ended at {ended:?}");
-}
-
-/// [`a_hold_ends_behind_an_answering_neighbour`], with `B` silent until its session closes:
-/// nothing is left to wait for.
-#[kio::test]
-async fn a_hold_ends_behind_a_closed_session() {
-	let ended = hold_behind(Child::Closes).await;
-	assert!(ended >= LAG && ended < LAG + DOUBT, "ended at {ended:?}");
-}
-
-/// [`a_hold_ends_behind_an_answering_neighbour`], with `B` silent: the hold ends at its
-/// deadline.
-#[kio::test]
-async fn a_hold_ends_at_its_deadline_behind_a_silent_neighbour() {
-	let ended = hold_behind(Child::Silent).await;
-	assert!(ended >= HOLD && ended < HOLD + DOUBT, "ended at {ended:?}");
+	assert!(ended.at >= DEBOUNCE && ended.at < DEBOUNCE + Duration::from_millis(100), "{seen:?}");
 }
 
 /// `W` reaches `P` through `A`. `Y` and `Z` peer with `W` and with each other, and carry

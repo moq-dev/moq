@@ -257,13 +257,14 @@ impl Node {
 		router.clock(clock.now());
 		router.follow();
 		for (key, upstream) in [(LOCAL, false), (LOCAL_MARKED, true)] {
+			// Free, so a claim costs what the links it crossed do.
 			let port = Port {
-				cost: 1,
+				cost: 0,
 				priority: i8::MAX,
 				upstream,
 				role: Role::Endpoint,
 			};
-			router.connect(key, port).expect("a fresh key at a positive cost");
+			router.connect(key, port).expect("a fresh key");
 			// The origin answers at once: its table is what it holds.
 			router.recv(key, Msg::Edited).expect("the origin was asked");
 			router.recv(key, Msg::Synced(Path::empty())).expect("the origin was asked");
@@ -716,7 +717,11 @@ impl State {
 			dirty.extend(self.router.claimed(origin).cloned());
 		}
 		let moved = !dirty.is_empty();
-		for broadcast in dirty {
+		// What the reader shows first, so the instance that replaces another at a path is
+		// served before the one it replaces goes.
+		let shown = |(path, instance): &Broadcast| self.router.shown().contains_key(&(instance.clone(), path.clone()));
+		let (staying, going): (Vec<Broadcast>, Vec<Broadcast>) = dirty.into_iter().partition(shown);
+		for broadcast in staying.into_iter().chain(going) {
 			self.relane(&broadcast, ended.contains(&broadcast));
 		}
 		if moved {

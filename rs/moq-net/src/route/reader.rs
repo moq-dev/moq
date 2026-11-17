@@ -123,9 +123,11 @@ impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A
 					// A claim presented at a narrower region moved up to the claim it
 					// stood for, which is still shown. That claim may have changed
 					// meanwhile, so a presented claim needs only something shown above it.
-					let moved = ancestors(claim)
-						.filter(|above| above != claim)
-						.any(|above| shown(&above).is_some_and(|now| was.presented || now.item == was.item));
+					// A claim its origin announced there is its own, whatever is above it.
+					let moved = was.presented
+						&& ancestors(claim)
+							.filter(|above| above != claim)
+							.any(|above| shown(&above).is_some());
 					let kind = if !watched(claim) {
 						Kind::Unwatched
 					} else if !moved && ended(claim) {

@@ -598,8 +598,10 @@ impl Routed {
 			} => {
 				let key = (origin, path, instance);
 				let ok = self.serve(subscriber, &key, served);
-				if !ok && let Some(entry) = self.served.remove(&key) {
-					entry.route.dynamic.withdrawn();
+				// Dropped, a claim this session may no longer carry goes offline rather
+				// than ending: its publisher never withdrew it.
+				if !ok {
+					self.served.remove(&key);
 				}
 				let (origin, path, instance) = key;
 				self.stream.serving(origin, &(path, instance), ok);
