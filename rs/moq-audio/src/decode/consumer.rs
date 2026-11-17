@@ -83,8 +83,9 @@ pub struct Options {
 	///
 	/// [`Delay::min`] is the playout delay: the jitter buffer a player holds ahead of the
 	/// playhead, reported by [`Consumer::delay`], and where a cold join starts. With
-	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. A `min`
-	/// beyond the track's max age is refused. [`Delay::max`] is how far a group may fall
+	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. The
+	/// subscription states whichever delay the player holds as its min, following the estimate,
+	/// so a missing group is waited for that long. A `min` beyond the track's max age is refused. [`Delay::max`] is how far a group may fall
 	/// behind the live edge before the subscription skips it; it adds no buffering.
 	pub delay: Delay,
 	/// Measure the playout delay from arrival timing, never below [`Delay::min`] (default:
@@ -165,6 +166,9 @@ pub struct Consumer {
 	terminal_start: Option<moq_net::Timestamp>,
 	/// The playout delay, fixed or estimated from arrivals.
 	target: Target,
+	/// The playout delay the subscription states as its [`Delay::min`] in place of
+	/// [`Options::delay`]'s, once the start no longer depends on it.
+	stated: Option<Duration>,
 	/// Where arrival times are measured from.
 	origin: Instant,
 	/// Packets read and observed but not yet decoded, held by the [`Backpressure`] gate,
@@ -188,6 +192,11 @@ pub struct Consumer {
 struct ActivitySpan {
 	end: moq_net::Timestamp,
 	activity: Activity,
+}
+
+/// A target in `f64` milliseconds as a [`Duration`].
+fn from_millis(millis: f64) -> Duration {
+	Duration::from_secs_f64(millis / 1000.0)
 }
 
 impl Consumer {
@@ -269,6 +278,7 @@ impl Consumer {
 
 		Ok(Self {
 			target: Target::new(delay, options.estimate, catalog.jitter),
+			stated: None,
 			decoder,
 			track,
 			resampler: None,
@@ -325,7 +335,7 @@ impl Consumer {
 	/// behind it, as `moq play` keeps it at the delay plus its time stretch.
 	pub fn set_max_delay(&mut self, max: std::time::Duration) {
 		self.options.delay = self.options.delay.with_max(max);
-		self.track.set_delay(self.options.delay);
+		self.track.set_delay(self.stated());
 		self.max_delay = max.min(self.max_age.unwrap_or(std::time::Duration::MAX));
 	}
 
@@ -337,7 +347,13 @@ impl Consumer {
 	/// frame is handled and let the playback buffer absorb the jitter, rather than
 	/// pacing reads to the speaker.
 	pub fn delay(&self) -> Duration {
-		Duration::from_secs_f64(self.target.millis() / 1000.0)
+		from_millis(self.target.millis())
+	}
+
+	// The delay the subscription carries: the options', with the playout delay as the min once the
+	// start no longer depends on it.
+	fn stated(&self) -> Delay {
+		self.options.delay.with_min(self.stated.or(self.options.delay.min))
 	}
 
 	/// Sample rate samples are actually delivered at, which is
@@ -591,11 +607,19 @@ impl Consumer {
 	/// that arrives meanwhile, or `None` once the track ends.
 	async fn next(&mut self) -> Result<Option<Encoded>, Error> {
 		loop {
-			// A missing group is waited for only the playout delay, since past it the group
-			// would play late, and a reordered backlog's holes waited out to the max delay
-			// would read as jitter. Late groups that did arrive still play up to the max.
-			// Refreshed before every poll, since each arrival and each decoded frame can move it.
-			self.track.set_wait(self.delay());
+			// The container waits a missing group out for the subscription's min, so it states the
+			// playout delay: past it the group would play late, and a reordered backlog's holes
+			// waited out to the max delay would read as jitter. Late groups that did arrive still
+			// play up to the max. An unfloored start waits for media the min reaches back to, which
+			// the estimate would measure as jitter, so that start keeps the configured min until
+			// reading started; a start at the live edge is floored there. Checked before every
+			// poll, since each arrival and each decoded frame can move it; the estimate moves in
+			// whole buckets, so each move is one update.
+			let placed = self.started || self.options.start == Start::Latest;
+			if placed && self.stated != Some(self.delay()) {
+				self.stated = Some(self.delay());
+				self.track.set_delay(self.stated());
+			}
 			// Read before judging the head, so any update after that wakes the wait.
 			let seen = self.gate.as_ref().map_or(0, |gate| gate.read().version);
 			let deadline = match self.pending.front() {
@@ -2849,6 +2873,64 @@ mod tests {
 			skipped <= 100.0 && unseen >= 300.0,
 			"{skipped} ms skipped, {unseen} ms unseen"
 		);
+	}
+
+	/// A missing packet is waited out for the playout estimate, the delay the subscription states
+	/// once reading started: not skipped at once, and not held to the max delay, which would hold
+	/// every packet behind it that long.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_is_waited_out_for_the_playout_estimate() {
+		use moq_mux::container::Container as _;
+
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let max = Duration::from_secs(2);
+		let options = Options {
+			delay: Delay {
+				max: Some(max),
+				..Delay::default()
+			},
+			estimate: true,
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&subscriber, &catalog, "audio", options).await.unwrap();
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let write = |sequence: u64| {
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let frame = moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.close().unwrap();
+		};
+
+		write(0);
+		next_frame(&mut consumer).await.unwrap().expect("the first packet");
+		let estimate = consumer.delay();
+		assert!(!estimate.is_zero() && estimate < max, "estimate {estimate:?}");
+
+		// Packet 1 never arrives; packet 2 lands 20 ms later, as it would have anyway.
+		tokio::time::advance(Duration::from_millis(20)).await;
+		write(2);
+		let since = kio::clock::now();
+		assert!(matches!(consumer.read().await.unwrap(), Some(Read::Gap { .. })));
+		assert_eq!(
+			since.elapsed(),
+			estimate,
+			"the hole was not waited out for the estimate"
+		);
+		next_frame(&mut consumer)
+			.await
+			.unwrap()
+			.expect("the packet past the hole");
 	}
 
 	/// A path that delivers every fifth packet 300 ms late from the start: each lands after

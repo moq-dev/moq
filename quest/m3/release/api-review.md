@@ -68,10 +68,8 @@ re-read this list, so it is settled:
   stay: both have callers (the first pass's claim fell on a re-read).
 - The byte-stream rung of `MoqMediaProducer`'s simulcast ladder stays:
   removing it changes `lower`'s type in every binding again.
-- `moq_mux`'s `set_wait` folds into `Delay`
-  ([the hole wait](/quest/m2/delay-hole-wait.md)). The first pass was wrong
-  that native audio sets it to the `min` it already passes: it passes its
-  live estimate, which that quest gives a home.
+- `moq_mux`'s `set_wait` folded into `Delay`: a hole is waited for
+  `Delay::min`, and native audio states its live estimate there.
 - `Rendition::applied()` and `moq_video::encode::Applied` go in
   [the media sweep](/quest/m2/unused-api/media.md); moq-sock's ICMP error
   queue and `qmux::Config::fixed_receive_window` in

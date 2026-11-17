@@ -60,7 +60,6 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [finish](/quest/m2/finish-sweep.md), [TS outcomes](/quest/m2/ts-typed-outcomes.md),
   and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
-  [the hole wait](/quest/m2/delay-hole-wait.md),
   [device and cursor](/quest/m2/native-media-config.md),
   [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),

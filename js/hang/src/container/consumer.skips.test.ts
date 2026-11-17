@@ -195,7 +195,7 @@ test("a blocking group is kept until its successor starts a budget behind the ne
 	const track = new Track.Producer("tone");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(150) },
+		delay: { min: null, max: Duration.millis(150) },
 	});
 	const sent = Time.Timestamp.now();
 	const write = (sequence: bigint, timestamp: number) => {

@@ -201,7 +201,9 @@ impl Release {
 				let source = ExportSource::for_stream(
 					&self.source,
 					&m2ts.track,
-					moq_net::track::Delay::default().with_max(self.delay / 2),
+					// Half the delay, as the export's budget, and no min, so a missing group is
+					// waited for it too.
+					moq_net::track::Delay::default().with_min(None).with_max(self.delay / 2),
 				)?;
 				let source = match self.replay {
 					true => source,

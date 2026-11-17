@@ -67,7 +67,9 @@ pub struct Delay {
 	/// included, and a resumed subscription ignore it, and changing it later moves nothing
 	/// already started.
 	///
-	/// A media consumer reads an unstated minimum as zero. The aggregate across subscribers is
+	/// A media consumer also waits this long for a missing group, since past it the group would
+	/// play late, and starts an unstated minimum as zero but waits a missing group for
+	/// [`Self::max`] instead. The aggregate across subscribers is
 	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches
 	/// back for the reader that buffers most; each reader's own minimum then bounds what it
 	/// reads of that copy. moq-lite before 07 and moq-transport cannot carry it.

@@ -257,7 +257,6 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		{
 			format: new Container.Legacy.Format("audio"),
 			delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
-			wait: sync.out.maxDelay,
 		},
 	);
 

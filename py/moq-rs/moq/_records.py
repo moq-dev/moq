@@ -228,8 +228,9 @@ class Delay:
     """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
 
     ``min`` is the target latency: the playout or jitter-buffer delay held behind the
-    live edge, and where a cold join starts. ``None`` leaves it unstated, which a decoder
-    plays as zero while the subscription keeps it unstated, so it never pulls the
+    live edge, where a cold join starts, and how long a decoder waits for a missing group.
+    ``None`` leaves it unstated, which a decoder starts as zero, waiting a missing group for
+    ``max`` instead, while the subscription keeps it unstated, so it never pulls the
     aggregate across subscribers to zero. A ``min`` past ``max`` starts at ``max``.
     ``max`` is how far a non-latest group may fall behind before it is skipped; zero
     skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age

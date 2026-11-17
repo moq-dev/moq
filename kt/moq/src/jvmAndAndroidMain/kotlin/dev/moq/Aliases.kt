@@ -216,10 +216,11 @@ typealias RouteInfo = uniffi.moq.MoqRouteInfo
 typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
- * How far behind the live edge a subscriber or decoder plays: `min` is the target latency and where
- * a cold join starts, null to leave it unstated (a decoder plays it as zero), and `max`, null for
- * no subscriber limit, is how far a non-latest group may fall behind before it is skipped. A `min`
- * past `max` starts at `max`.
+ * How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
+ * cold join starts, and how long a decoder waits for a missing group, null to leave it unstated (a
+ * decoder starts it as zero and waits a missing group for `max`), and `max`, null for no subscriber
+ * limit, is how far a non-latest group may fall behind before it is skipped. A `min` past `max`
+ * starts at `max`.
  */
 typealias Delay = uniffi.moq.MoqDelay
 

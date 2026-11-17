@@ -14,7 +14,7 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(budget) },
+		delay: { min: null, max: Duration.millis(budget) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -65,7 +65,7 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -122,7 +122,7 @@ test("the holes a stalled source left behind share one budget", async () => {
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -166,7 +166,7 @@ test("a hole is late from the earliest arrival past it", async () => {
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("data"),
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -273,7 +273,7 @@ test.each([true, false])("the head after a declared end is waited for (arrives: 
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(300) },
+		delay: { min: null, max: Duration.millis(300) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -353,7 +353,7 @@ test("a newest-first flush past a hole delivers the groups landing behind its ne
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(80) },
+		delay: { min: null, max: Duration.millis(80) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -404,8 +404,7 @@ test("a hole is waited for the wait while an arrived group plays up to the max d
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(1000) },
-		wait: Duration.millis(100),
+		delay: { min: Duration.millis(100), max: Duration.millis(1000) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -493,8 +492,7 @@ test.each([
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(2_000) },
-		wait: Duration.millis(500),
+		delay: { min: Duration.millis(500), max: Duration.millis(2_000) },
 		playhead,
 	});
 	const results: Read[] = [];
@@ -545,8 +543,7 @@ test("a hole ends once the playout clock jumps past the group past it", async ()
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(2_000) },
-		wait: Duration.millis(500),
+		delay: { min: Duration.millis(500), max: Duration.millis(2_000) },
 		playhead: { now: () => position, anchor },
 	});
 	const results: Read[] = [];

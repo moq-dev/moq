@@ -800,9 +800,9 @@ pub enum moq_demand {
 #[derive(Clone, Copy, Default)]
 pub struct moq_delay {
 	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
-	/// the live edge, and where a cold join starts. moq-lite-07 sends it upstream. A
-	/// `min_us` past the max starts at the max, since the publisher serves nothing older.
-	/// Ignored when `min_unstated` is set.
+	/// the live edge, where a cold join starts, and how long a media consumer waits for a
+	/// missing group. moq-lite-07 sends it upstream. A `min_us` past the max starts and waits
+	/// at the max, since the publisher serves nothing older. Ignored when `min_unstated` is set.
 	pub min_us: u64,
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in
 	/// microseconds. Zero skips immediately. Enforced by the publisher's cache and by any
@@ -811,8 +811,9 @@ pub struct moq_delay {
 	pub max_us: u64,
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
-	/// Leave the minimum unstated. A media consumer plays it as zero, while the subscription
-	/// keeps it unstated, so it never pulls the aggregate across subscribers to zero.
+	/// Leave the minimum unstated. A media consumer starts it as zero and waits a missing group
+	/// for the max instead, while the subscription keeps it unstated, so it never pulls the
+	/// aggregate across subscribers to zero.
 	pub min_unstated: bool,
 }
 

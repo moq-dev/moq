@@ -2627,7 +2627,7 @@ where
 					&self.program.source,
 					name,
 					config,
-					moq_net::track::Delay::default().with_max(self.budget()),
+					moq_net::track::Delay::default().with_min(None).with_max(self.budget()),
 				)?
 				.map(|s| at_edge(s, self.program.replay))
 				{
@@ -2653,7 +2653,7 @@ where
 					&self.program.source,
 					name,
 					config,
-					moq_net::track::Delay::default().with_max(self.budget()),
+					moq_net::track::Delay::default().with_min(None).with_max(self.budget()),
 				)?
 				.map(|s| at_edge(s, self.program.replay))
 				{
@@ -2685,7 +2685,7 @@ where
 						ExportSource::for_stream(
 							&self.program.source,
 							name,
-							moq_net::track::Delay::default().with_max(self.budget()),
+							moq_net::track::Delay::default().with_min(None).with_max(self.budget()),
 						)?,
 						&kind,
 						self.program.replay,
@@ -2738,7 +2738,7 @@ where
 					&self.program.source,
 					name,
 					config,
-					moq_net::track::Delay::default().with_max(budget),
+					moq_net::track::Delay::default().with_min(None).with_max(budget),
 				)?
 				.map(|s| at_edge(s, self.program.replay))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
@@ -2746,7 +2746,7 @@ where
 					&self.program.source,
 					name,
 					config,
-					moq_net::track::Delay::default().with_max(budget),
+					moq_net::track::Delay::default().with_min(None).with_max(budget),
 				)?
 				.map(|s| at_edge(s, self.program.replay))
 			} else if mpegts
@@ -2757,7 +2757,7 @@ where
 				let source = ExportSource::for_stream(
 					&self.program.source,
 					name,
-					moq_net::track::Delay::default().with_max(budget),
+					moq_net::track::Delay::default().with_min(None).with_max(budget),
 				)?;
 				Some(stream_edge(source, &track.kind, self.program.replay))
 			} else {
@@ -2796,7 +2796,7 @@ where
 					&self.program.source,
 					name,
 					config,
-					moq_net::track::Delay::default().with_max(budget),
+					moq_net::track::Delay::default().with_min(None).with_max(budget),
 				)?;
 				(source, video_kind(config, name)?)
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
@@ -2807,7 +2807,7 @@ where
 					&self.program.source,
 					name,
 					config,
-					moq_net::track::Delay::default().with_max(budget),
+					moq_net::track::Delay::default().with_min(None).with_max(budget),
 				)?;
 				(source, audio_kind(config, name)?)
 			} else {
@@ -4023,6 +4023,7 @@ where
 	/// How far a stalled group may fall behind the newest content before each source skips it:
 	/// half the delay. A skip comes once the next group's start is that far behind, and its
 	/// frames are only read then, so with the whole delay they would arrive at their deadline.
+	/// Sources state it with no min delay, so a missing group is waited for it too.
 	fn budget(&self) -> Duration {
 		self.program.delay / 2
 	}

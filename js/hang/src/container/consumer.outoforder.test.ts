@@ -82,7 +82,7 @@ test("the head of the window arriving after the live edge is delivered first", a
 	});
 	const consumer = new Consumer(
 		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { absolute: 1n } }] }),
-		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
+		{ format: new LegacyFormat("data"), delay: { min: null, max: Duration.millis(5000) } },
 	);
 
 	// The live edge lands first, and delivery waits for the floor rather than starting there.

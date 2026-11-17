@@ -21,20 +21,17 @@ stretch held `bursty` level but left `congestion` worse than the native
 estimate wait (A/V lag p95 808 to 946 ms against 288 to 631 ms over three
 runs each). `moq play` gives the clock to video only for that reason.
 
-`js/watch/src/audio/decoder.ts` passes `playhead: this.sync` with a
-`wait` of `sync.out.maxDelay`, so the browser has the rule that measured
+`js/watch/src/audio/decoder.ts` passes `playhead: this.sync`, and a hole
+waits at most its `delay.min` (`sync.out.delay`), so the browser has the rule that measured
 worst natively. First measure: the Chromium `bursty` and `congestion` rows
 with and without that `playhead`, a few runs each, since `congestion` is
 noisy.
 
 If the browser regressed, recommended: audio waits a hole out for its
 playout estimate from the arrival of the group past it, as native audio does
-(`rs/moq-audio/src/decode/consumer.rs`, `set_wait(self.delay())`), instead of
-the playhead. That still ends the resume hole within one playout delay.
+(`rs/moq-audio/src/decode/consumer.rs` states its estimate as `delay.min`),
+instead of the playhead. That still ends the resume hole within one playout delay.
 Confirm with #8799's repro, `taskset -c 4-5 nix develop --command just test
 media --media-engines firefox --media-cases rename,pause`. Video keeps the
 playhead.
 
-## Related
-
-- [A hole is waited for by the subscription's delay](/quest/m2/delay-hole-wait.md) - removes the separate wait this would keep for browser audio, so the two settle the same rule
