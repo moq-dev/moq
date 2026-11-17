@@ -43,10 +43,14 @@ impl Held {
 				track.start_at(0).unwrap();
 				let end = track::Position::group(groups as u64 + 1);
 				moq_net::fuzz::received(&track);
-				track.finish_at(end, None).unwrap();
+				track.finish_at(end).unwrap();
 				// Group 0 never arrives: the hole that holds the reader.
 				for key in 1..=groups as u64 {
-					track.create_group(group::Info { start: key }).unwrap().close().unwrap();
+					track
+						.create_group(group::Info { start: key })
+						.unwrap()
+						.finish()
+						.unwrap();
 				}
 				for _ in 0..groups {
 					assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));

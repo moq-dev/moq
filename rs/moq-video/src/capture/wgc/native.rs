@@ -260,7 +260,7 @@ impl Capture {
 			.session
 			.as_ref()
 			.unwrap()
-			.SetIsCursorCaptureEnabled(config.cursor)
+			.SetIsCursorCaptureEnabled(config.cursor.drawn())
 			.map_err(|e| error("configure WGC cursor", e))?;
 		Ok(capture)
 	}
@@ -652,7 +652,7 @@ mod tests {
 	}
 
 	async fn capture_and_release(source: Source) {
-		for cursor in [true, false] {
+		for cursor in [crate::capture::Cursor::Drawn, crate::capture::Cursor::Hidden] {
 			let config = Config {
 				source: source.clone(),
 				cursor,

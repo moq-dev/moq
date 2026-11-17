@@ -28,12 +28,11 @@ pub struct Text {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
 	pub renditions: BTreeMap<String, TextConfig>,
 }
 
-impl crate::catalog::Section for Text {
-	const MAP: &'static str = "renditions";
-}
+impl crate::catalog::Entry for TextConfig {}
 
 impl Text {
 	/// Insert a track config, returning an error if the name already exists.
@@ -121,10 +120,10 @@ pub struct TextConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum delay, in milliseconds, before the publisher flushes the next cue. A consumer's
-	/// jitter buffer should be at least this large. Absent means each cue is flushed immediately.
-	///
-	/// Serialized as an integer number of milliseconds, rounded up.
+	/// The largest media span the publisher hands to the transport behind a cue's timestamp, with
+	/// the same meaning and whole-millisecond encoding as
+	/// [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter). A cue written in timestamp
+	/// order adds nothing.
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,

@@ -174,7 +174,7 @@ fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
 	match cut.contains(&sequence) {
 		true => group.abort(moq_net::Error::Old).unwrap(),
 		false => {
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 }

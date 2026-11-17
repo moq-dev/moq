@@ -64,8 +64,8 @@ These land with the next breaking release.
   format. An object role, including one with a `rate` cap, is refused; use
   pattern arrays for `publish` and `subscribe`.
 - **The join interval replaces archive timelines.** The hang catalog's root
-  `archive` section is gone, and the root `clock` moved to `media.clock`. The
-  catalog's `media.join.interval`, the longest GOP of any track, is the grid an
+  `archive` section is gone, and the root `clock` moved to `sync.clock`. The
+  catalog's `sync.interval`, the longest GOP of any track, is the grid an
   HLS exporter numbers segments on from the media tracks themselves; Rust
   publishers and `@moq/publish` declare it. Neither side reads the other's
   shape, so upgrade HLS exporters and their publishers together.

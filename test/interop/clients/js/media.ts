@@ -163,7 +163,7 @@ const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
 if (!native && values.cases === undefined) {
 	console.error(
-		"QUARANTINE\treplacement\tintermittent audio stall after a route switch under CPU load; see quest/m0/interop-green/README.md",
+		"QUARANTINE\treplacement\tintermittent audio silence after skipped groups under CPU load; see quest/m0/interop-green/replacement-audio.md",
 	);
 }
 
@@ -1070,11 +1070,11 @@ try {
 	if (!native) {
 		const interval = await player
 			.locator(SELECTORS.watch)
-			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.media?.join?.interval);
+			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.sync?.interval);
 		check(
 			interval === KEYFRAME_INTERVAL_MS,
 			"declared join interval",
-			() => `the catalog declares media.join.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
+			() => `the catalog declares sync.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
 		);
 	}
 

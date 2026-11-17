@@ -65,9 +65,9 @@ New on 2026-11-15, from the prior art this is closest to:
 - A relay stops asking its standby when the standby is the only thing it
   serves that track to, so two relays never keep each other alive (the same
   RFC's rule for its secondary).
-- The answer to a metadata-only subscription is also where a neighbour says
-  whether it carries the Instance, if
-  [warmth](/quest/m2/multicast/warmth.md) picks that.
+- The answer to a metadata-only subscription carries the neighbour's offer
+  and data path for the Instance, as every subscribe answer does under
+  [cache-aware routing](/quest/m3/cache-routing/select.md).
 
 This README's own work, once its children land: end-to-end validation across
 a multi-hop relay network. Stalled video moves while healthy audio stays, a

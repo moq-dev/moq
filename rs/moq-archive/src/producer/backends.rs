@@ -37,7 +37,7 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 			let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
 			group.write_frame(pts, format!("v{sequence}.{frame}")).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let text = source
 		.create_track(CHAT, track::Info::default().with_max_age(None))
@@ -49,7 +49,7 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 				.write_frame(moq_net::Timestamp::unscaled(*sequence), frame.to_string())
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	(source, [video, text])
 }
@@ -101,16 +101,8 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	stored(
 		store,
 		&[
-			path(
-				store,
-				VIDEO,
-				"0000000000000000000-0000000000000000000-0000000000000000000",
-			),
-			path(
-				store,
-				VIDEO,
-				"0000000000000000002-0000000000000000000-0000000000000002000",
-			),
+			path(store, VIDEO, "0000000000000000000-0000000000000000000"),
+			path(store, VIDEO, "0000000000000000002-0000000000000000000"),
 			path(store, CHAT, "0000000000000000000-0000000000000000000"),
 		],
 	)
@@ -119,7 +111,7 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	assert_eq!(
 		decode(
 			&first_objects,
-			"video%2F1080p/0000000000000000002-0000000000000000000-0000000000000002000",
+			"video%2F1080p/0000000000000000002-0000000000000000000",
 			true,
 		),
 		[
@@ -188,9 +180,9 @@ async fn recordings_are_byte_identical_on_every_backend() {
 			"chat%2Ejson/0000000000000000000-0000000000000000001",
 			"chat%2Ejson/end",
 			"video%2F1080p/.info",
-			"video%2F1080p/0000000000000000000-0000000000000000000-0000000000000000000",
-			"video%2F1080p/0000000000000000002-0000000000000000000-0000000000000002000",
-			"video%2F1080p/0000000000000000004-0000000000000000000-0000000000000004000",
+			"video%2F1080p/0000000000000000000-0000000000000000000",
+			"video%2F1080p/0000000000000000002-0000000000000000000",
+			"video%2F1080p/0000000000000000004-0000000000000000000",
 			"video%2F1080p/end",
 		]
 	);
@@ -204,11 +196,7 @@ async fn recordings_are_byte_identical_on_every_backend() {
 		"the resumed group continues in its own object"
 	);
 	assert_eq!(
-		decode(
-			&expected,
-			"video%2F1080p/0000000000000000004-0000000000000000000-0000000000000004000",
-			true
-		),
+		decode(&expected, "video%2F1080p/0000000000000000004-0000000000000000000", true),
 		[
 			(4, vec!["v4.0".into(), "v4.1".into()]),
 			(5, vec!["v5.0".into(), "v5.1".into()])

@@ -81,9 +81,9 @@ impl Room {
 					.route(format!("room/{i}"), moq_net::origin::RouteOptions::default())
 					.unwrap();
 				let track = broadcast.broadcast().create_track("video", timed()).unwrap();
-				let mut group = track.append_group(0).unwrap();
+				let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 				group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				(broadcast, track)
 			})
 			.collect();

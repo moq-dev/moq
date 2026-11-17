@@ -3514,7 +3514,7 @@ mod tests {
 				control.clone(),
 				Default::default(),
 			);
-			handle.producer().send(crate::goaway::Goaway::new()).unwrap();
+			handle.send(crate::goaway::Goaway::new()).unwrap();
 			assert!(setup.poll(&kio::Waiter::noop()).is_pending());
 			let sent = goaway(VERSION, Some(first + 6));
 			assert_eq!(occurrences(&log, &sent), 1, "client={client}");

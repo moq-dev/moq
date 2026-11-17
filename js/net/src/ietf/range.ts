@@ -1,6 +1,6 @@
 import { race, Signal } from "@moq/signals";
 import { error, NotFound, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
-import { type Fill, fillChanged, wantedRuns } from "../fill.ts";
+import { type FillGroups, fillChanged, wantedRuns } from "../fill.ts";
 import type * as group from "../group.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
@@ -11,7 +11,7 @@ import { decodeFetchObject, EndOfRange, objectTime } from "./object.ts";
 
 /** The groups one standalone FETCH writes, sharing the joining FETCH's object and payload decoder. @internal */
 export class RangeFetch {
-	readonly fill: Fill;
+	readonly fill: FillGroups;
 	readonly first: bigint;
 	readonly last: bigint;
 	readonly bound?: number;
@@ -27,7 +27,7 @@ export class RangeFetch {
 	#finished = false;
 
 	constructor(options: {
-		fill: Fill;
+		fill: FillGroups;
 		first: bigint;
 		track: track.Producer;
 		timescale?: Timescale;

@@ -177,7 +177,8 @@ ash = { workspace = true, optional = true }
 # Flatpak (`FLATPAK_ID`). zbus 6 pipelines the whole handshake, which the
 # sandbox's D-Bus proxy drops before xdg-dbus-proxy 0.1.6 (Ubuntu 24.04 LTS
 # ships 0.1.5), failing every portal call there. Checked by the camera module's
-# `portal_handshake_waits_for_each_answer` test.
+# `portal_handshake_waits_for_each_answer` test. Bumping drops the zbus 5
+# advisory ignores in deny.toml.
 #
 # The `async-io` backend rather than `tokio`: ashpd refuses to build with both,
 # and GUI toolkits that call the portal themselves (GPUI, for one) ask for
