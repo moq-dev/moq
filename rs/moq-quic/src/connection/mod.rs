@@ -612,6 +612,21 @@ impl Connection {
 			self.spaces[space].maybe_queue_probe(request_immediate_ack, has_ack_eliciting_data, &self.streams);
 		}
 
+		// A client that lacks our ServerHello discarded the Handshake packets it could not read
+		// yet, so a probe re-sending the ServerHello carries the oldest Handshake CRYPTO in flight
+		// too, while the client has acknowledged none: coalesced into the padding the Initial
+		// needs anyway, it completes the client's flight within the round trip instead of after
+		// another PTO, and saves the anti-amplification budget a datagram of its own would cost.
+		if self.side.is_server()
+			&& self.spaces[SpaceId::Initial].loss_probes > 0
+			&& !self.spaces[SpaceId::Initial].pending.crypto.is_empty()
+			&& self.spaces[SpaceId::Handshake].crypto.is_some()
+			&& self.spaces[SpaceId::Handshake].largest_acked_packet.is_none()
+			&& self.spaces[SpaceId::Handshake].pending.crypto.is_empty()
+		{
+			self.spaces[SpaceId::Handshake].retransmit_oldest(&self.streams);
+		}
+
 		// Check whether we need to send a close message
 		let close = match self.state {
 			State::Drained => {
@@ -2601,6 +2616,7 @@ impl Connection {
 		// At most one probe per datagram the server sends, and those are bound by its
 		// anti-amplification limit.
 		if self.side.is_client()
+			&& self.state.is_handshake()
 			&& partial_decode.space() == Some(SpaceId::Handshake)
 			&& self.spaces[SpaceId::Handshake].crypto.is_none()
 			&& self.spaces[SpaceId::Initial].crypto.is_some()

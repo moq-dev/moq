@@ -137,14 +137,8 @@ impl PacketSpace {
 			return;
 		}
 
-		// Retransmit the data of the oldest in-flight packet
-		for packet in self.sent_packets.values_mut() {
-			if !packet.retransmits.is_empty(streams) {
-				// Remove retransmitted data from the old packet so we don't end up retransmitting
-				// it *again* even if the copy we're sending now gets acknowledged.
-				self.pending |= mem::take(&mut packet.retransmits);
-				return;
-			}
+		if self.retransmit_oldest(streams) {
+			return;
 		}
 
 		// Nothing new to send and nothing to retransmit, so fall back on a ping. This should only
@@ -153,6 +147,19 @@ impl PacketSpace {
 		if !self.immediate_ack_pending {
 			self.ping_pending = true;
 		}
+	}
+
+	/// Queues the data of the oldest in-flight packet that has any, returning whether one did
+	pub(super) fn retransmit_oldest(&mut self, streams: &StreamsState) -> bool {
+		for packet in self.sent_packets.values_mut() {
+			if !packet.retransmits.is_empty(streams) {
+				// Remove retransmitted data from the old packet so we don't end up retransmitting
+				// it *again* even if the copy we're sending now gets acknowledged.
+				self.pending |= mem::take(&mut packet.retransmits);
+				return true;
+			}
+		}
+		false
 	}
 
 	/// Get the next outgoing packet number in this space
@@ -192,9 +199,12 @@ impl PacketSpace {
 
 	/// Whether a packet in flight carries CRYPTO data the peer has not acknowledged.
 	pub(super) fn has_crypto_in_flight(&self) -> bool {
-		self.sent_packets
-			.range(..)
-			.any(|(_, packet)| packet.retransmits.get().is_some_and(|retransmits| !retransmits.crypto.is_empty()))
+		self.sent_packets.range(..).any(|(_, packet)| {
+			packet
+				.retransmits
+				.get()
+				.is_some_and(|retransmits| !retransmits.crypto.is_empty())
+		})
 	}
 
 	/// Verifies sanity of an ECN block and returns whether congestion was encountered.

@@ -172,7 +172,8 @@ fn handshake(seed: u64, latency: Duration, to_server: Link, to_client: Link) -> 
 
 /// A corrupted ServerHello costs one round trip, not a PTO: the Handshake packets coalesced with
 /// it reach the client, which cannot read them yet and probes in Initial at once, and that probe
-/// makes the server re-send the ServerHello at once (RFC 9002 §6.2.3).
+/// makes the server re-send the ServerHello at once (RFC 9002 §6.2.3), with the Handshake flight
+/// the client discarded coalesced behind it.
 #[test]
 fn a_corrupted_server_hello_is_resent_on_the_clients_probe() {
 	let _guard = subscribe();
@@ -206,8 +207,24 @@ fn a_corrupted_server_hello_is_resent_on_the_clients_probe() {
 		pair.server_conn_mut(server_ch).stats().frame_tx.crypto > resent,
 		"the server answered the probe without its ServerHello"
 	);
-	assert!(spaces(&pair.server.outbound).contains(&SpaceId::Initial));
-	assert_eq!(pair.time - sent, 2 * pair.latency);
+	let first: Vec<_> = packets(&pair.server.outbound[0].1)
+		.into_iter()
+		.map(|(space, _)| space)
+		.collect();
+	assert_eq!(
+		first[..2],
+		[SpaceId::Initial, SpaceId::Handshake],
+		"the ServerHello and the Handshake flight share one datagram"
+	);
+	pair.drive_server();
+
+	arrive(&mut pair.client, &mut pair.time);
+	pair.client.drive(pair.time, pair.server.addr);
+	assert!(
+		is_connected(pair.client_conn_mut(client_ch)),
+		"the client still lacks part of the server's flight"
+	);
+	assert_eq!(pair.time - sent, 3 * pair.latency);
 
 	pair.drive();
 	assert!(is_confirmed(pair.client_conn_mut(client_ch)));
