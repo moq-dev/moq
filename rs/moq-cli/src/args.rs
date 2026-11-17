@@ -2783,7 +2783,7 @@ mod tests {
 			&["--listen-version", "moq-lite-02"],
 			&["--listen-tls-generate", "localhost"],
 			&["--listen-preferred-v4", "127.0.0.1:443"],
-			&["--listen-quic-lb-id", "01"],
+			&["--listen-lb-id", "01"],
 			&["--listen-tcp-bind", "127.0.0.1:0"],
 			&["--cluster-node", "https://self.example"],
 			&["--auth-public", "**"],

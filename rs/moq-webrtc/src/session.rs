@@ -8,7 +8,6 @@
 //! to a remote URL (client side), or whether the media flow is RTP-in
 //! ([`MediaSink`]) or RTP-out ([`crate::egress::EgressSource`]).
 
-use crate::vendor::str0m;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
@@ -652,7 +651,7 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> Result<str0m::
 		.set_send_buffer_video(EGRESS_SEND_BUFFER_VIDEO);
 	for c in codecs {
 		config = match c {
-			Codec::Opus => config.enable_opus(true),
+			Codec::Opus => config.enable_opus(true, false),
 			Codec::H264 => config.enable_h264(true),
 			Codec::H265 => config.enable_h265(true),
 			Codec::Vp8 => config.enable_vp8(true),
@@ -665,12 +664,16 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> Result<str0m::
 	Ok(config)
 }
 
-/// A str0m config, refusing a CPU that rind, the stack's crypto, cannot run on.
-///
-/// str0m falls back on rind's provider, which panics on such a CPU instead.
+/// A str0m config on rind's crypto, refusing a CPU that rind cannot run on.
 pub(crate) fn rtc_config() -> std::result::Result<str0m::RtcConfig, moq_crypto::cpu::UnsupportedCpu> {
 	moq_crypto::cpu::check()?;
-	Ok(str0m::RtcConfig::new())
+	// rind-str0m repeats the check above, so its error is unreachable here.
+	let crypto = rind_str0m::default_provider().expect("the CPU check passed");
+	Ok(str0m::RtcConfig::new()
+		.set_crypto_provider(Arc::new(crypto))
+		// str0m's default today, pinned so a release that turns on DTLS 1.3 or
+		// version auto-selection changes the wire only when MoQ opts in.
+		.set_dtls_version(str0m::config::DtlsVersion::Dtls12))
 }
 
 /// Build a codec-restricted [`Rtc`] for the client egress path (which lets

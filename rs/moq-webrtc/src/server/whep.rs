@@ -3,7 +3,6 @@
 //! `POST /<broadcast-path>` accepts a WHEP SDP offer and returns an SDP
 //! answer sourced from the matching MoQ broadcast on the subscribe origin.
 
-use crate::vendor::str0m::Candidate;
 #[cfg(feature = "server")]
 use axum::{
 	Router,
@@ -13,6 +12,7 @@ use axum::{
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
+use str0m::Candidate;
 
 use std::time::Duration;
 
@@ -158,7 +158,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		broadcast,
 		offer,
 	} = request;
-	let offer = sdp::parse_offer(offer)?;
+	let (offer, refused) = sdp::parse_offer(offer)?;
 
 	let source = resolve(subscriber, broadcast).await?;
 	let codecs = source.catalog_codecs();
@@ -191,7 +191,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 
 	Ok(Response {
 		resource_id: resource_id.clone(),
-		answer: sdp::render_answer(&answer),
+		answer: sdp::render_answer(&answer, &refused),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,

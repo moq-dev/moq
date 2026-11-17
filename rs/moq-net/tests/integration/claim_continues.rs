@@ -86,6 +86,15 @@ impl Worker {
 		self.outputs.borrow().len()
 	}
 
+	/// Write the next group of the latest output.
+	pub(super) fn write(&self) {
+		let outputs = self.outputs.borrow();
+		let (_, track) = outputs.last().expect("an output");
+		let mut group = track.append_next().unwrap();
+		group.write_frame(group.at_start(), b"next".to_vec()).unwrap();
+		group.close().unwrap();
+	}
+
 	/// End the latest output, as a worker does when the job stops.
 	fn stop(&self) {
 		let (output, _) = self.outputs.borrow_mut().pop().expect("an output");

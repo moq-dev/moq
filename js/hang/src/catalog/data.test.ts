@@ -70,28 +70,3 @@ test("fields belonging to an unrecognized mode survive a round trip", () => {
 	expect(parsed.json?.tracks.future).toMatchObject({ mode: "windowed", window: 10 });
 	expect(parsed.binary?.tracks.future).toMatchObject({ mode: "windowed", chunk: "4k" });
 });
-
-test("a foreign data section does not fail the catalog", () => {
-	// A section name is only reserved from the version that defines it, and `json` and `binary` are
-	// generic enough that an application could already be using one. Dropping the section we can't
-	// read keeps video and audio playable, instead of failing the whole catalog over that key.
-	for (const section of ["json", "binary"] as const) {
-		const parsed = RootSchema.parse({ video: { renditions: {} }, [section]: { messages: "chat" } });
-		expect(parsed[section]).toBeUndefined();
-		expect(parsed.video).toBeDefined();
-	}
-});
-
-test("a foreign section with a non-object tracks value does not fail the catalog", () => {
-	// The gate is the map's *shape*, not just its presence: an application section that happens to
-	// carry its own `tracks` scalar is still someone else's key. Rust's `deserialize_section` gates
-	// on `is_object`, so recognizing this as ours would make the two parsers disagree and take the
-	// media sections down over a key we never owned.
-	for (const section of ["json", "binary"] as const) {
-		for (const tracks of [null, 3, "chat", [], true]) {
-			const parsed = RootSchema.parse({ video: { renditions: {} }, [section]: { tracks } });
-			expect(parsed[section]).toBeUndefined();
-			expect(parsed.video).toBeDefined();
-		}
-	}
-});

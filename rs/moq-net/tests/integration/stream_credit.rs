@@ -40,8 +40,8 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
-		options.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
+		// One for groups, past the stream the session keeps open.
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -104,8 +104,8 @@ async fn a_newer_group_resets_an_unfinished_older_one() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		// Draft 22 keeps its SETUP stream open, so it needs one more for groups.
-		options.transport.max_concurrent_uni_streams = Some(1 + usize::from(!version.is_lite()));
+		// One for groups, past the stream the session keeps open.
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -168,7 +168,7 @@ async fn a_reset_group_resumes_without_loss() {
 		let mut options = MockConnectOptions::new(version);
 		options.client_extensions.ietf = ietf;
 		options.server_extensions.ietf = ietf;
-		options.transport.max_concurrent_uni_streams = Some(1);
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -245,7 +245,7 @@ async fn a_reset_group_finishing_without_more_frames_ends_cleanly() {
 	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
+	options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(viewer.clone());
 	let _pair = connect_mock(options).await;
@@ -312,7 +312,7 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
+	options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(viewer.clone());
 	let _pair = connect_mock(options).await;
@@ -377,10 +377,10 @@ async fn a_waiting_continuation_lets_a_newer_group_through() {
 /// subscription past the publisher's credit is served once an earlier one leaves.
 #[kio::test]
 async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
-	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
+	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers.
 	// moq-transport needs 2: SUBSCRIBE_NAMESPACE and the first SUBSCRIBE. The second
 	// subscription waits for the first's credit.
-	for (version, credit) in [("moq-lite-07-wip", 4), ("moq-transport-22", 2)] {
+	for (version, credit) in [("moq-lite-07-wip", 3), ("moq-transport-22", 2)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
@@ -440,8 +440,8 @@ async fn a_subscription_past_the_credit_is_served_once_credit_returns() {
 /// Abandoning setup returns credit without ending earlier publishers or their route.
 #[kio::test]
 async fn an_abandoned_setup_returns_credit_with_the_publisher_still_live() {
-	// lite-07 needs 4: session-long AUTH and ANNOUNCE plus TRACK held until SUBSCRIBE answers.
-	for (version, credit) in [("moq-lite-07-wip", 4)] {
+	// lite-07 needs 3: session-long AUTH plus TRACK held until SUBSCRIBE answers.
+	for (version, credit) in [("moq-lite-07-wip", 3)] {
 		let version: Version = version.parse().unwrap();
 		let publisher = origin(1);
 		let viewer = origin(2);
@@ -533,7 +533,7 @@ async fn a_waiting_late_group_lets_a_newer_group_through() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(1);
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -597,7 +597,7 @@ async fn a_shed_late_group_lets_a_newer_group_through() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(1);
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -667,7 +667,7 @@ async fn an_ascending_backlog_waits_behind_a_waiting_group() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(1);
+		options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
@@ -734,7 +734,7 @@ async fn a_paused_group_given_up_while_it_waits_is_dropped() {
 	broadcast.announce().unwrap();
 
 	let mut options = MockConnectOptions::new(version);
-	options.transport.max_concurrent_uni_streams = Some(1);
+	options.transport.max_concurrent_uni_streams = Some(1 + crate::support::held_uni_streams(version));
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(viewer.clone());
 	let _pair = connect_mock(options).await;
@@ -804,7 +804,7 @@ async fn a_closing_stream_does_not_rank_a_waiting_group() {
 		broadcast.announce().unwrap();
 
 		let mut options = MockConnectOptions::new(version);
-		options.transport.max_concurrent_uni_streams = Some(2);
+		options.transport.max_concurrent_uni_streams = Some(2 + crate::support::held_uni_streams(version));
 		options.latency = LATENCY;
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(viewer.clone());

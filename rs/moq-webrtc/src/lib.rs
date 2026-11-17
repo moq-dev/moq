@@ -59,8 +59,6 @@ mod ice;
 mod ingest;
 mod sdp;
 mod session;
-// str0m, dimpl, and `is`, vendored and trimmed; see the module docs.
-mod vendor;
 
 pub use client::Client;
 pub use error::*;
@@ -409,7 +407,7 @@ mod tests {
 		logged("bps=900000").await;
 		// Lifting the cap lifts the publisher's ceiling rather than leaving the last one.
 		rate.set(None);
-		logged(&format!("bps={}", crate::vendor::str0m::bwe::Bitrate::MAX.as_u64())).await;
+		logged(&format!("bps={}", str0m::bwe::Bitrate::MAX.as_u64())).await;
 		assert!(!session.is_finished(), "a publisher under the cap was closed");
 		assert!(!pushed.is_finished(), "a publisher under the cap stopped");
 		session.abort();

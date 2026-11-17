@@ -132,8 +132,10 @@ Delete with the old rule:
   discount that formed pull cycles here, and lets a link cost 0 (line 88),
   which `route::Error::ZeroCost` refuses. The code implements neither, and
   item 10 of the epic makes a moq-transport session an endpoint, which has
-  no path to carry. `cluster.max_hops` then bounds lite-03 to lite-06 only
-  ([config names](/quest/m2/relay-config-names.md)).
+  no path to carry. `cluster.max_hops` then bounds lite-03 to lite-06 only:
+  drop the MoQ Cluster extension from its docs (`cluster::Config::max_hops`,
+  `origin::Config::max_hops`, `doc/bin/relay/cluster.md`, and
+  `doc/bin/relay/config.md`).
 - `rs/moq-net/verify/route/` and the `verify-route` skill, or rewrite the
   skill for the exhaustive search.
 - [Firefox tabs prove their route key](/quest/m5/routes-browser-proof.md),
@@ -213,4 +215,3 @@ extension on moq-transport is no longer sent or read.
 ## Required
 
 - [The router](/quest/m2/multicast/router.md) - the rule these sessions drive
-- [The route stream](/quest/m2/cluster-routes/route-stream.md) - one announce stream per side, which this builds on
