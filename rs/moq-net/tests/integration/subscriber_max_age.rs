@@ -53,7 +53,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 			.unwrap();
 		let mut group = source.append_next().unwrap();
 		group.write_frame(group.at_start(), b"catalog").unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		broadcast.announce().unwrap();
 		let consumer = viewer.consume();
 		let remote = consumer
@@ -129,7 +129,7 @@ async fn relay_forwards_the_largest_stated_min_delay() {
 		.unwrap();
 	let mut group = source.append_next().unwrap();
 	group.write_frame(group.at_start(), b"catalog").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	broadcast.announce().unwrap();
 
 	let cache = |origin: &origin::Producer| {

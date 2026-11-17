@@ -2470,7 +2470,11 @@ mod tests {
 		};
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
-		track.append_group(0).unwrap().close().unwrap();
+		track
+			.append_group(moq_net::Timestamp::unscaled(0))
+			.unwrap()
+			.finish()
+			.unwrap();
 		let track = track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}

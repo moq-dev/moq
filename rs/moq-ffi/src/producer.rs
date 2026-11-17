@@ -109,10 +109,15 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	}
 }
 
-/// One past the newest group's start, or 0 on an empty track: where a group the caller gave
-/// no start for begins.
-fn next_start(track: &moq_net::track::Producer) -> u64 {
-	track.largest().map_or(0, |largest| largest.group.saturating_add(1))
+/// One past the newest group's start, or 0 on an empty track, in the track's timescale: where a
+/// group the caller gave no start for begins, which stands in until every write carries a
+/// timestamp.
+fn next_start(track: &moq_net::track::Producer) -> moq_net::Result<moq_net::Timestamp> {
+	let key = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
+	match track.info().timescale {
+		Some(scale) => moq_net::Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch),
+		None => Ok(moq_net::Timestamp::unscaled(key)),
+	}
 }
 
 fn raw_track_info(info: Option<MoqTrackInfo>) -> Result<moq_net::track::Info, MoqError> {
@@ -497,8 +502,7 @@ impl MoqTrackRequests {
 			.reads
 			.wait(|requests, waiter| {
 				loop {
-					let fill = ready!(requests.poll_requested_fill(waiter))?;
-					if fill.time().is_none() {
+					if let moq_net::track::Fill::Groups(fill) = ready!(requests.poll_requested_fill(waiter))? {
 						return Poll::Ready(Ok(fill));
 					}
 				}
@@ -516,7 +520,7 @@ impl MoqTrackRequests {
 	}
 }
 
-/// A run of groups readers miss, mirroring [`moq_net::track::Fill`].
+/// A run of groups readers miss, mirroring [`moq_net::track::FillGroups`].
 ///
 /// Call [`accept`](Self::accept) for each group you have and [`drop_groups`](Self::drop_groups)
 /// for the rest, one group at a time as [`wanted_changed`](Self::wanted_changed) yields them;
@@ -527,13 +531,13 @@ impl MoqTrackRequests {
 /// fills you take concurrently: each waits on its own readers.
 #[derive(uniffi::Object)]
 pub struct MoqFill {
-	inner: moq_net::track::Fill,
+	inner: moq_net::track::FillGroups,
 	/// The watcher `wanted_changed` advances, kept apart from `inner` so its cursor is its own.
-	changes: Polled<moq_net::track::Fill>,
+	changes: Polled<moq_net::track::FillGroups>,
 }
 
 impl MoqFill {
-	fn new(inner: moq_net::track::Fill) -> Self {
+	fn new(inner: moq_net::track::FillGroups) -> Self {
 		let changes = Polled::new(inner.clone());
 		Self { inner, changes }
 	}
@@ -857,7 +861,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group(next_start(raw))?;
+		let group = raw.append_group(next_start(raw)?)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
@@ -987,7 +991,7 @@ impl MoqTrackProducer {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		raw.finish_at(moq_net::track::Position::group(final_sequence), None)?;
+		raw.finish_at(moq_net::track::Position::group(final_sequence))?;
 		Ok(())
 	}
 }
@@ -1102,7 +1106,7 @@ impl MoqGroupProducer {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock();
 		match std::mem::take(&mut *guard) {
-			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.close()?),
+			GroupPhase::Writing(group) => *guard = GroupPhase::Finished(group.finish()?),
 			GroupPhase::Finished(group) => *guard = GroupPhase::Finished(group),
 			GroupPhase::Closed => return Err(MoqError::Closed),
 		}
@@ -1143,7 +1147,7 @@ mod metadata_tests {
 	fn dropping_a_group_binding_ends_its_unfinished_group() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("test", moq_net::track::Info::default()).unwrap();
-		let group = track.append_group(0).unwrap();
+		let group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 		let mut consumer = group.consume();
 		let binding = MoqGroupProducer::from_inner(group);
 		drop(binding);

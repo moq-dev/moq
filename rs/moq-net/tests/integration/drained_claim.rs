@@ -66,7 +66,7 @@ impl Worker {
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
 				let mut group = track.append_next().unwrap();
 				group.write_frame(group.at_start(), name.as_bytes().to_vec()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				prepared.announce().unwrap();
 				served.borrow_mut().push((prepared, track));
 			}

@@ -70,7 +70,7 @@ import {
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
-export { Fill, Requests } from "./fill.ts";
+export { type Fill, FillGroups, FillLookup, Requests } from "./fill.ts";
 
 // The group a non-blocking read takes, skipping drops and throwing the track's error;
 // `undefined` when nothing is deliverable now.
@@ -760,9 +760,9 @@ class TrackState {
 	// One past the highest group received, including evicted content.
 	received = new Signal(0n);
 	/**
-	 * The declared end, by {@link Producer.finishAt} or a clean close at the head of the
-	 * sequence after the highest produced, with the error the track ended with there. One
-	 * value, so a wake on it sees both. Mirrors the Rust `End`.
+	 * The declared end, by {@link Producer.finishAt}, {@link Producer.fail}, or a clean close at
+	 * the head of the sequence after the highest produced, with the error the track ended with
+	 * there. One value, so a wake on it sees both. Mirrors the Rust `End`.
 	 */
 	end = new Signal<End | undefined>(undefined);
 	// A wire subscription's pending tail still owes a group below the end, so reaching the
@@ -2214,15 +2214,13 @@ export class Producer {
 	 * group, independently of closure. Throws if the track is closed, already has an end, or
 	 * `end` would orphan a group or frame already produced.
 	 *
-	 * With an `error`, the track ended that way rather than cleanly, yet keeps its history, unlike
-	 * {@link abort}: readers still get every group below the end, and a reader reaching the end
-	 * gets the error instead of the end of stream.
+	 * Always a clean end; {@link fail} ends the track in error.
 	 */
-	finishAt(end: Position, error?: Error): void {
+	finishAt(end: Position): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		const declared = this.#state.end.peek()?.at;
 		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
-		this.#declareEnd(end, error, false);
+		this.#declareEnd(end, undefined, false);
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
@@ -2386,6 +2384,21 @@ export class Producer {
 	}
 
 	/**
+	 * End the track with `error` after the highest sequence written, the end {@link finish}
+	 * declares, returning it as {@link Finished}. Mirrors the Rust `fail`.
+	 *
+	 * Unlike {@link abort}, the track keeps its history: readers still get every group below the
+	 * end, and a reader reaching the end gets `error` instead of the end of stream. Like
+	 * {@link finish}, a no-op once an end is declared or the track closed: the outcome already
+	 * given stands, so a cleanup path can fail whatever the track's state.
+	 */
+	fail(error: Error): Finished {
+		if (this.#state.end.peek() === undefined && this.#state.closed.peek() === undefined)
+			this.#declareEnd({ group: this.#received, frame: 0 }, error, false);
+		return this;
+	}
+
+	/**
 	 * Abort the track and every subscriber, mirroring the error to their open groups. Terminal
 	 * and idempotent.
 	 *
@@ -2401,8 +2414,8 @@ export class Producer {
 	/**
 	 * Release this producer, like dropping the last Rust producer. Idempotent.
 	 *
-	 * With an end declared ({@link finish} or {@link finishAt}), the track ends there and its
-	 * subscribers drain to it. Without one, the track aborts: nothing finished it.
+	 * With an end declared ({@link finish}, {@link finishAt}, or {@link fail}), the track ends
+	 * there and its subscribers drain to it. Without one, the track aborts: nothing finished it.
 	 */
 	close(): void {
 		if (this.#state.end.peek() !== undefined) this.#close(undefined);

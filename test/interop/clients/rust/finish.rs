@@ -101,9 +101,10 @@ async fn main() -> anyhow::Result<()> {
 		let track = health
 			.broadcast()
 			.create_track("live", moq_net::track::Info::default())?;
-		let mut group = track.append_group(0)?;
-		group.write_frame(moq_net::Timestamp::unscaled(group.start), b"session-alive".to_vec())?;
-		group.close()?;
+		let start = moq_net::Timestamp::unscaled(0);
+		let mut group = track.append_group(start)?;
+		group.write_frame(start, b"session-alive".to_vec())?;
+		group.finish()?;
 		let _track = track.finish()?;
 		health.announce()?;
 		let ack = args.finish_ack.context("publisher needs --finish-ack")?;
