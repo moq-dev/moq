@@ -1480,12 +1480,7 @@ impl Publish {
 	/// Not advertised in the catalog, which has no window mode. The track carries a refresh ratio
 	/// of 8: a join after more than eight headers' worth of edits asks for the window restated in a
 	/// fresh group, which a task answers until the track is finished.
-	pub fn json_window(
-		&mut self,
-		broadcast: Id,
-		name: &str,
-		config: moq_json::window::ProducerConfig,
-	) -> Result<Id, Error> {
+	pub fn json_window(&mut self, broadcast: Id, name: &str, config: moq_json::window::Config) -> Result<Id, Error> {
 		let data = self.data_track(broadcast, name, Some(8), |_, track| {
 			Ok(moq_json::window::Producer::new(track, config))
 		})?;
@@ -1508,7 +1503,7 @@ impl Publish {
 		timestamp: moq_net::Timestamp,
 	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.push(moq_json::Timed::new(&value, timestamp))?;
+		window.producer.push(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -1516,7 +1511,7 @@ impl Publish {
 	/// `timestamp` on the broadcast clock.
 	pub fn json_window_pop(&mut self, window: Id, count: u64, timestamp: moq_net::Timestamp) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window.producer.pop(moq_json::Timed::new(count, timestamp))?;
+		window.producer.pop(count, timestamp)?;
 		Ok(())
 	}
 

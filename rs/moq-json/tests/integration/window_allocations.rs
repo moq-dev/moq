@@ -1,7 +1,7 @@
 //! Decoding a window frame allocates only what the decoded records own.
 
 use crate::count;
-use moq_json::window::{ConsumerConfig, Decoder, Event};
+use moq_json::window::{Decoder, Event, consumer};
 
 #[derive(serde::Deserialize, Debug, PartialEq)]
 struct Record {
@@ -36,7 +36,7 @@ fn decode_allocates_only_the_output() {
 		.map(|index| serde_json::to_vec(&serde_json::json!({ "push": record(index) })).unwrap())
 		.collect();
 
-	let mut decoder = Decoder::<Record>::new(ConsumerConfig::default());
+	let mut decoder = Decoder::<Record>::new(consumer::Config::default());
 	let mut group = decoder.group();
 
 	let ((), allocations) = count(|| group.decode(&header).unwrap());
@@ -62,7 +62,7 @@ fn decode_allocates_only_the_output() {
 /// A malformed record still names where it went wrong.
 #[test]
 fn decode_error_names_the_path() {
-	let mut decoder = Decoder::<Record>::new(ConsumerConfig::default());
+	let mut decoder = Decoder::<Record>::new(consumer::Config::default());
 	let mut group = decoder.group();
 
 	let header = serde_json::to_vec(&serde_json::json!({

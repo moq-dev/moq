@@ -17,8 +17,8 @@ export function populatePreview(add: (path: Moq.Path.Valid) => Truck) {
 			track: origin.createTrack("status", { compression: "deflate" }),
 		});
 		(truck.broadcast.out.active as Moq.Signals.Signal<Moq.Broadcast.Consumer | undefined>).set(origin.consume());
-		producer.update({
-			value: {
+		producer.update(
+			{
 				accepted: { steering: 0, throttle: 0, brake: 1, gear: "neutral" },
 				measured: {
 					steering: 0.15,
@@ -33,8 +33,8 @@ export function populatePreview(add: (path: Moq.Path.Valid) => Truck) {
 				media_pipeline: {},
 			},
 			// The status track is scale-less, so the write names the group it opens.
-			at: Moq.Time.Timestamp.unscaled(0n),
-		});
+			Moq.Time.Timestamp.unscaled(0n),
+		);
 		cleanup.push(() => {
 			producer.finish();
 			origin.close();
