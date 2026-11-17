@@ -475,8 +475,7 @@ impl Encoder {
 	///
 	/// Returns [`Error::BitrateUnsupported`] if this backend can't retune while
 	/// running. That's not fatal: the encoder keeps running at its current rate,
-	/// so a caller driving a control loop should stop adapting rather than stop
-	/// encoding.
+	/// so a caller driving a control loop keeps encoding, and may try again later.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		if bitrate == self.bitrate {
 			return Ok(());

@@ -126,7 +126,7 @@ impl Sink {
 
 	/// Retune the encoder, waiting for the backend's verdict. See
 	/// [`Encoder::set_bitrate`](super::Encoder::set_bitrate) for what a failure
-	/// means (not fatal: stop adapting, keep encoding).
+	/// means (not fatal: the encoder keeps its rate and keeps encoding).
 	pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		self.0.set_bitrate(bitrate).await
 	}
@@ -173,8 +173,8 @@ mod threaded {
 		/// refusal has to reach the caller, since the alternative is a group
 		/// boundary that silently never happens.
 		Cut { resp: oneshot::Sender<Result<(), Error>> },
-		/// Retune to a new bitrate, reporting whether the backend took it so the
-		/// caller can stop adapting against an encoder that can't. The round trip
+		/// Retune to a new bitrate, reporting whether the backend took it, so the
+		/// caller's rate control knows the rate it is encoding at. The round trip
 		/// is affordable because the rate control policy only sends one of these
 		/// when the target moves meaningfully, not per frame.
 		SetBitrate {

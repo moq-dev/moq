@@ -145,6 +145,8 @@ pub struct Producer {
 	/// Whether a resume's encoder refused the funded rate, so this rung now resumes only at its
 	/// full ceiling, which needs no retune, rather than overshoot a partial grant.
 	ceiling_only: bool,
+	/// The soonest a resume at the ceiling that failed is tried again, a grant's retry step later.
+	resume_retry: Option<kio::clock::Instant>,
 }
 
 impl Producer {
@@ -230,6 +232,7 @@ impl Producer {
 			watched: false,
 			marked: false,
 			ceiling_only: false,
+			resume_retry: None,
 		})
 	}
 
@@ -598,14 +601,23 @@ impl Producer {
 		if !self.reservation.rate().is_some_and(|rate| rate >= ceiling) {
 			return;
 		}
+		let now = kio::clock::now();
+		if self.resume_retry.is_some_and(|retry| now < retry) {
+			return;
+		}
 		let target = rate::Target::Enabled(ceiling);
 		match self.apply(target).await {
 			Ok(()) => {
+				self.resume_retry = None;
 				if let Some(grant) = self.grant.as_mut() {
 					grant.assume(target);
 				}
 			}
-			Err(err) => tracing::warn!(error = %err, bitrate = ceiling.as_bps(), "failed to resume at the ceiling"),
+			// Retried a step later, as a failed grant target is, rather than on every frame.
+			Err(err) => {
+				tracing::warn!(error = %err, bitrate = ceiling.as_bps(), "failed to resume at the ceiling");
+				self.resume_retry = now.checked_add(rate::RETRY);
+			}
 		}
 	}
 
@@ -1030,6 +1042,69 @@ mod tests {
 		let resumed = probe::take();
 		assert!(resumed.iter().any(|(event, _)| *event == "open"), "{resumed:?}");
 		assert!(resumed.iter().all(|(event, _)| *event != "set_bitrate"), "{resumed:?}");
+
+		let _high = high.finish().await.unwrap();
+		let _low = low.finish().await.unwrap();
+	}
+
+	/// A resume at the ceiling whose encoder fails to open is tried again a grant's retry step
+	/// later, not on every frame.
+	#[tokio::test(start_paused = true)]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn a_failed_resume_waits_a_retry_step() {
+		let _probe = probe::exclusive();
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate.set(Some(Rate::from_mbps(10))).unwrap();
+		let bandwidth = moq_net::bandwidth::Allocator::new(estimate.consume());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let low = probed(
+			&broadcast,
+			&catalog,
+			"low",
+			Rate::from_kbps(500),
+			moq_net::bandwidth::Allocator::unlimited(),
+			None,
+		);
+		let ceiling = Rate::from_mbps(2);
+		let mut high = probed(&broadcast, &catalog, "high", ceiling, bandwidth, Some(low.rung()));
+		let _viewer = broadcast
+			.consume()
+			.track("high")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut micros = 0;
+
+		// Disabled, and resuming only at its ceiling, which the slice covers.
+		high.write(frame(&mut micros)).await.unwrap();
+		high.apply(rate::Target::Disabled).await.unwrap();
+		probe::refuse_once(Rate::from_mbps(1).as_bps());
+		high.apply(rate::Target::Enabled(Rate::from_mbps(1))).await.unwrap();
+		let _ = probe::take();
+
+		// An encoder that keeps failing to open, written to well inside one retry step: the
+		// ceiling resume and the grant's own resume each try once, not once per frame.
+		probe::fail_opens(u32::MAX);
+		for _ in 0..8 {
+			high.write(frame(&mut micros)).await.unwrap();
+			tokio::time::advance(moq_mux::rate::RETRY / 10).await;
+		}
+		let opens = events("open");
+		assert!((1..=2).contains(&opens), "{opens} opens in one retry step");
+		assert!(!enabled(&catalog, "high"));
+
+		// Once the encoder opens again, the next retry resumes the rung at its ceiling.
+		probe::fail_opens(0);
+		tokio::time::advance(moq_mux::rate::RETRY).await;
+		high.write(frame(&mut micros)).await.unwrap();
+		assert!(enabled(&catalog, "high"));
+		assert_eq!(high.bitrate(), Some(ceiling));
 
 		let _high = high.finish().await.unwrap();
 		let _low = low.finish().await.unwrap();

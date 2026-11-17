@@ -36,6 +36,9 @@ static BITRATES: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 /// A bitrate the probe refuses once, standing in for a transient codec failure.
 static REFUSE: Mutex<Option<u64>> = Mutex::new(None);
 
+/// How many of the next opens fail, standing in for a codec that is busy or gone.
+static FAIL_OPENS: Mutex<u32> = Mutex::new(0);
+
 /// Whether the next flush fails, standing in for a codec that loses its tail.
 static LOSE_TAIL: Mutex<bool> = Mutex::new(false);
 
@@ -50,6 +53,7 @@ pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 	let _ = take();
 	BITRATES.lock().unwrap().clear();
 	REFUSE.lock().unwrap().take();
+	*FAIL_OPENS.lock().unwrap() = 0;
 	*LOSE_TAIL.lock().unwrap() = false;
 	guard
 }
@@ -85,6 +89,22 @@ pub(crate) fn refuse_once(bitrate: u64) {
 	*REFUSE.lock().unwrap() = Some(bitrate);
 }
 
+/// Fail the next `count` opens.
+pub(crate) fn fail_opens(count: u32) {
+	*FAIL_OPENS.lock().unwrap() = count;
+}
+
+/// Record an open, failing it while [`fail_opens`] has any left.
+fn opened() -> Result<(), Error> {
+	record("open");
+	let mut failing = FAIL_OPENS.lock().unwrap();
+	if *failing == 0 {
+		return Ok(());
+	}
+	*failing -= 1;
+	Err(Error::Unsupported("probe open refused".into()))
+}
+
 /// Fail the next flush, losing the frame held back.
 pub(crate) fn lose_tail() {
 	*LOSE_TAIL.lock().unwrap() = true;
@@ -99,7 +119,7 @@ pub(crate) struct Probe {
 
 impl Probe {
 	pub(crate) fn open(_config: &Config) -> Result<Box<dyn Backend>, Error> {
-		record("open");
+		opened()?;
 		Ok(Box::new(Self {
 			held: None,
 			ready: VecDeque::new(),
@@ -108,7 +128,7 @@ impl Probe {
 	}
 
 	pub(crate) fn open_no_cut(_config: &Config) -> Result<Box<dyn Backend>, Error> {
-		record("open");
+		opened()?;
 		Ok(Box::new(Self {
 			held: None,
 			ready: VecDeque::new(),
