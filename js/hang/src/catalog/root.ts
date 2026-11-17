@@ -13,7 +13,7 @@ import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
 import { renditions } from "./section";
 import { StatsSchema } from "./stats";
-import { SyncSchema } from "./sync";
+import { TimelineSchema } from "./timeline";
 import { TextSchema } from "./text";
 import { track } from "./track";
 import { VideoSchema } from "./video";
@@ -70,7 +70,7 @@ export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
 	// The broadcast's timeline, omitted when it holds nothing.
-	sync: z.optional(SyncSchema),
+	sync: z.optional(TimelineSchema),
 	stats: z.optional(StatsSchema),
 	echo: z.optional(EchoSchema),
 	text: z.optional(TextSchema),

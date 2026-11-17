@@ -530,7 +530,7 @@ enum Role {
 	Root(Option<Box<include::Producer>>),
 	/// A broadcast included in a root broadcast. Its renditions take the root catalog's
 	/// `sync`, so they share the root's timeline and grid whatever the include declares.
-	Include(kio::Consumer<hang::catalog::Sync>),
+	Include(kio::Consumer<hang::catalog::Timeline>),
 }
 
 /// Follows a broadcast's catalog into its rendition set, as a driver task.

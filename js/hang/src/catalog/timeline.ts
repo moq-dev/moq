@@ -8,7 +8,7 @@ import { nonzeroU53Schema } from "./integers";
  *
  * Omitted when it holds nothing. A malformed `clock` or `interval` fails the catalog.
  */
-export const SyncSchema = z.object({
+export const TimelineSchema = z.object({
 	// The broadcast's one continuous clock, if the publisher exposes one.
 	clock: z.optional(ClockSchema),
 	// The promise that every audio and video track starts a group at least this often outside a
@@ -19,4 +19,4 @@ export const SyncSchema = z.object({
 });
 
 /** The broadcast's timeline: its clock and join interval. */
-export type Sync = z.infer<typeof SyncSchema>;
+export type Timeline = z.infer<typeof TimelineSchema>;

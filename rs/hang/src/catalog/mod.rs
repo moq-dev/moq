@@ -21,7 +21,7 @@ mod priority;
 mod reference;
 mod root;
 mod stats;
-mod sync;
+mod timeline;
 mod text;
 mod video;
 
@@ -39,7 +39,7 @@ pub use priority::*;
 pub use reference::*;
 pub use root::*;
 pub use stats::*;
-pub use sync::*;
+pub use timeline::*;
 pub use text::*;
 pub use video::*;
 

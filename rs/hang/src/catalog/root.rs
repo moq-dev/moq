@@ -45,8 +45,8 @@ pub struct Catalog<E = ()> {
 
 	/// The broadcast's timeline: its clock and join interval.
 	///
-	/// Omitted from the wire when it holds nothing. See [`Sync`](crate::catalog::Sync).
-	pub sync: crate::catalog::Sync,
+	/// Omitted from the wire when it holds nothing. See [`Timeline`](crate::catalog::Timeline).
+	pub sync: crate::catalog::Timeline,
 
 	/// Text (caption/subtitle) track information with multiple renditions.
 	///
@@ -121,10 +121,10 @@ struct Wire<E> {
 
 	#[serde(
 		default,
-		skip_serializing_if = "crate::catalog::Sync::is_empty",
+		skip_serializing_if = "crate::catalog::Timeline::is_empty",
 		deserialize_with = "crate::catalog::deserialize_object"
 	)]
-	sync: crate::catalog::Sync,
+	sync: crate::catalog::Timeline,
 
 	#[serde(
 		default,
@@ -1095,7 +1095,7 @@ mod test {
 		});
 		let catalog = Catalog::<()>::from_str(&json.to_string()).expect("retired fields must not reject media");
 		assert_eq!(catalog, plain);
-		assert_eq!(catalog.sync, crate::catalog::Sync::default());
+		assert_eq!(catalog.sync, crate::catalog::Timeline::default());
 		assert_eq!(catalog.to_json().unwrap(), plain.to_json().unwrap());
 	}
 

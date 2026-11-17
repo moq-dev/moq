@@ -11,7 +11,7 @@ use super::millis::MillisCeil;
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
-pub struct Sync {
+pub struct Timeline {
 	/// The broadcast's one continuous clock, if the publisher exposes one.
 	///
 	/// `wall` is the wall-clock time of PTS zero in `timescale` units since the moq epoch
@@ -35,7 +35,7 @@ pub struct Sync {
 	pub interval: Option<Duration>,
 }
 
-impl Sync {
+impl Timeline {
 	/// Whether the section holds nothing, so the catalog leaves it off the wire.
 	pub fn is_empty(&self) -> bool {
 		self.clock.is_none() && self.interval.is_none()
@@ -62,39 +62,39 @@ mod test {
 
 	#[test]
 	fn roundtrips_in_milliseconds() {
-		let sync = Sync {
+		let sync = Timeline {
 			interval: Some(Duration::from_micros(2_000_500)),
 			..Default::default()
 		};
 		let json = serde_json::to_string(&sync).unwrap();
 		assert_eq!(json, r#"{"interval":2001}"#);
 		assert_eq!(
-			serde_json::from_str::<Sync>(&json).unwrap().interval,
+			serde_json::from_str::<Timeline>(&json).unwrap().interval,
 			Some(Duration::from_millis(2001))
 		);
 	}
 
 	#[test]
 	fn a_zero_interval_is_no_promise() {
-		let zero = Sync {
+		let zero = Timeline {
 			interval: Some(Duration::ZERO),
 			..Default::default()
 		};
 		serde_json::to_string(&zero).expect_err("a zero interval must not encode");
 
 		// Anything above zero rounds up to a whole millisecond on the wire, which reads back.
-		let tiny = Sync {
+		let tiny = Timeline {
 			interval: Some(Duration::from_nanos(1)),
 			..Default::default()
 		};
-		let sync: Sync = serde_json::from_str(&serde_json::to_string(&tiny).unwrap()).unwrap();
+		let sync: Timeline = serde_json::from_str(&serde_json::to_string(&tiny).unwrap()).unwrap();
 		assert_eq!(sync.interval, Some(Duration::from_millis(1)));
 	}
 
 	#[test]
 	fn an_undecodable_interval_refuses() {
 		for interval in ["0", "-1", "1.5", r#""2000""#, "{}", "[2000]", "null"] {
-			serde_json::from_str::<Sync>(&format!(r#"{{"interval":{interval}}}"#)).expect_err(interval);
+			serde_json::from_str::<Timeline>(&format!(r#"{{"interval":{interval}}}"#)).expect_err(interval);
 		}
 	}
 }

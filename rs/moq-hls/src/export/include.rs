@@ -25,7 +25,7 @@ struct Context {
 	spawner: driver::Spawner,
 	/// The root catalog's `sync`. An include is part of the root broadcast, so its
 	/// renditions share the root's timeline and segment on the root's grid.
-	root: kio::Producer<hang::catalog::Sync>,
+	root: kio::Producer<hang::catalog::Timeline>,
 }
 
 #[derive(Default)]

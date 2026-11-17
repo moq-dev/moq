@@ -37,7 +37,7 @@ export * from "./path";
 export * from "./priority";
 export * from "./root";
 export * from "./stats";
-export * from "./sync";
+export * from "./timeline";
 export * from "./text";
 export * from "./track";
 export type { Color, Projection, VideoConfig } from "./video";

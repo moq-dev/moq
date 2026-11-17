@@ -123,7 +123,7 @@ type Catalog = {
   "version": number | undefined,
   "audio": AudioSchema | undefined,
   "video": VideoSchema | undefined,
-  "sync": SyncSchema | undefined,
+  "sync": TimelineSchema | undefined,
   "stats": { "track": string } | undefined,
   "echo": { "path": string } | undefined,
   "text": TextSchema | undefined,
@@ -168,7 +168,7 @@ Every other catalog change in this draft is safe to ignore: `enabled` ({{field-e
 The catalog's root `sync` field holds the broadcast's timeline: the clock every track's timestamps share, and how often a viewer can join its audio and video.
 
 ~~~
-type SyncSchema = {
+type TimelineSchema = {
   "clock": ClockSchema | undefined,
   "interval": number | undefined,
 }

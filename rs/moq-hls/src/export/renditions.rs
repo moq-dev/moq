@@ -121,7 +121,7 @@ pub(crate) struct Producer {
 #[derive(Default)]
 struct State {
 	renditions: BTreeMap<Key, Arc<Rendition>>,
-	sync: Option<hang::catalog::Sync>,
+	sync: Option<hang::catalog::Timeline>,
 	/// The catalog's confirmed end, distinct from dropping its watcher.
 	finished: Option<crate::Result<()>>,
 	// Cache catalog quality order without counting it as a holder.
