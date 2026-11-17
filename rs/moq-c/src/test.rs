@@ -9115,7 +9115,7 @@ fn base_moqt_server(version: &str, sink: u32) -> (String, mpsc::Receiver<TokenSe
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let mut listener = crate::ffi::RUNTIME
 		.block_on(async { config.init(Default::default()).unwrap().listen().await })
 		.unwrap();
