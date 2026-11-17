@@ -1,4 +1,4 @@
-# hang-04 freezes a catalog worth keeping
+# [S] hang-04 freezes a catalog worth keeping
 
 ## Goal
 
