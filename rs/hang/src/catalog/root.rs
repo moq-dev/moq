@@ -233,7 +233,77 @@ impl<'de, E: DeserializeOwned + Default> Deserialize<'de> for Catalog<E> {
 	/// Buffered, so every `version` is read before any section, which a newer draft may have
 	/// reshaped. An entry needing a newer draft is skipped and listed in [`skipped`](Self::skipped).
 	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-		Self::from_value(serde_json::Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+		Self::from_value(Strict::deserialize(deserializer)?.0).map_err(serde::de::Error::custom)
+	}
+}
+
+/// A JSON value that refuses an object repeating a member, which a [`Value`](serde_json::Value)
+/// would silently collapse to its last. Without it, `{"version":5,"version":3}` would read as 3.
+struct Strict(serde_json::Value);
+
+impl<'de> Deserialize<'de> for Strict {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+		struct Visitor;
+
+		impl<'de> serde::de::Visitor<'de> for Visitor {
+			type Value = serde_json::Value;
+
+			fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+				f.write_str("any JSON value")
+			}
+
+			fn visit_bool<E>(self, v: bool) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_f64<E>(self, v: f64) -> std::result::Result<Self::Value, E> {
+				Ok(serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, serde_json::Value::Number))
+			}
+
+			fn visit_str<E>(self, v: &str) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_string<E>(self, v: String) -> std::result::Result<Self::Value, E> {
+				Ok(v.into())
+			}
+
+			fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+				Ok(serde_json::Value::Null)
+			}
+
+			fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+				Ok(serde_json::Value::Null)
+			}
+
+			fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+				let mut items = Vec::new();
+				while let Some(Strict(item)) = seq.next_element()? {
+					items.push(item);
+				}
+				Ok(items.into())
+			}
+
+			fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+				let mut object = serde_json::Map::new();
+				while let Some((key, Strict(value))) = map.next_entry::<String, Strict>()? {
+					if object.insert(key.clone(), value).is_some() {
+						return Err(serde::de::Error::custom(format!("duplicate member `{key}`")));
+					}
+				}
+				Ok(object.into())
+			}
+		}
+
+		deserializer.deserialize_any(Visitor).map(Self)
 	}
 }
 
@@ -1396,7 +1466,12 @@ mod test {
 			let err = Catalog::<()>::from_str(json).unwrap_err();
 			assert!(err.to_string().contains("duplicate field `version`"), "{json}: {err}");
 			assert!(Catalog::<()>::from_reader(json.as_bytes()).is_err(), "{json}");
+			// So does plain serde, at the root and in an entry.
+			assert!(serde_json::from_str::<Catalog>(json).is_err(), "{json}");
 		}
+		let entry = r#"{"video":{"renditions":{"hd":{"version":5,"version":3,"codec":"avc1.64001f"}}}}"#;
+		assert!(Catalog::<()>::from_str(entry).is_err(), "{entry}");
+		assert!(serde_json::from_str::<Catalog>(entry).is_err(), "{entry}");
 	}
 
 	#[test]
