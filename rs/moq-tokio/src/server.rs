@@ -2112,7 +2112,7 @@ mod tests {
 			alpn: Some("qmux-01.moq-lite-06".into()),
 		};
 		options.identity = Some(crate::tls::PeerIdentity::from_chain(Vec::new()));
-		let accept = tokio::spawn(crate::websocket::accept(server, options));
+		let accept = tokio::spawn(crate::websocket::accept_request(server, options));
 		let client = crate::spawn_qmux(
 			qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
 				.connect()
@@ -2192,7 +2192,7 @@ mod tests {
 					admission.enter().unwrap(),
 				);
 				options.link.alpn = Some(protocol.into());
-				let accept = tokio::spawn(crate::websocket::accept(server, options));
+				let accept = tokio::spawn(crate::websocket::accept_request(server, options));
 				let client = crate::spawn_qmux(qmux::ws::Upgraded::new(client, protocol).connect().await.unwrap());
 				// A single Path parameter, including the empty value: lite uses a
 				// counted parameter bag; IETF uses a u16-sized SETUP option block.
