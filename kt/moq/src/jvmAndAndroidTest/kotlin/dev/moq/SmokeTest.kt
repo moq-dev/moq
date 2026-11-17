@@ -671,7 +671,11 @@ class SmokeTest {
     @Test
     fun `json abortUnwanted keeps a reader that joined late`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "events",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
             val producer = StreamProducer(broadcast, track)
             val demand = producer.demand()
             while (demand.wantedChanged() != null) {}
