@@ -183,7 +183,7 @@ settles.
   readers while an uplink closes and reopens, and churned random mesh 503's
   six relays.
   With the rank check removed it fails on the three drones: two readers'
-  relays each take the other's copy, find their own path in it, fall back,
+  relays each take the other's copy, find their own path in it, drop it,
   and repeat. The pick fails on case 503, as the sweep found.
 - **What stays from the first cut.** Adverts, the mark, the path, the
   answer's offer, and choosing again on a route change. Adverts still go

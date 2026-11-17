@@ -232,11 +232,13 @@ Options(r, u) ==
                             /\ Rule = "order" => h[2].rank < mine}}
     IN routes \cup copies
 
-\* The cheaper, a warm copy before the route, then the lower relay.
+\* The cheaper, a warm copy before the route, then the higher relay: the
+\* simulator's `best` takes the neighbour with the highest rendezvous hash, and
+\* relay IDs stand in for those hashes here, as Order = "id" ranks by them.
 Better(a, b) ==
     \/ a.cost < b.cost
     \/ a.cost = b.cost /\ a.copy /\ ~b.copy
-    \/ a.cost = b.cost /\ a.copy = b.copy /\ a.via < b.via
+    \/ a.cost = b.cost /\ a.copy = b.copy /\ a.via > b.via
 Best(opts) == CHOOSE o \in opts : \A p \in opts : p = o \/ Better(o, p)
 Vias(opts) == {o.via : o \in opts}
 

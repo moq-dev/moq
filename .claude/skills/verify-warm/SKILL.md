@@ -30,16 +30,16 @@ quest gate just rs tla moq-net/verify/warm/WarmSettle.tla -config rs/moq-net/ver
 
 | Config | Rule | Checks | States, time at four workers |
 | --- | --- | --- | --- |
-| `Drones.cfg` | ranked by route cost | three drones meshed with costly uplinks, readers starting and stopping three times | 164,434, 5 minutes |
-| `Hash.cfg` | ranked by relay | the same | 164,434, 5 minutes |
+| `Drones.cfg` | ranked by route cost | three drones meshed with costly uplinks, readers starting and stopping three times | 158,198, 5 minutes |
+| `Hash.cfg` | ranked by relay | the same | 158,198, 5 minutes |
 | `Flap.cfg` | ranked by route cost | readers fixed at two drones while one's uplink closes and reopens, changing its rank | 44,427, under a minute |
-| `Mesh503.cfg` | ranked by route cost | churned random mesh 503's six relays and readers, from no pulls | 490,125, 25 minutes |
+| `Mesh503.cfg` | ranked by route cost | churned random mesh 503's six relays and readers, from no pulls | 490,125, 20 minutes |
 | `Settled.cfg` | settled pulls | the same | 407,526, 6 minutes |
 | `SettledDrones.cfg` | settled pulls | as `Drones.cfg` | 6,852, seconds |
-| `Pick.cfg` | the price-moving pick | as `Mesh503.cfg`; fails `PullsQuiet` (open finding) | fails within 2 minutes |
-| `Orderless.cfg` | ranked, rank check removed | as `Drones.cfg`; fails `PullsQuiet` (open finding) | fails within 6 minutes |
+| `Pick.cfg` | the price-moving pick | as `Mesh503.cfg`; fails `PullsQuiet` (open finding) | fails within 6 minutes |
+| `Orderless.cfg` | ranked, rank check removed | as `Drones.cfg`; fails `PullsQuiet` (open finding) | fails within 9 minutes |
 
-Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. Two carry one, and neither is to be fixed. `Pick.cfg` shows the check has teeth: the rule it models is the one moq-dev/moq#8903 rejected for never settling case 503. `Orderless.cfg` shows the rank is what settles the ranked rule: without it, readers at drones 2 and 3 each take the other's warm copy over their uplinks, find their own path in what they now pull, fall back to their uplinks, and repeat for good.
+Nightly runs every config here and fails if a config with an `\* Open finding:` line passes. Two carry one, and neither is to be fixed. `Pick.cfg` shows the check has teeth: the rule it models is the one moq-dev/moq#8903 rejected for never settling case 503. `Orderless.cfg` shows the rank is what settles the ranked rule: without it, readers at two drones each take the other's warm copy over their uplinks, find their own path in what they now pull, drop it, and repeat for good.
 
 ## Reading a failure
 
@@ -47,12 +47,12 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path on th
 
 ## Coverage
 
-Sync commit: the merge of moq-dev/moq#8986. Run `git log -- rs/moq-net/src/route/tests/warm.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function. The rule lives in the simulator only; the port in `select.md` moves it into the relay and this table with it.
+Sync commit: `914382986815bc5bd785c8b88d4be0386f235435`, the base of [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986), which added the ranked rule and this model. Run `git log 9143829868.. -- rs/moq-net/src/route/tests/warm.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function. The rule lives in the simulator only; the port in `select.md` moves it into the relay and this table with it.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/route/tests/warm.rs` `WarmSim::ordered`, `pull`, `toward` | `Decide` (`Ordered`), `Next1`, `Toward` |
-| `rs/moq-net/src/route/tests/warm.rs` `WarmSim::options`, `copy`, `best` | `Options`, `Heard`, `CopyCost`, `Best` |
+| `rs/moq-net/src/route/tests/warm.rs` `WarmSim::options`, `copy`, `best` | `Options`, `Heard`, `CopyCost`, `Best`, `Better` (relay IDs for rendezvous hashes) |
 | `rs/moq-net/src/route/tests/warm.rs` `WarmSim::rank`, `own`, `ranked` | `RankOf`, `Own`, `Pub` (`pull`) |
 | `rs/moq-net/src/route/tests/warm.rs` `WarmSim::offer`, `warm`, `answer`, `advertise`, `scoped` | `Offer`, `Answer`, `Advert`, `Useful` |
 | `rs/moq-net/src/route/tests/warm.rs` `WarmSim::stay` | `Decide` (`"stay"`), `Chose` |
