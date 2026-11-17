@@ -96,6 +96,13 @@ describe("toEncoderConfig", () => {
 		const config = toEncoderConfig(resolve(captured, "opus"), "voice", {});
 		expect(config.opus).toEqual({ application: "voip", signal: "voice", frameDuration: 20_000 } as never);
 	});
+
+	test("tunes music, and leaves a kindless source to the browser", () => {
+		const music = toEncoderConfig(resolve(captured, "opus"), "music", {});
+		expect(music.opus).toEqual({ application: "audio", signal: "music", frameDuration: 20_000 } as never);
+		const unknown = toEncoderConfig(resolve(captured, "opus"), undefined, {});
+		expect(unknown.opus).toEqual({ frameDuration: 20_000 } as never);
+	});
 });
 
 // Like Chrome's Opus encoder, it emits one chunk per input and stamps each from the first input's
@@ -634,7 +641,7 @@ test("muting sends nothing and marks where the audio ends, keeping the rendition
 	expect(FakeAudioEncoder.probes).toHaveLength(1);
 });
 
-// With `capture="release"` a mute closes the microphone, taking its format away. The rendition stays
+// With `idle="release"` a mute closes the microphone, taking its format away. The rendition stays
 // advertised, still enabled, through the mute. Once unmuted it is disabled until the microphone
 // reopens, so one that never does isn't advertised as sending.
 test("a muted rendition keeps its config enabled while its capture is released", async () => {

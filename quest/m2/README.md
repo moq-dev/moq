@@ -50,17 +50,14 @@ removal, a rename, or a wire, catalog, or format change that is free until
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
-  [finish](/quest/m2/finish-sweep.md), and
-  [moq-json writes](/quest/m2/json-write-at.md).
+  and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
   [the WHEP pull's announcement](/quest/m2/whep-pull-announce.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
-- **JS and browser.**
-  [signals](/quest/m2/signals-semantics.md), and
-  [room, publish, and OBS names](/quest/m2/browser-packages.md).
+- **JS and browser.** [signals](/quest/m2/signals-semantics.md).
 - **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
