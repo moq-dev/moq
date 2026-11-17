@@ -82,6 +82,4 @@ compatible with code that awaits them. Wire: none.
 
 ## Related
 
-- [Reconnect, absent means off](/quest/m2/reconnect-off.md) - changes the same reconnect options and names GOAWAY once
 - [@moq/net addresses groups by start](/quest/m2/time-addressing/js.md) - the other `@moq/net` rename before the cut
-- [Unused @moq/net exports](/quest/m2/unused-api/js.md) - the removals that land beside these

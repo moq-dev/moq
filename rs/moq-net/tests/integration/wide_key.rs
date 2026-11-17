@@ -52,7 +52,7 @@ async fn largest_quic_key_reaches_the_subscriber() {
 				let timestamp = Timestamp::from_micros(key.min((1 << 61) - 1)).unwrap();
 				let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
 				group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				let mut got = kio::clock::timeout(Duration::from_secs(5), sub.recv_group())
 					.await
 					.unwrap_or_else(|_| panic!("{alpn} relayed={relayed} key={key} hung"))

@@ -14,13 +14,20 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
-# Inside `kio::clock::sim::run`, detached tasks spawn on kio's deterministic simulator,
+# Test support, for dev-dependencies only: production builds never compile it, and it
+# can change in any release. It publishes `quic::driver`, the Tokio QUIC stack under the
+# MoQ transports, and `quic::web`, WebTransport over it, which tests, benches, and the
+# QUIC interop example drive directly. It also runs tests on kio's deterministic
+# simulator: inside `kio::clock::sim::run`, detached tasks spawn on it,
 # `quic::driver::sim` carries datagrams over seeded, impaired `moq_quic::sim::Link`s with
 # no sockets, `client::Config::sim` and `server::Config::sim` bind a `Client` or `Server`
-# on one of its hosts, and `sim::Network` routes a client's dials over in-memory links
-# instead. Hidden from the docs. Meant for dev-dependencies, so production builds never
-# compile it.
-sim = ["kio/sim", "moq-quic/sim"]
+# on one of its hosts, and `sim::Network` routes a client's dials over in-memory links.
+# It also exposes the `decline_solicit` field of `connect::Config` and `listen::Config`,
+# which acts as a moq-transport peer without MoQ Solicit.
+test-support = ["kio/sim", "moq-quic/sim", "moq-net/test-support"]
+# The `ietf` field of `connect::Config` and `listen::Config`, which offers the lite-07 `ietf`
+# extension: moq-relay's door for its own links, not a setting. Hidden from the docs.
+relay = ["moq-net/relay"]
 
 [dependencies]
 bytes = "1"
@@ -101,9 +108,9 @@ kio = { path = "../kio", features = ["sim"] }
 moq-congestion = { path = "../moq-congestion", features = ["lab"] }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
-# The tests run QUIC sessions on the simulator. Only `sim`, so a test build keeps the
-# features it was asked for.
-moq-tokio = { path = ".", default-features = false, features = ["sim"] }
+# The tests drive the QUIC driver directly and run sessions on the simulator. Only
+# `test-support`, so a test build keeps the features it was asked for.
+moq-tokio = { path = ".", default-features = false, features = ["test-support"] }
 pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }
 # rustls without a provider, as another crate in the graph may build it, so the default test build covers an

@@ -66,8 +66,10 @@ m1 quest on 2026-10-22.
 - Known break, a Nix option rather than a Rust API (added 2026-10-31, from
   [moq-dev/moq#7343](https://github.com/moq-dev/moq/pull/7343)): the NixOS
   module option `services.moq-relay.cluster.rootUrl` takes a non-empty
-  list instead of a string. Migrate `rootUrl = "https://root:4443";` to
-  `rootUrl = [ "https://root:4443" ];`; an empty list fails evaluation.
+  list instead of a string, and is renamed `cluster.connect`
+  ([moq-dev/moq#8924](https://github.com/moq-dev/moq/pull/8924)). Migrate
+  `rootUrl = "https://root:4443";` to `connect = [ "https://root:4443" ];`;
+  an empty list fails evaluation, and `rootUrl` fails it naming `connect`.
   Write it into `rs/moq-relay/MIGRATE.md`'s transition section (its
   `## Unreleased` section until the cut names the version).
 

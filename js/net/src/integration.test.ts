@@ -588,8 +588,8 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 	}
 });
 
-// A time range goes upstream in the track's timescale, the publisher resolves its start from
-// where its groups start, and the copy's reader resolves the end from the groups it receives.
+// A time range goes upstream in the track's timescale, as the keys of the groups starting at
+// those times, both ends inclusive.
 test("integration: lite-07 serves a time range", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
@@ -599,26 +599,24 @@ test("integration: lite-07 serves a time range", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MICRO, maxAge: null });
-	for (let sequence = 0; sequence < 10; sequence++) {
-		const group = producer.appendGroup();
-		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(sequence * 1000)));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	// Keyed by start, as the wire names a group: one per second.
+	for (let start = 0n; start < 10_000n; start += 1000n) {
+		const group = producer.createGroup(start);
+		group.writeFrame(textFrame(`${start}`, Timestamp.fromMillis(Number(start))));
 		group.finish();
 	}
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	try {
-		const reader = remote
-			.track("video")
-			.subscribe({
-				delay: { max: null },
-				order: "ascending",
-				ranges: [{ start: { time: Timestamp.fromMillis(2500) }, end: { time: Timestamp.fromMillis(5000) } }],
-			})
-			.ordered();
+		const reader = remote.track("video").subscribe({
+			delay: { max: null },
+			order: "ascending",
+			ranges: [{ start: { time: Timestamp.fromMillis(2000) }, end: { time: Timestamp.fromMillis(5000) } }],
+		});
 		const got: bigint[] = [];
-		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1n);
-		expect(got).toEqual([2n, 3n, 4n, 5n]);
+		for (let i = 0; i < 4; i++) got.push((await reader.recvGroup())?.sequence ?? -1n);
+		expect(got.sort((a, b) => (a < b ? -1 : 1))).toEqual([2000n, 3000n, 4000n, 5000n]);
 		reader.close();
 
 		// An untimed track refuses it.
@@ -2220,6 +2218,12 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(function (this: LitePublisher, msg, stream) {
 			return run.call(this, msg, stream).finally(() => ended++);
 		});
+		// Lite-07 has one Announce Stream, and gives a prefix back with the edit removing it.
+		const request = LitePublisher.prototype.request;
+		spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, more, remove, add) {
+			ended += remove.length;
+			request.call(this, more, remove, add);
+		});
 		const pair = createMockTransportPair(alpn);
 		const serverOrigin = new OriginProducer();
 		const [client, server] = await Promise.all([
@@ -2243,7 +2247,39 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	},
 );
 
-test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
+// Lite-07 sends one edit at a time: a consumer that leaves before the peer answered the edit
+// adding its prefix has it removed by the next edit, once that answer is in.
+test("moq-lite-07-wip: closing an announce consumer before ANNOUNCE_OK removes its prefix once answered", async () => {
+	const request = LitePublisher.prototype.request;
+	const edits: { remove: bigint[]; add: string[] }[] = [];
+	const answer = Promise.withResolvers<void>();
+	spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, more, remove, add) {
+		edits.push({ remove, add: add.map(({ prefix }) => prefix) });
+		// The first edit reaches the publisher only once the test lets it.
+		if (edits.length === 1) void answer.promise.then(() => request.call(this, more, remove, add));
+		else request.call(this, more, remove, add);
+	});
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: new OriginProducer().consume() }),
+	]);
+
+	const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
+	await until(() => edits.length === 1);
+	announced.close();
+	for (let i = 0; i < 20; i++) await yieldNow();
+	// Nothing more is sent while the first edit is unanswered.
+	expect(edits).toEqual([{ remove: [], add: ["room"] }]);
+	answer.resolve();
+	await until(() => edits.length === 2);
+	expect(edits[1]).toEqual({ remove: [0n], add: [] });
+
+	client.abort();
+	server.abort();
+});
+
+test.each([Lite.ALPN_05, Lite.ALPN_06])(
 	"%s: closing an announce consumer before ANNOUNCE_OK ends the peer's stream",
 	async (alpn) => {
 		// The peer never answers, and returns only once the request stream closes.
@@ -2286,6 +2322,18 @@ for (const alpn of [Lite.ALPN_06, Lite.ALPN_07_WIP]) {
 			) {
 				started++;
 				return run.call(this, msg, stream).finally(() => ended++);
+			});
+			// Lite-07 asks and gives back each prefix with an edit on its one Announce Stream.
+			const edit = LitePublisher.prototype.request;
+			spyOn(LitePublisher.prototype, "request").mockImplementation(function (
+				this: LitePublisher,
+				more,
+				remove,
+				add,
+			) {
+				started += add.length;
+				ended += remove.length;
+				edit.call(this, more, remove, add);
 			});
 			const pair = createMockTransportPair(alpn);
 			const serverOrigin = new OriginProducer();
@@ -2429,8 +2477,9 @@ test("origin: a blind request ends with its session, and the next session answer
 	try {
 		const first = await waitFor(request.active, (b) => b !== undefined);
 
-		// The answering session dies, and the request it answered ends with it: the next session
-		// is another publisher instance as far as anything here can tell.
+		// The answering session dies once healthy, and the request it answered ends with it: the
+		// next session is another publisher instance as far as anything here can tell.
+		await clock.advance(Duration.millis(1000));
 		servers[0]?.session.close();
 		await Promise.resolve(request.closed);
 		expect(request.active.peek()).toBeUndefined();
@@ -2928,9 +2977,10 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 	30_000,
 );
 
-// A qmux session pair negotiating `protocol` over an in-memory socket, each side granting the other
-// `maxStreamsUni` unidirectional streams.
-function qmuxPair(protocol: string, maxStreamsUni: bigint): { client: Qmux; server: Qmux } {
+// A qmux session pair negotiating `protocol` over an in-memory socket, the client letting the server
+// open `maxStreams` streams of each kind. The client opens every bidirectional stream, so a small limit
+// bounds only the server's group streams.
+function qmuxPair(protocol: string, maxStreams: bigint): { client: Qmux; server: Qmux } {
 	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
 		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
 		return {
@@ -2945,9 +2995,8 @@ function qmuxPair(protocol: string, maxStreamsUni: bigint): { client: Qmux; serv
 		new TransformStream<Uint8Array, Uint8Array>({ transform: (chunk, c) => c.enqueue(chunk.slice()) });
 	const up = pipe();
 	const down = pipe();
-	const config = { idleTimeout: null, maxStreamsUni };
-	const client = new Qmux(socket(down.readable, up.writable), { config });
-	const server = Qmux.accept(socket(up.readable, down.writable), { config });
+	const client = new Qmux(socket(down.readable, up.writable), { config: { idleTimeout: null, maxStreams } });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config: { idleTimeout: null } });
 	return { client, server };
 }
 

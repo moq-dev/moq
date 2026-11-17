@@ -469,6 +469,31 @@ impl MoqAudioProducer {
 		self.reservation.lock().unwrap().clone()
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::runtime().enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				self.reservation.lock().unwrap().take();
+				Ok(true)
+			}
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
+	}
+
 	/// Drain the encoder and finish the audio track.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it.

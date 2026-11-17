@@ -7,27 +7,34 @@ use serde::{Deserialize, Serialize};
 /// unspecified, never a signalled default.
 ///
 /// Marked `#[non_exhaustive]`: start from [`Color::default`] and assign the fields you know.
+#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Color {
 	/// The chromaticities of the source primaries, as H.273 `ColourPrimaries` (1 is BT.709, 9 is BT.2020).
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub primaries: Option<u8>,
 
 	/// The transfer function, as H.273 `TransferCharacteristics` (1 is BT.709, 16 is PQ, 18 is HLG).
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub transfer: Option<u8>,
 
 	/// The matrix between RGB and Y'CbCr, as H.273 `MatrixCoefficients` (0 is RGB, 1 is BT.709, 9 is BT.2020 NCL).
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub matrix: Option<u8>,
 
 	/// The numeric range of the samples.
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub range: Option<ColorRange>,
 
 	/// The display the content was mastered on, as SMPTE ST 2086.
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub mastering: Option<Mastering>,
 
 	/// The content's light levels, as CTA-861.3.
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub content_light: Option<ContentLight>,
 }
 

@@ -27,7 +27,7 @@ impl Burst {
 }
 
 impl Log {
-	pub fn record(&mut self, pid: u16, error: &anyhow::Error) {
+	pub fn record(&mut self, pid: u16, error: &super::Error) {
 		let now = kio::clock::now();
 		self.flush(now);
 		let first = match self.bursts.entry(pid) {
@@ -88,7 +88,7 @@ mod tests {
 		reason = "the benchmark measures host CPU time"
 	)]
 	async fn benchmark_damage_pid_fanout() {
-		let error = anyhow::anyhow!("broken PES");
+		let error = super::super::Error::Malformed("broken PES".into());
 		println!("pids,damaged_units,ns_per_unit");
 		for pids in [1_u16, 64, 8192] {
 			for units in [1, 16, 128] {
@@ -117,7 +117,7 @@ mod tests {
 	#[tracing_test::traced_test]
 	async fn a_quiet_pid_starts_a_new_burst_between_summary_ticks() {
 		let mut log = Log::default();
-		let error = anyhow::anyhow!("broken PES");
+		let error = super::super::Error::Malformed("broken PES".into());
 		log.record(97, &error);
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
 		log.record(97, &error);
@@ -143,7 +143,7 @@ mod tests {
 	#[tracing_test::traced_test]
 	async fn a_continuous_burst_logs_one_summary_per_interval() {
 		let mut log = Log::default();
-		let error = anyhow::anyhow!("broken PES");
+		let error = super::super::Error::Malformed("broken PES".into());
 		log.record(97, &error);
 		for _ in 0..4 {
 			tokio::time::advance(stats::Log::INTERVAL / 2).await;

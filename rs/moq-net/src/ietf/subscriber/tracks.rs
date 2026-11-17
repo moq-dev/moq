@@ -270,9 +270,10 @@ impl Listings {
 		};
 		if entry.info.is_some() {
 			for lister in self.listers(&key.0) {
+				// Moq-transport has no datagram tracks to list.
 				let _ = match finished {
-					true => lister.finish(&key.1),
-					false => lister.remove(&key.1),
+					true => lister.finish(broadcast::Kind::Track, key.1.clone()),
+					false => lister.remove(broadcast::Kind::Track, key.1.clone()),
 				};
 			}
 		}
@@ -1884,8 +1885,8 @@ mod tests {
 	fn event(tracks: &mut crate::broadcast::Tracks) -> Option<String> {
 		match tracks.poll_next(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Added { name, .. }))) => Some(format!("+{name}")),
-			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Removed { name }))) => Some(format!("-{name}")),
-			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Finished { name }))) => Some(format!("~{name}")),
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Removed { name, .. }))) => Some(format!("-{name}")),
+			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Finished { name, .. }))) => Some(format!("~{name}")),
 			Poll::Ready(Ok(Some(crate::broadcast::TracksEvent::Synced))) => Some("synced".into()),
 			Poll::Ready(other) => Some(format!("{other:?}")),
 			Poll::Pending => None,
