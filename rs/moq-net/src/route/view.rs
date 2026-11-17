@@ -278,6 +278,16 @@ mod tests {
 		assert_eq!(v.present(&p("live/a")), view(&[("live/a", 5)], &[("live/a", 1)]));
 	}
 
+	/// A newer floor between a claim and the interest says nothing covers it there, so
+	/// the older claim above that floor is not presented; one below it still is.
+	#[test]
+	fn present_hides_a_claim_above_a_newer_floor() {
+		let v = view(&[("", 1), ("live", 5)], &[("", 9)]);
+		assert_eq!(v.present(&p("live/a")), view(&[("live/a", 5)], &[]));
+		let v = view(&[("", 1), ("live", 5)], &[("", 9), ("live", 3)]);
+		assert_eq!(v.present(&p("live/a")), view(&[("live/a", 5)], &[("live/a", 3)]));
+	}
+
 	#[test]
 	fn a_floor_certifies_only_what_lies_within_it() {
 		let v = view(&[("live/a", 5)], &[("live/a", 1), ("live/a/x", 2), ("live", 3)]);

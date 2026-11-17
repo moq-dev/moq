@@ -1007,6 +1007,115 @@ fn a_scoped_peers_goaway_and_close_touch_only_its_routes() {
 	assert!(router.shown()[&(7, p("a"))].available);
 }
 
+/// A scoped peer's GOAWAY ranks the routes it sent as draining, so the node moves off
+/// them at once onto another scoped peer's.
+#[test]
+fn a_scoped_peers_goaway_moves_off_its_routes() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	let qualify = super::super::qualifier([1; 32]);
+	for (peer, cost) in [(2, 1), (3, 2)] {
+		let scoped = Link {
+			cost,
+			scope: Some(Scope {
+				regions: vec![p("a")],
+				qualify: qualify.clone(),
+			}),
+			..Link::default()
+		};
+		router.connect(peer, peer as Id, scoped).unwrap();
+		router.edited(peer);
+		router.route(peer, 7, p("a"), Some(offered(peer as Id, 0)));
+	}
+	let next = |router: &path::Router<usize, u8>| router.route_for(qualify(7), &p("a")).and_then(path::Route::next);
+	assert_eq!(next(&router), Some(2));
+
+	router.goaway(2, Instant::ZERO);
+	assert_eq!(next(&router), Some(3));
+}
+
+/// A session opened without the neighbour's Node ID learns it from the last hop of the
+/// first route it sends, and a later route keeps it.
+#[test]
+fn an_unnamed_neighbour_is_named_by_its_first_route() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 0, Link::default()).unwrap();
+	router.edited(1);
+	assert_eq!(router.hop_of(1), 0);
+	router.route(1, 7, p(""), Some(reach(&[(7, 0), (3, 1)])));
+	assert_eq!(router.hop_of(1), 3);
+	router.route(1, 8, p(""), Some(reach(&[(8, 0), (4, 1)])));
+	assert_eq!(router.hop_of(1), 3);
+}
+
+/// An edit that adds a prefix leaves a route at a prefix it still asks for as it was,
+/// its claims and floors included.
+#[test]
+fn an_edit_keeps_a_route_at_a_prefix_it_still_asks_for() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(BTreeSet::from([p("a")])).unwrap();
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, p("a"), Some(offered(1, 0)));
+	router.batch(1, 7, p("a"), vec![(p("a"), Some(2)), (p("a/x"), Some(1))], Some(1));
+	let heard = |router: &path::Router<usize, u8>| -> Vec<((Id, Path), View<u8>)> {
+		router.heard().map(|(key, view)| (key.clone(), view.clone())).collect()
+	};
+	let before = heard(&router);
+	assert_eq!(before.len(), 1);
+
+	router.watch(BTreeSet::from([p("a"), p("b")])).unwrap();
+	router.edited(1);
+	assert_eq!(heard(&router), before);
+}
+
+/// Of two held routes an edit widens into one prefix, the first moves with its deadline.
+#[test]
+fn a_widening_edit_keeps_the_first_holds_deadline() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(BTreeSet::from([p("a/x"), p("a/y")])).unwrap();
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	for prefix in ["a/x", "a/y"] {
+		router.route(1, 7, p(prefix), Some(offered(1, 0)));
+	}
+	router.route(1, 7, p("a/x"), Some(path::Reach::Held));
+	let first = router.deadline().expect("a hold");
+	router.timeout(Instant::ZERO.saturating_add(std::time::Duration::from_secs(1)));
+	router.route(1, 7, p("a/y"), Some(path::Reach::Held));
+
+	router.watch(BTreeSet::from([p("a")])).unwrap();
+	router.edited(1);
+	assert!(router.route_for(7, &p("a")).is_some());
+	router.timeout(first);
+	assert!(router.route_for(7, &p("a")).is_none(), "held past the first deadline");
+}
+
+/// A route outside what this node asked the neighbour for is refused, and so is one to
+/// this node's own identity.
+#[test]
+fn a_route_outside_the_ask_or_to_this_node_is_refused() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(BTreeSet::from([p("a")])).unwrap();
+	router.originate(8);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, p("b"), Some(offered(1, 0)));
+	router.route(1, 8, p("a"), Some(offered(1, 0)));
+	assert_eq!(router.heard().count(), 0);
+}
+
+/// Only doubt keeping the node off a route it has no live one for makes the neighbour
+/// doubted: a route refused for naming this node does not.
+#[test]
+fn a_refused_route_is_no_doubt() {
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	router.route(1, 7, p(""), Some(reach(&[(7, 0), (99, 1), (1, 1)])));
+	assert!(unrouted(&router));
+	assert!(!router.doubted(1));
+}
+
 /// An offer through a closed session is dead until its sender says what became of
 /// it, even once the doubt lifts, and a stale repeat of it stays dead: the hop is
 /// remembered while any heard route names it.

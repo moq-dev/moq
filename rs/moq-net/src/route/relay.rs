@@ -2903,6 +2903,37 @@ mod tests {
 		assert!(router.reader.changed().is_empty(), "nothing reads which claims changed");
 	}
 
+	/// A neighbour asking a prefix under a broader claim is told it there, lowered by the
+	/// segments between the two.
+	#[test]
+	fn a_broader_claim_is_told_lowered_to_the_prefix_asked() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Endpoint);
+		let announce = Msg::Announce {
+			changes: vec![((p("a"), 7), claim(run(1), 0))],
+		};
+		router.recv(2, announce).unwrap();
+		open(&mut router, 3, Role::Endpoint);
+		router.drain();
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p("a/b/c")],
+		};
+		router.edit(3, edit).unwrap();
+		let told: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 3)
+			.filter_map(|(_, msg)| match msg {
+				Msg::Announce { changes } => Some(changes),
+				_ => None,
+			})
+			.flatten()
+			.collect();
+		assert!(
+			matches!(told.as_slice(), [((path, 7), Change::Live(claim))] if *path == p("a/b/c") && claim.item == Run { epoch: 1, above: 2 }),
+			"{told:?}"
+		);
+	}
+
 	/// A claim outside what this node asked a scoped neighbour for is refused whole.
 	#[test]
 	fn a_claim_outside_the_grant_is_refused() {

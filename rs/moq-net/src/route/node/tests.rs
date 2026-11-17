@@ -776,6 +776,30 @@ fn a_closed_session_takes_its_mounts() {
 	assert_eq!(relay.lock().router.neighbors(), 0);
 }
 
+/// A mount only sends: it asks its peer for nothing, whatever its session asks for.
+#[test]
+fn a_mount_asks_for_nothing() {
+	let relay = Node::new(2, 2, clock());
+	let session = relay.receive(peer(1, 3), Link::default()).unwrap();
+	let asks =
+		|stream: &Stream| std::iter::from_fn(|| stream.try_output()).any(|output| matches!(output, Output::Ask(_)));
+	assert!(asks(&session), "the session asks");
+	let mount = session.mount(p("live")).unwrap();
+	assert!(!asks(&mount));
+}
+
+/// Every stream of a session stays on it, relinked or not, so none is taken for a link
+/// that came back.
+#[test]
+fn a_stream_stays_on_its_session() {
+	let relay = Node::new(2, 2, clock());
+	let session = relay.answer(peer(4, 3), Link::default(), p("other")).unwrap();
+	let tag = |stream: &Stream| relay.lock().router.link(stream.key).unwrap().session;
+	assert_eq!(tag(&session), 4);
+	session.relink(Link::default(), false).unwrap();
+	assert_eq!(tag(&session), 4);
+}
+
 /// A scoped session's close doubts no node, since a scoped peer names itself as it likes,
 /// and an unscoped one doubts the Node ID it declared, whether or not a mount of it is
 /// open. A mount closes under the scope its session holds then, here one set after the

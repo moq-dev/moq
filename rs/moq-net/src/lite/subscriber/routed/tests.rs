@@ -536,6 +536,41 @@ async fn a_dead_and_its_updates_apply_as_one() {
 	assert!(routed.receive(dead(3)).is_err());
 }
 
+/// A DEAD that moves and ends nothing holds each route through the hop, except one the
+/// peer learned from this node: the peer holds that one under this node, unchanged.
+#[kio::test]
+async fn a_dead_leaves_a_route_learned_from_this_node() {
+	use crate::lite::Dead;
+	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
+	let mut routed = super::Routed::asking(&subscriber, &Path::empty(), 1, &Default::default()).unwrap();
+	// The origin's node, which names itself by its configured Node ID.
+	let own = 1;
+	assert_eq!(routed.node.hop(), own);
+	let hop = Hop { node: 5, session: 3 };
+	for (node, via) in [(7, own), (8, 6)] {
+		let start = Msg::RouteStart {
+			node,
+			prefix: 0,
+			suffix: Path::empty(),
+			exact: false,
+			offer: Offer {
+				path: [Hop { node, session: 0 }, Hop { node: via, session: 1 }, hop].into(),
+				..offer()
+			},
+		};
+		routed.receive(start).unwrap();
+	}
+	let dead = Dead::Closed {
+		hop,
+		far: 6,
+		gone: false,
+		moved: 0,
+	};
+	routed.receive(Msg::Dead(dead)).unwrap();
+	assert!(!routed.routes[&0].held, "learned from this node");
+	assert!(routed.routes[&1].held);
+}
+
 /// A route this node refuses still follows a DEAD naming a hop on its path, so both
 /// ends agree on which routes live: the closed session it crossed ends it, its claims
 /// with it, and the peer may start it over. A refused moved offer withdraws the route
