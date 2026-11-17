@@ -2,8 +2,7 @@
 
 ## Goal
 
-Every regression and defect in newly shipped code that the 2026-11-17
-pre-cut correctness audit found is fixed on `main` before the `0.22.0` cut,
+Every defect the 2026-11-17 pre-cut correctness audit found is fixed on `main` before the `0.22.0` cut,
 so the cut publishes none of them.
 
 ## Plan
@@ -18,13 +17,13 @@ exist were out of scope: the 2026-11-16 audit and the
 open m2 quest replaces (the old lite-07 route rule, YIELDED continuations,
 lite-07 sequence addressing, socket endpoints, moq-e2ee).
 
-Recommended 2026-11-17 (agent, under /quest-afk, for the maintainer's
-review): ✅ a finding gates the cut when `release` does not have it, being a
-regression or a defect in code the cut publishes for the first time
-(rejected: gating every finding, which holds the cut on bugs `release`
-already ships; gating none, which publishes regressions). The audit's
-findings that `release` already has are standalone m1 quests that ship
-whenever they land.
+Decided 2026-11-17 (maintainer, [moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)): ✅ every finding gates the cut, including those `release` already ships,
+so they all live in this epic, which the cut requires (rejected: gating only
+what `release` lacks, the agent's /quest-afk recommendation; gating none).
+The one exception: ✅ [ts-step-damage](/quest/m1/ts-step-damage.md) is a
+standalone low-priority m1 quest outside the gate, since it was read from
+source with no field report (rejected: keeping it in the gate; deleting it).
+✅ Every quest the audit added stays in m1 (rejected: only this epic in m1).
 
 Each child reproduces its finding before fixing it: most were read from
 source, not run. The reviewers' reports were scratch and are not kept; each

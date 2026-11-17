@@ -5,7 +5,7 @@
 `moq-stats`'s aggregator keeps one entry per node across a reconnect on a
 route whose instance a session minted (every version before lite-07, and
 moq-transport), so a cluster link redial, a route failover, or a relay
-restart never adds a node's cumulative counters on top of its own retained
+restart within the aggregator's grace (`Config::grace`, 10 minutes) never adds a node's cumulative counters on top of its own retained
 contribution. A real node restart is still detected by its counters going
 down, as `doc/concept/stats.md` says for minted routes.
 
@@ -25,10 +25,16 @@ Recommended: when the new instance `is_minted()` and the path's previous
 entry is also minted, carry the previous entry over to the new key, and let
 the existing `regressed` check treat a counter going down as a restart.
 A lite-07 instance a publisher named keeps today's per-instance entry.
+A return after the grace starts over from zero, as `Merged`'s docs already
+say for every route: the old entry has folded into `retired` and its path
+lookup is gone, and bounding a per-node ledger of retired nodes would cost
+memory for every departed node. This quest keeps that documented limit.
 
 Test: a simulated-clock aggregator test that unannounces and re-announces a
 node path under a fresh minted instance, with counters continuing, and
-asserts the merged total after the grace equals the node's last frame.
+asserts the merged total after the grace equals the node's last frame; and
+the boundary, a re-announce just after the grace, which starts over as
+documented.
 
 Public API: none. Wire: none.
 

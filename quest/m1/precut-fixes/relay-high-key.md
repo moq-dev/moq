@@ -25,8 +25,8 @@ first. Both are on `release` too.
 - `rs/moq-net/src/model/front.rs`: the front's track-info map keeps entries
   past `Forgotten`; drop them there.
 
-Recommended 2026-11-17 (agent, under /quest-afk, for the maintainer's
-review): ✅ backport the track fix to `release` as a separate PR after it
+Decided 2026-11-17 (maintainer, [moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)): ✅
+backport the track fix to `release` as a separate PR after it
 lands on `main`, per RELEASE.md, since one publisher can burn a shared
 relay's CPU (rejected: shipping it only with the cut).
 

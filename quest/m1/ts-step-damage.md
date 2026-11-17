@@ -21,8 +21,14 @@ data-only case: `place_pcr` with no media clock lets `PtsUnwrap` go
 negative, and `u64::try_from` fails the import with `TimeOverflow`, where a
 program with media drops the same packet as unplaced.
 
-Recommended (challenges [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898)'s
-rule that a TS audio rewind is a restart, for the maintainer's review): ✅
+Decided 2026-11-17 (maintainer,
+[moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)):
+✅ a standalone, low-priority m1 quest that does not gate the cut, since no
+field report backs it and a lone PID's PTS step needs a corrupt PES header
+or a muxer resetting one stream (rejected: gating the cut; deleting it).
+✅ This design stands for whenever it is done, reproduced first, and it
+challenges [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898)'s
+rule that a TS audio rewind is a restart:
 once the step judge rules "not a new source", a packet below the stream's
 floor is dropped and counted as that stream's damage, and a forward outlier
 raises the floor only when a second packet confirms it (rejected: keeping
@@ -39,3 +45,7 @@ Caused by, for the fix PR's `## Caused by`:
 
 - [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) - made a lone stream's rewind fatal to the import
 - [moq-dev/moq#5967](https://github.com/moq-dev/moq/pull/5967) - PCR unwrap that can go negative on a data-only program
+
+## Related
+
+- [moq-dev/moq#9035](https://github.com/moq-dev/moq/pull/9035) - plans `quest/m2/ts-passthrough-splice.md`, which handles a whole-source PCR step on the passthrough lane; this quest is the lone-stream step on the import

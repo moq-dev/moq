@@ -15,7 +15,7 @@ systemd's semantics. In `nix/modules/moq-relay.nix`, `moq-auth` is
 it: switching stops `moq-auth`, `Requires=` propagates the stop to the relay,
 and the relay drains every session and starts with no handoff.
 
-Recommended: `moq-auth` sets `stopIfChanged = false`, so it restarts in place
+Decided 2026-11-17 (maintainer, [moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)): ✅ `moq-auth` sets `stopIfChanged = false`, so it restarts in place
 and nothing propagates (rejected: `wants` instead of `requiredBy`, which lets
 the relay run with no auth server and refuse every session). Check it with
 the module's NixOS VM test if one covers handoff, else by a switch on a

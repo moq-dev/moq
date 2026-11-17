@@ -17,10 +17,10 @@ library's automatic reopen on purpose (`rs/moq-audio/MIGRATE.md`: "no
 automatic device reopen"), but nothing moved the reopen into the CLI.
 `release` recovered within 0.5 to 4 s.
 
-Recommended: ✅ the CLI reopens the capture and its publication in a loop
+Decided 2026-11-17 (maintainer, [moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)): ✅ the CLI reopens the capture and its publication in a loop
 with `release`'s backoff, keeping #7706's decision that the library does not
 (rejected: putting the reopen back in moq-audio, which reverses that
-decision). A failure that persists past the backoff ends only the audio
+decision; ending only the audio track with no reopen). A failure that persists past the backoff ends only the audio
 track, with its error, and the video keeps running.
 
 Public API: none (CLI behavior). Wire: none.

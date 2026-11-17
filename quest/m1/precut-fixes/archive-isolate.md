@@ -15,7 +15,7 @@ the task set and aborts every other recording. `doc/bin/cli.md` documents it
 ("Any recording that fails ends the export"), but AGENTS.md's Required rule
 says a publisher that breaks its identity hurts only its own broadcast.
 
-Recommended: ✅ log and drop the failed broadcast and keep exporting the rest;
+Decided 2026-11-17 (maintainer, [moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)): ✅ log and drop the failed broadcast and keep exporting the rest;
 the command still fails if the origin itself fails (rejected: keeping the
 documented behavior, which lets one publisher end everyone's recording).
 Update `doc/bin/cli.md`. Also check whether an ordinary publisher disconnect
