@@ -117,9 +117,12 @@ jobs:
           cd "release-out/moq_ffi-$BUILD_VERSION"
           dart pub get --enforce-lockfile
           dart analyze
-          dart pub publish --dry-run 2>&1 | tee publish.log
-          grep -q -- '── moq.dart (' publish.log
-          grep -q -- '── uniffi_runtime.dart (' publish.log
+          # pipefail keeps a failed dry run failing the step, and the log stays
+          # outside the package directory, which is uploaded and published.
+          set -o pipefail
+          dart pub publish --dry-run 2>&1 | tee "$RUNNER_TEMP/publish.log"
+          grep -q -- '── moq.dart (' "$RUNNER_TEMP/publish.log"
+          grep -q -- '── uniffi_runtime.dart (' "$RUNNER_TEMP/publish.log"
 
       - name: Upload pub package
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

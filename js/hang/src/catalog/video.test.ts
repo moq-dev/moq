@@ -118,16 +118,11 @@ test("video config ignores a legacy stalled flag", () => {
 	expect(parsed.enabled).toBeUndefined();
 });
 
-test("video warmup round trips as optional integer milliseconds", () => {
+// moq-hang-04 defines `warmup` for audio only, so a video rendition's is an unknown field.
+test("a video warmup is ignored", () => {
 	const base = { codec: "vp8", container: { kind: "legacy" } };
-	expect(VideoConfigSchema.parse(base).warmup).toBeUndefined();
-	for (const warmup of [0, 80, 1_000]) {
-		const config = VideoConfigSchema.parse({ ...base, warmup });
-		expect(Number(config.warmup)).toBe(warmup);
-		expect(VideoConfigSchema.parse(JSON.parse(JSON.stringify(config)))).toEqual(config);
-	}
-	for (const warmup of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
-		expect(() => VideoConfigSchema.parse({ ...base, warmup })).toThrow();
+	for (const warmup of [0, 500, -1, 0.5]) {
+		expect("warmup" in VideoConfigSchema.parse({ ...base, warmup })).toBe(false);
 	}
 });
 
