@@ -1331,7 +1331,9 @@ test.each([undefined, "off", "all"] as const)(
 
 			await push(4);
 			expect(encoder.out.stats.peek().frames).toBe(onDemand === "off" ? 4 : 0);
-			late = net.track("audio").subscribe({ delay: { min: Duration.millis(10_000), max: Duration.millis(10_000) } });
+			late = net
+				.track("audio")
+				.subscribe({ delay: { min: Duration.millis(10_000), max: Duration.millis(10_000) } });
 			await settle();
 			expect(encoder.out.active.peek()).toBe(true);
 			await push(3);

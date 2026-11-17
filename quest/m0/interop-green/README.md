@@ -224,10 +224,13 @@ Scheduled runs
   stalls past the 1039 ms bound after the route falls back. Reproduced
   at 1 of 8 and 2 of 12 loaded local runs (the audio ring still stalled 600 ms after the first
   audio group of the returned incumbent). Decided 2026-11-15 (AFK, recommendation, for review):
-  `replacement` is quarantined by default on every engine again, and the child
-  [replacement audio](/quest/m0/interop-green/replacement-audio.md) root-causes and restores it.
-  Its first PR found the stall: the decode gate released the backlog behind the clock one window
-  per worklet report. Its second restored the case on Chromium; Firefox's quarantine is in the child.
+  `replacement` is quarantined by default on every engine again, and a child quest root-caused
+  and restored it. Its first PR found the stall: the decode gate released the backlog behind the
+  clock one window per worklet report. Its second restored the case on Chromium, and
+  [moq-dev/moq#9023](https://github.com/moq-dev/moq/pull/9023) on Firefox: the incumbent replays
+  audio only from a returning viewer's min delay, and the player decodes what trails the clock
+  only to warm the codec. Off Chromium the moq-transport-22 row stays quarantined, since that
+  wire states no delay to cut the replay at.
 
 Public API: none. Wire: none.
 
