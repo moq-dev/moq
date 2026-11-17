@@ -717,16 +717,12 @@ export const hooks: {
 	 */
 	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
 	/**
-	 * Tell a lite-07 copy where its publisher started each live range counting back from
-	 * `latest`, as `[back, start]` pairs, replacing the last set: the copy holds only part of the
+	 * Tell a lite-07 copy where its publisher started each live range counting back, as
+	 * `[back, start, latest]` triples, replacing the last set: the copy holds only part of the
 	 * track, so a reader's relative start counts back as the publisher did, until a group past
-	 * `latest` moves the live edge. Assigned by `track.ts`.
+	 * the `latest` it counted from moves the live edge. Assigned by `track.ts`.
 	 */
-	relativeStarts: (
-		producer: Producer,
-		starts: Iterable<readonly [bigint, bigint]>,
-		latest: bigint | undefined,
-	) => void;
+	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint, bigint | undefined]>) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**

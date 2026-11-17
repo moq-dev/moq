@@ -187,8 +187,6 @@ interface Framing {
 }
 
 interface SubscribeEntry {
-	/** The publisher's latest group when SUBSCRIBE_START answered, if it had one. */
-	largest?: bigint;
 	datagrams?: DatagramEntry;
 	/** Release the stream demand held by readers of the legacy datagram track. */
 	datagramDemand?: Dispose;
@@ -215,6 +213,9 @@ interface SubscribeEntry {
 	// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range starts on lite-07, by Range
 	// ID, undefined for one with nothing to deliver.
 	starts: Map<bigint, bigint | undefined>;
+	// The latest group each range's start was counted back from, by Range ID: the publisher's when
+	// SUBSCRIBE_START answered, or the copy's when SUBSCRIBE_STARTED did.
+	edges: Map<bigint, bigint | undefined>;
 	// The first group the ranges last sent ask for, which a lite-07 declaration answers.
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
@@ -1724,6 +1725,7 @@ export class Subscriber {
 			asked: [...ranges],
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
+			edges: new Map(),
 			sent: 0,
 			stream: { kind: "setup" },
 			fillIds: new Set(),
@@ -2195,6 +2197,7 @@ export class Subscriber {
 			asked: ranges,
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
+			edges: new Map(),
 			sent: 0,
 			// Its responses are read here, which owns this stream's end.
 			stream: { kind: "setup" },
@@ -2543,8 +2546,11 @@ export class Subscriber {
 							`SUBSCRIBE_OK resolves ${resp.start.starts.length} ranges, not ${entry.live.initial}`,
 						);
 					// An update may have retired some already, whose starts say nothing now.
+					const edge = resp.start.largest?.position.group;
 					resp.start.starts.forEach((start, index) => {
-						if (entry.live.get(BigInt(index))) entry.starts.set(BigInt(index), start);
+						if (!entry.live.get(BigInt(index))) return;
+						entry.starts.set(BigInt(index), start);
+						entry.edges.set(BigInt(index), edge);
 					});
 				}
 				// The lowest range start is the first group served; none leaves nothing owed.
@@ -2554,7 +2560,6 @@ export class Subscriber {
 					undefined,
 				);
 				entry.start = start ?? null;
-				entry.largest = resp.start.largest?.position.group;
 				// A lite-07 tail waits for SUBSCRIBE_START to say where delivery starts.
 				entry.tail.touch();
 				// Lite-07 says where every live range starts, so the declaration follows them
@@ -2601,6 +2606,7 @@ export class Subscriber {
 				const range = entry.live.get(id);
 				if (range) {
 					entry.starts.set(id, start);
+					entry.edges.set(id, hooks.producerLargest(entry.track).peek()?.group);
 					// A fill's range starting past where it asked skips groups it will not deliver.
 					const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
 					if (asked) {
@@ -2820,7 +2826,11 @@ export class Subscriber {
 					entry.fillIds.has(id),
 				);
 				edit = edited;
-				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
+				for (const id of entry.starts.keys())
+					if (!entry.live.get(id)) {
+						entry.starts.delete(id);
+						entry.edges.delete(id);
+					}
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
@@ -2874,8 +2884,9 @@ export class Subscriber {
 		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
 		// `report_time_starts`.
 		const times: [bigint, bigint][] = [];
-		// And each one counting back, which the copy, holding only part of the track, can't count.
-		const relative: [bigint, bigint][] = [];
+		// And each one counting back, which the copy, holding only part of the track, can't count,
+		// with the latest group it counted back from.
+		const relative: [bigint, bigint, bigint | undefined][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
 			const time = range?.start?.time ?? range?.start?.absolute;
@@ -2883,15 +2894,10 @@ export class Subscriber {
 			const at = entry.starts.get(id);
 			if (at === undefined) continue;
 			if (time !== undefined) times.push([time, at]);
-			else if (back !== undefined) relative.push([back, at]);
+			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
 		}
 		hooks.timeStarts(entry.track, times);
-		// Counted back from the publisher's latest when it answered, which SUBSCRIBE_START reports
-		// and a range an update added counts from no earlier than the copy's.
-		const held = hooks.producerLargest(entry.track).peek()?.group;
-		const latest =
-			entry.largest === undefined || (held !== undefined && held > entry.largest) ? held : entry.largest;
-		hooks.relativeStarts(entry.track, relative, latest);
+		hooks.relativeStarts(entry.track, relative);
 
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;

@@ -23,10 +23,11 @@ fixing Rust in that PR; reverting JS to Rust's behavior).
   counts the copy's own cache; resolve a relative start from the reported
   start instead, as `@moq/net`'s `relativeStarts` hook
   (`js/net/src/track.ts`, `js/net/src/internal.ts`) does.
-- Scope the report to the publisher's latest when it answered (SUBSCRIBE_START's
-  Largest), as JS does: once a newer group arrives, a late live join counts
-  from the copy's own latest, so it starts at the live edge instead of
-  replaying from the old report.
+- Scope each range's report to the latest it was counted from, recorded when
+  its start was answered (SUBSCRIBE_START's Largest, or the copy's latest at
+  SUBSCRIBE_STARTED), as JS does: once a newer group arrives, a late live
+  join counts from the copy's own latest instead of replaying from the old
+  report, and an update that changes no range never re-stamps it.
 - `Copy::wire` (`rs/moq-net/src/model/resume.rs`) takes
   `sub.resolved_ranges()` for unchanged ranges, which is the resolution of
   the copy's clamped wire: a cap while replaced likely becomes the range's

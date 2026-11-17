@@ -529,7 +529,7 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 
 // A lite-07 copy counts a relative start back as its publisher reported, but only from the latest
 // group the publisher counted from: a reader joining live once newer groups arrived starts at the
-// live edge, not where the first reader started.
+// live edge, not where the first reader started, even after an update that changed no range.
 test("integration: lite-07 joins a late relative start at the live edge", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
@@ -552,6 +552,15 @@ test("integration: lite-07 joins a late relative start at the live edge", async 
 			hooks.appendNext(producer).finish();
 			expect((await first.recvGroup())?.start).toBe(BigInt(key));
 		}
+		// An update that changes no range leaves each report at the edge it was counted from.
+		first.update({ ...subscription, priority: 7 });
+		await withTimeout(
+			(async () => {
+				while (producer.subscription.peek()?.priority !== 7) await yieldNow();
+			})(),
+			Duration.millis(1000),
+			"the update never reached the publisher",
+		);
 		late = remote.track("video").subscribe(subscription).ordered();
 		expect((await late.nextGroup())?.start).toBe(3n);
 	} finally {
