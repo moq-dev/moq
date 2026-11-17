@@ -92,4 +92,3 @@ and the unpublished `@moq/obs`. Wire: none.
 
 ## Related
 
-- [@moq/ui is a workspace package](/quest/m2/ui-private.md) - the packaging change to the same overlays

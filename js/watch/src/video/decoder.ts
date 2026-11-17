@@ -15,7 +15,7 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
-import { rotateVideoDimensions } from "@moq/video";
+import { rotateDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
@@ -471,7 +471,7 @@ export class Decoder {
 
 		effect.set(
 			this.#out.display,
-			rotateVideoDimensions({ width: frame.displayWidth, height: frame.displayHeight }, catalog.rotation),
+			rotateDimensions({ width: frame.displayWidth, height: frame.displayHeight }, catalog.rotation),
 		);
 	}
 

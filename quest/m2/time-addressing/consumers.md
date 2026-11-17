@@ -139,5 +139,4 @@ them.
 
 ## Related
 
-- [The archive format ships as version 2](/quest/m2/archive-v2.md) - freezes the keys this made starts
 - [A group's frames present before the next group starts](/quest/m3/groups-never-overlap.md) - tightens the group rule a declared end relies on

@@ -134,13 +134,7 @@ impl Index {
 /// read its `end` when `end` is set. `.info` sorts before every object key and `end` after,
 /// so listing after `.info` lists everything else. Object stores promise no listing order, so
 /// it is sorted here.
-pub(super) async fn list<S: ObjectStore>(
-	store: &S,
-	dir: &Path,
-	cursor: &Path,
-	timed: bool,
-	end: bool,
-) -> Result<Listed> {
+pub(super) async fn list<S: ObjectStore>(store: &S, dir: &Path, cursor: &Path, end: bool) -> Result<Listed> {
 	let metas: Vec<_> = store.list_with_offset(Some(dir), cursor).try_collect().await?;
 	let mut listed = Listed::default();
 	let mut found = None;
@@ -153,7 +147,7 @@ pub(super) async fn list<S: ObjectStore>(
 			.location
 			.filename()
 			.ok_or_else(|| Error::Path(meta.location.to_string()))?;
-		match Name::parse(filename, timed)? {
+		match Name::parse(filename)? {
 			Name::Info => {}
 			Name::End => found = Some(meta.location),
 			Name::Object(start) => listed.objects.push(((start.group, start.frame), meta.location)),
