@@ -102,17 +102,6 @@ enum Family {
 	Closed,
 }
 
-/// One past the newest group's start, or 0 on an empty track, in the track's timescale: where a
-/// group the caller gave no start for begins, which stands in until every write carries a
-/// timestamp.
-fn next_start(track: &moq_net::track::Producer) -> moq_net::Result<moq_net::Timestamp> {
-	let key = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
-	match track.info().timescale {
-		Some(scale) => moq_net::Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch),
-		None => Ok(moq_net::Timestamp::unscaled(key)),
-	}
-}
-
 /// The track-publishing handles of one broadcast.
 ///
 /// Closing the broadcast ends every child still open with `Unroutable` (`Internal` to a
@@ -1227,11 +1216,10 @@ impl Publish {
 		}
 	}
 
-	/// Append a new group to a raw track, one past the newest group's start, returning a
-	/// group producer.
-	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
+	/// Append the next group to a raw track, starting at `start`, returning a group producer.
+	pub fn track_group(&mut self, track: Id, start: moq_net::Timestamp) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.append_group(next_start(&raw.inner)?)?;
+		let group = raw.inner.append_group(start)?;
 		self.insert_group(group)
 	}
 

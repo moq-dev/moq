@@ -717,7 +717,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cached, err := track.AppendGroup()
+	cached, err := track.AppendGroup(ts(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -933,7 +933,7 @@ func TestTrackPublishConsume(t *testing.T) {
 		t.Fatalf("frame = %+v, want payload=hello ts=12345", frame)
 	}
 
-	group, err := track.AppendGroup()
+	group, err := track.AppendGroup(ts(23_456))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -976,7 +976,7 @@ func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range 3 {
-		group, err := track.AppendGroup()
+		group, err := track.AppendGroup(ts(uint64(i) * 1000))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1033,7 +1033,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	}
 	defer consumer.Cancel()
 
-	empty, err := track.AppendGroup()
+	empty, err := track.AppendGroup(ts(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1333,7 +1333,7 @@ func TestRecvGroupCancelKeepsConsumer(t *testing.T) {
 		t.Fatalf("cancelled RecvGroup = %v, want context.Canceled", err)
 	}
 
-	group, err := track.AppendGroup()
+	group, err := track.AppendGroup(moq.Unscaled(0))
 	if err != nil {
 		t.Fatal(err)
 	}

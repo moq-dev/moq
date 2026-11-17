@@ -3661,18 +3661,25 @@ unsafe fn parse_track_info(info: *const moq_track_info) -> Result<moq_net::track
 	}
 }
 
-/// Append a new group to a raw track, returning a group producer.
+/// Append the next group to a raw track, starting at `start`, returning a group producer.
 ///
 /// Groups are delivered independently and each may contain any number of frames
-/// written via [moq_publish_group_frame]. Each starts after the last group; read the
-/// group's with [moq_publish_group_start].
+/// written via [moq_publish_group_frame]. `start` is converted to the track's timescale,
+/// as a frame's timestamp is; a scale-less track takes the unscaled group key (`has_scale`
+/// false). A start at or before a group the track holds, or one that doesn't match the
+/// track, fails. Read the group's start in the track's timescale with
+/// [moq_publish_group_start]. NULL fails with `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a non-zero handle to the group on success, or a negative code on failure.
+///
+/// # Safety
+/// - `start` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
+pub unsafe extern "C" fn moq_publish_track_group(track: u32, start: *const moq_timestamp) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().publish.track_group(track)
+		let start = unsafe { ffi::parse_timestamp(start)? };
+		State::lock().publish.track_group(track, start)
 	})
 }
 
@@ -4151,7 +4158,7 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 /// Read the start of a raw group, which names it within its track.
 ///
 /// On a scale-less track this is the key every [moq_publish_group_frame] timestamp carries
-/// (unscaled, `has_scale` false), including for a group [moq_publish_track_group] numbered.
+/// (unscaled, `has_scale` false).
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
