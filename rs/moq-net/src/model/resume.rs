@@ -5528,7 +5528,7 @@ mod test {
 	}
 
 	/// A late arrival the reader's ranges leave out is no gap of its own: it is neither reported
-	/// nor held, and widening the ranges offers it as the group it is.
+	/// nor held, and widening the ranges does not report it later, as the read never goes back.
 	#[test]
 	fn a_front_ignores_a_late_arrival_its_ranges_exclude() {
 		let routes = Producer::new();
@@ -5557,8 +5557,8 @@ mod test {
 		let mut sub = sub.with_range(..);
 		let widened = read(&mut sub);
 		assert!(
-			widened.iter().all(|item| item.starts_with("group")),
-			"widening offers groups, not gaps: {widened:?}"
+			widened.is_empty(),
+			"an ordered read never goes back, so widening reports no gap and returns no group: {widened:?}"
 		);
 	}
 

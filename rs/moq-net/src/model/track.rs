@@ -11100,10 +11100,10 @@ impl Ordered {
 				return Poll::Ready(Ok(Some(*group)));
 			}
 			// A range moved off it. With nothing in range above, it waits for the range to widen
-			// again, and the read ends as capped ranges do; otherwise the read passes it.
+			// again, and the read waits or ends as it does for capped ranges; otherwise the read
+			// passes it.
 			if self.inner.runs_in_range(key, u64::MAX).is_empty() {
 				self.held = Some(group);
-				return Poll::Ready(Ok(None));
 			}
 		}
 		let read = self.inner.poll_next_group(waiter);
@@ -19580,7 +19580,11 @@ mod test {
 		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
 		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
 		ordered.set_range(..2);
-		assert_eq!(items(&mut ordered), Vec::<String>::new(), "capped below the held group");
+		assert_eq!(
+			items(&mut ordered),
+			["pending"],
+			"capped below the held group, which waits for the range"
+		);
 		ordered.set_range(..4);
 		assert_eq!(
 			items(&mut ordered),
