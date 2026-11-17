@@ -90,7 +90,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 			.largest()
 			.map_or(0, |largest| largest.group.saturating_add(1));
 		let at = moq_net::Timestamp::unscaled(next);
-		if let Err(err) = refreshed.and_then(|()| track.update(moq_json::Timed::new(value, at))) {
+		if let Err(err) = refreshed.and_then(|()| track.update(value, at)) {
 			tracing::warn!(%err, "a report track failed; closing it");
 			if let Some(track) = self.track.take() {
 				let _ = track.abort(moq_net::Error::Transport(err.to_string()));
@@ -642,10 +642,10 @@ mod tests {
 		let mut read = reader(track.consume());
 		let mut report = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		report
-			.update(moq_json::Timed::new(
+			.update(
 				&serde_json::json!({ "pad": "x".repeat(MAX_REPORT) }),
 				moq_net::Timestamp::unscaled(0),
-			))
+			)
 			.unwrap();
 		assert!(matches!(read.next().await, Err(moq_json::Error::TooLarge(MAX_REPORT))));
 	}
@@ -684,10 +684,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), String::new(), out));
 
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 1 }),
-				moq_net::Timestamp::unscaled(1),
-			))
+			.update(&serde_json::json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
 			.unwrap();
 		let line = lines.next_line().await.unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
@@ -695,10 +692,7 @@ mod tests {
 		broadcast.withdraw();
 		kio::clock::sleep(DRAIN * 2).await;
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 2 }),
-				moq_net::Timestamp::unscaled(2),
-			))
+			.update(&serde_json::json!({ "n": 2 }), moq_net::Timestamp::unscaled(2))
 			.unwrap();
 		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
@@ -730,10 +724,7 @@ mod tests {
 		let mut feedback = moq_json::snapshot::Producer::<serde_json::Value>::new(track, Default::default());
 		route.announce().unwrap();
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 1 }),
-				moq_net::Timestamp::unscaled(1),
-			))
+			.update(&serde_json::json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
 			.unwrap();
 		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("the takeover was never read").unwrap().unwrap();
@@ -776,10 +767,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), ".viewers".to_string(), out));
 
 		feedback
-			.update(moq_json::Timed::new(
-				&serde_json::json!({ "n": 1 }),
-				moq_net::Timestamp::unscaled(1),
-			))
+			.update(&serde_json::json!({ "n": 1 }), moq_net::Timestamp::unscaled(1))
 			.unwrap();
 		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("no feedback read").unwrap().unwrap();

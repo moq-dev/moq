@@ -5,8 +5,16 @@ use std::task::Poll;
 use serde::de::DeserializeOwned;
 
 use super::decoder::Codec;
-use super::{ConsumerConfig, Decoder, Event};
+use super::{Decoder, Event};
 use crate::Result;
+
+/// Configuration for a [`Consumer`], and so for the [`Decoder`] inside one.
+///
+/// Empty for now. Build from [`Default`]; the struct is `#[non_exhaustive]`, so new options stay
+/// additive.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct Config {}
 
 /// Consumes a sliding window of JSON records from a track, yielding one event per change.
 ///
@@ -32,7 +40,12 @@ pub struct Consumer<T> {
 
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
-	pub fn new(track: moq_net::track::Subscriber, config: ConsumerConfig) -> Self {
+	///
+	/// Takes a subscriber where [`snapshot::Consumer::new`](crate::snapshot::Consumer::new) takes the
+	/// track: a reader that falls behind learns which records it missed, so the caller picks the
+	/// subscription's delay budget and priority, while a snapshot only wants the newest value and
+	/// subscribes itself at a zero delay.
+	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
 			track: track.ordered(),
 			group: None,

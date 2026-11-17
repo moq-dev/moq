@@ -911,9 +911,10 @@ export class Encoder {
 							}
 							const open = gate.open;
 							const passed = gate.push(data, end);
-							// The talker fell silent: declare the end now, not when speech resumes.
-							if (open && !gate.open) pause();
 							for (const entry of passed) take(entry.frame, entry.end);
+							// The talker fell silent: declare the end now, not when speech resumes, after the
+							// last frame sent, which may be this one.
+							if (open && !gate.open) pause();
 						}
 						deadline.set(backlog.deadline);
 					},

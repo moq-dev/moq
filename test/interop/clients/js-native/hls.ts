@@ -81,14 +81,14 @@ try {
 		compression: "deflate",
 	});
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
-	catalog.update({
-		value: Catalog.encode({
+	catalog.update(
+		Catalog.encode({
 			video: { renditions: renditions.video },
 			audio: { renditions: renditions.audio },
 			sync: { interval: Catalog.u53(INTERVAL) },
 		}),
-		at: Moq.Time.Timestamp.now(),
-	});
+		Moq.Time.Timestamp.now(),
+	);
 	catalog.finish();
 	publication.announce();
 	console.log("hls ready");

@@ -1,5 +1,5 @@
 /**
- * Session and stream error types.
+ * Session and stream error types, and what to do after one.
  *
  * @module
  */
@@ -10,6 +10,8 @@ export {
 	NotFound,
 	ProtocolViolation,
 	RefusedRedirect,
+	Retry,
+	retry,
 	Session,
 	Skipped,
 	Stream,

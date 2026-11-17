@@ -91,13 +91,17 @@ marks where each utterance ends, so listeners stay subscribed and treat the gap
 as intentional silence.
 
 A `voice` source, which the microphone is, does the same on its own while its
-talker is silent: SILK's voice activity detector (from libopus) scores each
-frame, and once it has scored 200 ms of silence nothing more is sent and the
-end is declared, so listeners play comfort noise instead of receiving encoded
-silence. Background noise that rises mid-call, such as a fan switched on, can
-keep scoring as speech, so the talker's silence over it is still sent. Speech
-reopens the gate with the frame before it, which keeps most soft onsets the
-detector scores late; a faint one it misses entirely is still clipped.
+talker is silent. Each frame is scored as libopus scores it for DTX at the
+complexity browsers and the Rust publisher encode with: its tonality analysis
+tells speech from steady noise, so a fan switched on mid-call stops sending
+within a second or so (SILK's detector decides alone at 8 and 12 kHz). Once it has
+scored 200 ms of silence nothing more is sent and the end is declared, so
+listeners play comfort noise instead of receiving encoded silence. Noise as
+loud as the talker, within 25 dB of their speech, keeps sending, as it does in
+libopus; so does any noise before they first speak, since the analysis's first
+scored frame sets the level it is judged against. Speech reopens the gate with the 20 ms before it, which keeps most soft
+onsets the detector scores late; a faint one it misses entirely is still
+clipped.
 Music and sources without a kind always send.
 
 Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
@@ -160,7 +164,7 @@ signals.run((effect) => {
     });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
-    meta.update({ value: current, at: Moq.Time.Timestamp.now() });
+    meta.update(current, Moq.Time.Timestamp.now());
 });
 ```
 

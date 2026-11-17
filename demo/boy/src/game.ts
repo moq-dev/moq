@@ -349,10 +349,7 @@ export class Game {
 		const command = effect.get(this.#command);
 		if (!command) return;
 
-		producer.update({
-			value: { ...command.cmd, timestamps: command.timestamps, seq: command.seq },
-			at: Moq.Time.Timestamp.now(),
-		});
+		producer.update({ ...command.cmd, timestamps: command.timestamps, seq: command.seq }, Moq.Time.Timestamp.now());
 	}
 }
 
