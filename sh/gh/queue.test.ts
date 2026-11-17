@@ -272,6 +272,11 @@ assert.ok(targets.some((target: string) => target.includes("-windows-")));
 // it must block a release.
 const features = await workflow("features");
 assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features"]);
-// Nightly runs the whole gate over every package in one Tests job.
-assert.ok(nightly.jobs.tests.strategy.matrix.recipe.includes("gate"));
+// Nightly runs the whole gate over every package on the queue's runners, from
+// main alone, and never beside Gate cost, so the queue keeps a runner.
+assert.ok(nightly.jobs.gate.steps.at(-1).run.includes("nix develop --command just gate"));
+assert.deepEqual(nightly.jobs.gate["runs-on"], ["self-hosted", "moq-queue"]);
+assert.equal(nightly.jobs.gate.if, "github.ref == 'refs/heads/main'");
+assert.equal(nightly.jobs.gate.concurrency.group, nightly.jobs["gate-cost"].concurrency.group);
+assert.ok(!JSON.stringify(nightly.jobs.gate).includes("secrets."), "a self-hosted Nightly job gets no secrets");
 console.log("queue event policy passed");
