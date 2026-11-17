@@ -2972,6 +2972,12 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
+			// Registered before any duplicate wait below, so a drop that lands during it finds the read.
+			if (hasSkip(this.version)) {
+				entry.reading ??= new Map();
+				entry.reading.set(group.sequence, counted);
+				reading = true;
+			}
 			// A duplicate of a copy still arriving, such as one another subscription sharing the copy
 			// delivers, waits unread, which flow control bounds. Created once that copy ends, it is
 			// refused as a duplicate if the copy finished and takes the group if it failed,
@@ -3000,14 +3006,9 @@ export class Subscriber {
 			if (passed.start < passed.end) this.#skipped(entry, passed.start, passed.end, `GROUP ${group.sequence}`);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
-			if (hasSkip(this.version)) {
-				entry.reading ??= new Map();
-				entry.reading.set(group.sequence, counted);
-				reading = true;
-				// A drop that overtook the header already accounts for the group; a copy served again
-				// is owed whatever dropped the earlier one.
-				if (!owed && dropped) counted.excuse();
-			}
+			// A drop that overtook the header already accounts for the group; a copy served again is
+			// owed whatever dropped the earlier one.
+			if (reading && !owed && dropped) counted.excuse();
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);

@@ -1589,6 +1589,55 @@ test.each([
 	}
 });
 
+// Lite-07: a Group Stream can wait unread on a copy of its group still arriving, as a recovery's does
+// on the copy its subscription shares. A final drop that lands during that wait accounts for the
+// group, so a stream whose reset the browser then loses holds the end at most the grace.
+test("a drop during a duplicate wait lets the end give up on a stream that never ends", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const version = Version.DRAFT_07;
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, toHop(1n));
+	const track = subscriber.consume(Path.from("room")).track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version, 1000);
+		const request = await opened(1);
+		await request.reading;
+		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
+
+		// The copy still arriving, then a stream of the same group that waits on it.
+		const first = handStream(version);
+		first.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), first.reader);
+		const group = await track.recvGroup();
+		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
+		const lost = handStream(version);
+		lost.write(await liteFrame(0, new Uint8Array([1])));
+		void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), lost.reader);
+		await drainReactions();
+
+		await respond(request, version, [
+			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
+			{ finish: new SubscribeFinish(1n) },
+		]);
+		await drainReactions();
+
+		let fin = false;
+		void request.finished.then(() => {
+			fin = true;
+		});
+		await clock.advance(GRACE.div(2));
+		expect(fin).toBe(false);
+		await clock.advance(GRACE);
+		expect(fin).toBe(true);
+	} finally {
+		track.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
 // Lite-07: a header that arrives after the grace gave up on its gap is covered by the tail, but
 // no drop accounts for it, so its stream is still delivering and holds the end until it is read.
 test("a stream whose gap the grace gave up on still holds the end", async () => {
