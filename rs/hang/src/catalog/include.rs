@@ -26,7 +26,7 @@ pub struct Include {
 	/// instance refuses it, and against one a relay minted it is best effort. A composer leaves it
 	/// out until the include resolves.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 }
 
