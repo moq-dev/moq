@@ -29,7 +29,7 @@ its parent loses its upstream, its pull runs through itself, its session
 closes, or its route changes. What it hears comes from **adverts between
 peers and toward upstreams, only where the copy could be taken, never down a
 link the neighbour marked upstream, and never up one with a copy that came
-over one**, and **the data path and the mark in every offer**. The race
+down one anywhere on its path**, and **the data path and the mark in every offer**. The race
 between simultaneous starts stands. **A one-shot query** from an edge to its
 other upstreams is a later step, with its price and condition below; with
 it, a relay also chooses once more on each query answer from its join.
@@ -189,11 +189,12 @@ nothing, so a new one replaces it outright.
   otherwise `O(P→R) + cold(P, R)`, the chain priced unshared. The publisher's
   relay offers 0. An offer is never below its sender's own cost.
 - **The path and the mark.** Every offer names the relays the data passes
-  from the publisher's relay to the sender, and says whether it came over a
-  link its receiver marked upstream, as a route's offer does.
+  from the publisher's relay to the sender, and carries the mark: set once
+  the copy came down a link its receiver marked upstream anywhere on that
+  path, and kept on every hop after, as a route's down-only flag is.
 - **Adverts.** While R has demand for an Instance besides N, N has not
-  marked R upstream, and R has not both marked N upstream and taken its copy
-  over a marked link, it tells N its offer on the announce stream when
+  marked R upstream, and R has not both marked N upstream and a copy whose
+  mark is set, it tells N its offer on the announce stream when
   `O(R→N) + cold(R, N)` is below N's route cost for the Instance, or equals it
   through a next hop other than R, since a tie prefers a warm copy. It tells
   again on each change, and withdraws when the demand, its upstream, or that
