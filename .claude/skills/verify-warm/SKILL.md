@@ -9,10 +9,10 @@ description: Model-check whether warm pulls settle (`rs/moq-net/verify/warm/Warm
 
 `Rule` picks the rule:
 
-- `"order"`: ranked readers, the rule [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986) measured. A reader ranks by its relay's route cost, then its relay (`Order = "route"`), or by relay alone (`"id"`). A relay takes a warm copy only from a neighbour feeding a reader ranked below every reader it feeds itself, priced at the link's cold price alone, and heads for the cheapest such copy or its route whenever either changes. A pull carries the lowest rank it feeds, and an advert or answer the lowest rank its sender feeds besides its receiver.
+- `"order"`: ranked readers, the rule [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986) measured and `quest/m3/cache-routing/select.md` ports. A reader ranks by its relay's route cost, then its relay (`Order = "route"`), or by relay alone (`"id"`). A relay takes a warm copy only from a neighbour feeding a reader ranked below every reader it feeds itself, priced at the link's cold price alone, and heads for the cheapest such copy or its route whenever either changes. A pull carries the lowest rank it feeds, and an advert or answer the lowest rank its sender feeds besides its receiver.
 - `"orderless"`: the same with the rank check removed.
 - `"pick"`: the price-moving pick moq-dev/moq#8903 rejected.
-- `"stay"`: settled pulls, the first cut `quest/m3/cache-routing/select.md` names.
+- `"stay"`: settled pulls, which the maintainer rejected for ranked readers on 2026-11-17; kept to show the model covers both.
 
 ## Rules
 
