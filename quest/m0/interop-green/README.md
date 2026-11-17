@@ -227,9 +227,8 @@ Scheduled runs
   `replacement` is quarantined by default on every engine again, and a child quest root-caused
   and restored it. Its first PR found the stall: the decode gate released the backlog behind the
   clock one window per worklet report. Its second restored the case on Chromium, and
-  [moq-dev/moq#9023](https://github.com/moq-dev/moq/pull/9023) on Firefox: the incumbent replays
-  audio only from a returning viewer's min delay, and the player decodes what trails the clock
-  only to warm the codec. Off Chromium the moq-transport-22 row stays quarantined, since that
+  [moq-dev/moq#9023](https://github.com/moq-dev/moq/pull/9023) on Firefox: the player decodes the
+  audio an incumbent replays behind the clock only to warm the codec. Off Chromium the moq-transport-22 row stays quarantined, since that
   wire states no delay to cut the replay at.
 
 Public API: none. Wire: none.

@@ -321,6 +321,9 @@ export class AudioBuffer {
 	#backpressure: Backpressure;
 	// Whether an end was declared since the last reset, which the next audio follows.
 	#declared = false;
+	// Where the latest declared end stands, until a reset that is not the next utterance. Audio before
+	// it is a finite tail, which the ring plays out however far it trails the clock.
+	#tail?: number;
 	// Bumped per reset. A state message posted before the worklet saw it reports the ring on the old
 	// timeline, which would open the gate.
 	#epoch = 0;
@@ -572,6 +575,7 @@ export class AudioBuffer {
 	 */
 	truncate(timestamp: number): void {
 		this.#backpressure.truncated(timestamp);
+		if (this.#tail !== undefined) this.#tail = Math.min(this.#tail, timestamp);
 		const msg: Truncate = { type: "truncate", timestamp };
 		this.#worklet.port.postMessage(msg);
 		if (this.#declared) this.next();
@@ -584,6 +588,7 @@ export class AudioBuffer {
 	 */
 	end(timestamp: number): void {
 		this.#declared = true;
+		this.#tail = timestamp;
 		const msg: End = { type: "end", timestamp };
 		this.#worklet.port.postMessage(msg);
 	}
@@ -604,6 +609,7 @@ export class AudioBuffer {
 
 	#reset(next: boolean): void {
 		this.#declared = false;
+		if (!next) this.#tail = undefined;
 		this.#epoch++;
 		const msg: Reset = {
 			type: "reset",
@@ -635,9 +641,11 @@ export class AudioBuffer {
 	 * Whether media at `timestamp`, in microseconds, trails the shared clock past the bound, so the ring
 	 * would skip it unheard, as a publisher's replayed backlog does on a rejoin. The decoder still
 	 * decodes it to warm the codec, but writes none of it: a ring anchored on it would play catch-up
-	 * instead of the live edge.
+	 * instead of the live edge. Audio before a declared end is never stale, since the ring plays a
+	 * finite tail out rather than skip it.
 	 */
 	stale(timestamp: number): boolean {
+		if (this.#tail !== undefined && timestamp < this.#tail) return false;
 		const position = this.#sync?.position();
 		if (position === undefined) return false;
 		return position * 1000 - timestamp > Math.max(this.#bound.asMicros(), WINDOW);

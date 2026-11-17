@@ -670,7 +670,7 @@ describe("AudioBuffer steering", () => {
 
 	// A rejoin's replayed backlog trails the clock by seconds, and the ring skips it unheard. Held to the
 	// ring's pace, the live edge behind it would arrive only once the ring had drained it all.
-	it("releases at once, and reports stale, what trails the clock past its bound", () => {
+	it("releases at once, and reports stale, what trails the clock past its bound short of a declared end", () => {
 		const clock = started();
 		const { buffer, state } = fake(100, {
 			bound: 200,
@@ -685,6 +685,15 @@ describe("AudioBuffer steering", () => {
 			expect(Bun.peek.status(buffer.wait(ms(3300), signal))).toBe("pending");
 			expect(buffer.stale(ms(2700))).toBe(true);
 			expect(Bun.peek.status(buffer.wait(ms(1000), signal))).toBe("fulfilled");
+
+			// A finite tail plays out however far it trails the clock, through the next utterance too.
+			buffer.end(ms(2800));
+			expect(buffer.stale(ms(2700))).toBe(false);
+			buffer.next();
+			expect(buffer.stale(ms(2700))).toBe(false);
+			expect(buffer.stale(ms(2790))).toBe(false);
+			buffer.reset();
+			expect(buffer.stale(ms(2700))).toBe(true);
 		} finally {
 			buffer.close();
 			clock.close();
