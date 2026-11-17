@@ -21077,7 +21077,18 @@ rec {
             name = "moq-uring";
             packageId = "moq-uring";
             usesDefaultFeatures = false;
-            target = { target, features }: ("linux" == target."os" or null);
+            target =
+              { target, features }:
+              (
+                ("linux" == target."os" or null)
+                && (
+                  ("x86_64" == target."arch" or null)
+                  || ("aarch64" == target."arch" or null)
+                  || ("riscv64" == target."arch" or null)
+                  || ("loongarch64" == target."arch" or null)
+                  || ("powerpc64" == target."arch" or null)
+                )
+              );
             features = [ "_manual" ];
           }
           {

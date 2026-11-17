@@ -5,7 +5,7 @@
 //!
 //! Linux-only like the mode itself. Unsupported local kernels skip loudly;
 //! CI_STRICT makes CI refuse them.
-#![cfg(target_os = "linux")]
+#![cfg(uring)]
 
 use std::net::SocketAddr;
 use std::time::Duration;

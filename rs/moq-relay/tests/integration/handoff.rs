@@ -36,7 +36,7 @@ fn certificate(dir: &Path) -> (PathBuf, PathBuf) {
 #[derive(Clone, Copy, Debug)]
 enum Backend {
 	Tokio,
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	Uring,
 }
 
@@ -59,7 +59,7 @@ fn config(dir: &Path, cert: &Path, key: &Path, backend: Backend) -> Config {
 	config.handoff.socket = Some(dir.join("handoff.sock"));
 	match backend {
 		Backend::Tokio => {}
-		#[cfg(target_os = "linux")]
+		#[cfg(uring)]
 		Backend::Uring => config.runtime.io_uring = true,
 	}
 	config
@@ -130,7 +130,7 @@ async fn a_new_relay_takes_over_while_the_old_one_drains() {
 	takes_over(Backend::Tokio, Backend::Tokio).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn an_io_uring_relay_takes_over() {
 	if crate::runtime_uring::supported() {
@@ -139,7 +139,7 @@ async fn an_io_uring_relay_takes_over() {
 }
 
 /// Both backends hand on the same group, with connection IDs in the same layout.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn a_relay_takes_over_across_backends() {
 	if crate::runtime_uring::supported() {

@@ -421,7 +421,7 @@ async fn worker_tokio_custom_route_and_quic() {
 }
 
 /// io_uring workers. Skips below the 6.12 floor unless CI_STRICT.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {

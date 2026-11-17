@@ -129,9 +129,11 @@ tracing-subscriber = { workspace = true }
 web-transport-proto = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64", target_arch = "powerpc64")))'.dev-dependencies]
 # Workers built inside a runtime with a manual clock installed run on that clock.
 moq-uring = { workspace = true, features = ["_manual"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 # Which sockets the process still holds, so the embed tests can prove a stopped
 # relay closed its own without rebinding a port another test could take.
 socket2 = { workspace = true, features = ["all"] }
