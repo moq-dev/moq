@@ -195,7 +195,8 @@ the connection's identity. The auth server sees `attach` for the same session
 id, with a fresh `auth` id that also names its revalidations and end. The
 attached credential arrives in `token` (`kind` 0, any bytes) and `query` stays
 exactly as dialed, still holding the connection's first credential, so read an
-event with `auth` from `token` alone; `moq auth serve` does. Attached grants revalidate and end
+event with `auth` from `token` alone; `moq auth serve` does, and for now also reads the
+attached credential from the query's `jwt` when a previous-release relay sends no `token`. Attached grants revalidate and end
 independently. Each JWT counts against its own `--limit-token` cap while any
 credential using it remains on that connection. The initial credential remains
 responsible for the connection's stats tier.

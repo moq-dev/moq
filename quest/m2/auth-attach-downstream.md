@@ -13,6 +13,19 @@ The relay now sends an attached credential as `token` (`kind` 0) and leaves
 verifies `query` at `attach` sees the connection's first credential instead.
 Neither the presented token nor its expiry is then the one admitted.
 
+Found at moq.pro `9373cdfb3`: `rs/edge/src/auth/mod.rs` reads the credential
+only from `request.query` through `query_jwt` (`:393`), never from
+`request.token`. See `:1312-1317` (`End` forgets the query credential),
+`:1331` (`Attach` and `Revalidate` decide on the query's `jwt`), `:1061`, and
+`limits.rs:179`, `:383`, `:419`. Plain `?jwt=` dials are unaffected. Kixel's
+`src/mesh.ts:557` reads a `credential` query parameter, and its client has no
+attach use today.
+
+Until moq.pro reads `token`, it must not meet a relay with this change:
+`moq auth serve` reads a previous-release relay's `query` shape for now (a
+marked temporary migration in `rs/moq-auth/src/serve.rs`), but moq.pro has no
+such reader for the new shape.
+
 ## Waiting
 
 - Maintainer: check the moq.pro and Kixel auth handlers read `attach` from

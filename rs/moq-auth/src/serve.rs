@@ -539,11 +539,18 @@ fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Denial> {
 /// Both at once count as one only when they are the same JWT.
 ///
 /// An attached credential (an event with `auth`) is only its `token`: the `query` is the
-/// connection's, still holding the first credential.
+/// connection's, still holding the first credential. An event with `auth` and no credential
+/// is refused, never decided on the anonymous or mTLS rules.
 fn jwt(request: &Request) -> Result<Option<Cow<'_, str>>, Denial> {
-	let query = match request.auth {
-		Some(_) => None,
-		None => query_jwt(request)?,
+	let query = match (&request.auth, &request.token) {
+		// TEMPORARY migration: a relay before this change rewrote an attached credential into
+		// `jwt` in the query and cleared the token. Delete once no such relay runs beside us.
+		(Some(_), None) => match query_jwt(request)? {
+			Some(jwt) => Some(jwt),
+			None => return Err(Denial::MalformedToken("an attachment needs a token".into())),
+		},
+		(Some(_), Some(_)) => None,
+		(None, _) => query_jwt(request)?,
 	};
 	match (&request.token, query) {
 		// A client that offers a version without in-band auth copies its SETUP token
@@ -753,10 +760,8 @@ impl Server {
 
 	/// Answer one event: the grant, or why the session is refused.
 	pub async fn answer(&self, request: &Request) -> Result<Option<Grant>, Denial> {
-		if matches!(request.event, Event::Attach) && (request.auth.is_none() || request.token.is_none()) {
-			return Err(Denial::MalformedToken(
-				"an attachment needs an auth id and a token".into(),
-			));
+		if matches!(request.event, Event::Attach) && request.auth.is_none() {
+			return Err(Denial::MalformedToken("an attachment needs an auth id".into()));
 		}
 		let policy = self.policy();
 		match request.event {
@@ -1440,12 +1445,38 @@ mod tests {
 		revalidate.event = Event::Revalidate;
 		assert!(server.answer(&revalidate).await.is_ok());
 
-		// The connection's credential is not the attachment's.
-		attach.token = None;
-		assert!(matches!(
-			server.answer(&attach).await.unwrap_err(),
-			Denial::MalformedToken(_)
-		));
+		// An attachment with no credential at all is refused, never decided anonymously.
+		let mut bare = attach.clone();
+		bare.token = None;
+		bare.query = None;
+		for event in [Event::Attach, Event::Revalidate] {
+			bare.event = event;
+			assert!(matches!(
+				server.answer(&bare).await.unwrap_err(),
+				Denial::MalformedToken(_)
+			));
+		}
+	}
+
+	/// TEMPORARY, with the migration in `jwt`: a previous-release relay sends the attached
+	/// credential as the query's `jwt` with no token, on `attach` and on `revalidate`.
+	#[tokio::test]
+	async fn a_previous_relays_attachment_is_read_from_its_query() {
+		let (dir, key) = key_dir();
+		let server = Server::new(Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		})
+		.unwrap();
+		let attached = sign(&key, "demo", &[], &["**"], None);
+		let mut attach = with_token(request("/demo"), &attached);
+		attach.auth = Some("attachment".into());
+		for event in [Event::Attach, Event::Revalidate] {
+			attach.event = event;
+			let grant = server.answer(&attach).await.unwrap().unwrap();
+			assert_eq!(grant.subscribe, patterns(&["**"]));
+			assert!(grant.publish.is_empty());
+		}
 	}
 
 	/// Two different credentials would leave the server guessing which one the client meant.
