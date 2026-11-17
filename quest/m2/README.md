@@ -25,7 +25,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   costs nothing on a moq-lite track; the path escape
   is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
-  [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries the
+  [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries the
   smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
   group drops took simpler contracts.
   [moq-transport time addressing](/quest/m2/ietf-time-addressing.md)
@@ -41,8 +41,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
-- **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md)
-  and [transport names](/quest/m2/transport-names.md).
+- **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md).
 - **Auth and crypto.** [Claims](/quest/m2/auth-claims.md). End-to-end encryption
   [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
@@ -50,15 +49,13 @@ removal, a rename, or a wire, catalog, or format change that is free until
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
-  [finish](/quest/m2/finish-sweep.md), and
-  [moq-json writes](/quest/m2/json-write-at.md).
+  and [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
-  [the WHEP pull's announcement](/quest/m2/whep-pull-announce.md), and
+  [a chained WHEP pull's shutdown](/quest/m2/whep-chain-shutdown.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
-- **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md).
 - **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).

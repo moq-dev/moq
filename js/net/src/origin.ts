@@ -1995,11 +1995,14 @@ export class Producer implements Table {
 			cached.front.close();
 		}
 		this.#state.materialized.clear();
+		// Every open request ends with the origin, pending or resolved, so an await never hangs.
+		const ended: RequestSlot[] = [];
 		this.#state.requests.update((requests) => {
 			for (const slot of requests.values()) {
 				slot.answer?.close();
 				slot.answer = undefined;
 				slot.route.set(undefined);
+				ended.push(slot);
 			}
 			return new Map();
 		});
@@ -2007,7 +2010,11 @@ export class Producer implements Table {
 			for (const slot of slots) {
 				this.#state.detach(path, slot);
 				slot.route.set(undefined);
+				ended.push(slot);
 			}
+		}
+		for (const slot of ended) {
+			for (const closed of slot.handles) if (closed.peek() === undefined) closed.set(abort ?? null);
 		}
 	}
 }
@@ -2045,6 +2052,15 @@ let requestHandoff: (request: Request) => Handoff | undefined;
 /**
  * An owned request for one publisher instance at a broadcast path; see {@link Consumer.request}.
  *
+ * Await {@link broadcast} for the broadcast, as Rust awaits `request(path)`; read {@link active} and
+ * {@link closed} to follow it reactively instead. The handle is not itself awaitable, so an
+ * `await` or an async return never takes the broadcast out from under the request that owns it.
+ *
+ * ```ts
+ * const request = origin.request(Path.from("room"));
+ * const broadcast = await request.broadcast();
+ * ```
+ *
  * @public
  */
 export class Requesting {
@@ -2067,6 +2083,7 @@ export class Requesting {
 
 	#dispose: Dispose;
 	#disposed = false;
+	#answer?: Promise<broadcast.Consumer>;
 
 	private constructor(
 		path: Path.Valid,
@@ -2084,12 +2101,47 @@ export class Requesting {
 		makeRequesting = (path, active, closed, dispose) => new Requesting(path, active, closed, dispose);
 	}
 
+	/**
+	 * Resolves with the broadcast once {@link active} holds one. Rejects with the error
+	 * {@link closed} carries if the request ends first, such as `Unroutable`, or with a
+	 * `StreamCode.Cancel` error if it closed cleanly: this handle or its origin was closed. The
+	 * answer is fixed by the first call, and every later call gets the same one. The request
+	 * still owns the broadcast, so close the request, not only the broadcast, when done.
+	 */
+	broadcast(): Promise<broadcast.Consumer> {
+		this.#answer ??= answer(this.active, this.closed);
+		return this.#answer;
+	}
+
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
 	close(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#dispose();
 	}
+}
+
+// The first of `active` holding a broadcast or `closed` settling, as a promise.
+function answer(
+	active: Getter<broadcast.Consumer | undefined>,
+	closed: GetPromise<Error | null>,
+): Promise<broadcast.Consumer> {
+	return new Promise((resolve, reject) => {
+		let done = false;
+		const stops: Dispose[] = [];
+		const check = () => {
+			if (done) return;
+			const ended = closed.peek();
+			const value = ended === undefined ? active.peek() : undefined;
+			if (ended === undefined && !value) return;
+			done = true;
+			for (const stop of stops) stop();
+			if (value) resolve(value);
+			else reject(ended ?? new StreamError(StreamCode.Cancel, { message: "request closed" }));
+		};
+		check();
+		if (!done) stops.push(active.subscribe(check), closed.subscribe(check));
+	});
 }
 
 /**
@@ -2236,7 +2288,7 @@ export class Consumer implements Reader {
 	 * session's discovery has synced without a route for it, and can use a session without
 	 * discovery instead. With no session attached, such as between reconnects, it waits. Once resolved it keeps
 	 * that instance, ending when the instance stops serving. Use {@link follow} to move on
-	 * to the next one.
+	 * to the next one. Await the handle for the broadcast, or the error ending it first.
 	 */
 	request(path: Path.Valid, options: RequestOptions = {}): Requesting {
 		return this.#resolve(path, options.instance, false);

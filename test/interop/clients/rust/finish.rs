@@ -78,15 +78,15 @@ async fn main() -> anyhow::Result<()> {
 	if args.role == "publish" {
 		let route = origin.route(&args.broadcast, moq_net::origin::RouteOptions::hidden())?;
 		let mut catalog = moq_mux::catalog::Producer::<()>::new(&mut route.broadcast().clone(), Default::default())?;
-		let mut media = moq_mux::import::TrackStream::video(
+		let mut stream = moq_mux::import::TrackStream::video(
 			route.broadcast().reserve_track("video")?,
 			catalog.reserve(),
 			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::Avc3, Vec::new()),
 		)?;
 		let mut data = Vec::new();
 		stdin.read_to_end(&mut data).await?;
-		media.decode(&data)?;
-		media.finish()?;
+		stream.decode(&data)?;
+		let media = stream.finish()?;
 		catalog.finish()?;
 		route.announce()?;
 		// Keep the finished broadcast up for the late readers, then take it offline.

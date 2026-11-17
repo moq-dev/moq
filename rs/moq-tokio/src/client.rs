@@ -490,7 +490,7 @@ impl Client {
 			)
 			.await?;
 			let session = connect_session(&moq, session).await?;
-			return Ok(Dialed::new(session, crate::Transport::Tcp));
+			return Ok(Dialed::new(session, crate::Transport::Tls));
 		}
 
 		// Unix domain socket (qmux, no TLS). Same-host only; the server can

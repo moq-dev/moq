@@ -473,8 +473,9 @@ export interface Lookup {
  * judged under the request's own budget, or a max age not known here (`judged` undefined), it is
  * refused to the readers waiting now, a verdict only on those no more tolerant, so a wider reader
  * asks again; under the publisher's max age it binds every reader, so the track records it as a
- * stale verdict under that age, which new terms or the drop set's expiry window forget. Any other
- * refusal answers only `[start, end)`, for now. Mirrors the Rust `Fill::reject_groups`.
+ * stale verdict under that age, which a new upstream subscription or the drop set's expiry window
+ * forgets. Any other refusal answers only `[start, end)`, for now. Mirrors the Rust
+ * `Fill::reject_groups`.
  * @internal
  */
 export let rejectGroups: (

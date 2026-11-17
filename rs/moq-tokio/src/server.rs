@@ -1273,7 +1273,7 @@ impl Incoming {
 			.zip(session.peer_certificates())
 			.map(|(tls, chain)| tls.peer(chain.to_vec()));
 		Self {
-			transport: Transport::Tcp,
+			transport: if tls.is_some() { Transport::Tls } else { Transport::Tcp },
 			url: None,
 			link: Link {
 				remote,

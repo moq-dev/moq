@@ -33,6 +33,9 @@ struct ConsumeCatalog {
 	// into `moq_catalog_section_*` instead of being dropped on parse.
 	catalog: moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>,
 
+	/// The media timestamp this snapshot takes effect at.
+	timestamp: moq_timestamp,
+
 	/// We need to store the codec information on the heap unfortunately.
 	audio_codec: Vec<String>,
 	video_codec: Vec<String>,
@@ -369,7 +372,8 @@ impl Consume {
 		self.closed_task.close(task, Error::NotFound)
 	}
 
-	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
+	/// Read a broadcast's catalog updates for a reader playing `delay` behind the live edge.
+	pub fn catalog(&mut self, broadcast: Id, delay: Duration, on_catalog: OnStatus) -> Result<Id, Error> {
 		let ConsumeBroadcast { broadcast, origin } =
 			self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
 
@@ -384,7 +388,8 @@ impl Consume {
 				driver
 					.watch(async move {
 						// The consumer subscribes itself at catalog priority.
-						let catalog = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?.into();
+						let track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
+						let catalog = hang::catalog::Consumer::new(track, delay);
 						Self::run_catalog(on_catalog, broadcast.clone(), origin, catalog, close).await
 					})
 					.await
@@ -396,14 +401,14 @@ impl Consume {
 		callback: OnStatus,
 		broadcast: moq_net::broadcast::Consumer,
 		origin: Option<crate::origin::Consumer>,
-		mut catalog: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
+		mut catalog: hang::catalog::Consumer<moq_mux::catalog::hang::Extra>,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
 			// `biased` so a pending close always wins over a ready update: a hot
 			// stream must not be able to starve the close signal, and we must not
 			// deliver another update once close has been requested.
-			let update = tokio::select! {
+			let moq_json::Timed { value: update, at } = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
 				next = catalog.next() => match next? {
@@ -452,6 +457,7 @@ impl Consume {
 				broadcast: broadcast.clone(),
 				origin: origin.clone(),
 				catalog: update,
+				timestamp: at.into(),
 				audio_codec,
 				video_codec,
 				audio_ref,
@@ -463,6 +469,11 @@ impl Consume {
 			let snapshot_id = State::lock().consume.catalog.insert(snapshot)?;
 			callback.call(Ok(snapshot_id));
 		}
+	}
+
+	/// The media timestamp a catalog snapshot takes effect at.
+	pub fn catalog_timestamp(&self, catalog: Id) -> Result<moq_timestamp, Error> {
+		Ok(self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?.timestamp)
 	}
 
 	pub fn video_config(&mut self, catalog: Id, index: usize, dst: &mut moq_video_config) -> Result<(), Error> {
@@ -1399,6 +1410,7 @@ mod supervision_tests {
 					driver: driver.clone(),
 				}),
 				catalog,
+				timestamp: moq_timestamp::default(),
 				audio_codec: Vec::new(),
 				video_codec: Vec::new(),
 				audio_ref: Vec::new(),
@@ -1435,6 +1447,7 @@ mod rendition_tests {
 				broadcast: broadcast.consume(),
 				origin: None,
 				catalog,
+				timestamp: moq_timestamp::default(),
 				audio_codec: Vec::new(),
 				video_codec: Vec::new(),
 				audio_ref: Vec::new(),
@@ -1583,6 +1596,7 @@ mod tests {
 						broadcast: broadcast.consume(),
 						origin: None,
 						catalog,
+						timestamp: moq_timestamp::default(),
 						audio_codec: Vec::new(),
 						video_codec: Vec::new(),
 						audio_ref: Vec::new(),

@@ -132,7 +132,8 @@ impl From<TrackInfo> for crate::track::Info {
 /// `ietf` extension, TRACK_PROPERTIES.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Framing {
-	/// The units of every frame Timestamp on the wire, or `None` when frames carry none.
+	/// The units of every frame Timestamp on the wire, or `None` when frames carry none or,
+	/// on lite-07, a scale-less track's bare number (see [`Self::stamped`]).
 	pub timescale: Option<Timescale>,
 	/// The draft the track's moq-transport publisher spoke, which serialized its objects'
 	/// properties, or `None` for a moq-lite one, which carries no moq-transport state.
@@ -154,6 +155,13 @@ impl Framing {
 			compressed: info.compressed(),
 			length_first: version.has_length_first(),
 		}
+	}
+
+	/// Whether every FRAME carries a timestamp: lite-05/06 always declare a timescale, and
+	/// lite-07, which leads with the length, stamps a scale-less track's frames with their
+	/// group's start.
+	pub fn stamped(&self) -> bool {
+		self.timescale.is_some() || self.length_first
 	}
 }
 
