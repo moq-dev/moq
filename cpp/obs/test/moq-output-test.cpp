@@ -218,10 +218,24 @@ long long obs_data_get_int(obs_data_t *settings, const char *)
 	return settings == reinterpret_cast<obs_data_t *>(MID_ENCODER) ? 4000 : 8000;
 }
 
-// The settings a retune builds carry only its rates, so the stub is those settings.
+// The settings a retune builds carry only its rates, so the stub is those settings. Start()
+// also builds a patch that caps the encoder, whose rate mode lands on the stub encoder.
 struct obs_data {
 	std::vector<std::pair<std::string, long long>> rates;
+	std::vector<std::pair<std::string, std::string>> strings;
 };
+
+bool obs_data_get_bool(obs_data_t *, const char *)
+{
+	return false;
+}
+
+void obs_data_set_bool(obs_data_t *, const char *, bool) {}
+
+void obs_data_set_string(obs_data_t *data, const char *key, const char *value)
+{
+	data->strings.emplace_back(key, value);
+}
 
 obs_data_t *obs_data_create()
 {
@@ -243,6 +257,10 @@ void obs_encoder_update(obs_encoder_t *encoder, obs_data_t *settings)
 	std::lock_guard<std::mutex> lock(g_updates_mutex);
 	for (const auto &[key, kbps] : settings->rates)
 		g_updates.emplace_back(encoder, key, kbps);
+	for (const auto &[key, value] : settings->strings) {
+		if (key == "rate_control")
+			g_rate_control = value;
+	}
 	delete settings;
 }
 
@@ -588,19 +606,21 @@ int main()
 	printf("retired stats never replace the accepted sample: ok\n");
 
 	// Publishes over a real session: connects, reports itself live, carries
-	// stats, and lands video and audio renditions in the relay's catalog. The catalog
-	// prices a video rendition at the hard peak its encoder holds: the bitrate under
-	// CBR, and the cap under x264's and NVENC's capped VBR. An encoder that only
-	// averages, or targets a quality, advertises none.
+	// stats, and lands video and audio renditions in the relay's catalog. The output
+	// owns the cap: whatever rate control the user chose, it leaves the encoder holding a
+	// hard peak (x264's and NVENC's capped VBR, CBR elsewhere) and the catalog prices the
+	// rendition at that peak.
 	struct HintCase {
 		const char *id;
 		const char *mode;
-		bool hint;
+		const char *held;
 	};
 	for (const auto &c :
-	     {HintCase{"obs_x264", "CBR", true}, HintCase{"obs_x264", "VBR", true}, HintCase{"obs_x264", "CRF", false},
-	      HintCase{"obs_nvenc_h264_tex", "CQVBR", true}, HintCase{"obs_nvenc_h264_tex", "VBR", true},
-	      HintCase{"obs_nvenc_h264_tex", "CQP", false}, HintCase{"obs_qsv11_v2", "VBR", false}}) {
+	     {HintCase{"obs_x264", "CBR", "CBR"}, HintCase{"obs_x264", "VBR", "VBR"},
+	      HintCase{"obs_x264", "CRF", "VBR"}, HintCase{"obs_x264", "ABR", "VBR"},
+	      HintCase{"obs_nvenc_h264_tex", "CQVBR", "CQVBR"}, HintCase{"obs_nvenc_h264_tex", "VBR", "VBR"},
+	      HintCase{"obs_nvenc_h264_tex", "CBR", "CBR"}, HintCase{"obs_nvenc_h264_tex", "CQP", "CQVBR"},
+	      HintCase{"obs_qsv11_v2", "VBR", "CBR"}, HintCase{"obs_qsv11_v2", "ICQ", "CBR"}}) {
 		TestRelay relay;
 		reset(relay.Url());
 		g_encoder_id = c.id;
@@ -608,6 +628,7 @@ int main()
 		{
 			MoQOutput o(nullptr, OUTPUT);
 			CHECK(o.Start());
+			CHECK(g_rate_control == c.held);
 			CHECK(WaitFor([&] { return o.IsLiveSession(); }));
 			CHECK(o.GetConnectTime() > 0);
 			CHECK(o.GetReconnectCount() == 0);
@@ -634,8 +655,8 @@ int main()
 				CHECK(catalog->audio.size() == 1);
 				for (const auto &[name, video] : catalog->video) {
 					CHECK(video.coded.has_value());
-					CHECK(video.bitrate.has_value() == c.hint);
-					CHECK(!c.hint || *video.bitrate == 8'000'000);
+					CHECK(video.bitrate.has_value());
+					CHECK(video.bitrate.value_or(0) == 8'000'000);
 				}
 			}
 
@@ -648,7 +669,7 @@ int main()
 		// The destructor stops too, which OBS ignores for an output already stopped.
 		CHECK(signalCount() == 2);
 	}
-	printf("publishes, and hints the peak its encoder holds: ok\n");
+	printf("publishes, and hints the cap it set on its encoder: ok\n");
 
 	// OBS reads the byte total as this stream's, so a stopped output that starts
 	// again counts from zero.
@@ -670,8 +691,9 @@ int main()
 	}
 	printf("a restart counts bytes from zero: ok\n");
 
-	// Video follows the grant only when the encoder retunes live and the bitrate
-	// drives it; every track reserves either way once the session connects.
+	// Video follows the grant when the encoder retunes live: the output made every
+	// rate control one the bitrate drives. Every track reserves either way once the
+	// session connects.
 	struct FollowCase {
 		const char *id;
 		const char *rate_control;
@@ -682,8 +704,8 @@ int main()
 			      FollowCase{"obs_x264", "vbr", OBS_ENCODER_CAP_DYN_BITRATE, true},
 			      FollowCase{"obs_nvenc_h264_tex", "CQVBR", OBS_ENCODER_CAP_DYN_BITRATE, true},
 			      FollowCase{"obs_qsv11_v2", "vbr", OBS_ENCODER_CAP_DYN_BITRATE, true},
-			      FollowCase{"obs_x264", "CQP", OBS_ENCODER_CAP_DYN_BITRATE, false},
-			      FollowCase{"obs_nvenc_h264_tex", "CQP", OBS_ENCODER_CAP_DYN_BITRATE, false},
+			      FollowCase{"obs_x264", "CQP", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"obs_nvenc_h264_tex", "CQP", OBS_ENCODER_CAP_DYN_BITRATE, true},
 			      FollowCase{"obs_x264", "CBR", 0, false}}) {
 		TestRelay relay;
 		reset(relay.Url());
@@ -710,7 +732,7 @@ int main()
 		}
 		o.Stop();
 	}
-	printf("video follows only a live-retunable, bitrate-driven encoder: ok\n");
+	printf("video follows only a live-retunable encoder: ok\n");
 
 	// Stopping hands the configured bitrate back to an encoder the grant lowered,
 	// so the next Start() reads the user's rate rather than the last grant.

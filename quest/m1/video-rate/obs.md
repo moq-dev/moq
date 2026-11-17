@@ -11,10 +11,16 @@ instead of the CBR they fall back to today.
 The epic's decisions apply: quality mode with a peak where honored, otherwise
 CBR.
 
-Done: `ApplyEncoderRate` in `cpp/obs/src/moq-encoder-rate.h` runs x264 as
-`VBR` (CRF under a VBV max rate) and NVENC as `CQVBR` with `max_bitrate`, and
-the output prices, advertises, and retunes that peak (NVENC under `max_bitrate`).
-Quick Sync (ICQ has no max rate) and AMF (QVBR sets no peak) stay CBR for good.
+Done: the MoQ output owns the cap on every video encoder it starts (maintainer
+decision on the PR). `EnforceCap` in `cpp/obs/src/moq-encoder-rate.h` writes it
+before OBS initializes the encoder, replaces any conflicting user rate option
+with a logged warning, and the catalog advertises exactly that cap: x264 keeps
+CBR and otherwise runs `VBR` (CRF under a VBV whose max rate and buffer are the
+bitrate, with `vbv-*`, `bitrate`, and `qp` stripped from `x264opts`), NVENC keeps
+CBR and VBR and otherwise runs `CQVBR` with `max_bitrate`, and every other
+encoder runs CBR at the cap. The output prices and retunes that peak (NVENC
+under `max_bitrate`). Quick Sync (ICQ has no max rate) and AMF (QVBR sets no
+peak) stay CBR for good.
 
 Remaining, each needing hardware to measure that the peak holds:
 
@@ -31,9 +37,9 @@ Remaining, each needing hardware to measure that the peak holds:
 Whatever measures as not holding stays CBR. Decided by the maintainer: "Use
 OBS Output settings" in Simple mode stays CBR, and every encoder keeps its own
 default quality level (x264 CRF 23, NVENC target quality 20) until the VMAF
-harness ([quest/m9/video-quality](/quest/m9/video-quality/README.md)) picks one. Extend `EncoderPeakKey`,
-`EncoderPeak`, and `ApplyEncoderRate` for the mode, and the retune and restore
-in `moq-output.cpp` for the setting a grant writes.
+harness ([quest/m9/video-quality](/quest/m9/video-quality/README.md)) picks one. Extend `EnforceCap` and
+`EncoderPeakKey` for the mode, and the retune and restore in `moq-output.cpp` for
+the setting a grant writes.
 
 Public API: none. Wire: none.
 

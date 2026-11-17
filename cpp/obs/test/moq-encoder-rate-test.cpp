@@ -5,10 +5,21 @@
 #include <cstdio>
 #include <map>
 #include <variant>
+#include <vector>
 
 struct obs_data {
 	std::map<std::string, std::variant<std::string, long long>> values;
 };
+
+bool obs_data_get_bool(obs_data_t *data, const char *key)
+{
+	auto entry = data->values.find(key);
+	return entry != data->values.end() && std::get<long long>(entry->second) != 0;
+}
+void obs_data_set_bool(obs_data_t *data, const char *key, bool value)
+{
+	data->values[key] = (long long)value;
+}
 
 const char *obs_data_get_string(obs_data_t *data, const char *key)
 {
@@ -42,15 +53,41 @@ int main()
 	assert(rate_control(x264) == "VBR" && obs_data_get_int(&x264, "bitrate") == 8000);
 	assert(EncoderPeak("obs_x264", &x264).kbps == 8000);
 
-	// x264opts that set a rate of their own replace the peak, so none is advertised;
-	// options that do not touch the rate leave it.
-	obs_data_set_string(&x264, "x264opts", "tune=film vbv-bufsize=4000 crf=20");
-	assert(EncoderPeak("obs_x264", &x264).kbps == 8000);
-	for (const char *options : {"vbv-maxrate=12000", "tune=film vbv_maxrate=0", "qp=20", "bitrate=4000"}) {
-		obs_data_set_string(&x264, "x264opts", options);
-		assert(!EncoderPeak("obs_x264", &x264).key);
+	// x264 runs the user's CBR or VBR at the cap, and anything else as VBR. x264opts and
+	// a buffer of its own cannot replace the cap: the options that set a rate are dropped
+	// and the rest stay.
+	struct Case {
+		const char *before;
+		const char *after;
+	};
+	for (const Case &c : {Case{"CBR", "CBR"}, Case{"cbr", "cbr"}, Case{"VBR", "VBR"}, Case{"CRF", "VBR"},
+			      Case{"ABR", "VBR"}, Case{"CQP", "VBR"}, Case{"", "VBR"}}) {
+		obs_data_t user, patch;
+		obs_data_set_string(&user, "rate_control", c.before);
+		obs_data_set_int(&user, "bitrate", 6000);
+		obs_data_set_int(&user, "buffer_size", 20000);
+		obs_data_set_bool(&user, "use_bufsize", true);
+		obs_data_set_string(&user, "x264opts", "tune=film vbv-bufsize=0 vbv_maxrate=0 qp=20 bitrate=1 crf=20");
+		assert(ConfiguredCapKbps("obs_x264", &user) == 6000);
+		const MoQCap cap = EnforceCap("obs_x264", &user, &patch, 6000);
+		assert(cap.changed);
+		const std::string after =
+			patch.values.count("rate_control") ? obs_data_get_string(&patch, "rate_control") : c.before;
+		assert(after == c.after);
+		// The bitrate is already the cap; the buffer and the options are not.
+		assert(!patch.values.count("bitrate"));
+		assert(!obs_data_get_bool(&patch, "use_bufsize"));
+		assert(std::string(obs_data_get_string(&patch, "x264opts")) == "tune=film crf=20");
+		// Four options and the buffer, plus the mode when it changed.
+		assert(cap.replaced.size() == 5 + (std::string(c.before) != c.after && *c.before ? 1 : 0));
 	}
-	obs_data_set_string(&x264, "x264opts", "");
+	// A compliant encoder is not touched.
+	obs_data_t clean, nothing;
+	obs_data_set_string(&clean, "rate_control", "VBR");
+	obs_data_set_int(&clean, "bitrate", 6000);
+	obs_data_set_string(&clean, "x264opts", "tune=film crf=20");
+	const MoQCap untouched = EnforceCap("obs_x264", &clean, &nothing, 6000);
+	assert(!untouched.changed && untouched.replaced.empty() && nothing.values.empty());
 
 	for (const char *id : {"obs_nvenc_h264_tex", "obs_nvenc_hevc_soft", "obs_nvenc_av1_tex"}) {
 		obs_data_t nvenc;
@@ -71,7 +108,51 @@ int main()
 		assert(std::string(peak.key) == "bitrate" && peak.kbps == 8000);
 	}
 
-	// What a user configured decides the peak, whatever the encoder.
+	// NVENC keeps CBR and VBR, and runs anything else as constant quality, under max_bitrate.
+	// Its own peak is the cap when it names one, and VBR's average stays under it.
+	obs_data_t vbr, vbr_patch;
+	obs_data_set_string(&vbr, "rate_control", "VBR");
+	obs_data_set_int(&vbr, "bitrate", 9000);
+	obs_data_set_int(&vbr, "max_bitrate", 6000);
+	assert(ConfiguredCapKbps("obs_nvenc_h264_tex", &vbr) == 6000);
+	const MoQCap lowered = EnforceCap("obs_nvenc_h264_tex", &vbr, &vbr_patch, 6000);
+	assert(lowered.changed && lowered.replaced.size() == 1);
+	assert(obs_data_get_int(&vbr_patch, "bitrate") == 6000 && !vbr_patch.values.count("max_bitrate"));
+	assert(!vbr_patch.values.count("rate_control"));
+	// An unset peak is the bitrate.
+	obs_data_set_int(&vbr, "max_bitrate", 0);
+	assert(ConfiguredCapKbps("obs_nvenc_h264_tex", &vbr) == 9000);
+	obs_data_t vbr_unset_patch;
+	EnforceCap("obs_nvenc_h264_tex", &vbr, &vbr_unset_patch, 9000);
+	assert(obs_data_get_int(&vbr_unset_patch, "max_bitrate") == 9000 && !vbr_unset_patch.values.count("bitrate"));
+	obs_data_t cbr, cbr_patch;
+	obs_data_set_string(&cbr, "rate_control", "CBR");
+	obs_data_set_int(&cbr, "bitrate", 5000);
+	obs_data_set_int(&cbr, "max_bitrate", 20000);
+	assert(ConfiguredCapKbps("obs_nvenc_h264_tex", &cbr) == 5000);
+	assert(!EnforceCap("obs_nvenc_h264_tex", &cbr, &cbr_patch, 5000).changed);
+	for (const char *mode : {"CQP", "lossless", ""}) {
+		obs_data_t user, patch;
+		obs_data_set_string(&user, "rate_control", mode);
+		obs_data_set_int(&user, "bitrate", 5000);
+		const MoQCap cap = EnforceCap("obs_nvenc_h264_tex", &user, &patch, 5000);
+		assert(cap.changed && std::string(obs_data_get_string(&patch, "rate_control")) == "CQVBR");
+		assert(obs_data_get_int(&patch, "max_bitrate") == 5000);
+	}
+
+	// An encoder with no quality mode that holds a peak runs CBR at the cap, whatever the user chose.
+	obs_data_t qsv, qsv_patch;
+	obs_data_set_string(&qsv, "rate_control", "ICQ");
+	obs_data_set_int(&qsv, "bitrate", 3000);
+	const MoQCap cbr_cap = EnforceCap("obs_qsv11_v2", &qsv, &qsv_patch, 3000);
+	assert(cbr_cap.replaced.size() == 1 && std::string(obs_data_get_string(&qsv_patch, "rate_control")) == "CBR");
+	assert(ConfiguredCapKbps("obs_qsv11_v2", &qsv) == 3000);
+
+	// A settings with no bitrate names no cap.
+	obs_data_t bare;
+	assert(ConfiguredCapKbps("obs_x264", &bare) == 0);
+
+	// What the settings hold decides the peak, whatever the encoder.
 	assert(std::string(EncoderPeakKey("obs_x264", "cbr")) == "bitrate");
 	assert(std::string(EncoderPeakKey("obs_nvenc_h264_tex", "vbr")) == "max_bitrate");
 	assert(std::string(EncoderPeakKey("obs_nvenc_h264_tex", "CBR")) == "bitrate");
@@ -81,8 +162,6 @@ int main()
 	assert(!EncoderPeakKey("obs_qsv11_v2", "VBR"));
 
 	// NVENC's plain VBR averages beside its peak; CQVBR and CBR have no average to keep.
-	obs_data_t vbr;
-	obs_data_set_string(&vbr, "rate_control", "VBR");
 	obs_data_set_int(&vbr, "bitrate", 6000);
 	obs_data_set_int(&vbr, "max_bitrate", 8000);
 	const MoQPeak averaged = EncoderPeak("obs_nvenc_h264_tex", &vbr);
