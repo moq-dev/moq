@@ -972,9 +972,9 @@ impl Connection {
 		// Every session of one connection reaches the same peer, so they share one hop: a
 		// route one learned is then never another's to announce, such as a successor's
 		// grant check judging what its draining predecessor learned.
-		let client = match client.peer_hop {
+		let client = match client.peer_node {
 			Some(_) => client,
-			None => client.with_peer_hop(random_hop()),
+			None => client.with_peer_node(random_hop()),
 		};
 
 		let closed: CloseGuard = Default::default();
@@ -3220,7 +3220,7 @@ mod tests {
 						let mut request = moq_net::Server::new()
 							.with_versions(versions.clone())
 							.with_subscriber(server_origin)
-							.accept_request(now, server)
+							.handshake(now, server)
 							.await
 							.unwrap();
 						// The connection credential grants nothing; only the configured token

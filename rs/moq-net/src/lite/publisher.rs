@@ -45,8 +45,8 @@ pub(super) struct PublisherConfig {
 	/// Receive-side GOAWAY signal: recorded when the peer's Goaway stream arrives.
 	pub goaway: crate::goaway::Protocol,
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_hop`.
-	pub peer_hop: Option<Hop>,
+	/// declare one itself. See `Client::with_peer_node`.
+	pub peer_node: Option<Hop>,
 	/// Our tokens' grants, which bound what we announce and serve, and the app's
 	/// claim on answering the peer's tokens.
 	pub auth: crate::auth::Link,
@@ -72,10 +72,10 @@ struct Shared {
 	// the same split-horizon rule as the announces we send them.
 	peer_setup: super::PeerSetup,
 	// The identity assigned to the peer (a fresh per-session id, or one the caller
-	// pinned with `with_peer_hop`), standing in wherever the
+	// pinned with `with_peer_node`), standing in wherever the
 	// peer declines to declare one. Backs both the announce filter and the serving
 	// origin, so a peer that names itself nowhere on the wire is still split-horizoned.
-	peer_hop: Option<Hop>,
+	peer_node: Option<Hop>,
 	// The excluded origin handle, resolved once: the peer sends exactly one
 	// SETUP, so its declared id never changes for the session.
 	serving: std::sync::OnceLock<origin::Consumer>,
@@ -226,7 +226,7 @@ impl Shared {
 			true => ready!(self.peer_setup.poll_hop(waiter)),
 			false => None,
 		};
-		let origin = match declared.or(self.peer_hop) {
+		let origin = match declared.or(self.peer_node) {
 			Some(peer) => self.origin.clone().excluding(peer),
 			None => self.origin.clone(),
 		};
@@ -255,7 +255,7 @@ impl Publisher {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
 		// across every session, required for cross-session loop detection.
-		let self_origin = crate::Hop::from(config.origin.hop());
+		let self_origin = crate::Hop::from(config.origin.node());
 		let accept = config.session.clone();
 		let enforce = (config.client && config.version.has_auth()).then(Enforce::default);
 		Self {
@@ -268,7 +268,7 @@ impl Publisher {
 				origin: config.origin.serving(),
 				self_origin,
 				peer_setup: config.peer_setup,
-				peer_hop: config.peer_hop,
+				peer_node: config.peer_node,
 				serving: std::sync::OnceLock::new(),
 				priority: Default::default(),
 				version: config.version,
@@ -986,7 +986,7 @@ impl AnnounceServe {
 		// announce stream; lite-06+ reads the session-wide SETUP Hop
 		// parameter, the same identity the subscribe path excludes. A peer that
 		// declares nothing falls back to the identity the session assigned it.
-		let assigned: Hop = self.shared.peer_hop.unwrap_or(Hop::UNKNOWN);
+		let assigned: Hop = self.shared.peer_node.unwrap_or(Hop::UNKNOWN);
 		let exclude_hop: Option<Hop> = match self.shared.version.has_exclude_hop() {
 			true => Some(match interest.exclude_hop {
 				Hop::UNKNOWN => assigned,
@@ -4157,7 +4157,7 @@ mod announce_test {
 		};
 		let _task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = crate::Hop::from(consumer.hop());
+			let self_origin = crate::Hop::from(consumer.node());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
 		settle().await;
@@ -4190,7 +4190,7 @@ mod announce_test {
 		};
 		let task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = crate::Hop::from(consumer.hop());
+			let self_origin = crate::Hop::from(consumer.node());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, version, auth).await
 		});
 		settle().await;
@@ -4360,7 +4360,7 @@ mod announce_test {
 		};
 		let task = kio::clock::sim::spawn(async move {
 			let mut announced = consumer.routes();
-			let self_origin = crate::Hop::from(consumer.hop());
+			let self_origin = crate::Hop::from(consumer.node());
 			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
 		});
 		settle().await;
@@ -9394,7 +9394,7 @@ mod serve_group_test {
 			publisher: &origin::Producer,
 			subscriber: &origin::Producer,
 		) -> (crate::Session, crate::Session) {
-			let version = crate::Version::Lite(version);
+			let version = crate::Version::lite(version);
 			let config = crate::transport::memory::Config {
 				protocol: Some(version.alpn().into()),
 				..Default::default()
@@ -10329,7 +10329,7 @@ mod tests {
 			version: Version::Lite06,
 			peer_setup,
 			goaway,
-			peer_hop: Some(assigned),
+			peer_node: Some(assigned),
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -10352,7 +10352,7 @@ mod tests {
 	/// Lite01/02 send the initial active set as ANNOUNCE_INIT. It must apply the
 	/// same per-peer route selection as the live loop: a broadcast whose only
 	/// route flows through the excluded hop (here the peer's assigned identity,
-	/// `Client::with_peer_hop`) is filtered from the initial set too.
+	/// `Client::with_peer_node`) is filtered from the initial set too.
 	#[kio::test]
 	async fn announce_init_applies_route_selection() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -10536,7 +10536,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -10573,7 +10573,7 @@ mod tests {
 			version,
 			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -10907,7 +10907,7 @@ mod tests {
 			version,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -11041,7 +11041,7 @@ mod tests {
 				version,
 				peer_setup,
 				goaway,
-				peer_hop: None,
+				peer_node: None,
 				subscriptions: Default::default(),
 				auth: crate::auth::Link::new(false),
 				peer_grant: Default::default(),
@@ -11109,7 +11109,7 @@ mod tests {
 			version,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			subscriptions: Default::default(),
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
@@ -11162,7 +11162,7 @@ mod tests {
 			version,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			subscriptions: Default::default(),
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
@@ -11392,7 +11392,7 @@ mod tests {
 						version,
 						peer_setup,
 						goaway,
-						peer_hop: None,
+						peer_node: None,
 						subscriptions: Default::default(),
 						auth: crate::auth::Link::new(false),
 						peer_grant: Default::default(),
@@ -11541,7 +11541,7 @@ mod tests {
 						version,
 						peer_setup,
 						goaway,
-						peer_hop: None,
+						peer_node: None,
 						auth: crate::auth::Link::new(false),
 						peer_grant: Default::default(),
 						client: false,
@@ -11674,7 +11674,7 @@ mod tests {
 			version,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -11806,7 +11806,7 @@ mod tests {
 			version,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			subscriptions: Default::default(),
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
@@ -12061,7 +12061,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -12133,7 +12133,7 @@ mod tests {
 			version: VERSION,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -12210,7 +12210,7 @@ mod tests {
 			version: VERSION,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -12672,7 +12672,7 @@ mod tests {
 			version: Version::Lite07,
 			peer_setup,
 			goaway,
-			peer_hop: None,
+			peer_node: None,
 			auth: crate::auth::Link::new(false),
 			peer_grant: Default::default(),
 			client: false,

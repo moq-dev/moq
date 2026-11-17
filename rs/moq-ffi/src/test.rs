@@ -8365,7 +8365,7 @@ async fn request_accept_inherits_overrides_and_captures_origins() {
 		let fresh = MoqOriginProducer::new(MoqOriginConfig::default());
 		let publish = override_publish.then(|| fresh.clone());
 		let consume = override_consume.then(|| fresh.clone());
-		let expected_publish = publish.as_ref().unwrap_or(&default_publish).inner().hop();
+		let expected_publish = publish.as_ref().unwrap_or(&default_publish).inner().node();
 		let expected_consume = consume.as_ref().unwrap_or(&default_consume).consume();
 		let captured = Arc::downgrade(&fresh);
 		let server = MoqServer::new(MoqServerConfig {
@@ -8416,7 +8416,7 @@ async fn request_accept_inherits_overrides_and_captures_origins() {
 		kio::clock::timeout(TIMEOUT, hold).await.unwrap().unwrap().unwrap();
 		let session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap().unwrap();
 		let client_session = kio::clock::timeout(TIMEOUT, connect).await.unwrap().unwrap().unwrap();
-		assert_eq!(session.publish().inner().hop(), expected_publish);
+		assert_eq!(session.publish().inner().node(), expected_publish);
 
 		// Incoming broadcasts reach the selected consume origin, independently
 		// of which publish side was selected.

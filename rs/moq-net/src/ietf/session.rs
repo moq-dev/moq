@@ -40,9 +40,9 @@ pub struct Config {
 	pub subscribe: Option<origin::Producer>,
 
 	/// The origin (hop) id to assign the peer when it declares none itself. See
-	/// `Client::with_peer_hop`; a peer that negotiates the MoQ Cluster extension
+	/// `Client::with_peer_node`; a peer that negotiates the MoQ Cluster extension
 	/// declares its own, which wins.
-	pub peer_hop: Option<Hop>,
+	pub peer_node: Option<Hop>,
 
 	/// What crossing this link costs. Declared in our SETUP (see
 	/// [`cluster::RELAY_COST`]) for the peer to charge, and charged locally on what the
@@ -165,7 +165,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 		client,
 		publish,
 		subscribe,
-		peer_hop,
+		peer_node,
 		cost,
 		version,
 		path,
@@ -219,7 +219,7 @@ pub fn start(config: Config) -> Result<(Driver, crate::goaway::Handle), Error> {
 		client,
 		publish,
 		subscribe,
-		peer_hop,
+		peer_node,
 		cost,
 		version,
 		setup: SetupParams {
@@ -261,7 +261,7 @@ struct Launch {
 	client: bool,
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
-	peer_hop: Option<Hop>,
+	peer_node: Option<Hop>,
 	cost: Option<u64>,
 	version: Version,
 	setup: SetupParams,
@@ -286,7 +286,7 @@ impl Launch {
 			client,
 			publish,
 			subscribe,
-			peer_hop,
+			peer_node,
 			cost,
 			version,
 			setup,
@@ -343,7 +343,7 @@ impl Launch {
 			session.clone(),
 			publish,
 			control.clone(),
-			peer_hop,
+			peer_node,
 			peer_setup.clone(),
 			version,
 		)
@@ -363,7 +363,7 @@ impl Launch {
 			session.clone(),
 			subscribe,
 			control.clone(),
-			peer_hop,
+			peer_node,
 			peer_setup.clone(),
 			self_origin,
 			cost,
@@ -620,8 +620,8 @@ pub struct PeerSetup {
 /// has no content to route, so a throwaway id is all it can offer.
 fn self_origin(publish: Option<&origin::Consumer>, subscribe: Option<&origin::Producer>) -> Hop {
 	publish
-		.map(|origin| origin.hop())
-		.or_else(|| subscribe.map(|origin| origin.hop()))
+		.map(|origin| origin.node())
+		.or_else(|| subscribe.map(|origin| origin.node()))
 		.map_or_else(Hop::random, Hop::from)
 }
 
@@ -676,7 +676,7 @@ impl SetupAccept {
 				}
 				SetupStep::Accept => {
 					let recv = ready!(session.poll_accept_uni(waiter)).map_err(Error::from_transport)?;
-					self.step = SetupStep::Peek(Reader::new(recv, crate::Version::Ietf(self.version)));
+					self.step = SetupStep::Peek(Reader::new(recv, crate::Version::ietf(self.version)));
 				}
 				SetupStep::Peek(reader) => {
 					let kind = match ready!(reader.poll_varint_peek(waiter)) {
@@ -893,7 +893,7 @@ impl SendSetup {
 						unreachable!("matched above");
 					};
 					let mut writer: Writer<SendStream, crate::Version> =
-						Writer::new(send, crate::Version::Ietf(self.version)).with_stats(&self.stats);
+						Writer::new(send, crate::Version::ietf(self.version)).with_stats(&self.stats);
 					let parameters = self.parameters(params)?;
 					writer
 						.buffer(&setup::Setup { parameters })
@@ -1069,7 +1069,7 @@ impl Unis {
 			let reader = match self.early.pop_front() {
 				Some(reader) => reader,
 				None => match self.session.poll_accept_uni(waiter) {
-					Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::Ietf(self.uni.version)),
+					Poll::Ready(Ok(recv)) => Reader::new(recv, crate::Version::ietf(self.uni.version)),
 					Poll::Ready(Err(err)) => {
 						self.ended = Some(Error::from_transport(err));
 						break;
@@ -1819,7 +1819,7 @@ mod tests {
 				client: true,
 				publish: None,
 				subscribe: Some(origin),
-				peer_hop: None,
+				peer_node: None,
 				cost: None,
 				version,
 				path: None,
@@ -1929,7 +1929,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: VERSION,
 			path: None,
@@ -1995,7 +1995,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: Some(scoped),
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: Version::Draft18,
 			path: None,
@@ -2089,7 +2089,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: Some(subscribe),
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version,
 			path: None,
@@ -2248,7 +2248,7 @@ mod tests {
 			client: true,
 			publish: Some(origin.consume()),
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: Version::Draft18,
 			path: None,
@@ -2343,7 +2343,7 @@ mod tests {
 			client: true,
 			publish: Some(origin.consume()),
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: Version::Draft18,
 			path: None,
@@ -2408,7 +2408,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: VERSION,
 			path: None,
@@ -2430,7 +2430,7 @@ mod tests {
 			.expect_err("the session ended instead of parking after SETUP");
 
 		let writes = log.writes.lock().unwrap().clone();
-		let (setup, _) = setup::Setup::decode_slice(&writes, crate::Version::Ietf(VERSION)).expect("our SETUP");
+		let (setup, _) = setup::Setup::decode_slice(&writes, crate::Version::ietf(VERSION)).expect("our SETUP");
 		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, VERSION).expect("its options");
 		solicit::from_setup(&params, VERSION).unwrap() == Some(true)
 	}
@@ -2491,7 +2491,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: VERSION,
 			path: None,
@@ -2538,7 +2538,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version,
 			path: None,
@@ -2908,7 +2908,7 @@ mod tests {
 			client: true,
 			publish,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: Version::Draft18,
 			path: None,
@@ -2974,7 +2974,7 @@ mod tests {
 		}
 		.encode(
 			&mut crate::coding::Encoder::new(&mut setup, VERSION.into()),
-			crate::Version::Ietf(VERSION),
+			crate::Version::ietf(VERSION),
 		)
 		.unwrap();
 
@@ -3036,7 +3036,7 @@ mod tests {
 					client: false,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					cost: None,
 					version,
 					path: None,
@@ -3105,7 +3105,7 @@ mod tests {
 					client: false,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					cost: None,
 					version,
 					path: None,
@@ -3192,7 +3192,7 @@ mod tests {
 					client: false,
 					publish: Some(origin.consume()),
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					cost: None,
 					version,
 					path: None,
@@ -3240,7 +3240,7 @@ mod tests {
 		}
 		.encode(
 			&mut crate::coding::Encoder::new(&mut buf, version.into()),
-			crate::Version::Ietf(version),
+			crate::Version::ietf(version),
 		)
 		.unwrap();
 		buf.extend_from_slice(after);
@@ -3433,7 +3433,7 @@ mod tests {
 			client: true,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version: VERSION,
 			path: None,
@@ -3542,7 +3542,7 @@ mod tests {
 			client,
 			publish: Some(origin.consume()),
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			cost: None,
 			version,
 			path: None,

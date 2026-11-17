@@ -433,7 +433,7 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 
 	// A local preference keeps `B` on standby even on versions that carry no
 	// cost, where equal-length routes of different instances rank by a hash.
-	let standby = relay.clone().with_preference(origin::Preference::new(-1));
+	let standby = relay.clone().with_priority(origin::Priority::new(-1));
 	let _b_to_r = link(version, &relay_b, &standby).await;
 	settle().await;
 
