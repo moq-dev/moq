@@ -3,8 +3,8 @@ import { Effect, type Getter, Signal } from "@moq/signals";
 import { Peak, ringHold, ringSamples } from "./latency";
 import type { Clock, Data, End, Init, Latency, Playing, Reading, Received, Reset, State, Truncate } from "./render";
 
-// The stretch's 30 ms processing window, in microseconds.
-const WINDOW = 30_000;
+// The stretch's 30 ms processing window, in microseconds. @internal
+export const WINDOW = 30_000;
 
 // How far the clock's offset from the context's time may fall per state report: far past any drift
 // between the two clocks, and well short of the render callback a reading can land within.
