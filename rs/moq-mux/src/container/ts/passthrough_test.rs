@@ -75,7 +75,7 @@ fn config() -> crate::catalog::Config<Ext> {
 }
 
 /// Import `data` in chunks of `chunk` bytes and read back every object.
-async fn import(data: &[u8], chunk: usize, pcr_pid: Option<u16>) -> anyhow::Result<Imported> {
+async fn import(data: &[u8], chunk: usize, pcr_pid: Option<u16>) -> crate::Result<Imported> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config())?;
 	import_onto(broadcast, catalog, data, chunk, pcr_pid).await
@@ -88,7 +88,7 @@ async fn import_onto(
 	data: &[u8],
 	chunk: usize,
 	pcr_pid: Option<u16>,
-) -> anyhow::Result<Imported> {
+) -> crate::Result<Imported> {
 	let consumer = broadcast.consume();
 	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve())?;
 	if let Some(pid) = pcr_pid {
@@ -110,7 +110,10 @@ async fn import_onto(
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
 	let mut starts = Vec::new();
-	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group()).await?? {
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
+		.await
+		.expect("the track stalled")?
+	{
 		starts.push(group.start);
 		while let Some(frame) = group.read_frame().await? {
 			if frame.payload.is_empty() {
@@ -643,7 +646,7 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	let clock = catalog.clock();
-	let fixed = catalog.snapshot().media.clock;
+	let fixed = catalog.snapshot().sync.clock;
 	tokio::time::advance(Duration::from_secs(5)).await;
 	let before = clock.now().as_micros().unwrap() as u64;
 	let shifted = import_onto(broadcast, catalog.clone(), &data, data.len(), None)
@@ -651,11 +654,7 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 		.unwrap();
 	let after = clock.now().as_micros().unwrap() as u64;
 
-	assert_eq!(
-		catalog.snapshot().media.clock,
-		fixed,
-		"the import never moves the clock"
-	);
+	assert_eq!(catalog.snapshot().sync.clock, fixed, "the import never moves the clock");
 	let first = shifted.objects[0].micros;
 	assert!(
 		(before..=after).contains(&first),
@@ -697,9 +696,8 @@ async fn a_flagged_step_back_is_a_restart() {
 		Ok(_) => panic!("a restart was carried on one timeline"),
 		Err(err) => err,
 	};
-	let restart = err.downcast_ref::<crate::Error>();
 	assert!(
-		matches!(restart, Some(crate::Error::PcrRestart { pid: 0x100, to, .. }) if *to == 2_000 * MS),
+		matches!(&err, crate::Error::PcrRestart { pid: 0x100, to, .. } if *to == 2_000 * MS),
 		"{err:?}"
 	);
 }
@@ -731,9 +729,8 @@ async fn an_unflagged_rewind_is_refused() {
 		Ok(_) => panic!("a rewind was accepted"),
 		Err(err) => err,
 	};
-	let rewind = err.downcast_ref::<crate::Error>();
 	assert!(
-		matches!(rewind, Some(crate::Error::PcrRewind { pid: 0x100, to, .. }) if *to == 9_000 * MS),
+		matches!(&err, crate::Error::PcrRewind { pid: 0x100, to, .. } if *to == 9_000 * MS),
 		"{err:?}"
 	);
 }
@@ -813,13 +810,7 @@ async fn a_clock_that_stops_is_refused_once_a_group_would_overflow() {
 		Ok(_) => panic!("an untimed run was accepted"),
 		Err(err) => err,
 	};
-	assert!(
-		matches!(
-			err.downcast_ref::<crate::Error>(),
-			Some(crate::Error::PcrGap { pid: 0x100, .. })
-		),
-		"{err:?}"
-	);
+	assert!(matches!(err, crate::Error::PcrGap { pid: 0x100, .. }), "{err:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -856,10 +847,7 @@ async fn a_192_or_204_byte_source_is_refused() {
 			Ok(_) => panic!("{size}-byte packets were accepted"),
 			Err(err) => err,
 		};
-		assert!(
-			matches!(err.downcast_ref::<crate::Error>(), Some(crate::Error::TsPacketSize(got)) if *got == size),
-			"{err:?}"
-		);
+		assert!(matches!(err, crate::Error::TsPacketSize(got) if got == size), "{err:?}");
 	}
 }
 

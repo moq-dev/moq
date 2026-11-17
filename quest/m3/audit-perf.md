@@ -36,8 +36,11 @@ bun bench/browser/micro.ts --bench frames --out <scratch>/frames.json base=<rele
 ```
 
 `<release>` is an export of `origin/release` with its own
-`bun install --frozen-lockfile`. Re-run every slower case in alternating
-rounds and count instructions for any that holds. `main` carries features
+`bun install --frozen-lockfile`. The relay comparison reports relay RSS
+(`rss_bytes`) beside CPU, and the report gives both per workload; memory that
+grows with connections shows only in `chat`. Re-run every slower or larger case in alternating
+rounds and count instructions for any that holds, or take a heap profile
+(`just bench-profile heap chat 1 tokio-workers origin/release`) for memory. `main` carries features
 `release` lacks, so a flat per-operation cost usually pays for one, while a
 cost that grows with `main`'s own sweep is accidental. Fix accidental cost in
 this run, and record each accepted cost with the feature and PR it pays for.

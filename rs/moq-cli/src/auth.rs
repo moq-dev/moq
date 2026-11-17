@@ -482,7 +482,7 @@ struct MtlsRules {
 		setting = "mtls.link"
 	)]
 	#[serde(skip_serializing_if = "Option::is_none")]
-	link: Option<moq_auth::serve::Link>,
+	link: Option<moq_auth::Link>,
 
 	/// Rules for particular certificates, keyed by the SHA-256 of a leaf or of a
 	/// certificate it was issued under.
@@ -635,34 +635,6 @@ impl Serve {
 			anyhow::bail!("--key, --key-dir, and --key-set conflict; pick one");
 		}
 
-		// 0.14 read `anon` as the prefix `anon/`, and a pattern reads it as exactly the
-		// broadcast `anon`, so either silent reading would mislead someone upgrading.
-		let mut flags = vec![
-			(
-				"--public-publish".to_string(),
-				self.public.publish.iter().collect::<Vec<_>>(),
-			),
-			("--public-subscribe".to_string(), self.public.subscribe.iter().collect()),
-			("--mtls-publish".to_string(), mtls.publish.iter().collect()),
-			("--mtls-subscribe".to_string(), mtls.subscribe.iter().collect()),
-		];
-		for (hash, rule) in &mtls.certificates {
-			for (direction, patterns) in [("publish", &rule.publish), ("subscribe", &rule.subscribe)] {
-				let patterns = patterns.iter().flat_map(|patterns| patterns.iter()).collect();
-				flags.push((format!("mtls.certificates.{hash}.{direction}"), patterns));
-			}
-		}
-		for (flag, patterns) in flags {
-			for pattern in patterns.into_iter().filter(|pattern| pattern.is_literal()) {
-				// A literal at the maximum depth is already its own subtree.
-				let subtree = Pattern::subtree(pattern.as_str())?;
-				if subtree != *pattern {
-					anyhow::bail!(
-						"{flag} `{pattern}` has no wildcard, so it names exactly one broadcast; write `{subtree}` for the subtree"
-					);
-				}
-			}
-		}
 		let rules = |publish: &[Pattern], subscribe: &[Pattern]| {
 			Permissions::new(
 				publish.iter().cloned().collect::<moq_auth::Patterns>(),
@@ -1087,7 +1059,7 @@ mod tests {
 		);
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Upstream));
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Upstream));
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -1157,9 +1129,8 @@ subscribe = ["**"]
 link = "peer"
 
 [mtls.certificates.{leaf}]
-publish = ["alice/**"]
+publish = {{ path = ["alice/**"], rate = 1000000 }}
 link = "none"
-publish_rate = 1000000
 "#
 			),
 		)
@@ -1176,12 +1147,13 @@ publish_rate = 1000000
 		assert_eq!(policy.tier.as_deref(), Some("from-flag"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.mtls.subscribe, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Peer));
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Peer));
 		let rule = &policy.certificates[&leaf.parse().unwrap()];
-		assert_eq!(rule.publish, Some(["alice/**".parse().unwrap()].into_iter().collect()));
+		let publish = rule.publish.as_ref().expect("the rule names publish");
+		assert_eq!(publish.path, ["alice/**".parse().unwrap()].into_iter().collect());
+		assert_eq!(publish.rate, moq_auth::Rate::from_bps(1_000_000).ok());
 		assert_eq!(rule.subscribe, None);
 		assert_eq!(rule.link, Some(moq_auth::serve::RuleLink::None));
-		assert_eq!(rule.publish_rate, moq_auth::Rate::from_bps(1_000_000).ok());
 
 		// A flag replaces the file's list rather than adding to it.
 		let (serve, _) = merged(&["moq", "auth", "serve", path, "--mtls-subscribe", "room/**"]).unwrap();
@@ -1207,11 +1179,8 @@ publish_rate = 1000000
 		let err = serve.policy().unwrap_err().to_string();
 		assert!(err.contains("conflict"), "{err}");
 		let (serve, _) = merged(&["moq", "auth", "serve", path]).unwrap();
-		let err = serve.policy().unwrap_err().to_string();
-		assert!(
-			err.contains(&format!("mtls.certificates.{leaf}.publish `alice`")),
-			"{err}"
-		);
+		// The literal `alice` names one broadcast, so the rule is valid.
+		serve.policy().unwrap();
 	}
 
 	/// A file edit narrows or revokes at the next re-check, and an edit that does not
@@ -1236,7 +1205,7 @@ publish_rate = 1000000
 			expires: None,
 			issuer: "CN=affiliates".into(),
 		});
-		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish;
+		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish.path;
 		assert_eq!(
 			publish(server.answer(&session).await.unwrap()),
 			["**".parse().unwrap()].into_iter().collect()
@@ -1263,40 +1232,23 @@ publish_rate = 1000000
 		assert!(server.answer(&session).await.is_err(), "deleting the rule revokes it");
 	}
 
-	/// 0.14 read `anon` as a prefix and a pattern reads it as one broadcast, so a
-	/// wildcard-free rule refuses to start rather than pick silently.
+	/// A rule without a wildcard names exactly one broadcast.
 	#[test]
-	fn serve_refuses_a_rule_without_a_wildcard() {
-		for (flag, rule, hint) in [
-			("--public-publish", "anon", "anon/**"),
-			("--public-subscribe", "event/cam1.hang", "event/cam1.hang/**"),
-			("--mtls-publish", "", "**"),
-			("--mtls-subscribe", "origin", "origin/**"),
+	fn serve_accepts_a_rule_without_a_wildcard() {
+		for (flag, rule) in [
+			("--public-publish", "anon"),
+			("--public-subscribe", "event/cam1.hang"),
+			("--mtls-publish", ""),
+			("--mtls-subscribe", "origin"),
 		] {
-			let err = serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap_err();
-			let err = err.to_string();
-			assert!(err.contains(flag) && err.contains(&format!("`{hint}`")), "{err}");
+			serve(&["moq", "auth", "serve", flag, rule]).policy().unwrap();
 		}
-		assert!(
-			serve(&[
-				"moq",
-				"auth",
-				"serve",
-				"--public-subscribe",
-				"*/chat",
-				"--mtls-publish",
-				"origin/*"
-			])
+		let policy = serve(&["moq", "auth", "serve", "--public-publish", "anon"])
 			.policy()
-			.is_ok()
-		);
-
-		// Nothing sits beneath a literal at the maximum depth, so it is its own subtree.
-		let deepest = vec!["a"; Pattern::MAX_SEGMENTS].join("/");
-		assert!(
-			serve(&["moq", "auth", "serve", "--public-subscribe", &deepest])
-				.policy()
-				.is_ok()
+			.unwrap();
+		assert_eq!(
+			policy.public.publish,
+			["anon".parse::<Pattern>().unwrap()].into_iter().collect()
 		);
 	}
 

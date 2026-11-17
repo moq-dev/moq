@@ -158,15 +158,14 @@ pub struct CaptureArgs {
 	#[usage(long = "no-audio", hide = true)]
 	no_audio: bool,
 
-	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
-	/// first that encodes, decodes, and scales.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	/// The render node the encoder opens, such as `/dev/dri/renderD129`: VA-API
+	/// opens it, and NVENC the NVIDIA GPU behind it. Defaults to the first that
+	/// encodes, decodes, and scales. Linux only.
+	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath, conflicts = "--v4l2-encoder")]
 	pub vaapi_device: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
-	/// that encodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that encodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_encoder: Option<std::path::PathBuf>,
 }
@@ -294,11 +293,12 @@ impl FinishedDecoder {
 }
 
 /// Point a multi-program refusal at the flag that resolves it.
-fn suggest_program(err: anyhow::Error) -> anyhow::Error {
-	if err.is::<ts::MultipleProgramsError>() {
-		err.context("choose one with `--program <n>`, or publish each with `--program all`")
-	} else {
-		err
+fn suggest_program(err: ts::Error) -> anyhow::Error {
+	let multiplex = matches!(err, ts::Error::MultiplePrograms { .. });
+	let err = anyhow::Error::from(err);
+	match multiplex {
+		true => err.context("choose one with `--program <n>`, or publish each with `--program all`"),
+		false => err,
 	}
 }
 
@@ -1152,7 +1152,10 @@ impl CaptureArgs {
 			.map(|fps| moq_video::FrameRate::new(fps, 1))
 			.transpose()
 			.map_err(anyhow::Error::from)?;
-		config.cursor = !self.no_cursor;
+		config.cursor = match self.no_cursor {
+			true => moq_video::capture::Cursor::Hidden,
+			false => moq_video::capture::Cursor::Drawn,
+		};
 		Ok(config)
 	}
 
@@ -1170,14 +1173,7 @@ impl CaptureArgs {
 		};
 		options.bandwidth = bandwidth;
 		options.on_demand = self.video == Mode::Demand;
-		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		{
-			options.vaapi = self.vaapi_device.clone();
-		}
-		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		{
-			options.v4l2 = self.v4l2_encoder.clone();
-		}
+		options.device = crate::device(&self.vaapi_device, &self.v4l2_encoder);
 		Ok(options)
 	}
 
@@ -1662,7 +1658,8 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert!(catalog.video.renditions.is_empty() && catalog.audio.renditions.is_empty());
 		let passthrough = catalog.ext.mpegts.passthrough.expect("the passthrough track");
 		assert!(passthrough.random_access);
@@ -1797,7 +1794,8 @@ pub(crate) mod tests {
 				.await
 				.unwrap()
 				.unwrap()
-				.expect("a catalog");
+				.expect("a catalog")
+				.value;
 			let name = catalog.ext.mpegts.passthrough.expect("the passthrough track").track;
 
 			// Subscribe and take the first group, so a read starts behind anything decoded
@@ -1951,8 +1949,9 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
-		let clock = catalog.media.clock.expect("the catalog advertises a clock");
+			.expect("a catalog")
+			.value;
+		let clock = catalog.sync.clock.expect("the catalog advertises a clock");
 		let (name, config) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(config).unwrap();
@@ -2005,7 +2004,8 @@ pub(crate) mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert_eq!(catalog.echo, Some(echo));
 		assert!(!catalog.video.renditions.is_empty(), "beside the tracks");
 	}
@@ -2121,7 +2121,7 @@ pub(crate) mod tests {
 				.await
 				.expect("the catalog track ends");
 			match next.expect("the catalog ends cleanly") {
-				Some(catalog) => last = Some(catalog),
+				Some(catalog) => last = Some(catalog.value),
 				None => break,
 			}
 		}
@@ -2159,7 +2159,7 @@ pub(crate) mod tests {
 			res = &mut import => panic!("the import returned before its linger: {res:?}"),
 			name = async {
 				loop {
-					let catalog = catalogs.next().await.unwrap().expect("a catalog before the finish");
+					let catalog = catalogs.next().await.unwrap().expect("a catalog before the finish").value;
 					if let Some(name) = catalog.video.renditions.keys().next() {
 						break name.clone();
 					}
@@ -2243,7 +2243,7 @@ pub(crate) mod tests {
 					assert!(matches!(event, moq_net::announce::Event::Present(_)), "{event:?}");
 					let broadcast = consumer.request("demo", None).await.unwrap();
 					let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
-					let catalog = catalogs.next().await.unwrap().expect("a catalog");
+					let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 					// A passthrough carries the multiplex on one track, named in the mpegts section.
 					let name = match catalog.ext.mpegts.passthrough {
 						Some(passthrough) => passthrough.track,
@@ -2361,7 +2361,7 @@ pub(crate) mod tests {
 		assert_eq!(next(&mut import).await, first);
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		let rate = catalog
 			.ext
 			.mpegts
@@ -2376,7 +2376,7 @@ pub(crate) mod tests {
 		assert_ne!(next(&mut import).await, first, "the new instance has its own instance");
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
-		let catalog = catalogs.next().await.unwrap().expect("a catalog");
+		let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
 		assert!(catalog.echo.is_some(), "the new instance solicits feedback too");
 		assert_eq!(
 			catalog.ext.mpegts.mux_rate,

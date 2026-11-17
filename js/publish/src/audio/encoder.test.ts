@@ -1314,7 +1314,7 @@ test("an audio-only broadcast declares its group spacing as the join interval", 
 
 		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		const root = (await catalog.latest())?.value;
-		expect(root?.media?.join).toEqual({ interval: Catalog.u53(40) });
+		expect(root?.sync?.interval).toEqual(Catalog.u53(40));
 		expect(root?.audio?.renditions.audio).toBeDefined();
 		expect(root?.audio?.renditions.audio).not.toHaveProperty("hls");
 	} finally {

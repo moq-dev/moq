@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
+use super::error::malformed;
 use super::{Export, catalog};
 use crate::container::Frame;
 
@@ -374,9 +375,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		match missing {
 			Missing::Ended { end, deadline } => State::Settling { end, deadline },
 			Missing::Switch => State::Settling {
-				end: Err(
-					anyhow::anyhow!("replacement broadcast `{}` ended before serving its catalog", self.path).into(),
-				),
+				end: Err(malformed!("replacement broadcast `{}` ended before serving its catalog", self.path).into()),
 				deadline: kio::clock::now().saturating_add(self.follow),
 			},
 		}

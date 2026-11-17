@@ -8,7 +8,7 @@ export const GameStatsSchema = z.object({
 	wall_secs: z.number(),
 });
 
-/** One component of a viewer's latency, in milliseconds. */
+/** One component of a viewer's latency. */
 export interface LatencyEntry {
 	/** The component's name. */
 	label: string;
@@ -24,14 +24,10 @@ const LatencyEntrySchema: z.ZodMiniType<LatencyEntry> = z.object({
 /** Per-frame status published by the emulator on the "status" track. */
 export const GameStatusSchema = z.object({
 	buttons: z.array(z.string()),
-	players: z.number().check(z.int(), z.nonnegative()),
+	/** Each viewer's latency breakdown, keyed by viewer id. The player count is the number of keys. */
+	latency: z.record(z.string(), z.array(LatencyEntrySchema)),
 	location: z.optional(z.string()),
 	stats: z.optional(GameStatsSchema),
-});
-
-/** What the emulator writes back on a viewer's session, one per command. */
-export const ReplySchema = z.object({
-	latency: z.array(LatencyEntrySchema),
 });
 
 /** Server-reported encoding and emulation performance stats. */

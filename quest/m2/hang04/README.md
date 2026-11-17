@@ -24,16 +24,11 @@ read the catalog as a frozen format: hang-03 is what the datatracker and
 readers are the first that check `version` at all. Each child's Plan records
 its own decisions.
 
-The children land in any order. They overlap in two places, so whichever
-lands second merges main first:
+The children land in any order.
 
-- [Entry versions](/quest/m2/hang04/entry-version.md) and
-  [video warmup](/quest/m2/hang04/video-warmup.md) both edit the version
-  computation (`min_version` in `rs/hang/src/catalog/root.rs`, `minVersion`
-  in `js/hang/src/catalog/root.ts`) and the draft's Version section.
-- [The sync section](/quest/m2/hang04/sync.md) is born strict, under the
-  rule [one strict rule](/quest/m2/hang04/shape.md) applies to the sections
-  that exist today.
+Every root section already reads under the hang draft's one rule (a root
+member the draft defines has its shape, or the catalog is refused), so
+the `sync` section and the MPEG-TS section are born strict.
 
 What the audit judged and kept, so nobody reopens it without new evidence:
 `include`, `track` apart from the ID, `instance` on references, `enabled`,
@@ -49,5 +44,4 @@ Public API: each child's. Wire: the hang-04 catalog JSON, unpublished.
 
 ## Related
 
-- [hang applies catalog updates at their timestamp](/quest/m2/catalog-at-timestamp.md) - the other catalog rule that freezes with hang-04
 - [Media consumers address groups by start](/quest/m2/time-addressing/consumers.md) - removes the markers from the draft's container rules

@@ -29,8 +29,6 @@ pub(crate) struct Inner {
 	pub(crate) wire: net::Wire,
 	socket_stats: Option<SharedSocketStats>,
 	address: Address,
-	/// From [`Config::fixed_receive_window`].
-	fixed_receive_window: bool,
 }
 
 pub(crate) struct State {
@@ -191,7 +189,6 @@ impl Session {
 			wire: net::Wire::new(),
 			socket_stats: transport.socket_stats(),
 			address: transport.address(),
-			fixed_receive_window: config.fixed_receive_window,
 		});
 		let session = Self {
 			_guard: Arc::new(Guard(inner.clone())),
@@ -236,13 +233,9 @@ impl Session {
 	///
 	/// Refuses, changing nothing, a rate cap (QMux never paces, so only
 	/// [`Rate::Unlimited`](moq_quic::Rate::Unlimited) is accepted), a receive window below
-	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW) or on a session whose window
-	/// is [fixed](Config::fixed_receive_window), and limits a peer would refuse. A window only
-	/// grows at once: credit already granted cannot be taken back.
+	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW), and limits a peer would refuse.
+	/// A window only grows at once: credit already granted cannot be taken back.
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), Error> {
-		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
-			return Err(Error::InvalidConfig("this session's receive window is fixed"));
-		}
 		crate::config::check_limits(&limits)?;
 		let capped = |rate: Option<moq_quic::Rate>| matches!(rate, Some(moq_quic::Rate::BytesPerSecond(_)));
 		if capped(limits.receive_rate) || capped(limits.send_rate) {
@@ -411,9 +404,6 @@ impl poll::Session for Session {
 	}
 
 	fn set_limits(&self, limits: net::Limits) -> Result<(), net::LimitsError> {
-		if self.inner.fixed_receive_window && limits.receive_window.is_some() {
-			return Err(net::LimitsError::Unsupported);
-		}
 		let mut quic = moq_quic::Limits::default();
 		quic.receive_window = limits.receive_window;
 		Session::set_limits(self, quic).map_err(|err| net::LimitsError::Refused(err.to_string()))
@@ -527,10 +517,26 @@ impl SendStream {
 impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = SendGroup;
-	// Writing into TCP is not delivery, so acknowledgments stay unsupported.
-	type Offset = ();
+	type Offset = send::Offset;
 
-	fn offset(&self) -> Self::Offset {}
+	fn offset(&self) -> send::Offset {
+		self.inner.lock().conn.send_stream(self.id).offset()
+	}
+
+	/// [`Acked::Sent`](poll::Acked::Sent) once the transport took the bytes, which is not the
+	/// peer acknowledging them. A reset or stop keeps the prefix that went out before it.
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &send::Offset) -> Poll<Result<poll::Acked, Error>> {
+		let mut state = self.inner.lock();
+		let mut stream = state.conn.send_stream(self.id);
+		if u64::from(*offset) <= stream.acked_len() {
+			return Poll::Ready(Ok(poll::Acked::Sent));
+		}
+		match ready!(stream.poll_acked(waiter, *offset)) {
+			Ok(()) => Poll::Ready(Ok(poll::Acked::Sent)),
+			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
+			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
+		}
+	}
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, mut buf: &[u8]) -> Poll<Result<usize, Error>> {
 		self.poll_write_buf(waiter, &mut buf)

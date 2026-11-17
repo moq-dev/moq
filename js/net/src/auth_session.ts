@@ -164,6 +164,8 @@ export interface Pending extends Credential {
 	readonly answered: Promise<void>;
 	/** Whether any session holds a grant for it now, a draining one included. */
 	readonly held: boolean;
+	/** Whether a peer granted it in band: false for a token only a request carries, which {@link answered} also resolves for. */
+	readonly inband: boolean;
 }
 
 /** A token the application added to a {@link Handle}, presented on every session of it. */
@@ -175,6 +177,7 @@ class Token implements Pending {
 
 	isAnswered = false;
 	ended = false;
+	inband = false;
 
 	#state: HandleState;
 	#close!: (err: Error | null) => void;
@@ -229,6 +232,8 @@ class HandleState {
 	own = false;
 	/** Set once the handle ends. */
 	closed?: Error;
+	/** The handle's end, for a watcher that outlives its sessions. */
+	readonly end = new Signal<Error | undefined>(undefined);
 	/** Every token the application added that has not ended. */
 	readonly tokens = new Set<Token>();
 	/** Every open session built on this handle, oldest first. */
@@ -307,6 +312,7 @@ class HandleState {
 	abort(err: Error) {
 		if (this.closed) return;
 		this.closed = err;
+		this.end.set(err);
 		for (const token of [...this.tokens]) this.verdict(token, err);
 		if (this.acceptor instanceof RequestQueue) this.acceptor.close();
 	}
@@ -336,6 +342,15 @@ export function vacant(handle: Handle) {
  */
 export function ended(handle: Handle): Error | undefined {
 	return stateOf(handle).closed;
+}
+
+/**
+ * When `handle` ends, with why, for a watcher that outlives its sessions.
+ *
+ * @internal
+ */
+export function ending(handle: Handle): Getter<Error | undefined> {
+	return stateOf(handle).end;
 }
 
 /**
@@ -597,6 +612,11 @@ export interface AuthSessionProps {
 	handle?: Handle;
 	/** Whether the session is draining after a GOAWAY or a local close, which frees its handle for a successor. */
 	draining?: () => boolean;
+	/**
+	 * Whether the peer's SETUP, still to come, is what accepts the connection credential: a
+	 * session without AUTH that is live before its peer has checked the credential.
+	 */
+	awaiting?: boolean;
 }
 
 /**
@@ -631,6 +651,9 @@ export class AuthSession {
 	// #presented by #recount after every change to it or to an `isAnswered`.
 	#setupPending = new Signal(0);
 	#pending = new Signal(0);
+	// The peer's verdict on the connection credential this session presented: null once accepted,
+	// the refusal, or undefined while it has none.
+	#credential = new Signal<Error | null | undefined>(undefined);
 	#closed = false;
 
 	// Whoever answers the peer's tokens is decided once, after the task that established
@@ -639,7 +662,7 @@ export class AuthSession {
 	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
-	constructor({ wire, requests, peerGrant, handle, draining }: AuthSessionProps) {
+	constructor({ wire, requests, peerGrant, handle, draining, awaiting }: AuthSessionProps) {
 		this.handle = handle ?? ownHandle();
 		this.#state = stateOf(this.handle);
 		this.#wire = wire;
@@ -647,6 +670,8 @@ export class AuthSession {
 		this.#peerGrant = peerGrant;
 		this.#draining = draining ?? (() => false);
 		this.#state.attach(this);
+		// A session without AUTH has the peer's acceptance with its handshake, unless it awaits its SETUP.
+		if (!wire && !awaiting) this.#credential.set(null);
 
 		// Present the connection's own credential right away, so both sides learn their
 		// grant without waiting on the app.
@@ -657,6 +682,20 @@ export class AuthSession {
 	/** Whether the session still takes new work: open, neither closing nor past a GOAWAY. */
 	get active(): boolean {
 		return !this.#closed && !this.#draining();
+	}
+
+	/**
+	 * The peer's verdict on the connection credential this session presented: `null` once it
+	 * accepted it, its refusal, or undefined while it has none, which the session ending leaves
+	 * to the session's own close.
+	 */
+	get credential(): Getter<Error | null | undefined> {
+		return this.#credential;
+	}
+
+	/** The peer's SETUP arrived, so it accepted the connection credential a session without AUTH presented. */
+	accepted(): void {
+		if (!this.#wire) this.#credential.set(null);
 	}
 
 	/** The union of this session's grants, undefined until its peer first answers. */
@@ -917,6 +956,7 @@ export class AuthSession {
 						answered = granted = replied = true;
 						delay = undefined;
 						this.#replied = true;
+						if (presented.setup) this.#credential.set(null);
 						this.#answered(presented);
 						this.#recompute();
 						continue;
@@ -991,6 +1031,13 @@ export class AuthSession {
 
 		// Already ended by the session's close.
 		if (presented.ended) return;
+		// The peer's verdict on the credential: Unsupported is the moq-transport SETUP that
+		// carried it accepting it before the peer declined AUTH. Anything else leaves it to the close.
+		if (presented.setup && !presented.withdrawn && isVerdict(refused, granted, result)) {
+			this.#credential.set(
+				result instanceof Unsupported ? null : (result ?? new Error("the peer ended the credential")),
+			);
+		}
 		presented.ended = true;
 		presented.grant = undefined;
 		// A token that ends unanswered counts as answered for enforcement: its refusal is
@@ -1024,6 +1071,7 @@ export class AuthSession {
 	/** The peer granted `presented`: it counts as answered, and so does the handle's token. */
 	#answered(presented: Presented) {
 		presented.isAnswered = true;
+		if (presented.owner) presented.owner.inband = true;
 		presented.owner?.answer();
 	}
 

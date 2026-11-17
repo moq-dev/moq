@@ -510,6 +510,39 @@ impl Surface {
 		}
 	}
 
+	/// A second handle on this picture, which capture keeps to repeat a still
+	/// screen. A GPU surface is retained rather than copied. `None` for an Android
+	/// buffer, which holds a decoder's queue slot and never comes from capture.
+	#[cfg(feature = "capture")]
+	pub(crate) fn retain(&self) -> Option<Self> {
+		Some(match self {
+			#[cfg(apple)]
+			Surface::PixelBuffer(s) => Surface::PixelBuffer(apple::PixelBuffer {
+				buffer: s.buffer.clone(),
+				width: s.width,
+				height: s.height,
+				color: s.color,
+			}),
+			#[cfg(target_os = "windows")]
+			Surface::Texture(t) => Surface::Texture(d3d11::Texture {
+				device: t.device.clone(),
+				texture: t.texture.clone(),
+				width: t.width,
+				height: t.height,
+				color: t.color,
+			}),
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Cuda(c) => Surface::Cuda(c.clone()),
+			#[cfg(target_os = "linux")]
+			Surface::Vulkan(v) => Surface::Vulkan(v.clone()),
+			#[cfg(target_os = "linux")]
+			Surface::DmaBuf(d) => Surface::DmaBuf(d.clone()),
+			#[cfg(all(target_os = "android", feature = "mediacodec"))]
+			Surface::HardwareBuffer(_) => return None,
+			Surface::I420(i) => Surface::I420(i.clone()),
+		})
+	}
+
 	/// Convert tightly-packed RGBA (`width * height * 4` bytes, no row padding) to
 	/// a CPU I420 surface in [`Color::infer`]'s color space for `size`, limited
 	/// range. The result reports it via [`I420::color`], and an encoder writes it
@@ -613,7 +646,7 @@ impl Surface {
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			Surface::DmaBuf(buffer) if output == crate::Output::Native => {
-				match vaapi::resize(buffer, size, config.vaapi.as_deref()) {
+				match vaapi::resize(buffer, size, config.device.render()) {
 					Ok(scaled) => Surface::DmaBuf(scaled),
 					Err(err) => {
 						static WARN_ONCE: std::sync::Once = std::sync::Once::new();
