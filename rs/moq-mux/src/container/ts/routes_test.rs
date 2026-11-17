@@ -95,7 +95,7 @@ impl Imported {
 	/// Import all of `data`.
 	fn all(data: &[u8]) -> Self {
 		let mut imported = Self::new();
-		imported.import.decode(data).unwrap();
+		imported.import.decode(data).unwrap().expect_continue();
 		imported.import.finish_in_place().unwrap();
 		imported
 	}
@@ -449,7 +449,7 @@ async fn an_mpts_counts_strays_once_both_pmts_are_in() {
 	)
 	.unwrap();
 	let mut one = Import::new(broadcast, catalog.reserve()).with_program(1);
-	one.decode(&data).unwrap();
+	one.decode(&data).unwrap().expect_continue();
 	let rows: Vec<u16> = one.stats().streams.keys().copied().collect();
 	assert_eq!(rows, [DATA], "only program 1's own PIDs");
 }
@@ -518,7 +518,7 @@ async fn a_pid_keeps_one_row_through_its_lifecycle() {
 	);
 	let mut at = 0;
 	for (end, (track, units, refused)) in steps.into_iter().zip(expected) {
-		one.import.decode(&data[at..end]).unwrap();
+		one.import.decode(&data[at..end]).unwrap().expect_continue();
 		programs.decode(&data[at..end]).unwrap();
 		at = end;
 		for (owner, row) in [

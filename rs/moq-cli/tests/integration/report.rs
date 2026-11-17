@@ -98,7 +98,7 @@ fn written(clip: &[u8]) -> (BTreeMap<String, hang::stats::Rendition>, ts::stats:
 		moq_mux::catalog::Config::default().with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let mut import = ts::Import::new(broadcast, catalog.reserve());
-	import.decode(clip).unwrap();
+	import.decode(clip).unwrap().expect_continue();
 	let import = import.finish().unwrap();
 	(catalog.stats(), import.stats())
 }

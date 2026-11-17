@@ -16,7 +16,7 @@ async fn ts_surround_opus_decodes() {
 	let broadcast_consumer = broadcast.consume();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 	let mut import = moq_mux::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&data[..]).unwrap();
+	import.decode(&data[..]).unwrap().expect_continue();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();

@@ -879,7 +879,7 @@ mod tests {
 		)
 		.unwrap();
 		let mut roundtrip_import = ts::Import::new(roundtrip, roundtrip_catalog.reserve());
-		roundtrip_import.decode(&output).unwrap();
+		roundtrip_import.decode(&output).unwrap().expect_continue();
 		let _finished = roundtrip_import.finish().unwrap();
 
 		let snapshot = roundtrip_catalog.snapshot();

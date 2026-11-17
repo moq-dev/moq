@@ -1454,7 +1454,7 @@ pub(crate) mod tests {
 
 		// Add the real video/audio (moves `broadcast` into the importer).
 		let mut import = Import::new(broadcast.broadcast().clone(), reserved);
-		import.decode(&BytesMut::from(BBB)).unwrap();
+		import.decode(&BytesMut::from(BBB)).unwrap().expect_continue();
 		let _finished = import.finish().unwrap();
 
 		// `catalog`, the producers, and `import` stay alive: the exporter subscribes to
@@ -1568,7 +1568,7 @@ pub(crate) mod tests {
 		let config = moq_mux::catalog::Config::default().with_catalog(Catalog::<tscat::Ext>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let mut import = Import::new(broadcast, catalog.reserve());
-		import.decode(&BytesMut::from(&output[..])).unwrap();
+		import.decode(&BytesMut::from(&output[..])).unwrap().expect_continue();
 		let _finished = import.finish().unwrap();
 		let snapshot = catalog.snapshot();
 

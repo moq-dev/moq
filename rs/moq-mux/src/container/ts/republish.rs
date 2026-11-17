@@ -201,7 +201,7 @@ impl Republish {
 
 	/// Demux `data` into the current instance, or republish at the step it reaches.
 	fn feed(&mut self, data: &[u8]) -> Result<Option<Republished>> {
-		let Some(restart) = self.instance.import.decode(data)? else {
+		let super::Decoded::Restart(restart) = self.instance.import.decode(data)? else {
 			self.instance.announce_if_listed()?;
 			return Ok(None);
 		};

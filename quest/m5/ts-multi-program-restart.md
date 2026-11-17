@@ -41,7 +41,7 @@ import.
   program added or removed) as they are.
 
 `ts::Import::decode` returns its restart as a value
-(`Result<Option<Restart>, ts::Error>`); give `Programs` the same shape, not a
+(`Result<Decoded, ts::Error>`, with `Decoded::Restart(Restart)` as a `#[must_use]` outcome); give `Programs` the same shape, not a
 second one.
 
 Public API: possibly additive on `Programs` (a restart result like

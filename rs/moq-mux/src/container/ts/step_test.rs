@@ -128,7 +128,7 @@ fn feed(data: &[u8], chunk: usize) -> Result<Option<(Restart, Vec<u8>)>, super::
 	.unwrap();
 	let mut import = Import::new(broadcast, catalog.reserve());
 	for (index, piece) in data.chunks(chunk).enumerate() {
-		if let Some(restart) = import.decode(piece)? {
+		if let super::Decoded::Restart(restart) = import.decode(piece)? {
 			let mut rest = restart.remainder.to_vec();
 			rest.extend(data.chunks(chunk).skip(index + 1).flatten());
 			// The instance before the step ends cleanly.

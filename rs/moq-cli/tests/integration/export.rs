@@ -557,7 +557,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		&& let Some(chunk) = chunks.next()
 	{
 		pace.tick().await;
-		import.decode(chunk).unwrap();
+		import.decode(chunk).unwrap().expect_continue();
 		split += chunk.len();
 	}
 	export.output_past(0).await;
@@ -581,7 +581,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {
 		pace.tick().await;
-		import.decode(chunk).unwrap();
+		import.decode(chunk).unwrap().expect_continue();
 	}
 	assert_eq!(
 		catalog.snapshot().media.clock,

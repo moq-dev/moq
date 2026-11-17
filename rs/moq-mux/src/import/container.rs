@@ -51,8 +51,8 @@ impl<E: crate::container::ts::Catalog> ContainerImpl<E> {
 			ContainerImpl::Fmp4(decoder) => decoder.decode(data),
 			ContainerImpl::Mkv(decoder) => decoder.decode(data),
 			ContainerImpl::Ts(decoder) => match decoder.decode(data)? {
-				Some(restart) => Err(crate::Error::Restarted(restart.step)),
-				None => Ok(()),
+				crate::container::ts::Decoded::Restart(restart) => Err(crate::Error::Restarted(restart.step)),
+				crate::container::ts::Decoded::Continue => Ok(()),
 			},
 			ContainerImpl::Flv(decoder) => decoder.decode(data),
 		}
