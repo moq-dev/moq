@@ -725,7 +725,9 @@ impl Drop for Held {
 /// configured here or found on the LAN; it never dials a URL learned from an
 /// announcement.
 ///
-/// Hop-based routing on broadcasts prevents announcement loops regardless of topology.
+/// A relay drops any route that names it, so announcements never loop whatever the
+/// topology: a moq-lite-07 route names each relay it crossed, and older versions
+/// carry that hop list on each broadcast.
 #[serde_with::serde_as]
 #[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -747,7 +749,13 @@ pub struct Config {
 	)]
 	pub route_key: Option<PathBuf>,
 
-	/// Longest hop path accepted or forwarded, from 1 to 32 (default 32).
+	/// Legacy: longest hop path accepted or forwarded on moq-lite-03 to 06, from 1 to 32
+	/// (default 32).
+	///
+	/// Also bounds moq-transport's MoQ Cluster extension. A moq-lite-07 route stops at
+	/// 32 nodes whatever this is, so the setting leaves with moq-lite-06. Until then, a
+	/// moq-lite-07 route that crossed in from moq-lite-06 is dropped when the chain it
+	/// carries, plus its publisher, is longer than this.
 	#[usage(
 		name = "cluster-max-hops",
 		long = "cluster-max-hops",
@@ -780,7 +788,7 @@ pub struct Config {
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect: Vec<Peer>,
 
-	/// Dynamic peer-list source and its independent TLS trust.
+	/// Dynamic peer-list source and its independent server trust.
 	#[usage(flatten)]
 	pub api: api::Config,
 
@@ -876,14 +884,14 @@ impl Config {
 			found.flag(
 				"--cluster-connect-api-tls-root",
 				Some("MOQ_CLUSTER_CONNECT_API_TLS_ROOT"),
-				"--cluster-api-tls-root",
+				"--cluster-api-root",
 			);
 		}
 		if self.removed_api.is_some() {
 			found.toml("[cluster] connect_api", "[cluster.api] url", None);
 		}
 		if self.removed_api_root.is_some() {
-			found.toml("[cluster] connect_api_tls_root", "[cluster.api.tls] root", None);
+			found.toml("[cluster] connect_api_tls_root", "[cluster.api] root", None);
 		}
 		const ID: &str = "the Hop ID is random on every start and nothing pins it";
 		if self.removed_id.is_some() {
@@ -1655,6 +1663,9 @@ impl Cluster {
 	/// A fixed bind port is kept instead: static and API peers share one socket
 	/// on it, while LAN dials still take ephemeral ports.
 	///
+	/// The template's [`tokens`](moq_tokio::connect::Config::tokens) are ignored: a
+	/// peer is handed only `cluster.token` or its own `token`.
+	///
 	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
@@ -1862,7 +1873,7 @@ impl Cluster {
 				.context("cluster.api.url with an http(s) URL needs a dial template (call Cluster::with_connect)")?
 				.tls
 				.build()?;
-			Some(crate::http_client::build(&tls, &self.config.api.tls.root)?)
+			Some(crate::http_client::build(&tls, &self.config.api.root)?)
 		} else {
 			None
 		};
@@ -2314,8 +2325,8 @@ impl Cluster {
 	/// redial moves to a fresh socket rather than retrying one the path may be
 	/// dropping.
 	///
-	/// Every peer client's reconnect loop gives up eventually: a zero backoff
-	/// timeout, which would retry forever, takes [`PEER_RETRY`] instead. The
+	/// Every peer client's reconnect loop gives up eventually: an unset or `none`
+	/// backoff timeout, which would retry forever, takes [`PEER_RETRY`] instead. The
 	/// redial loop already retries forever, and only it re-reads `cluster.token`,
 	/// so an unending inner loop could keep presenting a rotated-out token.
 	///
@@ -2327,6 +2338,9 @@ impl Cluster {
 			.as_deref()
 			.cloned()
 			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
+		// A peer gets only the credential the cluster settings chose for it, so the
+		// template's would reach every peer, LAN ones included.
+		connect.tokens.clear();
 		if ephemeral {
 			let mut bind = connect.resolve().bind;
 			bind.set_port(0);
@@ -3953,7 +3967,7 @@ mod tests {
 
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
-		let toml = "[cluster.api]\nurl = \"https://api.example.com/cluster/connect\"\ntls.root = [\"api.pem\"]\n";
+		let toml = "[cluster.api]\nurl = \"https://api.example.com/cluster/connect\"\nroot = [\"api.pem\"]\n";
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("cluster-connect-api-toml.toml");
 		std::fs::write(&path, toml).unwrap();
@@ -3964,7 +3978,7 @@ mod tests {
 			config.cluster.api.url.as_deref(),
 			Some("https://api.example.com/cluster/connect")
 		);
-		assert_eq!(config.cluster.api.tls.root, vec![PathBuf::from("api.pem")]);
+		assert_eq!(config.cluster.api.root, vec![PathBuf::from("api.pem")]);
 	}
 
 	#[tokio::test]
@@ -4406,6 +4420,83 @@ mod tests {
 			driver::connection::Error::ApplicationClosed(close) => assert_eq!(close.reason, "client shutdown"),
 			other => panic!("the link ended with {other:?}, not the shutdown close"),
 		}
+	}
+
+	/// Cluster dials carry only the credentials the cluster settings name: a dial
+	/// template's own tokens reach neither a static peer nor a LAN peer, in SETUP
+	/// or the URL. lite-07 puts the template's first token in SETUP and the rest on
+	/// AUTH streams, so an empty SETUP token means the template sent none. The
+	/// template's other settings (version, TLS) still dial both.
+	#[tokio::test]
+	async fn cluster_dials_present_no_template_tokens() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		moq_tokio::crypto::install_default().unwrap();
+
+		let mut server = moq_tokio::server::Config::default();
+		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		server.listen.tls.generate = vec!["localhost".into()];
+		server.listen.version = vec!["moq-lite-07-wip".parse().unwrap()];
+		let server = server.init().expect("server");
+		let fingerprint = server
+			.certificates()
+			.fingerprints()
+			.into_iter()
+			.next()
+			.expect("generated fingerprint");
+		let mut listener = server.listen().await.expect("listen");
+		let port = listener.local_addr().expect("quic addr").port();
+		let (sender, mut seen) = tokio::sync::mpsc::unbounded_channel();
+		tokio::spawn(async move {
+			while let Ok(request) = listener.accept().await {
+				let token = request.token().map(|token| token.value.clone());
+				sender
+					.send((request.path().to_string(), request.query().map(str::to_string), token))
+					.ok();
+				tokio::spawn(async move {
+					let Ok(_session) = request.ok().await else { return };
+					std::future::pending::<()>().await;
+				});
+			}
+		});
+		let mut next = async || {
+			kio::clock::timeout(TIMEOUT, seen.recv())
+				.await
+				.expect("no dial arrived")
+				.expect("server stopped")
+		};
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.tls.insecure = Some(true);
+		connect.version = vec!["moq-lite-07-wip".parse().unwrap()];
+		connect.tokens = vec!["template-setup".parse().unwrap(), "template-auth".parse().unwrap()];
+
+		let config = Config {
+			connect: vec![Peer::new(format!("moqt://localhost:{port}/static"))],
+			..Default::default()
+		};
+		let cluster = new_cluster(config)
+			.expect("cluster")
+			.with_connect(connect, Default::default());
+		let started = cluster.clone().start().await.expect("start");
+		let _running = tokio::spawn(started.run());
+		assert_eq!(next().await, ("/static".to_string(), None, None), "static peer");
+
+		cluster.set_lan_credential("lan-proof");
+		let url: Url = format!("moqt://127.0.0.1:{port}{CLUSTER_PATH}/lan-proof")
+			.parse()
+			.expect("url");
+		let target = DialTarget {
+			key: PeerKey::canonicalize(&format!("moqt://127.0.0.1:{port}/")),
+			url: url.clone(),
+			urls: vec![url],
+			cost: None,
+			fingerprint: Some(fingerprint),
+			lan: true,
+			upstream: false,
+		};
+		let _lan = cluster.dial_lan_target(&target).expect("dial");
+		let (path, query, token) = next().await;
+		assert_eq!((query, token), (None, None), "LAN peer at {path}");
 	}
 
 	/// A second close awaits the shutdown the first started, and still finishes it

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
@@ -72,6 +73,9 @@ class FakeSession {
 	/** Whether a lite-07 claim of `node` at `at` serves `path` beneath it: the session's floors. */
 	covering?: (node: bigint, at: Path.Valid, path: Path.Valid) => boolean;
 
+	/** Bumped when what `covering` answers changed with no route reporting it. */
+	readonly coverage = new Signal(0);
+
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
 
@@ -80,6 +84,7 @@ class FakeSession {
 		registerWire(this, {
 			consume: (path, instance) => this.consume(path, instance),
 			covers: (node, at, path) => this.covering?.(node, at, path) ?? true,
+			coverage: this.coverage,
 			exclusive,
 			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
@@ -248,6 +253,48 @@ test("the origin skips a claim above a newer floor's region", async () => {
 
 	request.close();
 	y.close();
+	live.close();
+	session.die();
+	origin.close();
+});
+
+// A floor moves what a claim covers while both routes stay as they were: the request already
+// open beneath it is admitted anew and ends, and the next one resolves through the claim that
+// still covers its path.
+test("a floor that moves what a claim covers admits the open requests beneath it anew", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+	const a = Instance.parse("a");
+	const b = Instance.parse("b");
+	const NODE_A = 0x7an;
+	const NODE_B = 0x8bn;
+	const live = origin.routes(Path.Pattern.subtree(Path.from("live")));
+	await settle();
+	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: a, node: NODE_A });
+	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: b, node: NODE_B, cost: 5n });
+	session.stream("live/**").synced();
+	await settle();
+
+	const x = Path.from("live/x");
+	const request = origin.request(x);
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	expect(session.pins).toEqual([a]);
+
+	session.covering = (node, at, path) => !(node === NODE_A && at === Path.from("live") && Path.hasPrefix(x, path));
+	session.coverage.update((n) => n + 1);
+	await settle();
+	// The claim it resolved through no longer serves its path, so it ends unroutable.
+	expect(request.closed.peek()).toBeInstanceOf(Error);
+	expect(session.pins).toEqual([a]);
+	const again = origin.request(x);
+	await settle();
+	expect(again.active.peek()).toBeDefined();
+	expect(session.pins).toEqual([a, b]);
+
+	request.close();
+	again.close();
 	live.close();
 	session.die();
 	origin.close();

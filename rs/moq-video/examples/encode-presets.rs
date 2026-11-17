@@ -3,7 +3,8 @@
 //! Feeds raw I420 through one backend for each preset (or just the one named last) and reports, per preset:
 //! p50 / p95 / max frame-to-packet latency at real-time pacing, back-to-back
 //! throughput and CPU time per frame, the most frames the codec held at once,
-//! the frames it skipped, and the achieved bitrate. Each preset's stream is
+//! the frames it skipped, the achieved bitrate, and the most any one second of
+//! the stream carried, which a capped encoder must hold to its cap. Each preset's stream is
 //! written next to the input, beside a `.yuv` reference holding the source
 //! frames that stream carries, so quality is scored frame for frame even when
 //! the encoder skipped some:
@@ -68,7 +69,7 @@ fn main() -> anyhow::Result<()> {
 	let pictures: Vec<&[u8]> = raw.chunks_exact(len).collect();
 	anyhow::ensure!(!pictures.is_empty(), "input holds no {size} I420 frame");
 
-	println!("preset\tencoder\tp50 ms\tp95 ms\tmax ms\tfps\tcpu ms/frame\theld\tskipped\tkbps");
+	println!("preset\tencoder\tp50 ms\tp95 ms\tmax ms\tfps\tcpu ms/frame\theld\tskipped\tkbps\tpeak kbps");
 	for (preset, label) in PRESETS
 		.into_iter()
 		.filter(|(_, label)| only.is_none_or(|only| only == *label))
@@ -102,7 +103,7 @@ fn main() -> anyhow::Result<()> {
 		let pick = |q: f64| latency[((latency.len() - 1) as f64 * q).round() as usize].as_secs_f64() * 1e3;
 		let seconds = pictures.len() as f64 / fps as f64;
 		println!(
-			"{label}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{}\t{}\t{:.0}",
+			"{label}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.0}\t{:.2}\t{}\t{}\t{:.0}\t{:.0}",
 			paced.name,
 			pick(0.5),
 			pick(0.95),
@@ -112,6 +113,7 @@ fn main() -> anyhow::Result<()> {
 			paced.held.max(burst.held),
 			paced.skipped.len(),
 			paced.stream.len() as f64 * 8.0 / seconds / 1e3,
+			peak(&paced.sizes, fps as usize) as f64 * 8.0 / 1e3,
 		);
 	}
 	Ok(())
@@ -127,6 +129,8 @@ struct Run {
 	/// The most frames submitted and later emitted, but not emitted yet.
 	held: usize,
 	stream: Vec<u8>,
+	/// Bytes coded for each submitted frame, zero for a skipped one.
+	sizes: Vec<usize>,
 	wall: Duration,
 	cpu: Duration,
 }
@@ -143,6 +147,7 @@ fn run(config: &Config, pictures: &[&[u8]], paced: bool) -> anyhow::Result<Run> 
 	// Per call, how many frames had come back by its end.
 	let mut returned = Vec::with_capacity(pictures.len());
 	let mut stream = Vec::new();
+	let mut sizes = vec![0; pictures.len()];
 
 	let mut collect =
 		|encoder: &mut Encoder, submitted: &[Instant], emitted: &mut [Option<Duration>]| -> anyhow::Result<()> {
@@ -151,6 +156,7 @@ fn run(config: &Config, pictures: &[&[u8]], paced: bool) -> anyhow::Result<Run> 
 				let index = (packet.timestamp.as_micros()? / frame_time.as_micros()) as usize;
 				emitted[index] = Some(now - submitted[index]);
 				stream.extend_from_slice(&packet.payload);
+				sizes[index] += packet.payload.len();
 			}
 			Ok(())
 		};
@@ -190,9 +196,19 @@ fn run(config: &Config, pictures: &[&[u8]], paced: bool) -> anyhow::Result<Run> 
 		skipped,
 		held,
 		stream,
+		sizes,
 		wall,
 		cpu,
 	})
+}
+
+/// The most bytes any `window` consecutive frames carried.
+fn peak(sizes: &[usize], window: usize) -> usize {
+	sizes
+		.windows(window.clamp(1, sizes.len().max(1)))
+		.map(|w| w.iter().sum())
+		.max()
+		.unwrap_or(0)
 }
 
 /// CPU time this process has used, across every thread (a codec may spread out).

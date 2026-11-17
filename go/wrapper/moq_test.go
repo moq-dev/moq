@@ -449,7 +449,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	}
 	video, err := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
 		Input:     moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
-		Output:    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.SoftwareEncoder()},
+		Output:    moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.SoftwareEncoder()},
 		Track:     &track,
 		Bandwidth: nil,
 	})
@@ -644,6 +644,34 @@ func TestTrackInfoMaxAge(t *testing.T) {
 	}
 	if _, err := broadcast.PublishTrack("negative", &moq.TrackInfo{MaxAge: -time.Second}); err == nil {
 		t.Error("a negative max age was accepted")
+	}
+	if err := broadcast.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A compression survives the record mapping both ways, and nil reads back as none.
+func TestTrackInfoCompression(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, in := range []*moq.Compression{nil, moq.DeflateCompression()} {
+		track, err := broadcast.PublishTrack(fmt.Sprint(i), &moq.TrackInfo{Compression: in})
+		if err != nil {
+			t.Fatal(err)
+		}
+		consumer, err := track.Consume(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := consumer.Info().Compression
+		if in == nil && got != nil {
+			t.Errorf("case %d: Compression = %s, want none", i, got.Name())
+		}
+		if in != nil && (got == nil || got.Name() != "deflate") {
+			t.Errorf("case %d: Compression = %v, want deflate", i, got)
+		}
 	}
 	if err := broadcast.Close(); err != nil {
 		t.Fatal(err)

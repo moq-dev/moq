@@ -4,7 +4,7 @@ import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -217,7 +217,7 @@ export class Subscriber {
 	#activeCount: boolean;
 
 	// Settles when the peer sends GOAWAY, ranking this session's routes last.
-	#goaway?: GetPromise<Drain>;
+	#goaway?: GetPromise<Goaway>;
 	// Our grant: a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
@@ -253,7 +253,7 @@ export class Subscriber {
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/** Settles when the peer sends GOAWAY. */
-		goaway?: GetPromise<Drain>;
+		goaway?: GetPromise<Goaway>;
 		/** The union of our tokens' grants, which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
 		auth?: AuthSession;
