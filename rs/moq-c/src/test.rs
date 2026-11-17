@@ -4685,6 +4685,243 @@ fn media_demand_refuses_a_container() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// The on-demand race `abort_unwanted` closes, for one handle. A reader joins after the watcher
+/// reported nobody wants the track, so the call keeps the track and the reader reads on. Once the
+/// reader leaves, the call ends the track and releases the handle.
+fn abort_unwanted_keeps_a_late_reader(
+	consume: u32,
+	name: &[u8],
+	demand_cb: &Callback,
+	abort: impl Fn() -> i32,
+	write: impl Fn(),
+) {
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+
+	let frame_cb = Callback::new();
+	let reader = consume_track(consume, name, &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+	assert_eq!(abort(), 0, "a reader wants the track, so it stays");
+
+	write();
+	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
+
+	cancel_track(reader, &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+	assert_eq!(abort(), 1, "nobody wants the track, so it ends");
+	assert!(abort() < 0, "ending the track released the handle");
+	assert!(demand_cb.recv_terminal() < 0, "the watcher ends with the track's abort");
+}
+
+#[test]
+fn track_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-abort-unwanted");
+	let name = b"data";
+	let track =
+		id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), std::ptr::null()) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+
+	let consume = consume_local(broadcast);
+	abort_unwanted_keeps_a_late_reader(
+		consume,
+		name,
+		&demand_cb,
+		|| moq_publish_track_abort_unwanted(track, 7),
+		|| {
+			let group = id(moq_publish_track_group(track));
+			assert_eq!(
+				unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(0)) },
+				0
+			);
+			assert_eq!(moq_publish_group_finish(group), 0);
+		},
+	);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Media comes from a track request here, so the reader is already joined when the handle
+/// exists: the call keeps the track for it, then ends it once it leaves.
+#[test]
+fn media_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-abort-unwanted");
+	let request_cb = Callback::new();
+	let _dynamic = id(unsafe { moq_publish_requests(broadcast, Some(channel_callback), request_cb.ptr) });
+
+	let consume = consume_local(broadcast);
+	let frame_cb = Callback::new();
+	let reader = consume_track(consume, b"audio", &frame_cb);
+
+	let request = id(request_cb.recv());
+	let init = opus_head();
+	let config = moq_audio_init {
+		format: moq_audio_format::MOQ_AUDIO_FORMAT_OPUS as u32,
+		init: init.as_ptr(),
+		init_len: init.len(),
+		label: std::ptr::null(),
+		label_len: 0,
+		hint: moq_audio_hint::default(),
+	};
+	let media = id(unsafe { moq_track_request_audio(request, &config) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_publish_media_demand(media, Some(channel_callback), demand_cb.ptr) });
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
+
+	assert_eq!(moq_publish_media_abort_unwanted(media, 7), 0, "the reader wants it");
+	let payload = b"opus frame";
+	assert_eq!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(1000)) },
+		0,
+		"the handle still publishes"
+	);
+	assert_eq!(moq_consume_track_frame_free(id(frame_cb.recv())), 0);
+
+	cancel_track(reader, &frame_cb);
+	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
+	assert_eq!(moq_publish_media_abort_unwanted(media, 7), 1, "nobody wants it");
+	assert!(
+		moq_publish_media_abort_unwanted(media, 7) < 0,
+		"ending the track released the handle"
+	);
+	assert!(
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(2000)) } < 0,
+		"nothing publishes to a released handle"
+	);
+	assert!(demand_cb.recv_terminal() < 0);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(request_cb.recv_terminal(), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A container handle is not a media handle, so the call refuses it as demand does.
+#[test]
+fn media_abort_unwanted_refuses_a_container() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"media-abort-unwanted-container");
+	let container = id(publish_container(
+		broadcast,
+		moq_container_format::MOQ_CONTAINER_FORMAT_FMP4,
+		&[],
+	));
+	assert!(moq_publish_media_abort_unwanted(container, 7) < 0);
+	assert_eq!(moq_publish_container_finish(container), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn audio_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"audio-abort-unwanted");
+	let input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let producer = id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &input, &output, 0) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_encode_audio_demand(producer, Some(channel_callback), demand_cb.ptr) });
+
+	let pcm: Vec<u8> = (0..960).flat_map(|i| (i as f32 / 960.0).to_le_bytes()).collect();
+	let consume = consume_local(broadcast);
+	abort_unwanted_keeps_a_late_reader(
+		consume,
+		b"audio",
+		&demand_cb,
+		|| moq_encode_audio_abort_unwanted(producer, 7),
+		|| {
+			let frame = moq_audio_frame {
+				timestamp: micros(0),
+				data: pcm.as_ptr(),
+				data_size: pcm.len(),
+			};
+			assert_eq!(unsafe { moq_encode_audio_frame(producer, &frame) }, 0);
+		},
+	);
+	assert!(
+		moq_encode_audio_finish(producer) < 0,
+		"ending the track released the handle"
+	);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn video_abort_unwanted_keeps_a_late_reader() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"video-abort-unwanted");
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30_000,
+			denominator: 1001,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 0,
+		join_us: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let producer = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
+	let demand_cb = Callback::new();
+	let _watcher = id(unsafe { moq_encode_video_demand(producer, Some(channel_callback), demand_cb.ptr) });
+	let name = State::lock()
+		.video
+		.demand(Id::try_from(producer).unwrap())
+		.unwrap()
+		.name()
+		.to_string();
+
+	let rgba = gray_rgba(320, 240);
+	let consume = consume_local(broadcast);
+	abort_unwanted_keeps_a_late_reader(
+		consume,
+		name.as_bytes(),
+		&demand_cb,
+		|| moq_encode_video_abort_unwanted(producer, 7),
+		|| {
+			assert_eq!(moq_encode_video_cut(producer), 0);
+			for index in 0..5u64 {
+				let frame = moq_video_encoder_frame {
+					timestamp: micros(index * 1_001_000 / 30),
+					data: rgba.as_ptr(),
+					data_size: rgba.len(),
+				};
+				assert_eq!(unsafe { moq_encode_video_frame(producer, &frame) }, 0);
+			}
+		},
+	);
+	assert!(
+		moq_encode_video_finish(producer) < 0,
+		"ending the track released the handle"
+	);
+
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn dynamic_serves_track_requests() {
 	let origin = id(moq_origin_create());
