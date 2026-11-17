@@ -351,7 +351,7 @@ async fn tokio_worker_peer_session_widens_quic_limits() {
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_peer_session_widens_quic_limits() {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
