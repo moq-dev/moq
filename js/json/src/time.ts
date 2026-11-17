@@ -1,31 +1,49 @@
-// How a producer places a write's timestamp on its track: a timed track's groups take the next
-// sequence, while a scale-less track's frames carry a group's key, which names its group.
+// How a producer places a write's timestamp on its track: a group starts at its first frame's
+// time in the track's timescale, or on a scale-less track at the key its unscaled timestamp names.
 import * as Moq from "@moq/net";
 
-/**
- * Whether a group whose first frame is at `at` would start past every group on `track`, which a
- * new scale-less group must: two groups never share a key. A timed group takes the next sequence,
- * so it always does. Mirrors the Rust `starts_past`.
- */
-export function startsPast(track: Moq.Track.Producer, at: Moq.Time.Timestamp): boolean {
-	const key = at.key;
-	if (key === undefined) return true;
-	const largest = track.largest();
-	return largest === undefined || key > largest.group;
+// Each track's timescale once its info resolved, `null` for a scale-less track.
+const scales = new WeakMap<Moq.Track.Producer, Moq.Time.Timescale | null>();
+
+// The track's timescale, `null` when scale-less, or undefined until its info resolves, which this
+// starts reading.
+function scaleOf(track: Moq.Track.Producer): Moq.Time.Timescale | null | undefined {
+	if (scales.has(track)) return scales.get(track);
+	void track.info().then(
+		(info) => scales.set(track, info.timescale),
+		() => {},
+	);
+	return undefined;
 }
 
 /**
- * Open a group for a write at `at`: the next sequence on a timed track, or on a scale-less one the
- * group `at` names, which must pass every group the track holds ({@link Moq.Error.TimestampMismatch}
- * otherwise). The sequences it passes are skipped, as `appendGroup` skips them.
+ * Whether a group whose first frame is at `at` would start past every group on `track`, which a
+ * new group must: two groups never share a start. A timed group starts at its first frame's time
+ * in the track's timescale, and a scale-less one at the key its unscaled timestamp names. False
+ * while the track's timescale is unknown. Mirrors the Rust `starts_past`.
+ */
+export function startsPast(track: Moq.Track.Producer, at: Moq.Time.Timestamp): boolean {
+	const largest = track.largest();
+	if (largest === undefined) return true;
+	let key = at.key;
+	if (key === undefined) {
+		const scale = scaleOf(track);
+		if (scale === undefined) return false;
+		// A scaled timestamp on a scale-less track is refused where the group opens.
+		if (scale === null) return true;
+		key = BigInt(Moq.Time.floorAt(at, scale));
+	}
+	return key > largest.group;
+}
+
+/**
+ * Open a group for a write at `at`, starting there: past every group the track holds
+ * ({@link Moq.Error.TimestampMismatch} otherwise). The starts it passes are skipped, as
+ * `appendGroup` skips them.
  */
 export function openGroup(track: Moq.Track.Producer, at: Moq.Time.Timestamp): Moq.Group.Producer {
-	const key = at.key;
-	if (key === undefined) return track.appendGroup();
-	if (!startsPast(track, at)) throw new Moq.Error.TimestampMismatch();
-	const largest = track.largest();
-	if (largest !== undefined && largest.group + 1n < key) track.skipGroups(largest.group + 1n, key);
-	return track.createGroup(key);
+	scaleOf(track);
+	return track.appendGroup(at);
 }
 
 /**

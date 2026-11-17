@@ -102,6 +102,13 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Duration): U
 	return data;
 }
 
+// Whether a group starting at `timestamp` microseconds starts past every group on `track`: hang
+// pins its tracks' timescale to microseconds (see `trackInfo`), so the start is the timestamp.
+function startsPast(track: Moq.Track.Producer, timestamp: number): boolean {
+	const largest = track.largest();
+	return largest === undefined || BigInt(timestamp) > largest.group;
+}
+
 // The wire carries whole microseconds, rounded down as moq-net's timestamps are.
 function micros(timestamp: Duration): number {
 	return Math.floor(timestamp.asMicros());
@@ -136,6 +143,8 @@ export class Producer {
 	#interval?: number;
 	// A discontinuity's marker is the newest group, so another one would say nothing new.
 	#marked = false;
+	// The newest frame timestamp written in any group, which a marker never starts below.
+	#newest?: number;
 
 	/** Wrap a track to publish legacy-container frames into it. */
 	constructor(track: Moq.Track.Producer, format: Format) {
@@ -150,12 +159,20 @@ export class Producer {
 		if (floor !== undefined && timestamp < floor) {
 			throw new Error("frame timestamp is below the previous group start");
 		}
+		// A keyframe opens a group starting at its timestamp, which has to start after every group the
+		// track holds. One that doesn't, such as parameter sets and the picture they precede written
+		// as two keyframes at one timestamp, continues the open group instead. With none open it is
+		// refused, before anything changes.
+		const opens = keyframe && startsPast(this.#track, timestamp);
+		if (keyframe && !opens && !this.#group) throw new Error("a keyframe must start after the previous group");
 		this.#marked = false;
-		if (keyframe) {
+		if (opens) {
 			const rewound = this.#previous !== undefined && timestamp < this.#previous;
 			this.#close(rewound ? undefined : timestamp);
 			if (rewound) this.#interval = undefined;
-			this.#group = this.#track.appendGroup();
+			// A track's first group says nothing came before it, so a reader can tell it is the first.
+			if (this.#track.largest() === undefined && timestamp > 0) this.#track.skipGroups(0n, BigInt(timestamp));
+			this.#group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
 			this.#floor = this.#start;
 			this.#start = timestamp;
 		} else if (!this.#group) {
@@ -174,6 +191,7 @@ export class Producer {
 		}
 		this.#previous = timestamp;
 		if (this.#end === undefined || timestamp > this.#end) this.#end = timestamp;
+		if (this.#newest === undefined || timestamp > this.#newest) this.#newest = timestamp;
 	}
 
 	/**
@@ -198,10 +216,16 @@ export class Producer {
 		if (end === undefined) this.#interval = undefined;
 		this.#close(end);
 		this.#interval = undefined;
-		const timestamp = end ?? this.#liveEdge;
-		if (this.#marked || timestamp === undefined) return;
+		const edge = end ?? this.#liveEdge;
+		if (this.#marked || edge === undefined) return;
 
-		const group = this.#track.appendGroup();
+		// The marker starts one microsecond before the live edge, so media resuming right at the edge
+		// still starts after it, but not below the newest frame, which it would otherwise claim to end
+		// before; and past the newest group, since starts strictly increase.
+		const largest = this.#track.largest()?.group;
+		let timestamp = Math.max(edge - 1, this.#newest ?? 0);
+		if (largest !== undefined && BigInt(timestamp) <= largest) timestamp = Number(largest + 1n);
+		const group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
 		group.writeFrame({
 			payload:
 				this.#format.kind === "data"
@@ -228,8 +252,11 @@ export class Producer {
 		}
 		end ??= this.#end !== undefined && this.#interval !== undefined ? this.#end + this.#interval : undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
-		this.#format.finishGroup(this.#group, this.#reordered || end === undefined ? undefined : Duration.micros(end));
-		this.#group.finish();
+		const bound = this.#reordered ? undefined : end;
+		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
+		// A group ends whole where its content stops, which bounds its reach without a successor.
+		if (bound !== undefined && BigInt(bound) > this.#group.start) this.#group.finishAt(BigInt(bound));
+		else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
 			this.#liveEdge = this.#liveEdge === undefined ? this.#end : Math.max(this.#liveEdge, this.#end);
