@@ -100,6 +100,27 @@ where
 	deserialize_object(deserializer).map(Some)
 }
 
+/// A [`serde_with`] adapter for an optional field that is absent or holds a value, never `null`.
+///
+/// serde reads `null` as `None`, but the draft refuses a catalog with a `null` field it defines.
+/// Pair it with `#[serde(default)]` so an absent field is still `None`.
+pub(crate) struct NotNull<T = serde_with::Same>(std::marker::PhantomData<T>);
+
+impl<T, U: serde_with::SerializeAs<T>> serde_with::SerializeAs<Option<T>> for NotNull<U> {
+	fn serialize_as<S: serde::Serializer>(source: &Option<T>, serializer: S) -> Result<S::Ok, S::Error> {
+		match source {
+			Some(value) => U::serialize_as(value, serializer),
+			None => serializer.serialize_none(),
+		}
+	}
+}
+
+impl<'de, T, U: serde_with::DeserializeAs<'de, T>> serde_with::DeserializeAs<'de, Option<T>> for NotNull<U> {
+	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+		U::deserialize_as(deserializer).map(Some)
+	}
+}
+
 /// An entry of a catalog map keyed by ID (a rendition, data track, or include), checked as it
 /// decodes.
 pub(crate) trait Entry: serde::de::DeserializeOwned {

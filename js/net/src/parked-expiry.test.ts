@@ -155,7 +155,9 @@ for (const protocol of protocols) {
 		const origin = new Origin();
 		const broadcastRoute = origin.route(Path.from("parked"));
 		const broadcast = broadcastRoute.broadcast;
-		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		// No publisher limit, so the eviction rather than a stale verdict gives the group up: lite-07
+		// closes the stream of a group gone stale instead of resetting it.
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		const write = (sequence: bigint, frames: number) => {
 			const group = track.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++) {

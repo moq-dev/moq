@@ -249,36 +249,37 @@ impl Lister {
 		self.inner.poll_unwanted(waiter).map_err(Error::Net)
 	}
 
-	/// List the track for `semantic`.
+	/// List the track for `semantic`, of the kind `info` is: a [`moq_net::track::Info`] or a
+	/// [`moq_net::datagram::Info`].
 	///
 	/// # Errors
 	///
 	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, or [`moq_net::Error::Duplicate`]
-	/// if this answer already lists it.
-	pub fn add(&self, semantic: &str, info: moq_net::track::Info) -> Result<()> {
+	/// if this answer already lists that kind and name.
+	pub fn add(&self, semantic: &str, info: impl Into<moq_net::broadcast::Listed>) -> Result<()> {
 		let name = self.generation.name(semantic)?;
 		Ok(self.inner.add(name.as_str(), info)?)
 	}
 
-	/// Stop listing the track for `semantic`, which left unfinished.
+	/// Stop listing the track of `kind` for `semantic`, which left unfinished.
 	///
 	/// # Errors
 	///
 	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, or [`moq_net::Error::NotFound`]
-	/// if this answer does not list it.
-	pub fn remove(&self, semantic: &str) -> Result<()> {
+	/// if this answer does not list that kind and name.
+	pub fn remove(&self, kind: moq_net::broadcast::Kind, semantic: &str) -> Result<()> {
 		let name = self.generation.name(semantic)?;
-		Ok(self.inner.remove(name.as_str())?)
+		Ok(self.inner.remove(kind, name.as_str())?)
 	}
 
-	/// Stop listing the track for `semantic`, which finished.
+	/// Stop listing the track of `kind` for `semantic`, which finished.
 	///
 	/// # Errors
 	///
 	/// Same as [`Self::remove`].
-	pub fn finish(&self, semantic: &str) -> Result<()> {
+	pub fn finish(&self, kind: moq_net::broadcast::Kind, semantic: &str) -> Result<()> {
 		let name = self.generation.name(semantic)?;
-		Ok(self.inner.finish(name.as_str())?)
+		Ok(self.inner.finish(kind, name.as_str())?)
 	}
 
 	/// The answer holds everything this hop knows now; later changes are live.

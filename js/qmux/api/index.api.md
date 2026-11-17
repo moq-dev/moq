@@ -16,8 +16,7 @@ export interface Config {
 	idleTimeout?: Duration | null;
 	maxDatagramFrameSize?: bigint | null;
 	maxRecordSize?: bigint;
-	maxStreamsBidi?: bigint;
-	maxStreamsUni?: bigint;
+	maxStreams?: bigint;
 	receiveWindow?: bigint;
 	streamReceiveWindow?: bigint;
 }

@@ -1,14 +1,14 @@
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 
-export type { BufferedRange, BufferedRanges, Frame } from "./types";
+export type { BufferedRange, BufferedRanges, Frame } from "./types.ts";
 
 import { Duration } from "@moq/clock";
-import type { AudioConfig, VideoConfig } from "../catalog";
-import * as Aac from "../util/aac";
-import * as Opus from "../util/opus";
-import type { Format as ContainerFormat } from "./format";
-import type { Frame } from "./types";
+import type { AudioConfig, VideoConfig } from "../catalog/index.ts";
+import * as Aac from "../util/aac.ts";
+import * as Opus from "../util/opus.ts";
+import type { Format as ContainerFormat } from "./format.ts";
+import type { Frame } from "./types.ts";
 
 /**
  * How long each packet of an audio track plays, as its codec states. Legacy frames carry no duration,

@@ -1,5 +1,5 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
+import { u53Schema } from "./integers.ts";
 
 /** The moq epoch (2020-01-01T00:00:00Z) in Unix-epoch milliseconds. */
 export const MOQ_EPOCH_UNIX_MILLIS = 1_577_836_800_000;

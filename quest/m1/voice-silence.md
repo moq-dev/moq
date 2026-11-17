@@ -51,7 +51,3 @@ Validate on real capture in Chrome and Firefox over a speech, pause, fan-noise,
 and quiet-talker recording: bytes sent during silence, clipped word heads or
 tails, a listening check of the comfort noise, and the VAD's decisions against
 libopus's own on the same input.
-
-## Related
-
-- [Rust and JS share an optional audio kind](/quest/m2/audio-kind.md) - the Rust publisher's gate, on the same wire shape

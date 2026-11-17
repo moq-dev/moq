@@ -54,14 +54,14 @@ Facts found by the audit:
   `lite/publisher.rs` and 264 in `lite/subscriber.rs`, plus
   `tests/integration/stream_credit.rs` (857 lines), the `test/stream-credit`
   browser harness, `Continuation.cfg`, and three of the seven rules in
-  `rs/moq-net/verify/subscribe/SubscribeAccounting.tla`. The other four
-  rules cover reopened OLD drops, which
-  [time addressing](/quest/m2/time-addressing/lite07.md) deletes.
+  `rs/moq-net/verify/subscribe/SubscribeAccounting.tla`. The rules for
+  reopened OLD drops left with [time addressing](https://github.com/moq-dev/moq/pull/8908).
 
 What goes:
 
-- Draft: the Yield section, the YIELDED row (0x3C), the paused clauses in
-  SUBSCRIBE_DROP's accounting rule, the continuation exception to the
+- Draft: the Yield section, the YIELDED row (0x3C), GROUP's `Frame Start`
+  (a continuation is its last sender on a subscription; lite-06 keeps its
+  field), the paused clauses in SUBSCRIBE_DROP's accounting rule, the continuation exception to the
   duplicate-stream rule with its "held unread" and "MAY end the earlier
   stream" rules, the `ietf` extension's never-yields sentence, and both
   changelog lines. The reset rule reads as lite-06's: the publisher resets
@@ -76,18 +76,13 @@ What goes:
 - JS: the same in `js/net/src/lite/{publisher,subscriber}.ts`, `open.ts`,
   and `error.ts`, including the paths that infer a pause from a reset without
   a code or from a later stream for the same group.
-- `verify/subscribe`: with this and OLD-final, none of the seven rules
-  describes shipped behaviour. Re-derive the model around what remains
-  (final drops, duplicate streams, the tail) or delete it with its skill
-  (`.claude/skills/verify-subscribe`) and nightly job; recommended:
-  re-derive, since tail accounting stays. Whichever PR lands second, this
-  or time addressing's, does it.
+- `verify/subscribe`: [time addressing](https://github.com/moq-dev/moq/pull/8908) re-derived the
+  model around final drops, expiry closes, and `Previous Start`; remove its
+  YIELDED half (`Continuation.cfg`, the paused rules, and the continuation
+  steps) and rerun the rest.
 
 Guidance for the PR:
 
-- Land after or with [time addressing](/quest/m2/time-addressing/lite07.md)
-  if both are open, since both rewrite SUBSCRIBE_DROP's accounting text;
-  neither blocks the other.
 - Keep `test/stream-credit` and `stream_credit.rs`, rewritten to the new
   contract: more live tracks than the cap, the highest-priority groups get
   the streams, every group the reader misses is named in a drop, and a
@@ -104,6 +99,5 @@ are unchanged.
 
 ## Related
 
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - rewrites the same SUBSCRIBE_DROP accounting text and deletes the model's other four rules
 - [Takeover](/quest/m3/group-takeover.md) - designs paused groups and continuations again, with takeover, for lite-08
 - [Browser reset reports](/quest/m4/browser-reset-reports.md) - the browser bugs that made the pause depend on a lost signal

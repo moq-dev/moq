@@ -42,7 +42,6 @@ import {
 	hasDatagramTracks,
 	hasGoaway,
 	hasHidden,
-	hasPadding,
 	hasProbeRtt,
 	hasRouteKey,
 	hasRoutes,
@@ -587,8 +586,6 @@ export class Connection implements Session {
 		if (typ === DataType.Group) {
 			const msg = await Group.decode(stream, this.#version);
 			await this.#subscriber.runGroup(msg, stream);
-		} else if (typ === DataType.Padding && hasPadding(this.#version)) {
-			await stream.discard();
 		} else if (typ === DataType.Announce && hasRoutes(this.#version)) {
 			// Claim the stream before reading it, so two that say nothing yet are duplicates too.
 			if (this.#announceSeen) throw new ProtocolViolation("duplicate Announce Stream");

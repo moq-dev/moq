@@ -108,9 +108,10 @@ fn send(track: &track::Producer, payload: &'static [u8]) {
 /// Read the next message from a session, or `None` once the peer finished.
 async fn recv(reader: &mut track::Ordered) -> Result<Option<Vec<u8>>, Error> {
 	kio::clock::timeout(TIMEOUT, async {
-		let Some(mut group) = reader.next_group().await? else {
+		let Some(item) = reader.next_group().await? else {
 			return Ok(None);
 		};
+		let mut group = item.group().expect("a group, not a gap");
 		let frame = group.read_frame().await?.expect("a frame");
 		Ok(Some(frame.payload.to_vec()))
 	})
@@ -185,8 +186,9 @@ async fn track_messages_are_read_in_key() {
 		group.finish().unwrap();
 	};
 	write(1, b"second");
-	// Let the later message arrive first.
-	assert!(kio::clock::timeout(SETTLE, reader.next_group()).await.is_err());
+	// Let the later message arrive first. A reader with no delay limit waits a second for a
+	// missing message the publisher may still write, then gives it up, so this stays under it.
+	assert!(kio::clock::timeout(SETTLE / 2, reader.next_group()).await.is_err());
 	write(0, b"first");
 	assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"first");
 	assert_eq!(recv(&mut reader).await.unwrap().unwrap(), b"second");

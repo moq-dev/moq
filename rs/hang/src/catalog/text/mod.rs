@@ -76,6 +76,7 @@ pub struct TextConfig {
 	/// broadcast that served this catalog (e.g. `../source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -86,6 +87,7 @@ pub struct TextConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
 	/// The instance of the stream the reference names, when the catalog knows it. Absent names
@@ -96,7 +98,7 @@ pub struct TextConfig {
 	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
 	/// catalog's own stream.
 	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 
 	/// The serialization format of each cue payload.
@@ -109,10 +111,14 @@ pub struct TextConfig {
 	pub role: TextRole,
 
 	/// The BCP-47 language tag of the track (e.g. `en`, `es-419`), if known.
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub lang: Option<String>,
 
 	/// A human-readable label for a track picker, when `lang` alone is ambiguous (e.g. distinguishing
 	/// "English" from "English (SDH)").
+	#[serde_as(as = "crate::catalog::NotNull")]
+	#[serde(default)]
 	pub label: Option<String>,
 
 	/// Container format for frame encoding. Defaults to "legacy" (a microsecond timestamp prefix

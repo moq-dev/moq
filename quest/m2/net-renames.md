@@ -83,4 +83,3 @@ them. Wire: none.
 
 - [The route switch](/quest/m2/multicast/switch.md) - removes the route key beside the node identity this renames
 - [Session close codes](/quest/m2/session-codes.md) - the other public moq-net cleanup in `error.rs`
-- [Unused moq-net API](/quest/m2/unused-api/net.md) - makes the lite version predicates crate-private beside the opaque `Version`

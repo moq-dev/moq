@@ -319,7 +319,14 @@ fn bench_track_recv(c: &mut Criterion) {
 				},
 				|(ctx, mut subscriber)| {
 					for _ in 0..n {
-						let group = subscriber.next_group().now_or_never().unwrap().unwrap().unwrap();
+						let group = subscriber
+							.next_group()
+							.now_or_never()
+							.unwrap()
+							.unwrap()
+							.unwrap()
+							.group()
+							.unwrap();
 						black_box(group);
 					}
 					(ctx, subscriber)

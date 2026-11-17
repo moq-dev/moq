@@ -4,7 +4,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
-import { rotateVideoDimensions } from "@moq/video";
+import { rotateDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { Order } from "./order";
 import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
@@ -83,7 +83,7 @@ export type BroadcastInput = {
 	 * which solicits it; undefined (the default) solicits none. A path that walks above the root from
 	 * the broadcast name is left out of the catalog with a warning, since every viewer would refuse it.
 	 */
-	echo: Getter<Moq.Path.Relative | undefined>;
+	echoPath: Getter<Moq.Path.Relative | undefined>;
 
 	/** Which renditions wait for a subscriber before encoding. Defaults to `"retain"`. */
 	onDemand: Getter<OnDemand>;
@@ -198,7 +198,7 @@ export class Broadcast {
 			maxAge: getter(props?.maxAge),
 			stats: getter(props?.stats ?? false),
 			probe: getter(props?.probe),
-			echo: getter(props?.echo),
+			echoPath: getter(props?.echoPath),
 			onDemand: getter(props?.onDemand ?? "retain"),
 		};
 
@@ -335,7 +335,7 @@ export class Broadcast {
 				const section: Catalog.Video = { renditions: video };
 				// display is optional in the schema, so it gates only itself, not the whole section.
 				if (display) {
-					const { width, height } = rotateVideoDimensions(display, rotation);
+					const { width, height } = rotateDimensions(display, rotation);
 					section.display = { width: Catalog.u53(width), height: Catalog.u53(height) };
 				}
 				if (flip) section.flip = true;
@@ -366,7 +366,7 @@ export class Broadcast {
 	// Solicit feedback in the catalog's `echo` section. A path above the root names no broadcast, and a
 	// viewer refuses the whole catalog for it, so it is left out instead.
 	#runEcho(effect: Effect) {
-		const path = effect.get(this.in.echo);
+		const path = effect.get(this.in.echoPath);
 		if (path === undefined) return;
 		const name = effect.get(this.in.name);
 		if (Moq.Path.tryResolve(name, path) === undefined) {

@@ -4367,12 +4367,12 @@ struct FrontListing {
 	/// The source being read.
 	source: Option<u64>,
 	reader: Option<broadcast::Tracks>,
-	/// Every name the front lists.
-	listed: HashSet<Arc<str>>,
-	/// Names an earlier source listed that the current one has yet to list. A source of the
+	/// Every track the front lists, by kind and name.
+	listed: HashSet<(broadcast::Kind, Arc<str>)>,
+	/// Tracks an earlier source listed that the current one has yet to list. A source of the
 	/// same instance lists the same tracks, so its readers see no churn: what it still lacks
 	/// at its SYNCED is gone.
-	stale: HashSet<Arc<str>>,
+	stale: HashSet<(broadcast::Kind, Arc<str>)>,
 }
 
 /// A track the ended front left in flight, held until its last reader leaves. It
@@ -5543,27 +5543,30 @@ impl kio::Task for FrontServe {
 					// The lister refuses only once the broadcast ended, which ends the front too.
 					match result {
 						Ok(Some(broadcast::TracksEvent::Added { name, info })) => {
-							if !state.stale.remove(&name) && state.listed.insert(name.clone()) {
-								let _ = self.lister.add(name, info);
+							let key = (info.kind(), name);
+							if !state.stale.remove(&key) && state.listed.insert(key.clone()) {
+								let _ = self.lister.add(key.1, info);
 							}
 						}
 						// Forwarded as the source reported it, finished or not.
-						Ok(Some(broadcast::TracksEvent::Removed { name })) => {
-							state.stale.remove(&name);
-							if state.listed.remove(&name) {
-								let _ = self.lister.remove(&name);
+						Ok(Some(broadcast::TracksEvent::Removed { kind, name })) => {
+							let key = (kind, name);
+							state.stale.remove(&key);
+							if state.listed.remove(&key) {
+								let _ = self.lister.remove(kind, key.1);
 							}
 						}
-						Ok(Some(broadcast::TracksEvent::Finished { name })) => {
-							state.stale.remove(&name);
-							if state.listed.remove(&name) {
-								let _ = self.lister.finish(&name);
+						Ok(Some(broadcast::TracksEvent::Finished { kind, name })) => {
+							let key = (kind, name);
+							state.stale.remove(&key);
+							if state.listed.remove(&key) {
+								let _ = self.lister.finish(kind, key.1);
 							}
 						}
 						Ok(Some(broadcast::TracksEvent::Synced)) => {
-							for name in state.stale.drain() {
-								state.listed.remove(&name);
-								let _ = self.lister.remove(&name);
+							for (kind, name) in state.stale.drain() {
+								state.listed.remove(&(kind, name.clone()));
+								let _ = self.lister.remove(kind, name);
 							}
 							self.lister.synced();
 						}
@@ -11196,12 +11199,17 @@ mod tests {
 		assert!(first.is_clone(&second), "the newcomer joins the front");
 	}
 
+	/// The next event, a datagram track's name prefixed `d:`.
 	#[cfg(feature = "async")]
 	async fn listed(tracks: &mut broadcast::Tracks) -> String {
+		let named = |kind: broadcast::Kind, name: Arc<str>| match kind {
+			broadcast::Kind::Track => name.to_string(),
+			broadcast::Kind::Datagrams => format!("d:{name}"),
+		};
 		match tracks.next().await {
-			Ok(Some(broadcast::TracksEvent::Added { name, .. })) => format!("+{name}"),
-			Ok(Some(broadcast::TracksEvent::Removed { name })) => format!("-{name}"),
-			Ok(Some(broadcast::TracksEvent::Finished { name })) => format!("~{name}"),
+			Ok(Some(broadcast::TracksEvent::Added { name, info })) => format!("+{}", named(info.kind(), name)),
+			Ok(Some(broadcast::TracksEvent::Removed { kind, name })) => format!("-{}", named(kind, name)),
+			Ok(Some(broadcast::TracksEvent::Finished { kind, name })) => format!("~{}", named(kind, name)),
 			Ok(Some(broadcast::TracksEvent::Synced)) => "synced".into(),
 			Ok(None) => "end".into(),
 			Err(err) => format!("error: {err}"),
@@ -11224,8 +11232,15 @@ mod tests {
 
 		let _audio = source.broadcast().create_track("audio", None).unwrap();
 		assert_eq!(listed(&mut tracks).await, "+audio");
+		let datagrams = source
+			.broadcast()
+			.create_datagrams("video", Default::default())
+			.unwrap();
+		assert_eq!(listed(&mut tracks).await, "+d:video");
 		drop(video);
 		assert_eq!(listed(&mut tracks).await, "-video");
+		datagrams.finish();
+		assert_eq!(listed(&mut tracks).await, "~d:video");
 
 		drop(source);
 		assert_eq!(listed(&mut tracks).await, "end");

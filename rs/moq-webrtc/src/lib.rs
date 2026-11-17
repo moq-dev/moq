@@ -192,7 +192,9 @@ mod tests {
 		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
-		let server = Server::new(server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let whep_origin = origin.consume();
 		let (sessions_tx, mut sessions) = tokio::sync::mpsc::channel(1);
 		let app = Router::new().route(
@@ -223,8 +225,9 @@ mod tests {
 		let output_consumer = output.broadcast().consume();
 		let client = Client::new(client::Config::default()).unwrap();
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
-		let fill = output.broadcast().clone();
-		let viewer = tokio::spawn(async move { client.pull(url, fill, Default::default()).await });
+		let mut fill = output.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut fill, Default::default()).unwrap();
+		let viewer = tokio::spawn(async move { client.pull(url, &fill, &catalog).await });
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
@@ -258,7 +261,9 @@ mod tests {
 		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
-		let server = Server::new(server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let ingest_origin = moq_tokio::origin::spawn();
 		let whip_origin = ingest_origin.clone();
 		let app = Router::new().route(
@@ -323,7 +328,9 @@ mod tests {
 		tokio::task::JoinHandle<()>,
 		tokio::sync::mpsc::Receiver<tokio::task::JoinHandle<crate::Result<()>>>,
 	) {
-		let server = Server::new(server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let origin = moq_tokio::origin::spawn();
 		let (sessions_tx, sessions) = tokio::sync::mpsc::channel(1);
 		let app = Router::new().route(
@@ -466,7 +473,9 @@ mod tests {
 		drop(announcements);
 
 		let server_origin = moq_tokio::origin::spawn();
-		let server = Server::new(server::Config::default());
+		let server = Server::bind("127.0.0.1:0".parse().unwrap(), server::Config::default())
+			.await
+			.unwrap();
 		let (sources_tx, mut sources_rx) = tokio::sync::mpsc::channel(2);
 		let whip_server = server.clone();
 		let whip_origin = server_origin.clone();
@@ -546,8 +555,9 @@ mod tests {
 		let whep = format!("http://user:pass@{address}/whep/ingested?jwt=canary-7f3e")
 			.parse()
 			.expect("WHEP URL");
-		let fill = output.broadcast().clone();
-		let whep_client = tokio::spawn(async move { client.pull(whep, fill, Default::default()).await });
+		let mut fill = output.broadcast().clone();
+		let catalog = moq_mux::catalog::Producer::new(&mut fill, Default::default()).unwrap();
+		let whep_client = tokio::spawn(async move { client.pull(whep, &fill, &catalog).await });
 		let (whep_id, whep_task) = kio::clock::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")
