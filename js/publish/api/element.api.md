@@ -11,7 +11,7 @@ import { Video } from "@moq/publish";
 
 export type AnnounceMode = "always" | "source";
 
-export type CaptureMode = "hold" | "release";
+export type IdleMode = "hold" | "release";
 
 export type SourceType = "camera" | "screen" | "file";
 
@@ -19,20 +19,18 @@ export default class extends HTMLElement {
 	constructor();
 	get announce(): AnnounceMode;
 	set announce(value: AnnounceMode);
-	attributeChangedCallback(name: "source" | "url" | "stats" | "announce" | "name" | "capture" | "backend" | "versions" | "muted" | "invisible" | "preview" | "echo-path", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "source" | "url" | "stats" | "announce" | "name" | "backend" | "versions" | "muted" | "invisible" | "preview" | "echo-path" | "idle", oldValue: string | null, newValue: string | null): void;
 	readonly audio: Audio.Encoder;
 	get backend(): Preview.Backend;
 	set backend(value: Preview.Backend);
 	readonly broadcast: Broadcast;
-	get capture(): CaptureMode;
-	set capture(value: CaptureMode);
 	connectedCallback(): void;
 	readonly connection: Net.Connection;
 	readonly controls: {
 		announce: Signals.Signal<AnnounceMode>;
 		backend: Signals.Signal<Preview.Backend>;
-		capture: Signals.Signal<CaptureMode>;
 		echoPath: Signals.Signal<Net.Path.Relative | undefined>;
+		idle: Signals.Signal<IdleMode>;
 		invisible: Signals.Signal<boolean>;
 		muted: Signals.Signal<boolean>;
 		preview: Signals.Signal<Preview.Mode>;
@@ -42,13 +40,15 @@ export default class extends HTMLElement {
 	disconnectedCallback(): void;
 	get echoPath(): Net.Path.Relative | undefined;
 	set echoPath(value: string | undefined);
+	get idle(): IdleMode;
+	set idle(value: IdleMode);
 	get invisible(): boolean;
 	set invisible(value: boolean);
 	get muted(): boolean;
 	set muted(value: boolean);
 	get name(): Net.Path.Valid;
 	set name(value: string | Net.Path.Valid);
-	static observedAttributes: readonly ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce", "stats", "echo-path", "capture"];
+	static observedAttributes: readonly ["url", "versions", "name", "muted", "invisible", "source", "preview", "backend", "announce", "stats", "echo-path", "idle"];
 	get preview(): Preview.Mode;
 	set preview(value: Preview.Mode);
 	readonly signals: Signals.Effect;
