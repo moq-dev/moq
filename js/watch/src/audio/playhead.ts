@@ -6,24 +6,26 @@ import { bound } from "./latency";
 
 /**
  * The oldest media the ring still plays, which the audio consumer reads as its clock. The ring renders
- * `output` (none until known) ahead of the shared clock, so the sample it renders now sounds when the clock reaches it,
- * and stretches audio trailing that within its {@link bound} back onto it. So a missing group can
- * still play until the group past it trails the ring by more than the bound, as when a late burst
- * fills the hole a moment after the group past it lands.
+ * `output` (none until known) ahead of the shared clock, so what it renders now sounds when the clock
+ * reaches it, and stretches audio trailing that within its {@link bound} back onto it. So a missing
+ * group can still play until the group past it trails the ring by more than the bound, as when a late
+ * burst fills the hole a moment after the group past it lands.
  *
  * @internal Exported for the replay harness.
  */
 export function playable(sync: Sync, output: Getter<Duration | undefined> = new Signal(undefined)): Container.Playhead {
+	// How far the oldest playable media trails the clock, in ms; negative when the output leads by more.
 	const trail = new Derived(
 		[sync.out.delay, sync.out.maxDelay, sync.in.stretch, output],
 		(delay, maxDelay, stretch, output) =>
-			bound({ delay, maxDelay, stretch }).asMicros() - (output?.asMicros() ?? 0),
+			bound({ delay, maxDelay, stretch }).asMillis() - (output?.asMillis() ?? 0),
 	);
 	return {
 		now: () => {
-			const now = sync.now();
-			if (now === undefined) return undefined;
-			return Duration.micros(Math.max(0, now.asMicros() - trail.peek()));
+			// The signed position, since before media zero's turn the ring may already render it.
+			const position = sync.position();
+			if (position === undefined) return undefined;
+			return Duration.millis(Math.max(0, position - trail.peek()));
 		},
 		anchor: new Derived([sync.anchor, trail], (anchor, trail) => ({ anchor, trail })),
 	};

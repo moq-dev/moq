@@ -40,3 +40,26 @@ it("reads the clock the ring renders at, less the stretch it plays late audio wi
 		installed.close();
 	}
 });
+
+it("applies the output latency before media zero's turn, when the ring already renders it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const sync = new Sync({ delay: Duration.millis(300), lookahead: Duration.millis(1000), stretch: Duration.ZERO });
+	const span = new Signal<{ start: Duration; end: Duration; lead?: Duration } | null>(null);
+	const audio = sync.track({ target: new Signal(Duration.millis(300)), startup: span });
+	const playhead = playable(sync, new Signal(Duration.millis(120)));
+	try {
+		await clock.advance(Duration.ZERO);
+		audio.received(Duration.ZERO);
+		span.set({ start: Duration.ZERO, end: Duration.millis(180), lead: Duration.millis(120) });
+		await clock.advance(Duration.millis(50));
+		// 70 ms short of media zero's turn, which the clock reads as zero, the ring renders 50 ms.
+		expect(sync.now()).toEqual(Duration.ZERO);
+		expect(sync.position()).toBe(-70);
+		expect(playhead.now()).toEqual(Duration.millis(50));
+	} finally {
+		audio.close();
+		sync.close();
+		installed.close();
+	}
+});
