@@ -10,12 +10,12 @@ import MoqFFI
 /// Foundation before the swift-foundation rewrite (iOS < 18 / macOS < 15), so encode an object
 /// or array there.
 ///
-/// Compression is the track's: publish JSON with `TrackInfo(compression: .deflate)`, and a consumer reads
-/// it with no option of its own.
+/// Compression is the track's: publish JSON with `TrackInfo(maxAge: 0, compression: Compression.deflate())`,
+/// and a consumer reads it with no option of its own.
 ///
 /// Every write (a snapshot update, a stream append, a window push or pop) takes a timestamp on the
 /// broadcast clock, the epoch every track in the broadcast shares: read it with
-/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(timescale: 1000)`); one
+/// `Media.CatalogProducer.now()`. The track needs a timescale (`TrackInfo(maxAge: 0, timescale: 1000)`); one
 /// without is refused.
 public enum Json {}
 
@@ -101,10 +101,17 @@ extension Json {
         let ffi: MoqJsonSnapshotConsumer
 
         /// Subscribe to the track `name` on `broadcast` and read it as a JSON snapshot track.
-        /// The consumer owns its subscription, at a zero `delay.max` and `priority` (higher
-        /// first); a read waits for it to resolve and throws if it cannot.
-        public init(broadcast: BroadcastConsumer, name: String, priority: Int8 = 0) throws {
-            ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name, priority: priority)
+        /// The consumer owns its subscription, at `priority` (higher first) and `delay`; a read
+        /// waits for it to resolve and throws if it cannot.
+        ///
+        /// `delay` is the reader's playout delay behind the live edge in seconds, the
+        /// subscription's `delay.min` and `delay.max`. Zero skips a snapshot the moment a newer
+        /// one arrives. A reader that holds each snapshot until media reaches its timestamp sets
+        /// its delay, so a superseded snapshot it may still need stays deliverable that long and
+        /// `next()` yields it.
+        public init(broadcast: BroadcastConsumer, name: String, priority: Int8 = 0, delay: TimeInterval = 0) throws {
+            let config = MoqJsonSnapshotConsumerConfig(priority: priority, delay: delay)
+            ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name, config: config)
         }
 
         /// The next state in order, or `nil` once the track ends or is closed.

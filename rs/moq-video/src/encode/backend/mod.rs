@@ -526,6 +526,69 @@ pub(crate) mod test_util {
 	use h264_reader::nal::sps::SeqParameterSet;
 	use h264_reader::nal::{Nal, RefNal, UnitType};
 
+	/// What a scene cost an encoder held to `config.bitrate`, its cap.
+	#[derive(Debug)]
+	pub(crate) struct Spent {
+		/// The mean bitrate after the first second, once rate control has settled.
+		pub mean: u64,
+		/// The most any one second carried after the first.
+		pub peak: u64,
+	}
+
+	/// Encode three seconds of a calm scene (a detailed picture drifting a pixel a
+	/// frame) or a busy one (fresh noise every frame, which no quantizer below the
+	/// coarsest codes under any cap) and report what it spent, retuning the cap
+	/// to `retune` half a second in. `None` when the backend `config` names
+	/// cannot open on this machine; once it opens, any failure panics, so an
+	/// encoder that opens but cannot encode fails the test instead of skipping it.
+	pub(crate) fn spend(config: &crate::encode::Config, busy: bool, retune: Option<u64>) -> Option<Spent> {
+		let mut encoder = crate::encode::Encoder::new(config).ok()?;
+		let size = crate::Size::new(config.width, config.height);
+		let fps = config.framerate.rounded() as usize;
+		let mut sizes = Vec::new();
+		let mut noise = 0x2545_f491_4f6c_dd1du64;
+		for index in 0..3 * fps {
+			if let Some(bps) = retune.filter(|_| index == fps / 2) {
+				encoder
+					.set_bitrate(moq_net::bandwidth::Rate::from_bps(bps))
+					.expect("retune the cap");
+			}
+			let (w, h) = (size.width as usize, size.height as usize);
+			let mut rgba = vec![255u8; w * h * 4];
+			for y in 0..h {
+				for x in 0..w {
+					let i = (y * w + x) * 4;
+					let value = if busy {
+						noise ^= noise << 13;
+						noise ^= noise >> 7;
+						noise ^= noise << 17;
+						noise as u8
+					} else {
+						let sx = x + index;
+						(((sx * 7) ^ (y * 13)) & 0xff) as u8 / 2 + ((sx / 9 + y / 5) % 2) as u8 * 64
+					};
+					rgba[i..i + 3].fill(value);
+				}
+			}
+			let surface = crate::Surface::rgba(&rgba, size).expect("wrap the frame");
+			let timestamp =
+				moq_net::Timestamp::from_micros(index as u64 * 1_000_000 / fps as u64).expect("frame timestamp");
+			let bytes: usize = encoder
+				.encode_all(&crate::Frame::new(surface, timestamp))
+				.expect("encode a frame")
+				.iter()
+				.map(|unit| unit.payload.len())
+				.sum();
+			sizes.push(bytes);
+		}
+		let settled = &sizes[fps..];
+		let bits = |frames: &[usize]| frames.iter().sum::<usize>() as u64 * 8;
+		Some(Spent {
+			mean: bits(settled) * fps as u64 / settled.len() as u64,
+			peak: settled.windows(fps).map(bits).max().unwrap_or(0),
+		})
+	}
+
 	/// A stream's VUI color description, as the raw code points ISO/IEC 23091-2
 	/// assigns them plus the range flag.
 	///

@@ -15,8 +15,8 @@ minor up per later API or wire cut, following
 [Versions](/RELEASE.md#versions), including packages that did not change. `@moq/qmux` and the Rust `qmux` crate are
 exempt from that version (`version.json`), so check each against its
 registry by hand: npm already has `@moq/qmux` 0.3.3 and 0.3.4, published
-from moq-dev/web-transport, and 0.3.5 follows for
-[the release line's credit fix](/quest/m0/release-qmux-credit.md), while `js/qmux` is at 0.3.3. Publishing 0.3.3
+from moq-dev/web-transport, and 0.3.5 for
+[the release line's credit fix](https://github.com/moq-dev/moq/pull/8808), while `js/qmux` is at 0.3.3. Publishing 0.3.3
 fails, and `workspace:^` would resolve `@moq/net`'s dependency to
 web-transport's latest 0.3.x, a different API. `js/qmux` must publish above that;
 the maintainer picks the version (found 2026-11-07 by the API shape audit).
@@ -211,10 +211,6 @@ with the suites above.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 
-- ✅ The cut waits on [the relay's memory growth](/quest/m2/relay-memory.md)
-  by name: the chat scenario's relay uses about 17% more memory on `main`
-  than on `release`, and 0.22 is not announced with that unexplained
-  (rejected: cutting and investigating after).
 - ✅ The cut waits on [the rind 0.4 adapters](/quest/m0/rind-adapters.md)
   ([moq-dev/moq#8432](https://github.com/moq-dev/moq/pull/8432)), so the
   `UnsupportedCpu` error that exists only for rind 0.3 is never published.
@@ -235,7 +231,6 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
-- [Relay memory](/quest/m2/relay-memory.md) - the relay's memory growth since `release` is fixed or recorded before 0.22 is announced
 - [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
 - [Migration audit](/quest/m3/release/migrate-audit.md) - every break on the cut PR has its MIGRATE.md entry
 - [API shape review](/quest/m3/release/api-review.md) - every new or changed public API was reviewed for a better shape, and approved changes landed

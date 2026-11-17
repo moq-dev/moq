@@ -32,11 +32,7 @@ fn main() {
 			for _ in 0..1_000 {
 				let mut buffer = buffer::Buffer::default();
 				for frame in &frames {
-					buffer.push(
-						black_box(frame.clone()),
-						Duration::from_millis(delay_ms),
-						Duration::ZERO,
-					);
+					buffer.push(black_box(frame.clone()), Duration::from_millis(delay_ms));
 					peak = peak.max(buffer.bytes);
 				}
 				black_box(buffer);

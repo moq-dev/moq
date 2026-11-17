@@ -32,23 +32,21 @@ impl From<moq_net::track::Position> for MoqPosition {
 /// Publisher-side track properties, mirroring [`moq_net::track::Info`].
 ///
 /// Construct with the fields you care about; the rest use raw-track defaults
-/// (priority 0, a zero max age, untimed).
+/// (priority 0, untimed, uncompressed). A null record uses moq-net's zero `max_age` too.
+/// Uniffi can't default a duration, so Kotlin and Swift name `max_age`, the Python, Go, and
+/// Dart wrappers default an omitted one to zero, and a bare C++ record leaves it unset, as
+/// [`MoqDelay`](crate::consumer::MoqDelay) does.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqTrackInfo {
 	/// Priority, used only to break ties between subscriptions of equal subscriber priority.
 	/// Higher is more urgent; the default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// How long a superseded group stays fresh, or null for the default, zero: only the live
-	/// edge is served. The publisher-side half of
-	/// [`MoqDelay::max`](crate::consumer::MoqDelay::max). Ignored when `max_age_unlimited` is
-	/// set. Uniffi can't default a duration, hence null rather than zero.
-	#[uniffi(default = None)]
+	/// How long a superseded group stays fresh, or null for no publisher limit, leaving only
+	/// the cache to bound how long one is served. Zero serves only the live edge. The
+	/// publisher-side half of [`MoqDelay::max`](crate::consumer::MoqDelay::max), which reads
+	/// null the same way.
 	pub max_age: Option<std::time::Duration>,
-	/// Set no publisher age limit, ignoring `max_age` and leaving only the cache to bound how
-	/// long a superseded group is served. A received track that advertised none reports this.
-	#[uniffi(default = false)]
-	pub max_age_unlimited: bool,
 	/// How many times its first frame a group's later bytes may grow before a joining
 	/// subscriber asks for a new group, or null to never ask. See
 	/// [`MoqTrackDemand::wanted`](crate::demand::MoqTrackDemand::wanted).
@@ -60,21 +58,33 @@ pub struct MoqTrackInfo {
 	/// How each group is compressed on the wire to peers that support it, or null to send
 	/// frames as written. Readers always see the original frames.
 	#[uniffi(default = None)]
-	pub compression: Option<MoqCompression>,
+	pub compression: Option<Arc<MoqCompression>>,
 }
 
 /// How a track's frames are compressed, mirroring [`moq_net::track::Compression`]; an
 /// uncompressed track has none.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
-pub enum MoqCompression {
-	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
-	Deflate,
-}
+///
+/// An immutable object so adding a compression later does not break callers switching over a
+/// closed enum. Compare a received one by [`name`](Self::name).
+#[derive(Debug, PartialEq, Eq, Hash, uniffi::Object)]
+#[uniffi::export(Debug, Eq, Hash)]
+pub struct MoqCompression(moq_net::track::Compression);
 
-fn compression(compression: Option<MoqCompression>) -> moq_net::track::Compression {
-	match compression {
-		None => moq_net::track::Compression::None,
-		Some(MoqCompression::Deflate) => moq_net::track::Compression::Deflate,
+#[uniffi::export]
+impl MoqCompression {
+	/// Each group is one DEFLATE stream, which suits small, repetitive frames like JSON.
+	#[uniffi::constructor]
+	pub fn deflate() -> Arc<Self> {
+		Arc::new(Self(moq_net::track::Compression::Deflate))
+	}
+
+	/// The compression's lowercase name, such as `deflate`.
+	pub fn name(&self) -> String {
+		match self.0 {
+			moq_net::track::Compression::Deflate => "deflate".into(),
+			// A compression added to moq-net before this binding names it.
+			other => format!("{other:?}").to_lowercase(),
+		}
 	}
 }
 
@@ -84,19 +94,18 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
 		let mut out = moq_net::track::Info::default()
 			.with_priority(info.priority)
-			.with_refresh(info.refresh);
-		if info.max_age_unlimited {
-			out = out.with_max_age(None);
-		} else if let Some(max_age) = info.max_age {
-			out = out.with_max_age(max_age);
-		}
+			.with_refresh(info.refresh)
+			.with_max_age(info.max_age);
 		if let Some(ticks) = info.timescale {
 			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
 				reason: format!("invalid timescale: {ticks}"),
 			})?;
 			out = out.with_timescale(scale);
 		}
-		Ok(out.with_compression(compression(info.compression)))
+		let compression = info
+			.compression
+			.map_or(moq_net::track::Compression::None, |compression| compression.0);
+		Ok(out.with_compression(compression))
 	}
 }
 
@@ -117,11 +126,10 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 		Self {
 			priority: info.priority,
 			max_age: info.max_age.map(crate::ffi::duration),
-			max_age_unlimited: info.max_age.is_none(),
 			refresh: info.refresh,
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
-			// A codec this binding cannot name yet reads as uncompressed, as its frames do.
-			compression: (info.compression == moq_net::track::Compression::Deflate).then_some(MoqCompression::Deflate),
+			compression: (info.compression != moq_net::track::Compression::None)
+				.then(|| Arc::new(MoqCompression(info.compression))),
 		}
 	}
 }
@@ -1171,30 +1179,38 @@ mod metadata_tests {
 
 	#[test]
 	fn max_age_survives_binding_conversion() {
-		let info = |max_age, max_age_unlimited| MoqTrackInfo {
+		let info = |max_age| MoqTrackInfo {
 			priority: 0,
 			max_age,
-			max_age_unlimited,
 			refresh: None,
 			timescale: None,
 			compression: None,
 		};
 		let zero = Some(std::time::Duration::ZERO);
-		let five = Some(std::time::Duration::from_secs(5));
 		assert_eq!(raw_track_info(None).unwrap().max_age, zero);
-		for (max_age, unlimited, want) in [
-			(None, false, zero),
-			(five, false, five),
-			(None, true, None),
-			// The flag wins over a stated age.
-			(five, true, None),
-		] {
-			let model = moq_net::track::Info::try_from(info(max_age, unlimited)).unwrap();
-			assert_eq!(model.max_age, want);
+		// Null is no limit, as `MoqDelay.max` reads it, and zero is the live edge only.
+		for max_age in [None, zero, Some(std::time::Duration::from_secs(5))] {
+			let model = moq_net::track::Info::try_from(info(max_age)).unwrap();
+			assert_eq!(model.max_age, max_age);
 			// A received record republishes unchanged.
 			let back = MoqTrackInfo::from(&model);
-			assert_eq!(moq_net::track::Info::try_from(back).unwrap().max_age, want);
+			assert_eq!(back.max_age, max_age);
 		}
+	}
+
+	#[test]
+	fn compression_survives_binding_conversion() {
+		let model = moq_net::track::Info::default();
+		assert!(MoqTrackInfo::from(&model).compression.is_none());
+		let deflate = model.with_compression(moq_net::track::Compression::Deflate);
+		let info = MoqTrackInfo::from(&deflate);
+		let read = info.compression.clone().unwrap();
+		assert_eq!(*read, *MoqCompression::deflate());
+		assert_eq!(read.name(), "deflate");
+		assert_eq!(
+			moq_net::track::Info::try_from(info).unwrap().compression,
+			moq_net::track::Compression::Deflate
+		);
 	}
 
 	/// C and C++ abort on a duration past `i64::MAX` nanoseconds, so a peer's longer age saturates.

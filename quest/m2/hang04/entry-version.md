@@ -50,7 +50,8 @@ Recommendations for the PR:
   IDs were skipped and the highest version among them, the per-entry twin
   of `Error::UnsupportedVersion` and JS `UnsupportedVersion`, so a player
   can say "upgrade to see everything".
-- With [video warmup](/quest/m2/hang04/video-warmup.md) out of hang-04, the
+- With video warmup out of hang-04
+  ([moq-dev/moq#8960](https://github.com/moq-dev/moq/pull/8960)), the
   renamed `track` is the only trigger, and nothing in hang-04 raises the
   root `version`. Keep the root check and its tests: it is what a reshaped
   root will use.
@@ -72,5 +73,4 @@ Wire: the hang-04 catalog JSON, unpublished.
 
 ## Related
 
-- [Video warmup leaves hang-04](/quest/m2/hang04/video-warmup.md) - removes the other trigger from the same lines
 - [Audio languages](/quest/m3/audio-lang.md) - a later rendition a 0.22 player should skip can be marked with this

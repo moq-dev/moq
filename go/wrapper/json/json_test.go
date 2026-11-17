@@ -57,8 +57,7 @@ func TestTracks(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	deflate := moq.CompressionDeflate
-	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
+	track, err := broadcast.PublishTrack("status", &moq.TrackInfo{Timescale: &scale, Compression: moq.DeflateCompression()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +137,7 @@ func TestWindow(t *testing.T) {
 	broadcast, consumer := newBroadcast(t)
 
 	scale := uint64(1_000_000)
-	deflate := moq.CompressionDeflate
-	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compression: &deflate})
+	track, err := broadcast.PublishTrack("log", &moq.TrackInfo{Timescale: &scale, Compression: moq.DeflateCompression()})
 	if err != nil {
 		t.Fatal(err)
 	}

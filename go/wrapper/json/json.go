@@ -19,6 +19,7 @@ import (
 	stdjson "encoding/json"
 	"fmt"
 	"iter"
+	"time"
 
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
@@ -179,13 +180,22 @@ type SnapshotConsumerOptions struct {
 	// Priority is the subscription's delivery priority, higher first, as
 	// moq.Subscription.Priority.
 	Priority int8
+	// Delay is the reader's playout delay behind the live edge, the subscription's
+	// Delay.Min and Delay.Max. Zero skips a snapshot the moment a newer one arrives. A
+	// reader that holds each snapshot until media reaches its timestamp sets its delay, so
+	// a superseded snapshot it may still need stays deliverable that long and Next yields it.
+	Delay time.Duration
 }
 
 // NewSnapshotConsumer subscribes to the track named name on broadcast and reads it as a
-// lossy latest-value JSON track. The consumer owns its subscription, at a zero Delay.Max
-// and the options' priority; a read waits for it to resolve and fails if it cannot.
+// lossy latest-value JSON track. The consumer owns its subscription, at the options'
+// priority and delay; a read waits for it to resolve and fails if it cannot.
 func NewSnapshotConsumer(broadcast *moq.BroadcastConsumer, name string, options SnapshotConsumerOptions) (*SnapshotConsumer, error) {
-	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, options.Priority)
+	if err := bridge.NonNegative(&options.Delay, "snapshot delay"); err != nil {
+		return nil, err
+	}
+	config := ffi.MoqJsonSnapshotConsumerConfig{Priority: options.Priority, Delay: options.Delay}
+	inner, err := ffi.NewMoqJsonSnapshotConsumer(bridge.BroadcastConsumer(broadcast), name, &config)
 	if err != nil {
 		return nil, err
 	}

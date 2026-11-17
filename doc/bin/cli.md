@@ -431,7 +431,8 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
-so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
+so it needs no `--connect`. `--connect-token` goes only to `--connect`, never to
+a cluster peer: give those `--cluster-token`. WAN cluster dials (`--cluster-connect`,
 `--cluster-api-url`) bind `--connect-bind`'s address. On port 0, each cluster
 session takes its own ephemeral port, so a redial leaves from a fresh one. A
 fixed port pins every WAN cluster dial to it, while LAN dials still take

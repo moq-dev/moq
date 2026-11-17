@@ -10,7 +10,7 @@ can then end the connection when a device that was live is removed or
 revoked. Non-goals: changing when the loop retries
 ([moq-dev/moq#8618](https://github.com/moq-dev/moq/pull/8618) keeps
 retrying a refusal after a healthy session, and
-[first-dial-refusal](/quest/m1/first-dial-refusal.md) ends only a first
+[moq-dev/moq#8817](https://github.com/moq-dev/moq/pull/8817) ends only a first
 session refused before it is healthy), and in-band AUTH retry hints
 ([moq-dev/moq#8836](https://github.com/moq-dev/moq/pull/8836)).
 

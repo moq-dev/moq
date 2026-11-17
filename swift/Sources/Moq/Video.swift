@@ -55,28 +55,16 @@ public enum Video {
         public func pixels(format: PixelFormat) throws -> Data { try ffi.pixels(format: format) }
 
         /// The decoder's platform surface, or `nil` when the frame is in CPU memory.
-        public func surface() -> Surface? { ffi.surface().map(Surface.init) }
+        public func surface() -> Surface? { ffi.surface() }
     }
 
-    /// The platform image backing a `DecodedFrame`, when `DecoderOutput` asked for one.
-    public enum Surface: Sendable, Equatable {
-        /// A borrowed `CVPixelBufferRef` address, valid while its frame lives.
-        case pixelBuffer(pointer: UInt64)
-        /// A surface kind this version of the package does not know yet.
-        case unknown
-
-        init(_ surface: MoqVideoSurface) {
-            // `if case` rather than `switch`, so a variant this package predates maps to `.unknown`.
-            if case .pixelBuffer(let pointer) = surface {
-                self = .pixelBuffer(pointer: pointer)
-            } else {
-                self = .unknown
-            }
-        }
-    }
+    /// The platform image backing a `DecodedFrame`, when `DecoderOutput` asked for one: a borrowed
+    /// `CVPixelBufferRef` address (`.pixelBuffer`), valid while its frame lives, or `.unknown` for a
+    /// kind this version cannot name yet.
+    public typealias Surface = MoqVideoSurface
     /// One encoded access unit from an `Encoder`.
     public typealias Packet = MoqVideoPacket
-    /// A video codec identifier (H.264 or H.265).
+    /// Selects the video encoder codec. Build one with `Codec.h264()` or `Codec.h265()`.
     public typealias Codec = VideoCodec
     /// A CPU pixel layout (I420 or RGBA).
     public typealias PixelFormat = VideoPixelFormat

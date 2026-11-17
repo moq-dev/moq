@@ -3,7 +3,7 @@ import { type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -96,7 +96,7 @@ export class Connection implements Session {
 	#cluster?: Cluster.Hops;
 
 	// The peer's GOAWAY, read off its SETUP stream.
-	#goaway = new Once<Drain>();
+	#goaway = new Once<Goaway>();
 
 	/** The implementation the peer advertised; see {@link Session.peerImplementation}. */
 	readonly peerImplementation: Promise<string | undefined>;
@@ -610,7 +610,7 @@ export class Connection implements Session {
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
-	get draining(): GetPromise<Drain> {
+	get draining(): GetPromise<Goaway> {
 		return this.#goaway;
 	}
 
