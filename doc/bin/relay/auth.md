@@ -24,8 +24,8 @@ The relay POSTs one JSON body per session event (`connect`, `attach`, `revalidat
 `end`) to `--auth-url` and reads a grant back. The request carries everything
 the relay knows: a session id, its own `node` name, the `relay` software
 (`moq-relay/0.22.0`), the transport, addresses,
-SNI and ALPN, the path and query exactly as dialed, a moq-transport SETUP
-token, the declared role and implementation, and the verified client
+SNI and ALPN, the path and query exactly as dialed, the SETUP
+`token` (or, on `attach`, the credential attached in band), the declared role and implementation, and the verified client
 certificate. Nothing is parsed on the server's behalf: the `jwt` query parameter is a convention of
 `moq auth serve`, not of the relay. A path with a `.` or `..` segment is refused
 before the server is asked: a URL transport resolves those away, but a SETUP
@@ -207,10 +207,13 @@ removes that token's grant: streams that lose permission reset, and other grants
 keep the connection alive. A refused new token leaves existing grants alone.
 The grant reports its real expiry so the client can renew in time.
 
-The relay verifies a presented JWT through the same admission path, replacing
-`jwt` in the original query and preserving the connection's identity. The auth
-server sees `attach` for the same session id, with a fresh `auth` id
-that also names its revalidations and end. Attached grants revalidate and end
+The relay verifies a presented JWT through the same admission path, preserving
+the connection's identity. The auth server sees `attach` for the same session
+id, with a fresh `auth` id that also names its revalidations and end. The
+attached credential arrives in `token` (`kind` 0, any bytes) and `query` stays
+exactly as dialed, still holding the connection's first credential, so read an
+event with `auth` from `token` alone; `moq auth serve` does, and for now also reads the
+attached credential from the query's `jwt` when a previous-release relay sends no `token`. Attached grants revalidate and end
 independently. Each JWT counts against its own `--limit-token` cap while any
 credential using it remains on that connection. The initial credential remains
 responsible for the connection's stats tier.

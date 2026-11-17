@@ -146,8 +146,9 @@ pub struct Rule {
 /// empty root: `anon/**` admits a session dialed at `/`, `/anon`, or `/anon/room`,
 /// each scoped to `anon/`, and refuses one dialed at `/other`.
 ///
-/// The JWT is the `jwt` query parameter or a moq-transport SETUP token of type 0
-/// ([`Token::OUT_OF_BAND`]), verified alike. A session presenting both is verified
+/// The JWT is the `jwt` query parameter or a SETUP token of type 0
+/// ([`Token::OUT_OF_BAND`]), verified alike. A credential attached in band is only the
+/// event's `token`, since its `query` is the connection's. A session presenting both is verified
 /// once when they are the same JWT and refused when they differ, as is a SETUP token
 /// of any other type, and one presenting a JWT alongside a
 /// certificate: neither can safely win, since a certificate would override a JWT
@@ -490,8 +491,22 @@ fn authorize(rules: &Permissions, path: &str) -> Result<Permissions, Denial> {
 
 /// The JWT the request presents: its SETUP token, or else its `jwt` query parameter.
 /// Both at once count as one only when they are the same JWT.
+///
+/// An attached credential (an event with `auth`) is only its `token`: the `query` is the
+/// connection's, still holding the first credential. An event with `auth` and no credential
+/// is refused, never decided on the anonymous or mTLS rules.
 fn jwt(request: &Request) -> Result<Option<Cow<'_, str>>, Denial> {
-	match (&request.token, query_jwt(request)?) {
+	let query = match (&request.auth, &request.token) {
+		// TEMPORARY migration: a relay before this change rewrote an attached credential into
+		// `jwt` in the query and cleared the token. Delete once no such relay runs beside us.
+		(Some(_), None) => match query_jwt(request)? {
+			Some(jwt) => Some(jwt),
+			None => return Err(Denial::MalformedToken("an attachment needs a token".into())),
+		},
+		(Some(_), Some(_)) => None,
+		(None, _) => query_jwt(request)?,
+	};
+	match (&request.token, query) {
 		// A client that offers a version without in-band auth copies its SETUP token
 		// into the URL too, so the same JWT arrives twice.
 		(Some(token), Some(jwt)) if token.kind == Token::OUT_OF_BAND && token.value == jwt.as_bytes() => Ok(Some(jwt)),
@@ -1355,6 +1370,69 @@ mod tests {
 		assert_eq!(grant.publish.path, patterns(&["**"]));
 	}
 
+	/// An attachment is its `token` alone: the dialed query's `jwt` is the connection's, so
+	/// it neither conflicts with the token nor stands in for a missing one.
+	#[tokio::test]
+	async fn an_attached_credential_is_read_from_its_token() {
+		let (dir, key) = key_dir();
+		let server = Server::new(Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		})
+		.unwrap();
+		// The connection dialed with a credential that has since expired.
+		let expired = Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
+		let dialed = sign(&key, "demo", &["**"], &[], expired);
+		let attached = sign(&key, "demo", &[], &["**"], None);
+		let mut attach = with_setup_token(with_token(request("/demo"), &dialed), Token::OUT_OF_BAND, &attached);
+		attach.auth = Some("attachment".into());
+		attach.event = Event::Attach;
+		let grant = server.answer(&attach).await.unwrap().unwrap();
+		assert_eq!(grant.subscribe, patterns(&["**"]));
+		assert!(
+			grant.publish.is_empty(),
+			"the dialed query's grant leaked into the attachment"
+		);
+
+		// Its revalidation reads the same token, not the expired query.
+		let mut revalidate = attach.clone();
+		revalidate.event = Event::Revalidate;
+		assert!(server.answer(&revalidate).await.is_ok());
+
+		// An attachment with no credential at all is refused, never decided anonymously.
+		let mut bare = attach.clone();
+		bare.token = None;
+		bare.query = None;
+		for event in [Event::Attach, Event::Revalidate] {
+			bare.event = event;
+			assert!(matches!(
+				server.answer(&bare).await.unwrap_err(),
+				Denial::MalformedToken(_)
+			));
+		}
+	}
+
+	/// TEMPORARY, with the migration in `jwt`: a previous-release relay sends the attached
+	/// credential as the query's `jwt` with no token, on `attach` and on `revalidate`.
+	#[tokio::test]
+	async fn a_previous_relays_attachment_is_read_from_its_query() {
+		let (dir, key) = key_dir();
+		let server = Server::new(Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		})
+		.unwrap();
+		let attached = sign(&key, "demo", &[], &["**"], None);
+		let mut attach = with_token(request("/demo"), &attached);
+		attach.auth = Some("attachment".into());
+		for event in [Event::Attach, Event::Revalidate] {
+			attach.event = event;
+			let grant = server.answer(&attach).await.unwrap().unwrap();
+			assert_eq!(grant.subscribe, patterns(&["**"]));
+			assert!(grant.publish.is_empty());
+		}
+	}
+
 	/// Two different credentials would leave the server guessing which one the client meant.
 	#[tokio::test]
 	async fn a_setup_token_and_a_different_query_jwt_are_refused() {
@@ -1982,7 +2060,8 @@ mod tests {
 		server.answer(&second).await.unwrap();
 
 		let attach = |session: &Request| {
-			let mut attach = with_token(session.clone(), &b);
+			// The dialed query still holds the connection's own `jwt`.
+			let mut attach = with_setup_token(session.clone(), Token::OUT_OF_BAND, &b);
 			attach.auth = Some("attachment".into());
 			attach.event = Event::Attach;
 			attach

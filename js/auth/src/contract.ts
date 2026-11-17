@@ -131,7 +131,10 @@ const BaseRequestSchema = z.object({
 	path: z.string(),
 	/** The raw query string, without the leading `?`. */
 	query: z.optional(z.string()),
-	/** The credential a moq-transport client presented in its SETUP. */
+	/**
+	 * The credential the client presented: the Token of its SETUP, or on an `attach` (and that
+	 * credential's `revalidate` and `end`) the one it attached in band, with `query` left as dialed.
+	 */
 	token: z.optional(TokenSchema),
 	/** The direction the client declared at SETUP; absent means both. */
 	role: z.optional(RoleSchema),

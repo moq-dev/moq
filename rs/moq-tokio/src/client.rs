@@ -1204,12 +1204,14 @@ mod tests {
 			.create_track("video", timed())
 			.expect("failed to create track");
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.expect("failed to append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 			.expect("failed to write frame");
-		group.close().expect("failed to finish group");
+		group.finish().expect("failed to finish group");
 
 		let ws_listener = crate::websocket::Listener::bind("[::]:0".parse().unwrap())
 			.await

@@ -196,7 +196,7 @@ int main()
 		} while (seconds(start) < budget);
 		results.push_back({std::string("call/") + name, "ns", seconds(start) * 1e9 / calls});
 	};
-	call("sequence", [&] { group->sequence(); });
+	call("start", [&] { group->start(); });
 	call("info", [&] { (void)consumer->info(); });
 	std::filesystem::create_directories(out);
 	std::ofstream file(std::filesystem::path(out) / "cpp.json");

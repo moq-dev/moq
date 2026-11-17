@@ -165,6 +165,57 @@
 		{
 			"text": "*a*",
 			"error": "invalid-segment"
+		},
+		{
+			"text": "room/a\\/b/*",
+			"segments": [
+				{
+					"kind": "literal",
+					"value": "room"
+				},
+				{
+					"kind": "literal",
+					"value": "a\\/b"
+				},
+				{
+					"kind": "wildcard"
+				}
+			]
+		},
+		{
+			"text": "a\\\\",
+			"segments": [
+				{
+					"kind": "literal",
+					"value": "a\\\\"
+				}
+			]
+		},
+		{
+			"text": "a\\/*",
+			"segments": [
+				{
+					"kind": "partial",
+					"prefix": "a\\/",
+					"suffix": ""
+				}
+			]
+		},
+		{
+			"text": "a\\b",
+			"error": "invalid-segment"
+		},
+		{
+			"text": "a\\",
+			"error": "invalid-segment"
+		},
+		{
+			"text": "a\\*",
+			"error": "invalid-segment"
+		},
+		{
+			"text": "a\\//",
+			"error": "empty-segment"
 		}
 	],
 	"literal": [
@@ -186,6 +237,14 @@
 		},
 		{
 			"path": "a.*",
+			"error": "invalid-segment"
+		},
+		{
+			"path": "/a\\//b/",
+			"pattern": "a\\//b"
+		},
+		{
+			"path": "a\\b",
 			"error": "invalid-segment"
 		}
 	],
@@ -245,6 +304,12 @@
 		{
 			"pattern": "a/b*/c",
 			"head": "a",
+			"literal": false,
+			"globstar": false
+		},
+		{
+			"pattern": "a\\/b/*",
+			"head": "a\\/b",
 			"literal": false,
 			"globstar": false
 		}
@@ -449,6 +514,41 @@
 			"pattern": "a*a",
 			"path": "aa",
 			"expect": true
+		},
+		{
+			"pattern": "room/*",
+			"path": "room/a\\/b",
+			"expect": true
+		},
+		{
+			"pattern": "room/*/*",
+			"path": "room/a\\/b",
+			"expect": false
+		},
+		{
+			"pattern": "room/a\\/b",
+			"path": "room/a\\/b",
+			"expect": true
+		},
+		{
+			"pattern": "room/a\\/b",
+			"path": "room/a/b",
+			"expect": false
+		},
+		{
+			"pattern": "a\\/*",
+			"path": "a\\/b\\/c",
+			"expect": true
+		},
+		{
+			"pattern": "*\\\\",
+			"path": "x\\\\\\/",
+			"expect": false
+		},
+		{
+			"pattern": "**/b",
+			"path": "a\\/b",
+			"expect": false
 		}
 	],
 	"contains": [
@@ -864,6 +964,16 @@
 			"pattern": "**/*.hang",
 			"root": "a.hang",
 			"expect": ["", "**/*.hang"]
+		},
+		{
+			"pattern": "x/**",
+			"root": "x/a\\/b",
+			"expect": ["**"]
+		},
+		{
+			"pattern": "x/a/**",
+			"root": "x/a\\/b",
+			"expect": []
 		}
 	],
 	"rooted": [
@@ -1032,6 +1142,11 @@
 			"a": "",
 			"b": "*",
 			"expect": []
+		},
+		{
+			"a": "a\\\\*",
+			"b": "*\\/b",
+			"expect": ["a\\\\*\\/b"]
 		}
 	],
 	"captures": [

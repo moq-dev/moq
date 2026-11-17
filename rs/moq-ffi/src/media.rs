@@ -870,9 +870,9 @@ impl MoqMediaCatalogProducer {
 	/// Set an application catalog section from JSON, refusing reserved section names.
 	///
 	/// `json` is any JSON document. Errors with [`MoqError::Json`] if it doesn't parse, or with
-	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `media`, `text`, `json`,
-	/// `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, and
-	/// `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
+	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `sync`, `text`, `json`,
+	/// `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, `media`,
+	/// and `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
 	/// `initDataList`).
 	pub fn set_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -1231,16 +1231,16 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
-	/// Draw a group boundary and start the next group at `sequence`, in the track's timescale.
+	/// Draw a group boundary and start the next group at `start`, in the track's timescale.
 	///
 	/// [`cut`](Self::cut) keyed explicitly rather than at the next keyframe's time, which has to
 	/// come after every group the track holds. Groups are keyed by their first frame's time, so
 	/// two encoders of the same content align without it.
-	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
+	pub fn seek(&self, start: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.seek(sequence).map_err(|err| MoqError::Codec {
+		media.import.seek(start).map_err(|err| MoqError::Codec {
 			reason: format!("seek failed: {err}"),
 		})?;
 		Ok(())
@@ -1333,15 +1333,15 @@ impl MoqMediaContainerProducer {
 		result
 	}
 
-	/// Start a new segment whose first group starts at `sequence`, in its track's timescale, after
+	/// Start a new segment whose first group starts at `start`, in its track's timescale, after
 	/// every group the track holds.
-	pub fn seek(&self, sequence: u64) -> Result<(), MoqError> {
+	pub fn seek(&self, start: u64) -> Result<(), MoqError> {
 		self.driver.check()?;
 		let result = (|| {
 			let _guard = crate::ffi::enter();
 			let mut guard = self.inner.lock().unwrap();
 			let container = guard.as_mut().ok_or(MoqError::Closed)?;
-			container.import.seek(sequence).map_err(|err| MoqError::Codec {
+			container.import.seek(start).map_err(|err| MoqError::Codec {
 				reason: format!("seek failed: {err}"),
 			})?;
 			Ok(())
@@ -1533,8 +1533,8 @@ pub struct MoqMediaTrackConfig {
 pub struct MoqMediaGroupConfig {
 	/// The catalog rendition to fetch from.
 	pub rendition: MoqRendition,
-	/// The group sequence.
-	pub sequence: u64,
+	/// The group start.
+	pub start: u64,
 	/// Fetch delivery options, or defaults when absent.
 	#[uniffi(default = None)]
 	pub options: Option<MoqFetchGroupOptions>,
@@ -1679,8 +1679,8 @@ mod read_tests {
 	async fn raw_media_catalog_warmup_reaches_the_subscription() {
 		let (_broadcast, track, reader) = subscribe_warmup().await;
 		let mut media = reader.reads.take(|_| Ok(())).unwrap();
-		let write = |sequence: u64, micros| {
-			let mut group = track.create_group(sequence.into()).unwrap();
+		let write = |start: u64, micros| {
+			let mut group = track.create_group(start.into()).unwrap();
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio)
 				.write(
 					&mut group,
@@ -1692,7 +1692,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		// Newest first, all before the first read. Group 4 covers the min delay alone, so
 		// without the warmup the start would skip group 3; only the warmup's reach keeps it.
@@ -1759,7 +1759,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		first.close().unwrap();
+		first.finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("expected frame")
 		};
@@ -1778,7 +1778,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		marker.close().unwrap();
+		marker.finish().unwrap();
 		assert!(
 			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp, duration }) if timestamp == micros(10_000) && duration == Duration::from_millis(10))
 		);
@@ -1798,7 +1798,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		resumed.close().unwrap();
+		resumed.finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("end is not EOF")
 		};
@@ -1813,7 +1813,7 @@ mod read_tests {
 /// A finite, container-decoded media group, fetched or decoded from a raw group.
 #[derive(uniffi::Object)]
 pub struct MoqMediaGroupConsumer {
-	sequence: u64,
+	start: u64,
 	reads: Polled<moq_mux::container::GroupConsumer<moq_mux::catalog::hang::Container>>,
 }
 
@@ -1825,7 +1825,7 @@ impl MoqMediaGroupConsumer {
 	) -> Self {
 		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
-			sequence: inner.start(),
+			start: inner.start(),
 			reads: Polled::new(inner).supervised(driver),
 		}
 	}
@@ -1834,8 +1834,8 @@ impl MoqMediaGroupConsumer {
 #[uniffi::export]
 impl MoqMediaGroupConsumer {
 	/// The start of this group, in its track's timescale, which names it within the track.
-	pub fn sequence(&self) -> u64 {
-		self.sequence
+	pub fn start(&self) -> u64 {
+		self.start
 	}
 
 	/// Read the next decoded media frame, or `None` when the group ends.
@@ -2000,7 +2000,7 @@ impl MoqMediaGroupConsumer {
 	) -> Result<Arc<MoqMediaGroupConsumer>, MoqError> {
 		let MoqMediaGroupConfig {
 			rendition,
-			sequence,
+			start,
 			options,
 		} = config;
 		let (reference, instance, name, container) = rendition.into_parts();
@@ -2015,7 +2015,7 @@ impl MoqMediaGroupConsumer {
 			.driver
 			.watch(async {
 				let track = resolved.track(&name).map_err(map_fetch_error)?;
-				track.fetch_group(sequence, options).await.map_err(map_fetch_error)
+				track.fetch_group(start, options).await.map_err(map_fetch_error)
 			})
 			.await?;
 		Ok(Arc::new(MoqMediaGroupConsumer::from_inner(
@@ -2101,14 +2101,10 @@ mod catalog_tests {
 			.await
 			.unwrap();
 			for ms in [1_000, 2_000, 3_000] {
-				let mut group = track.append_group(ms).unwrap();
-				group
-					.write_frame(
-						moq_net::Timestamp::from_millis(ms).unwrap(),
-						format!(r#"{{"app":{ms}}}"#),
-					)
-					.unwrap();
-				group.close().unwrap();
+				let at = moq_net::Timestamp::from_millis(ms).unwrap();
+				let mut group = track.append_group(at).unwrap();
+				group.write_frame(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
+				group.finish().unwrap();
 			}
 			drop(track.finish().unwrap());
 

@@ -3899,7 +3899,7 @@
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media null",
+		"name": "mis-shaped sync null",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3908,12 +3908,12 @@
 					}
 				}
 			},
-			"media": null
+			"sync": null
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media 5",
+		"name": "mis-shaped sync 5",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3922,12 +3922,12 @@
 					}
 				}
 			},
-			"media": 5
+			"sync": 5
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media \"x\"",
+		"name": "mis-shaped sync \"x\"",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3936,12 +3936,12 @@
 					}
 				}
 			},
-			"media": "x"
+			"sync": "x"
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media true",
+		"name": "mis-shaped sync true",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3950,12 +3950,12 @@
 					}
 				}
 			},
-			"media": true
+			"sync": true
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media []",
+		"name": "mis-shaped sync []",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3964,12 +3964,12 @@
 					}
 				}
 			},
-			"media": []
+			"sync": []
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"clock\": null}",
+		"name": "mis-shaped sync {\"clock\": null}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3978,14 +3978,14 @@
 					}
 				}
 			},
-			"media": {
+			"sync": {
 				"clock": null
 			}
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"clock\": [1000]}",
+		"name": "mis-shaped sync {\"clock\": [1000]}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3994,14 +3994,14 @@
 					}
 				}
 			},
-			"media": {
+			"sync": {
 				"clock": [1000]
 			}
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"clock\": {\"wall\": \"1000\"}}",
+		"name": "mis-shaped sync {\"clock\": {\"wall\": \"1000\"}}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -4010,7 +4010,7 @@
 					}
 				}
 			},
-			"media": {
+			"sync": {
 				"clock": {
 					"wall": "1000"
 				}
@@ -4019,7 +4019,7 @@
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"join\": null}",
+		"name": "mis-shaped sync {\"interval\": null}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -4028,14 +4028,14 @@
 					}
 				}
 			},
-			"media": {
-				"join": null
+			"sync": {
+				"interval": null
 			}
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"join\": [2000]}",
+		"name": "mis-shaped sync {\"interval\": [2000]}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -4044,14 +4044,14 @@
 					}
 				}
 			},
-			"media": {
-				"join": [2000]
+			"sync": {
+				"interval": [2000]
 			}
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"join\": {}}",
+		"name": "mis-shaped sync {\"interval\": {}}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -4060,14 +4060,14 @@
 					}
 				}
 			},
-			"media": {
-				"join": {}
+			"sync": {
+				"interval": {}
 			}
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"join\": {\"interval\": 0}}",
+		"name": "mis-shaped sync {\"interval\": 0}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -4076,16 +4076,14 @@
 					}
 				}
 			},
-			"media": {
-				"join": {
-					"interval": 0
-				}
+			"sync": {
+				"interval": 0
 			}
 		},
 		"refused": true
 	},
 	{
-		"name": "mis-shaped media {\"join\": {\"interval\": 1.5}}",
+		"name": "mis-shaped sync {\"interval\": 1.5}",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -4094,10 +4092,8 @@
 					}
 				}
 			},
-			"media": {
-				"join": {
-					"interval": 1.5
-				}
+			"sync": {
+				"interval": 1.5
 			}
 		},
 		"refused": true
@@ -4853,7 +4849,7 @@
 		"refused": true
 	},
 	{
-		"name": "media without a clock or join",
+		"name": "sync without a clock or interval",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -4862,12 +4858,31 @@
 					}
 				}
 			},
-			"media": {}
+			"sync": {}
 		},
 		"video": ["ok"]
 	},
 	{
-		"name": "media with a clock and join",
+		"name": "sync with a clock and interval",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f"
+					}
+				}
+			},
+			"sync": {
+				"clock": {
+					"wall": 1000
+				},
+				"interval": 2000
+			}
+		},
+		"video": ["ok"]
+	},
+	{
+		"name": "a retired media section is ignored",
 		"catalog": {
 			"video": {
 				"renditions": {

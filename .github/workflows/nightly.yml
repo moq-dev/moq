@@ -31,6 +31,11 @@ name: Nightly
 # edit no test notices; each edit rebuilds moq-net's tests, about 27 runner-hours
 # for the full set, so it rotates (see sh/rs/mutants.sh).
 #
+# `route-proof` type-checks the route rule's convergence proof with Agda, about
+# two minutes. The Rust side of its binding, the generated `Vectors.agda`, is
+# checked current by every PR's tests; the proof itself only changes when the
+# rule does, which review checks.
+#
 # `quic-interop` runs moq-quic against other QUIC stacks through the QUIC
 # Interop Runner, an hour of simulated links per peer, which only a moq-quic
 # change or a bumped pin moves.
@@ -505,6 +510,20 @@ jobs:
         run: nix shell --inputs-from . nixpkgs#just --command just test tla ${{ matrix.paths }}
         env:
           TLA_CACHE: .tmp/tla-cache
+
+  route-proof:
+    name: Route proof (Agda)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      # No dev shell: the proof brings its own Agda pin (nix/route-proof.nix).
+      - name: Type-check
+        run: nix shell --inputs-from . nixpkgs#just --command just test route-proof
 
   # Media QA with a Firefox player against a Chromium fixture. The Chromium
   # player already runs in interop.yml, nightly and on release PRs. WebKit has

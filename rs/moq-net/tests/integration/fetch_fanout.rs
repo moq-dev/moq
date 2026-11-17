@@ -59,7 +59,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					b"payload".as_ref(),
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			for (i, (_, _, remote)) in viewers.iter().enumerate() {
 				let mut group = remote.track("video").unwrap().fetch_group(key, None).await.unwrap();
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"payload");

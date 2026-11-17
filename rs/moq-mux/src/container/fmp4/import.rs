@@ -197,7 +197,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.estimator.cut(None);
 		self.publish_estimate()?;
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		Ok(())
 	}
@@ -1622,11 +1622,11 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		};
 		let group = if start_group {
 			if let Some(prev) = self.group.take() {
-				prev.close()?;
+				prev.finish()?;
 			}
 			match (self.pending_start.take(), start) {
 				(Some(start), _) => self.track.create_group(moq_net::group::Info { start })?,
-				(None, Some(start)) => self.track.append_group(start)?,
+				(None, Some(_)) => self.track.append_group(timestamp)?,
 				(None, None) => unreachable!("a new group without a pending start has one"),
 			}
 		} else {
