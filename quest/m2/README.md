@@ -28,7 +28,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries the
   smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
   group drops took simpler contracts.
-  [moq-transport time addressing](/quest/m2/ietf-time-addressing.md)
+  [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918)
   returned from m4, and the two moq-transport interop quests in m3 were
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
   all seven lite versions, the hidden `.` path prefix, and the route plan
@@ -42,7 +42,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
 - **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md).
-- **Auth and crypto.** [Claims](/quest/m2/auth-claims.md). End-to-end encryption
+- **Auth and crypto.** End-to-end encryption
   [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
@@ -56,8 +56,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [a chained WHEP pull's shutdown](/quest/m2/whep-chain-shutdown.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
-- **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
-  and [signals](/quest/m2/signals-semantics.md).
+- **JS and browser.** [signals](/quest/m2/signals-semantics.md).
 - **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
@@ -294,7 +293,7 @@ what would need a breaking release had it landed right after the cut:
   [media consumers](/quest/m2/time-addressing/consumers.md) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers),
   until it returned to m2 on 2026-11-16;
-  [moq-transport time addressing](/quest/m2/ietf-time-addressing.md) to m4
+  [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4
   (low-priority compatibility, no named consumer), until it returned to m2
   on 2026-11-16; and the
   [Playwright bump](/quest/m1/playwright-pin.md) to m1, which the release
@@ -321,3 +320,10 @@ what would need a breaking release had it landed right after the cut:
   Catalog at timestamp no longer waits
   for `@moq/net` by start, and the bindings shrank to a rename, since the model
   already filled each field with the start.
+
+Decided 2026-11-17 (maintainer, on
+[moq-dev/moq#8998](https://github.com/moq-dev/moq/pull/8998#issuecomment-6947837677)):
+✅ [rising background noise](/quest/m2/voice-rising-noise.md) joins m2 though
+it breaks nothing. It ports libopus's analysis step, so the browser voice gate
+that PR ships suppresses noise starting mid-call as the Rust publisher's
+libopus does (rejected: a faster SILK floor rise; dropping it).

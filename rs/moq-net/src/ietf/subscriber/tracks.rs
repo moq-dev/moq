@@ -736,7 +736,6 @@ impl Subscriber {
 		writer.buffer_message(
 			ietf::SubscribeUpdate::ID,
 			&ietf::SubscribeUpdate {
-				max_age: forward.max_age,
 				request_id,
 				subscriber_priority: forward.priority.map(super::super::priority::to_wire),
 				forward: Some(forward.forward),
@@ -1209,7 +1208,6 @@ impl OpenPaused {
 					let buffered = stream.writer.buffer_message(
 						ietf::Subscribe::ID,
 						&ietf::Subscribe {
-							max_age: None,
 							new_group: None,
 							request_id,
 							track_namespace: key.0.clone(),
@@ -1789,7 +1787,6 @@ pub(super) struct Forward {
 	pub(super) fill: Option<ietf::Fill>,
 	/// The aggregate priority, in the model's higher-first terms.
 	pub(super) priority: Option<i8>,
-	pub(super) max_age: Option<u64>,
 	pub(super) new_group: Option<u64>,
 }
 

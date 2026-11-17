@@ -23,14 +23,14 @@ import {
 import { type FillGroups, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
-import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Mint from "../mint.ts";
 import * as Path from "../path.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { received, Timescale, type Timestamp } from "../time.ts";
+import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -52,11 +52,12 @@ import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import {
 	decodeFetchObject,
-	decodeObjectTime,
+	decodeGroupGap,
 	EndOfTrackProperties,
 	Frame,
 	type Group as GroupMessage,
 	ObjectIdGap,
+	objectTime,
 	statusDefined,
 } from "./object.ts";
 import { Parameters } from "./parameters.ts";
@@ -93,7 +94,7 @@ type Subscription = {
 	// The join of SUBSCRIBE_OK's Largest group, whose head a draft-18 joining FETCH or a
 	// draft-22 fill brings.
 	join?: Join;
-	// The track's TIMESCALE, which the head's fetch objects are stamped in too.
+	// The track's TIMESCALE, the units of its Group IDs, which time the head's fetch objects too.
 	timescale?: Timescale;
 	// The request IDs the head's fetch stream may name, registered until the subscription ends.
 	fetchIds: bigint[];
@@ -147,6 +148,26 @@ function sees(filter: Filter, path: Path.Valid): boolean {
 }
 
 /**
+ * Skip the `gap` keys just below the group at `key`, as an object's Prior Group ID Gap says
+ * none of them will ever exist, through the path a lite SUBSCRIBE_SKIP takes. Best effort: a
+ * publisher that sends none leaves those keys to arrive or be given up.
+ */
+function skipPrior(track: track.Producer, key: bigint, gap: bigint): void {
+	if (gap > key) {
+		throw new StreamError(StreamCode.MalformedTrack, {
+			message: `Prior Group ID Gap ${gap} reaches below group 0 from group ${key}`,
+		});
+	}
+	// A group that arrived was produced after all: it keeps the group, and the session goes on.
+	const [cached] = hooks.skipTrackGroups(track, key - gap, key);
+	if (cached) {
+		console.warn(
+			`protocol error: a Prior Group ID Gap of ${gap} at group ${key} covers group ${cached.start}, which arrived; keeping it`,
+		);
+	}
+}
+
+/**
  * Handles subscribing to broadcasts using moq-transport protocol.
  * Each request rides its own bidi stream.
  *
@@ -173,7 +194,7 @@ export class Subscriber {
 	#aliases = new TrackAliases<Binding>();
 	#receiveYield?: Promise<void>;
 
-	// Units for each track's object Timestamps, from the TIMESCALE Track Property in
+	// Units for each track's Group IDs, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. A track missing from this map declared no timeline, so its frames
 	// arrive untimed.
 	#timescales = new Map<bigint, Timescale>();
@@ -211,7 +232,6 @@ export class Subscriber {
 
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
-	#maxAge: boolean;
 
 	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
 	#activeCount: boolean;
@@ -233,7 +253,6 @@ export class Subscriber {
 		quic,
 		cluster,
 		hidden = false,
-		maxAge = false,
 		activeCount = false,
 		goaway,
 		grant,
@@ -248,8 +267,6 @@ export class Subscriber {
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
-		/** Whether the peer accepts subscriber max age. */
-		maxAge?: boolean;
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/** Settles when the peer sends GOAWAY. */
@@ -265,7 +282,6 @@ export class Subscriber {
 		this.#announceSlots = new Slots(limits.announces, { quic, reason: "too many announcements" });
 		this.#cluster = cluster;
 		this.#hidden = hidden;
-		this.#maxAge = maxAge;
 		this.#activeCount = activeCount;
 		this.#goaway = goaway;
 		this.#grant = grant;
@@ -832,7 +848,6 @@ export class Subscriber {
 		let trackAlias: bigint;
 		// The SUBSCRIBER_PRIORITY the request went out with.
 		let priority: number;
-		let maxAge: number | undefined;
 		const abandoned = new Error("subscribe abandoned before it was accepted");
 		try {
 			// Returning demand keeps the same setup.
@@ -845,7 +860,6 @@ export class Subscriber {
 					binding = result.binding;
 					trackAlias = result.alias;
 					priority = result.priority;
-					maxAge = result.maxAge;
 					break;
 				}
 				if (hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek() !== undefined) continue;
@@ -945,7 +959,6 @@ export class Subscriber {
 				requestId,
 				producer,
 				priority,
-				maxAge,
 				unanswered,
 				race([done, stopped.promise]),
 			);
@@ -1401,7 +1414,6 @@ export class Subscriber {
 		requestId: bigint,
 		producer: track.Producer,
 		sent: number,
-		sentMaxAge: number | undefined,
 		unanswered: Signal<number>,
 		done: Promise<unknown>,
 	): Promise<void> {
@@ -1418,8 +1430,7 @@ export class Subscriber {
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = hooks.requested(producer).peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge && subscription ? maxDelayOf(subscription) : undefined;
-			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
+			if (!subscription || wanted === sent || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {
 					disposes.push(
@@ -1443,7 +1454,6 @@ export class Subscriber {
 
 			const parameters = new Parameters();
 			parameters.subscriberPriority = wanted;
-			parameters.maxAge = wantedMaxAge;
 			const update = new SubscribeUpdate({ requestId: own, parameters });
 			let message: Uint8Array;
 			try {
@@ -1463,7 +1473,6 @@ export class Subscriber {
 				return;
 			}
 			sent = wanted;
-			sentMaxAge = wantedMaxAge;
 			console.debug(`subscribe update: id=${requestId} priority=${wanted}`);
 		}
 	}
@@ -1567,7 +1576,6 @@ export class Subscriber {
 		binding: Binding;
 		alias: bigint;
 		priority: number;
-		maxAge?: number;
 	}> {
 		const version = this.#session.version;
 
@@ -1586,7 +1594,6 @@ export class Subscriber {
 			trackName: request.name,
 			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
-			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
 			// A known start is absolute, except group 0, which joins live with no filter. A Next
@@ -1707,7 +1714,6 @@ export class Subscriber {
 			binding,
 			alias: ok.trackAlias,
 			priority: msg.subscriberPriority,
-			maxAge: msg.maxAge,
 		};
 	}
 
@@ -1942,8 +1948,13 @@ export class Subscriber {
 			// through it, at the Object ID the head ends before (see Join).
 			const join = subscription.join?.sequence === group.groupId ? subscription.join : undefined;
 			let first = join?.outstanding === true;
-			const decode = (c: Cursor) => Frame.decode(c, group.flags, timescale, first);
+			const decode = (c: Cursor) => Frame.decode(c, group.flags, first);
 			let nextObject = 0;
+			// Every object of the group shares its start, and a key no timestamp holds refuses
+			// only this group.
+			let timestamp: Timestamp | undefined;
+			// A Prior Group ID Gap is applied once per group.
+			let gapped = false;
 			for (;;) {
 				// Every object already buffered is written without an await, so the reader wakes
 				// once per batch rather than once per object. Only the group's own stream ends it:
@@ -2026,22 +2037,13 @@ export class Subscriber {
 					break;
 				}
 
-				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
-				// malformed rather than something to invent a time for.
-				if (timescale !== undefined && frame.timestamp === undefined) {
-					throw new StreamError(StreamCode.MalformedTrack, {
-						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
-					});
+				if (frame.groupGap && !gapped) {
+					gapped = true;
+					skipPrior(track, group.groupId, frame.groupGap);
 				}
-				if (frame.payload)
-					open().writeFrame({
-						payload: frame.payload,
-						timestamp: received(frame.timestamp, open().sequence),
-					});
-				else if (
-					!(await receiveFrame(stream, open(), { size: frame.streamed ?? 0, timestamp: frame.timestamp }))
-				)
-					break;
+				timestamp ??= objectTime(timescale, group.groupId);
+				if (frame.payload) open().writeFrame({ payload: frame.payload, timestamp });
+				else if (!(await receiveFrame(stream, open(), { size: frame.streamed ?? 0, timestamp }))) break;
 				nextObject += 1;
 			}
 
@@ -2136,7 +2138,7 @@ export class Subscriber {
 		let discarding = false;
 		let next = 0;
 		try {
-			const decode = (c: Cursor) => decodeFetchObject(c, timescale);
+			const decode = (c: Cursor) => decodeFetchObject(c);
 			for (let first = true; ; first = false) {
 				const object =
 					stream.tryDecode(decode) ??
@@ -2181,12 +2183,7 @@ export class Subscriber {
 					throw new JoinUnsupported("a gap in the head cannot be stitched");
 				}
 
-				if (timescale !== undefined && object.timestamp === undefined) {
-					throw new StreamError(StreamCode.MalformedTrack, {
-						message: `object without a Timestamp on a track with TIMESCALE: group=${join.sequence}`,
-					});
-				}
-
+				const timestamp = objectTime(timescale, join.sequence);
 				if (first) {
 					producer = join.open(() => track.createGroup(join.sequence));
 					if (!producer) {
@@ -2195,12 +2192,8 @@ export class Subscriber {
 						continue;
 					}
 				}
-				if (object.payload)
-					producer?.writeFrame({
-						payload: object.payload,
-						timestamp: received(object.timestamp, join.sequence),
-					});
-				else if (producer && !(await receiveFrame(stream, producer, object))) break;
+				if (object.payload) producer?.writeFrame({ payload: object.payload, timestamp });
+				else if (producer && !(await receiveFrame(stream, producer, { size: object.size, timestamp }))) break;
 				join.wrote();
 				next += 1;
 			}
@@ -2304,28 +2297,28 @@ export class Subscriber {
 			return;
 		}
 
-		let timestamp: Timestamp | undefined;
 		if (datagram.properties) {
 			try {
-				const decoded = await new Reader(undefined, datagram.properties, this.#session.version).decode(
-					(cursor) => decodeObjectTime(cursor, binding.timescale ?? Timescale.SECOND),
-				);
-				if (binding.timescale !== undefined) timestamp = decoded;
+				await new Reader(undefined, datagram.properties, this.#session.version).decode(decodeGroupGap);
 			} catch (err) {
 				console.debug(`dropping a datagram with unreadable object properties: ${reason(err)}`);
 				return;
 			}
 		}
-		if (binding.timescale !== undefined && timestamp === undefined) {
+		// Its time is its sequence, as a group's is its ID.
+		let timestamp: Timestamp;
+		try {
+			timestamp = objectTime(binding.timescale, datagram.groupId);
+		} catch {
 			console.debug(
-				`dropping a datagram without a timestamp on a timed track: alias=${datagram.trackAlias} group=${datagram.groupId}`,
+				`dropping a datagram whose sequence is past the latest timestamp: alias=${datagram.trackAlias} group=${datagram.groupId}`,
 			);
 			return;
 		}
 		try {
 			binding.producer.insert({
 				sequence: datagram.groupId,
-				timestamp: received(timestamp, datagram.groupId),
+				timestamp,
 				payload: datagram.body.payload,
 			});
 		} catch (err) {

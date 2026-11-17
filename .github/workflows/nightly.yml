@@ -473,14 +473,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The largest model gets a runner of its own; the `rest` leg takes
+        # The largest model gets a runner of its own, as does the warm model
+        # (its configs take about an hour together); the `rest` leg takes
         # every other config, so a new one is checked without editing this
         # list. sh/gh/nightly.test.py fails on a path that no longer exists.
         include:
           - name: resume
             paths: rs/moq-net/verify/resume
+          - name: warm
+            paths: rs/moq-net/verify/warm
           - name: rest
-            paths: ":!rs/moq-net/verify/resume"
+            paths: ":!rs/moq-net/verify/resume :!rs/moq-net/verify/warm"
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

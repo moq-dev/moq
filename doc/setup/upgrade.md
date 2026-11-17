@@ -108,11 +108,9 @@ in any order, apart from these:
   finds no timeline in an old publisher's catalog, so upgrade publishers
   before the HLS gateway.
 - **Token grants are patterns.** Existing `put`/`get` tokens and key scopes
-  keep working as subtrees, and subtree-only grants are still signed in that
-  form, so a `moq-token` deployment can upgrade issuers and verifiers in either
-  order. Verifiers on the pattern-only `moq-auth` 0.1.0/0.1.1 or `@moq/auth`
-  0.1.x/0.2.0 refuse that form, so upgrade them before their issuers. Grants
-  only a pattern can express need an upgraded verifier.
+  keep working as subtrees, but every token and key scope is now written as
+  `publish` and `subscribe`, which a `moq-token` verifier (moq-relay 0.14 and
+  earlier) refuses. Upgrade verifiers before their issuers.
 - **Gossip discovery is removed.** Until every relay that ran
   `--cluster-mesh` is upgraded, keep client grants off `.internal/`: an older
   relay still dials any URL announced there with `cluster.token`, and an

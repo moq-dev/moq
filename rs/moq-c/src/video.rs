@@ -274,11 +274,7 @@ fn video_ceiling(
 	config
 		.bitrate
 		.or_else(|| rendition.bitrate.map(moq_net::bandwidth::Rate::from_bps))
-		.unwrap_or_else(|| {
-			moq_net::bandwidth::Rate::from_bps(
-				(config.size().pixels() as f64 * config.framerate.as_f64() * 0.07) as u64,
-			)
-		})
+		.unwrap_or_else(|| config.resolved_bitrate())
 }
 
 /// The policy a rendition follows: its manual `ceiling`, above the `lower` rendition's

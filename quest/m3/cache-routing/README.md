@@ -33,6 +33,11 @@ a node that says it carries a broadcast). What stands and what goes:
 - ✅ Warm means demand, not cache contents, and pop skipping and one uplink
   per group of drones are the two cases that must work (maintainer,
   2026-11-15, [epic](/quest/m2/multicast/README.md) item 9).
+- ✅ A pull moves to a cheaper warm copy only from a reader ranked below its
+  own: ranked readers, which a TLA+ model shows settle (maintainer,
+  2026-11-17, [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986);
+  rejected: settled pulls). Its wire lands in the first wip version after
+  the lite-07 cut.
 - The non-goal of "one copy across a multi-hop sparse overlay rather than
   among direct neighbors" is dropped: a mesh is the product this serves.
 
@@ -57,10 +62,9 @@ This README's own work, once its child lands:
   plus a skip link: a cold broadcast takes the skip, a reader on the skipped
   relay makes the far relay join it, and that reader leaving sends it back.
   Two LAN relays with their own uplinks and readers on both pull one copy
-  over one uplink when the readers arrive in turn. When they arrive at once,
-  both uplinks stay until one relay's readers leave, unless the maintainer
-  keeps the tie-break [warmth](https://github.com/moq-dev/moq/pull/8903) measured. The other uplink takes over
-  when that one is lost.
+  over one uplink when the readers arrive in turn, and when they arrive at
+  once, the higher-ranked relay moving onto the other's copy. The other
+  uplink takes over when that one is lost.
 - Docs: warm and cold costs in `doc/bin/relay/cluster.md`, and a section on
   the routing concept page once the
   [routing guide](/quest/m3/routing-guide.md) has added it.

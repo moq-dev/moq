@@ -142,7 +142,8 @@ just test push-to-talk
 
 This separate, roughly nine-minute run drives the shipped publish and watch elements in one Chromium
 page, and the native `moq play` as a second listener. Both elements keep their defaults: Opus with
-20 ms frames, and `delay: "auto"`. A constant tone loops through the fake microphone. A release
+20 ms frames, and `delay: "auto"`. A tone loops through the fake microphone, dipping briefly twice a second so the publisher's voice
+activity detector reads it as speech rather than background. A release
 mutes the publisher, which sends nothing until the next press while its rendition stays enabled,
 so the listener keeps its subscription and plays comfort noise in between. After warmup and a
 mute, it measures 22 presses,

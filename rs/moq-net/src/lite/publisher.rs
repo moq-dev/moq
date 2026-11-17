@@ -3120,9 +3120,8 @@ impl Request for FetchServe {
 					}
 					writer.bill(group.delegate());
 					let capped = msg.end_frame.is_some();
-					let timescale = stamp.and_then(|stamp| stamp.timescale);
 					// Only a track a moq-transport publisher made carries records.
-					let records = (ietf && group.ietf().is_some()).then(|| lite::ietf::Records::new(capped, timescale));
+					let records = (ietf && group.ietf().is_some()).then(|| lite::ietf::Records::new(capped));
 
 					*self = Self::Serve {
 						group,
@@ -6325,10 +6324,7 @@ impl GroupServe {
 		};
 		let header = writer.buffer(&lite::DataType::Group).and_then(|()| writer.buffer(&msg));
 		let records = match header {
-			Ok(()) => self
-				.ctx
-				.object_records
-				.then(|| lite::ietf::Records::new(self.capped, self.ctx.stamp.and_then(|stamp| stamp.timescale))),
+			Ok(()) => self.ctx.object_records.then(|| lite::ietf::Records::new(self.capped)),
 			Err(err) => {
 				// The header wrote nothing, so the group-stream reset has nothing to pin
 				// it to this subscription. The run loop reads the slot and resets the

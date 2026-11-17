@@ -69,7 +69,6 @@ fn ietf_range_updates_interop() {
 			range_filters: false,
 			authorization_token: None,
 			new_group: None,
-			max_age: None,
 		}
 		.encode(&mut w, version)
 		.unwrap();
@@ -84,7 +83,6 @@ fn ietf_range_updates_interop() {
 				filter: Some(filter),
 				authorization_token: None,
 				new_group: None,
-				max_age: None,
 				fill,
 			}
 			.encode(&mut w, version)
@@ -169,19 +167,30 @@ fn ietf_range_updates_interop() {
 				let mut r = Decoder::new(bytes, version.into());
 				let header = ietf::GroupHeader::decode(&mut r, version).unwrap();
 				assert_eq!(header.track_alias, 0, "updates must retain the subscription alias");
-				assert!(header.flags.has_end, "a complete group must end");
+				// A FIN claims nothing: a complete group ends with an explicit END_OF_GROUP.
+				assert!(!header.flags.has_end, "the header never claims the end");
 				let mut objects = Vec::new();
+				let mut prior = None;
+				let mut ended = false;
 				while !r.is_empty() {
+					assert!(!ended, "nothing follows END_OF_GROUP");
 					let delta = r.varint().unwrap();
-					let object = objects.last().map_or(delta, |prior| prior + delta + 1);
+					let object = prior.map_or(delta, |prior: u64| prior + delta + 1);
+					prior = Some(object);
 					if header.flags.has_extensions {
 						let len = r.varint().unwrap() as usize;
 						r.slice(len).unwrap();
 					}
 					let len = r.varint().unwrap() as usize;
+					if len == 0 {
+						assert_eq!(r.varint().unwrap(), ietf::object::END_OF_GROUP);
+						ended = true;
+						continue;
+					}
 					assert_eq!(r.slice(len).unwrap(), [header.group_id as u8, object as u8]);
 					objects.push(object);
 				}
+				assert!(ended, "a complete group must end");
 				groups.push((header.group_id, objects));
 			}
 		}
@@ -403,8 +412,6 @@ fn lite_varint_interop() {
 #[derive(serde::Deserialize)]
 struct DatagramEcho {
 	echoes: Vec<Vec<u8>>,
-	/// The Timestamp each datagram's Properties carry, in milliseconds, if any.
-	timestamps: Vec<Option<u64>>,
 	/// The OBJECT_DATAGRAM the JS publisher sends for the first datagram's fields.
 	published: Vec<u8>,
 }
@@ -426,7 +433,8 @@ fn ietf_datagram_interop() {
 		let mut w = Encoder::new(&mut properties, version.into());
 		ietf::encode_object_time(&mut w, Timestamp::from_millis(1234).unwrap(), Timescale::MILLI).unwrap();
 
-		// What a publisher sends: Object 0, explicit priority, ending its group, stamped.
+		// What a third-party publisher sends: Object 0, explicit priority, ending its group,
+		// stamped. The JS publisher sends the same without the Timestamp.
 		let mut datagrams = vec![ietf::ObjectDatagram {
 			track_alias: 3,
 			group_id: 42,
@@ -464,25 +472,13 @@ fn ietf_datagram_interop() {
 			serde_json::from_slice(&bun("ietf-datagram.ts", input)).expect("JS returned its encodings");
 
 		assert_eq!(echo.echoes, encoded, "{version}: JS re-encoded differently");
-		let expected: Vec<Option<u64>> = datagrams
-			.iter()
-			.map(|datagram| datagram.properties.as_ref().map(|_| 1234))
-			.collect();
-		assert_eq!(echo.timestamps, expected, "{version}: JS decoded different timestamps");
-
 		let (published, used) = ietf::ObjectDatagram::decode_slice(&echo.published, version).unwrap();
 		assert_eq!(used, echo.published.len(), "{version}: a datagram runs to its end");
-		assert_eq!(published, datagrams[0], "{version}: the JS publisher's datagram");
-		let Some(properties) = &published.properties else {
-			panic!("{version}: the JS publisher sent no Timestamp");
+		let unstamped = ietf::ObjectDatagram {
+			properties: None,
+			..datagrams[0].clone()
 		};
-		let mut r = Decoder::new(properties, version.into());
-		let timestamp = ietf::decode_object_time(&mut r, Timescale::MILLI, version).unwrap();
-		assert_eq!(
-			timestamp.map(|t| t.as_millis().unwrap()),
-			Some(1234),
-			"{version}: Timestamp"
-		);
+		assert_eq!(published, unstamped, "{version}: the JS publisher's datagram");
 	}
 }
 

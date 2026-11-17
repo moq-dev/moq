@@ -70,9 +70,9 @@ impl Args {
 
 				if let Some(dir) = public_dir {
 					let path = dir.join(format!("{id}.jwk"));
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				} else if let Some(path) = public {
-					write_key(&key.to_public()?, &path)?;
+					write_key(&key.public()?, &path)?;
 				}
 
 				if let Some(dir) = out_dir {
@@ -95,6 +95,7 @@ impl Args {
 				ttl,
 				unbounded,
 				issued,
+				id,
 			} => {
 				let key = read_key(&key)?;
 				let expires = match (unbounded, expires) {
@@ -112,7 +113,8 @@ impl Args {
 					.with_publish(publish)
 					.with_subscribe(subscribe)
 					.with_expires(expires)
-					.with_issued(issued.map(Into::into));
+					.with_issued(issued.map(Into::into))
+					.with_id(id.as_deref().map(moq_auth::TokenId::decode).transpose()?);
 
 				let token = key.sign(&payload)?;
 				println!("{token}");
@@ -214,6 +216,10 @@ enum Command {
 		/// Issued-at time as a unix timestamp.
 		#[usage(long)]
 		issued: Option<UnixTimestamp>,
+
+		/// The token ID, written as its `jti`, such as one you record to revoke it. None unless given.
+		#[usage(long)]
+		id: Option<String>,
 	},
 
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
