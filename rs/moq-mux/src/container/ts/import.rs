@@ -3248,6 +3248,14 @@ impl Fault {
 			published: 0,
 		}
 	}
+
+	/// This fault after `published` units of the same call went out, so damage still counts them.
+	fn after(self, published: u64) -> Self {
+		match self {
+			Self::Damaged { cause, .. } => Self::Damaged { cause, published },
+			fatal => fatal,
+		}
+	}
 }
 
 impl<E: Into<Error>> From<E> for Fault {
@@ -4064,10 +4072,11 @@ impl<E: CatalogExt> AacStream<E> {
 							Ok(_) => {
 								return Err(Fault::damaged(malformed!(
 									"AAC program config element changed mid-stream"
-								)));
+								))
+								.after(published));
 							}
 							Err(aac::Error::ProgramConfigMissing) => {}
-							Err(err) => return Err(unit_error(err.into())),
+							Err(err) => return Err(unit_error(err.into()).after(published)),
 						}
 					}
 					import
@@ -4088,7 +4097,7 @@ impl<E: CatalogExt> AacStream<E> {
 						// joined later may never see one. Stop withholding the catalog for this
 						// track; it joins the catalog if an element arrives.
 						self.reserved.take();
-						unit_error(err.into())
+						unit_error(err.into()).after(published)
 					})?;
 					let mut config = aac::config(&asc)?;
 					config.container = self.container.clone();
@@ -7609,21 +7618,25 @@ pub(super) mod test {
 			out: synth_pmt(&[(StreamType::AdtsAac, AAC_PID)], false),
 			..Default::default()
 		};
+		// The third PES publishes a frame before its changed element, which still counts.
 		for (pts, unit) in [
 			(90_000, [with.as_slice(), &bare]),
 			(180_000, [changed.as_slice(), &bare]),
+			(270_000, [bare.as_slice(), &changed]),
 		] {
 			let cc = mux.cc(AAC_PID);
 			mux.out.extend(audio_pes_packet(AAC_PID, cc, pts, &unit.concat()));
 		}
 		let cc = mux.cc(AAC_PID);
-		mux.out.extend(audio_pes_packet(AAC_PID, cc, 270_000, &bare));
+		mux.out.extend(audio_pes_packet(AAC_PID, cc, 360_000, &bare));
 		import.decode(&mux.out).unwrap();
 		import.finish_in_place().unwrap();
-		assert_eq!(import.stats().streams[&AAC_PID].damaged, 1);
+		let stream = &import.stats().streams[&AAC_PID];
+		assert_eq!(stream.damaged, 2);
 
 		let frames = read_audio_frames(&consumer, &catalog).await;
-		assert_eq!(frames.len(), 3, "the changed unit is dropped, the rest publish");
+		assert_eq!(frames.len(), 4, "the changed units are dropped, the rest publish");
+		assert_eq!(stream.units, 4, "every published frame counts as delivered");
 	}
 
 	// Resync is bounded: a PID carrying something other than the codec its PMT declares is a

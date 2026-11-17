@@ -355,7 +355,7 @@ fn a_stream_the_new_source_lacks_is_not_waited_for() {
 fn a_clock_stepping_alone_is_no_switch() {
 	let (data, _) = replay(HZ, |clock| if clock == Clock::Pcr { -SWITCH } else { 0 });
 	let fed = feed(&data, 188 * 7);
-	assert!(!matches!(fed, Ok(Some(_))), "{fed:?}");
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 
 	// The audio carries on a second after the first pass while the rest rewinds.
 	let audio = audio_pid(CLIP);
@@ -364,7 +364,7 @@ fn a_clock_stepping_alone_is_no_switch() {
 		|clock| if clock == Clock::Pes(audio) { SWITCH + HZ } else { 0 },
 	);
 	let fed = feed(&data, 188 * 7);
-	assert!(!matches!(fed, Ok(Some(_))), "{fed:?}");
+	assert!(matches!(fed, Ok(None)), "{fed:?}");
 }
 
 /// The PID of the clip's audio: the PES that are not video.
