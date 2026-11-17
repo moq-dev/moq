@@ -5498,6 +5498,41 @@ mod test {
 		assert_eq!(read(&mut sub), ["group 6"]);
 	}
 
+	/// A late arrival the reader's ranges leave out is no gap of its own: it is neither reported
+	/// nor held, and widening the ranges offers it as the group it is.
+	#[test]
+	fn a_front_ignores_a_late_arrival_its_ranges_exclude() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR).ordered().with_range(50..);
+		let waiter = kio::Waiter::noop();
+		let read = |sub: &mut track::Ordered| -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+				});
+			}
+			items
+		};
+		write(&a, 50);
+		write(&a, 60);
+		assert_eq!(read(&mut sub), ["group 50", "group 60"]);
+		for key in (0..40).step_by(2) {
+			write(&a, key);
+			assert!(read(&mut sub).is_empty(), "group {key} is outside the ranges");
+		}
+		let mut sub = sub.with_range(..);
+		let widened = read(&mut sub);
+		assert!(
+			widened.iter().all(|item| item.starts_with("group")),
+			"widening offers groups, not gaps: {widened:?}"
+		);
+	}
+
 	/// Lowering a front reader's local floor offers the cached groups below the old one it
 	/// passed over, as a plain reader does.
 	#[test]

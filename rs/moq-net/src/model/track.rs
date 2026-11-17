@@ -10263,15 +10263,18 @@ impl Subscriber {
 	/// never hands out, as given up `Old`. A group it handed out or judged stale is already
 	/// settled, so the record blocks it.
 	fn note_late(&mut self) {
-		let (record, late) = match &mut self.inner {
-			Inner::Plain(cursor) => {
-				let late = cursor.late(cursor.next_key);
-				(&mut cursor.record, late)
-			}
-			Inner::Resume(resume, logical) => {
-				let late = resume.late(logical.record.delivered.floor());
-				(&mut logical.record, late)
-			}
+		let mut late = match &mut self.inner {
+			Inner::Plain(cursor) => cursor.late(cursor.next_key),
+			Inner::Resume(resume, logical) => resume.late(logical.record.delivered.floor()),
+		};
+		// A copy's window can be wider than this reader's ranges and bounds, so a late key they
+		// leave out is no gap of this reader's, as the plain path's window already clips it.
+		if matches!(self.inner, Inner::Resume(..)) {
+			late.retain(|key| !self.runs_in_range(*key, key.saturating_add(1)).is_empty());
+		}
+		let record = match &mut self.inner {
+			Inner::Plain(cursor) => &mut cursor.record,
+			Inner::Resume(_, logical) => &mut logical.record,
 		};
 		for key in late {
 			if let Some(end) = key.checked_add(1) {
@@ -11106,10 +11109,12 @@ impl Ordered {
 	/// it that run covers, since the ranges may have moved since the gap was found. A gap they
 	/// exclude waits, in case they widen again.
 	fn lowest_gap(&mut self) -> Option<(u64, ops::Range<u64>)> {
-		let gaps: Vec<_> = self.gaps.iter().map(|(start, (end, _))| (*start, *end)).collect();
-		gaps.into_iter().find_map(|(start, end)| {
-			let runs = self.inner.runs_in_range(start, end);
-			Some((start, runs.into_iter().next()?))
+		// The fields borrow apart, so the map is walked in place and the walk stops at the
+		// first gap the ranges cover.
+		let Self { inner, gaps, .. } = self;
+		gaps.iter().find_map(|(start, (end, _))| {
+			let runs = inner.runs_in_range(*start, *end);
+			Some((*start, runs.into_iter().next()?))
 		})
 	}
 

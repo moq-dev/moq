@@ -481,8 +481,10 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 	const WRITTEN: u64 = 4;
 	for versions in [[LITE06, LITE06], [LITE07, LITE07]] {
 		kio::clock::timeout(TIMEOUT * 10, async {
-			// One stream of credit, held from the relay, so the groups queue until reclaimed.
-			let chain = Chain::with_credit(versions, [expiring(EXPIRY), forever(), forever()], Some(1)).await;
+			// One stream of credit past the Announce Stream that lite-07 holds: group 0's, held from the relay,
+			// so the rest queue.
+			let credit = if versions == [LITE07, LITE07] { 2 } else { 1 };
+			let chain = Chain::with_credit(versions, [expiring(EXPIRY), forever(), forever()], Some(credit)).await;
 			// A budget bounds the wait on a group a hop judged stale; none would fill it instead.
 			let mut reader = chain
 				.subscribe(reading(Duration::from_secs(3600), [support::keys(0..)]))
