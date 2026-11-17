@@ -1536,14 +1536,7 @@ mod tests {
 	#[test]
 	fn every_transport_has_an_auth_name() {
 		use moq_tokio::Transport as T;
-		for transport in [
-			T::Quic,
-			T::WebTransport,
-			T::WebSocket,
-			T::Tcp,
-			T::Tls,
-			T::Unix,
-		] {
+		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Tls, T::Unix] {
 			assert_eq!(super::transport(transport).as_str(), transport.as_str());
 		}
 	}
