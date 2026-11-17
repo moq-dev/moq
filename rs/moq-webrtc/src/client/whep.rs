@@ -19,9 +19,9 @@ pub(crate) async fn dial(
 	client: &Client,
 	url: Url,
 	broadcast: moq_net::broadcast::Producer,
-	catalog: moq_mux::catalog::Config,
+	catalog: moq_mux::catalog::Producer,
 ) -> Result<()> {
-	let sink = Box::new(IngestSink::new(broadcast, catalog)?);
+	let sink = Box::new(IngestSink::new(broadcast, catalog));
 
 	let socket = session::bind_udp().await?;
 	let mut rtc = session::rtc_config()?.build(kio::clock::now().into_std());

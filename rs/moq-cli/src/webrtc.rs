@@ -85,27 +85,35 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `target.name` (import),
-/// announced under `instance`.
+/// announced under `instance` once its catalog names a track.
 pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::Instance) -> anyhow::Result<()> {
 	let name = &target.name;
-	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
-	// can discover the broadcast while it connects. Held until the pull ends.
+	// Hidden until the catalog exists: a viewer or export that resolved the broadcast earlier
+	// would find no catalog track. Held until the pull ends.
 	let route = target
 		.origin
-		.route(
-			name,
-			moq_net::origin::RouteOptions::default().with_instance(instance, 0),
-		)
+		.route(name, moq_net::origin::RouteOptions::hidden().with_instance(instance, 0))
 		.context("failed to create broadcast")?;
+	let catalog = moq_mux::catalog::Producer::new(&mut route.broadcast().clone(), target.ingest.catalog())?;
+	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default())?;
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");
 	notify_ready();
 
-	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default())?;
-	client
-		.pull(url, route.broadcast().clone(), target.ingest.catalog())
-		.await?;
-	Ok(())
+	let announce = async {
+		let mut updates = catalog.consume()?;
+		// The pull ends the catalog when its session ends, and reports why itself.
+		if let Ok(Some(_)) = updates.next().await {
+			route.announce().context("failed to announce broadcast")?;
+			tracing::info!(%name, "publishing WHEP broadcast");
+		}
+		std::future::pending::<anyhow::Result<()>>().await
+	};
+
+	tokio::select! {
+		end = client.pull(url, route.broadcast(), &catalog) => Ok(end?),
+		err = announce => err,
+	}
 }
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
@@ -148,4 +156,45 @@ async fn serve(router: axum::Router, role: &str, listen: Listen) -> anyhow::Resu
 	notify_ready();
 
 	crate::web::serve(listener, app, None).await
+}
+
+#[cfg(test)]
+mod tests {
+	use futures::FutureExt;
+
+	use super::*;
+
+	/// A WHEP pull keeps its broadcast hidden while the session negotiates, since nothing has
+	/// published its catalog yet, and never announces a pull that fails before then.
+	#[tokio::test]
+	async fn a_whep_pull_hides_its_broadcast_until_the_catalog_exists() {
+		let origin = moq_tokio::origin::spawn();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		// A WHEP endpoint that takes the offer and never answers it.
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/whep", listener.local_addr().unwrap())
+			.parse()
+			.unwrap();
+		let target = ImportTarget {
+			origin,
+			name: "pulled".to_string(),
+			ingest: moq_mux::Ingest::default(),
+		};
+		let pull = tokio::spawn(connect_import(target, url, moq_net::Instance::random()));
+
+		let (offer, _) = listener.accept().await.unwrap();
+		assert!(
+			announced.next().now_or_never().is_none(),
+			"announced before the catalog exists"
+		);
+
+		drop(offer);
+		pull.await.unwrap().expect_err("the endpoint hung up without an answer");
+		// The origin ends with the pull, so the only announcement left would be the pull's.
+		assert!(
+			announced.next().now_or_never().flatten().is_none(),
+			"announced a failed pull"
+		);
+	}
 }

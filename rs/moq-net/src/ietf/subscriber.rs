@@ -15325,6 +15325,12 @@ mod stitch_tests {
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
 		let direct = relay_passthrough_via(script.clone(), ingress, egress, fetch, None, false).await;
 		let hopped = relay_passthrough_via(script, ingress, egress, fetch, None, true).await;
+		// The bytes alone would pass a hop that wrote them and then reset the stream.
+		assert_eq!(
+			hopped.1.resets(),
+			direct.1.resets(),
+			"{ingress} -> {egress}: the moq-lite hop changed the resets"
+		);
 		let fetch_ok = |bytes: &[u8]| {
 			let mut decoder = Decoder::new(bytes, egress.into());
 			(decoder.varint().ok()? == ietf::FetchOk::ID).then_some(())?;
@@ -15547,6 +15553,44 @@ mod stitch_tests {
 			assert_eq!(decoder.varint().unwrap(), 1);
 			assert_eq!(decoder.slice(1).unwrap(), &[99]);
 		}
+	}
+
+	/// A subscribed moq-transport group crosses two relays joined by a moq-lite hop with the
+	/// `ietf` extension byte for byte, as it crosses one: its Object IDs, the gaps between
+	/// them and their marks, its properties, and its END_OF_GROUP status object.
+	#[kio::test]
+	async fn passthrough_keeps_gaps_properties_and_the_end_across_two_relays() {
+		let version = Version::Draft22;
+		let objects: [(u64, &[u8], Option<u64>); 3] = [
+			(6, &[0x3e, 6, 0x22, 1], None),
+			(9, &[0x3e, 2], None),
+			(10, &[], Some(super::super::object::END_OF_GROUP)),
+		];
+		let script = object_stream(version, true, &objects);
+		// Compares the two-relay path against the direct one.
+		let (bytes, log) = relay_passthrough_stream(script.clone(), version, version).await;
+		assert!(log.resets().is_empty());
+		let mut decoder = Decoder::new(&bytes, version.into());
+		let header = ietf::GroupHeader::decode(&mut decoder, version).unwrap();
+		assert!(header.flags.first_object && header.flags.has_extensions);
+		let mut previous = None;
+		for (id, properties, status) in objects {
+			let delta = previous.map_or(id, |previous: u64| id - previous - 1);
+			previous = Some(id);
+			assert_eq!(decoder.varint().unwrap(), delta, "Object {id}");
+			assert_eq!(decoder.bytes().unwrap(), properties, "Object {id}");
+			match status {
+				Some(status) => {
+					assert_eq!(decoder.varint().unwrap(), 0, "Object {id}");
+					assert_eq!(decoder.varint().unwrap(), status, "Object {id}");
+				}
+				None => {
+					assert_eq!(decoder.varint().unwrap(), 1, "Object {id}");
+					assert_eq!(decoder.slice(1).unwrap(), &[99], "Object {id}");
+				}
+			}
+		}
+		assert!(decoder.is_empty());
 	}
 
 	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the

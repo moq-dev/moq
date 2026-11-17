@@ -588,8 +588,8 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 	}
 });
 
-// A time range goes upstream in the track's timescale, the publisher resolves its start from
-// where its groups start, and the copy's reader resolves the end from the groups it receives.
+// A time range goes upstream in the track's timescale, as the keys of the groups starting at
+// those times, both ends inclusive.
 test("integration: lite-07 serves a time range", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
 	const origin = new OriginProducer();
@@ -599,26 +599,24 @@ test("integration: lite-07 serves a time range", async () => {
 	]);
 
 	const broadcast = publish(origin, Path.from("test"));
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MICRO, maxAge: null });
-	for (let sequence = 0; sequence < 10; sequence++) {
-		const group = producer.appendGroup();
-		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(sequence * 1000)));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	// Keyed by start, as the wire names a group: one per second.
+	for (let start = 0n; start < 10_000n; start += 1000n) {
+		const group = producer.createGroup(start);
+		group.writeFrame(textFrame(`${start}`, Timestamp.fromMillis(Number(start))));
 		group.finish();
 	}
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	try {
-		const reader = remote
-			.track("video")
-			.subscribe({
-				delay: { max: null },
-				order: "ascending",
-				ranges: [{ start: { time: Timestamp.fromMillis(2500) }, end: { time: Timestamp.fromMillis(5000) } }],
-			})
-			.ordered();
+		const reader = remote.track("video").subscribe({
+			delay: { max: null },
+			order: "ascending",
+			ranges: [{ start: { time: Timestamp.fromMillis(2000) }, end: { time: Timestamp.fromMillis(5000) } }],
+		});
 		const got: bigint[] = [];
-		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.sequence ?? -1n);
-		expect(got).toEqual([2n, 3n, 4n, 5n]);
+		for (let i = 0; i < 4; i++) got.push((await reader.recvGroup())?.sequence ?? -1n);
+		expect(got.sort((a, b) => (a < b ? -1 : 1))).toEqual([2000n, 3000n, 4000n, 5000n]);
 		reader.close();
 
 		// An untimed track refuses it.
@@ -2979,9 +2977,10 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 	30_000,
 );
 
-// A qmux session pair negotiating `protocol` over an in-memory socket, each side granting the other
-// `maxStreamsUni` unidirectional streams.
-function qmuxPair(protocol: string, maxStreamsUni: bigint): { client: Qmux; server: Qmux } {
+// A qmux session pair negotiating `protocol` over an in-memory socket, the client letting the server
+// open `maxStreams` streams of each kind. The client opens every bidirectional stream, so a small limit
+// bounds only the server's group streams.
+function qmuxPair(protocol: string, maxStreams: bigint): { client: Qmux; server: Qmux } {
 	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
 		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
 		return {
@@ -2996,9 +2995,8 @@ function qmuxPair(protocol: string, maxStreamsUni: bigint): { client: Qmux; serv
 		new TransformStream<Uint8Array, Uint8Array>({ transform: (chunk, c) => c.enqueue(chunk.slice()) });
 	const up = pipe();
 	const down = pipe();
-	const config = { idleTimeout: null, maxStreamsUni };
-	const client = new Qmux(socket(down.readable, up.writable), { config });
-	const server = Qmux.accept(socket(up.readable, down.writable), { config });
+	const client = new Qmux(socket(down.readable, up.writable), { config: { idleTimeout: null, maxStreams } });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config: { idleTimeout: null } });
 	return { client, server };
 }
 

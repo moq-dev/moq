@@ -4292,7 +4292,7 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.reportedLargest(track, { group: 4n, frame: 3 });
+	hooks.reportedLargest(track, { group: 4n, frame: 3 }, false);
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({

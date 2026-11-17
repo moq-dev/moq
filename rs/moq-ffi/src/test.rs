@@ -9247,7 +9247,7 @@ async fn token_server(
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
