@@ -155,9 +155,11 @@ public final class TrackProducer: Sendable {
         TrackRequests(try ffi.requests())
     }
 
-    /// Append a new group, returning a producer for its frames.
-    public func appendGroup() throws -> GroupProducer {
-        GroupProducer(try ffi.appendGroup())
+    /// Append the next group at `start`, returning a producer for its frames. `start` is
+    /// converted to the track's timescale; on a scale-less track it is `Timestamp.unscaled(key)`
+    /// at the group's key. A start at or before a group the track holds throws.
+    public func appendGroup(start: Timestamp) throws -> GroupProducer {
+        GroupProducer(try ffi.appendGroup(start: start))
     }
 
     /// Create a group with an explicit start.
