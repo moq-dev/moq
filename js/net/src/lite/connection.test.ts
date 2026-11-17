@@ -11,7 +11,7 @@ import { createMockTransportPair, type MockTransport, manual, settlesWithin, tex
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { acceptBudget, Stream, Writer } from "../stream.ts";
-import { Timescale } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
@@ -365,7 +365,7 @@ for (const [alpn, version] of [
 		});
 		try {
 			const first = hooks.appendNext(producer);
-			first.writeFrame(textFrame("first"));
+			first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 			first.finish();
 			// A frame can arrive while its sender still yields on the write. Drain the setup group
 			// before a zero-delay subscription supersedes its still-unfinished sender.
@@ -376,7 +376,7 @@ for (const [alpn, version] of [
 
 			fin.enable();
 			const last = hooks.appendNext(producer);
-			last.writeFrame(textFrame("last"));
+			last.writeFrame(textFrame("last", Timestamp.fromMillis(Number(last.start))));
 			last.finish();
 			producer.finish();
 			producer.close();
@@ -430,7 +430,7 @@ for (const [alpn, version] of [
 			});
 			try {
 				const first = hooks.appendNext(producer);
-				first.writeFrame(textFrame("first"));
+				first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 				first.finish();
 				const received = await track.nextGroup();
 				expect(await received?.readString()).toBe("first");
@@ -439,7 +439,7 @@ for (const [alpn, version] of [
 
 				fin.enable();
 				const last = hooks.appendNext(producer);
-				last.writeFrame(textFrame("last"));
+				last.writeFrame(textFrame("last", Timestamp.fromMillis(Number(last.start))));
 				last.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("last");
 				await fin.reached;
@@ -493,7 +493,7 @@ for (const [alpn, version] of [
 			const track = remote.track("video").subscribe().ordered();
 			try {
 				const first = hooks.appendNext(producer);
-				first.writeFrame(textFrame("first"));
+				first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 				first.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("first");
 
@@ -544,7 +544,7 @@ for (const [alpn, version] of [
 			const track = remote.track("video").subscribe().ordered();
 			try {
 				const group = hooks.appendNext(producer);
-				group.writeFrame(textFrame("only"));
+				group.writeFrame(textFrame("only", Timestamp.fromMillis(Number(group.start))));
 				group.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("only");
 
@@ -588,7 +588,7 @@ for (const [alpn, version] of [
 			const track = remote.track("video").subscribe().ordered();
 			try {
 				const group = hooks.appendNext(producer);
-				group.writeFrame(textFrame("only"));
+				group.writeFrame(textFrame("only", Timestamp.fromMillis(Number(group.start))));
 				group.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("only");
 
@@ -623,7 +623,7 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 	});
 
 	const group = hooks.appendNext(producer);
-	group.writeFrame(textFrame("last"));
+	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();
 
 	const subscriber = await Stream.open(pair.client, { version });
@@ -734,7 +734,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = hooks.appendNext(producer);
-	group.writeFrame(textFrame("last"));
+	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
@@ -787,7 +787,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const group = hooks.appendNext(producer);
-	group.writeFrame(textFrame("last"));
+	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();
 	const url = new URL("https://localhost/test");
 	const [client, server] = await Promise.all([

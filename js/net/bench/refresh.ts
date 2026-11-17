@@ -3,12 +3,12 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
+import { hooks } from "../src/internal.ts";
 import { ALPN_07_WIP } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Timestamp } from "../src/time.ts";
-import { hooks } from "../src/internal.ts";
 
 console.debug = () => {};
 console.log("retained,tracks,joined,refresh_us");

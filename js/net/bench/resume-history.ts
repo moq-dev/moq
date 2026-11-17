@@ -21,6 +21,7 @@ import { Manual } from "@moq/clock/test";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
+import { hooks } from "../src/internal.ts";
 import { ALPN_06 } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
@@ -28,7 +29,6 @@ import * as Path from "../src/path.ts";
 import { Front } from "../src/resume.ts";
 import { Timestamp } from "../src/time.ts";
 import { wireOf } from "../src/wire.ts";
-import { hooks } from "../src/internal.ts";
 
 const PAYLOAD = 4096;
 const MAX_DELAY = Duration.millis(1000);

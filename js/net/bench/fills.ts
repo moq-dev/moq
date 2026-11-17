@@ -8,12 +8,12 @@ import { RequestOk } from "../src/ietf/request";
 import { NativeSession } from "../src/ietf/session";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "../src/ietf/subscribe";
 import { ALPN, Version } from "../src/ietf/version";
+import { hooks } from "../src/internal.ts";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
 import { Reader, Stream } from "../src/stream";
 import { Timestamp } from "../src/time";
-import { hooks } from "../src/internal.ts";
 
 console.debug = () => {};
 const version = Version.DRAFT_22;

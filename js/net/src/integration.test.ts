@@ -1505,7 +1505,7 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 	const remote = wireOf(client).consume(Path.from("test"));
 
 	for (let i = 0; i < 8; i++) {
-		video.writeFrame(textFrame(`hello-${i}`));
+		video.writeFrame(textFrame(`hello-${i}`, Timestamp.fromMillis(i)));
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
 		await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
