@@ -11,7 +11,7 @@ different catalogs.
 ## Plan
 
 Found while landing the draft's one strict rule: that PR made every root
-section and `media`'s `clock` and `join` refuse `null` in Rust
+section and `sync`'s `clock` and `interval` refuse `null` in Rust
 (`deserialize_some` in `rs/hang/src/catalog/mod.rs`), but the
 `Option<_>` fields inside renditions, data tracks, includes, and `color`
 still take serde's default, where `null` decodes as `None`. JS uses

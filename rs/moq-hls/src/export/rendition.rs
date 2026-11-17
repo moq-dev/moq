@@ -381,7 +381,7 @@ pub struct Rendition {
 	config: Config,
 	/// The container its media track carries, to decode a group's first frame.
 	container: Arc<moq_mux::catalog::hang::Container>,
-	/// The catalog's `media.join.interval`, which fixes [`segment`](Self::segment).
+	/// The catalog's `sync.interval`, which fixes [`segment`](Self::segment).
 	interval: Duration,
 	/// The segment length the grid numbers this rendition's segments on (see
 	/// [`grid::segment_length`]).
@@ -395,7 +395,7 @@ pub struct Rendition {
 	target_duration: u64,
 	/// Segments listed past the target duration, counted to rate-limit their warning.
 	overruns: AtomicU64,
-	/// The catalog's `media.clock`: the wall anchor segment times map through. Absent when the
+	/// The catalog's `sync.clock`: the wall anchor segment times map through. Absent when the
 	/// publisher exposes none.
 	clock: Option<Clock>,
 	/// This rendition's window over its segments.
@@ -590,7 +590,7 @@ impl Rendition {
 		&self.media.track
 	}
 
-	/// The catalog's `media.join.interval`, which fixes the [segment length](Self::segment_length).
+	/// The catalog's `sync.interval`, which fixes the [segment length](Self::segment_length).
 	pub(super) fn interval(&self) -> Duration {
 		self.interval
 	}
@@ -647,7 +647,7 @@ impl Rendition {
 	}
 
 	/// Build a video rendition numbering its media track's groups on a grid of `interval`, timed
-	/// by the catalog's `media.clock`.
+	/// by the catalog's `sync.clock`.
 	///
 	/// Fails when the config's `broadcast` reference escapes above the origin root, so it names no
 	/// broadcast, or its container is unknown or malformed, so its media can't be read: either way

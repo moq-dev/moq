@@ -9,11 +9,11 @@ import { EchoSchema } from "./echo";
 import { TRACK } from "./format";
 import { IncludeSchema } from "./include";
 import { JsonSchema } from "./json";
-import { MediaSchema } from "./media";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
 import { renditions } from "./section";
 import { StatsSchema } from "./stats";
+import { SyncSchema } from "./sync";
 import { TextSchema } from "./text";
 import { track } from "./track";
 import { VideoSchema } from "./video";
@@ -47,9 +47,8 @@ const VersionSchema = z.number().check(
 /**
  * The root catalog: the base sections every hang broadcast carries.
  *
- * The media sections are `video`, `audio`, and `text`, alongside `media`, which holds what applies
- * to every audio and video track: the broadcast's `clock` (the one wall-clock mapping) and its
- * `join` interval. `json` and `binary` list application data tracks that aren't media. A section is omitted
+ * The media sections are `video`, `audio`, and `text`, alongside `sync`, the broadcast's timeline:
+ * its `clock` (the one wall-clock mapping) and its join `interval`. `json` and `binary` list application data tracks that aren't media. A section is omitted
  * when it holds no tracks. `stats` names the publisher's media snapshot track, `echo`
  * solicits viewer feedback under a relative broadcast prefix, and `include` lists whole
  * broadcasts without opening them; each shares this catalog's PTS timeline and root settings.
@@ -70,8 +69,8 @@ export const RootSchema = z.looseObject({
 	version: z.optional(VersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// What applies to every audio and video track, omitted when it holds nothing.
-	media: z.optional(MediaSchema),
+	// The broadcast's timeline, omitted when it holds nothing.
+	sync: z.optional(SyncSchema),
 	stats: z.optional(StatsSchema),
 	echo: z.optional(EchoSchema),
 	text: z.optional(TextSchema),
@@ -80,7 +79,7 @@ export const RootSchema = z.looseObject({
 	include: z.optional(renditions(IncludeSchema, "include")),
 });
 
-/** The root catalog object: the media sections, `media`, the data track sections, plus any app extensions. */
+/** The root catalog object: the media sections, `sync`, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;
 
 /**
@@ -124,7 +123,7 @@ export function checkRenditions(root: Root): Root {
 /**
  * The catalog as a publisher writes it: refused as every reader refuses it, with the root
  * `version` computed rather than carried, so an edit can't claim less than the catalog uses, and an
- * empty `media` left off the wire.
+ * empty `sync` left off the wire.
  *
  * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
@@ -132,7 +131,7 @@ export function encode(root: Root): Root {
 	checkRenditions(root);
 	const value = { ...root };
 	delete value.version;
-	if (value.media && value.media.clock === undefined && value.media.join === undefined) delete value.media;
+	if (value.sync && value.sync.clock === undefined && value.sync.interval === undefined) delete value.sync;
 	const version = minVersion(root);
 	if (version !== undefined) value.version = version;
 	return value;

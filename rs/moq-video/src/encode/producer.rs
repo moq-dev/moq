@@ -1814,7 +1814,7 @@ mod tests {
 					let now = kio::clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
 					let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
-					let advertised = fixture.catalog.snapshot().media.clock;
+					let advertised = fixture.catalog.snapshot().sync.clock;
 					assert_eq!(advertised, fixture.clock.wall());
 
 					let mut track = fixture.subscribe().await;
@@ -1827,7 +1827,7 @@ mod tests {
 					fixture.assert_acquired(published, captured);
 					let mapped = advertised.unwrap().wall_clock(us(published)).unwrap();
 					assert_eq!(mapped, wall + Duration::from_micros(published));
-					assert_eq!(fixture.catalog.snapshot().media.clock, advertised);
+					assert_eq!(fixture.catalog.snapshot().sync.clock, advertised);
 					fixture.finish().await;
 				})
 				.await

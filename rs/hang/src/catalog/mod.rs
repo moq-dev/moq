@@ -15,13 +15,13 @@ mod hex;
 mod include;
 mod json;
 mod m2ts;
-mod media;
 mod millis;
 mod mode;
 mod priority;
 mod reference;
 mod root;
 mod stats;
+mod sync;
 mod text;
 mod video;
 
@@ -34,12 +34,12 @@ pub use echo::*;
 pub use include::*;
 pub use json::*;
 pub use m2ts::*;
-pub use media::*;
 pub use mode::*;
 pub use priority::*;
 pub use reference::*;
 pub use root::*;
 pub use stats::*;
+pub use sync::*;
 pub use text::*;
 pub use video::*;
 

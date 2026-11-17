@@ -209,7 +209,7 @@ mod test {
 			);
 			for ms in [1_000, 2_000, 3_000] {
 				let mut catalog = Catalog::<()>::default();
-				catalog.media.join = crate::catalog::Join::new(std::time::Duration::from_millis(ms));
+				catalog.sync.interval = Some(std::time::Duration::from_millis(ms));
 				let mut group = track.append_group(ms).unwrap();
 				group
 					.write_frame(moq_net::Timestamp::from_millis(ms).unwrap(), catalog.to_json().unwrap())

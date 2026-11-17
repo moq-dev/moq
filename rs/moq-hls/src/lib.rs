@@ -1,22 +1,23 @@
-//! HLS / LL-HLS <-> MoQ gateway.
+//! HLS and DASH <-> MoQ gateway.
 //!
-//! Bridges HLS (and Low-Latency HLS) and [`moq_net`] broadcasts in both
-//! directions, mirroring the WHIP/WHEP split in `moq-webrtc`:
+//! Bridges HLS and [`moq_net`] broadcasts in both directions, mirroring the
+//! WHIP/WHEP split in `moq-webrtc`:
 //!
 //! - [`import`] pulls a remote HLS master/media playlist and publishes its CMAF
 //!   segments into MoQ (an HTTP *client* that *publishes*).
 //! - [`server`] serves HLS playlists, DASH manifests, and CMAF segments over
 //!   HTTP for MoQ broadcasts (an HTTP *server*). It subscribes only to each
-//!   broadcast's catalog and HLS record tracks; media bytes are FETCHed from
-//!   the relay one group at a time, only when a segment is actually requested.
+//!   broadcast's catalog and numbers segments on its `sync.interval` grid; media
+//!   bytes are FETCHed from the relay one group at a time, only when a segment
+//!   is actually requested.
 //!   It serves every request; gate access by layering your own middleware onto
 //!   [`Server::router`](server::Server::router), or parse and authorize each request
 //!   yourself and answer it with [`Server::respond`](server::Server::respond).
 //!
 //! All CMAF byte handling (import via [`moq_mux::container::fmp4::Import`],
 //! export via [`moq_mux::container::fmp4::Muxer`]) lives in `moq-mux`; this
-//! crate owns the HLS playlist and DASH manifest generation, the
-//! record-driven playlist window, and the HTTP surface.
+//! crate owns the HLS playlist and DASH manifest generation, the segment
+//! grid, and the HTTP surface.
 //!
 //! Its cryptography is [rind](https://docs.rs/rind), so every constructor that first needs it
 //! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`], carrying [`moq_crypto::cpu::UnsupportedCpu`].

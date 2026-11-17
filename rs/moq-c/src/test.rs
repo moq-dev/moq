@@ -8952,7 +8952,7 @@ fn join_hint_declares_the_join_interval() {
 	for i in 0..60u64 {
 		if i == 50 {
 			assert_eq!(
-				published_catalog(broadcast).media.join,
+				published_catalog(broadcast).sync.interval,
 				None,
 				"no window has closed yet"
 			);
@@ -8966,7 +8966,7 @@ fn join_hint_declares_the_join_interval() {
 		}
 	}
 	assert_eq!(
-		published_catalog(broadcast).media.interval(),
+		published_catalog(broadcast).sync.interval,
 		Some(std::time::Duration::from_millis(500)),
 		"the hint, not the 100 ms groups measured"
 	);

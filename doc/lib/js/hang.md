@@ -33,7 +33,7 @@ into a `Date`. It takes integer ticks at a timescale, so pass a frame's
 
 ```ts
 for await (const { value: root } of Catalog.watch(broadcast)) {
-	const clock = root.media?.clock;
+	const clock = root.sync?.clock;
 	if (!clock) continue; // the publisher exposes no clock
 	// `frame` comes from your own `Container.Legacy` consumer.
 	const captured = Catalog.wallClockTime(clock, Math.floor(frame.timestamp.asMicros()), 1_000_000);

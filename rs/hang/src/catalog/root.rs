@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `media`
+/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `sync`
 /// section (the broadcast's one wall-clock mapping and join interval), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
@@ -43,10 +43,10 @@ pub struct Catalog<E = ()> {
 	/// wire when it has no renditions.
 	pub audio: Audio,
 
-	/// What applies to every audio and video track: the broadcast's clock and join interval.
+	/// The broadcast's timeline: its clock and join interval.
 	///
-	/// Omitted from the wire when it holds nothing. See [`Media`](crate::catalog::Media).
-	pub media: crate::catalog::Media,
+	/// Omitted from the wire when it holds nothing. See [`Sync`](crate::catalog::Sync).
+	pub sync: crate::catalog::Sync,
 
 	/// Text (caption/subtitle) track information with multiple renditions.
 	///
@@ -77,8 +77,8 @@ pub struct Catalog<E = ()> {
 
 	/// Whole broadcasts listed for explicit, lazy selection, keyed by include ID.
 	///
-	/// Each shares this catalog's PTS timeline and root settings, including `media.clock` and
-	/// `media.join.interval`; its own settings are ignored. Listing one subscribes to nothing;
+	/// Each shares this catalog's PTS timeline and root settings, including `sync.clock` and
+	/// `sync.interval`; its own settings are ignored. Listing one subscribes to nothing;
 	/// see [`Include`](crate::catalog::Include). Omitted from the wire when empty.
 	pub include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
@@ -121,10 +121,10 @@ struct Wire<E> {
 
 	#[serde(
 		default,
-		skip_serializing_if = "crate::catalog::Media::is_empty",
+		skip_serializing_if = "crate::catalog::Sync::is_empty",
 		deserialize_with = "crate::catalog::deserialize_object"
 	)]
-	media: crate::catalog::Media,
+	sync: crate::catalog::Sync,
 
 	#[serde(
 		default,
@@ -190,7 +190,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			version: _,
 			video,
 			audio,
-			media,
+			sync,
 			text,
 			json,
 			binary,
@@ -203,7 +203,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 		Self {
 			video,
 			audio,
-			media,
+			sync,
 			text,
 			json,
 			binary,
@@ -315,7 +315,7 @@ impl<E> Catalog<E> {
 		Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
-			media: self.media,
+			sync: self.sync,
 			text: self.text.clone(),
 			..Default::default()
 		}
@@ -1063,27 +1063,27 @@ mod test {
 	}
 
 	#[test]
-	fn media_roundtrips_at_the_root() {
+	fn sync_roundtrips_at_the_root() {
 		let clock =
 			crate::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
 		let mut catalog = Catalog::<()>::default();
-		catalog.media.clock = Some(clock);
-		catalog.media.join = crate::catalog::Join::new(std::time::Duration::from_secs(2));
+		catalog.sync.clock = Some(clock);
+		catalog.sync.interval = Some(std::time::Duration::from_secs(2));
 
 		let json = catalog.to_json().expect("failed to encode");
 		assert_eq!(
 			json,
-			r#"{"media":{"clock":{"wall":1751846400000000,"timescale":1000000},"join":{"interval":2000}}}"#
+			r#"{"sync":{"clock":{"wall":1751846400000000,"timescale":1000000},"interval":2000}}"#
 		);
 		assert_eq!(Catalog::<()>::from_str(&json).expect("failed to decode"), catalog);
 	}
 
-	/// The clock moved under `media`, and records are gone: a root `clock` and a rendition `hls`
-	/// field are someone else's keys, ignored rather than read.
+	/// Retired shapes are someone else's keys, ignored rather than read: the root `clock` and the
+	/// `media` section that each held the clock before `sync`, and a rendition `hls` record.
 	#[test]
-	fn a_retired_root_clock_and_hls_field_are_ignored() {
+	fn a_retired_clock_media_and_hls_field_are_ignored() {
 		let rendition = serde_json::json!({"codec": "avc1.64001f", "container": {"kind": "legacy"}});
-		let media =
+		let plain =
 			Catalog::<()>::from_str(&serde_json::json!({"video": {"renditions": {"video": rendition}}}).to_string())
 				.unwrap();
 		let mut retired = rendition.clone();
@@ -1091,10 +1091,12 @@ mod test {
 		let json = serde_json::json!({
 			"video": {"renditions": {"video": retired}},
 			"clock": {"wall": 1000, "timescale": 1000000},
+			"media": {"clock": {"wall": 1000}, "join": {"interval": 2000}},
 		});
 		let catalog = Catalog::<()>::from_str(&json.to_string()).expect("retired fields must not reject media");
-		assert_eq!(catalog, media);
-		assert_eq!(catalog.to_json().unwrap(), media.to_json().unwrap());
+		assert_eq!(catalog, plain);
+		assert_eq!(catalog.sync, crate::catalog::Sync::default());
+		assert_eq!(catalog.to_json().unwrap(), plain.to_json().unwrap());
 	}
 
 	/// A section with the wrong shape refuses the catalog rather than reading as absent. The shared
@@ -1125,14 +1127,14 @@ mod test {
 
 	#[test]
 	fn packaged_clock_fixture_decodes() {
-		// The canonical shape: the clock and join interval under `media`. A reader maps media
+		// The canonical shape: the clock and join interval under `sync`. A reader maps media
 		// timestamps through the clock after timescale conversion.
 		let json = include_str!("../../fixtures/catalog-clock.json");
 		let catalog = Catalog::<()>::from_str(json).expect("the packaged fixture must decode");
 
-		let clock = catalog.media.clock.expect("the fixture carries a clock");
+		let clock = catalog.sync.clock.expect("the fixture carries a clock");
 		assert_eq!(clock.wall.scale().map(moq_net::Timescale::as_u64), Some(1_000_000));
-		assert_eq!(catalog.media.interval(), Some(std::time::Duration::from_secs(2)));
+		assert_eq!(catalog.sync.interval, Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.
 		let expected = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_751_846_402_000);
