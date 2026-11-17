@@ -56,7 +56,8 @@ pub use passthrough::Passthrough;
 pub use programs::Programs;
 pub use release::Release;
 pub use republish::{Republish, Republished};
-pub use step::{Decoded, Restart, Step};
+use step::Restart;
+pub use step::Step;
 
 pub mod stats;
 

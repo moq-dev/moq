@@ -181,9 +181,7 @@ struct Imported {
 /// or one the first PTS places (so they stay verbatim).
 fn import(data: &[u8], captured: bool) -> Result<Imported, super::Error> {
 	let mut import = start(captured);
-	if let super::Decoded::Restart(restart) = import.import.decode(data)? {
-		panic!("the source restarted: {}", restart.step);
-	}
+	import.import.decode(data)?;
 	import.import.finish_in_place()?;
 	Ok(import)
 }
@@ -577,11 +575,7 @@ async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
 		}
-		imported
-			.import
-			.decode(&feed.bytes()[head.len()..])
-			.unwrap()
-			.expect_continue();
+		imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
 		imported.import.finish_in_place().unwrap();
 
 		let (frames, err) = reader.await.unwrap();
@@ -595,7 +589,7 @@ async fn a_pes_with_a_field_no_rebase_reaches_refuses_its_stream() {
 /// Begin importing `head` onto a clock the first PTS places.
 fn start_import(head: &[u8]) -> Imported {
 	let mut imported = start(false);
-	imported.import.decode(head).unwrap().expect_continue();
+	imported.import.decode(head).unwrap();
 	imported
 }
 
@@ -849,11 +843,7 @@ async fn a_pmt_naming_or_dropping_the_pcr_reroutes_private_pes() {
 	for _ in 0..10 {
 		tokio::task::yield_now().await;
 	}
-	imported
-		.import
-		.decode(&feed.bytes()[head.len()..])
-		.unwrap()
-		.expect_continue();
+	imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
 	imported.import.finish_in_place().unwrap();
 
 	let (frames, err) = reader.await.unwrap();
@@ -924,11 +914,7 @@ async fn a_revised_private_stream_publishes_under_a_fresh_name() {
 		let mut imported = start_import(&head);
 		let (old, _) = imported.entry().unwrap();
 		let old_reader = reader(&imported, &old).await;
-		imported
-			.import
-			.decode(&feed.bytes()[head.len()..])
-			.unwrap()
-			.expect_continue();
+		imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
 
 		let (frames, end) = old_reader.await.unwrap();
 		assert_eq!(end, Ok(true), "the old track finishes");
@@ -970,11 +956,7 @@ async fn a_dropped_private_stream_finishes_and_its_reused_pid_opens_a_new_track(
 	let mut imported = start_import(&head);
 	let (old, _) = imported.entry().unwrap();
 	let old_reader = reader(&imported, &old).await;
-	imported
-		.import
-		.decode(&dropped[head.len()..])
-		.unwrap()
-		.expect_continue();
+	imported.import.decode(&dropped[head.len()..]).unwrap();
 	let (frames, end) = old_reader.await.unwrap();
 	assert_eq!(end, Ok(true), "the dropped stream's track finishes");
 	assert_eq!(frames.len(), 1, "nothing after the drop is carried");
@@ -982,11 +964,7 @@ async fn a_dropped_private_stream_finishes_and_its_reused_pid_opens_a_new_track(
 	assert_eq!(imported.stats().units, 1);
 	assert_eq!(imported.stats().quiet, None, "a PID the PMT dropped is not silent");
 
-	imported
-		.import
-		.decode(&feed.bytes()[dropped.len()..])
-		.unwrap()
-		.expect_continue();
+	imported.import.decode(&feed.bytes()[dropped.len()..]).unwrap();
 	imported.import.finish_in_place().unwrap();
 	let (name, _) = imported.entry().expect("the PID is carried again");
 	assert_ne!(name, old, "a reused PID gets a new name");
@@ -1035,11 +1013,7 @@ async fn a_private_stream_dropped_past_a_lone_pcr_counts_its_pes_unplaced() {
 	let mut imported = start_import(&head);
 	let (name, _) = imported.entry().unwrap();
 	let held = reader(&imported, &name).await;
-	imported
-		.import
-		.decode(&feed.bytes()[head.len()..])
-		.unwrap()
-		.expect_continue();
+	imported.import.decode(&feed.bytes()[head.len()..]).unwrap();
 	let (frames, end) = held.await.unwrap();
 	assert!(frames.is_empty());
 	assert!(end.is_ok(), "{end:?}");
@@ -1067,7 +1041,7 @@ fn pmt_revisions_apply_across_the_version_wrap() {
 			feed.mux.pmt_at(version, PMT_PID, 1, CLOCK_PID, streams, 0);
 		}
 		let bytes = feed.bytes();
-		imported.import.decode(&bytes[decoded..]).unwrap().expect_continue();
+		imported.import.decode(&bytes[decoded..]).unwrap();
 		let (name, entry) = imported.entry().unwrap();
 		assert_eq!(
 			entry.pes_packet.as_ref().unwrap().stream_type,
@@ -1078,11 +1052,7 @@ fn pmt_revisions_apply_across_the_version_wrap() {
 
 		feed.mux.pmt_at(version, PMT_PID, 1, CLOCK_PID, streams, 0);
 		let repeated = feed.bytes();
-		imported
-			.import
-			.decode(&repeated[bytes.len()..])
-			.unwrap()
-			.expect_continue();
+		imported.import.decode(&repeated[bytes.len()..]).unwrap();
 		decoded = repeated.len();
 		assert_eq!(imported.entry().unwrap().0, name, "a repetition of version {version}");
 		names.push(name);

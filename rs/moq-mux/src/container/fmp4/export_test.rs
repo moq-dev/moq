@@ -2619,7 +2619,7 @@ async fn export_reordered_clip(cap: Option<std::time::Duration>) -> (Bytes, Vec<
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)

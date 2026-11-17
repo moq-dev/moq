@@ -1,8 +1,7 @@
 /// Why a TS import or export stopped.
 ///
 /// A damaged packet, PES, or access unit is not one: the importer counts it in its
-/// [`stats`](super::stats) and carries on. Nor is a change of source, which
-/// [`Import::decode`](super::Import::decode) returns as a [`Restart`](super::Restart).
+/// [`stats`](super::stats) and carries on.
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -25,6 +24,12 @@ pub enum Error {
 		/// The program numbers the PAT lists, in PAT order.
 		programs: Vec<u16>,
 	},
+
+	/// The source's clock stepped onto another timeline, or its PAT named another program, so
+	/// what follows is another broadcast. [`Republish`](super::Republish) carries on into a new
+	/// instance instead.
+	#[error("the source {0}; what follows is a new broadcast")]
+	Restarted(super::Step),
 
 	/// The input ended before it declared anything to publish.
 	#[error("input ended before {0}")]

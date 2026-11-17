@@ -128,7 +128,7 @@ fn feed(data: &[u8], chunk: usize) -> Result<Option<(Restart, Vec<u8>)>, super::
 	.unwrap();
 	let mut import = Import::new(broadcast, catalog.reserve());
 	for (index, piece) in data.chunks(chunk).enumerate() {
-		if let super::Decoded::Restart(restart) = import.decode(piece)? {
+		if let Some(restart) = import.decode_or_restart(piece)? {
 			let mut rest = restart.remainder.to_vec();
 			rest.extend(data.chunks(chunk).skip(index + 1).flatten());
 			// The instance before the step ends cleanly.
@@ -176,6 +176,25 @@ fn an_unflagged_switch_restarts_either_way() {
 			assert!(matches!(fed, Ok(None)), "{expected}: {fed:?}");
 		}
 	}
+}
+
+/// A raw import has no next instance to carry on into, so a switch fails `decode`, and every
+/// later call, while `finish` still ends the instance cleanly before the step.
+#[test]
+fn a_switch_fails_a_raw_import() {
+	let (data, _) = replay(SWITCH, |_| 0);
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let mut import = Import::new(broadcast, catalog.reserve());
+	let err = import.decode(&data).unwrap_err();
+	assert!(matches!(err, super::Error::Restarted(Step::Leap { .. })), "{err:?}");
+	let again = import.decode(&[]).unwrap_err();
+	assert!(matches!(again, super::Error::Restarted(Step::Leap { .. })), "{again:?}");
+	let _finished = import.finish().unwrap();
 }
 
 /// A source switch whose PAT names another `transport_stream_id` before its first clock

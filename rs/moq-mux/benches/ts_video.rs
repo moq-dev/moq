@@ -78,7 +78,7 @@ fn assembly(c: &mut Criterion) {
 						)
 					},
 					|(mut import, _catalog)| {
-						import.decode(&data).unwrap().expect_continue();
+						import.decode(&data).unwrap();
 						let import = import.finish().unwrap();
 						let _finished = std::hint::black_box(import);
 					},

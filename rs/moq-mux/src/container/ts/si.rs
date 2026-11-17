@@ -847,19 +847,19 @@ mod tests {
 		mux.section(0x11, &sdt);
 		mux.packet(0x1ff, Flags::pcr(0));
 		mux.section(0x11, &sdt);
-		import.decode(&std::mem::take(&mut mux.out)).unwrap().expect_continue();
+		import.decode(&std::mem::take(&mut mux.out)).unwrap();
 		assert!(catalog.snapshot().ext.mpegts.si.is_empty());
 		let row = &import.stats().streams[&0x11];
 		assert_eq!((row.track.as_str(), row.unplaced), (".si", 2));
 		mux.packet(0x1ff, Flags::pcr(40 * 27_000));
 		mux.section(0x11, &sdt);
-		import.decode(&std::mem::take(&mut mux.out)).unwrap().expect_continue();
+		import.decode(&std::mem::take(&mut mux.out)).unwrap();
 		assert!(catalog.snapshot().ext.mpegts.si.contains_key(&0x11));
 		assert_eq!(import.stats().streams[&0x11].unplaced, 2);
 		// Accepted PCR intervals move the program clock; no video PTS or host time passes.
 		for n in 2..=52 {
 			mux.packet(0x1ff, Flags::pcr(n * 40 * 27_000));
-			import.decode(&std::mem::take(&mut mux.out)).unwrap().expect_continue();
+			import.decode(&std::mem::take(&mut mux.out)).unwrap();
 		}
 		assert!(catalog.snapshot().ext.mpegts.si.is_empty());
 	}

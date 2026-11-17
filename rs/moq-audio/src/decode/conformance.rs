@@ -144,7 +144,7 @@ fn import(
 	let source: Box<dyn std::any::Any> = match vector.container {
 		Container::Ts(bytes) => {
 			let mut importer = moq_mux::container::ts::Import::new(broadcast, catalog.reserve());
-			importer.decode(bytes).unwrap().expect_continue();
+			importer.decode(bytes).unwrap();
 			Box::new(importer.finish().unwrap())
 		}
 		Container::Cmaf(bytes) => {

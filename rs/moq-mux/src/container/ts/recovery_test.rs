@@ -482,7 +482,7 @@ async fn record(profile: Profile) -> Recording {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 	let consumer = broadcast.consume();
 	let mut import = super::Import::new(broadcast.clone(), catalog.reserve());
-	import.decode(&profile.clip().ts).unwrap().expect_continue();
+	import.decode(&profile.clip().ts).unwrap();
 	let _finished = import.finish().unwrap();
 	let snapshot = catalog.snapshot();
 

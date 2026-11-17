@@ -52,13 +52,6 @@ pub enum Error {
 	#[error("ts: {0}")]
 	Ts(crate::container::ts::Error),
 
-	/// A TS source changed onto another timeline or program, which needs a new broadcast.
-	///
-	/// Only the generic [`Container`](crate::import::Container) importer reports it;
-	/// [`ts::Republish`](crate::container::ts::Republish) carries on under a new instance instead.
-	#[error("the source {0}; what follows is a new broadcast")]
-	Restarted(crate::container::ts::Step),
-
 	/// Error parsing or building MKV / WebM streams.
 	#[error("mkv: {0}")]
 	Mkv(#[from] crate::container::mkv::Error),

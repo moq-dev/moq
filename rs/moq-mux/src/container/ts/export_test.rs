@@ -906,7 +906,7 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 	let imported_consumer = imported.consume();
 	let import_catalog = crate::catalog::Producer::new(&mut imported, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(imported, import_catalog.reserve());
-	import.decode(&ts).unwrap().expect_continue();
+	import.decode(&ts).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = import_catalog.snapshot();
@@ -933,7 +933,7 @@ async fn export_bframe_video_authors_dts() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	// `import` and `catalog` stay alive: retained tracks the exporter subscribes to.
@@ -1264,7 +1264,7 @@ async fn export_decodes_where_the_source_did() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 	let ts = drain(consumer).await;
 
@@ -1443,7 +1443,7 @@ async fn export_pcr_is_a_uniform_ramp() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let ts = drain(consumer).await;
@@ -1802,7 +1802,7 @@ async fn export_scte35_roundtrip() {
 
 	// Now add the real video/audio by importing bbb.ts (this moves `broadcast`).
 	let mut import = crate::container::ts::Import::new(broadcast, reserved);
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	// `import`, `catalog`, and `scte_producer` stay alive: retained tracks. The
@@ -1850,7 +1850,7 @@ async fn export_scte35_roundtrip() {
 	)
 	.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let _finished = import2.finish().unwrap();
 
 	let snapshot = catalog2.snapshot();
@@ -1944,8 +1944,7 @@ async fn assert_unknown_stream_type(pes: bool) {
 	let mut import = crate::container::ts::Import::new(broadcast, reserved);
 	import
 		.decode(&BytesMut::from(&include_bytes!("test_data/bbb.ts")[..]))
-		.unwrap()
-		.expect_continue();
+		.unwrap();
 	let _finished = import.finish().unwrap();
 	let ts = drain_with(
 		open_ts(
@@ -2044,7 +2043,7 @@ async fn export_pes_packet_roundtrip() {
 
 	// Real video/audio supplies the media clock (moves `broadcast`).
 	let mut import = crate::container::ts::Import::new(broadcast, reserved);
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	// `import`, `catalog`, and `data_producer` stay alive: retained tracks.
@@ -2069,7 +2068,7 @@ async fn export_pes_packet_roundtrip() {
 	)
 	.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let _finished = import2.finish().unwrap();
 
 	let snapshot = catalog2.snapshot();
@@ -2152,7 +2151,7 @@ async fn programs_without_video_roundtrip_opaque_tracks() {
 			)
 			.unwrap();
 			let mut import = super::Import::new(broadcast, catalog.reserve());
-			import.decode(&mux.bytes()).unwrap().expect_continue();
+			import.decode(&mux.bytes()).unwrap();
 			let _finished = import.finish().unwrap();
 			let original = catalog
 				.snapshot()
@@ -2230,7 +2229,7 @@ async fn programs_without_video_roundtrip_opaque_tracks() {
 			)
 			.unwrap();
 			let mut import2 = super::Import::new(broadcast2, catalog2.reserve());
-			import2.decode(&output).unwrap().expect_continue();
+			import2.decode(&output).unwrap();
 			let _finished = import2.finish().unwrap();
 			let restored = catalog2
 				.snapshot()
@@ -2316,7 +2315,7 @@ async fn stats_count_what_the_import_writes_and_the_export_reads() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -2366,7 +2365,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let names: Vec<String> = catalog.snapshot().audio.renditions.keys().cloned().collect();
@@ -2402,7 +2401,7 @@ async fn mp2_kyrion_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let _finished = import2.finish().unwrap();
 
 	let names2: Vec<String> = catalog2.snapshot().audio.renditions.keys().cloned().collect();
@@ -2435,7 +2434,7 @@ async fn ac3_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let name = catalog
@@ -2479,7 +2478,7 @@ async fn ac3_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let _finished = import2.finish().unwrap();
 
 	let name2 = catalog2
@@ -2513,7 +2512,7 @@ async fn aac_program_config_roundtrip() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -2537,7 +2536,7 @@ async fn aac_program_config_roundtrip() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let _finished = import2.finish().unwrap();
 
 	let snapshot2 = catalog2.snapshot();
@@ -2647,10 +2646,7 @@ async fn aac_program_config_follows_each_table() {
 	let joined_consumer = joined.consume();
 	let joined_catalog = crate::catalog::Producer::new(&mut joined, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(joined, joined_catalog.reserve());
-	import
-		.decode(&BytesMut::from(&ts[pats[1]..]))
-		.unwrap()
-		.expect_continue();
+	import.decode(&BytesMut::from(&ts[pats[1]..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = joined_catalog.snapshot();
@@ -2932,7 +2928,7 @@ async fn eac3_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let name = catalog
@@ -2979,7 +2975,7 @@ async fn eac3_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let _finished = import2.finish().unwrap();
 
 	let name2 = catalog2
@@ -3019,7 +3015,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let ingested = read_audio_by_codec(&consumer, &catalog).await;
@@ -3067,7 +3063,7 @@ async fn kyrion_ac3_mp2_roundtrip_byte_exact() {
 	let consumer2 = broadcast2.consume();
 	let catalog2 = crate::catalog::Producer::new(&mut broadcast2, crate::catalog::Config::default()).unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let _finished = import2.finish().unwrap();
 
 	let roundtripped = read_audio_by_codec(&consumer2, &catalog2).await;
@@ -3169,7 +3165,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		)
 		.unwrap();
 		let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-		import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+		import.decode(&BytesMut::from(&data[..])).unwrap();
 		let _finished = import.finish().unwrap();
 
 		let snap = catalog.snapshot();
@@ -3229,7 +3225,7 @@ async fn scte35_fixtures_survive_roundtrip() {
 		)
 		.unwrap();
 		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-		import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+		import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 		let _finished = import2.finish().unwrap();
 		let name2 = scte_track(&catalog2.snapshot()).expect("a scte35 track");
 		let roundtripped = read_cues(&consumer2, &name2).await;
@@ -3399,7 +3395,7 @@ async fn service_layer_survives_roundtrip() {
 	)
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&input[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -3499,7 +3495,7 @@ async fn service_layer_survives_roundtrip() {
 	)
 	.unwrap();
 	let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-	import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+	import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 	let import2 = import2.finish().unwrap();
 	// Its row, if any, is the SI track's, never an unclaimed PID's.
 	if let Some(nit) = import2.stats().streams.get(&0x0010) {
@@ -3553,7 +3549,7 @@ async fn a_reimport_keeps_the_first_si() {
 		)
 		.unwrap();
 		let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-		import.decode(&BytesMut::from(&input[..])).unwrap().expect_continue();
+		import.decode(&BytesMut::from(&input[..])).unwrap();
 		let import = import.finish().unwrap();
 		let units = |stats: super::stats::Snapshot| {
 			stats
@@ -3607,7 +3603,7 @@ async fn a_reimport_keeps_the_first_si() {
 		)
 		.unwrap();
 		let mut import2 = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-		import2.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+		import2.decode(&BytesMut::from(ts.as_ref())).unwrap();
 		let import2 = import2.finish().unwrap();
 		let stats = import2.stats();
 		for (pid, stream) in &stats.streams {
@@ -3739,7 +3735,7 @@ async fn a_reimport_keeps_the_first_si_across_a_gap() {
 		)
 		.unwrap();
 		let mut import = crate::container::ts::Import::new(broadcast2, catalog2.reserve());
-		import.decode(&BytesMut::from(ts.as_ref())).unwrap().expect_continue();
+		import.decode(&BytesMut::from(ts.as_ref())).unwrap();
 		let import = import.finish().unwrap();
 		for (pid, stream) in &import.stats().streams {
 			assert_eq!(
@@ -4526,10 +4522,7 @@ async fn multi_packet_si_section_is_captured() {
 	assert!(input.len() > 188, "the SDT must span more than one TS packet");
 
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -4554,10 +4547,7 @@ struct SiRig {
 
 fn si_rig() -> SiRig {
 	let mut rig = si_import();
-	rig.import
-		.decode(&BytesMut::from(&si_clock(1)[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&si_clock(1)[..])).unwrap();
 	rig
 }
 
@@ -4599,10 +4589,7 @@ async fn torn_transition_is_never_published() {
 	// Version 5 arrives complete in one batch.
 	let mut input = si_packet(0x0011, &sdt(5, 0, 0xaa));
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(5, 1, 0xab), 1));
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
 	let track = &si[&0x0011][&0x42].track;
 	// A superseded snapshot is stale at once, so each batch's newest is read before the next.
@@ -4611,13 +4598,11 @@ async fn torn_transition_is_never_published() {
 	// at v6, section 1 still v5) must never hit the track.
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 0, 0xba), 2)[..]))
-		.unwrap()
-		.expect_continue();
+		.unwrap();
 	snapshots.push(newest_si_group(&rig.consumer, track).await);
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(6, 1, 0xbb), 3)[..]))
-		.unwrap()
-		.expect_continue();
+		.unwrap();
 	let _finished = rig.import.finish().unwrap();
 	snapshots.push(newest_si_group(&rig.consumer, track).await);
 
@@ -4656,10 +4641,7 @@ async fn eit_now_next_and_schedule_are_captured() {
 		input.extend_from_slice(&si_packet_cc(0x0012, section, cc as u8));
 	}
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -4690,10 +4672,7 @@ fn si_rig_selecting(program: u16) -> SiRig {
 		consumer,
 	} = si_import();
 	let mut import = import.with_program(program);
-	import
-		.decode(&BytesMut::from(&si_clock(program)[..]))
-		.unwrap()
-		.expect_continue();
+	import.decode(&BytesMut::from(&si_clock(program)[..])).unwrap();
 	SiRig {
 		import,
 		catalog,
@@ -4783,10 +4762,7 @@ async fn a_selected_program_carries_only_its_own_si() {
 		let mut input = crate::container::ts::import::test::two_programs();
 		input.extend(two_service_si());
 		let mut rig = si_rig_selecting(program);
-		rig.import
-			.decode(&BytesMut::from(&input[..]))
-			.unwrap()
-			.expect_continue();
+		rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 		let _finished = rig.import.finish().unwrap();
 
 		let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -4810,10 +4786,7 @@ async fn a_selected_program_carries_only_its_own_si() {
 #[tokio::test(start_paused = true)]
 async fn an_unselected_import_keeps_every_service() {
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&two_service_si()[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&two_service_si()[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -4837,10 +4810,7 @@ async fn an_unselected_import_keeps_every_service() {
 #[tokio::test(start_paused = true)]
 async fn a_selection_missing_from_the_sdt_carries_none() {
 	let mut rig = si_rig_selecting(3);
-	rig.import
-		.decode(&BytesMut::from(&two_service_si()[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&two_service_si()[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -5037,10 +5007,7 @@ async fn a_selected_programs_si_survives_export() {
 	let mut input = crate::container::ts::import::test::two_programs();
 	input.extend(two_service_si());
 	let mut rig = si_rig_selecting(2);
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let ts = drain_with(
@@ -5095,10 +5062,7 @@ async fn sdt_other_networks_do_not_collide() {
 	input.extend_from_slice(&si_packet_cc(0x0011, &net2, 1));
 	input.extend_from_slice(&si_packet_cc(0x0011, &net1v2, 2));
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -5125,10 +5089,7 @@ async fn next_version_sections_are_dropped() {
 	input.extend_from_slice(&si_packet(0x0010, &nit));
 	input.extend_from_slice(&si_packet_cc(0x0010, &nit, 1));
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -5150,15 +5111,11 @@ async fn tdt_round_trips_as_latest_value() {
 	input.extend_from_slice(&si_packet_cc(0x0014, &tick(1), 1));
 	input.extend_from_slice(&si_packet(0x0011, &sdt));
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	// The clock ticks: the new section replaces the old slot.
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0014, &tick(2), 2)[..]))
-		.unwrap()
-		.expect_continue();
+		.unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -5199,10 +5156,7 @@ async fn abort_removes_si_catalog_entries() {
 	let mut input = si_packet(0x0011, &sdt);
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt, 1));
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	assert!(
 		!rig.catalog.snapshot().ext.mpegts.si.is_empty(),
 		"the SDT entry was advertised"
@@ -5224,14 +5178,10 @@ async fn short_form_repetition_cuts_no_group() {
 	let mut rig = si_rig();
 	let mut input = si_packet(0x0014, &tdt);
 	input.extend_from_slice(&si_packet_cc(0x0014, &tdt, 1));
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0014, &tdt, 2)[..]))
-		.unwrap()
-		.expect_continue();
+		.unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -5481,7 +5431,7 @@ async fn opus_export_import_roundtrip() {
 	let imported_consumer = imported.consume();
 	let import_catalog = crate::catalog::Producer::new(&mut imported, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(imported, import_catalog.reserve());
-	import.decode(&ts).unwrap().expect_continue();
+	import.decode(&ts).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = import_catalog.snapshot();
@@ -6552,10 +6502,7 @@ async fn lost_dense_section_recovers_on_the_next_cycle() {
 	input.extend_from_slice(&si_packet_cc(0x0011, &s1, 3));
 	input.extend_from_slice(&si_packet_cc(0x0011, &s1, 4));
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -7281,12 +7228,12 @@ async fn overlapping_capture_teardown_keeps_the_survivors_mapping() {
 	)
 	.unwrap();
 	let mut old = crate::container::ts::Import::new(broadcast.clone(), catalog.reserve());
-	old.decode(&BytesMut::from(&input[..])).unwrap().expect_continue();
+	old.decode(&BytesMut::from(&input[..])).unwrap();
 
 	// The replacement importer captures the same table; its deterministic track
 	// name is taken, so it advertises under a fallback name, overwriting the key.
 	let mut new = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	new.decode(&BytesMut::from(&input[..])).unwrap().expect_continue();
+	new.decode(&BytesMut::from(&input[..])).unwrap();
 	let survivor = catalog.snapshot().ext.mpegts.si[&0x0011][&0x42].track.clone();
 	assert_ne!(survivor, "0x0011-0x42.si", "the replacement fell back to a unique name");
 
@@ -7315,10 +7262,7 @@ async fn contiguous_same_version_commit_replaces_stale_sections() {
 	input.extend_from_slice(&si_packet_cc(0x0011, &b0, 3));
 	input.extend_from_slice(&si_packet_cc(0x0011, &b1, 4));
 	let mut rig = si_rig();
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 	let _finished = rig.import.finish().unwrap();
 
 	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
@@ -7340,10 +7284,7 @@ async fn debounce_opens_without_a_media_clock() {
 
 	let mut input = si_packet(0x0011, &sdt(0, 0xaa));
 	input.extend_from_slice(&si_packet_cc(0x0011, &sdt(0, 0xaa), 1));
-	rig.import
-		.decode(&BytesMut::from(&input[..]))
-		.unwrap()
-		.expect_continue();
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 
 	let name = rig.catalog.snapshot().ext.mpegts.si[&0x0011][&0x42].track.clone();
 	let mut track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
@@ -7356,8 +7297,7 @@ async fn debounce_opens_without_a_media_clock() {
 	// A revision inside the window is coalesced...
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 2)[..]))
-		.unwrap()
-		.expect_continue();
+		.unwrap();
 	assert!(
 		track.poll_largest(&kio::Waiter::noop()).is_pending(),
 		"a revision inside the window is held"
@@ -7367,8 +7307,7 @@ async fn debounce_opens_without_a_media_clock() {
 	tokio::time::advance(Duration::from_millis(1200)).await;
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
-		.unwrap()
-		.expect_continue();
+		.unwrap();
 	assert_eq!(
 		track.largest().await.map(|position| position.group),
 		Some(1),
@@ -7696,7 +7635,7 @@ async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let mut exporter = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
@@ -7917,7 +7856,7 @@ async fn export_fixture(data: &[u8], mux_rate: Option<u64>) -> BytesMut {
 	)
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(data).unwrap().expect_continue();
+	import.decode(data).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let mut export = export_of(&consumer).await;
@@ -8059,7 +7998,7 @@ impl Joined {
 		)
 		.unwrap();
 		let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-		import.decode(&data[..head]).unwrap().expect_continue();
+		import.decode(&data[..head]).unwrap();
 		let source = crate::source::announced(&consumer).await;
 		let stream = source
 			.catalog::<tscat::Ext>(crate::catalog::CatalogFormat::Hang)
@@ -8083,10 +8022,7 @@ impl Joined {
 		let chunk = self.data.len() / 50 / 188 * 188;
 		for _ in 0..steps {
 			let end = (self.read + chunk).min(self.data.len());
-			self.import
-				.decode(&self.data[self.read..end])
-				.unwrap()
-				.expect_continue();
+			self.import.decode(&self.data[self.read..end]).unwrap();
 			self.read = end;
 			let until = kio::clock::now().saturating_add(STEP);
 			while let Ok(frame) = kio::clock::timeout_at(until, self.export.next()).await {
@@ -11727,7 +11663,7 @@ async fn placed_sections_keep_their_source_positions() {
 	)
 	.unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(data).unwrap().expect_continue();
+	import.decode(data).unwrap();
 	let _finished = import.finish().unwrap();
 	let name = scte_track(&catalog.snapshot()).unwrap();
 	let cues = read_cues(&consumer, &name).await;

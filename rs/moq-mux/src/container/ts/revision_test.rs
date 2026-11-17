@@ -87,7 +87,7 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Fram
 			}
 			ticks += 40 * MS;
 		}
-		import.decode(&mux.bytes()).unwrap().expect_continue();
+		import.decode(&mux.bytes()).unwrap();
 		let export = match &mut export {
 			Some(export) => export,
 			None => {
@@ -106,7 +106,7 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Fram
 	}
 	let mut mux = Mux::default();
 	mux.packet(CLOCK_PID, Flags::pcr(ticks));
-	import.decode(&mux.bytes()).unwrap().expect_continue();
+	import.decode(&mux.bytes()).unwrap();
 	let _finished = import.finish().unwrap();
 	catalog.finish().unwrap();
 

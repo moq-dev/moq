@@ -26,7 +26,7 @@ fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(data);
-	import.decode(&buf).unwrap().expect_continue();
+	import.decode(&buf).unwrap();
 	let _finished = import.finish().unwrap();
 
 	catalog.snapshot()
@@ -43,7 +43,7 @@ fn import_ts_ext(data: &[u8]) -> crate::catalog::hang::Catalog<crate::container:
 	.unwrap();
 
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(data).unwrap().expect_continue();
+	import.decode(data).unwrap();
 	let _finished = import.finish().unwrap();
 
 	catalog.snapshot()
@@ -84,7 +84,7 @@ async fn public_container_preserves_loc_for_ts() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let reserved = catalog.reserve();
 	let mut import = super::Import::new(broadcast, reserved).with_container(hang::catalog::Container::Loc);
-	import.decode(data).unwrap().expect_continue();
+	import.decode(data).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -239,7 +239,7 @@ async fn import_opus_frames() {
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
-	import.decode(&BytesMut::from(&data[..])).unwrap().expect_continue();
+	import.decode(&BytesMut::from(&data[..])).unwrap();
 	let _finished = import.finish().unwrap();
 
 	let name = catalog
@@ -296,7 +296,7 @@ async fn opus_catalog_carries_the_anchored_clock() {
 	// Packet by packet, so a snapshot published at the PMT is seen before the PES replaces it.
 	let mut published = Vec::new();
 	for pkt in data.chunks(188) {
-		import.decode(pkt).unwrap().expect_continue();
+		import.decode(pkt).unwrap();
 		published.extend(clocks.drain());
 	}
 	let _finished = import.finish().unwrap();
@@ -445,7 +445,7 @@ fn resyncs_across_chunk_boundaries() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	for chunk in misaligned.chunks(100) {
-		import.decode(&BytesMut::from(chunk)).unwrap().expect_continue();
+		import.decode(&BytesMut::from(chunk)).unwrap();
 	}
 	let _finished = import.finish().unwrap();
 
@@ -472,7 +472,7 @@ async fn import_export_import_roundtrip() {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	let buf = BytesMut::from(&data[..]);
-	import.decode(&buf).unwrap().expect_continue();
+	import.decode(&buf).unwrap();
 	let _finished = import.finish().unwrap();
 
 	// Re-export to TS. `import` and `catalog` stay alive so the exporter can
@@ -524,8 +524,7 @@ async fn survives_midstream_join() {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import
 		.decode(&BytesMut::from(&buf[..]))
-		.expect("a mid-stream join must not abort the demux")
-		.expect_continue();
+		.expect("a mid-stream join must not abort the demux");
 	let _finished = import.finish().unwrap();
 
 	let snapshot = catalog.snapshot();
@@ -577,8 +576,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 	import
 		.decode(&BytesMut::from(&data[..]))
-		.expect("a dirty mid-stream join must not abort the demux")
-		.expect_continue();
+		.expect("a dirty mid-stream join must not abort the demux");
 	let _finished = import.finish().unwrap();
 
 	let snap = catalog.snapshot();
@@ -640,7 +638,7 @@ fn import_handles_unaligned_chunks() {
 
 	for chunk in data.chunks(100) {
 		let buf = BytesMut::from(chunk);
-		import.decode(&buf).unwrap().expect_continue();
+		import.decode(&buf).unwrap();
 	}
 	let _finished = import.finish().unwrap();
 
@@ -723,7 +721,7 @@ async fn import_stream(data: &[u8]) -> Imported {
 	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
 
 	let before = kio::clock::wall();
-	import.decode(data).unwrap().expect_continue();
+	import.decode(data).unwrap();
 	let after = kio::clock::wall();
 	let _finished = import.finish().unwrap();
 
@@ -890,11 +888,11 @@ fn sample(ts: &[u8], at: &[std::time::Duration]) -> Vec<crate::container::ts::st
 			* timed(ts)
 				.position(|(now, _)| now >= at)
 				.expect("the fixture reaches it");
-		import.decode(&ts[done..end]).unwrap().expect_continue();
+		import.decode(&ts[done..end]).unwrap();
 		samples.push(import.stats());
 		done = end;
 	}
-	import.decode(&ts[done..]).unwrap().expect_continue();
+	import.decode(&ts[done..]).unwrap();
 	samples.push(import.stats());
 	samples
 }

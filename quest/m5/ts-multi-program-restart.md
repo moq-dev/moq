@@ -40,9 +40,13 @@ import.
   rules for PAT changes that aren't a source switch (a moved PMT PID, a
   program added or removed) as they are.
 
-`ts::Import::decode` returns its restart as a value
-(`Result<Decoded, ts::Error>`, with `Decoded::Restart(Restart)` as a `#[must_use]` outcome); give `Programs` the same shape, not a
-second one.
+The restart stays out of the public API (maintainer, 2026-11-16, on
+[moq-dev/moq#8939](https://github.com/moq-dev/moq/pull/8939)): the public
+`ts::Import::decode` fails at a step with `ts::Error::Restarted`, and only
+`ts::Republish` sees the restart as a value, through the `pub(super)`
+`Import::decode_or_restart`. Give `Programs` the same shape, not a second one:
+it reads the restart through a private method and follows it itself, never by
+matching the error.
 
-Public API: possibly additive on `Programs` (a restart result like
-`Import`'s). Wire: none.
+Public API: possibly additive on `Programs` (a report of each program it
+republished, like `ts::Republished`). Wire: none.

@@ -1136,7 +1136,7 @@ mod test {
 			let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 			let mut import = Import::new(broadcast, catalog.reserve());
 			for piece in self.out.chunks(chunk) {
-				import.decode(piece).unwrap().expect_continue();
+				import.decode(piece).unwrap();
 			}
 			import.stats()
 		}
@@ -1197,7 +1197,7 @@ mod test {
 				let mut import = Import::new(broadcast, catalog.reserve());
 				let mut feed = Feed::default();
 				feed.clean(0, 100);
-				import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+				import.decode(&std::mem::take(&mut feed.out)).unwrap();
 				for t in (100..=1_000).step_by(100) {
 					wait(100).await;
 					if continuing {
@@ -1210,7 +1210,7 @@ mod test {
 						feed.pcr(90 * MS, false);
 					}
 					feed.null();
-					import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+					import.decode(&std::mem::take(&mut feed.out)).unwrap();
 				}
 				let stats = import.stats();
 				assert_eq!(stats.pcr_repetition_error, 1, "{continuing} {repeated}: {stats:?}");
@@ -1280,20 +1280,20 @@ mod test {
 				// Long enough to measure the rate, then a packet at a time, with a long wait in
 				// front of packets that carry no PCR.
 				feed.clean(0, 3_000);
-				import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+				import.decode(&std::mem::take(&mut feed.out)).unwrap();
 				feed.clean(3_000, 5_000);
 				for (i, packet) in feed.out.chunks(188).enumerate() {
 					if i % 40 == 1 {
 						wait(400).await;
 					}
-					import.decode(packet).unwrap().expect_continue();
+					import.decode(packet).unwrap();
 				}
 			} else {
 				// Too short to measure: chunks of 20 packets, each carrying a PCR, 400 ms apart.
 				feed.clean(0, 1_500);
 				for chunk in feed.out.chunks(188 * 20) {
 					wait(400).await;
-					import.decode(chunk).unwrap().expect_continue();
+					import.decode(chunk).unwrap();
 				}
 			}
 			assert_eq!(import.stats().health(), [0; 9], "measured {measured}");
@@ -1310,10 +1310,10 @@ mod test {
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut import = Import::new(broadcast, catalog.reserve());
 		let half = CLIP.len() / 2 / 188 * 188;
-		import.decode(&CLIP[..half]).unwrap().expect_continue();
+		import.decode(&CLIP[..half]).unwrap();
 		wait(1_000).await;
 		for packet in CLIP[half..].chunks(188) {
-			import.decode(packet).unwrap().expect_continue();
+			import.decode(packet).unwrap();
 		}
 		let import = import.finish().unwrap();
 		assert_eq!(import.stats().health(), [0; 9]);
@@ -1382,14 +1382,14 @@ mod test {
 		let mut import = Import::new(broadcast, catalog.reserve());
 		let mut feed = Feed::default();
 		feed.run(0, 100, |t, _| t * MS, |_, part| part != Part::Pcr);
-		import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+		import.decode(&std::mem::take(&mut feed.out)).unwrap();
 		wait(100).await;
 		feed.null();
-		import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+		import.decode(&std::mem::take(&mut feed.out)).unwrap();
 		assert_eq!(import.stats().pcr_repetition_error, 0, "exactly 100 ms is on time");
 		wait(1).await;
 		feed.null();
-		import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+		import.decode(&std::mem::take(&mut feed.out)).unwrap();
 		assert_eq!(import.stats().pcr_repetition_error, 1);
 	}
 
@@ -1413,7 +1413,7 @@ mod test {
 			let mut import = Import::new(broadcast, catalog.reserve());
 			let mut feed = Feed::default();
 			feed.clean(0, 100);
-			import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+			import.decode(&std::mem::take(&mut feed.out)).unwrap();
 			wait(1_000).await;
 			assert_eq!(import.stats().health(), [0; 9], "no timer");
 			match resume {
@@ -1422,7 +1422,7 @@ mod test {
 				Resume::Stepped => feed.clean(1_000, 1_100),
 				Resume::Stalled => feed.run(100, 200, |t, _| t * MS, |_, part| part != Part::Pcr),
 			}
-			import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+			import.decode(&std::mem::take(&mut feed.out)).unwrap();
 			let import = import.finish().unwrap();
 			let stats = import.stats();
 			let (pat, pts, pcr) = match resume {
@@ -1453,11 +1453,11 @@ mod test {
 			let mut import = Import::new(broadcast, catalog.reserve());
 			let mut feed = Feed::default();
 			feed.clean(0, 200);
-			import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+			import.decode(&std::mem::take(&mut feed.out)).unwrap();
 			wait(50).await;
 			// The PCR alone steps back: held until a stream says whether the source stepped.
 			feed.pcr((190 * MS + PCR_WRAP - 5_000 * MS) % PCR_WRAP, false);
-			import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+			import.decode(&std::mem::take(&mut feed.out)).unwrap();
 			assert!(import.held() >= 188, "the step is held");
 			wait(200).await;
 			if eof {
@@ -1467,7 +1467,7 @@ mod test {
 				// is missing from when the held one arrived.
 				feed.pes(VIDEO, 200 * 90, false);
 				feed.pes(PEER, 200 * 90, false);
-				import.decode(&std::mem::take(&mut feed.out)).unwrap().expect_continue();
+				import.decode(&std::mem::take(&mut feed.out)).unwrap();
 				assert!(import.held() < 188, "the step cleared");
 			}
 			let stats = import.stats();

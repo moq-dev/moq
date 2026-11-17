@@ -575,7 +575,7 @@ impl SiImport {
 			Self::packet(0x20, 0, this.section(2, 1, &[0xe1, 0xff, 0xf0, 0])),
 		]
 		.concat();
-		this.inner.decode(&program).unwrap().expect_continue();
+		this.inner.decode(&program).unwrap();
 		this.tick();
 		this
 	}
@@ -618,7 +618,7 @@ impl SiImport {
 			0,
 		]);
 		packet.resize(188, 0xff);
-		self.inner.decode(&packet).unwrap().expect_continue();
+		self.inner.decode(&packet).unwrap();
 		self.clock += 40 * 27_000;
 	}
 
@@ -629,7 +629,7 @@ impl SiImport {
 			self.cc[pid] = (cc + 1) & 15;
 			packets.extend(Self::packet(Self::PIDS[pid], cc, self.section(table, id, &[0; 6])));
 		}
-		self.inner.decode(&packets).unwrap().expect_continue();
+		self.inner.decode(&packets).unwrap();
 	}
 
 	fn identities(count: u16) -> Self {

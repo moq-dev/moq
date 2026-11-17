@@ -40,55 +40,14 @@ const PTS_WRAP: u64 = 1 << 33;
 /// The source's clock stepped onto another timeline, or its PAT named another program, so the
 /// [`Import`](super::Import) ended its instance there.
 ///
-/// What follows is another broadcast: read [`remainder`](Self::remainder) into a new import.
-/// [`Republish`](super::Republish) carries on that way into a new instance on the same path.
+/// Only [`Republish`](super::Republish) sees it, and reads [`remainder`](Self::remainder) into a
+/// new instance on the same path; a raw import fails with [`Error::Restarted`](super::Error::Restarted).
 #[derive(Clone, Debug)]
-#[non_exhaustive]
-pub struct Restart {
+pub(super) struct Restart {
 	/// How the source changed.
 	pub step: Step,
 	/// The input from the step on, which this import did not read.
 	pub remainder: Bytes,
-}
-
-/// What [`Import::decode`](super::Import::decode) did with its input.
-///
-/// A restart is a value the caller must act on, so `#[must_use]` makes the compiler flag a call
-/// that drops it, such as `import.decode(data)?;`.
-#[derive(Clone, Debug)]
-#[must_use = "a restart ends the import: read its remainder into a new one, or assert there was none"]
-pub enum Decoded {
-	/// The input was read, and the import carries on.
-	Continue,
-	/// The import ended its instance at a step; read the [`Restart`] into a new one.
-	Restart(Restart),
-}
-
-impl Decoded {
-	/// The [`Restart`], when the import ended its instance.
-	pub fn restart(self) -> Option<Restart> {
-		match self {
-			Self::Continue => None,
-			Self::Restart(restart) => Some(restart),
-		}
-	}
-
-	/// Assert the import carried on, for a caller whose input holds no restart, such as a test.
-	///
-	/// # Panics
-	///
-	/// Panics when the import ended its instance.
-	#[track_caller]
-	pub fn expect_continue(self) {
-		if let Self::Restart(restart) = self {
-			panic!("the source restarted: {}", restart.step);
-		}
-	}
-
-	/// Whether the import ended its instance.
-	pub fn is_restart(&self) -> bool {
-		matches!(self, Self::Restart(_))
-	}
 }
 
 /// How the source changed, ending an import's instance.
