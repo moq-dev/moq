@@ -9,12 +9,8 @@ hang is the media format on top of [moq-lite](/concept/moq-lite): a catalog
 track that describes the media tracks, and a container that gives each frame a
 timestamp. It is modeled on [WebCodecs](https://www.w3.org/TR/webcodecs/) so a
 browser can decode it directly. The spec is
-[draft-lcurley-moq-hang](/draft/moq-hang). Plaintext broadcast names end in
-`.hang` so a player knows which catalog to expect. End-to-end encrypted
-broadcasts live at `<opaque>`, derived from the credential and a semantic name
-such as `foo.hang`, and the [instance](/concept/moq-lite#publisher-instances)
-on their route, the run's moq-e2ee epoch, identifies each publisher run. The path exposes no format or protection marker; the
-payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
+[draft-lcurley-moq-hang](/draft/moq-hang). Broadcast names end in
+`.hang` so a player knows which catalog to expect.
 
 ## Catalog
 
@@ -223,22 +219,6 @@ which is what `avc3`/`hev1` tracks do. Decoders should handle both. CMAF is the
 exception: its samples are always length-prefixed, so an `avc3`/`hev1` CMAF
 track keeps the configuration record as its `description` for the NAL length
 size, even when the parameter sets ride in the samples.
-
-## Encryption
-
-[moq-e2ee](/draft/moq-e2ee) encrypts groups, datagrams, and track names so a
-relay forwards ciphertext and never sees a content key. The application
-distributes the credential on its own channel. Each publisher run binds that
-credential to a fresh moq-e2ee epoch, announced as its route's
-[instance](/concept/moq-lite#publisher-instances), which derives the track names
-and keys for that run alone. A restart under a fresh epoch
-shares no names or keys with the previous run. Never share or reuse an epoch
-under one credential, whether for a replica or a later run: two instances on
-one epoch derive the same keys from the same group sequences and repeat
-AES-GCM nonces. The broadcast path is an opaque name
-derived from the credential and a semantic name such as `foo.hang`; it carries
-no format marker. `moq-crypto` is the Rust implementation. Relays need no
-configuration to carry it.
 
 ## Your own format
 

@@ -166,6 +166,12 @@ impl Version {
 		)
 	}
 
+	/// Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
+	/// earlier versions have no frame bounds, and a lite-07 subscription reads whole groups.
+	pub(crate) fn has_group_frame_start(self) -> bool {
+		matches!(self, Self::Lite06)
+	}
+
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
 	/// Added in lite-07; an earlier subscription is served newest first.
 	pub(crate) fn has_order(self) -> bool {
@@ -303,17 +309,6 @@ impl Version {
 	/// closes an expired group's stream rather than resetting it. Added in lite-07; earlier
 	/// versions end every group with a bare FIN.
 	pub(crate) fn has_group_end(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether a Group Stream reset with YIELDED pauses its group, which a later stream
-	/// continues. Added in lite-07; an earlier publisher out of stream credit gives the reset
-	/// group up.
-	#[cfg(feature = "async")]
-	pub(crate) fn has_yield(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -465,13 +460,13 @@ impl fmt::Display for Version {
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
 		match v {
-			Version::Lite01 => crate::Version::Lite(Version::Lite01),
-			Version::Lite02 => crate::Version::Lite(Version::Lite02),
-			Version::Lite03 => crate::Version::Lite(Version::Lite03),
-			Version::Lite04 => crate::Version::Lite(Version::Lite04),
-			Version::Lite05 => crate::Version::Lite(Version::Lite05),
-			Version::Lite06 => crate::Version::Lite(Version::Lite06),
-			Version::Lite07 => crate::Version::Lite(Version::Lite07),
+			Version::Lite01 => crate::Version::lite(Version::Lite01),
+			Version::Lite02 => crate::Version::lite(Version::Lite02),
+			Version::Lite03 => crate::Version::lite(Version::Lite03),
+			Version::Lite04 => crate::Version::lite(Version::Lite04),
+			Version::Lite05 => crate::Version::lite(Version::Lite05),
+			Version::Lite06 => crate::Version::lite(Version::Lite06),
+			Version::Lite07 => crate::Version::lite(Version::Lite07),
 		}
 	}
 }
@@ -480,9 +475,9 @@ impl TryFrom<crate::Version> for Version {
 	type Error = ();
 
 	fn try_from(v: crate::Version) -> Result<Self, Self::Error> {
-		match v {
-			crate::Version::Lite(v) => Ok(v),
-			crate::Version::Ietf(_) => Err(()),
+		match v.0 {
+			crate::Draft::Lite(v) => Ok(v),
+			crate::Draft::Ietf(_) => Err(()),
 		}
 	}
 }

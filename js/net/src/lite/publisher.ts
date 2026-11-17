@@ -94,7 +94,6 @@ import {
 	hasRoutes,
 	hasSkip,
 	hasTrackStream,
-	hasYield,
 	keepsSubscribeOpen,
 	resolvesStart,
 	Version,
@@ -1508,16 +1507,6 @@ export class Publisher {
 		// skipped starts its GROUP passed over, which go out first since that GROUP may never have
 		// arrived.
 		const pendingDrops: { start: bigint; end: bigint; error: Error; passed: { start: bigint; end: bigint } }[] = [];
-		// Lite-07: a fresh read of the group `serving` served, whose stream the session reset to make
-		// room, for a new stream to continue it at the same frames; undefined once the subscription's
-		// budget or the cache gave it up. The Rust publisher keeps an unread clone of the reset
-		// stream's cursor instead, which a read handle here cannot make.
-		const continuation = (serving: RunGroup): RunGroup | undefined => {
-			// From the reset stream's Frame Start, which a cache holding only the group's tail can serve.
-			const resumed = hooks.continueGroup(track, serving.group.sequence, serving.start);
-			if (!resumed) return undefined;
-			return { ...serving, group: resumed, givenUp: new GivenUp(resumed) };
-		};
 
 		// Cancels groups still queued for a stream slot. Only the subscriber leaving counts:
 		// a track that ran out of groups still has to flush the ones already queued, and the
@@ -1841,49 +1830,24 @@ export class Publisher {
 					end: range.end,
 					previous,
 				};
-				// The FIN waits for every stream to finish or reset, including one that has not opened yet,
-				// and a paused group's continuation.
+				// The FIN waits for every stream to finish or reset, including one that has not opened yet.
+				// A stream reset to make room fails the group like any other reset, so it is dropped.
 				const task = (async () => {
-					let serving = options;
-					for (;;) {
-						const writer = await this.#openGroup(serving);
-						let failed: Error | undefined;
-						try {
-							failed = writer instanceof Error ? writer : await this.#serveGroup(writer, serving);
-						} finally {
-							serving.givenUp.close();
-						}
-						if (!failed) return;
-						// Lite-07: the session reset the stream to make room, which only pauses the group.
-						// The subscriber keeps what arrived, and a new stream continues the group from
-						// the reset one's Frame Start, owing no drop. Mirrors the Rust `GroupServe::settle_failed`.
-						if (!(writer instanceof Error) && writer.preempted && hasYield(this.version)) {
-							// The group's own failure, such as the publisher's abort or an eviction, ends
-							// it with that error, as the Rust continuation reads it off the group. Read
-							// before the release replaces it with the reset's.
-							const fate = serving.group.closed.peek();
-							hooks.releaseGroupReader(serving.group, failed);
-							const resumed = fate instanceof Error ? undefined : continuation(serving);
-							if (resumed) {
-								console.debug(
-									`continuing paused group: track=${track.name} sequence=${group.sequence} frame_start=${serving.start}`,
-								);
-								serving = resumed;
-								continue;
-							}
-							// Given up meanwhile, such as by the subscription's budget: the usual stale drop.
-							failed = fate instanceof Error ? fate : new StreamError(StreamCode.Old);
-						}
-						if (emitRange) {
-							pendingDrops.push({
-								start: group.sequence,
-								end: group.sequence + 1n,
-								error: failed,
-								passed: passedOver(serving.previous, group.sequence),
-							});
-							drops.update((revision) => revision + 1);
-						}
-						return;
+					const writer = await this.#openGroup(options);
+					let failed: Error | undefined;
+					try {
+						failed = writer instanceof Error ? writer : await this.#serveGroup(writer, options);
+					} finally {
+						options.givenUp.close();
+					}
+					if (failed && emitRange) {
+						pendingDrops.push({
+							start: group.sequence,
+							end: group.sequence + 1n,
+							error: failed,
+							passed: passedOver(options.previous, group.sequence),
+						});
+						drops.update((revision) => revision + 1);
 					}
 				})();
 				groups.add(task);
@@ -2346,8 +2310,6 @@ export class Publisher {
 					sendOrder: place.rank,
 					cancel: race([unsubscribed, abandoned]),
 					group: true,
-					// Lite-07: a reset to make room pauses the group, which a new stream continues.
-					yields: hasYield(this.version),
 				});
 			} finally {
 				opened.resolve();
@@ -2488,9 +2450,7 @@ export class Publisher {
 				e = failed;
 			}
 			stream.reset(e);
-			// A reset that pauses the group leaves the reader to the caller, which reads its fate
-			// first. A reset stream is never preempted after, so the caller sees the same flag.
-			if (!(stream.preempted && hasYield(this.version))) hooks.releaseGroupReader(group, e);
+			hooks.releaseGroupReader(group, e);
 			return e;
 		} finally {
 			priority.remove(stream);

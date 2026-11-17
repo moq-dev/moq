@@ -39,7 +39,7 @@ watched at 100 ms by one viewer and 10 s by another.
 - [moq-lite](/concept/moq-lite): the pub/sub protocol, discovery, path patterns, subscriptions, and congestion behavior.
 - [Identity and recovery](/concept/identity): choosing stream instances, following restarts, and answering work on demand without mixing streams.
 - [Sockets](/concept/socket): dial and accept point-to-point sessions through relays, each a track of messages each way.
-- [hang](/concept/hang): the media catalog, containers, encryption, and how to extend both.
+- [hang](/concept/hang): the media catalog, containers, and how to extend both.
 - [Archives](/concept/archives): record listed tracks into object storage and serve them back from a host.
 - [Audio jitter](/concept/audio-jitter): how a receiver sizes its audio playout target from arrival timing.
 - [Compressed tracks](/concept/compression): when to compress a track, what each protocol version receives, and the relay's cost.
@@ -53,7 +53,6 @@ watched at 100 ms by one viewer and 10 s by another.
 | --- | --- |
 | Who may publish or subscribe? | [Relay authentication](/bin/relay/auth) |
 | How do I add chat, state, or custom tracks? | [JSON tracks](/lib/js/json), [rooms](/lib/js/room), or [raw pub/sub](/lib/rs/moq-net) |
-| How does media encryption fit in? | [hang](/concept/hang) and the [E2EE draft](/draft/moq-e2ee) |
 | How do multiple relays or redundant sources fit together? | [Clustering](/bin/relay/cluster) and [redundant ingest](/setup/redundancy) |
 | How do restarts and failover keep content apart? | [Identity and recovery](/concept/identity) |
 | Which package implements this layer? | [Libraries](/lib/) to integrate it, [repository map](/setup/repository) to change it |

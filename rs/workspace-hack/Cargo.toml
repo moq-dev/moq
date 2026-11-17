@@ -51,6 +51,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hyper = { version = "1", features = ["full"] }
@@ -138,6 +139,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
+getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hyper = { version = "1", features = ["full"] }
@@ -206,7 +208,6 @@ crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -237,7 +238,6 @@ crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -270,7 +270,6 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -301,7 +300,6 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -323,7 +321,6 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.dependencies]
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -342,7 +339,6 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.build-dependencies]
 crossbeam-epoch = { version = "0.9" }
 flate2 = { version = "1", features = ["zlib-rs"] }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -367,7 +363,6 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -398,7 +393,6 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures-io = { version = "0.3" }
-getrandom = { version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }

@@ -134,9 +134,14 @@ class TrackProducer:
         """Serve fetches for groups that are not currently cached."""
         return TrackRequests(self._inner.requests())
 
-    def append_group(self) -> GroupProducer:
-        """Start a new group; write frames into it, then finish()."""
-        return GroupProducer(self._inner.append_group())
+    def append_group(self, start: Timestamp) -> GroupProducer:
+        """Start the next group at ``start``; write frames into it, then finish().
+
+        ``start`` is converted to the track's timescale; on a scale-less track it is
+        :meth:`Timestamp.unscaled` at the group's key. A start at or before a group the
+        track holds is refused.
+        """
+        return GroupProducer(self._inner.append_group(start._ffi()))
 
     def create_group(self, start: int) -> GroupProducer:
         """Create a group with an explicit start."""

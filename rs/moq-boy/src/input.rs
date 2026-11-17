@@ -258,7 +258,7 @@ mod tests {
 			self.at += 1;
 			let value: serde_json::Value = serde_json::from_str(command).unwrap();
 			let at = moq_net::Timestamp::from_millis(self.at).unwrap();
-			self.commands.update(moq_json::Timed::new(&value, at)).unwrap();
+			self.commands.update(&value, at).unwrap();
 		}
 	}
 

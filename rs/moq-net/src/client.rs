@@ -21,7 +21,7 @@ pub struct Client {
 	url: Option<url::Url>,
 	setup_token: Option<setup::Token>,
 	cost: Option<u64>,
-	peer_hop: Option<std::num::NonZeroU64>,
+	peer_node: Option<std::num::NonZeroU64>,
 	limits: crate::session::Limits,
 	extensions: setup::Extensions,
 	auth: Option<crate::auth::Handle>,
@@ -250,24 +250,24 @@ impl Client {
 		self
 	}
 
-	/// Assign the hop id this peer's routes are attributed to, overriding the fresh
+	/// Assign the Node ID this peer's routes are attributed to, overriding the fresh
 	/// per-dial default.
 	///
-	/// A dialed session whose peer declares no hop gets a random one for that
+	/// A dialed session whose peer declares no Node ID gets a random one for that
 	/// connection, the same way an accepted session does. That keeps a route
 	/// learned from the peer off the session that learned it, and keeps a
 	/// SUBSCRIBE that arrives on it from being routed back to it. An identity the
 	/// peer declares on the wire still wins.
 	///
 	/// Pass an id only for a peer whose identity the caller has actually
-	/// established. Two dials given the same hop are treated as one endpoint:
+	/// established. Two dials given the same node are treated as one endpoint:
 	/// routes learned from either are kept off both, and content arriving on
 	/// either is interchangeable with the other's. That is the point when they
 	/// really are one peer reconnecting or running redundant links, and a bug
 	/// otherwise. Derive it from the authenticated identity, never from something
 	/// coarser like the remote address.
-	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
-		self.peer_hop = Some(hop);
+	pub fn with_peer_node(mut self, node: std::num::NonZeroU64) -> Self {
+		self.peer_node = Some(node);
 		self
 	}
 
@@ -277,7 +277,7 @@ impl Client {
 	/// connection gets a fresh one, matching the per-session default an accepted
 	/// session already has.
 	fn assigned_hop(&self) -> crate::Hop {
-		self.peer_hop.map_or_else(crate::Hop::random, crate::Hop::from)
+		self.peer_node.map_or_else(crate::Hop::random, crate::Hop::from)
 	}
 
 	/// The new session's side of its auth handle: the one from [`with_auth`](Self::with_auth),
@@ -295,12 +295,12 @@ impl Client {
 	/// Reads through the publish (egress) consumer and writes through the
 	/// subscribe (ingress) producer are attributed by the model through the
 	/// stats context; one shared context, so presence and viewer counts are
-	/// never double-attributed across the two halves. `peer_hop` is the identity
+	/// never double-attributed across the two halves. `peer_node` is the identity
 	/// this connection attributes the peer to when the peer declares none, so
 	/// subscriptions from the peer resolve to a source whose route excludes it.
 	/// A declared identity still wins inside each publisher; announce filtering
 	/// is per-protocol and handled there too.
-	fn origins(&self, peer_hop: crate::Hop) -> (Option<origin::Consumer>, Option<origin::Producer>) {
+	fn origins(&self, peer_node: crate::Hop) -> (Option<origin::Consumer>, Option<origin::Producer>) {
 		if self.publish.is_none() && self.subscribe.is_none() {
 			tracing::warn!("not publishing or consuming anything");
 		}
@@ -309,7 +309,7 @@ impl Client {
 			.subscribe
 			.clone()
 			.map(|origin| origin.with_stats(self.stats.clone()));
-		let publish = publish.map(|origin| origin.excluding(peer_hop));
+		let publish = publish.map(|origin| origin.excluding(peer_node));
 		(publish, subscribe)
 	}
 
@@ -320,9 +320,9 @@ impl Client {
 		runtime: Deadlines,
 		session: Transport,
 		version: lite::Version,
-		peer_hop: crate::Hop,
+		peer_node: crate::Hop,
 	) -> Result<(Session, crate::Driver), Error> {
-		let (publish, subscribe) = self.origins(peer_hop);
+		let (publish, subscribe) = self.origins(peer_node);
 
 		// Advertise our capabilities (we report what the transport measures, and
 		// probe to the peer's target only with a sender) plus the request path on
@@ -360,7 +360,7 @@ impl Client {
 			setup_stream: None,
 			publish,
 			subscribe,
-			peer_hop: Some(peer_hop),
+			peer_node: Some(peer_node),
 			version,
 			our_setup,
 			peer_setup: None,
@@ -415,8 +415,8 @@ impl Client {
 	/// Start the session the transport's ALPN picks, or begin negotiating moq-lite on a bidi
 	/// SETUP when it picks none.
 	fn start(&self, runtime: Deadlines, session: Transport) -> Result<Connect, Error> {
-		let peer_hop = self.assigned_hop();
-		let (publish, subscribe) = self.origins(peer_hop);
+		let peer_node = self.assigned_hop();
+		let (publish, subscribe) = self.origins(peer_node);
 
 		let supported = match session.protocol() {
 			Some(alpn @ (ALPN_22 | ALPN_20 | ALPN_18)) => {
@@ -426,7 +426,7 @@ impl Client {
 					_ => ietf::Version::Draft18,
 				};
 
-				let v = self.versions.select(Version::Ietf(draft)).ok_or(Error::Version)?;
+				let v = self.versions.select(Version::ietf(draft)).ok_or(Error::Version)?;
 
 				// SETUP is exchanged by the connection driver.
 				// We advertise the request path in our SETUP for URL-less transports.
@@ -441,7 +441,7 @@ impl Client {
 					client: true,
 					publish,
 					subscribe,
-					peer_hop: Some(peer_hop),
+					peer_node: Some(peer_node),
 					cost: self.cost,
 					version: draft,
 					path: self.setup_path(session.address()),
@@ -483,25 +483,25 @@ impl Client {
 					ALPN_LITE_06 => lite::Version::Lite06,
 					_ => lite::Version::Lite05,
 				};
-				self.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
+				self.versions.select(Version::lite(version)).ok_or(Error::Version)?;
 				return self
-					.start_lite(runtime, session, version, peer_hop)
+					.start_lite(runtime, session, version, peer_node)
 					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_04) => {
 				self.versions
-					.select(Version::Lite(lite::Version::Lite04))
+					.select(Version::lite(lite::Version::Lite04))
 					.ok_or(Error::Version)?;
 				return self
-					.start_lite(runtime, session, lite::Version::Lite04, peer_hop)
+					.start_lite(runtime, session, lite::Version::Lite04, peer_node)
 					.map(|started| Connect::Started(Box::new(started)));
 			}
 			Some(ALPN_LITE_03) => {
 				self.versions
-					.select(Version::Lite(lite::Version::Lite03))
+					.select(Version::lite(lite::Version::Lite03))
 					.ok_or(Error::Version)?;
 				return self
-					.start_lite(runtime, session, lite::Version::Lite03, peer_hop)
+					.start_lite(runtime, session, lite::Version::Lite03, peer_node)
 					.map(|started| Connect::Started(Box::new(started)));
 			}
 			// No ALPN, or `moql`: negotiate moq-lite in a bidi SETUP.
@@ -513,7 +513,7 @@ impl Client {
 			negotiation: Negotiation {
 				runtime,
 				session,
-				peer_hop,
+				peer_node,
 				publish,
 				subscribe,
 				supported,
@@ -532,7 +532,7 @@ impl Client {
 		let Negotiation {
 			runtime,
 			session,
-			peer_hop,
+			peer_node,
 			publish,
 			subscribe,
 			..
@@ -550,7 +550,7 @@ impl Client {
 			setup_stream: Some(stream),
 			publish,
 			subscribe,
-			peer_hop: Some(peer_hop),
+			peer_node: Some(peer_node),
 			version,
 			// Lite 01/02 continue on the bidi SETUP stream and have no Setup Stream.
 			our_setup: lite::Setup::default(),
@@ -562,7 +562,7 @@ impl Client {
 		Ok(Session::new(
 			runtime,
 			session,
-			Version::Lite(version),
+			Version::lite(version),
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
@@ -585,7 +585,7 @@ impl Client {
 struct Negotiation {
 	runtime: Deadlines,
 	session: Transport,
-	peer_hop: crate::Hop,
+	peer_node: crate::Hop,
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
 	/// The versions offered in the client SETUP.
@@ -657,7 +657,7 @@ impl Connect {
 					let stream = ready!(Stream::poll_open(
 						&negotiation.session,
 						open,
-						Version::Lite(lite::Version::Lite01),
+						Version::lite(lite::Version::Lite01),
 						waiter
 					))?;
 					let mut stream = stream.with_stats(&client.stats);
@@ -680,13 +680,13 @@ impl Connect {
 						.find(|v| coding::Version::from(**v) == server.version)
 						.copied()
 						.ok_or(Error::Version)?;
-					let Version::Lite(version) = version else {
+					let Version(crate::Draft::Lite(version)) = version else {
 						return Poll::Ready(Err(Error::Version));
 					};
 					let Self::Exchange { negotiation, stream } = std::mem::replace(self, Self::Done) else {
 						unreachable!("matched above");
 					};
-					if !Version::Lite(version).hands_off() {
+					if !Version::lite(version).hands_off() {
 						return Poll::Ready(client.start_negotiated(negotiation, stream, version));
 					}
 					*self = Self::HandOff {
@@ -710,10 +710,10 @@ impl Connect {
 					let Negotiation {
 						runtime,
 						session,
-						peer_hop,
+						peer_node,
 						..
 					} = negotiation;
-					return Poll::Ready(client.start_lite(runtime, session, version, peer_hop));
+					return Poll::Ready(client.start_lite(runtime, session, version, peer_node));
 				}
 				Self::Done => panic!("handshake polled after it resolved"),
 			}
@@ -1011,12 +1011,12 @@ mod tests {
 	}
 
 	async fn run_alpn_lite_fallback_case(protocol: Option<&'static str>) {
-		let fake = FakeSession::new(protocol, mock_server_setup(Version::Lite(lite::Version::Lite01)));
+		let fake = FakeSession::new(protocol, mock_server_setup(Version::lite(lite::Version::Lite01)));
 		let client = Client::new().with_versions(
 			[
-				Version::Lite(lite::Version::Lite03),
-				Version::Lite(lite::Version::Lite02),
-				Version::Lite(lite::Version::Lite01),
+				Version::lite(lite::Version::Lite03),
+				Version::lite(lite::Version::Lite02),
+				Version::lite(lite::Version::Lite01),
 			]
 			.into(),
 		);
@@ -1027,7 +1027,7 @@ mod tests {
 
 		// Verify the client offered every configured moq-lite version over the `moql` SETUP.
 		let mut setup_bytes = Bytes::from(fake.control_writes());
-		let setup = crate::coding::decode_buf(&mut setup_bytes, Version::Lite(lite::Version::Lite02), |r, v| {
+		let setup = crate::coding::decode_buf(&mut setup_bytes, Version::lite(lite::Version::Lite02), |r, v| {
 			setup::Client::decode(r, v)
 		})
 		.unwrap();
@@ -1035,9 +1035,9 @@ mod tests {
 		assert_eq!(
 			advertised,
 			vec![
-				Version::Lite(lite::Version::Lite03),
-				Version::Lite(lite::Version::Lite02),
-				Version::Lite(lite::Version::Lite01),
+				Version::lite(lite::Version::Lite03),
+				Version::lite(lite::Version::Lite02),
+				Version::lite(lite::Version::Lite01),
 			]
 		);
 
@@ -1067,7 +1067,7 @@ mod tests {
 		// A subscribe origin is what makes the client open an announce stream at all.
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let client = Client::new()
-			.with_versions([Version::Lite(lite::Version::Lite05)].into())
+			.with_versions([Version::lite(lite::Version::Lite05)].into())
 			.with_subscriber(origin);
 
 		// Paused time auto-advances while every task is idle, so a `connect` that waits
@@ -1170,11 +1170,11 @@ mod tests {
 	#[test]
 	fn driver_is_caller_polled_and_holds_no_session() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
-		assert_eq!(session.version(), Version::Lite(lite::Version::Lite04));
+		assert_eq!(session.version(), Version::lite(lite::Version::Lite04));
 
 		// Construction leaves the driver idle until the caller polls it.
 		assert!(driver.poll(runtime.now(), &kio::Waiter::noop()).is_ok());
@@ -1193,7 +1193,7 @@ mod tests {
 	#[test]
 	fn session_clones_share_the_close() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
@@ -1230,7 +1230,7 @@ mod tests {
 			let registry = Registry::new(Default::default());
 			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 			let client = Client::new()
-				.with_versions(Version::Lite(lite::Version::Lite04).into())
+				.with_versions(Version::lite(lite::Version::Lite04).into())
 				.with_stats(
 					registry
 						.tier(Tier::default())
@@ -1266,7 +1266,7 @@ mod tests {
 		use crate::transport::poll::Session as _;
 		let registry = Registry::new(Default::default());
 		let client = Client::new()
-			.with_versions(Version::Lite(lite::Version::Lite04).into())
+			.with_versions(Version::lite(lite::Version::Lite04).into())
 			.with_stats(
 				registry
 					.tier(Tier::default())
@@ -1297,7 +1297,7 @@ mod tests {
 	fn dropped_driver_resolves_closed() {
 		for polled in [false, true] {
 			let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-			let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+			let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 			let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 			let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake)).unwrap();
 			if polled {
@@ -1311,7 +1311,7 @@ mod tests {
 	#[test]
 	fn driver_panic_is_published_before_the_executor_drops_it() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 		let runtime = crate::time::Deadlines::new(crate::time::Instant::now());
 		let (session, mut driver) = futures::executor::block_on(client.connect(runtime.now(), fake.clone())).unwrap();
 		fake.state
@@ -1345,7 +1345,7 @@ mod tests {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
 		kio::clock::sim::spawn(crate::time::run(driver));
 
@@ -1375,7 +1375,7 @@ mod tests {
 		fake.set_send_rate(None);
 		fake.set_sent_bytes(0);
 
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
 		kio::clock::sim::spawn(crate::time::run(driver));
 		assert!(
@@ -1403,7 +1403,7 @@ mod tests {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new());
 		fake.set_send_rate(Some(1_000_000));
 
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
 		let mut bandwidth = session.send_bandwidth().expect("backend reports an estimate");
 		assert_eq!(
@@ -1447,7 +1447,7 @@ mod tests {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
 		fake.set_send_rate(Some(1_000_000));
 
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
 		kio::clock::sim::spawn(crate::time::run(driver));
 		let bandwidth = session.allocator();
@@ -1475,7 +1475,7 @@ mod tests {
 	#[kio::test]
 	async fn an_override_replaces_the_reservations() {
 		let fake = FakeSession::new(Some(ALPN_LITE_04), Vec::new()).with_probe();
-		let client = Client::new().with_versions(Version::Lite(lite::Version::Lite04).into());
+		let client = Client::new().with_versions(Version::lite(lite::Version::Lite04).into());
 		let (session, driver) = client.connect(kio::clock::now(), fake.clone()).await.unwrap();
 		kio::clock::sim::spawn(crate::time::run(driver));
 		let bandwidth = session.allocator();
@@ -1500,7 +1500,7 @@ mod tests {
 	async fn a_reconnect_keeps_following_the_reservations() {
 		let bandwidth = crate::bandwidth::Allocator::default();
 		let client = Client::new()
-			.with_versions(Version::Lite(lite::Version::Lite04).into())
+			.with_versions(Version::lite(lite::Version::Lite04).into())
 			.with_allocator(bandwidth.clone());
 
 		let (_broadcast, track) = reservable();

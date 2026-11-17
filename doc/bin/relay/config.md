@@ -221,9 +221,9 @@ Pinning is off by default because every relay pins its workers to the same
 first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
-`io_uring` additionally needs Linux 6.12+; it
-shares the same reloadable TLS identity and serves every configured version
-like the shared runtime. A setting the host cannot deliver refuses to
+`io_uring` additionally needs Linux 6.12+ on a 64-bit x86, ARM, RISC-V,
+LoongArch, or POWER CPU; it shares the same reloadable TLS identity and serves
+every configured version like the shared runtime. A setting the host cannot deliver refuses to
 start rather than being ignored. Linux 6.14 up to the 7.3 fix (backported to
 stable kernels) charges io\_uring rings to `RLIMIT_MEMLOCK`: if io\_uring workers
 fail to start naming it, raise it (`LimitMEMLOCK=` under systemd).

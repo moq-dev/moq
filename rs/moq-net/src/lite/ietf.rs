@@ -126,7 +126,7 @@ fn encode_list(properties: &crate::model::object::TrackProperties) -> Result<Vec
 /// shares the message with its Version, so a list that fit its moq-transport message may
 /// still not fit, though only by a few bytes.
 pub(crate) fn fits(properties: &crate::model::object::TrackProperties) -> bool {
-	let code = crate::Version::Ietf(properties.version).code();
+	let code = crate::Version::ietf(properties.version).code();
 	let Ok(code) = crate::coding::varint::size(code, Version::Lite07.into()) else {
 		return false;
 	};
@@ -304,7 +304,7 @@ impl<'a> Message<'a> for TrackProperties {
 		let Some(properties) = &self.0 else {
 			return w.varint(0);
 		};
-		w.varint(crate::Version::Ietf(properties.version).code())?;
+		w.varint(crate::Version::ietf(properties.version).code())?;
 		w.slice(&encode_list(properties)?);
 		Ok(())
 	}
@@ -318,7 +318,7 @@ impl<'a> Message<'a> for TrackProperties {
 				false => Err(DecodeError::InvalidValue),
 			};
 		}
-		let Some(crate::Version::Ietf(version)) = crate::Version::from_code(code) else {
+		let Some(crate::Version(crate::Draft::Ietf(version))) = crate::Version::from_code(code) else {
 			return Err(DecodeError::InvalidValue);
 		};
 		let properties = crate::model::object::TrackProperties {
@@ -369,7 +369,7 @@ mod tests {
 
 	/// The moq-transport version code TRACK_PROPERTIES carries for `version`.
 	fn code(version: Draft) -> u64 {
-		crate::Version::Ietf(version).code()
+		crate::Version::ietf(version).code()
 	}
 
 	#[test]
@@ -574,7 +574,7 @@ mod tests {
 			decode(&wire(&[opaque(0x40)], 0)).is_err(),
 			"properties on a moq-lite track"
 		);
-		for code in [1, 0xff000099, crate::Version::Lite(V).code()] {
+		for code in [1, 0xff000099, crate::Version::lite(V).code()] {
 			assert!(decode(&wire(&[], code)).is_err(), "{code:#x} is no moq-transport draft");
 		}
 
@@ -709,7 +709,7 @@ pub(crate) async fn test_hop(
 	offer: [bool; 2],
 ) -> (crate::origin::Producer, [crate::Session; 2]) {
 	use crate::model::ProduceTest;
-	let version = crate::Version::Lite(Version::Lite07);
+	let version = crate::Version::lite(Version::Lite07);
 	let downstream = crate::origin::Config::new(std::num::NonZeroU64::new(3).unwrap()).produce();
 	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
 		protocol: Some(version.alpn().to_string()),

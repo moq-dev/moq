@@ -11,13 +11,13 @@ use crate::{coding, ietf, lite};
 /// moq-transport negotiates only by ALPN.
 #[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 pub(crate) const NEGOTIATED: [Version; 7] = [
-	Version::Lite(lite::Version::Lite07),
-	Version::Lite(lite::Version::Lite06),
-	Version::Lite(lite::Version::Lite05),
-	Version::Lite(lite::Version::Lite04),
-	Version::Lite(lite::Version::Lite03),
-	Version::Lite(lite::Version::Lite02),
-	Version::Lite(lite::Version::Lite01),
+	Version::lite(lite::Version::Lite07),
+	Version::lite(lite::Version::Lite06),
+	Version::lite(lite::Version::Lite05),
+	Version::lite(lite::Version::Lite04),
+	Version::lite(lite::Version::Lite03),
+	Version::lite(lite::Version::Lite02),
+	Version::lite(lite::Version::Lite01),
 ];
 
 /// ALPN strings for supported versions, most-preferred first. `ALPNS[0]` is the
@@ -49,38 +49,52 @@ pub(crate) const ALPN_20: &str = "moqt-20";
 pub(crate) const ALPN_22: &str = "moqt-22";
 
 const ALL: [Version; 10] = [
-	Version::Lite(lite::Version::Lite07),
-	Version::Lite(lite::Version::Lite06),
-	Version::Lite(lite::Version::Lite05),
-	Version::Lite(lite::Version::Lite04),
-	Version::Lite(lite::Version::Lite03),
-	Version::Lite(lite::Version::Lite02),
-	Version::Lite(lite::Version::Lite01),
-	Version::Ietf(ietf::Version::Draft22),
-	Version::Ietf(ietf::Version::Draft20),
-	Version::Ietf(ietf::Version::Draft18),
+	Version::lite(lite::Version::Lite07),
+	Version::lite(lite::Version::Lite06),
+	Version::lite(lite::Version::Lite05),
+	Version::lite(lite::Version::Lite04),
+	Version::lite(lite::Version::Lite03),
+	Version::lite(lite::Version::Lite02),
+	Version::lite(lite::Version::Lite01),
+	Version::ietf(ietf::Version::Draft22),
+	Version::ietf(ietf::Version::Draft20),
+	Version::ietf(ietf::Version::Draft18),
 ];
 
-/// A MoQ protocol version.
+/// The draft a [`Version`] names, which only this crate tells apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum Version {
+pub(crate) enum Draft {
 	/// A `moq-lite` draft, the simplified protocol this project specifies.
 	Lite(lite::Version),
 	/// An IETF `moq-transport` draft.
 	Ietf(ietf::Version),
 }
 
+/// A MoQ protocol version, such as `moq-lite-06`.
+///
+/// Opaque: parse it ([`FromStr`]), print it, and ask [`is_lite`](Self::is_lite) or
+/// [`alpn`](Self::alpn), so adding or dropping a draft is never an API change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Version(pub(crate) Draft);
+
 impl Version {
+	pub(crate) const fn lite(version: lite::Version) -> Self {
+		Self(Draft::Lite(version))
+	}
+
+	pub(crate) const fn ietf(version: ietf::Version) -> Self {
+		Self(Draft::Ietf(version))
+	}
+
 	/// Every version this crate speaks, newest first, including the opt-in `-wip` drafts
 	/// that [`Versions::all`] leaves out.
 	pub const ALL: &'static [Version] = &ALL;
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn session_code(self, error: &crate::SessionError) -> u32 {
-		match self {
-			Self::Lite(_) => crate::lite::error::to_session_code(error),
-			Self::Ietf(_) => crate::ietf::error::to_session_code(error),
+		match self.0 {
+			Draft::Lite(_) => crate::lite::error::to_session_code(error),
+			Draft::Ietf(_) => crate::ietf::error::to_session_code(error),
 		}
 	}
 
@@ -88,9 +102,9 @@ impl Version {
 	/// `Client::with_token`, behind the `async` feature). Every moq-transport draft can;
 	/// moq-lite gained it in lite-07, so older versions need the credential in the URL.
 	pub(crate) fn has_setup_token(self) -> bool {
-		match self {
-			Self::Lite(version) => version.has_auth(),
-			Self::Ietf(_) => true,
+		match self.0 {
+			Draft::Lite(version) => version.has_auth(),
+			Draft::Ietf(_) => true,
 		}
 	}
 
@@ -98,73 +112,73 @@ impl Version {
 	/// QUIC, qmux over TCP) can still name its target: moq-lite-05 and newer, and every
 	/// moq-transport draft.
 	pub fn has_request_path(&self) -> bool {
-		match self {
-			Self::Lite(version) => version.has_setup_stream(),
-			Self::Ietf(_) => true,
+		match self.0 {
+			Draft::Lite(version) => version.has_setup_stream(),
+			Draft::Ietf(_) => true,
 		}
 	}
 
 	/// Handshake / config name, e.g. `moq-lite-05` or `moq-transport-22`.
 	pub fn as_str(&self) -> &'static str {
-		match self {
-			Self::Lite(lite::Version::Lite01) => "moq-lite-01",
-			Self::Lite(lite::Version::Lite02) => "moq-lite-02",
-			Self::Lite(lite::Version::Lite03) => "moq-lite-03",
-			Self::Lite(lite::Version::Lite04) => "moq-lite-04",
-			Self::Lite(lite::Version::Lite05) => "moq-lite-05",
-			Self::Lite(lite::Version::Lite06) => "moq-lite-06",
-			Self::Lite(lite::Version::Lite07) => "moq-lite-07-wip",
-			Self::Ietf(ietf::Version::Draft18) => "moq-transport-18",
-			Self::Ietf(ietf::Version::Draft20) => "moq-transport-20",
-			Self::Ietf(ietf::Version::Draft22) => "moq-transport-22",
+		match self.0 {
+			Draft::Lite(lite::Version::Lite01) => "moq-lite-01",
+			Draft::Lite(lite::Version::Lite02) => "moq-lite-02",
+			Draft::Lite(lite::Version::Lite03) => "moq-lite-03",
+			Draft::Lite(lite::Version::Lite04) => "moq-lite-04",
+			Draft::Lite(lite::Version::Lite05) => "moq-lite-05",
+			Draft::Lite(lite::Version::Lite06) => "moq-lite-06",
+			Draft::Lite(lite::Version::Lite07) => "moq-lite-07-wip",
+			Draft::Ietf(ietf::Version::Draft18) => "moq-transport-18",
+			Draft::Ietf(ietf::Version::Draft20) => "moq-transport-20",
+			Draft::Ietf(ietf::Version::Draft22) => "moq-transport-22",
 		}
 	}
 
 	/// Parse from wire version code (used during SETUP negotiation).
 	pub(crate) fn from_code(code: u64) -> Option<Self> {
 		match code {
-			0xff0dad01 => Some(Self::Lite(lite::Version::Lite01)),
-			0xff0dad02 => Some(Self::Lite(lite::Version::Lite02)),
-			0xff0dad03 => Some(Self::Lite(lite::Version::Lite03)),
-			0xff0dad04 => Some(Self::Lite(lite::Version::Lite04)),
-			0xff0dad05 => Some(Self::Lite(lite::Version::Lite05)),
-			0xff0dad06 => Some(Self::Lite(lite::Version::Lite06)),
-			0xff0dad07 => Some(Self::Lite(lite::Version::Lite07)),
-			0xff000012 => Some(Self::Ietf(ietf::Version::Draft18)),
-			0xff000014 => Some(Self::Ietf(ietf::Version::Draft20)),
-			0xff000016 => Some(Self::Ietf(ietf::Version::Draft22)),
+			0xff0dad01 => Some(Self::lite(lite::Version::Lite01)),
+			0xff0dad02 => Some(Self::lite(lite::Version::Lite02)),
+			0xff0dad03 => Some(Self::lite(lite::Version::Lite03)),
+			0xff0dad04 => Some(Self::lite(lite::Version::Lite04)),
+			0xff0dad05 => Some(Self::lite(lite::Version::Lite05)),
+			0xff0dad06 => Some(Self::lite(lite::Version::Lite06)),
+			0xff0dad07 => Some(Self::lite(lite::Version::Lite07)),
+			0xff000012 => Some(Self::ietf(ietf::Version::Draft18)),
+			0xff000014 => Some(Self::ietf(ietf::Version::Draft20)),
+			0xff000016 => Some(Self::ietf(ietf::Version::Draft22)),
 			_ => None,
 		}
 	}
 
 	/// Get the wire version code.
 	pub(crate) fn code(&self) -> u64 {
-		match self {
-			Self::Lite(lite::Version::Lite01) => 0xff0dad01,
-			Self::Lite(lite::Version::Lite02) => 0xff0dad02,
-			Self::Lite(lite::Version::Lite03) => 0xff0dad03,
-			Self::Lite(lite::Version::Lite04) => 0xff0dad04,
-			Self::Lite(lite::Version::Lite05) => 0xff0dad05,
-			Self::Lite(lite::Version::Lite06) => 0xff0dad06,
-			Self::Lite(lite::Version::Lite07) => 0xff0dad07,
-			Self::Ietf(ietf::Version::Draft18) => 0xff000012,
-			Self::Ietf(ietf::Version::Draft20) => 0xff000014,
-			Self::Ietf(ietf::Version::Draft22) => 0xff000016,
+		match self.0 {
+			Draft::Lite(lite::Version::Lite01) => 0xff0dad01,
+			Draft::Lite(lite::Version::Lite02) => 0xff0dad02,
+			Draft::Lite(lite::Version::Lite03) => 0xff0dad03,
+			Draft::Lite(lite::Version::Lite04) => 0xff0dad04,
+			Draft::Lite(lite::Version::Lite05) => 0xff0dad05,
+			Draft::Lite(lite::Version::Lite06) => 0xff0dad06,
+			Draft::Lite(lite::Version::Lite07) => 0xff0dad07,
+			Draft::Ietf(ietf::Version::Draft18) => 0xff000012,
+			Draft::Ietf(ietf::Version::Draft20) => 0xff000014,
+			Draft::Ietf(ietf::Version::Draft22) => 0xff000016,
 		}
 	}
 
 	/// Returns the ALPN string for this version.
 	pub fn alpn(&self) -> &'static str {
-		match self {
-			Self::Lite(lite::Version::Lite07) => ALPN_LITE_07_WIP,
-			Self::Lite(lite::Version::Lite06) => ALPN_LITE_06,
-			Self::Lite(lite::Version::Lite05) => ALPN_LITE_05,
-			Self::Lite(lite::Version::Lite04) => ALPN_LITE_04,
-			Self::Lite(lite::Version::Lite03) => ALPN_LITE_03,
-			Self::Lite(lite::Version::Lite01 | lite::Version::Lite02) => ALPN_LITE,
-			Self::Ietf(ietf::Version::Draft18) => ALPN_18,
-			Self::Ietf(ietf::Version::Draft20) => ALPN_20,
-			Self::Ietf(ietf::Version::Draft22) => ALPN_22,
+		match self.0 {
+			Draft::Lite(lite::Version::Lite07) => ALPN_LITE_07_WIP,
+			Draft::Lite(lite::Version::Lite06) => ALPN_LITE_06,
+			Draft::Lite(lite::Version::Lite05) => ALPN_LITE_05,
+			Draft::Lite(lite::Version::Lite04) => ALPN_LITE_04,
+			Draft::Lite(lite::Version::Lite03) => ALPN_LITE_03,
+			Draft::Lite(lite::Version::Lite01 | lite::Version::Lite02) => ALPN_LITE,
+			Draft::Ietf(ietf::Version::Draft18) => ALPN_18,
+			Draft::Ietf(ietf::Version::Draft20) => ALPN_20,
+			Draft::Ietf(ietf::Version::Draft22) => ALPN_22,
 		}
 	}
 
@@ -172,14 +186,14 @@ impl Version {
 	/// as this version's ALPN would rather than on that stream.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn hands_off(self) -> bool {
-		matches!(self, Self::Lite(v) if !matches!(v, lite::Version::Lite01 | lite::Version::Lite02))
+		matches!(self.0, Draft::Lite(v) if !matches!(v, lite::Version::Lite01 | lite::Version::Lite02))
 	}
 
 	/// Whether this is a lite protocol version.
 	pub fn is_lite(&self) -> bool {
-		match self {
-			Self::Lite(_) => true,
-			Self::Ietf(_) => false,
+		match self.0 {
+			Draft::Lite(_) => true,
+			Draft::Ietf(_) => false,
 		}
 	}
 }
@@ -260,7 +274,7 @@ impl Versions {
 	pub fn all() -> Self {
 		Self(
 			ALL.iter()
-				.filter(|version| !matches!(version, Version::Lite(lite::Version::Lite07)))
+				.filter(|version| **version != Version::lite(lite::Version::Lite07))
 				.copied()
 				.collect(),
 		)
@@ -341,7 +355,7 @@ mod tests {
 
 	#[test]
 	fn default_versions_prefer_lite_06() {
-		let newest = Version::Lite(lite::Version::Lite06);
+		let newest = Version::lite(lite::Version::Lite06);
 		assert_eq!(newest.alpn(), "moq-lite-06");
 		assert!("moq-lite-06-wip".parse::<Version>().is_err());
 		assert_eq!(Versions::all().iter().next(), Some(&newest));
@@ -351,7 +365,7 @@ mod tests {
 
 	#[test]
 	fn lite_07_wip_is_opt_in_only() {
-		let wip = Version::Lite(lite::Version::Lite07);
+		let wip = Version::lite(lite::Version::Lite07);
 		assert_eq!(wip.alpn(), "moq-lite-07-wip");
 		assert_eq!(wip.to_string(), "moq-lite-07-wip");
 		assert_eq!("moq-lite-07-wip".parse::<Version>(), Ok(wip));

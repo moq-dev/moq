@@ -160,7 +160,7 @@ signals.run((effect) => {
     });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
-    meta.update({ value: current, at: Moq.Time.Timestamp.now() });
+    meta.update(current, Moq.Time.Timestamp.now());
 });
 ```
 

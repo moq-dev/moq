@@ -308,11 +308,6 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		Poll::Ready(res)
 	}
 
-	/// The stream, until the writer finishes, aborts, or closes it.
-	pub(crate) fn stream(&self) -> Option<&S> {
-		self.stream.as_ref()
-	}
-
 	/// Set the priority within the stream's send group, or session-wide when ungrouped.
 	///
 	/// Streams with HIGHER values are transmitted first. This is the transport trait's
@@ -569,11 +564,11 @@ mod tests {
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(
-				crate::Version::Ietf(crate::ietf::Version::Draft22),
+				crate::Version::ietf(crate::ietf::Version::Draft22),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 			(
-				crate::Version::Lite(crate::lite::Version::Lite05),
+				crate::Version::lite(crate::lite::Version::Lite05),
 				Error::Stream(crate::StreamError::GoingAway),
 			),
 		] {

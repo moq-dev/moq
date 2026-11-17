@@ -15,8 +15,6 @@ export * as Catalog from "./catalog/index.ts";
 export * as Container from "./container/index.ts";
 /** Solicited viewer feedback schemas and broadcast names. */
 export * as Echo from "./echo.ts";
-/** Client health graded from two consecutive media reports. */
-export * as Health from "./health.ts";
 /** The compressed snapshot track a stats or feedback report is written to. */
 export * as Report from "./report.ts";
 /** Publisher media and transport snapshot schemas. */

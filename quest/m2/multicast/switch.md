@@ -128,4 +128,3 @@ on moq-transport is no longer sent or read.
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the epic
 - [Acceptance](/quest/m2/cluster-routes/acceptance.md) - retires the update hold itself
-- [The moq-net renames](/quest/m2/net-renames.md) - renames `Config::hop` and `with_preference`; whichever lands second merges

@@ -3914,25 +3914,6 @@ test("a route whose IETF session closed before subscribing moves the track to th
 	b.close();
 });
 
-// A front's reader continues a yielded group its serving route's copy still caches and judges fresh,
-// so a relay's publisher continues the group through it, and nothing it lacks.
-test("a resumed reader continues a group its serving copy still caches", () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	front.serve(a.consume());
-	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
-	ta.write(0n);
-	expect(drain(sub)).toEqual([0n]);
-	const group = hooks.continueGroup(sub, 0n, 0);
-	expect(group?.sequence).toBe(0n);
-	group?.close();
-	expect(hooks.continueGroup(sub, 1n, 0)).toBeUndefined();
-	sub.close();
-	front.consumer.close();
-	a.close();
-});
-
 test("routed metadata receives a refusal without polling a group cursor", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

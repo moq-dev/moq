@@ -236,7 +236,7 @@ impl Routed {
 		let port = relay::Port {
 			// A zero-cost link never reaches here: SETUP refuses it on lite-07.
 			cost: link_cost.max(1),
-			priority: subscriber.origin.preference().value(),
+			priority: subscriber.origin.priority().value(),
 			// A node that never forwards marks every link, so nothing it learns on one
 			// reaches another.
 			upstream: !forwards

@@ -74,7 +74,7 @@ final class SmokeTests: XCTestCase {
     func testStreamAbortPreservesProtocolDetails() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "errors")
-        let producer = try track.appendGroup()
+        let producer = try track.appendGroup(start: .unscaled(0))
         let consumer = try broadcast.consume()
         let group = try await consumer.fetchGroup(name: "errors", start: 0)
         try producer.abort(errorCode: 404)
@@ -94,7 +94,7 @@ final class SmokeTests: XCTestCase {
         let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
         let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
-            let group = try track.appendGroup()
+            let group = try track.appendGroup(start: micros(ms * 1_000))
             try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
             try group.finish()
         }
@@ -109,7 +109,7 @@ final class SmokeTests: XCTestCase {
             let group = try await consumer.recvGroup()
             starts.append(try XCTUnwrap(group).start)
         }
-        XCTAssertEqual(starts, [0, 1, 2])
+        XCTAssertEqual(starts, [0, 1_000, 2_000])
     }
 
     /// An error's description is the Rust error message.
@@ -627,7 +627,7 @@ final class SmokeTests: XCTestCase {
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
-        let group = try track.appendGroup()
+        let group = try track.appendGroup(start: micros(0))
         try group.writeFrame(Data("cached".utf8), timestamp: micros(0))
         try group.finish()
 
@@ -865,7 +865,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(frame?.payload, payload)
         XCTAssertEqual(frame?.timestamp, micros(12_345))
 
-        let group = try track.appendGroup()
+        let group = try track.appendGroup(start: micros(23_456))
         let groupConsumer = try group.consume()
         let groupPayload = Data("group".utf8)
         try group.writeFrame(groupPayload, timestamp: micros(23_456))
@@ -945,8 +945,8 @@ final class SmokeTests: XCTestCase {
         let track = try broadcast.publishTrack(name: "status", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         let consumer = try track.consume()
 
-        try track.appendGroup().finish()
-        try track.appendGroup().finish()
+        try track.appendGroup(start: micros(0)).finish()
+        try track.appendGroup(start: micros(1_000)).finish()
         try track.writeFrame(Data("populated".utf8), timestamp: micros(2_000))
 
         let frame = try await consumer.readFrame()

@@ -287,8 +287,10 @@ coroutines:
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-stats -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-stats --no-deps --no-default-features
-    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features e2ee,provider
-    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features e2ee,provider
+    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features provider
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features provider
+    run bash sh/rs/coroutines.sh moq-e2ee
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-e2ee --no-deps
     run bash sh/rs/coroutines.sh rs/moq-auth/Cargo.toml -- --no-default-features
     finish
 
@@ -555,7 +557,7 @@ codspeed shard:
             --bench parameter_sets --bench sync --bench ts_programs --bench ts_schedule --bench ts_video
         ;;
     rest)
-        build -p kio -p moq-audio -p moq-crypto -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
+        build -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-pattern -p moq-quic -p moq-rtmp \
             --features moq-json/bench,moq-quic/fuzz \
             --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
             --bench matching --bench endpoint --bench receive --bench sent_packets --bench streams \

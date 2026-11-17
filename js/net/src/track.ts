@@ -3108,20 +3108,6 @@ export class Subscriber {
 		};
 	}
 
-	// A fresh read from frame `from` of group `sequence`, if the cache still holds it from there and
-	// this cursor admits it and does not judge it stale, expiring against the budget: a lite-07
-	// continuation of a group whose stream yielded. A resumed reader asks its serving route's copy.
-	#continueGroup(sequence: bigint, from: number): GroupConsumer | undefined {
-		if (this.#resume) return this.#resume.continueGroup(sequence, from);
-		const producer = this.#state.producer;
-		if (!producer) return undefined;
-		const cap = this.#cursor.peek().end;
-		const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
-		if (!admitted || this.#staleAt(sequence, this.#drift())) return undefined;
-		const group = cachedMirror(producer, sequence, from);
-		return group && this.#guard(group);
-	}
-
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
@@ -3816,7 +3802,6 @@ export class Subscriber {
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
-		hooks.continueGroup = (subscriber, sequence, from) => subscriber.#continueGroup(sequence, from);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>

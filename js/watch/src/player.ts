@@ -156,13 +156,11 @@ export class Player {
 		const videoSource = new Video.Source({
 			broadcast: this.broadcast,
 			target: this.in.video.target,
-			supported: Video.Decoder.supported,
 			rate: this.#videoRate,
 		});
 		const audioSource = new Audio.Source({
 			broadcast: this.broadcast,
 			target: this.in.audio.target,
-			supported: Audio.Decoder.supported,
 		});
 		this.#signals.cleanup(() => {
 			videoSource.close();

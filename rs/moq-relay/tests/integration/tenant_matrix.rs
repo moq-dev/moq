@@ -515,7 +515,7 @@ async fn tokio_keeps_tenants_apart() {
 	matrix(false).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_keeps_tenants_apart() {
 	if !crate::runtime_uring::supported() {

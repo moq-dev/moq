@@ -576,7 +576,7 @@ mod tests {
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
 				.with_stats(lease.stats.clone())
-				.accept_request(now, server)
+				.handshake(now, server)
 				.await
 				.unwrap();
 			let lease = lease
@@ -696,7 +696,7 @@ mod tests {
 				.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().unwrap().into())
 				.with_subscriber(origin)
 				.with_stats(stats.clone())
-				.accept_request(now, server)
+				.handshake(now, server)
 				.await
 				.unwrap();
 			let mut changed = initial;

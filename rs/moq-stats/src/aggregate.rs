@@ -1417,9 +1417,7 @@ mod tests {
 				epoch: bucket_epoch(),
 				tiers: BTreeMap::from([(String::new(), bucket)]),
 			};
-			self.bucket
-				.update(moq_json::Timed::new(&frame, next_stamp(&self.track)))
-				.expect("publish");
+			self.bucket.update(&frame, next_stamp(&self.track)).expect("publish");
 		}
 
 		/// Fail the node's reader: append a frame the snapshot decoder can't
@@ -2031,10 +2029,7 @@ mod tests {
 			let mut totals = Totals::default();
 			totals.publisher.bytes = bytes;
 			self.totals
-				.update(moq_json::Timed::new(
-					&TotalsFrame::from([(String::new(), totals)]),
-					next_stamp(&self.track),
-				))
+				.update(&TotalsFrame::from([(String::new(), totals)]), next_stamp(&self.track))
 				.expect("publish");
 		}
 	}
