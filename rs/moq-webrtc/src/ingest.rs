@@ -188,7 +188,7 @@ mod tests {
 		let mut track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
 		let mut groups = 0;
 		let mut read = async |track: &mut moq_net::track::Subscriber| {
-			while let Ok(Ok(Some(_))) = tokio::time::timeout(Duration::from_millis(100), track.recv_group()).await {
+			while let Ok(Ok(Some(_))) = kio::clock::timeout(Duration::from_millis(100), track.recv_group()).await {
 				groups += 1;
 			}
 		};

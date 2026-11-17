@@ -4476,7 +4476,7 @@ impl FrontServeRun {
 /// was serving as closed, rather than leave them to warn as producers dropped unfinished.
 impl Drop for FrontServeRun {
 	fn drop(&mut self) {
-		let mut close = |logical: &mut Logical| {
+		let close = |logical: &mut Logical| {
 			if let Logical::Accepted(accepted) = std::mem::replace(logical, Logical::Ended) {
 				let _ = accepted.abort(Error::Closed);
 			}
