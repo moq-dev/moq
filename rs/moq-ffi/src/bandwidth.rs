@@ -24,13 +24,6 @@ impl MoqAllocator {
 	pub(crate) fn inner(&self) -> &moq_net::bandwidth::Allocator {
 		&self.allocator
 	}
-
-	pub(crate) fn reserve_demand(&self, demand: &moq_net::track::Demand, max_bps: u64) -> Arc<MoqReservation> {
-		Arc::new(MoqReservation::new(
-			self.allocator
-				.reserve(demand, moq_net::bandwidth::Rate::from_bps(max_bps)),
-		))
-	}
 }
 
 #[uniffi::export]
@@ -44,7 +37,10 @@ impl MoqAllocator {
 	/// [`MoqReservation::update`] moves the ceiling without claiming twice.
 	pub fn reserve(&self, demand: &MoqTrackDemand, max_bps: u64) -> Arc<MoqReservation> {
 		let _guard = crate::ffi::enter();
-		self.reserve_demand(demand.inner(), max_bps)
+		Arc::new(MoqReservation::new(
+			self.allocator
+				.reserve(demand.inner(), moq_net::bandwidth::Rate::from_bps(max_bps)),
+		))
 	}
 }
 

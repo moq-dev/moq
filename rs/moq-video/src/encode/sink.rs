@@ -126,8 +126,8 @@ impl Sink {
 
 	/// Retune the encoder, waiting for the backend's verdict.
 	///
-	/// [`Error::BitrateUnsupported`] is not fatal: the encoder keeps its rate and keeps
-	/// encoding (see [`Encoder::set_bitrate`](super::Encoder::set_bitrate)).
+	/// A refused rate, such as [`Error::BitrateUnsupported`], is not fatal: the encoder keeps
+	/// its rate and keeps encoding (see [`Encoder::set_bitrate`](super::Encoder::set_bitrate)).
 	/// [`Error::CodecGone`] means the encode thread stopped, so the sink cannot continue.
 	pub async fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		self.0.set_bitrate(bitrate).await

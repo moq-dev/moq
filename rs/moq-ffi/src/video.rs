@@ -433,9 +433,10 @@ impl MoqVideoProducer {
 	/// and the grant's ceiling move with it, so a later grant cannot retune above this
 	/// value.
 	///
-	/// Errors if this backend cannot retune while running. That is not fatal: the
-	/// encoder keeps running at its current rate, so stop adapting rather than
-	/// stop publishing. Any other error means the encoder stopped.
+	/// Errors if the backend refuses the rate: some cannot retune while running, and
+	/// openh264 cannot raise past its opening rate. That is not fatal: the encoder
+	/// keeps running at its current rate, so stop adapting rather than stop
+	/// publishing. An error saying the codec session ended means the encoder stopped.
 	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		self.with(|producer| {
