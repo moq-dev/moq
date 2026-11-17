@@ -300,16 +300,17 @@ impl Session {
 						Admit::Forward => {}
 						Admit::Drop => return Ok(()),
 						Admit::Request => {
-							if let Some(mut writer) = self.agent.rtc_mut().writer(data.mid) {
-								writer
-									.request_keyframe(data.rid, str0m::media::KeyframeRequestKind::Pli)
-									.map_err(Error::rtc)?;
-							}
+							request_keyframe(&mut self.agent, data.mid, data.rid)?;
 							return Ok(());
 						}
 					}
 					let opens_group = data.is_keyframe() || self.ingest_order.is_audio(data.mid);
 					let mapped = self.ingest_clock.normalize(data.mid, arrival, media_us, opens_group);
+					// A video step waits for a keyframe, which a publisher that sends one only
+					// when asked never volunteers.
+					if mapped.deferred && self.ingest_order.keyframe_due(data.mid, Instant::now()) {
+						request_keyframe(&mut self.agent, data.mid, data.rid)?;
+					}
 					if mapped.stepped {
 						sink.on_discontinuity(data.mid)?;
 					}
@@ -469,6 +470,20 @@ impl IngestRate {
 	}
 }
 
+/// Ask the publisher of `mid` for a keyframe with PLI.
+fn request_keyframe(
+	agent: &mut crate::ice::Agent,
+	mid: str0m::media::Mid,
+	rid: Option<str0m::media::Rid>,
+) -> Result<()> {
+	if let Some(mut writer) = agent.rtc_mut().writer(mid) {
+		writer
+			.request_keyframe(rid, str0m::media::KeyframeRequestKind::Pli)
+			.map_err(Error::rtc)?;
+	}
+	Ok(())
+}
+
 /// Which ingested frames may reach the sink, line by line.
 ///
 /// RTP can join a publisher mid-group, and deliver a packet late, as a retransmission does. A
@@ -486,8 +501,9 @@ struct IngestOrder {
 enum IngestLine {
 	/// Video yet to see a keyframe, with when it may next ask for one: `None` without PLI.
 	Keyless { request_at: Option<Instant> },
-	/// Video forwarding, refusing anything before its last keyframe at `keyframe`.
-	Video { keyframe: u64 },
+	/// Video forwarding, refusing anything before its last keyframe at `keyframe`, and with when
+	/// it may next ask for one (`None` without PLI) to take a deferred timeline step.
+	Video { keyframe: u64, request_at: Option<Instant> },
 	/// Audio forwarding, refusing anything not after its last frame at `last`.
 	Audio { last: Option<u64> },
 }
@@ -520,6 +536,20 @@ impl IngestOrder {
 		matches!(self.lines.get(&mid), Some(IngestLine::Audio { .. }))
 	}
 
+	/// Whether to ask `mid`, a video line that deferred a timeline step, for a keyframe now: at
+	/// most once an interval, and never without PLI.
+	fn keyframe_due(&mut self, mid: str0m::media::Mid, now: Instant) -> bool {
+		match self.lines.get_mut(&mid) {
+			Some(IngestLine::Video {
+				request_at: Some(at), ..
+			}) if now >= *at => {
+				*at = now.saturating_add(KEYFRAME_REQUEST_INTERVAL);
+				true
+			}
+			_ => false,
+		}
+	}
+
 	/// Whether a frame on `mid` at its line's RTP time `timestamp_us` reaches the sink, and whether
 	/// to ask for a keyframe.
 	fn admit(&mut self, mid: str0m::media::Mid, keyframe: bool, timestamp_us: u64, now: Instant) -> Admit {
@@ -534,12 +564,15 @@ impl IngestOrder {
 				}
 				_ => Admit::Drop,
 			},
-			IngestLine::Keyless { .. } => {
-				*line = IngestLine::Video { keyframe: timestamp_us };
+			IngestLine::Keyless { request_at } => {
+				*line = IngestLine::Video {
+					keyframe: timestamp_us,
+					request_at: *request_at,
+				};
 				Admit::Forward
 			}
-			IngestLine::Video { keyframe: floor } if timestamp_us < *floor => Admit::Drop,
-			IngestLine::Video { keyframe: floor } => {
+			IngestLine::Video { keyframe: floor, .. } if timestamp_us < *floor => Admit::Drop,
+			IngestLine::Video { keyframe: floor, .. } => {
 				if keyframe {
 					*floor = timestamp_us;
 				}
@@ -638,14 +671,15 @@ impl IngestClock {
 			None => fallback,
 		};
 		let step = continued.is_some_and(|continued| output > continued.saturating_add(STEP_US));
-		let (output, stepped) = match continued {
-			Some(continued) if step && !opens_group => (continued, false),
-			_ => (output, step),
+		let (output, stepped, deferred) = match continued {
+			Some(continued) if step && !opens_group => (continued, false, true),
+			_ => (output, step, false),
 		};
 		self.tracks.get_mut(&mid).expect("track was inserted").last_output_us = Some(output);
 		Mapped {
 			timestamp_us: output,
 			stepped,
+			deferred,
 		}
 	}
 
@@ -684,6 +718,9 @@ struct Mapped {
 	timestamp_us: u64,
 	/// The frame opens a group the track's timeline stepped to, which no earlier frame led to.
 	stepped: bool,
+	/// The track's timeline should step but this frame continues a group, so it waits for the
+	/// next keyframe.
+	deferred: bool,
 }
 
 #[derive(Default)]
@@ -1227,12 +1264,39 @@ mod tests {
 		for ms in (1_000..1_200).step_by(40) {
 			let delta = frame(&mut clock, video, ms, 0, video_base, false);
 			assert!(!delta.stepped, "{ms}");
+			assert!(delta.deferred, "{ms}: a deferred step asks for a keyframe");
 			assert_eq!(delta.timestamp_us, ms * 1_000, "a delta continues its group");
 		}
 		let key = frame(&mut clock, video, 1_200, 0, video_base, true);
 		assert!(key.stepped, "the keyframe takes the step");
+		assert!(!key.deferred);
 		assert_eq!(key.timestamp_us, 1_500_000);
-		assert!(!frame(&mut clock, video, 1_240, 0, video_base, false).stepped);
+		let after = frame(&mut clock, video, 1_240, 0, video_base, false);
+		assert!(!after.stepped && !after.deferred);
+	}
+
+	/// A video line that deferred a step asks for a keyframe at once and then at most once an
+	/// interval, as long as it negotiated PLI.
+	#[test]
+	fn a_deferred_step_asks_for_a_keyframe() {
+		let mut order = IngestOrder::default();
+		let (video, silent, audio) = (Mid::from("1"), Mid::from("2"), Mid::from("0"));
+		let t0 = Instant::now();
+		order.open(video, true, true, t0);
+		order.open(silent, true, false, t0);
+		order.open(audio, false, true, t0);
+		for mid in [video, silent] {
+			assert_eq!(order.admit(mid, true, 0, t0), Admit::Forward);
+		}
+
+		assert!(order.keyframe_due(video, t0));
+		let early = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL - Duration::from_millis(1));
+		assert!(!order.keyframe_due(video, early));
+		assert!(order.keyframe_due(video, t0.saturating_add(KEYFRAME_REQUEST_INTERVAL)));
+
+		let late = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL * 5);
+		assert!(!order.keyframe_due(silent, late), "no PLI, no request");
+		assert!(!order.keyframe_due(audio, late), "audio opens a group on every frame");
 	}
 
 	/// A reordered picture, which decodes before the one sent ahead of it, lands where its own media

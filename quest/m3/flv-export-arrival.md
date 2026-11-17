@@ -19,6 +19,8 @@ looks older than the last by the time it waited: replaying a recorded trace, one
 takes `arrived.max(track.subscribed)`), and add a test that gates one track and checks the
 buffer sees no lead growing.
 
+The maintainer kept this quest (2026-11-17, [on the PR that found it](https://github.com/moq-dev/moq/pull/9032#issuecomment-6962042151)).
+
 ## Related
 
 - [Container export ends cleanly](/quest/m3/export-close.md) - the same exports' shutdown
