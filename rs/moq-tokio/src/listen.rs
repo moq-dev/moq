@@ -138,10 +138,19 @@ pub struct Config {
 	)]
 	pub version: Vec<moq_net::Version>,
 
-	/// The extensions to offer in SETUP, every moq-transport one by default.
-	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	/// Offer the `ietf` extension on moq-lite-07. Behind the `relay` feature: moq-relay's
+	/// door for its own links, not a setting.
+	#[cfg(feature = "relay")]
 	#[usage(skip)]
-	pub extensions: moq_net::setup::Extensions,
+	#[serde(skip)]
+	pub ietf: bool,
+
+	/// Decline MoQ Solicit, acting as a moq-transport peer without it. Behind the
+	/// `test-support` feature: a test's door, not a setting.
+	#[cfg(feature = "test-support")]
+	#[usage(skip)]
+	#[serde(skip)]
+	pub decline_solicit: bool,
 
 	/// The implementation to advertise in SETUP, as space-separated `name/version`
 	/// product tokens. `None` advertises [`moq_net::IMPLEMENTATION`]; empty advertises
@@ -266,8 +275,6 @@ pub struct Resolved {
 	pub bind: Option<Bind>,
 	/// The versions to accept, every one when none was configured.
 	pub versions: moq_net::Versions,
-	/// The extensions to offer in SETUP.
-	pub extensions: moq_net::setup::Extensions,
 	/// The implementation to advertise in SETUP, or the runtime's own when unset.
 	pub implementation: Option<String>,
 	/// The handshake deadline, from [`Config::resolved_timeout`].
@@ -560,7 +567,12 @@ impl Config {
 		let Self {
 			bind,
 			version: _,
-			extensions,
+			// Offered by the moq-net server every listener accepts with, which no QUIC
+			// listener reads.
+			#[cfg(feature = "relay")]
+				ietf: _,
+			#[cfg(feature = "test-support")]
+				decline_solicit: _,
 			implementation,
 			timeout: _,
 			tls,
@@ -581,7 +593,6 @@ impl Config {
 		Ok(Resolved {
 			bind: bind.clone(),
 			versions: self.versions(),
-			extensions: *extensions,
 			implementation: implementation.clone(),
 			timeout: self.resolved_timeout(),
 			tls: tls.clone(),
@@ -614,19 +625,10 @@ impl Config {
 mod tests {
 	use super::*;
 
-	/// The listen config offers every extension unless told otherwise, and leaves the
-	/// default out when serialized.
+	/// The SETUP extensions are no setting: a file naming them is refused.
 	#[test]
-	fn extensions_default_on_and_parse_off() {
-		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
-		assert!(!config.extensions.solicit);
-		assert!(!config.extensions.ietf);
-		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
-		assert!(
-			!toml::to_string(&Config::default())
-				.expect("serialize")
-				.contains("extensions")
-		);
+	fn extensions_are_not_a_setting() {
+		assert!(toml::from_str::<Config>("[extensions]\nsolicit = false\n").is_err());
 	}
 	/// A parser wrapping the config, since it derives `Args` (see the note in
 	/// [`crate::connect`]).

@@ -144,21 +144,27 @@ fn from(start: u64) -> track::Range {
 	}
 }
 
+/// The next group, past the gaps the read reports for what the archive never held.
+async fn group(reader: &mut track::Ordered) -> Option<moq_net::group::Consumer> {
+	loop {
+		let item = timeout(Duration::from_secs(10), reader.next_group())
+			.await
+			.expect("a group arrives")
+			.unwrap()?;
+		if let track::Item::Group(group) = item {
+			return Some(group);
+		}
+	}
+}
+
 /// The next group's start, without waiting for it to end.
 async fn sequence(reader: &mut track::Ordered) -> Option<u64> {
-	timeout(Duration::from_secs(10), reader.next_group())
-		.await
-		.expect("a group arrives")
-		.unwrap()
-		.map(|group| group.start)
+	group(reader).await.map(|group| group.start)
 }
 
 /// The next group and every frame in it, once the group ends.
 async fn next(reader: &mut track::Ordered) -> Option<(u64, Vec<String>)> {
-	let mut group = timeout(Duration::from_secs(10), reader.next_group())
-		.await
-		.expect("a group arrives")
-		.unwrap()?;
+	let mut group = group(reader).await?;
 	let mut frames = Vec::new();
 	while let Some(frame) = timeout(Duration::from_secs(10), group.read_frame())
 		.await
@@ -226,7 +232,7 @@ async fn a_recording_round_trips() {
 
 	let mut reader = subscribe(&broadcast, "video").await;
 	for sequence in 0..6 {
-		let mut group = reader.next_group().await.unwrap().unwrap();
+		let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
 		assert_eq!(group.start, sequence);
 		for index in 0..3 {
 			let frame = group.read_frame().await.unwrap().unwrap();
@@ -450,7 +456,7 @@ async fn an_archive_without_markers_stays_open() {
 	let (broadcast, _run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
 	assert_eq!(next(&mut reader).await.unwrap(), (0, expected(true, 0, 0..1)));
-	let mut group = reader.next_group().await.unwrap().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 	let pending = timeout(30 * REFRESH, group.read_frame()).await;
 	assert!(pending.is_err(), "the newest group stays open");
@@ -466,7 +472,7 @@ async fn closing_the_broadcast_cancels_the_live_tracks() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	broadcast.close();
@@ -485,7 +491,7 @@ async fn a_gapped_continuation_aborts_the_open_group() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	// Frame 1 of group 0 is missing.
@@ -508,7 +514,7 @@ async fn a_store_failure_aborts_the_served_tracks() {
 
 	let (broadcast, run) = serve(&archive.store).await;
 	let mut reader = subscribe(&broadcast, "video").await;
-	let mut group = reader.next_group().await.unwrap().unwrap();
+	let mut group = reader.next_group().await.unwrap().unwrap().group().unwrap();
 	assert!(group.read_frame().await.unwrap().is_some());
 
 	archive.store.inner().fail_lists();
@@ -564,7 +570,7 @@ async fn a_completed_archive_ends_as_recorded() {
 	let end = timeout(Duration::from_secs(10), reader.next_group())
 		.await
 		.expect("the track ends");
-	let end = end.map(|group| group.map(|group| group.start));
+	let end = end.map(|item| item.map(|item| item.group().expect("a group").start));
 	assert!(
 		matches!(end, Err(moq_net::Error::Stream(moq_net::StreamError::App(7)))),
 		"{end:?}"
@@ -717,7 +723,9 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 	let mut read = Vec::new();
 	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
 		match group.unwrap() {
-			Some(group) => read.push(group.start),
+			Some(track::Item::Group(group)) => read.push(group.start),
+			// Nothing is stored below the first group, which the read reports as a gap.
+			Some(track::Item::Gap { .. }) => {}
 			None => break,
 		}
 	}

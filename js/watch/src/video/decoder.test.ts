@@ -1259,6 +1259,26 @@ describe("Decoder stalls", () => {
 		}
 	});
 
+	// A publisher repeats a still screen at a 4 Hz floor rather than its frame rate.
+	it("a still picture repeated every 250 ms plays without a stall", async () => {
+		const { clock, feeds, playback, stalls, close } = await cold();
+		try {
+			feeds.push(0, sample(0n, 0));
+			await microtasks();
+			for (let ms = 250; ms <= 5000; ms += 250) {
+				await clock.advance(250);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+				// Past the poster's second-long wait, the picture plays.
+				if (ms >= 1500) expect(playback.decoder.out.stalled.peek()).toBe(false);
+			}
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(4_000_000);
+			expect(stalls()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
 	it("holds the last picture through a declared end without a stall", async () => {
 		const { clock, feeds, playback, stalls, feedback, close } = await cold();
 		try {

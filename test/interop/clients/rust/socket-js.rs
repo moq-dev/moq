@@ -56,7 +56,11 @@ async fn main() -> anyhow::Result<()> {
 		if dial {
 			stream.producer.write_frame(key(i), vec![own + i])?;
 		}
-		let mut group = reader.next_group().await?.context("short track half")?;
+		let mut group = reader
+			.next_group()
+			.await?
+			.and_then(moq_net::track::Item::group)
+			.context("short track half")?;
 		ensure!(group.start == u64::from(i), "wrong group key");
 		let frame = group.read_frame().await?.context("empty track message")?;
 		ensure!(frame.payload.as_ref() == [peer + i], "wrong track frame");
@@ -80,7 +84,11 @@ async fn main() -> anyhow::Result<()> {
 		ensure!(reset_reader.next_group().await.is_err(), "track RST became FIN");
 		eprintln!("socket reset verified dial");
 	} else {
-		let mut group = reset_reader.next_group().await?.context("missing reset signal")?;
+		let mut group = reset_reader
+			.next_group()
+			.await?
+			.and_then(moq_net::track::Item::group)
+			.context("missing reset signal")?;
 		ensure!(
 			group
 				.read_frame()

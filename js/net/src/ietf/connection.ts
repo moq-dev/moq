@@ -121,13 +121,13 @@ export class Connection implements Session {
 		client,
 		publish,
 		solicit,
+		declaredSolicit = true,
 		hidden = false,
 		maxAge = false,
 		activeCount = false,
 		cluster,
 		handle,
 		early = [],
-		extensions,
 		peerImplementation,
 	}: {
 		url: URL;
@@ -143,6 +143,8 @@ export class Connection implements Session {
 		 * nothing, which is the one case where announcing at us unasked is not a bug.
 		 */
 		solicit?: boolean;
+		/** Whether our own SETUP declared MoQ Solicit; `false` only in a test acting as a peer without it. */
+		declaredSolicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
 		/** Whether the peer accepts subscriber max age. */
@@ -158,8 +160,6 @@ export class Connection implements Session {
 		handle?: Auth.Handle;
 		/** Uni streams that arrived before the peer's SETUP, type unread. */
 		early?: Reader[];
-		/** What our own SETUP offered; every extension when omitted. */
-		extensions?: { solicit: boolean };
 		/** The implementation the peer's SETUP advertised, read before the session starts. */
 		peerImplementation?: string;
 	}) {
@@ -208,7 +208,7 @@ export class Connection implements Session {
 			auth: this.#auth,
 		});
 		this.#solicit = solicit;
-		this.#declaredSolicit = extensions?.solicit ?? true;
+		this.#declaredSolicit = declaredSolicit;
 		this.#cluster = cluster;
 		this.#subscriber = new Subscriber({
 			maxAge,
@@ -407,7 +407,7 @@ export class Connection implements Session {
 				const msg = await this.#request(stream, "publish_namespace", decoded);
 				if (!msg) break;
 
-				// Unless we declined it, we declare that advertisements to us must be
+				// Unless a test declined it, we declare that advertisements to us must be
 				// solicited (MoQ Solicit), and writing the option at all proves the peer
 				// implements the extension, whichever value it chose. It also cannot have
 				// advertised before reading our SETUP, since our SETUP is what says whether
