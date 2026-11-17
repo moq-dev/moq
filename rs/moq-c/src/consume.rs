@@ -788,7 +788,7 @@ impl Consume {
 	///
 	/// No catalog lookup or container parsing. This is the moq-net primitive for
 	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
-	/// in sequence order. Frames must be released with [`Self::raw_frame_close`].
+	/// in start order. Frames must be released with [`Self::raw_frame_close`].
 	pub fn raw_track(
 		&mut self,
 		broadcast: Id,
@@ -866,7 +866,7 @@ impl Consume {
 		mut track: moq_net::track::Ordered,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// Deliver every frame in sequence order, reading all frames within each
+		// Deliver every frame in start order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
 		// "raw track contents" model: the consumer sees exactly what the
 		// producer wrote, regardless of how it was grouped.
@@ -1468,8 +1468,8 @@ mod read_tests {
 			format(),
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
-		let write = |sequence, us, payload: bytes::Bytes| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+		let write = |start, us, payload: bytes::Bytes| {
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
 			format()
 				.write(
 					&mut group,
@@ -1605,11 +1605,8 @@ mod tests {
 			}
 		}
 
-		fn write(&mut self, sequence: u64, micros: u64) {
-			let mut group = self
-				.track
-				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap();
+		fn write(&mut self, start: u64, micros: u64) {
+			let mut group = self.track.create_group(moq_net::group::Info { start }).unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),

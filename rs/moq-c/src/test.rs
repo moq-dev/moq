@@ -3882,7 +3882,7 @@ fn double_close_all_resource_types() {
 
 /// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
 /// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
-/// what a live publisher does, and `_seek` does the same with a chosen sequence number.
+/// what a live publisher does, and `_seek` does the same with a chosen start.
 #[test]
 fn media_cut_bounds_audio_groups() {
 	let origin = id(moq_origin_create());
@@ -4865,7 +4865,7 @@ fn track_request_accepted_after_the_broadcast_closes_is_refused() {
 fn fetch_group(
 	broadcast: u32,
 	name: &str,
-	sequence: u64,
+	start: u64,
 	priority: i8,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -4879,7 +4879,7 @@ fn fetch_group(
 		let res = async {
 			let track = consumer.track(&name)?;
 			let options = moq_net::group::Fetch::default().with_priority(priority);
-			let mut group = track.fetch_group(sequence, options).await?;
+			let mut group = track.fetch_group(start, options).await?;
 			let index = group.index();
 			let frame = group.read_frame().await?.expect("expected a fetched frame");
 			Ok((index, frame.payload.to_vec()))
@@ -4903,13 +4903,13 @@ fn track_dynamic_serves_a_fetch_miss() {
 
 	let fetch = fetch_group(broadcast, "data", 5, 11);
 	let request = id(group_cb.recv());
-	let mut sequence = 0u64;
+	let mut start = 0u64;
 	let mut priority = 0i8;
 	let mut frame_start = 1u64;
-	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
+	assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
 	assert_eq!(unsafe { moq_group_request_frame_start(request, &mut frame_start) }, 0);
-	assert_eq!(sequence, 5);
+	assert_eq!(start, 5);
 	assert_eq!(priority, 11);
 	assert_eq!(frame_start, 0);
 
@@ -4984,15 +4984,15 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		reader
 	};
 	let first = id(group_cb.recv_reading(&mut reader));
-	let mut sequence = 0u64;
-	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
-	assert_eq!(sequence, 7);
+	let mut start = 0u64;
+	assert_eq!(unsafe { moq_group_request_start(first, &mut start) }, 0);
+	assert_eq!(start, 7);
 
 	// Reading only 8, so the fill owes nothing once 8 is let go.
 	reader.update(ascending(8, Some(8))).unwrap();
 	let next = id(group_cb.recv_reading(&mut reader));
-	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
-	assert_eq!(sequence, 8, "group 7, which nobody reads, held the fill back");
+	assert_eq!(unsafe { moq_group_request_start(next, &mut start) }, 0);
+	assert_eq!(start, 8, "group 7, which nobody reads, held the fill back");
 	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
 
 	assert_eq!(moq_group_request_free(next), 0);
@@ -5041,15 +5041,15 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	};
 	let waiter = kio::Waiter::noop();
 
-	let mut sequence = 0u64;
+	let mut start = 0u64;
 	for reject in [
 		|request| moq_group_request_abort(request, 9),
 		|request| moq_group_request_free(request),
 	] {
 		let mut reader = subscribe();
 		let request = id(group_cb.recv_reading(&mut reader));
-		assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
-		assert_eq!(sequence, 6);
+		assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
+		assert_eq!(start, 6);
 		assert_eq!(reject(request), 0);
 	}
 
@@ -5090,9 +5090,9 @@ fn track_request_dynamic_survives_accept() {
 	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
 
 	let group_request = id(group_cb.recv());
-	let mut sequence = 0u64;
-	assert_eq!(unsafe { moq_group_request_sequence(group_request, &mut sequence) }, 0);
-	assert_eq!(sequence, 9);
+	let mut start = 0u64;
+	assert_eq!(unsafe { moq_group_request_start(group_request, &mut start) }, 0);
+	assert_eq!(start, 9);
 	let group = id(moq_group_request_accept(group_request));
 	let payload = b"archive";
 	assert_eq!(
