@@ -101,8 +101,9 @@ less than 4 does; 6 moves to 3, 4 turns cold for 3, and 6 moves back. Each
 fence covered one shape of a relay's own demand coming back as a price, as
 the old route rule's fixes did; refusing every offer whose path crosses the
 taker's below the publisher's relay unsettled other arms instead. Under the
-recommendation the reflection costs at most one wrong choice per event, never
-a loop.
+recommendation no price moves a pull, so the reflection can make a choice
+wrong but cannot make one. Whether the choices a lost or failed pull sets
+off can repeat is not yet shown, as below.
 
 Also rejected:
 
@@ -176,7 +177,7 @@ upstream uses.
 
 | part | on the wire | relay state | bounded by | without it |
 |---|---|---|---|---|
-| advert | offer, path, and mark on the announce stream, in order with the route messages, and its withdrawal | one heard per neighbour per demanded Instance | neighbours; the path by the hop limit | path joins: drones in turn 5 uplinks against 1, a ring 48 against 8, tiers 1191 against 1095 |
+| advert | offer, path, and mark on the announce stream, in order with the route messages, and its withdrawal | one heard per neighbour per Instance the relay has a route for | neighbours; the path by the hop limit | path joins: drones in turn 5 uplinks against 1, a ring 48 against 8, tiers 1191 against 1095 |
 | the route layer's mark on adverts | one bit on the advert, the answer, and the query's answer, as a route's offer carries | the bit with each heard advert and live pull | one per offer | an edge carries a copy between its cores, which no route would: 51 readers in 400 churned regions fed that way under the pick, and 1.05 to 1.55 warm messages per one-viewer reader change on an unpeered CDN against 1.0 |
 | offer on the subscribe answer | a cost, path, and mark on the answer, and an update on each change; none when the parent lost its upstream | one per pull | one per subscription | nothing prices a query answer or a new route against the pull, and a lost parent cannot say so |
 | path in the offer | a list on the advert, the answer, and the query's answer | as the offer | the hop limit | 2 of 6,000 churned meshes unsettled (random 433, drones 1783), longest cycle 109 deliveries against 27: a pull cycle formed on stale adverts cannot be seen |

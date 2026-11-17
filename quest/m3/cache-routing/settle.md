@@ -99,8 +99,7 @@ models there are laid out, with its nightly lane and skill:
   order removed, must fail it.
 
 This takes over the model check [select](/quest/m3/cache-routing/select.md)
-asked of the port; move that requirement here and leave select the port of
-the model's rule.
+had asked of the port; select now ports the rule this model checks.
 
 Report in the PR:
 

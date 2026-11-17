@@ -1356,12 +1356,12 @@ fn benchmark_warmth_churn() {
 				out.settle,
 				out.tree,
 				out.cheapest,
-				out.first.map_or("0".into(), |first| format!(
-					"{}: {}",
-					out.failed,
-					first.replace(',', ";")
-				)),
+				out.failed,
 			);
+			// The first failure's dump spans lines, so it stays out of the row.
+			if let Some(first) = &out.first {
+				eprintln!("{name},{}: {first}", arm.name());
+			}
 		}
 	}
 }
