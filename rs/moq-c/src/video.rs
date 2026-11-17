@@ -739,7 +739,6 @@ impl VideoEncoder {
 		retuned
 	}
 
-	/// Drain and finish the encoder behind handle `id`.
 	/// End the track with `err` unless a reader holds it, handing the encoder back unchanged when
 	/// one does. Closed, the encoder and the rate follower go with it.
 	#[expect(
@@ -757,6 +756,7 @@ impl VideoEncoder {
 		}
 	}
 
+	/// Drain and finish the encoder behind handle `id`.
 	fn publish_finish(self, id: Id) -> Result<(), Error> {
 		let VideoEncoder {
 			encoder,
