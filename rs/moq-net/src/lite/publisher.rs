@@ -3322,7 +3322,7 @@ mod test {
 			group
 				.write_frame(Timestamp::from_millis(second * 1000).unwrap(), b"x".to_vec())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		// What run_subscribe hands the model for a peer that sent no budget at all.
@@ -3382,7 +3382,7 @@ mod test {
 		let write = |producer: &mut track::Producer, key: u64| {
 			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 
 		// Group 7 arrives first: run_track resolves the start there and raises
@@ -3419,7 +3419,7 @@ mod test {
 		let write = |producer: &mut track::Producer, key: u64| {
 			let mut group = producer.create_group(crate::group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"x".to_vec()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 
 		write(&mut producer, 7);
@@ -3444,9 +3444,9 @@ mod test {
 		producer
 			.create_group(group::Info { start: 5 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
-		producer.finish_at(track::Position::group(7), None).unwrap();
+		producer.finish_at(track::Position::group(7)).unwrap();
 
 		// Group 5 is delivered first.
 		match recv_next(&mut subscriber, true).await.unwrap() {
@@ -3466,7 +3466,7 @@ mod test {
 		producer
 			.create_group(group::Info { start: 6 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
 			Recv::Group(group) => assert_eq!(group.start, 6),
@@ -3492,9 +3492,7 @@ mod test {
 				true => subscriber.with_range(..3),
 				false => subscriber,
 			};
-			producer
-				.finish_at(track::Position::group(7), Some(Error::App(7)))
-				.unwrap();
+			producer.end_at(track::Position::group(7), Some(Error::App(7))).unwrap();
 			let next = |subscriber: &mut track::Subscriber| {
 				kio::wait(|waiter| poll_recv_next(subscriber, Some(ALL), true, end_error, waiter)).now_or_never()
 			};
@@ -3524,7 +3522,7 @@ mod test {
 		producer
 			.create_group(group::Info { start: 2 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
 			Recv::Group(group) => assert_eq!(group.start, 2),
@@ -3535,7 +3533,7 @@ mod test {
 		producer
 			.create_group(group::Info { start: 1 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		match recv_next(&mut subscriber, false).now_or_never() {
 			Some(Ok(Recv::Group(group))) => assert_eq!(group.start, 1),
@@ -3545,7 +3543,7 @@ mod test {
 
 		// Staleness is the max delay window's job, not arrival order's: the track
 		// still finishes normally afterward.
-		producer.finish_at(track::Position::group(3), None).unwrap();
+		producer.finish_at(track::Position::group(3)).unwrap();
 		match recv_next(&mut subscriber, false).await.unwrap() {
 			Recv::Finished => {}
 			_ => panic!("expected finished"),
@@ -6831,8 +6829,8 @@ mod serve_group_test {
 			"video",
 			crate::track::Info::timed(),
 		);
-		let four = track.append_group(4).unwrap();
-		let seven = track.append_group(7).unwrap();
+		let four = track.append_group(Timestamp::from_millis(4).unwrap()).unwrap();
+		let seven = track.append_group(Timestamp::from_millis(7).unwrap()).unwrap();
 		assert!(position_group(four.consume(), &legacy.frames).is_none());
 		assert!(position_group(seven.consume(), &legacy.frames).is_some());
 	}
@@ -6898,7 +6896,7 @@ mod serve_group_test {
 		for i in 0..4u8 {
 			group.write_frame(group.key_time(), vec![i]).unwrap();
 		}
-		let group = group.close().unwrap();
+		let group = group.finish().unwrap();
 		let ending = |group, frame| Frames {
 			last: Some((group, frame)),
 			..Frames::default()
@@ -7020,7 +7018,7 @@ mod serve_group_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
-		old.close().unwrap();
+		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7034,7 +7032,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7085,11 +7083,11 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			let mut subscriber = track.subscribe(None);
-			let mut group = track.append_group(0).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 			for _ in 0..FRAMES {
 				group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			let before = billed();
 			let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
 			let consumer = subscriber
@@ -7160,7 +7158,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
 		let consumer = subscriber
@@ -7247,7 +7245,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7306,7 +7304,7 @@ mod serve_group_test {
 		*open = false;
 		drop(open);
 		frame.write(b"b".as_slice()).unwrap();
-		frame.finish().unwrap().close().unwrap();
+		frame.finish().unwrap().finish().unwrap();
 		assert!(
 			futures::poll!(serve.as_mut()).is_pending(),
 			"the final byte is transport-blocked"
@@ -7316,7 +7314,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7353,7 +7351,7 @@ mod serve_group_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
-		old.close().unwrap();
+		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7367,7 +7365,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 	}
@@ -7608,7 +7606,7 @@ mod serve_group_test {
 			.write_frame(Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
 		let consumer = group.consume();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		subscription.serve_group(0, 0, handle, consumer).await.unwrap();
@@ -7656,7 +7654,7 @@ mod serve_group_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
-		old.close().unwrap();
+		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
@@ -7668,7 +7666,7 @@ mod serve_group_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(futures::poll!(serve.as_mut()), Poll::Ready(Err(Error::Old))));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -7705,7 +7703,7 @@ mod serve_group_test {
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"hello".as_slice()).unwrap();
 		let consumer = group.consume();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let handle = subscription.priority.insert(Priority::new(0, 0, 0));
 		let queue = subscription.priority.clone();
@@ -7808,7 +7806,7 @@ mod serve_group_test {
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), &b"more"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let update = |wanted_group| lite::SubscribeUpdate {
 			wanted_group,
 			priority: 0,
@@ -7826,7 +7824,7 @@ mod serve_group_test {
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		run.replace(update(Some(1)));
 		assert_eq!(track.demand().wanted(), Some(1), "answered request stays answered");
 		run.replace(update(Some(2)));
@@ -7838,7 +7836,7 @@ mod serve_group_test {
 		group
 			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 
 	/// A datagram sender for subscription 0 on `session`, stamping in milliseconds.
@@ -8021,7 +8019,7 @@ mod serve_group_test {
 				.write_frame(Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut tasks: kio::Tasks<Task> = kio::Tasks::new();
 		let turns = Arc::new(AtomicU64::new(0));
@@ -8988,7 +8986,7 @@ mod serve_group_test {
 			});
 		}
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		track.finish_at(track::Position::group(3), None).unwrap();
+		track.finish_at(track::Position::group(3)).unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert_eq!(
 			drop_updates(&mut writer, &log, Version::Lite07).await,
@@ -9088,7 +9086,7 @@ mod serve_group_test {
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			{
 				let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
-				track.finish_at(track::Position::group(4), None).unwrap();
+				track.finish_at(track::Position::group(4)).unwrap();
 				write_group(&mut track, 0, 0);
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				write_group(&mut track, 2, 2);
@@ -9121,7 +9119,7 @@ mod serve_group_test {
 			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
 			assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)], "{version:?}");
 
-			track.finish_at(track::Position::group(2), None).unwrap();
+			track.finish_at(track::Position::group(2)).unwrap();
 			drop(track);
 			let Poll::Ready(result) = run.poll(&mut writer, &kio::Waiter::noop()) else {
 				panic!("run did not finish");
@@ -9153,7 +9151,7 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 
 		write_group(&mut track, 2, 2);
-		track.finish_at(track::Position::group(3), None).unwrap();
+		track.finish_at(track::Position::group(3)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -9281,7 +9279,7 @@ mod serve_group_test {
 		// before this run looks.
 		track.drop_groups(1..2, crate::StreamError::NotFound);
 		write_group(&mut track, 1, 1);
-		track.finish_at(track::Position::group(2), None).unwrap();
+		track.finish_at(track::Position::group(2)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, []);
@@ -9312,7 +9310,7 @@ mod serve_group_test {
 
 		write_group(&mut track, 1, 1);
 		write_group(&mut track, 2, 2);
-		track.finish_at(track::Position::group(3), None).unwrap();
+		track.finish_at(track::Position::group(3)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
@@ -9669,7 +9667,7 @@ mod serve_group_test {
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 2, 2);
 		write_group(&mut track, 5, 5);
-		track.finish_at(track::Position::group(7), None).unwrap();
+		track.finish_at(track::Position::group(7)).unwrap();
 		// Serve group 5, which resolves SUBSCRIBE_START.
 		while run.start.resolved().is_none() {
 			let step = run.poll_step(&mut writer, &kio::Waiter::noop());
@@ -9736,7 +9734,7 @@ mod serve_group_test {
 			write_group(&mut track, 4, 4);
 			write_group(&mut track, 2, 2);
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			track.finish_at(track::Position::group(6), None).unwrap();
+			track.finish_at(track::Position::group(6)).unwrap();
 			drop(track);
 			run.await.unwrap();
 		}
@@ -9785,7 +9783,7 @@ mod serve_group_test {
 		kio::clock::sim::advance(Duration::from_millis(900)).await;
 		run.replace(update(2));
 		kio::clock::sim::advance(Duration::from_millis(200)).await;
-		track.finish_at(track::Position::group(6), None).unwrap();
+		track.finish_at(track::Position::group(6)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		// The feed gives up on 2..5 once its grace passes, a miss nothing fills. Group 1 lies
@@ -9830,7 +9828,7 @@ mod serve_group_test {
 		for key in 1..5 {
 			write_group(&mut track, key, key);
 		}
-		track.finish_at(track::Position::group(5), None).unwrap();
+		track.finish_at(track::Position::group(5)).unwrap();
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, []);
@@ -9916,7 +9914,7 @@ mod serve_group_test {
 				sent
 			};
 
-			track.finish_at(track::Position::group(273), None).unwrap();
+			track.finish_at(track::Position::group(273)).unwrap();
 			step(&mut run, &mut writer);
 			kio::wait(|waiter| writer.poll_flush(waiter)).await.unwrap();
 			assert_eq!(
@@ -9997,7 +9995,7 @@ mod serve_group_test {
 			kio::clock::sim::advance(Duration::from_secs(2)).await;
 			write_group(&mut track, 4, 4);
 			assert!(futures::poll!(run.as_mut()).is_pending());
-			track.finish_at(track::Position::group(5), None).unwrap();
+			track.finish_at(track::Position::group(5)).unwrap();
 			drop(track);
 			run.await.unwrap();
 		}
@@ -10213,7 +10211,7 @@ mod serve_group_test {
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
 			.unwrap();
-		headless.close().unwrap();
+		headless.finish().unwrap();
 		write_group(&mut track, 6, 6);
 		relay.settle();
 
@@ -10241,7 +10239,7 @@ mod serve_group_test {
 		headless
 			.write_frame(Timestamp::from_millis(5).unwrap(), b"x".as_slice())
 			.unwrap();
-		headless.close().unwrap();
+		headless.finish().unwrap();
 		write_group(&mut track, 6, 6);
 		relay.settle();
 
@@ -11526,7 +11524,7 @@ mod tests {
 			for &key in keys {
 				let mut group = track.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 		}
 
@@ -11778,7 +11776,7 @@ mod tests {
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(group.key_time(), frame).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
 			panic!("the subscription is not running");
@@ -11792,7 +11790,7 @@ mod tests {
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(group.key_time(), frame).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		session.push(&update(Some(2), 5).encode_bytes(version).unwrap());
 		assert!(!drive(&mut serve).await, "the subscription ended");
 		let RequestState::Serve(SubscribeServe::Run(run)) = &serve.state else {
@@ -11946,7 +11944,7 @@ mod tests {
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				appended += 1;
 			}
 			if appended == GROUPS {
@@ -12154,11 +12152,11 @@ mod tests {
 			.create_track("video", track::Info::timed())
 			.unwrap();
 		broadcast.announce().unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(crate::Timestamp::from_millis(0).unwrap()).unwrap();
 		for _ in 0..FRAMES {
 			group.write_frame(crate::Timestamp::ZERO, b"x".to_vec()).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default()).unwrap();
@@ -12291,7 +12289,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(ms).unwrap(), b"x".to_vec())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		assert!(drive(&mut serve).await, "the budget ends the response");
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Old.to_code()]);
@@ -12747,7 +12745,7 @@ mod tests {
 		let mut bench = PausedBench::new(1);
 		let run = &mut bench.coverage.run;
 		let empty = bench.coverage.track.create_group(group::Info { start: 200 }).unwrap();
-		let empty = empty.close().unwrap();
+		let empty = empty.finish().unwrap();
 		run.pause(Paused {
 			group: empty.consume(),
 			frame_start: 0,

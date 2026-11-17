@@ -873,7 +873,7 @@ mod tests {
 				.map(|(index, ms)| frame(ms, index == 0))
 				.collect();
 			format.write(&mut group, &frames).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		write(10, vec![100, 80, 90, 110]);
 		write(11, vec![200, 180, 190, 210]);
@@ -1307,7 +1307,7 @@ mod tests {
 				.create_group(moq_net::group::Info { start: sequence })
 				.unwrap();
 			format().write(&mut group, &[frame(sequence * 100, true)]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let mut shown = Vec::new();
 		// Groups 0 to 4 arrive live. Group 5 is lost, and from 6 on the path holds video 300 ms.

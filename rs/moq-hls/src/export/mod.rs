@@ -1508,7 +1508,7 @@ mod tests {
 		for group in 2..5 {
 			let mut writing = media.create_group(group.into()).unwrap();
 			write_keyframe(&mut writing, group);
-			writing.close().unwrap();
+			writing.finish().unwrap();
 		}
 		until_listed(&rendition, 4).await;
 		let segment = rendition
@@ -1584,7 +1584,7 @@ mod tests {
 		write_keyframe(&mut open, sequence);
 		let mut next = media.create_group((sequence + 1).into()).unwrap();
 		write_keyframe(&mut next, sequence + 1);
-		next.close().unwrap();
+		next.finish().unwrap();
 		(media, open)
 	}
 
@@ -1633,7 +1633,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
@@ -1668,7 +1668,7 @@ mod tests {
 		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
 	}
@@ -1708,7 +1708,7 @@ mod tests {
 		failed(&broken).await;
 		assert!(broadcaster.manifest(None).unwrap().is_none());
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(manifest) = broadcaster.manifest(None).unwrap() {
@@ -1816,7 +1816,7 @@ mod tests {
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 		assert!(!manifest.contains("type=\"static\""), "{manifest}");
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("type=\"static\""), "{manifest}");
 	}
@@ -1844,7 +1844,7 @@ mod tests {
 				.is_err(),
 			"resolved without a listable video"
 		);
-		open.close().unwrap();
+		open.finish().unwrap();
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
 			.expect("video0 is listable once its init is built");
@@ -1872,7 +1872,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
@@ -1890,7 +1890,7 @@ mod tests {
 		for sequence in 0..4 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
@@ -3643,7 +3643,7 @@ mod tests {
 				.write_to(&mut group)
 				.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		/// Write group `sequence` at `pts_ms` with a single keyframe.
@@ -3667,7 +3667,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		/// Write group `sequence` at `2 * sequence` seconds: one GOP per grid line.
@@ -4070,7 +4070,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
 			group.write_frame(frames[0].timestamp, bytes).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		fragment(0, 500, 2_400);
 		fragment(1, 2_500, 4_400);
@@ -4654,7 +4654,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		media.at(cap + 1, 2_000);
 		media.at(cap + 2, 4_000);

@@ -80,7 +80,7 @@ async fn round(version: &str) -> Option<Result<Option<usize>, moq_net::Error>> {
 		let mut next = track.append_next().unwrap();
 		next.write_frame(Timestamp::from_millis(millis).unwrap(), &b"edge"[..])
 			.unwrap();
-		next.close().unwrap();
+		next.finish().unwrap();
 	}
 	let tail = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
