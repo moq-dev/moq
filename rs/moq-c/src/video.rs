@@ -745,6 +745,23 @@ impl VideoEncoder {
 		retuned
 	}
 
+	/// End the track with `err` unless a reader holds it, handing the encoder back unchanged when
+	/// one does. Closed, the encoder and the rate follower go with it.
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the encoder back to keep serving without allocating on an idle check"
+	)]
+	fn abort_unwanted(self, id: Id, err: moq_net::Error) -> Result<(), Self> {
+		let Self { producer, .. } = self;
+		match producer.abort_unwanted(err) {
+			Ok(()) => {
+				self.children.forget(crate::publish::Child::Video(id));
+				Ok(())
+			}
+			Err(producer) => Err(Self { producer, ..self }),
+		}
+	}
+
 	/// Drain and finish the encoder behind handle `id`.
 	fn publish_finish(self, id: Id) -> Result<(), Error> {
 		let VideoEncoder {
@@ -1280,6 +1297,39 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 		// A racing close may have released the id already.
 		let _ = State::lock().video.remove(id);
 		finished
+	})
+}
+
+/// End a video track with an application error code, but only while nobody wants it.
+///
+/// This is how an on-demand publisher ends the track once its [`moq_encode_video_demand`]
+/// watcher reports `MOQ_DEMAND_UNWANTED`: releasing it instead fails a reader that joined in
+/// between. Returns 1 once the track is closed, which releases the handle, the encoder, and its
+/// bandwidth claim like [moq_encode_video_finish] but drops the frames the codec still holds, and
+/// `0` when a reader wants it again, which leaves the handle serving: wait for
+/// `MOQ_DEMAND_UNWANTED` from a new watcher, since one that already reported it misses a reader
+/// that came and went. A negative code is a failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_encode_video_abort_unwanted(producer: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let id = ffi::parse_id(producer)?;
+		let shared = State::lock().video.producer(id)?;
+		let closed = {
+			let mut guard = shared.lock();
+			let encoder = guard.take().ok_or(Error::MediaNotFound)?;
+			match encoder.abort_unwanted(id, moq_net::Error::App(error_code)) {
+				Ok(()) => true,
+				Err(encoder) => {
+					*guard = Some(encoder);
+					false
+				}
+			}
+		};
+		if closed {
+			// A racing close may have released the id already.
+			let _ = State::lock().video.remove(id);
+		}
+		Ok(i32::from(closed))
 	})
 }
 
