@@ -42,6 +42,7 @@ mod path;
 mod rate;
 mod request;
 mod set;
+mod token_id;
 mod wire;
 
 pub mod lease;
@@ -67,3 +68,4 @@ pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 pub use rate::*;
 pub use request::*;
 pub use set::*;
+pub use token_id::*;
