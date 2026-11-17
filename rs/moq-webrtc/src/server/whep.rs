@@ -3,7 +3,6 @@
 //! `POST /<broadcast-path>` accepts a WHEP SDP offer and returns an SDP
 //! answer sourced from the matching MoQ broadcast on the subscribe origin.
 
-use crate::vendor::str0m::Candidate;
 #[cfg(feature = "server")]
 use axum::{
 	Router,
@@ -13,6 +12,7 @@ use axum::{
 	response::{IntoResponse, Response as HttpResponse},
 	routing::post,
 };
+use str0m::Candidate;
 
 use std::time::Duration;
 
@@ -158,7 +158,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		broadcast,
 		offer,
 	} = request;
-	let offer = sdp::parse_offer(offer)?;
+	let (offer, refused) = sdp::parse_offer(offer)?;
 
 	let source = resolve(subscriber, broadcast).await?;
 	let codecs = source.catalog_codecs();
@@ -170,7 +170,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	// CodecConfig before accept_offer so the answer intersects the peer's offer
 	// with what the catalog actually has, instead of agreeing to a codec we can't
 	// fulfil; set the mux's known ICE credentials on the same config.
-	let mux = server.mux().await?;
+	let mux = server.mux();
 	let (creds, inbound, registration) = mux.register();
 	let mut rtc = session::rtc_config_with_codecs(&codecs)?
 		.set_local_ice_credentials(creds)
@@ -191,7 +191,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 
 	Ok(Response {
 		resource_id: resource_id.clone(),
-		answer: sdp::render_answer(&answer),
+		answer: sdp::render_answer(&answer, &refused),
 		session: crate::server::AcceptedSession {
 			server: server.clone(),
 			resource_id,
@@ -343,7 +343,10 @@ mod tests {
 			.expect("create broadcast");
 		let (sub_origin, _connection, accept) = lazy_client(pub_origin).await;
 
-		let _router = super::router(crate::server::Server::new(Default::default()), sub_origin.consume());
+		let server = crate::server::Server::bind("127.0.0.1:0".parse().unwrap(), Default::default())
+			.await
+			.unwrap();
+		let _router = super::router(server, sub_origin.consume());
 		let missing = kio::clock::timeout(TIMEOUT, sub_origin.consume().request("missing", None))
 			.await
 			.expect("sync timed out");

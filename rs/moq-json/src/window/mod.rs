@@ -312,14 +312,14 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		track
 	}
 
@@ -677,7 +677,7 @@ mod test {
 			let first = encoder.push(&rec(0)).unwrap();
 			let payload = first.payload.clone();
 			first.commit();
-			let mut lost = track.append_group(0).unwrap();
+			let mut lost = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 			lost.write_frame(moq_net::Timestamp::ZERO, payload).unwrap();
 			assert_eq!(
 				drain(&mut consumer),
@@ -691,11 +691,11 @@ mod test {
 			let second = encoder.push(&rec(1)).unwrap();
 			let payload = second.payload.clone();
 			second.commit();
-			let mut checkpoint = track.append_group(1).unwrap();
+			let mut checkpoint = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 			checkpoint
 				.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), payload)
 				.unwrap();
-			checkpoint.close().unwrap();
+			checkpoint.finish().unwrap();
 			let _track = track.finish().unwrap();
 
 			assert_eq!(
@@ -877,8 +877,13 @@ mod test {
 		assert!(producer.window().is_empty());
 
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
-			panic!("the rejected group's header was published");
+		let mut group = loop {
+			let Poll::Ready(Ok(Some(item))) = subscriber.poll_next_group(&waiter) else {
+				panic!("the rejected group's header was published");
+			};
+			if let Some(group) = item.group() {
+				break group;
+			}
 		};
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 	}
@@ -938,7 +943,7 @@ mod test {
 		let _finished = producer.clone().finish().unwrap();
 
 		let waiter = kio::Waiter::noop();
-		let Poll::Ready(Ok(Some(mut group))) = subscriber.poll_next_group(&waiter) else {
+		let Poll::Ready(Ok(Some(moq_net::track::Item::Group(mut group)))) = subscriber.poll_next_group(&waiter) else {
 			panic!("expected the window group");
 		};
 		while let Poll::Ready(Ok(Some(_))) = group.poll_read_frame(&waiter) {}

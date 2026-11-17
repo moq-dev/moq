@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use super::Encoded;
 use super::backend::{self, Backend};
-use crate::{Color, Error, Frame, FrameRate, Size};
+use crate::{Color, Device, Error, Frame, FrameRate, Size};
 
 /// Output video codec. `#[non_exhaustive]` so new codecs can be added without
 /// breaking external `match`es.
@@ -95,7 +95,7 @@ pub struct Applied {
 	/// not confirm them (a refused or advisory low-latency setting).
 	pub preset: Option<Preset>,
 	/// The backend controls that took effect, for display, e.g.
-	/// `"p1, low-latency tuning, no B-frames, CBR, 1-frame VBV"`. Not a parse target.
+	/// `"p1, low-latency tuning, no B-frames, CQ 30 under the cap, 3-frame VBV"`. Not a parse target.
 	pub controls: String,
 	/// Whether [`Encoder::cut`] can force a group boundary; one that cannot (a V4L2
 	/// driver without the force-keyframe control) refuses every cut.
@@ -213,16 +213,15 @@ pub struct Config {
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
 	#[cfg(target_os = "linux")]
 	pub input: Option<crate::frame::vulkan::Device>,
-	/// The VA-API render node, such as `/dev/dri/renderD129`. `None` picks the
-	/// first that encodes, decodes, and scales, so a DMA-BUF moves between them
-	/// without a copy. A named node is used even when it fails to open.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	pub vaapi: Option<std::path::PathBuf>,
-	/// The V4L2 M2M encoder node, such as `/dev/video11`. `None` searches every
-	/// node for one that encodes H.264, which a driver whose format enumeration
-	/// is wrong can defeat.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	pub v4l2: Option<std::path::PathBuf>,
+	/// The hardware the encoder opens. [`Device::Auto`] (the default) picks
+	/// one: VA-API the first render node that encodes, decodes, and scales, so a
+	/// DMA-BUF moves between them without a copy; NVENC the first CUDA device, or
+	/// the one behind [`input`](Self::input); V4L2 the first node that encodes
+	/// H.264, which a driver whose format enumeration is wrong can defeat.
+	///
+	/// A render node an NVIDIA driver runs that is not the device behind
+	/// `input` is refused.
+	pub device: Device,
 }
 
 impl Config {
@@ -242,10 +241,7 @@ impl Config {
 			resize: None,
 			#[cfg(target_os = "linux")]
 			input: None,
-			#[cfg(all(target_os = "linux", feature = "vaapi"))]
-			vaapi: None,
-			#[cfg(all(target_os = "linux", feature = "v4l2"))]
-			v4l2: None,
+			device: Device::Auto,
 		}
 	}
 
@@ -349,14 +345,12 @@ impl Config {
 		self.color.unwrap_or_else(|| Color::infer(self.size()))
 	}
 
-	/// The resize options, scaling on this encoder's VA-API node unless they name one.
+	/// The resize options, scaling on this encoder's device unless they name one.
 	fn resolved_resize(&self) -> Option<crate::resize::Config> {
-		let resize = self.resize.clone()?;
-		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		let resize = crate::resize::Config {
-			vaapi: resize.vaapi.or_else(|| self.vaapi.clone()),
-			..resize
-		};
+		let mut resize = self.resize.clone()?;
+		if resize.device == Device::Auto {
+			resize.device = self.device.clone();
+		}
 		Some(resize)
 	}
 

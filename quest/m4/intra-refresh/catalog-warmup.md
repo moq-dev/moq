@@ -22,13 +22,15 @@ rendition. It returns here, with the producers this epic adds.
 - Restore from history, not from scratch: #8857 is the design (one
   decoder, the container consumer's warmup reach, `Recovery`'s hold, the
   recovery-point SEI Chromium needs), and the PR that removed it before the
-  cut is its inverse. Read both, then re-apply by hand against the tree as
+  cut, [moq-dev/moq#8960](https://github.com/moq-dev/moq/pull/8960), is its
+  inverse. Read both, then re-apply by hand against the tree as
   it is.
 - The field comes back in the hang draft's next version, with the group
   rule that lets a video group start at a picture from which decoding
   converges. It raises the entry's `version`, not the root's (the
-  per-entry rule hang-04 ships, planned as `quest/m2/hang04/entry-version.md`),
-  so a player that cannot play it keeps the other renditions.
+  per-entry rule hang-04 ships, `Entry::version` in `rs/hang` and
+  `videoVersion` in `js/hang`), so a player that cannot play it keeps the
+  other renditions.
 - Audio `warmup` never left; reuse `moq_mux::container::Playout` and the
   JS consumer's `warmup` reach as they are.
 - The draft says which engines play it. The Firefox and Safari check in

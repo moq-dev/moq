@@ -1,5 +1,160 @@
 # Release performance comparison
 
+## Relay memory (2026-11-16)
+
+The 2026-11-05 pairing below recorded relay RSS but never reported it: `chat`,
+with 2,001 connections, used 17% more on `main`. The cause was the relay's own
+per-connection task, and [moq-dev/moq#8943](https://github.com/moq-dev/moq/pull/8943)
+fixed it; `main` now uses less memory than `release` in every workload. The
+comparison reports `rss_bytes` beside CPU from now on.
+
+Five alternating rounds of `just bench-relay origin/release quic` on
+`fedora` (32 CPUs, shared: the 1-minute load read 13 to 26 at each
+snapshot), `release` at
+[ca3b801a6c](https://github.com/moq-dev/moq/commit/ca3b801a6c), `main` at
+[6488ce6b87](https://github.com/moq-dev/moq/commit/6488ce6b87), median peak
+relay RSS with its range:
+
+| Workload | release | main | Change | main with the fix | Change |
+| --- | --- | --- | --- | --- | --- |
+| `chat` | 427.0 MiB | 495.6 MiB | +16.1% (+14.1 to +29.4) | 392.1 MiB | -7.2% (-13.4 to -6.8) |
+| `fanout` | 37.2 MiB | 41.1 MiB | +10.3% (+5.5 to +23.5) | 37.4 MiB | -2.7% (-5.2 to +4.0) |
+| `video` | 30.5 MiB | 29.1 MiB | -3.5% (-14.1 to +0.7) | 27.4 MiB | -6.0% (-13.2 to -0.4) |
+
+Each fix column is its own five-round run against `release`. `chat` RSS
+before the fix was +35 KiB per connection, as the audit found (+37).
+
+A jemalloc heap profile of `chat` on both sides
+(`just bench-profile heap chat 8 tokio-workers origin/release`) attributes
+the retained heap at the end of the steady window, by the innermost crate
+that allocated it, in KiB per connection (main minus release):
+
+| Owner | main | main with the fix |
+| --- | --- | --- |
+| relay (`moq-relay`'s per-connection tasks) | +65.3 | -13.1 |
+| origin (`moq_net::model`) | +12.4 | +9.7 |
+| session (`moq_net` protocol, `kio`) | -1.3 | +1.9 |
+| transport (QUIC, TLS, the Tokio driver) | -38.3 | -38.6 |
+| total | +38.8 | -39.2 |
+
+- **Relay, fixed.** `Connection::run` passed its startup future by value
+  through `Lifecycle::start`, `Lifecycle::run` and `Lifecycle::isolate`, and
+  an async fn keeps its arguments for its whole life. So the connection's
+  task held 44.8 KiB (startup's largest state, twice) and a box beside it
+  held 20.4 KiB more, until the connection closed; serving needs 6.2 KiB.
+  Boxing the startup future before the task is built frees it once the
+  session starts, and building the supervision with combinators instead of
+  an async block drops its second copy of the session's state. The task is
+  now 1.4 KiB plus the 6.2 KiB supervision (`-Zprint-type-sizes`).
+  Holding startup's state for the session's life is as old as the task
+  (`release`'s holds about 27 KiB);
+  [moq-dev/moq#5761](https://github.com/moq-dev/moq/pull/5761) moved its box
+  behind by-value arguments, which put a second copy in the task itself.
+- **Transport, a saving.** The in-tree QUIC stack holds about 38 KiB less
+  per connection than `noq` did.
+- **Origin, accepted.** About 10 KiB per connection, one reader each in
+  `chat`, spread across bookkeeping `release` lacks. The largest, 4 KiB, is the record of what a reader was
+  told about each group ([moq-dev/moq#8440](https://github.com/moq-dev/moq/pull/8440));
+  the one-delivery record ([moq-dev/moq#5446](https://github.com/moq-dev/moq/pull/5446)),
+  demand preferences ([moq-dev/moq#5670](https://github.com/moq-dev/moq/pull/5670))
+  and routes are each about 1 KiB. Both records are billed to the cache
+  pool, so a peer cannot grow them past it.
+
+The same pairing measured `chat` and `fanout` relay CPU per delivered frame
++43% and +35% on `main` (every pair slower), the opposite of the 2026-11-05
+result; [Relay CPU](#relay-cpu-2026-11-16) explains it. The run directories
+stayed in the measuring checkout's disposable `.tmp/bench`; the numbers above
+are the record.
+
+## Relay CPU (2026-11-16)
+
+`main`'s extra relay CPU in `chat` and `fanout` is work under a track's
+shared state lock, and contention for it. Every subscriber of a track wakes on
+each group at once, and on each pass over the track the relay's publisher
+forwards drops ([moq-dev/moq#5691](https://github.com/moq-dev/moq/pull/5691))
+and judges misses for fills
+([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)) for that
+subscriber, taking the track lock several times. `release` has neither, so its
+readers rarely meet on the lock. The contention grows with the workers that
+meet there, so the gap depends on the host: the 2026-11-05 pairing ran on 8
+pinned CPUs, this one on 32.
+
+[moq-dev/moq#8867](https://github.com/moq-dev/moq/pull/8867) added one more
+lock per drop poll, reading the revision that says whether a stale run
+received from upstream may be gone even when the reader held none;
+[moq-dev/moq#8979](https://github.com/moq-dev/moq/pull/8979) skips that read
+when nothing was received. The rest is accepted for the cut as the cost of drop
+forwarding and fills; [Track lock passes](/quest/m3/relay-track-lock.md)
+plans cutting it.
+
+All runs on `fedora` (32 CPUs, shared: one-minute load 24 to 66), `release`
+at [ca3b801a6c](https://github.com/moq-dev/moq/commit/ca3b801a6c), `main`
+at [ba9c4c6533](https://github.com/moq-dev/moq/commit/ba9c4c6533). By owner,
+in instructions per delivered frame
+(`just bench-profile instructions <workload> 8 tokio-workers`, relay on CPUs
+0-7, three alternating rounds; `chat` at load 27 to 35, `fanout` 25 to 60):
+
+| Owner | `chat` release | `chat` main | `fanout` release | `fanout` main |
+| --- | ---: | ---: | ---: | ---: |
+| transport (QUIC, TLS, sockets) | 79.1k | 49.8k | 77.9k | 51.0k |
+| session (`moq_net` protocol, `kio`) | 57.7k | 49.5k | 64.8k | 66.1k |
+| origin (`moq_net::model`) | 26.3k | 88.5k | 29.2k | 102.4k |
+| total | 163.2k | 187.8k (+15%) | 171.9k | 219.4k (+28%) |
+
+- **The lock.** In `chat`, futex syscalls rose from 2.4k to 19.7k
+  instructions per frame and user-side lock and unlock from 32.4k to 39.6k,
+  the whole net growth; cycles per frame rose 25%. In `fanout`, futex rose
+  from 12.6k to 33.8k and lock and unlock from 35.0k to 46.7k, most of it.
+  On `main`, nearly every contended acquire is the track's (`TrackState`),
+  from the drop poll, its miss judgement, the drift edge, and the read path.
+- **The passes.** Each subscriber's track side runs three passes per group
+  (its arrival, the pass after serving it, its finish), forwarding drops five
+  times and judging misses six (callgrind, `just bench-fanout`, `session` at
+  512 subscribers). The forward-drop path is 56k instructions per frame in
+  `chat` and 65k in `fanout`, 30% of `main`'s relay in each.
+- **Workers.** Futex instructions per frame in `chat` on `main` were 3.2k at
+  2 workers and 8.7k at 8 in one run (load 31 to 66), against 2.3k for
+  `release` at both.
+
+With the fix, alternating rounds of the same count:
+
+| | release | main | main with the fix |
+| --- | ---: | ---: | ---: |
+| `chat` instructions per frame (4 rounds, load 24 to 53) | 161.2k | 164.8k | 164.0k |
+| `chat` futex instructions per frame | 2.3k | 8.5k | 4.7k |
+| `fanout` instructions per frame (3 rounds, load 25 to 60) | 170.7k | 219.7k | 218.7k |
+| `fanout` futex instructions per frame | 12.6k | 33.8k | 32.9k |
+
+The fix halves `chat`'s futex cost and barely moves `fanout`'s, whose 64
+subscribers per track contend in the passes themselves.
+
+Median relay CPU per delivered frame from `just bench-relay <base> quic`
+(the default shared runtime), with the range of paired changes:
+
+| Workload | main to the fix (5 rounds) | release to the fix (5 rounds) |
+| --- | --- | --- |
+| `chat` | -11.5% (-31.8 to +1.6) | +8.7% (-5.3 to +25.3) |
+| `fanout` | +4.1% (-10.1 to +18.5) | +18.8% (-6.8 to +38.2) |
+| `video` | 0.0% (-14.3 to +17.3) | -15.2% (-36.3 to -12.5) |
+
+Four of five `chat` pairs read the fix lower than `main`; the first column
+also kept the spare chunk of sent packets below, about 0.4% of a `chat`
+frame. Against `release`, two of the fix's `chat` rounds delivered below the
+offered 20,000 frames/s in the window; the three at the offered rate read
++8.7%, +22.1%, and +25.3%. The fix lost 0.3% to 1.1% of `chat`'s groups
+over each run's lifetime, all during the startup ramp, and `release` none.
+Earlier runs in the same session saw `main` lose up to 11.9% there, with the
+window still draining the backlog, which read the largest CPU per frame of
+any pair. [Chat startup loss](/quest/m3/chat-startup-loss.md) owns that loss.
+
+The transport lead was measured and not taken. A connection with every packet
+acknowledged before it sends the next frees its 8 KiB chunk of sent packets
+and allocates another per packet
+([moq-dev/moq#6936](https://github.com/moq-dev/moq/pull/6936)). Keeping one
+spare chunk cut that from 803 to 200 instructions per packet (jemalloc),
+about 0.4% of a `chat` frame, but holds 8 KiB on every idle connection (16
+MiB across `chat`'s 2,001), so the memory finding above outweighs it.
+
 ## Final relay pairing (2026-11-05)
 
 The remaining fanout check passes: main uses less relay CPU in all seven

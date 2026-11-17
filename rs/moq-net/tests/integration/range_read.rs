@@ -29,7 +29,7 @@ fn write_group(track: &mut moq_net::track::Producer, key: u64) {
 	for frame in 0..2u64 {
 		group.write_frame(at, payload(key, frame)).unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 fn payload(key: u64, frame: u64) -> Vec<u8> {

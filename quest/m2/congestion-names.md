@@ -83,4 +83,3 @@ none.
 ## Related
 
 - [Realtime uplink congestion control](/quest/m4/quic-realtime.md) - its winner joins this enum under its own name
-- [Open-set selectors in the bindings](/quest/m2/ffi-open-selectors.md) - the rule the binding selector already follows

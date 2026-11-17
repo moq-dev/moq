@@ -663,7 +663,7 @@ mod tests {
 					frame += 1;
 				}
 				assert!(
-					catalog.snapshot().media.join.is_some(),
+					catalog.snapshot().sync.interval.is_some(),
 					"the capture declared its interval"
 				);
 

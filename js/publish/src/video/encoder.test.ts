@@ -1459,7 +1459,7 @@ test("an on-demand rendition declares its join, and a media subscriber starts it
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		subscribers.push(catalog);
 		const first = (await catalog.latest())?.value;
-		expect(first?.media?.join).toEqual({ interval: Catalog.u53(3000) });
+		expect(first?.sync?.interval).toEqual(Catalog.u53(3000));
 		expect(first?.video?.renditions.video).not.toHaveProperty("hls");
 
 		subscribers.push(net.track("video").subscribe());
@@ -1469,7 +1469,7 @@ test("an on-demand rendition declares its join, and a media subscriber starts it
 		// A later join leaves the declared grid alone for this broadcast.
 		config.set({ join: Duration.millis(5000) });
 		await settle();
-		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(3000));
+		expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(3000));
 	} finally {
 		for (const subscriber of subscribers) subscriber.close();
 		encoder.close();
@@ -1483,7 +1483,7 @@ test("the default join is the declared join interval", async () => {
 	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never });
 	try {
 		await settle();
-		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
+		expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(2000));
 	} finally {
 		encoder.close();
 		broadcast.close();
@@ -1507,7 +1507,7 @@ async function liveInterval(changed: Duration): Promise<{ keys: number[]; interv
 			if (ms === 2500) config.set({ join: changed });
 			await recording.send(ms);
 		}
-		return { keys: [...recording.keys], interval: (await readCatalog(broadcast))?.media?.join?.interval };
+		return { keys: [...recording.keys], interval: (await readCatalog(broadcast))?.sync?.interval };
 	} finally {
 		encoder.close();
 		broadcast.close();

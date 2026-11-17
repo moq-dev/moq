@@ -76,7 +76,7 @@ async fn acquisition(version: &str, carries_instance: bool) {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), b"catalog".to_vec())
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let result = pending.await;
 	if carries_instance {
 		let mut subscription = result.expect("the same instance must acquire");

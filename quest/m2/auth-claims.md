@@ -76,10 +76,7 @@ For the PR:
 - Names: recommended to spell claims as the grant already does (`expires`,
   `issued`, `not_before` in Rust, `expires`, `issued`, `notBefore` in JS;
   the wire stays `exp`, `iat`, `nbf`), make `authorize` and `allows` methods
-  or free functions in both, and use `KeySet::{public, find}` in both. This
-  touches the same JS claims transform that
-  [the nested role type](/quest/m2/auth-grants.md) rewrites, so it lands
-  after it.
+  or free functions in both, and use `KeySet::{public, find}` in both.
 - `KeyOperation`: a key file whose `key_ops` lists `encrypt` or `decrypt` is
   refused after the removal, which is what strict key parsing already does
   for an unknown operation. Record it for `MIGRATE.md`. Keep the variants if
@@ -90,7 +87,3 @@ Public API: breaking in `moq-auth` and `@moq/auth` (accessor names, the
 `KeyOperation` variants, `Algorithm` made non-exhaustive); `jti` is
 additive. Token format: new tokens no longer verify on moq-relay 0.14 and
 earlier; a `jti` that is not a bounded string is refused. Wire: none.
-
-## Required
-
-- [A relay refuses a grant it does not fully understand](/quest/m2/auth-grants.md) - the nested role type, which rewrites the claims transform these renames touch

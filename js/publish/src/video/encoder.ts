@@ -56,7 +56,7 @@ export interface Config {
 	/**
 	 * The time between join points: the longest a group runs before the next keyframe. A joining
 	 * subscriber forces one sooner once the group's deltas outweigh the track's refresh ratio. The
-	 * broadcast declares the longest as its catalog's `media.join.interval` when media is first
+	 * broadcast declares the longest as its catalog's `sync.interval` when media is first
 	 * listed, which then bounds every group: a live change past it, including to infinite, is capped
 	 * there until a new network broadcast declares again. Anything but a positive duration refuses
 	 * the rendition. (default: 2000 milliseconds)

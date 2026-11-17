@@ -26,8 +26,8 @@ mod listing;
 // Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 #[cfg(feature = "async")]
 pub(crate) use listing::Owner;
+pub use listing::{Kind, Listed, Lister, Tracks, TracksEvent};
 pub(super) use listing::{ListOnAccept, Unlist};
-pub use listing::{Lister, Tracks, TracksEvent};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -329,17 +329,17 @@ impl Producer {
 			// live same-name entry cannot exist (its presence would have kept
 			// the request from queuing).
 			let _ = state.cache_track(track.weak());
-			let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+			let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
 			return Ok(track.listed(unlist));
 		}
 
 		let track = track::Producer::new(self.info.clone(), name.clone(), info.clone()).with_stats(self.stats.clone());
 		state.insert_track(track.weak())?;
-		let unlist = Unlist::list(&self.state, &mut state.listing, name, &info);
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Track(info));
 		Ok(track.listed(unlist))
 	}
 
-	/// Produce a new datagram track and insert it into the broadcast.
+	/// Produce a new datagram track and insert it into the broadcast, listed until it ends.
 	///
 	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
 	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
@@ -353,24 +353,53 @@ impl Producer {
 		name: impl Into<Arc<str>>,
 		info: datagram::Info,
 	) -> Result<datagram::Producer, Error> {
-		let name = name.into();
+		self.insert_datagrams(name.into(), info, true)
+	}
+
+	/// [`Self::create_datagrams`] for a track no listing ever names, as a session's datagram
+	/// track riding a stream track's subscription, which serves a request rather than the
+	/// broadcast's inventory.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn create_unlisted_datagrams(
+		&self,
+		name: impl Into<Arc<str>>,
+		info: datagram::Info,
+	) -> Result<datagram::Producer, Error> {
+		self.insert_datagrams(name.into(), info, false)
+	}
+
+	fn insert_datagrams(
+		&self,
+		name: Arc<str>,
+		info: datagram::Info,
+		listed: bool,
+	) -> Result<datagram::Producer, Error> {
 		let mut state = self.state.lock();
-		if let Some(live) = state.datagrams.get(name.as_ref()) {
-			// A consumer asked for it before it existed, and no handler took the request yet:
-			// creating the track serves those consumers.
-			let queued = state
-				.datagram_requests
-				.iter()
-				.position(|request| live.same_channel(&request.weak()));
-			let Some(queued) = queued else {
-				return Err(Error::Duplicate);
-			};
-			let request = state.datagram_requests.remove(queued).expect("found above");
-			return Ok(request.with_stats(self.stats.clone()).accept(info));
+		let producer = match state.datagrams.get(name.as_ref()) {
+			Some(live) => {
+				// A consumer asked for it before it existed, and no handler took the request
+				// yet: creating the track serves those consumers.
+				let queued = state
+					.datagram_requests
+					.iter()
+					.position(|request| live.same_channel(&request.weak()));
+				let Some(queued) = queued else {
+					return Err(Error::Duplicate);
+				};
+				let request = state.datagram_requests.remove(queued).expect("found above");
+				request.with_stats(self.stats.clone()).accept(info)
+			}
+			None => {
+				let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
+				state.datagrams.insert(name.clone(), producer.weak());
+				producer
+			}
+		};
+		if !listed {
+			return Ok(producer);
 		}
-		let producer = datagram::Producer::new(name.clone(), Some(info)).with_stats(self.stats.clone());
-		state.datagrams.insert(name, producer.weak());
-		Ok(producer)
+		let unlist = Unlist::list(&self.state, &mut state.listing, name, Listed::Datagrams(info));
+		Ok(producer.listed(unlist))
 	}
 
 	/// Answer datagram lookups from `source`, the broadcast an origin's front serves from,
@@ -1842,7 +1871,7 @@ mod test {
 
 		// Create the track before any consumer exists.
 		let track1 = producer.assert_create_track("track1", crate::track::Info::timed());
-		track1.append_next().unwrap().close().unwrap();
+		track1.append_next().unwrap().finish().unwrap();
 
 		let consumer = producer.consume();
 
@@ -1856,7 +1885,7 @@ mod test {
 		let mut track2_consumer = consumer2.track("track2").unwrap().subscribe(None).await.unwrap();
 		track2_consumer.assert_no_group();
 
-		track2.append_next().unwrap().close().unwrap();
+		track2.append_next().unwrap().finish().unwrap();
 
 		track2_consumer.assert_group();
 	}
@@ -1944,7 +1973,7 @@ mod test {
 		track3.subscribe(None).assert_is_clone(&track1);
 
 		// Append a group and make sure they all get it.
-		track3.append_next().unwrap().close().unwrap();
+		track3.append_next().unwrap().finish().unwrap();
 		track1.assert_group();
 		track2.assert_group();
 
@@ -1970,7 +1999,7 @@ mod test {
 		let mut track1 = track1_fut.await.unwrap();
 
 		// Close the producer (simulating publisher disconnect).
-		producer1.append_next().unwrap().close().unwrap();
+		producer1.append_next().unwrap().finish().unwrap();
 		let producer1 = producer1.finish().unwrap();
 		drop(producer1);
 
@@ -1988,7 +2017,7 @@ mod test {
 		producer2
 			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		track2.assert_group();
 	}
@@ -2007,7 +2036,7 @@ mod test {
 		let first = dynamic.assert_request().accept(crate::track::Info::timed());
 		let mut group = first.create_group(crate::group::Info { start: 8 }).unwrap();
 		group.write_frame(at(1000), b"a".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let first = first.finish().unwrap();
 		drop((first, track));
 
@@ -2019,7 +2048,7 @@ mod test {
 		drop((group, second, track));
 
 		let mut third = producer.create_track("media", crate::track::Info::timed()).unwrap();
-		third.finish_at(crate::track::Position::group(0), None).unwrap();
+		third.finish_at(crate::track::Position::group(0)).unwrap();
 	}
 
 	/// Names that are gone leave nothing behind, served or not, so churning distinct names
@@ -2032,7 +2061,7 @@ mod test {
 		for i in 0..1000 {
 			let track = consumer.track(&format!("requested/{i}")).unwrap().subscribe(None);
 			let served = dynamic.assert_request().accept(crate::track::Info::timed());
-			served.append_next().unwrap().close().unwrap();
+			served.append_next().unwrap().finish().unwrap();
 			drop((served, track));
 
 			let track = consumer.track(&format!("refused/{i}")).unwrap().subscribe(None);
@@ -2041,7 +2070,7 @@ mod test {
 			let created = producer
 				.create_track(format!("created/{i}"), crate::track::Info::timed())
 				.unwrap();
-			created.append_next().unwrap().close().unwrap();
+			created.append_next().unwrap().finish().unwrap();
 		}
 		let state = producer.state.lock();
 		assert!(state.tracks.len() < 16, "{} names retained", state.tracks.len());
@@ -2116,7 +2145,7 @@ mod test {
 		let mut sub = subscribing.await.expect("fulfilled by create_track");
 
 		// The fulfilled subscription is live against this very producer.
-		track.append_next().unwrap().close().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		sub.recv_group().await.expect("recv").expect("group");
 
 		// The handler never sees the request; a fresh subscribe reuses the track.
@@ -2241,7 +2270,7 @@ mod test {
 		assert!(matches!(queued.await, Err(Error::Unroutable)));
 		assert!(matches!(consumer.track("later"), Err(Error::Unroutable)));
 
-		served.append_next().unwrap().close().unwrap();
+		served.append_next().unwrap().finish().unwrap();
 		accepted.assert_group();
 	}
 
@@ -2309,7 +2338,7 @@ mod test {
 		let pending_fetch = track.fetch_group(0, None);
 		let fetch = dynamic.requested_fill_group().await.unwrap();
 		let group = fetch.accept(crate::track::Info::timed()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		pending_fetch.await.unwrap();
 
 		let mut subscriber = track.subscribe(None).await.unwrap();
@@ -2385,7 +2414,7 @@ mod test {
 		producer.close();
 		assert!(matches!(consumer.track("track1"), Err(Error::Unroutable)));
 
-		track.append_next().unwrap().close().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		subscriber.assert_group();
 		let _track = track.finish().unwrap();
 	}
@@ -2470,7 +2499,7 @@ mod test {
 		assert!(!track.is_closed());
 		let mut subscriber = viewer.await.unwrap();
 		subscriber.assert_no_group();
-		track.append_next().unwrap().close().unwrap();
+		track.append_next().unwrap().finish().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
 
 		// Once the viewer really leaves, the same teardown commits, and the lookup

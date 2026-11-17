@@ -16,7 +16,7 @@ use super::window::Event;
 pub(super) struct Played {
 	/// Which sink it went through, in the order they were opened.
 	pub sink: usize,
-	/// Which utterance on that sink: each [`Sink::next`] starts another.
+	/// Which utterance on that sink: each [`Sink::resume`] starts another.
 	pub utterance: usize,
 	/// Its first sample, which tells a test's renditions apart.
 	pub sample: f32,
@@ -116,7 +116,7 @@ impl Speaker for Recorder {
 			capacity: input.latency + RING_HEADROOM,
 			refill: false,
 			declared: false,
-			next: false,
+			resuming: false,
 			utterance: 0,
 			prime: Some(input.latency),
 			pending: Vec::new(),
@@ -150,7 +150,7 @@ pub(super) struct FakeSink {
 	/// Running dry is a declared silence rather than an underrun.
 	declared: bool,
 	/// The next write starts the next utterance one latency out.
-	next: bool,
+	resuming: bool,
 	utterance: usize,
 	prime: Option<Duration>,
 	pending: Vec<(f32, Duration)>,
@@ -175,7 +175,7 @@ impl Sink for FakeSink {
 			self.end = Instant::now();
 		}
 		if self.refill {
-			self.resume();
+			self.release();
 		}
 		kio::clock::sleep_until(self.end).await;
 	}
@@ -190,15 +190,15 @@ impl Sink for FakeSink {
 		if let Some(prime) = self.prime.take() {
 			self.end = now.saturating_add(prime);
 			// The opening silence already holds the first utterance one latency out.
-			if std::mem::take(&mut self.next) {
+			if std::mem::take(&mut self.resuming) {
 				self.declared = false;
 				self.utterance += 1;
 			}
-		} else if std::mem::take(&mut self.next) {
+		} else if std::mem::take(&mut self.resuming) {
 			self.utterance += 1;
 			// Comfort noise tops the queue up to the latency ahead of the utterance.
 			if self.refill {
-				self.resume();
+				self.release();
 			}
 			self.declared = false;
 			let ahead = self.end.saturating_duration_since(now);
@@ -228,7 +228,7 @@ impl Sink for FakeSink {
 			self.pending.push((sample, duration));
 			self.queued += duration;
 			if self.queued >= CUSHION {
-				self.resume();
+				self.release();
 			}
 		} else {
 			self.play(sample, duration);
@@ -237,12 +237,12 @@ impl Sink for FakeSink {
 		Ok(written)
 	}
 
-	fn end(&mut self) {
+	fn silence(&mut self) {
 		self.declared = true;
 	}
 
-	fn next(&mut self) {
-		self.next = true;
+	fn resume(&mut self) {
+		self.resuming = true;
 	}
 
 	/// A device that has not reported its latency, as before its first callback.
@@ -273,7 +273,8 @@ impl FakeSink {
 		self.end = self.end.saturating_add(duration);
 	}
 
-	fn resume(&mut self) {
+	/// Play the refill held back, starting now.
+	fn release(&mut self) {
 		self.end = Instant::now();
 		let pending = std::mem::take(&mut self.pending);
 		for (sample, duration) in pending {

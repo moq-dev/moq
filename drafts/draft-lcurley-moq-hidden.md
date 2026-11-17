@@ -134,13 +134,6 @@ Both values are even, so each is a bare varint.
 
 --- back
 
-# Changelog
-
-## Since draft-lcurley-moq-hidden-00 (in progress)
-
-- Apply hidden filtering only to peers that declared the HIDDEN Setup Option.
-- Measure visibility from the requested namespace prefix, independently of authorization scope.
-
 # Acknowledgments
 {:numbered="false"}
 

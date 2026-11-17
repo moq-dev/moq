@@ -2,7 +2,8 @@
 //! preserves, carried across a lite-07 hop when both SETUPs offer it.
 //!
 //! Every field here is crate-private relay metadata (see `model::object`). Plain readers
-//! never see it, and a session without the extension sends none of it.
+//! never see it, and only a track a moq-transport publisher made carries it, so a moq-lite
+//! track crosses a negotiated hop exactly as it crosses one without the extension.
 
 use std::sync::Arc;
 
@@ -210,8 +211,8 @@ pub(crate) fn decode_end(body: &[u8], framing: super::Framing) -> Result<Decoded
 	Ok(decoded)
 }
 
-/// A group stream's object records on egress, sent before each frame once the extension
-/// is negotiated.
+/// A group stream's object records on egress, sent before each frame of a track with a
+/// Version on a session that negotiated the extension.
 #[cfg(feature = "async")]
 pub(crate) struct Records {
 	/// Whether the Group State is written, which waits for the group's relay state.
@@ -226,15 +227,15 @@ pub(crate) struct Records {
 
 #[cfg(feature = "async")]
 impl Records {
-	/// The records a group stream needs, or `None` unless the session negotiated the
-	/// extension. `capped` when the stream stops before the group may end.
-	pub fn new(ietf: bool, capped: bool, timescale: Option<Timescale>) -> Option<Self> {
-		ietf.then_some(Self {
+	/// The records a group stream of a track that carries them needs. `capped` when the
+	/// stream stops before the group may end.
+	pub fn new(capped: bool, timescale: Option<Timescale>) -> Self {
+		Self {
 			stated: false,
 			prior: None,
 			capped,
 			timescale,
-		})
+		}
 	}
 
 	/// Buffer the Group State for a stream serving `group` from its current index, once the
@@ -747,17 +748,13 @@ pub(crate) async fn test_hop(
 		protocol: Some(version.alpn().to_string()),
 		..Default::default()
 	});
-	let extensions = |ietf| crate::setup::Extensions {
-		ietf,
-		..Default::default()
-	};
 	let dial = crate::Client::new()
 		.with_versions(version.into())
-		.with_extensions(extensions(offer[0]))
+		.with_ietf(offer[0])
 		.with_subscriber(downstream.clone());
 	let serve = crate::Server::new()
 		.with_versions(version.into())
-		.with_extensions(extensions(offer[1]))
+		.with_ietf(offer[1])
 		.with_publisher(upstream.consume());
 	let (client, server) = futures::join!(
 		async {
@@ -951,7 +948,7 @@ mod hop_tests {
 					properties: Properties::default(),
 				})
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"b");
@@ -1118,7 +1115,7 @@ mod hop_tests {
 		);
 		assert!(frame.fields.is_none() && received.wire().is_none());
 		group.write_frame(ts(6), b"delta".to_vec()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let frame = next(&mut received).await.unwrap();
 		assert_eq!(
 			(frame.timestamp, &frame.payload.contiguous(0)[..]),
@@ -1127,6 +1124,40 @@ mod hop_tests {
 		assert!(frame.fields.is_none());
 		assert!(next(&mut received).await.is_none());
 		assert!(received.end_object().is_none());
+		drop(sessions);
+	}
+
+	/// A group of a moq-lite publisher's track fetched across a negotiated hop is as plain
+	/// as one subscribed: the FETCH response carries no Group State or records either.
+	#[kio::test]
+	async fn plain_media_fetches_unchanged() {
+		let upstream = crate::origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
+		let broadcast = upstream.route("room", crate::origin::RouteOptions::default()).unwrap();
+		let track = broadcast
+			.broadcast()
+			.create_track("video", track::Info::timed().with_timescale(Timescale::MILLI))
+			.unwrap();
+		let mut first = track.create_group(0u64.into()).unwrap();
+		first.write_frame(ts(5), b"key".to_vec()).unwrap();
+		first.write_frame(ts(6), b"delta".to_vec()).unwrap();
+		first.finish().unwrap();
+		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
+		let broadcast = downstream.consume().request("room", None).await.unwrap();
+		let copy = broadcast.track("video").unwrap();
+		let mut fetched = kio::clock::timeout(TIMEOUT, copy.fetch_group(0, None))
+			.await
+			.unwrap()
+			.unwrap();
+		for (millis, payload) in [(5, &b"key"[..]), (6, b"delta")] {
+			let frame = next(&mut fetched).await.unwrap();
+			assert_eq!(
+				(frame.timestamp, &frame.payload.contiguous(0)[..]),
+				(ts(millis), payload)
+			);
+			assert!(frame.fields.is_none());
+		}
+		assert!(next(&mut fetched).await.is_none());
+		assert!(fetched.wire().is_none());
 		drop(sessions);
 	}
 
@@ -1146,14 +1177,17 @@ mod hop_tests {
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
 			let mut head = track.create_group(0u64.into()).unwrap();
 			head.write_frame(ts(100), b"frame".to_vec()).unwrap();
-			head.close().unwrap();
+			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
 			let broadcast = downstream.consume().request("room", None).await.unwrap();
 			// A listing carries no provenance, so it lists the track as native lite.
 			let mut tracks = broadcast.tracks().unwrap();
 			let listed = loop {
 				match kio::clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
-					Some(crate::broadcast::TracksEvent::Added { name, info }) if &*name == "video" => break info,
+					Some(crate::broadcast::TracksEvent::Added {
+						name,
+						info: crate::broadcast::Listed::Track(info),
+					}) if &*name == "video" => break info,
 					Some(_) => continue,
 					None => panic!("listing ended before the track"),
 				}
@@ -1190,7 +1224,7 @@ mod hop_tests {
 			let start = if negotiated { ts(50) } else { ts(150) };
 			let mut group = track.create_group(1u64.into()).unwrap();
 			group.write_frame(start, b"frame".to_vec()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
 			assert_eq!(received.start, 1);
 			let frame = next(&mut received).await.unwrap();
@@ -1219,7 +1253,7 @@ mod hop_tests {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(ts(5), payload(1)).unwrap();
 		group.write_frame(ts(6), payload(2)).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut received = recv(&mut subscriber).await;
 		for (millis, n) in [(5, 1), (6, 2)] {
 			let frame = next(&mut received).await.unwrap();

@@ -46,9 +46,9 @@ mod sink;
 pub use backend::NAMES;
 pub use encoded::Encoded;
 pub use encoder::{Applied, Codec, Config, Encoder, Kind, Preset};
-pub use producer::Producer;
 #[cfg(feature = "capture")]
 pub use producer::{Capture, Driver, Publication, State, Status, publish_capture};
+pub use producer::{Finished, Producer};
 pub use sink::Sink;
 
 #[cfg(test)]

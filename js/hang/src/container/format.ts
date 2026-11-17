@@ -1,6 +1,6 @@
 import type { Duration } from "@moq/clock";
 import type { Time } from "@moq/net";
-import type { Frame } from "./types";
+import type { Frame } from "./types.ts";
 
 /** A container format that decodes raw MoQ frames into media frames. */
 export interface Format {

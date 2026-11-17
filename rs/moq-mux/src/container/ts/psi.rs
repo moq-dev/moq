@@ -8,10 +8,10 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::Context;
 use mpeg2ts::ts::Pid;
 
 use super::catalog::Descriptor;
+use super::error::{Context, Result, ensure, ensure_supported, unsupported};
 
 /// The checksum closing every long-form section.
 pub(super) const CRC: crc::Crc<u32> = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2);
@@ -26,7 +26,7 @@ pub(super) fn crc_ok(section: &[u8]) -> bool {
 }
 
 /// Encode the exporter's single-program PAT independently of TS packet boundaries.
-pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<bytes::Bytes> {
+pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> Result<bytes::Bytes> {
 	let mut section = vec![PAT_TABLE_ID, 0xb0, 0];
 	section.extend_from_slice(&pat.transport_stream_id.to_be_bytes());
 	section.extend_from_slice(&[0xc1 | (pat.version_number.as_u8() << 1), 0, 0]);
@@ -38,7 +38,7 @@ pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<byte
 }
 
 /// Encode a PMT at `version`, rejecting descriptor or table lengths that MPEG-TS cannot represent.
-pub(super) fn encode_pmt(pmt: &Pmt, version: mpeg2ts::ts::VersionNumber) -> anyhow::Result<bytes::Bytes> {
+pub(super) fn encode_pmt(pmt: &Pmt, version: mpeg2ts::ts::VersionNumber) -> Result<bytes::Bytes> {
 	let mut section = vec![PMT_TABLE_ID, 0xb0, 0];
 	section.extend_from_slice(&pmt.program_number.to_be_bytes());
 	section.extend_from_slice(&[0xc1 | (version.as_u8() << 1), 0, 0]);
@@ -52,24 +52,25 @@ pub(super) fn encode_pmt(pmt: &Pmt, version: mpeg2ts::ts::VersionNumber) -> anyh
 	finish_section(section)
 }
 
-fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[Descriptor]) -> anyhow::Result<()> {
+fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[Descriptor]) -> Result<()> {
 	let length = descriptors
 		.iter()
 		.map(|descriptor| 2 + descriptor.data.len())
 		.sum::<usize>();
-	anyhow::ensure!(length <= 0x0fff, "PSI descriptor loop exceeds 4095 bytes");
+	ensure_supported!(length <= 0x0fff, "PSI descriptor loop exceeds 4095 bytes");
 	out.extend_from_slice(&(0xf000 | length as u16).to_be_bytes());
 	for descriptor in descriptors {
-		let length = u8::try_from(descriptor.data.len()).context("PSI descriptor exceeds 255 bytes")?;
+		let length =
+			u8::try_from(descriptor.data.len()).map_err(|_| unsupported!("PSI descriptor exceeds 255 bytes"))?;
 		out.extend_from_slice(&[descriptor.tag, length]);
 		out.extend_from_slice(&descriptor.data);
 	}
 	Ok(())
 }
 
-fn finish_section(mut section: Vec<u8>) -> anyhow::Result<bytes::Bytes> {
+fn finish_section(mut section: Vec<u8>) -> Result<bytes::Bytes> {
 	let length = section.len() - 3 + 4;
-	anyhow::ensure!(length <= 1021, "PAT/PMT section exceeds 1021 bytes");
+	ensure_supported!(length <= 1021, "PAT/PMT section exceeds 1021 bytes");
 	section[1] |= (length >> 8) as u8;
 	section[2] = length as u8;
 	let crc = CRC.checksum(&section);
@@ -286,9 +287,9 @@ pub(super) struct PesStart<'a> {
 
 impl<'a> PesStart<'a> {
 	/// The next header boundary needed before parsing, capped by the 8-bit optional length.
-	pub fn header_len(payload: &[u8]) -> anyhow::Result<usize> {
+	pub fn header_len(payload: &[u8]) -> Result<usize> {
 		let prefix = payload.len().min(3);
-		anyhow::ensure!(
+		ensure!(
 			payload[..prefix] == [0, 0, 1][..prefix],
 			"missing PES start code prefix"
 		);
@@ -301,11 +302,11 @@ impl<'a> PesStart<'a> {
 		if payload.len() < 9 {
 			return Ok(9);
 		}
-		anyhow::ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
-		anyhow::ensure!(payload[7] & 0xc0 != 0x40, "PES DTS without a PTS");
+		ensure!(payload[6] & 0xc0 == 0x80, "unexpected PES header marker bits");
+		ensure!(payload[7] & 0xc0 != 0x40, "PES DTS without a PTS");
 		let len = usize::from(payload[8]);
 		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
-		anyhow::ensure!(
+		ensure!(
 			packet_len == 0 || packet_len >= 3 + len,
 			"PES packet length shorter than its header"
 		);
@@ -318,9 +319,9 @@ impl<'a> PesStart<'a> {
 	/// PES CRC, extensions, stuffing) are skipped by `PES_header_data_length`. Incomplete headers
 	/// must be assembled before parsing; malformed headers are refused. A scrambled one parses,
 	/// for its stream to refuse: [`Self::scrambled`].
-	pub fn parse(payload: &'a [u8]) -> anyhow::Result<Self> {
+	pub fn parse(payload: &'a [u8]) -> Result<Self> {
 		let header_len = Self::header_len(payload)?;
-		anyhow::ensure!(payload.len() >= header_len, "PES header truncated");
+		ensure!(payload.len() >= header_len, "PES header truncated");
 		let stream_id = payload[3];
 		let packet_len = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
 
@@ -376,10 +377,10 @@ impl PesStart<'_> {
 	/// the clock field it carries that only the PTS and DTS of are moved onto the catalog clock:
 	/// ESCR, a `pack_header_field`, or a TREF (ISO 13818-1 2.4.3.7). Refuses an unbounded PES
 	/// that is not video, and a flagged optional field that runs past `PES_header_data_length`.
-	pub fn whole(&self, stream_type: u8) -> anyhow::Result<Option<&'static str>> {
+	pub fn whole(&self, stream_type: u8) -> Result<Option<&'static str>> {
 		let stream_id = self.stream_id;
 		let video = matches!(stream_id, 0xe0..=0xef) || (stream_id == 0xfd && is_video_stream_type(stream_type));
-		anyhow::ensure!(
+		ensure!(
 			self.header[4..6] != [0, 0] || video,
 			"PES_packet_length 0 on stream_id {stream_id:#04x}, which only a video stream may leave unbounded"
 		);
@@ -427,7 +428,7 @@ impl PesStart<'_> {
 				at += 1 + len;
 			}
 		}
-		anyhow::ensure!(
+		ensure!(
 			at <= fields.len(),
 			"PES optional fields need {at} bytes where PES_header_data_length gives {}",
 			fields.len()
@@ -453,10 +454,10 @@ pub(super) fn is_video_stream_type(stream_type: u8) -> bool {
 }
 
 /// A 33-bit PTS or DTS behind its 4-bit prefix and three marker bits.
-fn timestamp(bytes: Option<&[u8]>, prefix: u8) -> anyhow::Result<u64> {
+fn timestamp(bytes: Option<&[u8]>, prefix: u8) -> Result<u64> {
 	let bytes = bytes.context("PES header truncated")?;
-	anyhow::ensure!(bytes[0] >> 4 == prefix, "unexpected PES timestamp prefix");
-	anyhow::ensure!(
+	ensure!(bytes[0] >> 4 == prefix, "unexpected PES timestamp prefix");
+	ensure!(
 		bytes[0] & 1 == 1 && bytes[2] & 1 == 1 && bytes[4] & 1 == 1,
 		"unexpected PES timestamp marker bit"
 	);

@@ -114,7 +114,7 @@ types, and the vectors regenerate once):
   Instance and tracks under the same credential, and correct the draft's
   sentence.
 - Per-group keys: add the group's wire ID (its start, after
-  [lite-07 addresses groups by start](/quest/m2/time-addressing/lite07.md))
+  [lite-07 addresses groups by start](https://github.com/moq-dev/moq/pull/8908))
   to `key_info`. For datagram tracks recommend the sequence's high bits as
   the key index, so one HKDF-Expand covers a run of datagrams; settle the
   split in the PR and bench it with `benches/protect.rs`. Then delete
@@ -135,9 +135,8 @@ types, and the vectors regenerate once):
   `broadcast::Consumer::track(name)` then `.subscribe(..)` in place of
   `subscribe`; rename `track::Consumer` to `track::Subscriber`; `name()` is
   the semantic name everywhere, with the physical one under another name;
-  `Frame.plaintext` becomes `payload`; group `close()` follows
-  [moq-net's group API](/quest/m2/group-api.md) to `finish()`. JS takes the
-  same names in the same PR. Error conversion into `moq_net::Error` stays
+  `Frame.plaintext` becomes `payload`. JS takes the same names in the same
+  PR. Error conversion into `moq_net::Error` stays
   with [the trait quest](/quest/m5/net-wrap/e2ee.md).
 - Profile: `Config.profile` is a `#[non_exhaustive]` enum with one variant,
   and a credential naming another profile is refused. Delete the draft's
@@ -165,7 +164,6 @@ and moq-lite: none.
 ## Required
 
 - [End-to-end encryption is its own unpublished crate again](/quest/m2/e2ee-crate.md) - the `moq-e2ee` crate this changes and publishes
-- [The lite-07 wire addresses groups by start](/quest/m2/time-addressing/lite07.md) - the group identity the per-group key and the nonce bind
 
 ## Related
 

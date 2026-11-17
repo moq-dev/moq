@@ -10,8 +10,8 @@ import { Writer } from "./stream.ts";
 const version = Version.DRAFT_07;
 const never = new Promise<void>(() => {});
 
-// A qmux session pair over an in-memory socket, the server granting `maxStreamsUni`.
-function qmuxPair(maxStreamsUni?: bigint): { client: WebTransport; server: WebTransport } {
+// A qmux session pair over an in-memory socket, the server granting `maxStreams`.
+function qmuxPair(maxStreams?: bigint): { client: WebTransport; server: WebTransport } {
 	const socket = (readable: ReadableStream<Uint8Array>, writable: WritableStream<Uint8Array>) => {
 		const closed = Promise.withResolvers<{ closeCode: number; reason: string }>();
 		return {
@@ -28,7 +28,7 @@ function qmuxPair(maxStreamsUni?: bigint): { client: WebTransport; server: WebTr
 	const down = pipe();
 	const config = { idleTimeout: null };
 	const client = new Qmux(socket(down.readable, up.writable), { config });
-	const server = Qmux.accept(socket(up.readable, down.writable), { config: { ...config, maxStreamsUni } });
+	const server = Qmux.accept(socket(up.readable, down.writable), { config: { ...config, maxStreams } });
 	return { client, server };
 }
 

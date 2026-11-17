@@ -1,7 +1,7 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Signal } from "@moq/signals";
+import { Once, Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
@@ -1790,7 +1790,7 @@ class Tokens {
 	issue(value: string): Credential {
 		const token: Credential = {
 			grant: new Signal<Grant | undefined>(undefined),
-			closed: new Promise(() => {}),
+			closed: new Once<Error | null>(),
 			answered: Promise.resolve(),
 			close: () => {
 				this.#issued.delete(token);
@@ -4292,7 +4292,7 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.reportedLargest(track, { group: 4n, frame: 3 });
+	hooks.reportedLargest(track, { group: 4n, frame: 3 }, false);
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({

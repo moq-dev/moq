@@ -11,6 +11,7 @@
 
 export { ConnectError, type ConnectReason, RequestError } from "./error.ts";
 export {
+	type Config,
 	type Configured,
 	type ConnectProps,
 	connect,
@@ -18,7 +19,6 @@ export {
 	type Ignored,
 	Obs,
 	PORT,
-	type Publish,
 	type Source,
 	type Stats,
 	type StreamState,

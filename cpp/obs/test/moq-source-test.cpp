@@ -697,7 +697,7 @@ std::vector<uint8_t> PcmFrame(uint64_t timestamp_us, uint32_t channels)
 moq::Catalog CatalogSnapshot(Publisher &publisher)
 {
 	auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
-	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer, {}).get(), "local catalog");
 	auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 	CHECK(snapshot.has_value());
 	return *snapshot;
@@ -1097,7 +1097,7 @@ int main()
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
 		auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
-		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer, {}).get(), "local catalog");
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto &video = snapshot->video.begin()->second;
@@ -1582,7 +1582,7 @@ int main()
 		void *source = createSource();
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
 		auto consumer = TestOk(publisher.broadcast->consume(), "local broadcast consumer");
-		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "local catalog");
+		auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer, {}).get(), "local catalog");
 		auto snapshot = TestOk(catalogs->next().get(), "catalog snapshot");
 		CHECK(snapshot.has_value());
 		auto config = snapshot->video.begin()->second;
