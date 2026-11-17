@@ -1695,8 +1695,8 @@ describe("Decoder across a rename", () => {
 		}
 	});
 
-	// `configure` throws for the replacement's config, so setup fails before the replacement's
-	// consumer exists. Nothing replaces the outgoing estimate, so it must not linger.
+	// `configure` throws for the replacement's config after its consumer exists, so the failure
+	// must still release the arrival estimate that consumer replaced.
 	it("reports a replacement that fails to set up and stops holding the delay", async () => {
 		const playback = await livePlayback(12);
 		try {
