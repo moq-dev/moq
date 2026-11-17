@@ -103,6 +103,19 @@ describe("Analysis", () => {
 		expect(active.slice(130, 200).some(Boolean)).toBe(false);
 	});
 
+	test("a frame of no whole number of subframes reads the newest window, without drifting", () => {
+		// The windows themselves, one per 20 ms.
+		const windows = probabilities(48_000, 960);
+		// AAC's 1024-sample frames are 21 1/3 ms.
+		const samples = signal(48_000);
+		const analysis = new Analysis({ sampleRate: 48_000 });
+		for (let at = 0; at + 1024 <= samples.length; at += 1024) {
+			const p = analysis.probability(chunk(samples, at, at + 1024, 48_000));
+			const newest = Math.floor((at + 1024) / 960) - 1;
+			expect([windows[newest], windows[newest - 1]]).toContain(p);
+		}
+	});
+
 	test("a 10 ms frame before the first window has no score", () => {
 		const analysis = new Analysis({ sampleRate: 48_000 });
 		const samples = signal(48_000);

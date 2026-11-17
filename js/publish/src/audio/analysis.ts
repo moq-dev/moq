@@ -26,7 +26,6 @@ import { Mlp } from "./mlp";
 import { Resampler } from "./resampler";
 
 // The analysis runs at 24 kHz on 20 ms windows, advancing 20 ms at a time over a 30 ms buffer.
-const RATE = 24_000;
 const N = 480;
 const N2 = 240;
 const BUF = 720;
@@ -35,8 +34,6 @@ const NB_TBANDS = 18;
 const NB_TONAL_SKIP_BANDS = 9;
 const DETECT_SIZE = 100;
 const COUNT_MAX = 10_000;
-// A 2.5 ms subframe at 24 kHz, the unit the encoder reads the analysis in.
-const SUBFRAME = 60;
 
 // Below this activity probability a frame is noise, unless it is loud (DTX_ACTIVITY_THRESHOLD).
 const ACTIVITY_THRESHOLD = 0.1;
@@ -225,7 +222,8 @@ export class Analysis {
 	readonly #info: Info[] = Array.from({ length: DETECT_SIZE }, () => ({ valid: false, probability: 0 }));
 	#writePos = 0;
 	#readPos = 0;
-	#readSubframe = 0;
+	// How far the reader is into its window, in input samples times 50: a window is the input rate.
+	#readOffset = 0;
 
 	// The encoder's peak_signal_energy: the loudest recent active frame, decaying 0.1% a frame.
 	#peak = 0;
@@ -290,17 +288,17 @@ export class Analysis {
 		}
 		this.#append(input);
 
-		// Where the frame reads from, in 2.5 ms subframes of the window ring.
-		const length = Math.round((samples * RATE) / this.#sampleRate);
+		// Where the frame reads from: libopus advances one window per 20 ms of frames, which this
+		// counts exactly, so a frame that is no whole number of 2.5 ms subframes (AAC's 1024 samples)
+		// does not drift.
 		let pos = this.#readPos;
-		this.#readSubframe += Math.floor(length / SUBFRAME);
-		while (this.#readSubframe >= 8) {
-			this.#readSubframe -= 8;
-			this.#readPos++;
+		this.#readOffset += samples * 50;
+		while (this.#readOffset >= this.#sampleRate) {
+			this.#readOffset -= this.#sampleRate;
+			this.#readPos = (this.#readPos + 1) % DETECT_SIZE;
 		}
-		if (this.#readPos >= DETECT_SIZE) this.#readPos -= DETECT_SIZE;
 		// A long frame reads the second window rather than the first.
-		if (length > N && pos !== this.#writePos) pos = (pos + 1) % DETECT_SIZE;
+		if (samples * 50 > this.#sampleRate && pos !== this.#writePos) pos = (pos + 1) % DETECT_SIZE;
 		if (pos === this.#writePos) pos--;
 		if (pos < 0) pos = DETECT_SIZE - 1;
 

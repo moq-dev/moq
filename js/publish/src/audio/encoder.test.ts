@@ -698,6 +698,31 @@ test("a voice source sends nothing while its talker is silent", async () => {
 	expect(written).toEqual([[1_120_000, 0], ...frames(1_200_000, 2)]);
 });
 
+// A long frame whose first 20 ms is still inside the hangover is sent, and the gate shuts behind
+// it: the end is declared after that frame, not before it.
+test("a voice source declares its end after the last frame the hangover sends", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Order(), { mime: "opus", frameDuration: Duration.millis(60) } as Codec);
+	const { capture, feed, written } = env;
+
+	const configuring = configured();
+	capture.in.source.set({ track: {}, kind: "voice" } as never);
+	await configuring;
+
+	let state = 1;
+	const speech = () => {
+		state = (Math.imul(state, 1103515245) + 12345) | 0;
+		return (state >>> 8) / 0x1000000 - 0.5;
+	};
+	for (let i = 0; i < 6; i++) {
+		const samples = i === 0 ? Float32Array.from({ length: 2880 }, speech) : new Float32Array(2880);
+		await feed.push({ timestamp: Duration.micros(i * 60_000), channels: [samples] });
+	}
+	await feed.drain();
+	const frames = Array.from({ length: 5 }, (_, i): [number, number] => [i * 60_000, 1]);
+	expect(written).toEqual([...frames, [300_000, 0]]);
+});
+
 // With `idle="release"` a mute closes the microphone, taking its format away. The rendition stays
 // advertised, still enabled, through the mute. Once unmuted it is disabled until the microphone
 // reopens, so one that never does isn't advertised as sending.
