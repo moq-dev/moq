@@ -204,7 +204,7 @@ async fn a_flapping_link_keeps_a_dual_homed_publisher_routed() {
 		let sent = kio::clock::now();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), payload(flap, 0)).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(next(&mut rx).await, (flap, payload(flap, 0)), "flap {flap}");
 		let late = kio::clock::now().saturating_duration_since(sent);
 		assert!(late < DOUBT / 2, "flap {flap}: read {late:?} after it was written");

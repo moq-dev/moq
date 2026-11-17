@@ -61,7 +61,13 @@ function handle() {
 	const fake = {
 		present(token: string) {
 			presented.push(token);
-			const pending = { held: false, answered: Promise.resolve(), close: () => closed.push(token) };
+			const pending = {
+				held: false,
+				inband: true,
+				answered: Promise.resolve(),
+				closed: new Promise<never>(() => {}),
+				close: () => closed.push(token),
+			};
 			pending.answered = new Promise<void>((resolve) =>
 				answers.set(token, () => {
 					pending.held = true;

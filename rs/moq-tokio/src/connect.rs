@@ -4,7 +4,7 @@
 //! accept side lives in [`crate::listen`].
 
 use crate::Backoff;
-use crate::connection::Goaway;
+use crate::connection::Handover;
 use std::net;
 use url::Url;
 
@@ -667,7 +667,7 @@ pub struct Config {
 	/// How [`crate::Client::connect`] reacts to a peer's GOAWAY (`--connect-goaway-*`).
 	#[usage(flatten)]
 	#[serde(default)]
-	pub goaway: Goaway,
+	pub goaway: Handover,
 
 	/// WebSocket fallback settings (`--websocket-*`), used when QUIC is
 	/// blocked.

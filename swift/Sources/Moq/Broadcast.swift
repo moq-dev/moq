@@ -21,14 +21,14 @@ public final class BroadcastConsumer: Sendable {
         TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
 
-    /// Fetch one complete group by track name and group sequence without holding
+    /// Fetch one complete group by track name and group start without holding
     /// a live subscription. The group may still be receiving frames.
     public func fetchGroup(
         name: String,
-        sequence: UInt64,
+        start: UInt64,
         options: FetchGroupOptions? = nil
     ) async throws -> GroupConsumer {
-        GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
+        GroupConsumer(try await ffi.fetchGroup(name: name, start: start, options: options))
     }
 
     /// Resolve a catalog rendition to the broadcast serving its track.

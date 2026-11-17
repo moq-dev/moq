@@ -26,8 +26,8 @@ fn wire(claims: &Claims) -> Value {
 
 /// The grant a relay hands an auth callback for `claims`, as JSON.
 fn grant(claims: &Claims) -> Value {
-	let mut grant = moq_auth::Grant::new(claims.publish.clone(), claims.subscribe.clone());
-	(grant.publish_rate, grant.subscribe_rate) = (claims.publish_rate, claims.subscribe_rate);
+	let mut grant = moq_auth::Grant::default();
+	(grant.publish, grant.subscribe) = (claims.publish.clone(), claims.subscribe.clone());
 	let wire = serde_json::to_value(&grant).unwrap();
 	assert_eq!(serde_json::from_value::<moq_auth::Grant>(wire.clone()).unwrap(), grant);
 	wire

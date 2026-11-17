@@ -46,7 +46,7 @@ pub struct Video {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
+	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
 	pub renditions: BTreeMap<String, VideoConfig>,
 
 	/// Render the video at this size in pixels.
@@ -316,30 +316,20 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum delay between a frame being ready and the publisher flushing it.
-	/// The player's jitter buffer should be larger than this value.
-	/// If not provided, the player should assume each frame is flushed immediately.
+	/// The largest media span the publisher hands to the transport behind a frame's presentation
+	/// timestamp: the reorder delay of a frame presented after frames decoded behind it, or the span
+	/// of a batch written together, such as an fMP4 fragment. A consumer's jitter buffer should be at
+	/// least this large. Absent when the publisher measured none.
 	///
-	/// This is measured at the publisher (encoder latency, segment size, B-frame
-	/// reordering), never on the network a consumer sees. It only ever grows over the life of a
-	/// stream.
+	/// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
+	/// whatever the frame rate; encoder latency and the network don't count. It only ever grows
+	/// over the life of a stream.
 	///
 	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
 	/// rounds down into a promise the publisher can't keep.
-	///
-	/// ex:
-	/// - If each frame is flushed immediately, this would be 1000/fps.
-	/// - If there can be up to 3 b-frames in a row, this would be 3 * 1000/fps.
-	/// - If frames are buffered into 2s segments, this would be 2s.
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
-
-	/// After a non-continuous join, decode from the group start, present at start plus warmup, and join that much earlier.
-	/// Serialized as whole milliseconds, rounded up so presentation never starts early.
-	#[serde_as(as = "Option<MillisCeil>")]
-	#[serde(default)]
-	pub warmup: Option<std::time::Duration>,
 
 	/// How far this rendition's frames reach the transport behind the broadcast's other
 	/// renditions: a constant offset, either supplied by the publisher or measured as the least
@@ -394,7 +384,6 @@ impl VideoConfig {
 			optimize_for_latency: None,
 			container: Container::default(),
 			jitter: None,
-			warmup: None,
 			delay: None,
 		}
 	}
@@ -416,7 +405,7 @@ impl VideoConfig {
 	}
 }
 
-impl crate::catalog::Rendition for VideoConfig {
+impl crate::catalog::Entry for VideoConfig {
 	fn check(&self) -> crate::Result<()> {
 		for (field, value) in [
 			("codedWidth", self.coded_width),
@@ -446,19 +435,6 @@ mod test {
 	use super::*;
 
 	#[test]
-	fn warmup_round_trips() {
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		assert!(serde_json::to_value(&config).unwrap().get("warmup").is_none());
-		for millis in [0, 80, 1_000] {
-			config.warmup = Some(std::time::Duration::from_millis(millis));
-			let encoded = serde_json::to_value(&config).unwrap();
-			assert_eq!(encoded["warmup"], millis);
-			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
-			assert_eq!(decoded.warmup, config.warmup);
-		}
-	}
-
-	#[test]
 	fn reorder_keeps_zero_distinct_from_absent() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		assert!(serde_json::to_value(&config).unwrap().get("reorder").is_none());
@@ -468,18 +444,6 @@ mod test {
 			assert_eq!(encoded["reorder"], depth);
 			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
 			assert_eq!(decoded.reorder, Some(depth));
-		}
-	}
-
-	#[test]
-	fn warmup_rounds_up() {
-		let mut config = VideoConfig::new(VideoCodec::VP8);
-		for (nanos, millis) in [(1, 1), (499_999, 1), (333_200_000, 334)] {
-			config.warmup = Some(std::time::Duration::from_nanos(nanos));
-			let encoded = serde_json::to_value(&config).unwrap();
-			assert_eq!(encoded["warmup"], millis);
-			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
-			assert_eq!(decoded.warmup, Some(std::time::Duration::from_millis(millis)));
 		}
 	}
 

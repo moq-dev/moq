@@ -30,9 +30,9 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ video
 `warmup` is not in moq-hang-04 (rejected: freezing it with Chromium-only
 evidence; gating the cut on a Safari and Firefox run). No producer wrote it,
 and a 0.22 player claiming to read it would mis-decode a later producer's
-rendition instead of refusing it. The m2 quest
-`quest/m2/hang04/video-warmup.md` removed the field and the one-decoder
-player path that
+rendition instead of refusing it.
+[moq-dev/moq#8960](https://github.com/moq-dev/moq/pull/8960) removed the
+field and the one-decoder player path that
 [moq-dev/moq#8857](https://github.com/moq-dev/moq/pull/8857) had landed the
 day before. [Catalog warmup](/quest/m4/intra-refresh/catalog-warmup.md)
 brings both back, from that history, as the next catalog version, and every

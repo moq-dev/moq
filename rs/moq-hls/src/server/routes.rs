@@ -317,7 +317,7 @@ mod tests {
 	/// A catalog config declaring a two-second join interval up front, so its renditions are listed.
 	fn hls_config() -> moq_mux::catalog::Config {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+		catalog.sync.interval = Some(Duration::from_secs(2));
 		moq_mux::catalog::Config::default().with_catalog(catalog)
 	}
 

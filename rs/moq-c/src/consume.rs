@@ -88,8 +88,11 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 	/// The delivery priority its tracks subscribe with.
 	const PRIORITY: i8;
 
-	/// The history needed to prime a decoder.
-	fn warmup(&self) -> Duration;
+	/// The history needed to prime a decoder: none unless the catalog declares a `warmup`, which
+	/// moq-hang-04 defines for audio alone.
+	fn warmup(&self) -> Duration {
+		Duration::ZERO
+	}
 
 	/// Its renditions, keyed by ID.
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self>;
@@ -100,10 +103,6 @@ pub(crate) trait Media: hang::catalog::Reference + Clone {
 
 impl Media for hang::catalog::VideoConfig {
 	const PRIORITY: i8 = hang::catalog::PRIORITY.video;
-
-	fn warmup(&self) -> Duration {
-		self.warmup.unwrap_or_default()
-	}
 
 	fn renditions(catalog: &moq_mux::catalog::hang::Catalog<moq_mux::catalog::hang::Extra>) -> &BTreeMap<String, Self> {
 		&catalog.video.renditions
@@ -503,8 +502,6 @@ impl Consume {
 				.map(|label| label.as_ptr() as *const c_char)
 				.unwrap_or(std::ptr::null()),
 			label_len: config.label.as_ref().map_or(0, String::len),
-			warmup_us: micros(config.warmup),
-			has_warmup: config.warmup.is_some(),
 			broadcast,
 			broadcast_len,
 			instance,
@@ -791,7 +788,7 @@ impl Consume {
 	///
 	/// No catalog lookup or container parsing. This is the moq-net primitive for
 	/// non-media tracks. `on_frame` is called with a raw frame ID for each frame,
-	/// in sequence order. Frames must be released with [`Self::raw_frame_close`].
+	/// in start order. Frames must be released with [`Self::raw_frame_close`].
 	pub fn raw_track(
 		&mut self,
 		broadcast: Id,
@@ -869,7 +866,7 @@ impl Consume {
 		mut track: moq_net::track::Ordered,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// Deliver every frame in sequence order, reading all frames within each
+		// Deliver every frame in start order, reading all frames within each
 		// group rather than the one-frame-per-group convenience. This is the
 		// "raw track contents" model: the consumer sees exactly what the
 		// producer wrote, regardless of how it was grouped.
@@ -1471,8 +1468,8 @@ mod read_tests {
 			format(),
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();
-		let write = |sequence, us, payload: bytes::Bytes| {
-			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+		let write = |start, us, payload: bytes::Bytes| {
+			let mut group = track.create_group(moq_net::group::Info { start }).unwrap();
 			format()
 				.write(
 					&mut group,
@@ -1484,7 +1481,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let mut ids = Vec::<i32>::new();
 		let callback = unsafe { OnStatus::new((&mut ids as *mut Vec<i32>).cast(), Some(received)) }.unwrap();
@@ -1563,16 +1560,13 @@ mod tests {
 	}
 
 	impl MediaConsumer {
-		async fn new(video: bool, warmup: Option<Duration>, delay: Delay) -> Self {
+		async fn new(warmup: Option<Duration>, delay: Delay) -> Self {
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let mut request = broadcast.reserve_track("media").unwrap();
 			let mut catalog = moq_mux::catalog::hang::Catalog::default();
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 			audio.warmup = warmup;
 			catalog.audio.renditions.insert("media".into(), audio);
-			let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
-			config.warmup = warmup;
-			catalog.video.renditions.insert("media".into(), config);
 			let reads = Box::new(kio::Queue::new());
 			let callback =
 				unsafe { OnStatus::new(std::ptr::from_ref(reads.as_ref()).cast_mut().cast(), Some(on_read)).unwrap() };
@@ -1593,25 +1587,15 @@ mod tests {
 					})
 					.unwrap();
 				// Exercise the shared C media path on this runtime so time stays controlled.
-				let task = if video {
-					state
-						.consume
-						.media::<hang::catalog::VideoConfig>(snapshot, 0, delay, callback)
-				} else {
-					state
-						.consume
-						.media::<hang::catalog::AudioConfig>(snapshot, 0, delay, callback)
-				}
-				.unwrap();
+				let task = state
+					.consume
+					.media::<hang::catalog::AudioConfig>(snapshot, 0, delay, callback)
+					.unwrap();
 				state.consume.catalog_free(snapshot).unwrap();
 				task
 			};
 			let initial_delay = request.subscription_changed().await.unwrap().delay;
-			let track = request.accept(hang::container::track_info(if video {
-				hang::catalog::PRIORITY.video
-			} else {
-				hang::catalog::PRIORITY.audio
-			}));
+			let track = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 			Self {
 				_broadcast: broadcast,
 				track,
@@ -1621,18 +1605,15 @@ mod tests {
 			}
 		}
 
-		fn write(&mut self, sequence: u64, micros: u64) {
-			let mut group = self
-				.track
-				.create_group(moq_net::group::Info { start: sequence })
-				.unwrap();
+		fn write(&mut self, start: u64, micros: u64) {
+			let mut group = self.track.create_group(moq_net::group::Info { start }).unwrap();
 			hang::container::Frame {
 				timestamp: moq_net::Timestamp::from_micros(micros).unwrap(),
 				payload: bytes::Bytes::from_static(b"frame"),
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		async fn frame(&self) -> Option<u128> {
@@ -1658,28 +1639,29 @@ mod tests {
 	/// Warmup changes the first request too, before the container can update it.
 	#[tokio::test(start_paused = true)]
 	async fn media_subscription_includes_warmup() {
-		for video in [false, true] {
-			for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
-				for max in [
-					None,
-					Some(Duration::from_millis(200)),
-					Some(Duration::MAX - Duration::from_millis(100)),
-				] {
-					let delay = Delay {
-						min: Some(Duration::from_millis(200)),
-						max,
-					};
-					let consumer = MediaConsumer::new(video, warmup, delay).await;
-					assert_eq!(
-						consumer.initial_delay,
-						// The request aggregate represents Duration::MAX as unlimited.
-						delay.with_max(
-							max.map(|max| max.saturating_add(warmup.unwrap_or_default()))
-								.filter(|max| *max != Duration::MAX)
-						)
-					);
-					consumer.cancel().await;
-				}
+		for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
+			for max in [
+				None,
+				Some(Duration::from_millis(200)),
+				Some(Duration::MAX - Duration::from_millis(100)),
+			] {
+				let delay = Delay {
+					min: Some(Duration::from_millis(200)),
+					max,
+				};
+				let consumer = MediaConsumer::new(warmup, delay).await;
+				let warmup = warmup.unwrap_or_default();
+				assert_eq!(
+					consumer.initial_delay,
+					// The request aggregate represents Duration::MAX as unlimited.
+					Delay {
+						min: Some(Duration::from_millis(200) + warmup),
+						max: max
+							.map(|max| max.saturating_add(warmup))
+							.filter(|max| *max != Duration::MAX),
+					}
+				);
+				consumer.cancel().await;
 			}
 		}
 	}
@@ -1687,33 +1669,31 @@ mod tests {
 	/// Newest-first delivery must leave time for history covering min plus warmup.
 	#[tokio::test(start_paused = true)]
 	async fn media_warmup_reaches_history() {
-		for video in [false, true] {
-			for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
-				let delay = Delay {
-					min: Some(Duration::from_millis(200)),
-					max: Some(Duration::from_millis(200)),
-				};
-				let mut consumer = MediaConsumer::new(video, warmup, delay).await;
-				consumer.write(5, 5_000_000);
-				consumer.write(4, 4_700_000);
-				let first = kio::clock::timeout(Duration::from_millis(50), consumer.frame()).await;
-				let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
-				assert_eq!(first.is_err(), warming, "video={video}, warmup={warmup:?}");
-				consumer.write(3, 4_400_000);
-				drop(consumer.track.clone().finish().unwrap());
-				let mut stamps: Vec<_> = first.ok().flatten().into_iter().collect();
-				while let Some(stamp) = consumer.frame().await {
-					stamps.push(stamp);
-				}
-				assert_eq!(
-					stamps,
-					if warming {
-						vec![4_400_000, 4_700_000, 5_000_000]
-					} else {
-						vec![4_700_000, 5_000_000]
-					}
-				);
+		for warmup in [None, Some(Duration::ZERO), Some(Duration::from_millis(300))] {
+			let delay = Delay {
+				min: Some(Duration::from_millis(200)),
+				max: Some(Duration::from_millis(200)),
+			};
+			let mut consumer = MediaConsumer::new(warmup, delay).await;
+			consumer.write(5, 5_000_000);
+			consumer.write(4, 4_700_000);
+			let first = kio::clock::timeout(Duration::from_millis(50), consumer.frame()).await;
+			let warming = warmup.is_some_and(|warmup| !warmup.is_zero());
+			assert_eq!(first.is_err(), warming, "warmup={warmup:?}");
+			consumer.write(3, 4_400_000);
+			drop(consumer.track.clone().finish().unwrap());
+			let mut stamps: Vec<_> = first.ok().flatten().into_iter().collect();
+			while let Some(stamp) = consumer.frame().await {
+				stamps.push(stamp);
 			}
+			assert_eq!(
+				stamps,
+				if warming {
+					vec![4_400_000, 4_700_000, 5_000_000]
+				} else {
+					vec![4_700_000, 5_000_000]
+				}
+			);
 		}
 	}
 }

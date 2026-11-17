@@ -82,6 +82,25 @@ class LocalGate(unittest.TestCase):
             self.assertEqual(result.returncode, 11, result.stderr)
             self.assertEqual(result.stdout.splitlines(), ["admitted", "outer", "inner"])
 
+    def test_dotenv_in_the_working_directory_is_not_loaded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".env").write_text("LOCAL_ENV_FILE_PROBE=loaded\n")
+            result = subprocess.run(
+                [
+                    BASH,
+                    str(LAUNCHER),
+                    sys.executable,
+                    "-c",
+                    'import os; print(os.environ.get("LOCAL_ENV_FILE_PROBE"))',
+                ],
+                cwd=directory,
+                env=self.env(QUEST_GATE_ADMITTED="1"),
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "None")
+
     def test_pinned_review_preserves_arguments_cwd_and_failure_without_host_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

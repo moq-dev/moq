@@ -95,7 +95,7 @@ func BenchmarkFFI(b *testing.B) {
 	for _, c := range benchCases {
 		b.Run("throughput/"+c.name(), func(b *testing.B) { benchThroughput(b, c) })
 	}
-	b.Run("call/sequence", func(b *testing.B) {
+	b.Run("call/start", func(b *testing.B) {
 		track := benchTrack(b, "calls")
 		producer, err := track.AppendGroup()
 		if err != nil {
@@ -106,7 +106,7 @@ func BenchmarkFFI(b *testing.B) {
 			b.Fatal(err)
 		}
 		b.Cleanup(group.Cancel)
-		benchCall(b, func() { group.Sequence() })
+		benchCall(b, func() { group.Start() })
 	})
 	b.Run("call/info", func(b *testing.B) {
 		consumer, err := benchTrack(b, "calls").Consume(nil)

@@ -8,9 +8,9 @@
 import { Pattern, Patterns } from "@moq/pattern";
 import * as z from "zod/mini";
 import * as Path from "./path.ts";
-import { decodeGrants, decodeRoles, PatternListSchema, UnixSecondsSchema, WireRoleSchema } from "./wire.ts";
+import { AccessSchema, decodeGrants, PatternListSchema, paths, UnixSecondsSchema } from "./wire.ts";
 
-export { PatternListSchema } from "./wire.ts";
+export { type Access, AccessSchema, PatternListSchema } from "./wire.ts";
 
 /** Parse a list of pattern texts into a reduced union. */
 export function patterns(texts: readonly string[] | undefined): Patterns {
@@ -61,10 +61,10 @@ export type Scope = z.output<typeof ScopeSchema>;
 
 const ClaimsFields = {
 	...ScopeFields,
-	/** Patterns the holder may publish, relative to `root`, optionally with a bitrate cap. */
-	publish: z.optional(WireRoleSchema),
-	/** Patterns the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
-	subscribe: z.optional(WireRoleSchema),
+	/** What the holder may publish, relative to `root`, optionally with a bitrate cap. */
+	publish: z.optional(AccessSchema),
+	/** What the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
+	subscribe: z.optional(AccessSchema),
 	/** Expiration time, as a whole unix timestamp in seconds. */
 	exp: z.optional(UnixSecondsSchema),
 	/** Issued-at time, as a whole unix timestamp in seconds. */
@@ -92,10 +92,10 @@ const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
  * exactly what it says: `alice` is one broadcast, `alice/**` is a subtree, and `**` is
  * everything under the root. Legacy `moq-token` claims read too, each `put`/`get`
  * prefix `p` as the subtree `p/**`, and signing writes that form whenever it says the
- * same thing. A role may instead be `{"path": [...], "rate": bps}`, which parses into
- * `publish_rate` or `subscribe_rate` beside the patterns; a capped role is never written
- * as a prefix, since an older verifier would drop the cap. The registered `iss`, `sub`,
- * and `jti` claims are read and dropped; any other field fails verification.
+ * same thing. A role may instead be an {@link Access} with a cap, `{"path": [...], "rate": bps}`,
+ * read and written as it is; a capped role is never written as a prefix, since an older
+ * verifier would drop the cap. The registered `iss`, `sub`, and `jti` claims are read and
+ * dropped; any other field fails verification.
  */
 export const ClaimsSchema = z
 	.pipe(
@@ -105,13 +105,13 @@ export const ClaimsSchema = z
 			put: z.optional(PrefixListSchema),
 			get: z.optional(PrefixListSchema),
 		}),
-		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeRoles(decodeGrants(claims, ctx))),
+		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeGrants(claims, ctx)),
 	)
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
 		// rejects such a token as useless. Checking `!== undefined` here would mint
 		// tokens that Rust then refuses to verify.
-		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
+		z.refine((data) => paths(data.publish).length > 0 || paths(data.subscribe).length > 0, {
 			message: "Either publish or subscribe must grant at least one pattern",
 		}),
 	);
@@ -178,8 +178,8 @@ export function authorize(claims: Claims, path: string): Permissions {
 	}
 
 	const permissions: Permissions = {
-		subscribe: scope(patterns(claims.subscribe)),
-		publish: scope(patterns(claims.publish)),
+		subscribe: scope(patterns(paths(claims.subscribe))),
+		publish: scope(patterns(paths(claims.publish))),
 	};
 	if (permissions.subscribe.size === 0 && permissions.publish.size === 0) {
 		throw new Error(`token grants no access to path "${target}"`);
@@ -210,5 +210,5 @@ export function scopeAllows(scope: Scope, claims: Claims): boolean {
 		}
 	};
 
-	return covers(scope.publish, claims.publish) && covers(scope.subscribe, claims.subscribe);
+	return covers(scope.publish, paths(claims.publish)) && covers(scope.subscribe, paths(claims.subscribe));
 }

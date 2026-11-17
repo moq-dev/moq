@@ -2,9 +2,7 @@
 
 Coverage-guided fuzzing of the receive control-message walk: the unsafe code that steps
 through the kernel's control buffer (`udp::cmsg::Iter`) by the lengths written in it, and
-reads each payload as a C struct (`ControlMetadata::decode` for a datagram,
-`LinuxError::decode` for an error-queue entry, whose offender address an ICMP sender
-chooses).
+reads each payload as a C struct (`ControlMetadata::decode`).
 
 ```bash
 cargo install --locked cargo-fuzz
@@ -29,12 +27,11 @@ pinned stable toolchain and `just rs miri` runs its seeds under Miri. moq-uring'
 
 A run of control messages, then optionally a malformed end. Each message is an opcode,
 then a payload length byte and the payload, zero-padded if the input runs short. An
-opcode below 9 names a level and type from the table in `src/udp/fuzz.rs` (`UDP_GRO`,
-`SCM_TIMESTAMPNS`, the TOS and traffic class, both packet infos, both error-queue
-types); opcode 9 spells out its level and type as two native `i32`s. Opcodes 10 and 11
-end the buffer with a header whose length is too short or runs past the buffer, followed
-by the rest of the input; opcode 12 ends it with fewer bytes than a header. Opcodes wrap
-modulo 13.
+opcode below 7 names a level and type from the table in `src/udp/fuzz.rs` (`UDP_GRO`,
+`SCM_TIMESTAMPNS`, the TOS and traffic class, and both packet infos); opcode 7 spells
+out its level and type as two native `i32`s. Opcodes 8 and 9 end the buffer with a
+header whose length is too short or runs past the buffer, followed by the rest of the
+input; opcode 10 ends it with fewer bytes than a header. Opcodes wrap modulo 11.
 
 The messages are laid out as the kernel writes them: each header, its payload, and padding
 to `CMSG_SPACE`.
