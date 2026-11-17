@@ -86,7 +86,7 @@ if command -v cmake >/dev/null; then
     sed 's/@VERSION@/0.22.1/' rs/libmoq/cmake/moq-config-version.cmake.in >"$pkg/moq-config-version.cmake"
     echo 'set(moq_FOUND TRUE)' >"$pkg/moq-config.cmake"
     # request:found
-    for case in ":1" "0.22:1" "0.22.1:1" "0.22.2:0" "0.23:0" "0.21:0" "0.6:0" "1.0:0"; do
+    for case in ":1" "0.22:1" "0.22.1:1" "0.22.2:0" "0.23:0" "0.21:0" "0.6:0" "1.0:0" "0.22...0.22.1:1" "0.22...<0.22.1:0" "0.22...<0.23:1" "0.22...0.22.0:0" "0.22...<0.22.2:1"; do
         request="${case%%:*}"
         want="${case##*:}"
         printf 'cmake_minimum_required(VERSION 3.21)\nproject(probe NONE)\nfind_package(moq %s QUIET CONFIG PATHS "%s" NO_DEFAULT_PATH)\nif(moq_FOUND)\n  message(STATUS "found=1")\nelse()\n  message(STATUS "found=0")\nendif()\n' \

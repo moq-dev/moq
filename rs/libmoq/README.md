@@ -237,7 +237,7 @@ A scale-less track has no time, so there `has_scale` is false and `value` is
 the frame's group key (a datagram's sequence). Every write takes a non-NULL
 timestamp: `moq_publish_track_frame` and `moq_publish_group_frame` convert
 theirs to the track's timescale, a microsecond one unless
-`moq_track_info.timescale` sets another, and `moq_publish_group_sequence` reads
+`moq_track_info.timescale` sets another with `timescale_present` true, and `moq_publish_group_sequence` reads
 the key a scale-less group's frames carry. `moq_consume_track_frame` points
 `moq_frame.timestamp` at the timestamp read, never NULL, valid until the frame
 is freed.
