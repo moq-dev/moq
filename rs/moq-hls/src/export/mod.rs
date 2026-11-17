@@ -2479,9 +2479,7 @@ mod tests {
 				.unwrap(),
 			json,
 		);
-		catalog
-			.update(moq_json::Timed::new(&snapshot, moq_net::Timestamp::ZERO))
-			.unwrap();
+		catalog.update(&snapshot, moq_net::Timestamp::ZERO).unwrap();
 		let mut media = Gops {
 			track: broadcast.broadcast().create_track("video0", timed()).unwrap(),
 		};

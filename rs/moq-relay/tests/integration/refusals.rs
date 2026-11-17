@@ -543,7 +543,7 @@ async fn tokio_refuses_uri_setup_paths() {
 	uri_setup_paths(false).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_refuses_uri_setup_paths() {
 	match moq_uring::Worker::new(Default::default()) {

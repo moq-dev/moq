@@ -23,7 +23,13 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		let broadcast = publisher
 			.route("ladder", moq_net::origin::RouteOptions::hidden())
 			.unwrap();
-		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO);
+		// moq-transport carries a frame's time as its Group ID, which a sequence past a
+		// timestamp's range can't be, so that track is untimed.
+		let untimed = alpn.starts_with("moq-transport");
+		let info = match untimed {
+			true => moq_net::track::Info::default(),
+			false => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MICRO),
+		};
 		let track = broadcast.broadcast().create_track("data", info).unwrap();
 		broadcast.announce().unwrap();
 		let _publisher = connect(
@@ -54,7 +60,10 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 		let mut sub = remote.track("data").unwrap().subscribe(None).await.unwrap();
 		for sequence in [5, 1 << 32, (1 << 53) - 1, (1 << 53) + 1, (1 << 62) - 1] {
 			// Timestamps stop at 2^61 - 1, the most lite-05/06 can zigzag as a first frame.
-			let timestamp = moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap();
+			let timestamp = match untimed {
+				true => moq_net::Timestamp::unscaled(sequence),
+				false => moq_net::Timestamp::from_micros(sequence.min((1 << 61) - 1)).unwrap(),
+			};
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
 			group.finish().unwrap();

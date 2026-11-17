@@ -90,18 +90,18 @@ impl KeySet {
 	}
 
 	/// Copy the set with each key's private parts removed, failing on a symmetric key, which has no public half, and on a key that cannot verify.
-	pub fn to_public_set(&self) -> crate::Result<KeySet> {
+	pub fn public(&self) -> crate::Result<KeySet> {
 		Ok(KeySet {
 			keys: self
 				.keys
 				.iter()
-				.map(|key| key.as_ref().to_public().map(Arc::new))
+				.map(|key| key.as_ref().public().map(Arc::new))
 				.collect::<Result<Vec<Arc<Key>>, _>>()?,
 		})
 	}
 
 	/// Find the key with the given key ID.
-	pub fn find_key(&self, kid: &str) -> Option<Arc<Key>> {
+	pub fn find(&self, kid: &str) -> Option<Arc<Key>> {
 		self.keys
 			.iter()
 			.find(|k| k.kid.as_ref().is_some_and(|k| k.encode() == kid))
@@ -135,7 +135,7 @@ impl KeySet {
 		let header = jsonwebtoken::decode_header(token)?;
 		match header.kid {
 			Some(kid) => self
-				.find_key(kid.as_str())
+				.find(kid.as_str())
 				.ok_or_else(|| crate::Error::from(KeyError::KeyNotFound(kid))),
 			None => {
 				// If we only have one key we can use it without a kid
@@ -168,6 +168,7 @@ mod tests {
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
+			id: None,
 		}
 	}
 
@@ -184,7 +185,7 @@ mod tests {
 		let set = set.unwrap();
 		assert_eq!(set.keys.len(), 1);
 		assert_eq!(set.keys[0].kid.as_ref().map(|k| k.encode()), Some("1"));
-		assert!(set.find_key("1").is_some());
+		assert!(set.find("1").is_some());
 	}
 
 	#[test]
@@ -199,8 +200,8 @@ mod tests {
 		let deserialized = KeySet::from_str(&json).unwrap();
 
 		assert_eq!(deserialized.keys.len(), 2);
-		assert!(deserialized.find_key("1").is_some());
-		assert!(deserialized.find_key("2").is_some());
+		assert!(deserialized.find("1").is_some());
+		assert!(deserialized.find("2").is_some());
 	}
 
 	#[test]
@@ -210,7 +211,7 @@ mod tests {
 			keys: vec![Arc::new(key)],
 		};
 
-		let found = set.find_key("other-key");
+		let found = set.find("other-key");
 		assert!(found.is_none());
 	}
 
@@ -221,7 +222,7 @@ mod tests {
 			keys: vec![Arc::new(key)],
 		};
 
-		let found = set.find_key("any-key");
+		let found = set.find("any-key");
 		assert!(found.is_none());
 	}
 
@@ -247,7 +248,7 @@ mod tests {
 	fn test_sign_skips_public_only_key() {
 		let private = create_test_key(Some("active"));
 		let public = create_test_key(Some("old"))
-			.to_public()
+			.public()
 			.unwrap()
 			.with_operations([KeyOperation::Sign, KeyOperation::Verify]);
 
@@ -261,7 +262,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_to_public_set() {
+	fn test_public() {
 		// Use asymmetric key (ES256) so we can separate public/private
 		let key = create_test_key(Some("1"));
 
@@ -269,7 +270,7 @@ mod tests {
 			keys: vec![Arc::new(key)],
 		};
 
-		let public_set = set.to_public_set().expect("failed to convert to public set");
+		let public_set = set.public().expect("failed to convert to public set");
 		assert_eq!(public_set.keys.len(), 1);
 
 		let public_key = &public_set.keys[0];
@@ -279,13 +280,13 @@ mod tests {
 	}
 
 	#[test]
-	fn test_to_public_set_fails_for_symmetric() {
+	fn test_public_fails_for_symmetric() {
 		let key = Key::generate(Algorithm::HS256, Some(crate::KeyId::decode("sym").unwrap())).unwrap();
 		let set = KeySet {
 			keys: vec![Arc::new(key)],
 		};
 
-		let result = set.to_public_set();
+		let result = set.public();
 		assert!(result.is_err());
 	}
 

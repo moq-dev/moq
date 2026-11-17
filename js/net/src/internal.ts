@@ -493,6 +493,8 @@ export interface ResumeSource {
 	start(): bigint | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
+	/** The longest run of keys just below `key` any copy knows were never produced. */
+	skippedBelow(key: bigint): bigint;
 	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
 	starts(from: bigint): (bigint | undefined)[] | undefined;
 	/** Each range as the serving copy resolved it, undefined without one. */
@@ -525,8 +527,6 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
-	/** See {@link hooks.continueGroup}, answered by the serving copy. */
-	continueGroup(sequence: bigint, from: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -669,6 +669,12 @@ export const hooks: {
 	subscriberEnd: (subscriber: Subscriber) => Position | undefined;
 	/** The error that end carries, if the track does not end cleanly. Assigned by `track.ts`. */
 	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
+	/**
+	 * How many keys just below `key` the publisher declared it never produced: the skip run
+	 * ending at `key`, which a moq-transport Prior Group ID Gap names. Mirrors the Rust
+	 * `skipped_below`; assigned by `track.ts`.
+	 */
+	skippedBelow: (subscriber: Subscriber, key: bigint) => bigint;
 	joinSubscriber: (subscriber: Subscriber) => void;
 	/** Re-evaluate a live-edge join at a producer. */
 	joinProducer: (producer: Producer) => void;
@@ -795,12 +801,6 @@ export const hooks: {
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
-	/**
-	 * A fresh read from frame `from` of group `sequence`, if a subscriber's track still caches it from
-	 * there, its range still admits it, and its current budget does not judge it stale, expiring
-	 * against that budget: a lite-07 continuation of a group whose stream yielded.
-	 */
-	continueGroup: (subscriber: Subscriber, sequence: bigint, from: number) => GroupConsumer | undefined;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
 	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
@@ -1047,6 +1047,9 @@ export const hooks: {
 	subscriberEndError: () => {
 		throw new Error("track.ts not loaded");
 	},
+	skippedBelow: () => {
+		throw new Error("track.ts not loaded");
+	},
 	joinSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1123,9 +1126,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	supersedeStale: () => {
-		throw new Error("track.ts not loaded");
-	},
-	continueGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {

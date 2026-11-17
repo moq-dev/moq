@@ -189,9 +189,11 @@ func (t *TrackProducer) Requests() (*TrackRequests, error) {
 	return &TrackRequests{inner: inner}, nil
 }
 
-// AppendGroup starts a new group; write frames into it, then Finish.
-func (t *TrackProducer) AppendGroup() (*GroupProducer, error) {
-	inner, err := t.inner.AppendGroup()
+// AppendGroup starts the next group at start, converted to the track's timescale
+// (on a scale-less track, Unscaled at the group's key); write frames into it, then
+// Finish. A start at or before a group the track holds is refused.
+func (t *TrackProducer) AppendGroup(start Timestamp) (*GroupProducer, error) {
+	inner, err := t.inner.AppendGroup(start)
 	if err != nil {
 		return nil, err
 	}

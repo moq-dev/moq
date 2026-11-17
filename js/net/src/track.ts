@@ -712,6 +712,14 @@ function bufferInsert(groups: GroupConsumer[], group: GroupConsumer): void {
 	else groups.splice(timelineIndex(groups, group.sequence + 1n), 0, group);
 }
 
+// How many keys just below `key` the publisher declared it never produced: the skip run that
+// ends at `key`. Mirrors the Rust `TrackState::skipped_below`.
+function skippedBelow(state: TrackState, key: bigint): bigint {
+	if (key === 0n) return 0n;
+	const run = state.drops.at(key - 1n);
+	return run?.skip ? key - run.start : 0n;
+}
+
 // The shared state behind a Producer / Subscriber pair. Package-internal
 // wiring, unexported so it never appears in the published type declarations.
 class TrackState {
@@ -3100,20 +3108,6 @@ export class Subscriber {
 		};
 	}
 
-	// A fresh read from frame `from` of group `sequence`, if the cache still holds it from there and
-	// this cursor admits it and does not judge it stale, expiring against the budget: a lite-07
-	// continuation of a group whose stream yielded. A resumed reader asks its serving route's copy.
-	#continueGroup(sequence: bigint, from: number): GroupConsumer | undefined {
-		if (this.#resume) return this.#resume.continueGroup(sequence, from);
-		const producer = this.#state.producer;
-		if (!producer) return undefined;
-		const cap = this.#cursor.peek().end;
-		const admitted = (cap === undefined || sequence < cap) && this.#window.contains(sequence);
-		if (!admitted || this.#staleAt(sequence, this.#drift())) return undefined;
-		const group = cachedMirror(producer, sequence, from);
-		return group && this.#guard(group);
-	}
-
 	private constructor(name: string, state: TrackState) {
 		this.name = name;
 		this.#state = state;
@@ -3739,6 +3733,8 @@ export class Subscriber {
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek()?.at;
 		hooks.subscriberEndError = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.end.peek()?.error;
+		hooks.skippedBelow = (subscriber, key) =>
+			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
 		hooks.joinSubscriber = (subscriber) => {
 			if (subscriber.#resume) subscriber.#resume.join();
 			else if (subscriber.#state.producer) hooks.joinProducer(subscriber.#state.producer);
@@ -3806,7 +3802,6 @@ export class Subscriber {
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
-		hooks.continueGroup = (subscriber, sequence, from) => subscriber.#continueGroup(sequence, from);
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.handedOut = (subscriber, sequence) => subscriber.#delivered.has(sequence);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>

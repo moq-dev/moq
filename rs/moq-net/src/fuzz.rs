@@ -20,7 +20,7 @@ pub use request::request;
 pub use session::{session_ietf, session_lite};
 
 /// Lite-07 publisher run loops for the publisher bench.
-pub use crate::lite::{CoverageBench, PausedBench};
+pub use crate::lite::CoverageBench;
 
 use bytes::Bytes;
 
@@ -147,7 +147,6 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 						ietf::Version::Draft22,
 					)
 					.unwrap(),
-					..Default::default()
 				},
 			})
 		});
@@ -428,8 +427,8 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		25 => roundtrip::<lite::AuthOk, _>(rest, &mut Vec::new(), version),
 		26 => roundtrip::<lite::AuthError, _>(rest, &mut Vec::new(), version),
 		27 => roundtrip::<lite::AuthReply, _>(rest, &mut Vec::new(), version),
-		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
-		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
+		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::lite(version)),
+		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::lite(version)),
 		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
 		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
 		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
@@ -1631,7 +1630,7 @@ fn setup<'a, T>(data: &'a [u8], scratch: &'a mut Vec<u8>, version: ietf::Version
 where
 	T: Decode<'a, crate::Version> + Encode<crate::Version>,
 {
-	let outer = crate::Version::Ietf(version);
+	let outer = crate::Version::ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
 		let parameters = parameters(&message);
 		if ietf::decode_peer_setup(parameters, version, true).is_ok() {
@@ -1749,7 +1748,6 @@ impl Default for Messages {
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
-				max_age: None,
 				new_group: None,
 				request_id: ietf::RequestId(2),
 				track_namespace: Path::from_static("room/alice"),
@@ -1916,7 +1914,6 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			range_filters: false,
 			authorization_token: None,
 			new_group: None,
-			max_age: None,
 		}
 		.encode(w, BENCH_IETF)
 		.unwrap(),
@@ -1969,7 +1966,12 @@ pub fn path(data: &[u8]) -> bool {
 			Err(crate::path::Error::TooLong)
 		} else if escaped_segments(s).iter().any(|segment| !paired(segment)) {
 			Err(crate::path::Error::InvalidEscape)
-		} else if escaped_segments(s).iter().any(String::is_empty) {
+		} else if escaped_segments(s).iter().any(String::is_empty)
+			// TEMPORARY MIGRATION, delete at the next version cut: the previous release splits at
+			// every `/`, escaped or not, so a `/` doubled or at the end is refused even after a `\`.
+			|| s.ends_with('/')
+			|| s.contains("//")
+		{
 			Err(crate::path::Error::EmptySegment)
 		} else {
 			Ok(())
@@ -2239,7 +2241,7 @@ pub fn seeds() -> Vec<Seed> {
 
 	// SETUP has its own type prefix, which uniform bodies cannot synthesize.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
-		let outer = crate::Version::Ietf(*version);
+		let outer = crate::Version::ietf(*version);
 		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
 		let messages = vec![(26, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
 		for (kind, message) in messages {
@@ -2255,7 +2257,7 @@ pub fn seeds() -> Vec<Seed> {
 
 	// The `moql` SETUP pair, framed as lite-01/02, also has its own type prefix.
 	for (index, version) in LITE_VERSIONS.iter().enumerate() {
-		let outer = crate::Version::Lite(*version);
+		let outer = crate::Version::lite(*version);
 		let client = crate::setup::Client {
 			versions: coding::Versions::from([outer.into()]),
 			parameters: Default::default(),

@@ -15,7 +15,7 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use moq_json::window::{ConsumerConfig, Decoder};
+use moq_json::window::{Decoder, consumer};
 
 struct Counter;
 
@@ -108,7 +108,7 @@ fn run(records: usize) -> ((usize, Duration), (usize, Duration)) {
 	let (mut header_allocs, mut header_time) = (0, Duration::ZERO);
 	let (mut push_allocs, mut push_time) = (0, Duration::ZERO);
 	for _ in 0..RUNS {
-		let mut decoder = Decoder::<Record>::new(ConsumerConfig::default());
+		let mut decoder = Decoder::<Record>::new(consumer::Config::default());
 		let mut group = decoder.group();
 
 		let (allocs, time) = measure(|| group.decode(&header).unwrap());

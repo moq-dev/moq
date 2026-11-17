@@ -171,7 +171,7 @@ async fn embed_and_stop(mut config: Config) {
 		relay.config().quic.max_streams,
 		Some(moq_tokio::quic::DEFAULT_MAX_STREAMS)
 	);
-	assert_eq!(relay.cluster().id(), relay.cluster().origin.hop().get());
+	assert_eq!(relay.cluster().id(), relay.cluster().origin.node().get());
 
 	// The application handles: in-process workers publish into the origin the
 	// QUIC sessions see, and the trigger stops the owner from any task. Both
@@ -421,7 +421,7 @@ async fn worker_tokio_custom_route_and_quic() {
 }
 
 /// io_uring workers. Skips below the 6.12 floor unless CI_STRICT.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {

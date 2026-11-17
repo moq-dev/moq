@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
 	Error, Path, SessionError, Timescale, broadcast,
-	coding::{Decode, DecodeError, Decoder, Reader, Stream, Writer},
+	coding::{Decode, DecodeError, Decoder, Reader, Stream, StreamCodes as _, Writer},
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
 	origin, track,
@@ -1124,7 +1124,7 @@ pub(super) struct Subscriber {
 	// declares none of its own (see `session_route`). Base moq-transport carries no
 	// hop ids, so a peer only has an identity if it negotiated the MoQ Cluster
 	// extension; otherwise this is the one the session assigned it (a fresh id per
-	// dialed or accepted session, unless the caller pinned one with `with_peer_hop`),
+	// dialed or accepted session, unless the caller pinned one with `with_peer_node`),
 	// or `Hop::UNKNOWN` (0) when none was assigned.
 	//
 	// The assigned id stays local: it is never written into a hop chain, so a peer
@@ -1236,7 +1236,7 @@ impl Subscriber {
 		session: Transport,
 		origin: origin::Producer,
 		control: Control,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
 		self_origin: crate::Hop,
 		cost: Option<u64>,
@@ -1250,7 +1250,7 @@ impl Subscriber {
 			// Its own frame budget, so a peer's declared sizes crowd out no other session.
 			origin: origin.with_own_frames(),
 			control,
-			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			session_origin: peer_node.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
 			peer_setup,
 			solicit: true,
@@ -3770,10 +3770,8 @@ struct OnceRequest {
 
 /// What the request went out with.
 struct Sent {
-	/// What the peer's SETUP negotiated: MAX_AGE, and compressed properties.
-	max_age_supported: bool,
+	/// Whether the peer's SETUP negotiated compressed properties.
 	flate: bool,
-	max_age: Option<u64>,
 	priority: i8,
 	new_group: Option<u64>,
 	properties_wanted: bool,
@@ -3914,11 +3912,7 @@ struct Established {
 	dynamic_groups: bool,
 	/// The group the track's consumers want, `None` once nobody does.
 	wanted: Option<u64>,
-	/// MAX_AGE is negotiated, so an update carries the aggregate's.
-	max_age_supported: bool,
 	/// The subscriber priority upstream holds, and the one the aggregate now asks for.
-	sent_max_age: Option<u64>,
-	wanted_max_age: Option<u64>,
 	sent_priority: i8,
 	priority: i8,
 	sent_bounds: WireBounds,
@@ -4284,15 +4278,11 @@ impl SubscribeOnce {
 		// the order.
 		let aggregate = target.subscription();
 		let sent = Sent {
-			max_age_supported: peer.max_age,
 			flate: peer.flate,
 			priority: aggregate.as_ref().map(|s| s.priority).unwrap_or(0),
-			max_age: peer
-				.max_age
-				.then(|| super::max_age::millis(aggregate.as_ref().map_or(Duration::MAX, |s| s.budget()))),
 			// Without an Established subscription, a relay includes the request it holds.
 			new_group: target.new_group(),
-			// A timed copy asks for the units that opt its objects into timestamps.
+			// A timed copy asks for the units its Group IDs are in.
 			properties_wanted: match &target {
 				Target::Request(_) => true,
 				Target::Resume(idle) => idle.properties.timescale.is_some(),
@@ -4313,7 +4303,6 @@ impl SubscribeOnce {
 					filter: Some(join.filter),
 					fill: join.fill,
 					priority: Some(sent.priority),
-					max_age: sent.max_age,
 					// Only a track declaring DYNAMIC_GROUPS takes one on an update.
 					new_group: sent.new_group.filter(|_| held.properties.dynamic_groups),
 				};
@@ -4322,7 +4311,6 @@ impl SubscribeOnce {
 			None => req.stream.writer.buffer_message(
 				ietf::Subscribe::ID,
 				&ietf::Subscribe {
-					max_age: sent.max_age,
 					new_group: sent.new_group,
 					request_id,
 					track_namespace: broadcast_path.clone(),
@@ -4729,9 +4717,6 @@ impl SubscribeOnce {
 			requested: sent.new_group,
 			dynamic_groups: track.info().refresh.is_some(),
 			wanted: None,
-			max_age_supported: sent.max_age_supported,
-			sent_max_age: sent.max_age,
-			wanted_max_age: sent.max_age,
 			sent_priority: sent.priority,
 			priority: sent.priority,
 			sent_bounds,
@@ -4816,9 +4801,6 @@ impl SubscribeOnce {
 					Ok(Some(bounds)) => live.wanted_bounds = Ok(bounds),
 					Ok(None) => live.unsettled = Some(subscription.clone()),
 					Err(err) => live.wanted_bounds = Err(err),
-				}
-				if live.max_age_supported {
-					live.wanted_max_age = Some(super::max_age::millis(subscription.budget()));
 				}
 			}
 		}
@@ -4927,7 +4909,6 @@ impl SubscribeOnce {
 			filter: ranges.as_ref().map(|join| join.filter),
 			fill: ranges.and_then(|join| join.fill),
 			priority: (live.priority != live.sent_priority).then_some(live.priority),
-			max_age: live.wanted_max_age.filter(|_| live.wanted_max_age != live.sent_max_age),
 			new_group,
 		};
 		let mut state = this.state.lock();
@@ -4954,11 +4935,7 @@ impl SubscribeOnce {
 		} else {
 			None
 		};
-		if update.priority.is_none()
-			&& update.max_age.is_none()
-			&& update.new_group.is_none()
-			&& update.filter.is_none()
-		{
+		if update.priority.is_none() && update.new_group.is_none() && update.filter.is_none() {
 			return Poll::Pending;
 		}
 		let update_id = this.control.next_request_id();
@@ -5002,11 +4979,10 @@ impl SubscribeOnce {
 			}
 			ServeEnd::Update(update_id, update, bounds) => {
 				let changed_range = update.filter.is_some();
-				let (asked, new_group, asked_age) = (update.priority, update.new_group, update.max_age);
+				let (asked, new_group) = (update.priority, update.new_group);
 				if let Err(err) = req.stream.writer.buffer_message(
 					ietf::SubscribeUpdate::ID,
 					&ietf::SubscribeUpdate {
-						max_age: update.max_age,
 						request_id: update_id,
 						subscriber_priority: update.priority.map(super::priority::to_wire),
 						forward: None,
@@ -5023,9 +4999,6 @@ impl SubscribeOnce {
 				if changed_range {
 					live.sent_bounds = bounds;
 					let _ = live.track.start_at(live.sent_bounds.0);
-				}
-				if asked_age.is_some() {
-					live.sent_max_age = asked_age;
 				}
 				if let Some(asked) = asked {
 					live.sent_priority = asked;
@@ -5959,7 +5932,7 @@ impl LearnTrackStatus {
 					} else if let Poll::Ready(res) = response {
 						Some(SetupResponse::Response(res))
 					} else if let Poll::Ready(err) = this.session.poll_closed(waiter) {
-						Some(SetupResponse::Cancelled(Error::from_transport(err)))
+						Some(SetupResponse::Cancelled(this.version.transport_error(err)))
 					} else {
 						// A fetch needs nothing from the status to go out, only to read its objects.
 						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_groups(waiter) {
@@ -6141,29 +6114,21 @@ impl Subscriber {
 			return Ok(None);
 		}
 
-		let timestamp = match &datagram.properties {
-			Some(raw) => {
-				let bytes = bytes::Bytes::copy_from_slice(raw);
-				match super::object::read(&bytes, self.version, timescale) {
-					Ok(object) => object.timestamp,
-					Err(err) => {
-						tracing::debug!(%err, "dropping a datagram with unreadable object properties");
-						return Ok(None);
-					}
-				}
-			}
-			None => None,
-		};
-		if timescale.is_some() && timestamp.is_none() {
+		if let Some(raw) = &datagram.properties
+			&& let Err(err) = super::object::read(&bytes::Bytes::copy_from_slice(raw), self.version)
+		{
+			tracing::debug!(%err, "dropping a datagram with unreadable object properties");
+			return Ok(None);
+		}
+		// Its time is its sequence, as a group's is its ID.
+		let Ok(timestamp) = object_time(timescale, datagram.group_id) else {
 			tracing::debug!(
 				alias = datagram.track_alias,
 				group = datagram.group_id,
-				"dropping a datagram without a timestamp on a timed track"
+				"dropping a datagram whose sequence is past the latest time"
 			);
 			return Ok(None);
-		}
-		// A scale-less datagram's time is its sequence.
-		let timestamp = crate::Timestamp::received(timestamp, datagram.group_id);
+		};
 		if let Err(err) = producer.insert(crate::datagram::Datagram {
 			sequence: datagram.group_id,
 			timestamp,
@@ -6400,6 +6365,7 @@ impl RecvGroup {
 
 		let mut ingest: GroupIngest = GroupIngest::new(this.version, &group, timescale);
 		ingest.expected_first = Some(start);
+		ingest.track = Some(track.clone());
 		let res = wait!(Ingest => {
 			if let Poll::Ready(err) = track.poll_aborted(waiter) {
 				Poll::Ready(Err(err))
@@ -6696,9 +6662,11 @@ fn poll_claim_fill(
 }
 
 /// Pumps moq-transport subgroup objects from a reader into a group producer:
-/// the id delta, the extension headers (carrying the timestamp), the size, the
-/// status for empty objects, and the streamed payload.
+/// the id delta, the extension headers, the size, the status for empty objects, and the
+/// streamed payload.
 pub(crate) struct GroupIngest {
+	/// The track a Prior Group ID Gap skips keys on, none to ignore it.
+	pub(crate) track: Option<track::Producer>,
 	has_extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -6709,6 +6677,8 @@ pub(crate) struct GroupIngest {
 	/// The property list `properties` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
 	gap: Option<u64>,
+	/// The object's Prior Group ID Gap, applied only once the object proves to be a frame.
+	group_gap: Option<u64>,
 	inflated: Option<u64>,
 	phase: IngestPhase,
 }
@@ -6721,9 +6691,9 @@ enum IngestPhase {
 	/// Reading (and decoding or discarding) the extension block.
 	ExtBytes { size: usize },
 	/// Reading the object size.
-	Size { timestamp: Option<crate::Timestamp> },
+	Size,
 	/// Reading the status of an empty object.
-	Status { timestamp: Option<crate::Timestamp> },
+	Status,
 	/// Waiting to admit the object, or an empty one's properties, until the group's
 	/// fastest reader leaves room for it.
 	Admit { header: frame::Header },
@@ -6737,6 +6707,7 @@ enum IngestPhase {
 impl GroupIngest {
 	pub(crate) fn new(version: Version, group: &ietf::GroupHeader, timescale: Option<Timescale>) -> Self {
 		Self {
+			track: None,
 			has_extensions: group.flags.has_extensions,
 			timescale,
 			version,
@@ -6745,6 +6716,7 @@ impl GroupIngest {
 			properties: Default::default(),
 			raw: bytes::Bytes::new(),
 			gap: None,
+			group_gap: None,
 			inflated: None,
 			phase: IngestPhase::Delta,
 		}
@@ -7082,7 +7054,7 @@ impl RunFill {
 		}
 
 		let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
-		let decoded = super::object::read(&raw, self.version, self.timescale)?;
+		let decoded = super::object::read(&raw, self.version)?;
 		let expected = self
 			.head
 			.as_ref()
@@ -8022,7 +7994,7 @@ impl GroupFetchObjects {
 				return Poll::Ready(Err(Error::ProtocolViolation));
 			}
 			let raw = bytes::Bytes::from(object.properties.unwrap_or_default());
-			let decoded = super::object::read(&raw, self.version, timescale)?;
+			let decoded = super::object::read(&raw, self.version)?;
 			if id > next && decoded.gap.is_none_or(|gap| gap < id - next) {
 				return Poll::Ready(Err(Error::Unsupported));
 			}
@@ -8124,8 +8096,7 @@ impl FetchPayloadRecv {
 		producer.mark_gap(payload.id, payload.decoded.gap)?;
 		let size = wait!(Size => stream.poll_varint(waiter))?;
 		let FetchPayload { decoded, timescale, id } = payload;
-		super::object::check_frame(&decoded.properties, timescale)?;
-		let timestamp = object_time(timescale, decoded.timestamp, producer.key)?;
+		let timestamp = object_time(timescale, producer.key)?;
 		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
 		let fields = (!plain).then(|| {
 			std::sync::Arc::new(crate::model::object::Fields {
@@ -8336,23 +8307,49 @@ fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> st
 	piece.expect("the run holds the group")
 }
 
-/// A Normal object's timestamp: required on a timed track, where an object without a
-/// Timestamp is malformed, and its group's `key` on a scale-less one, which carries none.
-fn object_time(
-	timescale: Option<Timescale>,
-	timestamp: Option<crate::Timestamp>,
-	key: u64,
-) -> Result<crate::Timestamp, Error> {
-	match (timescale, timestamp) {
-		(Some(_), None) => Err(Error::MalformedTrack),
-		(_, timestamp) => Ok(crate::Timestamp::received(timestamp, key)),
+/// A received object's timestamp: its group's `key`, in the track's `timescale` when it
+/// declares one. Nothing reads time from an object's properties, which pass between
+/// moq-transport peers untouched, so every object of a group shares its start.
+fn object_time(timescale: Option<Timescale>, key: u64) -> Result<crate::Timestamp, Error> {
+	match timescale {
+		// A key past the latest time is a group we cannot carry.
+		Some(timescale) => crate::Timestamp::new(key, timescale).map_err(|_| Error::Unsupported),
+		None => Ok(crate::Timestamp::unscaled(key)),
 	}
 }
 
 impl GroupIngest {
+	/// Skip the `gap` keys just below the group at `key`, as an object's Prior Group ID Gap
+	/// says none of them will ever exist. Best effort: a publisher that sends none leaves
+	/// the keys to arrive or be given up. Once per group, since every object naming it must
+	/// agree.
+	fn skip_prior(&mut self, key: u64, gap: Option<u64>) -> Result<(), Error> {
+		let Some(gap) = gap.filter(|gap| *gap > 0) else {
+			return Ok(());
+		};
+		let start = key.checked_sub(gap).ok_or(Error::MalformedTrack)?;
+		let Some(track) = self.track.take() else {
+			return Ok(());
+		};
+		// A group that arrived was produced after all: it keeps the group, and the session
+		// goes on, as for a lite SUBSCRIBE_SKIP.
+		if let Some(cached) = track.skip_received(start..key).iter().next() {
+			tracing::warn!(
+				track = %track.name(),
+				group = key,
+				gap,
+				cached = cached.start,
+				"protocol error: a Prior Group ID Gap covers a group that arrived; keeping the group"
+			);
+		}
+		Ok(())
+	}
+
 	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
-		super::object::check_frame(&self.properties, self.timescale)?;
 		let id = self.prior_object.expect("payload follows object ID");
+		// A status object refused for its properties must not have skipped keys already.
+		let gap = self.group_gap.take();
+		self.skip_prior(group.start, gap)?;
 		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
 		let plain = id == group.frame_count() as u64 && self.properties.is_empty();
 		let fields = (!plain).then(|| {
@@ -8396,10 +8393,11 @@ impl GroupIngest {
 					self.properties = Default::default();
 					self.raw = bytes::Bytes::new();
 					self.gap = None;
+					self.group_gap = None;
 					self.inflated = None;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
-						false => IngestPhase::Size { timestamp: None },
+						false => IngestPhase::Size,
 					};
 				}
 				IngestPhase::ExtSize => {
@@ -8408,21 +8406,21 @@ impl GroupIngest {
 				}
 				IngestPhase::ExtBytes { size } => {
 					let ext = ready!(reader.poll_read_exact(waiter, *size))?;
-					let decoded = super::object::read(&ext, self.version, self.timescale)?;
-					let timestamp = decoded.timestamp;
+					let decoded = super::object::read(&ext, self.version)?;
+					self.group_gap = decoded.group_gap;
 					self.properties = decoded.properties;
 					self.raw = ext;
 					self.gap = decoded.gap;
 					self.inflated = decoded.inflated;
-					self.phase = IngestPhase::Size { timestamp };
+					self.phase = IngestPhase::Size;
 				}
-				IngestPhase::Size { timestamp } => {
+				IngestPhase::Size => {
 					let size = ready!(reader.poll_varint(waiter))?;
 					if size == 0 {
-						self.phase = IngestPhase::Status { timestamp: *timestamp };
+						self.phase = IngestPhase::Status;
 						continue;
 					}
-					let timestamp = object_time(self.timescale, *timestamp, group.start)?;
+					let timestamp = object_time(self.timescale, group.start)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					self.phase = IngestPhase::Admit { header };
 				}
@@ -8442,16 +8440,15 @@ impl GroupIngest {
 						false => self.phase = IngestPhase::Payload { frame },
 					}
 				}
-				IngestPhase::Status { timestamp } => {
+				IngestPhase::Status => {
 					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
-						let timestamp = object_time(self.timescale, *timestamp, group.start)?;
+						let timestamp = object_time(self.timescale, group.start)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
 						self.phase = IngestPhase::Admit { header };
 						continue;
 					}
-					// A status object has no frame to hold its time, so its block keeps it.
-					self.properties = super::object::unframed(&self.raw, self.version, self.timescale)?;
+					self.properties = super::object::unframed(&self.raw, self.version)?;
 					super::object::check_status(&self.properties)?;
 					if status == END_OF_GROUP {
 						group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
@@ -11041,7 +11038,7 @@ mod tests {
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
-	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
+	/// anonymous (hop 0). An identity assigned via `Client::with_peer_node` is
 	/// stored as `via` for split-horizon and never written into the chain.
 	#[kio::test]
 	async fn assigned_peer_hop_attributes_announces() {
@@ -11097,7 +11094,7 @@ mod tests {
 		let mut announced = consumer.routes();
 
 		// The publish direction: an origin handle scoped to the peer, which is what
-		// `Client::with_peer_hop` hands the publisher. Holding its announce stream
+		// `Client::with_peer_node` hands the publisher. Holding its announce stream
 		// is what records that the peer has been offered these paths.
 		let mut publishing = consumer.clone().excluding(peer).routes();
 
@@ -13847,7 +13844,7 @@ mod tests {
 		};
 		assert_eq!(
 			SessionError::from(&err),
-			SessionError::TooManyRequestUpdates,
+			crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES,
 			"the flood must surface TOO_MANY_REQUEST_UPDATES"
 		);
 		assert!(
@@ -13855,7 +13852,7 @@ mod tests {
 				.log
 				.closes()
 				.iter()
-				.any(|close| close.0 == SessionError::TooManyRequestUpdates.to_code()),
+				.any(|close| close.0 == crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES.to_code()),
 			"the flood must close the session with TOO_MANY_REQUEST_UPDATES: {:?}",
 			session.log.closes()
 		);
@@ -14405,7 +14402,7 @@ mod tests {
 			matches!(
 				result,
 				Err(Error::Decode(DecodeError::Session(
-					crate::SessionError::UnknownAuthTokenAlias
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS
 				)))
 			),
 			"the queued update's unknown alias closes the session: {result:?}"
@@ -14527,8 +14524,6 @@ struct Update {
 	fill: Option<ietf::Fill>,
 	/// The aggregate subscriber priority, in the model's higher-first terms.
 	priority: Option<i8>,
-	/// Subscriber age budget, in milliseconds.
-	max_age: Option<u64>,
 	/// NEW_GROUP_REQUEST.
 	new_group: Option<u64>,
 }
@@ -14817,8 +14812,14 @@ mod stitch_tests {
 	const KEY: u64 = 4;
 
 	/// A distinct timestamp per object, so a stitched group's frames can be told apart.
+	/// The Timestamp property a publisher puts on object `index`, which nothing reads.
 	fn timestamp(index: usize) -> Timestamp {
 		Timestamp::from_micros(1000 + index as u64).expect("in range")
+	}
+
+	/// What a received frame of group `key` is stamped with on a microsecond track.
+	fn key_time(key: u64) -> Timestamp {
+		Timestamp::new(key, Timescale::MICRO).expect("in range")
 	}
 
 	/// A publisher's fill fetch stream: a FETCH_HEADER, then one object per payload
@@ -15188,9 +15189,9 @@ mod stitch_tests {
 		assert_eq!(
 			frames,
 			vec![
-				(timestamp(0), b"head-0".to_vec()),
-				(timestamp(1), b"head-1".to_vec()),
-				(timestamp(2), b"tail-2".to_vec()),
+				(key_time(KEY), b"head-0".to_vec()),
+				(key_time(KEY), b"head-1".to_vec()),
+				(key_time(KEY), b"tail-2".to_vec()),
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
@@ -15226,12 +15227,12 @@ mod stitch_tests {
 		tail.expect("tail");
 		let (key, frames) = read_group(&mut consumer).await;
 		assert_eq!(key, KEY - 2);
-		assert_eq!(frames, vec![(timestamp(0), b"history".to_vec())]);
+		assert_eq!(frames, vec![(key_time(KEY - 2), b"history".to_vec())]);
 		let (key, frames) = read_group(&mut consumer).await;
 		assert_eq!(key, KEY);
 		assert_eq!(
 			frames,
-			vec![(timestamp(1), b"head".to_vec()), (timestamp(1), b"tail".to_vec())]
+			vec![(key_time(KEY), b"head".to_vec()), (key_time(KEY), b"tail".to_vec())]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done));
 	}
@@ -15471,7 +15472,6 @@ mod stitch_tests {
 			ietf::Fetch::ID
 		} else {
 			ietf::Subscribe {
-				max_age: None,
 				new_group: None,
 				request_id: RequestId(3),
 				track_namespace: Path::from_static("room"),
@@ -15593,32 +15593,58 @@ mod stitch_tests {
 		assert!(decoder.is_empty());
 	}
 
-	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the
-	/// track on the publisher's grid, so a copy of the same instance over another route
-	/// matches it, including across a moq-lite hop that negotiated the `ietf` extension.
+	/// A publisher's Timestamp and Prior Group ID Gap are properties like any other, which
+	/// reach the next moq-transport peer byte for byte, including across a moq-lite hop that
+	/// negotiated the `ietf` extension.
 	#[kio::test]
-	async fn passthrough_keeps_the_publishers_timestamp_units() {
+	async fn passthrough_keeps_the_publishers_properties() {
 		let version = Version::Draft22;
-		// Timestamp 42 (ms), then an unknown property that must survive beside it.
-		let properties = [0x10, 42, 0x70, 7];
+		// Timestamp 42 (ms), a Prior Group ID Gap of 1, then an unknown property.
+		let properties = [0x10, 42, 0x3c - 0x10, 1, 0x70 - 0x3c, 7];
 		let script = object_stream(version, true, &[(0, &properties, None)]);
 		for hop in [false, true] {
-			let timestamp = Timestamp::new(42, Timescale::MILLI).ok();
 			let (bytes, log) =
 				relay_passthrough_via(script.clone(), version, version, None, Some(Timescale::MILLI), hop).await;
 			assert!(log.resets().is_empty(), "hop: {hop}");
 			let mut decoder = Decoder::new(&bytes, version.into());
 			ietf::GroupHeader::decode(&mut decoder, version).unwrap();
 			assert_eq!(decoder.varint().unwrap(), 0);
-			let relayed = bytes::Bytes::copy_from_slice(decoder.bytes().unwrap());
-			let decoded = super::super::object::read(&relayed, version, timestamp.map(|_| Timescale::MILLI)).unwrap();
-			assert_eq!(decoded.timestamp, timestamp, "hop: {hop}");
-			assert_eq!(
-				super::super::object::listed(&decoded.properties, version).len(),
-				1,
-				"hop: {hop}"
-			);
+			assert_eq!(decoder.bytes().unwrap(), properties, "hop: {hop}");
 		}
+	}
+
+	/// A Prior Group ID Gap skips the keys just below its group on the track, so a reader
+	/// moves past them at once. One reaching below key 0 makes the track malformed.
+	#[kio::test]
+	async fn a_prior_group_id_gap_skips_the_keys_below() {
+		use futures::FutureExt;
+
+		let h = Harness::new(Fill::Done, vec![object_stream(VERSION, true, &[(0, &[0x3c, 2], None)])]);
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		let track = h.track.consume();
+		assert_eq!(track.skipped_below(KEY), 2);
+		assert_eq!(track.skipped_below(KEY - 1), 1);
+		assert_eq!(track.skipped_below(KEY - 2), 0, "a gap names only the keys it covers");
+		let mut group = track.peek_group(KEY).unwrap();
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.timestamp, key_time(KEY));
+
+		let past = [0x3c, KEY as u8 + 1];
+		let h = Harness::new(Fill::Done, vec![object_stream(VERSION, true, &[(0, &past, None)])]);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
+
+		// A status object may not carry properties, so one refused for them skips nothing.
+		let h = Harness::new(
+			Fill::Done,
+			vec![object_stream(VERSION, true, &[(0, &[0x3c, 2], Some(END_OF_GROUP))])],
+		);
+		let mut stream = h.stream().await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(res.is_err(), "{res:?}");
+		assert_eq!(h.track.consume().skipped_below(KEY), 0);
 	}
 
 	fn object_stream(version: Version, first: bool, objects: &[(u64, &[u8], Option<u64>)]) -> Vec<u8> {
@@ -16248,10 +16274,10 @@ mod stitch_tests {
 		stream
 	}
 
-	/// A fill object without a Timestamp on a timed track ends the track, as a subgroup
-	/// object does: the fill is the head of a group the subscription carries.
+	/// A fill object without a Timestamp on a timed track is its group's, as a subgroup
+	/// object is: nothing reads time from an object.
 	#[kio::test]
-	async fn an_unstamped_fill_object_ends_the_track() {
+	async fn an_unstamped_fill_object_is_accepted() {
 		use futures::FutureExt;
 
 		let mut script = Vec::new();
@@ -16277,18 +16303,14 @@ mod stitch_tests {
 
 		let h = Harness::new(Fill::Serving(Some(Timescale::MICRO)), vec![script]);
 		let mut stream = h.stream().await;
-		let res = h.subscriber.clone().recv_fill(&mut stream).await;
-		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(
-			h.track.closed().now_or_never(),
-			Some(Err(Error::MalformedTrack))
-		));
+		h.subscriber.clone().recv_fill(&mut stream).await.unwrap();
+		assert!(h.track.closed().now_or_never().is_none(), "the track goes on");
 	}
 
-	/// A subgroup object without a Timestamp on a timed track makes the whole track
-	/// malformed, so the track ends rather than only its group.
+	/// Every object of a group on a timed track is stamped with the group's key in the
+	/// track's units, whatever Timestamp property it carries or lacks.
 	#[kio::test]
-	async fn an_unstamped_subgroup_object_ends_the_track() {
+	async fn a_subgroup_object_is_stamped_with_its_group_key() {
 		use futures::FutureExt;
 
 		let mut script = Vec::new();
@@ -16308,13 +16330,13 @@ mod stitch_tests {
 		script.extend_from_slice(&[0, 1, 42]);
 
 		let h = Harness::new(Fill::Done, vec![script]);
+		let mut consumer = h.track.subscribe(None);
 		let mut stream = h.stream().await;
-		let res = h.subscriber.clone().recv_group(&mut stream).await;
-		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(
-			h.track.closed().now_or_never(),
-			Some(Err(Error::MalformedTrack))
-		));
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		assert!(h.track.closed().now_or_never().is_none(), "the track goes on");
+		let (key, frames) = read_group(&mut consumer).await;
+		assert_eq!(key, KEY);
+		assert_eq!(frames, vec![(key_time(KEY), vec![42])]);
 	}
 
 	/// END_OF_TRACK after a group's last object ends the track right after that group.
@@ -17207,10 +17229,9 @@ mod stitch_tests {
 		}
 	}
 
-	/// On a timed track every Normal object carries a Timestamp, so one without is
-	/// malformed rather than stamped with its arrival time.
+	/// A fetched object on a timed track needs no Timestamp: it takes its group's key.
 	#[kio::test]
-	async fn an_unstamped_object_on_a_timed_track_is_malformed() {
+	async fn an_unstamped_fetched_object_is_accepted() {
 		let mut run = GroupFetchRun::new(VERSION, group_fetch_objects(KEY, 0, &[b"a"])).await;
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -17219,12 +17240,8 @@ mod stitch_tests {
 		);
 		run.track = track.clone();
 		let (slot, _) = run.slot(Some(Timescale::MICRO), None).await;
-		let res = run.subscriber.recv_group_fetch(&mut run.stream, slot).await;
-		assert!(matches!(res, Err(Error::MalformedTrack)), "{res:?}");
-		assert!(matches!(
-			futures::FutureExt::now_or_never(track.closed()),
-			Some(Err(Error::MalformedTrack))
-		));
+		run.subscriber.recv_group_fetch(&mut run.stream, slot).await.unwrap();
+		assert!(futures::FutureExt::now_or_never(track.closed()).is_none());
 	}
 
 	/// FETCH_OK's End Location inside the group bounds the stream: one that runs past it

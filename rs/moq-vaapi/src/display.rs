@@ -89,8 +89,7 @@ pub(crate) fn open_first(probe: impl Fn(&Display) -> anyhow::Result<()>) -> anyh
 /// A VADisplay opened over DRM.
 ///
 /// A Display is the starting point to using libva. This struct is essentially a safe wrapper over
-/// `VADisplay`, from which [`Surface`]s and [`Context`]s can be allocated in order to perform
-/// actual work using [`Display::create_surfaces`] and [`Display::create_context`], respectively.
+/// `VADisplay`, from which [`Surface`]s can be allocated with [`Display::create_surfaces`].
 ///
 /// Although libva offers several ways to create a display, this struct currently only supports
 /// opening through DRM. It may be extended to support other display types (X11, Wayland) in the
@@ -169,7 +168,7 @@ impl Display {
 	}
 
 	/// Returns the handle of this display.
-	pub fn handle(&self) -> bindings::VADisplay {
+	pub(crate) fn handle(&self) -> bindings::VADisplay {
 		self.handle
 	}
 
@@ -247,7 +246,7 @@ impl Display {
 	///
 	/// Entries of `attributes` must have their `type_` member initialized to the desired attribute
 	/// to retrieve.
-	pub fn get_config_attributes(
+	pub(crate) fn get_config_attributes(
 		&self,
 		profile: bindings::VAProfile::Type,
 		entrypoint: bindings::VAEntrypoint::Type,
@@ -316,7 +315,7 @@ impl Display {
 	/// * `coded_height` - The coded picture height
 	/// * `surfaces` - Optional hint for the amount of surfaces tied to the context
 	/// * `progressive` - Whether only progressive frame pictures are present in the sequence
-	pub fn create_context<D: SurfaceMemoryDescriptor>(
+	pub(crate) fn create_context<D: SurfaceMemoryDescriptor>(
 		self: &Arc<Self>,
 		config: &Config,
 		coded_width: u32,
@@ -340,7 +339,7 @@ impl Display {
 	/// for a given profile/entrypoint pair can be retrieved using
 	/// [`Display::get_config_attributes`]. Other attributes will take their default values, and
 	/// `attrs` can be empty in order to obtain a default configuration.
-	pub fn create_config(
+	pub(crate) fn create_config(
 		self: &Arc<Self>,
 		attrs: Vec<bindings::VAConfigAttrib>,
 		profile: bindings::VAProfile::Type,

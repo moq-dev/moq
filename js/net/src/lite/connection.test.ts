@@ -9,11 +9,12 @@ import { SessionCode, SessionError } from "../error.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { acceptBudget, Stream, Writer } from "../stream.ts";
+import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { wireOf } from "../wire.ts";
-import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
+import { AuthMessage, AuthOk } from "./auth.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -957,16 +958,17 @@ for (const [alpn, version] of [
 	});
 }
 
-// A transport tail keeps its absolute frame numbers and the session open. A group past
-// the declared end still ends the session, so a hostile peer cannot repeat that violation.
+// A lite-06 transport tail keeps its absolute frame numbers and the session open (lite-07 has no
+// Frame Start). A group past the declared end still ends the session, so a hostile peer cannot
+// repeat that violation.
 for (const violation of ["a partial group", "a group past the declared end"] as const) {
 	test(
 		violation === "a partial group"
 			? "a partial group keeps its indices and the session open"
 			: "a group past the declared end closes the session with PROTOCOL_VIOLATION",
 		async () => {
-			const version = Version.DRAFT_07;
-			const pair = createMockTransportPair(ALPN_07_WIP);
+			const version = violation === "a partial group" ? Version.DRAFT_06 : Version.DRAFT_07;
+			const pair = createMockTransportPair(violation === "a partial group" ? ALPN_06 : ALPN_07_WIP);
 			const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
 			try {
 				const track = wireOf(connection).consume(Path.from("room")).track("video").subscribe();
@@ -1005,8 +1007,8 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 				await group.encode(writer, version);
 
 				if (violation === "a partial group") {
-					await writer.u53(2); // a one-byte payload's size plus one
 					await writer.u62(2000n); // timestamp 1000, zigzag delta from 0
+					await writer.u53(1); // a one-byte payload
 					await writer.write(new Uint8Array([7]));
 					writer.close();
 					const received = await track.recvGroup();
@@ -1051,8 +1053,30 @@ for (const [name, violate] of [
 	[
 		"a reset Announce Stream",
 		async (pair) => {
+			// The client answers once its peer grants its credential.
+			const auth = await Stream.accept(pair.server, Version.DRAFT_07);
+			if (!auth || (await auth.reader.u53()) !== StreamId.Auth)
+				throw new Error("the peer never presented a credential");
+			await AuthMessage.decode(auth.reader, Version.DRAFT_07);
+			const all = new Path.Patterns([Path.Pattern.all()]);
+			await new AuthOk(all, all).encode(auth.writer, Version.DRAFT_07);
 			const { writer, send } = await announceStream(pair);
 			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			// A reset discards what the peer has not read, and a stream whose type byte is lost
+			// is not known to be an Announce Stream, so it cannot break the session. Reset only
+			// once the ANNOUNCE_OK answering the request shows the stream was identified.
+			const readers = new Readers(pair.server, Version.DRAFT_07);
+			try {
+				for (;;) {
+					const stream = await readers.next();
+					if (!stream) throw new Error("the peer never answered");
+					if ((await stream.u53()) !== DataType.Announce) continue;
+					expect(await decodeAnnounceBroadcast(stream, Version.DRAFT_07)).toEqual({ status: "ok" });
+					break;
+				}
+			} finally {
+				readers.close();
+			}
 			writer.reset(new Error("gone"));
 		},
 	],

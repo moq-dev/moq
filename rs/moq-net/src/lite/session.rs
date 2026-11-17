@@ -81,7 +81,7 @@ impl SetupAccept {
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
-					accept_error = Some(crate::lite::error::from_transport(err));
+					accept_error = Some(Error::from_transport(err));
 					break;
 				}
 			}
@@ -193,8 +193,8 @@ pub struct Config {
 	pub subscribe: Option<origin::Producer>,
 
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_hop`.
-	pub peer_hop: Option<Hop>,
+	/// declare one itself. See `Client::with_peer_node`.
+	pub peer_node: Option<Hop>,
 
 	/// The version of the protocol to use.
 	pub version: Version,
@@ -231,7 +231,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		setup_stream,
 		publish,
 		subscribe,
-		peer_hop,
+		peer_node,
 		version,
 		mut our_setup,
 		peer_setup,
@@ -261,8 +261,8 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	if our_setup.hop.is_none() {
 		our_setup.hop = publish
 			.as_ref()
-			.map(|origin| origin.hop())
-			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
+			.map(|origin| origin.node())
+			.or_else(|| subscribe.as_ref().map(|origin| origin.node()))
 			.map(Hop::from);
 	}
 	// Lite-07 declares the Node ID our routes originate under instead, so a peer that is
@@ -373,7 +373,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		version,
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
-		peer_hop,
+		peer_node,
 		auth: auth.clone(),
 		peer_grant,
 		client,
@@ -387,7 +387,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		recv_bandwidth: recv_bw_for_sub,
 		version,
 		peer_setup,
-		peer_hop,
+		peer_node,
 		// Local policy for what pulling from this peer costs. Set only when we
 		// configured a price; otherwise the subscriber charges what the peer declared
 		// for its own egress.
@@ -774,7 +774,7 @@ impl PresentToken {
 							let Ok(code) = u32::try_from(refused.code) else {
 								return Poll::Ready(Error::ProtocolViolation);
 							};
-							let err = match crate::lite::error::from_session_code(code) {
+							let err = match crate::SessionError::from_code(code) {
 								crate::SessionError::Unsupported => Error::Unsupported,
 								code => Error::Session(code),
 							};
@@ -857,7 +857,7 @@ impl SendSetup {
 	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Waiting for stream credit on our own session handle.
 		let stream = wait!(Open => self.session.poll_open_uni(&mut self.open, waiter, Default::default()))
-			.map_err(crate::lite::error::from_transport)?;
+			.map_err(Error::from_transport)?;
 		let mut writer: Writer<crate::transport::boxed::SendStream, Version> =
 			Writer::new(stream, self.version).with_stats(&self.stats);
 		writer.buffer(&super::DataType::Setup)?;
@@ -1021,7 +1021,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
@@ -1067,7 +1067,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
@@ -1148,7 +1148,7 @@ mod tests {
 				setup_stream: None,
 				publish: None,
 				subscribe: None,
-				peer_hop: None,
+				peer_node: None,
 				version: Version::Lite07,
 				our_setup: Setup::default(),
 				peer_setup: None,
@@ -1236,7 +1236,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup,
 			peer_setup: None,
@@ -1306,7 +1306,7 @@ mod tests {
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
@@ -1362,7 +1362,7 @@ mod tests {
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
@@ -1397,7 +1397,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version,
 			our_setup: Setup::default(),
 			peer_setup,

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::{
-	Error, Timescale,
+	Error,
 	coding::{DecodeError, Decoder, EncodeError, Encoder},
 	group,
 	model::object::{Fields, Properties, Property, Value},
@@ -126,7 +126,7 @@ fn encode_list(properties: &crate::model::object::TrackProperties) -> Result<Vec
 /// shares the message with its Version, so a list that fit its moq-transport message may
 /// still not fit, though only by a few bytes.
 pub(crate) fn fits(properties: &crate::model::object::TrackProperties) -> bool {
-	let code = crate::Version::Ietf(properties.version).code();
+	let code = crate::Version::ietf(properties.version).code();
 	let Ok(code) = crate::coding::varint::size(code, Version::Lite07.into()) else {
 		return false;
 	};
@@ -158,8 +158,7 @@ fn decode_list(r: &mut Decoder<'_>, version: crate::ietf::Version) -> Result<Vec
 
 /// An object's properties as a record body, empty when it has none.
 ///
-/// The block is sent as it is held. A timed track's mutable Timestamp is the frame's, so
-/// it is never sent here.
+/// The block is sent as it is held.
 fn encode_properties(properties: &Properties) -> &[u8] {
 	properties.block.as_ref().map_or(&[], |block| &block.bytes)
 }
@@ -170,12 +169,11 @@ pub(crate) struct Decoded {
 	pub gap: Option<u64>,
 }
 
-/// Decode an object's record body on a track `framing` describes: the units its sealed
-/// Timestamp is in, and the draft that serialized its block. A `framed` object's frame
-/// holds its time; a status object's block holds it.
+/// Decode an object's record body on a track `framing` describes, whose draft serialized
+/// the block.
 ///
 /// Only the canonical form is accepted, so what decodes re-encodes to the same bytes.
-pub(crate) fn decode_properties(body: &[u8], framing: super::Framing, framed: bool) -> Result<Decoded, DecodeError> {
+pub(crate) fn decode_properties(body: &[u8], framing: super::Framing) -> Result<Decoded, DecodeError> {
 	if body.is_empty() {
 		return Ok(Decoded {
 			properties: Properties::default(),
@@ -186,11 +184,9 @@ pub(crate) fn decode_properties(body: &[u8], framing: super::Framing, framed: bo
 	let version = framing.ietf.ok_or(DecodeError::InvalidValue)?;
 	// A small cached block must not pin the reader's larger receive buffer.
 	let bytes = Bytes::copy_from_slice(body);
-	let checked = crate::ietf::object::check(&bytes, version, framing.timescale, framed)
-		.map_err(|_| DecodeError::InvalidValue)?;
+	let checked = crate::ietf::object::check(&bytes, version).map_err(|_| DecodeError::InvalidValue)?;
 	Ok(Decoded {
 		properties: Properties {
-			sealed_time: checked.sealed_time,
 			block: Some(crate::model::object::Block {
 				bytes,
 				immutable: checked.immutable,
@@ -204,7 +200,7 @@ pub(crate) fn decode_properties(body: &[u8], framing: super::Framing, framed: bo
 /// object, so it may not carry properties.
 #[cfg(feature = "async")]
 pub(crate) fn decode_end(body: &[u8], framing: super::Framing) -> Result<Decoded, DecodeError> {
-	let decoded = decode_properties(body, framing, false)?;
+	let decoded = decode_properties(body, framing)?;
 	if decoded.properties.block.is_some() {
 		return Err(DecodeError::InvalidValue);
 	}
@@ -221,20 +217,17 @@ pub(crate) struct Records {
 	prior: Option<u64>,
 	/// The stream stops at a frame cap, so its Group State promised no END_OF_GROUP.
 	capped: bool,
-	/// The units the track declares, which a sealed Timestamp must already be in.
-	timescale: Option<Timescale>,
 }
 
 #[cfg(feature = "async")]
 impl Records {
 	/// The records a group stream of a track that carries them needs. `capped` when the
 	/// stream stops before the group may end.
-	pub fn new(capped: bool, timescale: Option<Timescale>) -> Self {
+	pub fn new(capped: bool) -> Self {
 		Self {
 			stated: false,
 			prior: None,
 			capped,
-			timescale,
 		}
 	}
 
@@ -292,20 +285,7 @@ impl Records {
 	) -> Result<(), Error> {
 		writer.buffer_varint(encode_object(self.prior, id, end)?)?;
 		self.prior = Some(id);
-		let block = match fields {
-			Some(fields) => {
-				// A sealed Timestamp keeps its units, which the receiver reads as the track's.
-				if fields
-					.properties
-					.sealed_time
-					.is_some_and(|sealed| self.timescale != sealed.scale())
-				{
-					return Err(Error::Unsupported);
-				}
-				encode_properties(&fields.properties)
-			}
-			None => &[],
-		};
+		let block = fields.map_or(&[][..], |fields| encode_properties(&fields.properties));
 		writer.buffer_varint(block.len() as u64)?;
 		writer.buffer_raw(block);
 		Ok(())
@@ -324,7 +304,7 @@ impl<'a> Message<'a> for TrackProperties {
 		let Some(properties) = &self.0 else {
 			return w.varint(0);
 		};
-		w.varint(crate::Version::Ietf(properties.version).code())?;
+		w.varint(crate::Version::ietf(properties.version).code())?;
 		w.slice(&encode_list(properties)?);
 		Ok(())
 	}
@@ -338,7 +318,7 @@ impl<'a> Message<'a> for TrackProperties {
 				false => Err(DecodeError::InvalidValue),
 			};
 		}
-		let Some(crate::Version::Ietf(version)) = crate::Version::from_code(code) else {
+		let Some(crate::Version(crate::Draft::Ietf(version))) = crate::Version::from_code(code) else {
 			return Err(DecodeError::InvalidValue);
 		};
 		let properties = crate::model::object::TrackProperties {
@@ -372,6 +352,7 @@ impl<'a> Message<'a> for TrackProperties {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::Timescale;
 	use crate::ietf::Version as Draft;
 
 	const V: Version = Version::Lite07;
@@ -388,7 +369,7 @@ mod tests {
 
 	/// The moq-transport version code TRACK_PROPERTIES carries for `version`.
 	fn code(version: Draft) -> u64 {
-		crate::Version::Ietf(version).code()
+		crate::Version::ietf(version).code()
 	}
 
 	#[test]
@@ -438,7 +419,7 @@ mod tests {
 
 	#[test]
 	fn properties_round_trip() {
-		// An immutable block holding a gap of 2 (0x3e) and a timestamp.
+		// An immutable block holding a timestamp and a gap of 2 (0x3e).
 		let mut sealed = Vec::new();
 		let e = &mut Encoder::new(&mut sealed, Draft::Draft18.into());
 		for value in [0x10u64, 77, 0x3e - 0x10, 2] {
@@ -455,41 +436,37 @@ mod tests {
 			},
 		];
 		let properties = Properties {
-			sealed_time: Some(crate::Timestamp::new(77, Timescale::MILLI).unwrap()),
 			block: crate::ietf::object::block(&values, Draft::Draft18).unwrap(),
 		};
 		let body = encode_properties(&properties);
-		let decoded = decode_properties(body, from(Draft::Draft18, Some(Timescale::MILLI)), true).unwrap();
+		let decoded = decode_properties(body, from(Draft::Draft18, Some(Timescale::MILLI))).unwrap();
 		assert_eq!(decoded.properties, properties);
 		assert_eq!(decoded.gap, Some(2));
 
 		// None at all is an empty body.
 		assert!(encode_properties(&Properties::default()).is_empty());
-		let empty = decode_properties(&[], from(Draft::Draft18, Some(Timescale::MILLI)), true).unwrap();
+		let empty = decode_properties(&[], from(Draft::Draft18, Some(Timescale::MILLI))).unwrap();
 		assert_eq!(empty.properties, Properties::default());
 
-		// An untimed track's Timestamp has no frame to hold it, so it stays in the block.
-		let untimed = [0x10, 7];
-		let decoded = decode_properties(&untimed, from(Draft::Draft18, None), true).unwrap();
-		assert_eq!(encode_properties(&decoded.properties), untimed);
+		// A mutable Timestamp is a property like any other, on any track.
+		let timestamp = [0x10, 7];
+		for timescale in [Some(Timescale::MILLI), None] {
+			let decoded = decode_properties(&timestamp, from(Draft::Draft18, timescale)).unwrap();
+			assert_eq!(encode_properties(&decoded.properties), timestamp);
+		}
 	}
 
 	/// Only the canonical form decodes, so whatever decodes re-encodes to the same bytes.
 	#[test]
 	fn properties_refuse_what_is_not_canonical() {
 		let timed = from(Draft::Draft18, Some(Timescale::MILLI));
-		for (body, reason) in [
-			(
-				&[0x10, 5][..],
-				"a timed track's mutable Timestamp, which its frame holds",
-			),
-			(&[0x0b, 2, 0x0b, 0][..], "a nested Immutable Properties"),
-		] {
-			assert!(decode_properties(body, timed, true).is_err(), "accepted {reason}");
-		}
+		assert!(
+			decode_properties(&[0x0b, 2, 0x0b, 0], timed).is_err(),
+			"accepted a nested Immutable Properties"
+		);
 		// A track published over moq-lite has no moq-transport properties.
 		let lite = super::super::Framing { ietf: None, ..timed };
-		assert!(decode_properties(&[0x20, 1], lite, true).is_err());
+		assert!(decode_properties(&[0x20, 1], lite).is_err());
 	}
 
 	/// The worst case for re-encoding, a full moq-transport list of zero-delta properties
@@ -503,30 +480,21 @@ mod tests {
 			for value in [0x10, 77, (1 << 40) - 0x10, 1] {
 				e.varint(value).unwrap();
 			}
-			// The largest a timed track's block may be, once its Timestamp leaves it.
-			while list.len() <= crate::ietf::object::max_block(Some(Timescale::MILLI)) {
+			// The largest block an object may carry.
+			while list.len() + 2 <= crate::ietf::object::MAX_BLOCK {
 				list.extend([0, 1]);
 			}
 			let list = Bytes::from(list);
-			let decoded = crate::ietf::object::read(&list, version, Some(Timescale::MILLI)).unwrap();
-			let frame = decoded.timestamp;
-			let properties = decoded.properties;
+			let properties = crate::ietf::object::read(&list, version).unwrap().properties;
 			let block = properties.block.as_ref().unwrap();
-			assert!(block.bytes.len() < list.len(), "{version}");
+			assert_eq!(block.bytes, list, "{version}");
 			assert_eq!(properties.heap(), block.bytes.len() as u64, "{version}");
 
 			let body = encode_properties(&properties);
 			assert!(body.len() <= MAX_PROPERTIES, "{version}: {} bytes", body.len());
-			let received = decode_properties(body, from(version, Some(Timescale::MILLI)), true).unwrap();
+			let received = decode_properties(body, from(version, Some(Timescale::MILLI))).unwrap();
 			assert_eq!(received.properties, properties, "{version}");
-			let written = crate::ietf::object::write(
-				&received.properties,
-				Some(version),
-				frame,
-				version,
-				Some(Timescale::MILLI),
-			)
-			.unwrap();
+			let written = crate::ietf::object::write(&received.properties, Some(version), version).unwrap();
 			assert_eq!(written, list, "{version}: the hop changed the list");
 		}
 	}
@@ -606,7 +574,7 @@ mod tests {
 			decode(&wire(&[opaque(0x40)], 0)).is_err(),
 			"properties on a moq-lite track"
 		);
-		for code in [1, 0xff000099, crate::Version::Lite(V).code()] {
+		for code in [1, 0xff000099, crate::Version::lite(V).code()] {
 			assert!(decode(&wire(&[], code)).is_err(), "{code:#x} is no moq-transport draft");
 		}
 
@@ -715,9 +683,8 @@ mod tests {
 	#[test]
 	fn a_block_means_what_its_tracks_draft_says() {
 		for (version, kept) in [(Draft::Draft18, false), (Draft::Draft22, true)] {
-			let decoded = decode_properties(&[0x06, 42], from(version, None), true).unwrap();
-			let written =
-				crate::ietf::object::write(&decoded.properties, Some(version), None, Draft::Draft22, None).unwrap();
+			let decoded = decode_properties(&[0x06, 42], from(version, None)).unwrap();
+			let written = crate::ietf::object::write(&decoded.properties, Some(version), Draft::Draft22).unwrap();
 			assert_eq!(!written.is_empty(), kept, "{version}");
 		}
 	}
@@ -742,7 +709,7 @@ pub(crate) async fn test_hop(
 	offer: [bool; 2],
 ) -> (crate::origin::Producer, [crate::Session; 2]) {
 	use crate::model::ProduceTest;
-	let version = crate::Version::Lite(Version::Lite07);
+	let version = crate::Version::lite(Version::Lite07);
 	let downstream = crate::origin::Config::new(std::num::NonZeroU64::new(3).unwrap()).produce();
 	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
 		protocol: Some(version.alpn().to_string()),
@@ -781,6 +748,7 @@ pub(crate) async fn test_hop(
 #[cfg(all(test, feature = "async"))]
 mod hop_tests {
 	use super::*;
+	use crate::Timescale;
 	use crate::{Timestamp, frame, model::ProduceTest, track};
 	use std::time::Duration;
 
@@ -904,7 +872,6 @@ mod hop_tests {
 				id: 6,
 				properties: Properties {
 					block: block(&[property(0x20, 1), property(GAP, 6)]),
-					..Default::default()
 				},
 			};
 			group.mark_gap(6, Some(6)).unwrap();
@@ -936,7 +903,6 @@ mod hop_tests {
 				id: 9,
 				properties: Properties {
 					block: block(&[property(GAP, 2)]),
-					..Default::default()
 				},
 			};
 			group.mark_gap(9, Some(2)).unwrap();

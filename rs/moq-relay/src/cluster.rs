@@ -1425,7 +1425,7 @@ impl Cluster {
 
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
-		self.origin.hop().get()
+		self.origin.node().get()
 	}
 
 	/// Creates a cluster with one origin, using [`Options`] for identity, cache,
@@ -1512,7 +1512,7 @@ impl Cluster {
 		}));
 		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
-		tracing::info!(hop_id = %origin.hop(), "cluster initialized");
+		tracing::info!(hop_id = %origin.node(), "cluster initialized");
 		let cluster = Cluster {
 			client_limits: client.resolve(),
 			peer_limits: peer.resolve(),
@@ -4104,7 +4104,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		// The dialer marks what the peer forwards: it entered at `node`, not here.
-		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.hop().get()));
+		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.node().get()));
 
 		let _from_fp = fingerprint
 			.origin
@@ -4120,7 +4120,7 @@ mod tests {
 				// The acceptor marks a LAN peer the same way.
 				assert_eq!(
 					update.route.source(),
-					origin::Source::Peer(fingerprint.origin.hop().get())
+					origin::Source::Peer(fingerprint.origin.node().get())
 				);
 				break;
 			}

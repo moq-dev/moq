@@ -32,7 +32,7 @@ async def run(bind: str, broadcast_name: str, track_name: str, host: str) -> Non
             while True:
                 now = datetime.now(timezone.utc).replace(microsecond=0)
                 timestamp = moq.Timestamp(int(now.timestamp()), 1)
-                group = track.append_group()
+                group = track.append_group(timestamp)
                 group.write_frame(now.strftime("%Y-%m-%d %H:%M:").encode(), timestamp)
 
                 current_minute = now.minute

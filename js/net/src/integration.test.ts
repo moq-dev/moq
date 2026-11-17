@@ -237,8 +237,8 @@ test("integration: lite subscription options and updates reach the publisher", a
 	server.abort();
 });
 
-// Both handshake paths: a SETUP-negotiated draft (16) and ALPN-selected ones (17+).
-test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age to the publisher", async (alpn) => {
+// moq-transport has no field for a subscriber budget, so the publisher's own policy bounds it.
+test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries no subscriber max age", async (alpn) => {
 	const pair = createMockTransportPair(alpn);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -256,12 +256,7 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe({ delay: { max: Duration.millis(250) } });
 	const producer = await accepted;
-	// Without the negotiated parameter the publisher keeps its whole backlog instead.
-	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(250));
-
-	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Duration.millis(500) } });
-	expect((await updated)?.delay?.max).toEqual(Duration.millis(500));
+	expect(producer.subscription.peek()?.delay?.max).toEqual(Duration.millis(Number.MAX_SAFE_INTEGER));
 
 	subscriber.close();
 	remote.close();
@@ -3000,10 +2995,10 @@ function qmuxPair(protocol: string, maxStreams: bigint): { client: Qmux; server:
 	return { client, server };
 }
 
-// On lite-07 a group whose stream a newer one reset to make room only pauses: once credit returns,
-// a new stream continues it, and its reader receives every frame without an error. Mirrors the Rust
-// `a_reset_group_resumes_without_loss`.
-test("integration: lite-07 resumes a group reset to make room without loss", async () => {
+// On lite-07 a group whose stream a newer one reset to make room is dropped: its reader ends with
+// TOO_FAR_BEHIND, and a reader that wants the rest FETCHes it whole. Mirrors the Rust
+// `a_reset_group_is_fetched_whole`.
+test("integration: lite-07 drops a group reset to make room, and a FETCH reads it whole", async () => {
 	using clock = manual();
 	// Advance the clock until `work` settles: a waiting open makes room once it has waited about a
 	// round trip.
@@ -3029,29 +3024,30 @@ test("integration: lite-07 resumes a group reset to make room without loss", asy
 		// Unfinished, so its stream holds the only credit until the newer group resets it.
 		const older = producer.appendGroup();
 		older.writeFrame(textFrame("a"));
-		const paused = await settled(subscriber.recvGroup(), "the older group");
-		if (!paused) throw new Error("no older group");
-		expect(paused.sequence).toBe(0n);
-		expect(await settled(paused.readString(), "its first frame")).toBe("a");
+		const reset = await settled(subscriber.recvGroup(), "the older group");
+		if (!reset) throw new Error("no older group");
+		expect(reset.sequence).toBe(0n);
+		expect(await settled(reset.readString(), "its first frame")).toBe("a");
 
 		const newer = producer.appendGroup();
 		newer.writeFrame(textFrame("new"));
 		newer.finish();
 		const group = await settled(subscriber.recvGroup(), "the newer group taking the older one's credit");
 		expect(group?.sequence).toBe(1n);
+		expect(await settled(Promise.resolve(reset.closed), "the older group's end")).toMatchObject({
+			code: StreamCode.TooFarBehind,
+		});
 
-		// Written after the reset: a continuation carries them, behind the frame already held.
 		older.writeFrame(textFrame("b"));
-		older.writeFrame(textFrame("c"));
 		older.finish();
-		const rest: string[] = [];
+		const fetched = await settled(remote.track("0").fetchGroup(0n), "the FETCH of the dropped group");
+		const frames: string[] = [];
 		for (;;) {
-			const frame = await settled(paused.readString(), "the paused group's continuation");
+			const frame = await settled(fetched.readString(), "the fetched group");
 			if (frame === undefined) break;
-			rest.push(frame);
+			frames.push(frame);
 		}
-		expect(rest).toEqual(["b", "c"]);
-		expect(await paused.closed).toBeNull();
+		expect(frames).toEqual(["a", "b"]);
 	} finally {
 		subscriber.close();
 		remote.close();

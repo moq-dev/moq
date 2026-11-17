@@ -380,10 +380,9 @@ with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
 controls always run, including when a planned break skips cross-version lanes,
 so a broken reader cannot make compatibility failures ambiguous.
 
-Each `moq-net` library states whether a draft has FETCH (lite-05 onward
-today). A draft without it in both is logged and its FETCH lanes skipped; one
-the release supports and the checkout dropped fails, unless a planned break covers
-the `fetch-capability` cell for that version. Both Rust versions FETCH the group the
+The draft decides whether FETCH runs (lite-05 onward); an older draft is logged
+and its FETCH lanes skipped, so a library that drops FETCH on a draft that has it
+fails those lanes. Both Rust versions FETCH the group the
 publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.

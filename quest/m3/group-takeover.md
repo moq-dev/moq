@@ -14,7 +14,7 @@ reset as a final drop that the reader FETCHes around.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ paused
 groups and continuations leave lite-07
-([YIELDED deferred](/quest/m2/yield-defer.md)) and are designed again here,
+([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)) and are designed again here,
 with takeover, as one lite-08 feature (rejected: keep YIELDED in lite-07 and
 add takeover later; keep it but stop pausing on a reset without a code).
 lite-07 would have frozen the half that still needs a new stream per
@@ -123,10 +123,12 @@ track's. `GroupRecv` rebinds the stream at each GROUP message.
 
 Public API: `StreamError::Yielded`, or whatever replaces it, returns to Rust
 and `@moq/net`. Wire: lite-08 paused groups, continuations, a takeover
-marker, and multi-group streams.
+marker, and multi-group streams. lite-07's GROUP has no `Frame Start` (only
+lite-06 carries one), so a continuation that starts partway through its group
+brings one back, or names its start some other way.
 
 ## Related
 
-- [YIELDED deferred](/quest/m2/yield-defer.md) - removes paused groups and continuations from lite-07
+- [A reader fetches a group reset to make room](/quest/m3/fetch-preempted-group.md) - the drop plus FETCH that Measure first compares a continuation against
 - [YIELDED reset](https://github.com/moq-dev/moq/pull/8545) - the lite-07-wip design this starts from
 - [Finalize lite-07](/quest/m2/lite07-finalize.md) - freezes lite-07 without takeover or continuations

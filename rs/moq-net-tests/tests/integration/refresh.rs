@@ -14,7 +14,6 @@ fn origin(hop: u64) -> origin::Producer {
 /// complete snapshot.
 #[kio::test]
 async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
-	use moq_json::Timed;
 	use moq_json::snapshot;
 	use moq_net::{Timescale, Timestamp};
 	use serde_json::{Value, json};
@@ -61,7 +60,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		// A group starts at its first frame's time, in the track's milliseconds.
 		let key = |n| 100 + n;
 		let value = |n| json!({ "n": n, "p": "" });
-		let snapshot_bytes = producer.update(Timed::new(&value(0), at(0))).unwrap().unwrap();
+		let snapshot_bytes = producer.update(&value(0), at(0)).unwrap().unwrap();
 		let mut original = baseline.recv_group().await.unwrap().unwrap();
 		assert_eq!(original.start, key(0));
 		let first = original.read_frame().await.unwrap().unwrap();
@@ -72,7 +71,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		let mut delta_bytes = 0;
 		let mut joins = Vec::new();
 		for n in 1..=2 * u64::from(ratio) {
-			delta_bytes += producer.update(Timed::new(&value(n), at(n))).unwrap().unwrap();
+			delta_bytes += producer.update(&value(n), at(n)).unwrap().unwrap();
 			let delta = original.read_frame().await.unwrap().unwrap();
 			assert_eq!(delta.timestamp, at(n));
 			assert_eq!(
@@ -95,7 +94,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		);
 
 		let n = 2 * u64::from(ratio) + 1;
-		delta_bytes += producer.update(Timed::new(&value(n), at(n))).unwrap().unwrap();
+		delta_bytes += producer.update(&value(n), at(n)).unwrap().unwrap();
 		original.read_frame().await.unwrap().unwrap();
 		assert!(delta_bytes > ratio as usize * snapshot_bytes);
 		// Simulated time passing cannot roll a group, even with deltas over the ratio.
@@ -135,7 +134,7 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 		assert!(fresh.poll_read_frame(&kio::Waiter::noop()).is_pending());
 		assert_eq!(baseline.recv_group().await.unwrap().unwrap().start, key(n));
 
-		producer.update(Timed::new(&value(n + 1), at(n + 1))).unwrap();
+		producer.update(&value(n + 1), at(n + 1)).unwrap();
 		let delta = fresh.read_frame().await.unwrap().unwrap();
 		assert_eq!(delta.timestamp, at(n + 1));
 		assert_eq!(

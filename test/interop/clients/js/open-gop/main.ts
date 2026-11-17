@@ -91,7 +91,13 @@ window.runRecovery = async (packets) => {
 		catalogFormat: "manual",
 		catalog: { video: { renditions: { video: config } } },
 	});
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
+	// A rejected codec probe selects no rendition, so nothing else would end the run.
+	source.out.error.subscribe((error) => {
+		if (!error) return;
+		failed = error;
+		ended();
+	});
 	const sync = new Sync({ delay: Duration.millis(0), lookahead: Duration.millis(10_000) });
 	const decoder = new Decoder({ source, sync });
 	try {

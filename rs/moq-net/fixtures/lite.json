@@ -320,14 +320,21 @@
 		"name": "a group sequence at 2^64-1, the largest a u64 holds",
 		"version": "moq-lite-07-wip",
 		"message": "group",
-		"hex": "0c00ffffffffffffffffff0000",
+		"hex": "0b00ffffffffffffffffff00",
 		"expect": "decoded"
+	},
+	{
+		"name": "a lite-07 group carrying a Frame Start, which only lite-06 has",
+		"version": "moq-lite-07-wip",
+		"message": "group",
+		"hex": "0c00ffffffffffffffffff0000",
+		"expect": "refused"
 	},
 	{
 		"name": "a group naming the start just below it as the previous one, carried plus one",
 		"version": "moq-lite-07-wip",
 		"message": "group",
-		"hex": "1400ffffffffffffffffffffffffffffffffffff00",
+		"hex": "1300ffffffffffffffffffffffffffffffffffff",
 		"expect": "decoded"
 	},
 	{

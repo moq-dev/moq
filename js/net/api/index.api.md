@@ -332,6 +332,12 @@ export namespace Error {
 	export class RefusedRedirect extends Error {
 		constructor(reason: string);
 	}
+	export const Retry: Readonly<{
+		readonly Never: "never";
+		readonly Reroute: "reroute";
+		readonly Same: "same";
+	}>;
+	export type Retry = typeof Error.Retry[keyof typeof Error.Retry];
 	export class Session extends Error {
 		constructor(code: SessionCode, options?: {
 			cause?: unknown;
@@ -362,6 +368,7 @@ export namespace Error {
 			cause?: unknown;
 		});
 	}
+	export function retry(err: unknown): Error.Retry;
 }
 
 export namespace Frame {
@@ -578,22 +585,15 @@ export namespace Path {
 }
 
 export const SessionCode: ((code: number) => SessionCode) & {
-	readonly AuthTokenCacheOverflow: SessionCode;
 	readonly Cancel: SessionCode;
 	readonly Expired: SessionCode;
 	readonly GoawayTimeout: SessionCode;
 	readonly Internal: SessionCode;
-	readonly InvalidAuthority: SessionCode;
-	readonly InvalidPath: SessionCode;
-	readonly InvalidRequestId: SessionCode;
-	readonly KeyValueFormatting: SessionCode;
 	readonly MalformedAuthToken: SessionCode;
 	readonly ProtocolViolation: SessionCode;
 	readonly Timeout: SessionCode;
-	readonly TooManyRequestUpdates: SessionCode;
 	readonly TooManyRequests: SessionCode;
 	readonly Unauthorized: SessionCode;
-	readonly UnknownAuthTokenAlias: SessionCode;
 	readonly Unsupported: SessionCode;
 	readonly Version: SessionCode;
 };
@@ -649,7 +649,6 @@ export const StreamCode: ((code: number) => StreamCode) & {
 	readonly TooFarBehind: StreamCode;
 	readonly Unauthorized: StreamCode;
 	readonly Unroutable: StreamCode;
-	readonly Yielded: StreamCode;
 };
 
 export type StreamCode = number & {

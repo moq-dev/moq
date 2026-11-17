@@ -190,6 +190,16 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
+    "moq-e2ee" = rec {
+      packageId = "moq-e2ee";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-e2ee";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
     "moq-ffi" = rec {
       packageId = "moq-ffi";
       build = internal.buildRustCrateWithFeatures {
@@ -19016,23 +19026,8 @@ rec {
         ];
         dependencies = [
           {
-            name = "base64";
-            packageId = "base64 0.23.1";
-            optional = true;
-          }
-          {
-            name = "bytes";
-            packageId = "bytes";
-            optional = true;
-          }
-          {
             name = "data-encoding";
             packageId = "data-encoding";
-          }
-          {
-            name = "kio";
-            packageId = "kio";
-            optional = true;
           }
           {
             name = "moq-net";
@@ -19068,15 +19063,105 @@ rec {
             packageId = "thiserror 2.0.21";
           }
           {
+            name = "zeroize";
+            packageId = "zeroize";
+            optional = true;
+            features = [ "derive" ];
+          }
+        ];
+        devDependencies = [
+          {
+            name = "hex";
+            packageId = "hex";
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "tempfile";
+            packageId = "tempfile";
+          }
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+        features = {
+          "cpu" = [ "dep:rind" ];
+          "default" = [ "endpoint" ];
+          "endpoint" = [
+            "dep:moq-net"
+            "dep:rind"
+            "dep:zeroize"
+          ];
+          "provider" = [
+            "cpu"
+            "dep:rind-rustls"
+            "dep:rustls"
+          ];
+          "serde" = [ "dep:serde" ];
+        };
+        resolvedDefaultFeatures = [
+          "cpu"
+          "default"
+          "endpoint"
+          "provider"
+          "serde"
+        ];
+      };
+      "moq-e2ee" = rec {
+        crateName = "moq-e2ee";
+        version = "0.0.26";
+        edition = "2024";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-e2ee;
+        };
+        libName = "moq_e2ee";
+        authors = [
+          "Luke Curley <kixelated@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "base64";
+            packageId = "base64 0.23.1";
+          }
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "kio";
+            packageId = "kio";
+          }
+          {
+            name = "moq-crypto";
+            packageId = "moq-crypto";
+            usesDefaultFeatures = false;
+            features = [ "cpu" ];
+          }
+          {
+            name = "moq-net";
+            packageId = "moq-net";
+          }
+          {
+            name = "rind";
+            packageId = "rind";
+            features = [ "wipe" ];
+          }
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.21";
+          }
+          {
             name = "uuid";
             packageId = "uuid";
-            optional = true;
             features = [ "v7" ];
           }
           {
             name = "zeroize";
             packageId = "zeroize";
-            optional = true;
             features = [ "derive" ];
           }
         ];
@@ -19096,9 +19181,8 @@ rec {
             features = [ "runtime" ];
           }
           {
-            name = "moq-crypto";
-            packageId = "moq-crypto";
-            usesDefaultFeatures = false;
+            name = "moq-e2ee";
+            packageId = "moq-e2ee";
             features = [ "async" ];
           }
           {
@@ -19109,10 +19193,6 @@ rec {
           {
             name = "serde_json";
             packageId = "serde_json";
-          }
-          {
-            name = "tempfile";
-            packageId = "tempfile";
           }
           {
             name = "tokio";
@@ -19131,43 +19211,9 @@ rec {
           }
         ];
         features = {
-          "async" = [ "kio?/async" ];
-          "cpu" = [ "dep:rind" ];
-          "default" = [
-            "endpoint"
-            "e2ee"
-          ];
-          "e2ee" = [
-            "cpu"
-            "dep:base64"
-            "dep:bytes"
-            "dep:kio"
-            "dep:moq-net"
-            "dep:rind"
-            "dep:uuid"
-            "dep:zeroize"
-          ];
-          "endpoint" = [
-            "dep:moq-net"
-            "dep:rind"
-            "dep:zeroize"
-          ];
-          "provider" = [
-            "cpu"
-            "dep:rind-rustls"
-            "dep:rustls"
-          ];
-          "serde" = [ "dep:serde" ];
+          "async" = [ "kio/async" ];
         };
-        resolvedDefaultFeatures = [
-          "async"
-          "cpu"
-          "default"
-          "e2ee"
-          "endpoint"
-          "provider"
-          "serde"
-        ];
+        resolvedDefaultFeatures = [ "async" ];
       };
       "moq-ffi" = rec {
         crateName = "moq-ffi";
@@ -20833,7 +20879,18 @@ rec {
             name = "moq-uring";
             packageId = "moq-uring";
             usesDefaultFeatures = false;
-            target = { target, features }: ("linux" == target."os" or null);
+            target =
+              { target, features }:
+              (
+                ("linux" == target."os" or null)
+                && (
+                  ("x86_64" == target."arch" or null)
+                  || ("aarch64" == target."arch" or null)
+                  || ("riscv64" == target."arch" or null)
+                  || ("loongarch64" == target."arch" or null)
+                  || ("powerpc64" == target."arch" or null)
+                )
+              );
             features = [ "quic" ];
           }
           {
@@ -20949,7 +21006,18 @@ rec {
           {
             name = "web-transport-proto";
             packageId = "web-transport-proto";
-            target = { target, features }: ("linux" == target."os" or null);
+            target =
+              { target, features }:
+              (
+                ("linux" == target."os" or null)
+                && (
+                  ("x86_64" == target."arch" or null)
+                  || ("aarch64" == target."arch" or null)
+                  || ("riscv64" == target."arch" or null)
+                  || ("loongarch64" == target."arch" or null)
+                  || ("powerpc64" == target."arch" or null)
+                )
+              );
           }
         ];
         devDependencies = [
@@ -21010,7 +21078,18 @@ rec {
             name = "moq-uring";
             packageId = "moq-uring";
             usesDefaultFeatures = false;
-            target = { target, features }: ("linux" == target."os" or null);
+            target =
+              { target, features }:
+              (
+                ("linux" == target."os" or null)
+                && (
+                  ("x86_64" == target."arch" or null)
+                  || ("aarch64" == target."arch" or null)
+                  || ("riscv64" == target."arch" or null)
+                  || ("loongarch64" == target."arch" or null)
+                  || ("powerpc64" == target."arch" or null)
+                )
+              );
             features = [ "_manual" ];
           }
           {

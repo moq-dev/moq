@@ -221,7 +221,7 @@ impl Server {
 	/// When a connection that arrived at `arrived` must be accepted by, or `None` to wait
 	/// forever, including past the clock's range.
 	///
-	/// A caller that runs a transport handshake before [`accept_request`](Self::accept_request)
+	/// A caller that runs a transport handshake before [`handshake`](Self::handshake)
 	/// bounds that handshake by this instant, then hands it to [`Accept::with_deadline`].
 	pub fn deadline(&self, arrived: Instant) -> Option<Instant> {
 		arrived.checked_add(self.timeout?)
@@ -263,7 +263,7 @@ impl Server {
 		session: Transport,
 		version: lite::Version,
 		client_setup: Option<lite::AcceptedSetup>,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		auth: crate::auth::Link,
 	) -> Result<(Session, crate::Driver), Error> {
 		let (publish, subscribe) = self.stat_tagged_origins();
@@ -304,7 +304,7 @@ impl Server {
 			setup_stream: None,
 			publish,
 			subscribe,
-			peer_hop,
+			peer_node,
 			version,
 			our_setup,
 			peer_setup: client_setup,
@@ -388,15 +388,15 @@ impl Server {
 	/// Poll the returned driver with nondecreasing time, starting at `now`. The accept
 	/// deadline counts from `now` too.
 	///
-	/// Convenience wrapper over [`accept_request`](Self::accept_request) that
-	/// completes the handshake immediately. Use `accept_request` when you need to
+	/// Convenience wrapper over [`handshake`](Self::handshake) that
+	/// completes the handshake immediately. Use `handshake` when you need to
 	/// inspect the client's advertised path before deciding what to serve.
 	pub fn accept(
 		&self,
 		now: Instant,
 		session: impl crate::transport::poll::Boxable,
 	) -> impl Future<Output = Result<(Session, crate::Driver), Error>> {
-		let mut accept = self.accept_request(now, session);
+		let mut accept = self.handshake(now, session);
 		let mut answer = None;
 		kio::wait(move |waiter| {
 			let answer = match &mut answer {
@@ -425,7 +425,7 @@ impl Server {
 	/// ([`with_timeout`](Self::with_timeout)) unless [`Accept::with_deadline`] moves it. The
 	/// deadline goes on to bound the caller's admission ([`Handshake::expired`]) and the SETUP
 	/// reply ([`Handshake::ok`]).
-	pub fn accept_request(&self, now: Instant, session: impl crate::transport::poll::Boxable) -> Accept {
+	pub fn handshake(&self, now: Instant, session: impl crate::transport::poll::Boxable) -> Accept {
 		Accept {
 			server: self.clone(),
 			timer: Timer::new(self.deadline(now)),
@@ -685,7 +685,7 @@ impl Handshaking {
 								ALPN_20 => ietf::Version::Draft20,
 								_ => ietf::Version::Draft18,
 							};
-							server.versions.select(Version::Ietf(version)).ok_or(Error::Version)?;
+							server.versions.select(Version::ietf(version)).ok_or(Error::Version)?;
 							AcceptStep::Ietf {
 								runtime,
 								session,
@@ -754,7 +754,7 @@ impl Handshaking {
 						Some(stream) => stream,
 						None => stream.insert(ready!(Stream::poll_accept(
 							session,
-							Version::Lite(lite::Version::Lite01),
+							Version::lite(lite::Version::Lite01),
 							waiter
 						))?),
 					};
@@ -770,7 +770,7 @@ impl Handshaking {
 					else {
 						unreachable!("matched above");
 					};
-					if !Version::Lite(version).hands_off() {
+					if !Version::lite(version).hands_off() {
 						return Poll::Ready(Ok(server.negotiated_handshake(
 							runtime,
 							session,
@@ -782,7 +782,7 @@ impl Handshaking {
 
 					// Answer, close the stream, and continue as that version's ALPN would.
 					let reply = setup::Server {
-						version: Version::Lite(version).into(),
+						version: Version::lite(version).into(),
 						parameters: lite::Parameters::default().encode_bytes(version)?,
 					};
 					let Stream { mut writer, reader } = stream;
@@ -838,7 +838,7 @@ impl Handshaking {
 		session: Transport,
 		version: lite::Version,
 	) -> Result<AcceptStep, Error> {
-		server.versions.select(Version::Lite(version)).ok_or(Error::Version)?;
+		server.versions.select(Version::lite(version)).ok_or(Error::Version)?;
 		Ok(AcceptStep::Lite {
 			runtime,
 			session,
@@ -850,7 +850,7 @@ impl Handshaking {
 
 /// A paused server-side handshake.
 ///
-/// Returned by [`Server::accept_request`] once the peer's advertised
+/// Returned by [`Server::handshake`] once the peer's advertised
 /// [`path`](Self::path) is known but before the session is granted anything. Set
 /// the origins to serve, then call [`ok`](Self::ok) to complete the handshake, or
 /// [`close`](Self::close) to reject it. Modeled on the WebTransport `Request` in
@@ -863,7 +863,7 @@ pub struct Handshake {
 	peer_implementation: Option<String>,
 	/// The identity this session's routes are attributed to for split horizon when the
 	/// peer declares none on the wire; it never enters a hop chain. Fresh per request unless the caller overrides it
-	/// ([`Handshake::with_peer_hop`]).
+	/// ([`Handshake::with_peer_node`]).
 	assigned_hop: crate::Hop,
 	/// The session's auth handle, available before [`Handshake::ok`] so the caller can
 	/// take the peer's token requests before any arrive.
@@ -916,7 +916,7 @@ impl PausedIetf {
 		self,
 		server: Server,
 		runtime: Deadlines,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		auth: crate::auth::Link,
 	) -> Result<(Session, crate::Driver), Error> {
 		let Self {
@@ -939,7 +939,7 @@ impl PausedIetf {
 			client: false,
 			publish,
 			subscribe,
-			peer_hop,
+			peer_node,
 			// Only the dialing side prices a link.
 			cost: None,
 			version,
@@ -994,7 +994,7 @@ impl PausedNegotiated {
 		self,
 		server: Server,
 		runtime: Deadlines,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		auth: crate::auth::Link,
 	) -> Result<NegotiatedReply, Error> {
 		let Self {
@@ -1008,7 +1008,7 @@ impl PausedNegotiated {
 		let (publish, subscribe) = server.stat_tagged_origins();
 
 		stream.writer.buffer(&setup::Server {
-			version: Version::Lite(version).into(),
+			version: Version::lite(version).into(),
 			parameters: lite::Parameters::default().encode_bytes(version)?,
 		})?;
 		Ok(NegotiatedReply(Some(NegotiatedStart {
@@ -1017,7 +1017,7 @@ impl PausedNegotiated {
 			session,
 			stream,
 			version,
-			peer_hop,
+			peer_node,
 			auth,
 			publish,
 			subscribe,
@@ -1046,7 +1046,7 @@ struct NegotiatedStart {
 	session: Transport,
 	stream: Stream<Transport, Version>,
 	version: lite::Version,
-	peer_hop: Option<crate::Hop>,
+	peer_node: Option<crate::Hop>,
 	auth: crate::auth::Link,
 	publish: Option<origin::Consumer>,
 	subscribe: Option<origin::Producer>,
@@ -1060,7 +1060,7 @@ impl NegotiatedStart {
 			session,
 			stream,
 			version,
-			peer_hop,
+			peer_node,
 			auth,
 			publish,
 			subscribe,
@@ -1079,7 +1079,7 @@ impl NegotiatedStart {
 			setup_stream: Some(stream),
 			publish,
 			subscribe,
-			peer_hop,
+			peer_node,
 			version,
 			our_setup: lite::Setup::default(),
 			peer_setup: None,
@@ -1114,7 +1114,7 @@ impl Handshake {
 	/// Empty when the client advertised none: either it sent an empty path, or the
 	/// version carries none in-band (lite 01-04). Those mean the same thing, so the
 	/// wire distinction isn't surfaced. Populated for moq-lite-05 and newer,
-	/// and every moq-transport draft we speak. See the note on [`Server::accept_request`].
+	/// and every moq-transport draft we speak. See the note on [`Server::handshake`].
 	pub fn path(&self) -> &str {
 		self.path.as_deref().unwrap_or("")
 	}
@@ -1126,7 +1126,7 @@ impl Handshake {
 	/// that the wire doesn't distinguish: an older version, a client that omitted the parameter, and a
 	/// client that explicitly advertised both directions. All three mean the same thing
 	/// (the client may publish and subscribe), so authorize on what the token grants.
-	/// See the note on [`Server::accept_request`].
+	/// See the note on [`Server::handshake`].
 	pub fn role(&self) -> Option<Role> {
 		self.role
 	}
@@ -1140,7 +1140,7 @@ impl Handshake {
 	///
 	/// Self-declared, so treat it as a correlation hint rather than an
 	/// authenticated identity: authorize on the token or client certificate.
-	pub fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
+	pub fn peer_node(&self) -> Option<std::num::NonZeroU64> {
 		self.origin.and_then(|hop| std::num::NonZeroU64::new(hop.id()))
 	}
 
@@ -1201,7 +1201,7 @@ impl Handshake {
 	/// per-session default.
 	///
 	/// Only for a peer whose identity the server has actually established, such as one
-	/// authenticated by mTLS or a token ([`crate::Client::with_peer_hop`] is the
+	/// authenticated by mTLS or a token ([`crate::Client::with_peer_node`] is the
 	/// dialing-side equivalent). An identity the peer declares on the wire still wins.
 	///
 	/// Two sessions given the same origin are treated as one endpoint: routes learned
@@ -1209,8 +1209,8 @@ impl Handshake {
 	/// with the other's. That is the point when they really are one peer reconnecting or
 	/// running redundant links, and a bug otherwise. Derive it from the authenticated
 	/// identity, never from something coarser like the remote address.
-	pub fn with_peer_hop(mut self, hop: std::num::NonZeroU64) -> Self {
-		self.assigned_hop = crate::Hop::from(hop);
+	pub fn with_peer_node(mut self, node: std::num::NonZeroU64) -> Self {
+		self.assigned_hop = crate::Hop::from(node);
 		self
 	}
 
@@ -1356,11 +1356,11 @@ impl Answer {
 			if let Err(err) = open_window(&server, &paused) {
 				return Poll::Ready(Some(Err(err)));
 			}
-			let peer_hop = Some(self.handshake.assigned_hop);
+			let peer_node = Some(self.handshake.assigned_hop);
 			let auth = self.handshake.auth.clone();
 			let started = match paused {
 				PausedHandshake::LiteBare { session, version } => {
-					server.start_lite(runtime, session, version, None, peer_hop, auth)
+					server.start_lite(runtime, session, version, None, peer_node, auth)
 				}
 				PausedHandshake::LiteSetup {
 					session,
@@ -1368,10 +1368,10 @@ impl Answer {
 					client_setup,
 				} => {
 					server.stats.control(stats::Message::Session, client_setup.size, true);
-					server.start_lite(runtime, session, version, Some(client_setup), peer_hop, auth)
+					server.start_lite(runtime, session, version, Some(client_setup), peer_node, auth)
 				}
-				PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_hop, auth),
-				PausedHandshake::Negotiated(paused) => match paused.reply(server, runtime, peer_hop, auth) {
+				PausedHandshake::Ietf(paused) => paused.ok(server, runtime, peer_node, auth),
+				PausedHandshake::Negotiated(paused) => match paused.reply(server, runtime, peer_node, auth) {
 					Ok(reply) => {
 						self.reply = Some(Box::new(reply));
 						return self.poll_reply(waiter);
@@ -1782,8 +1782,8 @@ mod tests {
 		let mut buf = Vec::new();
 		setup::Setup { parameters }
 			.encode(
-				&mut crate::coding::Encoder::new(&mut buf, (crate::Version::Ietf(version)).into()),
-				crate::Version::Ietf(version),
+				&mut crate::coding::Encoder::new(&mut buf, (crate::Version::ietf(version)).into()),
+				crate::Version::ietf(version),
 			)
 			.unwrap();
 		buf
@@ -1791,7 +1791,7 @@ mod tests {
 
 	/// A moq-lite-02 CLIENT_SETUP, sent on the bidi stream the `moql` ALPN negotiates over.
 	fn moql_setup() -> Vec<u8> {
-		let version = crate::Version::Lite(lite::Version::Lite02);
+		let version = crate::Version::lite(lite::Version::Lite02);
 		let mut buf = Vec::new();
 		setup::Client {
 			versions: crate::coding::Versions::from([version.into()]),
@@ -1816,7 +1816,7 @@ mod tests {
 	}
 
 	/// An acceptor taken with `Handshake::requests()` BEFORE `ok()` must govern the
-	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
+	/// session the driver then runs, through the REAL accept path (`handshake` -> `ok`).
 	/// Its auth link routes a request token to that pre-ok consumer after `ok()`, instead of
 	/// falling to the `Unsupported` default, and granting admits.
 	/// A QUIC server has no other point to install the verifier.
@@ -1829,7 +1829,7 @@ mod tests {
 
 		for (session, version) in cases {
 			let mut request = Server::new()
-				.accept_request(kio::clock::now(), session)
+				.handshake(kio::clock::now(), session)
 				.await
 				.unwrap_or_else(|e| panic!("accept at {version:?}: {e}"));
 
@@ -1862,7 +1862,7 @@ mod tests {
 		let session = FakeSession::new(ALPN_18, [ietf_setup(ietf::Version::Draft18, None)]);
 		let request = Server::new()
 			.with_allocator(allocator.clone())
-			.accept_request(kio::clock::now(), session)
+			.handshake(kio::clock::now(), session)
 			.await
 			.expect("accept");
 		let (session, _driver) = request.ok().await.expect("ok");
@@ -1883,14 +1883,14 @@ mod tests {
 	#[kio::test]
 	async fn a_reply_the_peer_never_takes_fails_at_the_deadline() {
 		let registry = stats::Registry::new(Default::default());
-		let version = Version::Lite(lite::Version::Lite02);
+		let version = Version::lite(lite::Version::Lite02);
 		let session = FakeSession::new(ALPN_LITE, [])
 			.with_bi(moql_setup())
 			.withholding_credit();
 		let start = kio::clock::now();
 		let deadline = start.saturating_add(DEFAULT_TIMEOUT);
 		let request = Server::new()
-			.accept_request(start, session.clone())
+			.handshake(start, session.clone())
 			.await
 			.unwrap()
 			.with_stats(
@@ -1920,7 +1920,7 @@ mod tests {
 		] {
 			let deadline = kio::clock::now().saturating_add(std::time::Duration::from_secs(3));
 			let accept = Server::new()
-				.accept_request(kio::clock::now(), session.clone())
+				.handshake(kio::clock::now(), session.clone())
 				.with_deadline(Some(deadline));
 			let Err(err) = accept.await else {
 				panic!("{:?}: accepted without a SETUP", session.protocol);
@@ -1940,7 +1940,7 @@ mod tests {
 		let start = kio::clock::now();
 		let mut request = Server::new()
 			.with_timeout(Some(std::time::Duration::from_secs(5)))
-			.accept_request(start, session.clone())
+			.handshake(start, session.clone())
 			.await
 			.unwrap()
 			.with_stats(
@@ -1953,7 +1953,7 @@ mod tests {
 			kio::clock::now(),
 			start.saturating_add(std::time::Duration::from_secs(5))
 		);
-		let version = Version::Lite(lite::Version::Lite05);
+		let version = Version::lite(lite::Version::Lite05);
 		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
 		let failed = registry.snapshot().sessions()[0].1.sessions_failed;
 		assert_eq!(failed.count(stats::Failure::Application), 1, "{failed:?}");
@@ -1969,7 +1969,7 @@ mod tests {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		let request = Server::new()
 			.with_timeout(Some(std::time::Duration::from_secs(1)))
-			.accept_request(kio::clock::now(), session.clone())
+			.handshake(kio::clock::now(), session.clone())
 			.await
 			.unwrap();
 		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
@@ -1977,7 +1977,7 @@ mod tests {
 			panic!("a late admission started");
 		};
 		assert!(matches!(err, Error::Timeout), "{err:?}");
-		let version = Version::Lite(lite::Version::Lite05);
+		let version = Version::lite(lite::Version::Lite05);
 		assert_eq!(session.close_code(), Some(version.session_code(&SessionError::Timeout)));
 	}
 
@@ -1990,17 +1990,17 @@ mod tests {
 		let server = Server::new().with_receive_window(window);
 
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]).widening(None);
-		let request = server.accept_request(kio::clock::now(), session.clone()).await.unwrap();
+		let request = server.handshake(kio::clock::now(), session.clone()).await.unwrap();
 		let _accepted = request.ok().await.expect("ok");
 		assert_eq!(session.window(), Some(window));
 
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]).widening(None);
-		let request = server.accept_request(kio::clock::now(), session.clone()).await.unwrap();
+		let request = server.handshake(kio::clock::now(), session.clone()).await.unwrap();
 		let _accepted = request.with_receive_window(wider).ok().await.expect("ok");
 		assert_eq!(session.window(), Some(wider));
 
 		let fixed = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		let request = server.accept_request(kio::clock::now(), fixed.clone()).await.unwrap();
+		let request = server.handshake(kio::clock::now(), fixed.clone()).await.unwrap();
 		let _accepted = request.ok().await.expect("a transport that can't widen starts");
 		assert_eq!(fixed.close_code(), None);
 	}
@@ -2013,14 +2013,14 @@ mod tests {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]).widening(Some("too small"));
 		let request = Server::new()
 			.with_receive_window(window)
-			.accept_request(kio::clock::now(), session.clone())
+			.handshake(kio::clock::now(), session.clone())
 			.await
 			.unwrap();
 		let Err(err) = request.ok().await else {
 			panic!("served on a refused window");
 		};
 		assert!(matches!(err, Error::Transport(_)), "{err:?}");
-		let version = Version::Lite(lite::Version::Lite05);
+		let version = Version::lite(lite::Version::Lite05);
 		let code = version.session_code(&SessionError::from(&err));
 		assert_eq!(session.close_code(), Some(code));
 	}
@@ -2030,12 +2030,12 @@ mod tests {
 	#[kio::test]
 	async fn an_abandoned_reply_fails_like_the_deadline() {
 		let registry = stats::Registry::new(Default::default());
-		let version = Version::Lite(lite::Version::Lite02);
+		let version = Version::lite(lite::Version::Lite02);
 		let session = FakeSession::new(ALPN_LITE, [])
 			.with_bi(moql_setup())
 			.withholding_credit();
 		let request = Server::new()
-			.accept_request(kio::clock::now(), session.clone())
+			.handshake(kio::clock::now(), session.clone())
 			.await
 			.unwrap()
 			.with_stats(
@@ -2062,7 +2062,7 @@ mod tests {
 			let observed = session.clone();
 			let abandoned = kio::clock::timeout(
 				std::time::Duration::from_secs(1),
-				Server::new().accept_request(kio::clock::now(), session),
+				Server::new().handshake(kio::clock::now(), session),
 			)
 			.await;
 			assert!(abandoned.is_err(), "{:?}: accepted without a SETUP", observed.protocol);
@@ -2083,7 +2083,7 @@ mod tests {
 			let registry = stats::Registry::new(Default::default());
 			let session = FakeSession::new(ALPN_22, [ietf_setup(ietf::Version::Draft22, None)]);
 			Server::new()
-				.accept_request(kio::clock::now(), session)
+				.handshake(kio::clock::now(), session)
 				.await
 				.unwrap()
 				.with_stats(
@@ -2101,7 +2101,7 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn accept_request_exposes_the_setup_token() {
+	async fn handshake_exposes_the_setup_token() {
 		let ietf = FakeSession::new(
 			ALPN_22,
 			[ietf_setup_with(
@@ -2109,16 +2109,16 @@ mod tests {
 				token_params(ietf::Version::Draft22),
 			)],
 		);
-		let request = Server::new().accept_request(kio::clock::now(), ietf).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), ietf).await.unwrap();
 		assert_eq!(request.token(), Some(&setup_token()));
 	}
 
 	#[kio::test]
-	async fn accept_request_without_a_token_reports_none() {
+	async fn handshake_without_a_token_reports_none() {
 		let ietf = FakeSession::new(ALPN_22, [ietf_setup(ietf::Version::Draft22, None)]);
 		let lite = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		for (name, session) in [("draft-22", ietf), ("lite-05", lite)] {
-			let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+			let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 			assert_eq!(request.token(), None, "{name}");
 		}
 	}
@@ -2130,40 +2130,40 @@ mod tests {
 		let truncated = [0x3]; // USE_VALUE with no Token Type
 		for (raw, code) in [
 			(&delete[..], SessionError::ProtocolViolation),
-			(&truncated[..], SessionError::KeyValueFormatting),
+			(&truncated[..], crate::ietf::error::session::KEY_VALUE_FORMATTING),
 		] {
 			let mut params = ietf::Parameters::default();
 			params.set_bytes(ietf::ParameterBytes::AuthorizationToken, raw.to_vec());
 
 			let session = FakeSession::new(ALPN_22, [ietf_setup_with(ietf::Version::Draft22, params)]);
-			let result = Server::new().accept_request(kio::clock::now(), session.clone()).await;
+			let result = Server::new().handshake(kio::clock::now(), session.clone()).await;
 			assert!(result.is_err());
 			assert_eq!(session.close_code(), Some(code.to_code()), "{code}");
 		}
 	}
 
 	#[kio::test]
-	async fn accept_request_reads_ietf_path() {
+	async fn handshake_reads_ietf_path() {
 		// Every draft gates on the SETUP stream before starting, so the
 		// path is known at authorization time just like lite-05.
 		for (alpn, version) in [(ALPN_18, ietf::Version::Draft18), (ALPN_22, ietf::Version::Draft22)] {
 			let session = FakeSession::new(alpn, [ietf_setup(version, Some("/team/room"))]);
-			let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+			let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 			assert_eq!(request.path(), "/team/room", "{alpn}");
 		}
 	}
 
 	#[kio::test]
-	async fn accept_request_ietf_without_path_is_empty() {
+	async fn handshake_ietf_without_path_is_empty() {
 		let session = FakeSession::new(ALPN_22, [ietf_setup(ietf::Version::Draft22, None)]);
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
 	#[kio::test]
-	async fn accept_request_ietf_empty_path_is_accepted() {
+	async fn handshake_ietf_empty_path_is_accepted() {
 		let session = FakeSession::new(ALPN_22, [ietf_setup(ietf::Version::Draft22, Some(""))]);
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
@@ -2180,50 +2180,50 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn accept_request_reads_lite05_path() {
+	async fn handshake_reads_lite05_path() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), None, None)]);
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
 	}
 
 	#[kio::test]
-	async fn accept_request_lite05_without_path_is_empty() {
+	async fn handshake_lite05_without_path_is_empty() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
 	#[kio::test]
-	async fn accept_request_lite05_empty_path_is_accepted() {
+	async fn handshake_lite05_empty_path_is_accepted() {
 		// An empty path is valid on the wire and means the same as omitting it, so a
 		// client that wants the root doesn't have to special-case the parameter.
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some(""), None, None)]);
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
 	#[kio::test]
 	async fn uri_address_rejects_setup_path_presence() {
 		for version in [
-			Version::Lite(lite::Version::Lite05),
-			Version::Lite(lite::Version::Lite06),
-			Version::Lite(lite::Version::Lite07),
-			Version::Ietf(ietf::Version::Draft18),
-			Version::Ietf(ietf::Version::Draft22),
+			Version::lite(lite::Version::Lite05),
+			Version::lite(lite::Version::Lite06),
+			Version::lite(lite::Version::Lite07),
+			Version::ietf(ietf::Version::Draft18),
+			Version::ietf(ietf::Version::Draft22),
 		] {
 			let alpn = version.alpn();
 			for path in ["", "/team/room?jwt=other"] {
 				let setup = match version {
-					Version::Lite(_) => lite05_setup(Some(path), None, None),
-					Version::Ietf(version) => ietf_setup(version, Some(path)),
+					Version(crate::Draft::Lite(_)) => lite05_setup(Some(path), None, None),
+					Version(crate::Draft::Ietf(version)) => ietf_setup(version, Some(path)),
 				};
 				let mut session = FakeSession::new(alpn, [setup]);
 				session.address = crate::transport::Address::Uri;
 				let observed = session.clone();
 				let result = Server::new()
 					.with_versions(version.into())
-					.accept_request(kio::clock::now(), session)
+					.handshake(kio::clock::now(), session)
 					.await;
 				assert!(
 					matches!(result, Err(Error::ProtocolViolation)),
@@ -2237,22 +2237,22 @@ mod tests {
 	#[kio::test]
 	async fn uri_address_accepts_setup_without_path() {
 		for version in [
-			Version::Lite(lite::Version::Lite05),
-			Version::Lite(lite::Version::Lite06),
-			Version::Lite(lite::Version::Lite07),
-			Version::Ietf(ietf::Version::Draft18),
-			Version::Ietf(ietf::Version::Draft22),
+			Version::lite(lite::Version::Lite05),
+			Version::lite(lite::Version::Lite06),
+			Version::lite(lite::Version::Lite07),
+			Version::ietf(ietf::Version::Draft18),
+			Version::ietf(ietf::Version::Draft22),
 		] {
 			let alpn = version.alpn();
 			let setup = match version {
-				Version::Lite(_) => lite05_setup(None, None, None),
-				Version::Ietf(version) => ietf_setup(version, None),
+				Version(crate::Draft::Lite(_)) => lite05_setup(None, None, None),
+				Version(crate::Draft::Ietf(version)) => ietf_setup(version, None),
 			};
 			let mut session = FakeSession::new(alpn, [setup]);
 			session.address = crate::transport::Address::Uri;
 			let request = Server::new()
 				.with_versions(version.into())
-				.accept_request(kio::clock::now(), session)
+				.handshake(kio::clock::now(), session)
 				.await
 				.unwrap();
 			assert_eq!(request.path(), "");
@@ -2260,32 +2260,32 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn accept_request_reads_lite05_role() {
+	async fn handshake_reads_lite05_role() {
 		let session = FakeSession::new(
 			ALPN_LITE_05,
 			[lite05_setup(Some("/team/room"), Some(Role::Publisher), None)],
 		);
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.role(), Some(Role::Publisher));
 	}
 
 	#[kio::test]
-	async fn accept_request_holds_uni_stream_before_setup() {
+	async fn handshake_holds_uni_stream_before_setup() {
 		let session = FakeSession::new(
 			ALPN_LITE_05,
 			[lite05_group(), lite05_setup(Some("/team/room"), None, None)],
 		);
 		let stops = session.stops.clone();
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert!(stops.lock().unwrap().is_empty(), "the early stream must stay open");
 	}
 
 	#[kio::test]
-	async fn accept_request_reads_buffered_setup_after_transport_close() {
+	async fn handshake_reads_buffered_setup_after_transport_close() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
 		crate::transport::poll::Session::close(&session, SessionError::Cancel.to_code(), "closed");
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/closed");
 	}
 
@@ -2309,14 +2309,14 @@ mod tests {
 		let session = FakeSession::new(ALPN_LITE_07_WIP, [setup]);
 		let transport = session.clone();
 		let request = Server::new()
-			.with_versions(Version::Lite(v).into())
-			.accept_request(kio::clock::now(), session)
+			.with_versions(Version::lite(v).into())
+			.handshake(kio::clock::now(), session)
 			.await
 			.unwrap();
 		assert!(matches!(request.ok().await, Err(Error::ProtocolViolation)));
 		assert_eq!(
 			transport.close_code(),
-			Some(Version::Lite(v).session_code(&SessionError::ProtocolViolation))
+			Some(Version::lite(v).session_code(&SessionError::ProtocolViolation))
 		);
 	}
 
@@ -2324,7 +2324,7 @@ mod tests {
 	async fn accepted_lite_setup_refuses_a_second_setup_stream() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		let transport = session.clone();
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		let (_session, mut driver) = request.ok().await.unwrap();
 		transport.uni.lock().unwrap().push_back(vec![1]);
 		let _ = driver.poll(kio::clock::now(), &kio::Waiter::noop());
@@ -2332,11 +2332,11 @@ mod tests {
 	}
 
 	#[kio::test]
-	async fn accept_request_reads_lite05_peer_hop() {
+	async fn handshake_reads_lite05_peer_hop() {
 		let hop = Hop::new(42).unwrap();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(hop))]);
-		let request = Server::new().accept_request(kio::clock::now(), session).await.unwrap();
-		assert_eq!(request.peer_hop(), Some(std::num::NonZeroU64::new(42).unwrap()));
+		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
+		assert_eq!(request.peer_node(), Some(std::num::NonZeroU64::new(42).unwrap()));
 	}
 
 	#[kio::test]
@@ -2366,7 +2366,7 @@ mod tests {
 					peer_setup: ietf::PeerSetup {
 						stream: crate::coding::Reader::new(
 							crate::transport::boxed::RecvStream::new(crate::lite::test_transport::PendingRecv),
-							Version::Ietf(version),
+							Version::ietf(version),
 						),
 						size: 0,
 						options: ietf::SetupOptions {

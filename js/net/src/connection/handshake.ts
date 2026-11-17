@@ -1,6 +1,7 @@
 import { Duration } from "@moq/clock";
-import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
+import { closeReason, ProtocolViolation, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
+import { IetfSessionCode } from "../ietf/error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
@@ -44,7 +45,6 @@ export async function exchangeSetup(
 	solicit: boolean | undefined;
 	declaredSolicit: boolean;
 	hidden: boolean;
-	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	peerImplementation: string | undefined;
@@ -53,7 +53,6 @@ export async function exchangeSetup(
 	Ietf.implementationIntoSetup(params, implementation);
 	if (solicit) Ietf.solicitIntoSetup(params);
 	Ietf.hiddenIntoSetup(params);
-	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params);
 	// Only a client presents a connection credential.
 	if (client && token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: token });
@@ -85,7 +84,6 @@ export async function exchangeSetup(
 		solicit: received.solicit,
 		declaredSolicit: solicit,
 		hidden: received.hidden,
-		maxAge: received.maxAge,
 		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
 		peerImplementation: received.implementation,
@@ -115,7 +113,6 @@ async function receiveSetup(
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
-	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Hop | undefined;
 	implementation: string | undefined;
@@ -164,10 +161,10 @@ async function receiveSetup(
 
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
-		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
+		throw new ProtocolViolation("server SETUP carries PATH", { code: IetfSessionCode.InvalidPath });
 	}
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Authority) !== undefined) {
-		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
+		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: IetfSessionCode.InvalidAuthority });
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
 	// session (draft-22 section 8.9).
@@ -178,7 +175,6 @@ async function receiveSetup(
 		early,
 		solicit: Ietf.solicitFromSetup(setup.parameters),
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
-		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
 		activeCount: Ietf.activeCountFromSetup(setup.parameters),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters),
 		implementation: Ietf.implementationFromSetup(setup.parameters),

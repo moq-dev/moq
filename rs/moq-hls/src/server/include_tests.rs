@@ -42,7 +42,7 @@ fn publish(origin: &moq_net::origin::Producer, path: &str, instance: &Instance, 
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
 	let mut catalog = moq_json::snapshot::Producer::new(track, Default::default());
-	catalog.update(moq_json::Timed::new(value, Timestamp::ZERO)).unwrap();
+	catalog.update(value, Timestamp::ZERO).unwrap();
 	let video = publication
 		.create_track("same", hang::container::track_info(1))
 		.unwrap();
@@ -165,10 +165,7 @@ async fn an_idle_predecessor_does_not_strand_a_requested_reconfigure() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	include
-		.catalog
-		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
-		.unwrap();
+	include.catalog.update(&value, Timestamp::ZERO).unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	// The new response lists the predecessor's retained rows while waiting for its
 	// last pending segment. Its body keeps the replacement requested past that idle window.
@@ -291,10 +288,7 @@ async fn idle_release_keeps_an_ended_playlists_inherited_segments() {
 	let video = value.video.renditions.get_mut("same").unwrap();
 	video.track = Some("next".into());
 	video.coded_width = Some(640);
-	include
-		.catalog
-		.update(moq_json::Timed::new(&value, Timestamp::ZERO))
-		.unwrap();
+	include.catalog.update(&value, Timestamp::ZERO).unwrap();
 	master(&server, "RESOLUTION=640x240", true).await;
 	let _video = include.video.finish().unwrap();
 	let held = server

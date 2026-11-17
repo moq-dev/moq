@@ -5,7 +5,7 @@ import { wall } from "@moq/clock";
 import { Command, Option } from "commander";
 import { base64url } from "jose";
 import type { Algorithm } from "./algorithm.ts";
-import { authorize, ClaimsSchema, type Scope, ScopeSchema } from "./claims.ts";
+import { Claims, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
 import { encodeGrants } from "./wire.ts";
 
@@ -40,7 +40,6 @@ program
 			}
 
 			const encodeKey = (k: { scope?: Scope }): string => {
-				// Written the legacy way when that says the same thing, so older readers load it.
 				const json = JSON.stringify(k.scope ? { ...k, scope: encodeGrants(k.scope) } : k, null, 2);
 				if (options.base64) {
 					return base64url.encode(json);
@@ -83,23 +82,23 @@ program
 	)
 	.addOption(new Option("--unbounded", "Write no exp, so the token never expires"))
 	.option("--issued <timestamp>", "Issued time as unix timestamp", parseUnixTimestamp)
+	.option("--id <id>", "Token ID, written as its jti, such as one you record to revoke it")
 	.action(async (options) => {
 		try {
 			const keyEncoded = readFileSync(options.key, "utf-8");
 			const key = Key.parse(keyEncoded);
 
-			const exp = options.unbounded
+			const expires = options.unbounded
 				? undefined
 				: (options.expires ?? Math.floor(wall().asUnixMillis() / 1000) + (options.ttl ?? 3600));
-			const claims = ClaimsSchema.parse({
+			const token = await Key.sign(key, {
 				root: options.root,
 				...(options.publish && { publish: options.publish }),
 				...(options.subscribe && { subscribe: options.subscribe }),
-				...(exp !== undefined && { exp }),
-				...(options.issued && { iat: options.issued }),
+				...(expires !== undefined && { expires }),
+				...(options.issued && { issued: options.issued }),
+				...(options.id !== undefined && { id: options.id }),
 			});
-
-			const token = await Key.sign(key, claims);
 			console.log(token);
 		} catch (error) {
 			console.error("Error signing token:", error instanceof Error ? error.message : error);
@@ -123,7 +122,7 @@ program
 
 			const claims = await Key.verify(key, token);
 			if (options.root !== undefined) {
-				authorize(claims, options.root);
+				Claims.authorize(claims, options.root);
 			}
 			console.log(JSON.stringify(claims, null, 2));
 		} catch (error) {

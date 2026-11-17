@@ -19,10 +19,7 @@ advertises its measured peak, which starts low on a calm opening scene.
 Candidates: x264's `VBR` (CRF under a VBV max rate) and NVENC's `VBR` or `CQVBR`
 with `max_bitrate`; check each encoder's settings keys and the
 `OBS_ENCODER_CAP_DYN_BITRATE` path. The profile bitrates follow the
-[cap formula](/quest/m1/video-rate/cap-formula.md) for their resolution.
+default cap formula (`Config::resolved_bitrate` in
+`rs/moq-video/src/encode/encoder.rs`) for their resolution.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [One default cap formula](/quest/m1/video-rate/cap-formula.md) - the peaks the profiles use

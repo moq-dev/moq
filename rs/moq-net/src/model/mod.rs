@@ -63,7 +63,7 @@ pub mod origin {
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::Mounted;
 	pub use super::origin_impl::{
-		Claim, Config, Consumer, Cost, Driver, Link, Preference, Producer, Request, Requesting, Route, RouteInfo,
+		Claim, Config, Consumer, Cost, Driver, Link, Priority, Producer, Request, Requesting, Route, RouteInfo,
 		RouteOptions, Source,
 	};
 	#[cfg(feature = "async")]
