@@ -16,7 +16,7 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 `dev.moq.media` owns catalogs, encoded imports, and container consumers. `TrackProducer.audio`
 / `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
 `CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
-Publish JSON tracks with `TrackInfo(compression = Compression.DEFLATE)`; a `dev.moq.json` consumer reads one with no option of its own.
+Publish JSON tracks with `TrackInfo(maxAge = Duration.ZERO, compression = Compression.deflate())`; a `dev.moq.json` consumer reads one with no option of its own.
 Every write takes a timestamp, and the library never substitutes zero or now.
 `SnapshotProducer.update`, `StreamProducer.append`, and `WindowProducer.push` and `pop` require a timestamp on the broadcast clock (`CatalogProducer.now()`), the epoch every track in the broadcast shares, so their track needs a timescale.
 `dev.moq.json` consumers' `values()` emits `Value` (`value`, `timestamp`) and `valuesAs<T>()` emits `Timed<T>`;
@@ -24,7 +24,8 @@ a snapshot consumer yields each state in order, and `latest()` skips to the newe
 A `Timestamp(value, scale)` is exact and reads back at the track's timescale, so a 90 kHz tick republishes unchanged.
 `Duration.toTimestamp()` is exact at nanosecond scale; `Timestamp.toDuration()` rounds down to a whole nanosecond.
 A raw track with a `null` timescale is untimed: each frame carries `Timestamp.unscaled(key)`, its group's key, whose `scale` is `null`.
-`MoqTrackInfo.compression` set to `DEFLATE` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+`TrackInfo` names `maxAge` (a `java.time.Duration`), how long a superseded group stays fresh: `Duration.ZERO` serves only the live edge, and `null` sets no publisher limit, as `null` does for `Delay.max`.
+`TrackInfo.compression` set to `Compression.deflate()` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -83,7 +84,7 @@ Moq.connect("https://relay.example.com").use { moq ->
     val video = dev.moq.video.Producer(
         CatalogProducer(broadcast),
         dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
-        output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, join = null, kind = autoEncoder), track = "camera"),
+        output = VideoEncoderOutput(codec = VideoCodec.h264(), bitrate = null, join = null, kind = autoEncoder), track = "camera"),
     )
     video.write(VideoFrame(timestamp = pts, data = rgba))
     route.announce() // the route mints its own instance: route.instance()
@@ -115,6 +116,7 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ClientConfig(versions = ...)`), collect `moq.grants().updates()` for the `Grant` the relay sent back and each change, `null` until it answers and while a client session reconnects. Ending the collection cancels the consumer.
 - **Tokens.** Pass `ClientConfig(tokens = listOf(...))` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `moq.tokens().set(listOf(...))` replaces them before they expire: the next dial presents them, a live AUTH session at once. Suspending `tokens().answered()` returns once the relay accepts them and throws its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `moq.credential(token)` returns a `Credential` that `route.setAuth(credential)` or `claim.setAuth(credential)` names (`null` for none); setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. Suspending `credential.answered()` throws the peer's refusal, and `credential.cancel()` withdraws it unless a route or claim still names it.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
+- **Catalog timing.** Each catalog a `CatalogConsumer` yields carries the `timestamp` it takes effect at on the broadcast's media timeline. `CatalogConsumer.subscribe(broadcast, Duration.ZERO)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout delay instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `MoqException.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** `Subscription.default()` returns moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once; passing no subscription means the same. `copy` it to change a field; building a `Subscription(...)` must name its `Delay(min, max)`, where a null `max` sets no subscriber limit and a null `min` leaves the target latency unstated. Decoders take the same `Delay`.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call the producer's `abortUnwanted(code)` once `wantedChanged()` returns null rather than releasing it: it returns false and keeps the track for a subscriber that joined since.

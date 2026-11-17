@@ -28,7 +28,7 @@ Every write takes a timestamp, and the library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowEventPush`, `WindowEventPop`, or `WindowEventSkip`.
 A raw track with a `None` timescale is untimed: each frame carries `moq.Timestamp.unscaled(key)`, its group's key, whose `scale` is `None`.
-`TrackInfo(compression=moq.Compression.DEFLATE)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+`TrackInfo(compression=moq.Compression.deflate())` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `update`, `append`, `push`, and `pop` require a `timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
@@ -86,7 +86,7 @@ async def main():
             catalog_producer,
             moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=moq.video.FrameRate(numerator=30000, denominator=1001)),
             moq.VideoEncoderOutput(
-                codec=moq.VideoCodec.H264,
+                codec=moq.VideoCodec.h264(),
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
             ),
             track="camera",
@@ -96,7 +96,7 @@ async def main():
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}', moq.Timestamp.unscaled(0))  # untimed: the first group's key
-        status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.DEFLATE))
+        status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compression=moq.Compression.deflate()))
         status = moq.json.SnapshotProducer(broadcast, status_track)
         status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 
@@ -130,6 +130,7 @@ shows which module holds each.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `versions=`), `async for grant in session.grants()` yields the `Grant` the relay sent back and each change, `None` until it answers and while a client session reconnects. `grants().grant()` reads it once; cancelling or leaving an `async with` releases the wait.
 - **Tokens.** Pass `tokens=[...]` instead of putting the credential in the URL. The first is the connection credential, sent in SETUP and, while an offered version can't carry it there (lite before 07), as the URL's `?jwt=`; each other token widens the grant over AUTH. `session.tokens().set([...])` replaces a client session's tokens before they expire: the next dial presents them, a live AUTH session at once. `await tokens.answered()` returns once the relay accepts them and raises its refusal with the relay's code. A `?jwt=` already in the URL stays the connection credential, which is how to reach a relay older than this release. For a per-request token, `session.credential(token)` returns a `Credential` that `route.set_auth(credential)` or `claim.set_auth(credential)` names; setting a new one renews the announcement in place. Only the session that minted it carries it, a client session across its reconnects; another session announcing the same route uses its own scope. On moq-transport `answered` resolves at once, since only the request carries the token; on moq-lite the token rides AUTH instead (07 only, unsupported before), so `answered` is the peer's verdict and the grant joins the whole session's, not only the named route's. `await credential.answered()` raises the peer's refusal, and `credential.cancel()` withdraws it unless a route or claim still names it.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
+- **Catalog timing.** Each catalog a `CatalogConsumer` yields carries the `timestamp` it takes effect at on the broadcast's media timeline. `CatalogConsumer.subscribe(broadcast)` reads only the newest catalog; a player that holds each update until its media reaches that time passes its playout `delay=` instead, and reads in order every update it may still need.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode. Audio and video subscribe setup returns `moq.Error.UnsupportedConfig` when the decoder refuses the codec, layout, or description; a player can then try its next ranked rendition. Decoder faults and later peer or decode failures do not report that setup refusal.
 - **Subscription defaults.** A bare `moq.Subscription()`, passing no subscription, and `moq.Subscription.default()` all mean moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once. Pass `delay=moq.Delay(max=None)` for no subscriber limit, or `min=None` to leave the target latency unstated. Decoders take the same `moq.Delay`.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one. To end a track nobody wants, call the producer's `abort_unwanted(code)` once `wanted_changed()` returns `None` rather than releasing it: it returns `False` and keeps the track for a subscriber that joined since.

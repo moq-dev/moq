@@ -45,7 +45,7 @@ public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
 /// A CPU pixel layout (I420 or RGBA): fed to a `Video.Producer`, or delivered
 /// by a `Video.Consumer`.
 public typealias VideoPixelFormat = MoqFFI.MoqVideoPixelFormat
-/// A video codec identifier (H.264 or H.265).
+/// Selects the video encoder codec. Build one with `VideoCodec.h264()` or `VideoCodec.h265()`.
 public typealias VideoCodec = MoqFFI.MoqVideoCodec
 /// Which encoder implementation to use: automatic, hardware, software, or one
 /// named backend.
@@ -81,7 +81,8 @@ public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
-/// How a track's frames are compressed on the wire: `.deflate`, or `nil` in `TrackInfo` for none.
+/// How a track's frames are compressed on the wire: `Compression.deflate()`, or `nil` in `TrackInfo`
+/// for none. Compare a received one with `==` or by `name()`.
 public typealias Compression = MoqFFI.MoqCompression
 
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
@@ -89,9 +90,11 @@ public typealias Compression = MoqFFI.MoqCompression
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
 /// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
-/// field keeps its default. Until a session has stayed up past 1s or been drained
-/// by a GOAWAY, a failed dial or a closed session, such as a refused credential,
-/// ends the connection with its error rather than retrying.
+/// field keeps its default, zero means zero (retry at once, or give up at the
+/// first failure), and `maxUnlimited` lifts the ceiling. Until a session has
+/// stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+/// session, such as a refused credential, ends the connection with its error
+/// rather than retrying.
 public typealias Backoff = MoqFFI.MoqBackoff
 
 /// Certificate trust and the mTLS identity for a `Client`.
@@ -116,7 +119,8 @@ public typealias ConnectionPhase = MoqFFI.MoqConnectionPhase
 /// One coherent connection lifecycle snapshot.
 public typealias ConnectionState = MoqFFI.MoqConnectionState
 
-/// The network transport carrying an incoming session.
+/// The network transport carrying an incoming session, or `.unknown` for one this version cannot
+/// name yet.
 public typealias Transport = MoqFFI.MoqTransport
 
 /// The error thrown by every throwing call in this package. Already conforms to

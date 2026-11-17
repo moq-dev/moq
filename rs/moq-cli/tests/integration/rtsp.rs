@@ -90,7 +90,8 @@ async fn next_broadcast(
 	let catalog = running(child, "the first catalog", catalogs.next())
 		.await
 		.expect("catalog read")
-		.expect("a catalog");
+		.expect("a catalog")
+		.value;
 	assert_eq!(
 		catalog.video.renditions.len(),
 		1,
