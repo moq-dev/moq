@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Path;
 
-use super::view::ancestors;
+use super::prefix::ancestors;
 use super::{Event, Id, Kind, Shown};
 
 /// How the reader sees each claim, and the events not yet taken.
@@ -44,14 +44,6 @@ impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A
 		self.shown.get(&(id, claim.clone()))
 	}
 
-	/// The claims of `id` the reader sees.
-	pub fn claims(&self, id: K) -> impl Iterator<Item = &Path> {
-		self.shown
-			.range((id.clone(), Path::empty())..)
-			.take_while(move |((key, _), _)| *key == id)
-			.map(|((_, claim), _)| claim)
-	}
-
 	/// Take the identities recomputed since the last call, each with the claims whose
 	/// shown state changed.
 	pub fn changed(&mut self) -> BTreeMap<K, BTreeSet<Path>> {
@@ -61,30 +53,6 @@ impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A
 	/// Take the events, in order.
 	pub fn events(&mut self) -> Vec<Event<A, K>> {
 		std::mem::take(&mut self.events)
-	}
-
-	/// Count a forget against each claim of `id` this node has shown that `kept` does not keep.
-	#[cfg_attr(not(test), allow(unused_variables, reason = "only fixtures count forgets"))]
-	pub fn forget(&mut self, id: K, kept: impl Fn(&Path) -> bool) {
-		#[cfg(test)]
-		for ((key, claim), count) in self.forgot.iter_mut() {
-			if *key == id && !kept(claim) {
-				*count += 1;
-			}
-		}
-	}
-
-	/// Assert that `now`, recomputed for some claims of `id`, agrees with `full`,
-	/// recomputed for all of them.
-	#[cfg(test)]
-	pub fn check(&self, id: K, now: &BTreeMap<Path, Option<Shown<A>>>, full: BTreeMap<Path, Option<Shown<A>>>) {
-		for (claim, full) in full {
-			let got = match now.get(&claim) {
-				Some(got) => got.as_ref(),
-				None => self.get(id.clone(), &claim),
-			};
-			assert_eq!(got, full.as_ref(), "incremental reader view of {id:?} {claim:?}");
-		}
 	}
 
 	/// The reader now sees each claim of `id` in `now` as it says, where `watched`. Log

@@ -482,11 +482,6 @@ impl PeerSetup {
 		self.0.read().tag
 	}
 
-	/// The Node ID the peer's SETUP declared (lite-07), once it arrived.
-	pub fn node(&self) -> Option<crate::route::NodeId> {
-		self.0.read().setup().and_then(|setup| setup.node)
-	}
-
 	/// Poll for the Node ID the peer's SETUP declared (lite-07), waiting until it arrives.
 	pub fn poll_node(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::route::NodeId>> {
 		self.poll_get(waiter, |setup| setup.node)

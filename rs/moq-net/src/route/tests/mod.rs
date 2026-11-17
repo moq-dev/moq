@@ -16,11 +16,8 @@ mod warmth;
 
 use std::{
 	collections::{BTreeMap, BTreeSet, VecDeque},
-	sync::Arc,
 	time::Duration,
 };
-
-use kio::clock::Instant;
 
 use super::*;
 
@@ -52,14 +49,6 @@ pub(super) struct Stats {
 	pub claim_items: usize,
 	/// Messages delivered.
 	pub delivered: usize,
-}
-
-/// How many scenarios a sweep runs: `MOQ_ROUTE_SCENARIOS`, or the gate's 150.
-/// Each sweep draws its scenarios from one seeded stream, so a larger count
-/// replays the gate's first and continues past them. Run a large count under
-/// nextest's `sweep` profile (`just rs test -P sweep`), which waits up to an hour.
-pub(super) fn scenarios() -> usize {
-	std::env::var("MOQ_ROUTE_SCENARIOS").map_or(150, |count| count.parse().expect("MOQ_ROUTE_SCENARIOS"))
 }
 
 pub(super) struct XorShift(pub u64);

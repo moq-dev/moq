@@ -1926,16 +1926,6 @@ impl Mounted {
 		self.mount.name(path)
 	}
 
-	/// Whether the absolute, handle-side `path` lies at or beneath the mount point.
-	pub fn holds(&self, path: &Path) -> bool {
-		path.has_prefix(&self.mount.at)
-	}
-
-	/// The absolute, handle-side mount point.
-	pub fn at(&self) -> &Path {
-		&self.mount.at
-	}
-
 	/// How many segments the handle-side `path` lies beneath the mount point: the most a
 	/// claim read through the mount can be above it. A claim covering the whole target, which
 	/// is broader than the mount point as the handle sees it, covers no more than that.

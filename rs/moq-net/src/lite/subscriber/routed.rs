@@ -552,6 +552,7 @@ impl Routed {
 	}
 
 	/// Tell the node's other sessions what the messages received changed.
+	#[cfg(test)]
 	pub(in crate::lite) fn flush(&self) {
 		self.stream.flush();
 	}

@@ -596,16 +596,6 @@ impl Permit {
 		covers(&self.granted) && covers(&self.limit)
 	}
 
-	/// Whether the limit alone allows every path at or beneath `prefix`, judged
-	/// pattern by pattern, so a `false` may be spurious but a `true` never is.
-	#[cfg(feature = "async")]
-	pub(crate) fn within_limit_subtree(&self, prefix: &str) -> bool {
-		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return false;
-		};
-		self.limit.as_ref().is_none_or(|limit| limit.contains(&subtree))
-	}
-
 	/// The prefixes this confines the peer to, or `None` when it confines nothing: the
 	/// heads of the scope's patterns, which grants this side issued. What the peer
 	/// granted this side limits only what this side does, so a client never scopes the

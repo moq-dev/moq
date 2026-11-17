@@ -17,7 +17,7 @@
 pub(crate) mod node;
 mod reader;
 pub(crate) mod relay;
-mod view;
+mod prefix;
 
 #[cfg(test)]
 mod tests;
@@ -29,7 +29,7 @@ use crate::Path;
 pub(crate) use node::Node;
 pub(crate) use relay::NodeId;
 #[cfg(feature = "async")]
-pub(crate) use view::{ancestors, within};
+pub(crate) use prefix::{ancestors, within};
 
 /// A claim's attributes as the router carries them down a stream.
 pub(crate) trait Item: Clone + Eq + fmt::Debug {
@@ -157,8 +157,6 @@ pub(crate) enum Error {
 	ZeroCost,
 	#[error("unknown neighbor")]
 	UnknownNeighbor,
-	#[error("no declared identity")]
-	NoIdentity,
 	#[error("one interest prefix inside another")]
 	Nested,
 	#[error("no such interest prefix")]

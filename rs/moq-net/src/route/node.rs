@@ -30,7 +30,7 @@ use crate::{Instance, Path};
 use super::{
 	Error, Id, Item, Kind, Metric,
 	relay::{self, Next, NodeId, Port, Role, Router},
-	view::ancestors,
+	prefix::ancestors,
 };
 
 /// One session, or one mount a session answers through.
@@ -404,14 +404,6 @@ impl Node {
 		}));
 		Poll::Ready(*deadline)
 	}
-
-	/// What the node's reader shows: each claim's attributes, and whether a route reaches it.
-	#[cfg(test)]
-	pub(crate) fn shown(&self) -> BTreeMap<(Instance, Path), (Attr, bool)> {
-		(self.lock().router.shown().iter())
-			.map(|(key, shown)| (key.clone(), (shown.item.clone(), shown.available)))
-			.collect()
-	}
 }
 
 /// One session's key on the node, or a mount's ([`Self::mount`]). Dropping a session's
@@ -556,11 +548,6 @@ impl Stream {
 	/// Whether the peer answered every edit of what this node asks it for.
 	pub fn answered(&self) -> bool {
 		self.node.lock().router.answered(self.key)
-	}
-
-	/// Whether the peer sent the initial set of `prefix`, or `None` when it is not asked.
-	pub fn is_synced(&self, prefix: &Path) -> Option<bool> {
-		self.node.lock().router.is_synced(self.key, prefix)
 	}
 
 	/// The peer sent GOAWAY: what it gave ranks below everything else.

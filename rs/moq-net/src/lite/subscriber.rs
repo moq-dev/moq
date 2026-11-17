@@ -1037,37 +1037,6 @@ impl Subscriber {
 		Ok(announced.offer(self, path, metadata))
 	}
 
-	/// Handle an ANNOUNCE_RESTART: a live advertisement serves another instance, or a
-	/// newer epoch of its own, as the caller recorded.
-	///
-	/// The replacement enters the origin as a fresh route before the old one leaves, so
-	/// local consumers see one restart rather than an end and a start, and nothing
-	/// resolved through the old route is joined again. The sources the old route minted
-	/// take no new tracks, while the tracks already in flight run to their own end.
-	///
-	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
-	/// route is now gone), `Ok(true)` otherwise.
-	fn restart_announce(
-		&mut self,
-		path: Path,
-		hops: crate::Hops,
-		// See `update_announce`.
-		cost: crate::origin::Cost,
-		link_cost: u64,
-		responder_origin: Option<crate::Hop>,
-		announced: &mut Announced,
-	) -> Result<bool, Error> {
-		let Some(hops) = self.chain(&path, hops, responder_origin) else {
-			announced.declined(path);
-			return Ok(false);
-		};
-
-		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
-		let route = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
-		// Held to the limit like a start: a restart outside it is withheld, dropping the old route.
-		Ok(announced.offer(self, path, route))
-	}
-
 	/// Whether `hops` passed through this node: the claim came back, and filed again it
 	/// would keep itself alive once its source left.
 	pub(super) fn names_self(&self, hops: &crate::Hops) -> bool {
@@ -9888,89 +9857,6 @@ mod tests {
 		(subscriber, consumer)
 	}
 
-	/// A restart re-prices the announced route in place: consumers observe another
-	/// active update with the new metadata rather than a retract-and-announce.
-	#[kio::test]
-	async fn restart_updates_the_route_in_place() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
-
-		let mut announced = Announced::default();
-		let path = Path::from_static("room/host");
-		subscriber
-			.start_announce(
-				path.clone(),
-				None,
-				crate::Hops::new(),
-				crate::origin::Cost::UNKNOWN,
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-
-		let mut cursor = consumer.routes();
-		kio::clock::sim::yield_now().await;
-		cursor.expect_next_active("room/host").await;
-
-		subscriber
-			.update_announce(
-				path.clone(),
-				crate::Hops::new(),
-				crate::origin::Cost::new(5),
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-
-		kio::clock::sim::yield_now().await;
-		let route = cursor.expect_next_active("room/host").await;
-		assert_eq!(route.cost, crate::origin::Cost::new(5).charged(0));
-	}
-
-	/// A restart is held to the subscribe limit like a start: one the limit no longer
-	/// covers is withheld, ending the old instance rather than attaching the new one.
-	#[kio::test]
-	async fn a_restart_outside_the_limit_is_withheld() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
-		let auth = subscriber.auth.clone();
-
-		let mut announced = Announced::default();
-		let path = Path::from_static("room/host");
-		subscriber
-			.start_announce(
-				path.clone(),
-				None,
-				crate::Hops::new(),
-				crate::origin::Cost::UNKNOWN,
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-		let mut cursor = consumer.routes();
-		cursor.expect_next_active("room/host").await;
-
-		auth.handle().authorize(&crate::auth::Grant {
-			publish: Default::default(),
-			subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
-			expires: None,
-		});
-		announced.restart(&path, None);
-		let attached = subscriber
-			.restart_announce(
-				path.clone(),
-				crate::Hops::new(),
-				crate::origin::Cost::UNKNOWN,
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-		assert!(!attached, "a restart outside the limit was attached");
-		cursor.expect_next_offline("room/host").await;
-	}
-
 	/// An announce stream that dies without an explicit `ended` retracts the route
 	/// as promptly as an explicit retraction: a route into a dead session must not
 	/// stay announced.
@@ -11363,14 +11249,6 @@ impl Announced {
 	/// The instance and epoch the advertisement at `path` serves.
 	fn instance(&self, path: &Path) -> Option<(crate::Instance, u64)> {
 		self.instances.get(path).map(|(instance, _)| instance.clone())
-	}
-
-	/// Record the instance and epoch a restart of the live advertisement at `path` names.
-	fn restart(&mut self, path: &Path, instance: Option<(crate::Instance, u64)>) {
-		self.forget(path, true);
-		if let Some(instance) = instance {
-			self.instances.insert(path.clone(), (instance, false));
-		}
 	}
 
 	/// Drop the instance recorded for `path`, releasing it if the session minted it, and

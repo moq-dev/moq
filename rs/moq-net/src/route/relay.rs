@@ -70,7 +70,7 @@ use kio::clock::Instant;
 use crate::Path;
 
 use super::reader::Reader;
-use super::view::{ancestors, below, within_any, within_set};
+use super::prefix::{ancestors, below, within_any, within_set};
 use super::{Error, Event, Id, Item, Key, MAX_HOPS, Metric, Rev, Shown};
 
 /// How a forwarding node names itself on a path: its relay, and which start of that
@@ -775,6 +775,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	}
 
 	/// The route this node uses to `origin`: the neighbour, and the offer as it stands here.
+	#[cfg(test)]
 	pub fn best(&self, origin: NodeId) -> Option<(N, &Offer)> {
 		self.best.get(&origin).map(|best| (best.via, &best.offer))
 	}
@@ -987,6 +988,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	/// Whether `peer` sent the initial set of `prefix`, which this node asks it for, or
 	/// `None` when it does not ask for it.
+	#[cfg(test)]
 	pub fn is_synced(&self, peer: N, prefix: &Path) -> Option<bool> {
 		let peer = self.peers.get(&peer)?;
 		let pending = || peer.asking.iter().any(|edit| edit.add.contains(prefix));
@@ -1010,7 +1012,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				let mut lost = Vec::new();
 				for prefix in &edit.remove {
 					peer.asked.remove(prefix);
-					lost.extend(peer.given.keys().filter(|(path, _)| super::view::within(path, prefix)).cloned());
+					lost.extend(peer.given.keys().filter(|(path, _)| super::prefix::within(path, prefix)).cloned());
 				}
 				for broadcast in lost {
 					self.peers.get_mut(&from).expect("a neighbour").given.remove(&broadcast);

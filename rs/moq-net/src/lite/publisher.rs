@@ -1131,24 +1131,6 @@ struct Advertised {
 	/// wire cannot carry (the route's source, servability), which must not restart.
 	hops: Hops,
 	cost: crate::origin::Cost,
-	/// The instance and epoch last put on the wire (lite-07); see [`served`].
-	served: Served,
-}
-
-/// The instance and epoch a route serves, as an advertisement carries them.
-type Served = (Option<crate::Instance>, u64);
-
-/// What `route` serves; see [`Served`].
-fn served(route: &crate::origin::RouteInfo) -> Served {
-	(route.instance.clone(), route.epoch)
-}
-
-/// The hop chain as `version` carries it: lite-07 names a claim's route instead.
-fn chain(version: Version, hops: Hops) -> Hops {
-	match version.has_routes() {
-		true => Hops::new(),
-		false => hops,
-	}
 }
 
 enum AnnouncePhase {
@@ -1252,7 +1234,7 @@ impl AnnounceRun {
 			}
 			let absolute = origin.root().rejoin(&suffix);
 			if let Some((hops, cost)) = self.outgoing(&route, &absolute) {
-				self.advertise(stream, suffix, hops, cost, served(&route), &absolute)?;
+				self.advertise(stream, suffix, hops, cost, &absolute)?;
 			}
 		}
 		Ok(())
@@ -1266,7 +1248,6 @@ impl AnnounceRun {
 		suffix: crate::Path,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		route: Served,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
 		match self.live.get_mut(&suffix) {
@@ -1278,7 +1259,6 @@ impl AnnounceRun {
 				tracing::debug!(route = %absolute, "reannounce");
 				advertised.hops = hops.clone();
 				advertised.cost = cost;
-				let hops = chain(self.version, hops);
 				match advertised.id {
 					Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::Update {
 						id,
@@ -1299,7 +1279,7 @@ impl AnnounceRun {
 			Some(_) => {}
 			None => {
 				tracing::debug!(route = %absolute, "announce");
-				self.start(stream, suffix, hops, cost, route)?;
+				self.start(stream, suffix, hops, cost)?;
 			}
 		}
 		Ok(())
@@ -1345,23 +1325,19 @@ impl AnnounceRun {
 		suffix: crate::Path,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		// Fixed while the peer holds the advertisement: a new one is a restart.
-		route: Served,
 	) -> Result<(), Error> {
 		let (id, wire) = self.encoder.start(suffix.clone());
-		let wire_hops = chain(self.version, hops.clone());
 		self.live.insert(
 			suffix,
 			Advertised {
 				id,
-				hops,
+				hops: hops.clone(),
 				cost,
-				served: route.clone(),
 			},
 		);
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 			suffix: wire,
-			hops: wire_hops,
+			hops,
 			cost,
 		})?;
 		self.sent(stream)?;
@@ -1376,12 +1352,11 @@ impl AnnounceRun {
 		suffix: crate::Path,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		route: Served,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
 		tracing::debug!(route = %absolute, "restart");
 		self.retract(stream, suffix.clone(), absolute)?;
-		self.start(stream, suffix, hops, cost, route)?;
+		self.start(stream, suffix, hops, cost)?;
 		Ok(())
 	}
 
@@ -1440,7 +1415,7 @@ impl AnnounceRun {
 				let absolute = origin.root().rejoin(&suffix);
 				let (hops, cost) = self.outgoing(&update.route, &absolute)?;
 				tracing::debug!(route = %absolute, "announce");
-				Some((suffix, hops, cost, served(&update.route)))
+				Some((suffix, hops, cost))
 			})
 			.collect();
 		match self.version {
@@ -1448,16 +1423,8 @@ impl AnnounceRun {
 				let suffixes = initial.iter().map(|(suffix, ..)| suffix.clone()).collect();
 				stream.writer.buffer(&lite::AnnounceInit { suffixes })?;
 				// The peer holds these now, so a later retraction or narrower grant ends them.
-				for (suffix, hops, cost, served) in initial {
-					self.live.insert(
-						suffix,
-						Advertised {
-							id: None,
-							hops,
-							cost,
-							served,
-						},
-					);
+				for (suffix, hops, cost) in initial {
+					self.live.insert(suffix, Advertised { id: None, hops, cost });
 				}
 			}
 			_ => {
@@ -1465,8 +1432,8 @@ impl AnnounceRun {
 					origin: self.self_origin,
 					active: initial.len() as u64,
 				})?;
-				for (suffix, hops, cost, served) in initial {
-					self.start(stream, suffix, hops, cost, served)?;
+				for (suffix, hops, cost) in initial {
+					self.start(stream, suffix, hops, cost)?;
 				}
 			}
 		}
@@ -1604,9 +1571,9 @@ impl AnnounceRun {
 
 			match self.outgoing(&update.route, &absolute) {
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
-					self.restart(stream, suffix, hops, cost, served(&update.route), &absolute)?;
+					self.restart(stream, suffix, hops, cost, &absolute)?;
 				}
-				Some((hops, cost)) => self.advertise(stream, suffix, hops, cost, served(&update.route), &absolute)?,
+				Some((hops, cost)) => self.advertise(stream, suffix, hops, cost, &absolute)?,
 				// The chain must not be forwarded (reflected, or full): retract
 				// whatever the peer holds.
 				None => self.retract(stream, suffix, &absolute)?,
@@ -4095,7 +4062,7 @@ mod announce_test {
 		match initial.as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
 				assert_eq!(suffix.rest.as_str(), "cam");
-				assert_eq!(hops, &chain(version, pub_hops()));
+				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(7));
 			}
 			other => panic!("expected the initial announce, got {other:?}"),
