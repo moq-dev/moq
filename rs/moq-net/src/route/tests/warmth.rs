@@ -518,10 +518,18 @@ const REJOIN: Arm = Arm { rejoin: true, ..STAY };
 /// [`STAY`], choosing again when its route changes.
 const REROUTE: Arm = Arm { reroute: true, ..STAY };
 
+/// [`REROUTE`] without the query: adverts and the path only.
+const REROUTE_UNQUERIED: Arm = Arm {
+	stay: true,
+	reroute: true,
+	..NOT_DOWN
+};
+
 /// The narrower audiences for useful adverts, which keep them off a CDN's edges.
 /// [`NOT_DOWN_QUERY`] is the pick, [`CHAIN`] the pick with the chain, [`STAY`] the
-/// pick whose settled pulls stay, and [`REJOIN`] and [`REROUTE`] that, choosing again
-/// on a reader of its own or a new route.
+/// pick whose settled pulls stay, [`REJOIN`] and [`REROUTE`] that, choosing again
+/// on a reader of its own or a new route, and [`REROUTE_UNQUERIED`] the last without
+/// the query.
 fn narrower() -> Vec<Arm> {
 	vec![
 		NOT_NEXT,
@@ -533,6 +541,7 @@ fn narrower() -> Vec<Arm> {
 		STAY,
 		REJOIN,
 		REROUTE,
+		REROUTE_UNQUERIED,
 	]
 }
 
@@ -1086,6 +1095,7 @@ fn every_arm_settles_after_churn() {
 		CHAIN,
 		STAY,
 		REROUTE,
+		REROUTE_UNQUERIED,
 	] {
 		for shape in [random as fn(&mut XorShift) -> Shape, flying, regional] {
 			let out = churn(arm, 0..12, shape);

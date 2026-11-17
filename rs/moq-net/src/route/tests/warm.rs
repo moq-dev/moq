@@ -1065,13 +1065,12 @@ impl WarmSim {
 		stays.then_some(target.via)
 	}
 
-	/// Move toward `target` unless already there or on the way, marking a new pull the
-	/// merge asked for.
 	/// [`Arm::stay`]'s rule for a relay already pulling: a pending pull waits for its
 	/// answer, failing closed only if its source left; a live one moves only for a
-	/// query answer from its join that is strictly cheaper, judged once, keeping the old
-	/// pull until the new one is live; a lost one, or one through itself, is replaced by
-	/// a fresh choice.
+	/// query answer from its join, or a choice [`Arm::rejoin`] or [`Arm::reroute`]
+	/// grants, to something strictly cheaper, judged once, keeping the old pull until
+	/// the new one is live; a lost one, or one through itself, is replaced by a fresh
+	/// choice.
 	fn stay(&mut self, node: Node, cast: usize, up: &Pull, options: &[Choice], best: Option<Choice>) {
 		let hops = self.arm.hops;
 		let reroute = self.arm.reroute;
@@ -1123,6 +1122,8 @@ impl WarmSim {
 		}
 	}
 
+	/// Move toward `target` unless already there or on the way, marking a new pull the
+	/// merge asked for.
 	fn toward(&mut self, node: Node, cast: usize, target: Node, merged: bool) {
 		let carry = self.entry(node, cast);
 		let up = carry.up.as_ref().map(|pull| pull.via);
@@ -1147,8 +1148,11 @@ impl WarmSim {
 	/// Tell each neighbour pulling through `node` what it offers now.
 	fn answer(&mut self, node: Node, cast: usize) {
 		let carry = self.entry(node, cast).clone();
-		// Neither pulling nor trying to: a new subscriber hears so at once.
-		let stuck = carry.next.is_none() && carry.up.as_ref().is_none_or(|pull| pull.state == State::Lost);
+		// Neither pulling nor trying to, nor waiting on asks: a new subscriber hears so
+		// at once.
+		let stuck = carry.unanswered.is_empty()
+			&& carry.next.is_none()
+			&& carry.up.as_ref().is_none_or(|pull| pull.state == State::Lost);
 		for (&child, streams) in &carry.down {
 			let offer = self.offer(node, cast, child);
 			for &stream in streams {
@@ -1342,6 +1346,12 @@ impl WarmSim {
 		carry.rejoin |= rejoin && reading && !carry.reader && carry.up.is_some();
 		carry.reader = reading;
 		carry.since = reading.then_some(round);
+		// A reader at a relay already fed has its first frame at once, whether or not
+		// anything is sent.
+		if reading && self.fed(node, cast) && self.live(node, cast).is_some() {
+			self.entry(node, cast).since = None;
+			self.waits.push(0);
+		}
 		self.dirty.insert((node, cast));
 		self.step();
 	}
