@@ -8,12 +8,12 @@
 use std::hint::black_box;
 
 use bytes::Bytes;
-use moq_net::{Client, Hop, Server, Timestamp, Version, cache, origin, transport::memory};
+use moq_net::{Client, Server, Timestamp, Version, cache, origin, transport::memory};
 
 /// An origin whose cache holds what the model scenario's does, so neither the relay's nor a
 /// viewer's grows with the groups a run delivers.
 fn origin(hop: u64) -> origin::Producer {
-	let mut config = origin::Config::new(Hop::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
 	config.pool = cache::Pool::new(cache::Config::default().with_capacity(64 * 1024));
 	let (producer, driver) = origin::Producer::new(config);
 	tokio::spawn(moq_net::time::run(driver));
@@ -96,10 +96,10 @@ fn main() {
 
 		let payload = Bytes::from(vec![0; 64]);
 		// Past the first groups' one-time work, so the zero-cycle run shares it.
-		for _ in 0..(16 + cycles) {
-			let mut group = track.append_group().unwrap();
-			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-			group.finish().unwrap();
+		for start in 0..(16 + cycles) as u64 {
+			let mut group = track.append_group(start).unwrap();
+			group.write_frame(Timestamp::from_millis(start).unwrap(), payload.clone()).unwrap();
+			group.close().unwrap();
 			for (_, _, subscriber) in &mut audience {
 				let mut group = subscriber.recv_group().await.unwrap().expect("a group");
 				black_box(group.read_frame().await.unwrap().expect("a frame"));

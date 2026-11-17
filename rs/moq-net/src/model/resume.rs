@@ -1949,14 +1949,18 @@ impl Reader {
 			// A received stale run queued here that new terms superseded since is unknown again:
 			// the copy no longer holds it, and its upstream re-offers or drops it again. Checked
 			// only once the copy let a stale run go, never on every poll: each poll reports one
-			// run, so a check per poll would cost the received runs squared to drain them.
-			let current = sub.stale_revision();
-			if self.received_checked != Some(current) {
-				for run in self.received.iter() {
-					superseded.extend(sub.stale_held(run.clone()).gaps(run));
+			// run, so a check per poll would cost the received runs squared to drain them. With
+			// none received there is nothing to check, so a live reader never reads the revision
+			// through the track lock every subscriber shares.
+			if !self.received.is_empty() {
+				let current = sub.stale_revision();
+				if self.received_checked != Some(current) {
+					for run in self.received.iter() {
+						superseded.extend(sub.stale_held(run.clone()).gaps(run));
+					}
 				}
+				self.received_checked = Some(current);
 			}
-			self.received_checked = Some(current);
 			loop {
 				let polled = match probe {
 					true => sub.poll_drop(waiter),
