@@ -66,9 +66,6 @@ pub struct Client<S = Conn> {
 	work: VecDeque<ClientSessionResult>,
 	/// The `<app>` this client connected to, logged in place of the stream key.
 	app: String,
-	/// How long [`publish`](Self::publish)'s FLV muxer waits for a stalled group
-	/// before skipping.
-	delay: Duration,
 	/// Script data [`pull`](Self::pull) discards, including any sent before Play.Start.
 	metadata: crate::metadata::Dropped,
 }
@@ -95,6 +92,56 @@ impl Connect {
 	pub fn with_tls(mut self, tls: impl Into<Option<std::sync::Arc<rustls::ClientConfig>>>) -> Self {
 		self.tls = tls.into();
 		self
+	}
+}
+
+/// What [`Client::publish`] pushes to the remote, and under which stream key.
+#[non_exhaustive]
+pub struct Push<'a> {
+	/// The stream key to publish on, the final component of `rtmp://host/<app>/<key>`.
+	pub stream_key: &'a str,
+	/// The resolved broadcast to restream; the FLV export resolves any sibling broadcast a
+	/// rendition's catalog `broadcast` field references through its origin.
+	pub source: moq_mux::Source,
+	/// The FLV release delay and stalled-group budget. Defaults to 500 ms; zero releases
+	/// available frames immediately without deadline drops.
+	pub delay: Duration,
+}
+
+impl<'a> Push<'a> {
+	/// Push `source` on `stream_key` with the default delay.
+	pub fn new(stream_key: &'a str, source: moq_mux::Source) -> Self {
+		Self {
+			stream_key,
+			source,
+			delay: crate::DEFAULT_DELAY,
+		}
+	}
+}
+
+/// What [`Client::pull`] plays from the remote, and where and how it publishes it.
+#[non_exhaustive]
+pub struct Pull<'a> {
+	/// The stream key to play, the final component of `rtmp://host/<app>/<key>`.
+	pub stream_key: &'a str,
+	/// The producer the media is published into.
+	pub publisher: &'a origin::Producer,
+	/// The broadcast to publish, relative to the producer's root.
+	pub broadcast: moq_net::Path,
+	/// How the ingested broadcast is published.
+	pub ingest: moq_mux::Ingest,
+}
+
+impl<'a> Pull<'a> {
+	/// Play `stream_key` into `publisher` under `broadcast` with the default
+	/// [`Ingest`](moq_mux::Ingest).
+	pub fn new(stream_key: &'a str, publisher: &'a origin::Producer, broadcast: impl Into<moq_net::Path>) -> Self {
+		Self {
+			stream_key,
+			publisher,
+			broadcast: broadcast.into(),
+			ingest: moq_mux::Ingest::default(),
+		}
 	}
 }
 
@@ -268,30 +315,22 @@ impl<S: Stream> Client<S> {
 			session,
 			work,
 			app: app.to_string(),
-			delay: crate::DEFAULT_DELAY,
 			metadata: Default::default(),
 		})
 	}
 
-	/// Set the FLV release delay and stalled-group budget for [`publish`](Self::publish).
-	/// Defaults to 500 ms; zero releases available frames immediately without deadline drops.
-	///
-	/// The publish (egress) direction only; [`pull`](Self::pull) takes a
-	/// [`moq_mux::Ingest`] instead.
-	pub fn with_delay(mut self, delay: Duration) -> Self {
-		self.delay = delay;
-		self
-	}
-
-	/// Push a MoQ broadcast out to the remote: request `publish` on `stream_key`,
-	/// mux the broadcast to FLV, and send each tag as an RTMP audio/video message
+	/// Push a MoQ broadcast out to the remote: request `publish` on the [`Push`]'s stream
+	/// key, mux its source to FLV, and send each tag as an RTMP audio/video message
 	/// until the broadcast ends or the connection drops.
 	///
-	/// `source` is the resolved broadcast to restream; the FLV export resolves any sibling
-	/// broadcast a rendition's catalog `broadcast` field references through its origin.
 	/// This future resolves when the broadcast ends, so callers usually run it on its own
 	/// task.
-	pub async fn publish(mut self, stream_key: &str, source: moq_mux::Source) -> Result<()> {
+	pub async fn publish(mut self, push: Push<'_>) -> Result<()> {
+		let Push {
+			stream_key,
+			source,
+			delay,
+		} = push;
 		let path = source.broadcast().info().path.clone();
 		let request = self
 			.session
@@ -312,11 +351,8 @@ impl<S: Stream> Client<S> {
 			.catalog::<()>(moq_mux::catalog::CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?;
-		let mut export = FlvExport::new(source, catalog).with_delay(
-			moq_net::track::Delay::default()
-				.with_min(self.delay)
-				.with_max(self.delay),
-		);
+		let mut export = FlvExport::new(source, catalog)
+			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
 		let mut tags = flv::TagReader::new();
 		let mut buffer = [0u8; READ_BUFFER];
 
@@ -368,9 +404,9 @@ impl<S: Stream> Client<S> {
 		Ok(())
 	}
 
-	/// Pull a remote stream into `origin`: request `play` on `stream_key`, receive
-	/// its FLV tags, demux them, and publish the result at `path` as `ingest` says until the remote
-	/// stops or the connection drops.
+	/// Pull a remote stream into an origin: request `play` on the [`Pull`]'s stream key,
+	/// receive its FLV tags, demux them, and publish the result as its broadcast, as its
+	/// ingest says, until the remote stops or the connection drops.
 	///
 	/// This future resolves when the remote stream ends, so callers usually run it
 	/// on its own task.
@@ -379,14 +415,13 @@ impl<S: Stream> Client<S> {
 	/// ends cleanly: the finished broadcast stays up for the ingest's
 	/// [linger](moq_mux::Ingest::linger), and the future resolves after that. Dropping the
 	/// future ends the linger early. A connection that drops first closes the broadcast at once.
-	pub async fn pull(
-		mut self,
-		stream_key: &str,
-		origin: &origin::Producer,
-		path: impl Into<moq_net::Path>,
-		ingest: &moq_mux::Ingest,
-	) -> Result<()> {
-		let path: moq_net::Path = path.into();
+	pub async fn pull(mut self, pull: Pull<'_>) -> Result<()> {
+		let Pull {
+			stream_key,
+			publisher: origin,
+			broadcast: path,
+			ingest,
+		} = pull;
 		let request = self
 			.session
 			.request_playback(stream_key.to_string())
@@ -772,7 +807,7 @@ mod tests {
 			let client = Client::connect(Connect::new(url).with_tls(pinned(fingerprint))).await?;
 			let origin = moq_tokio::origin::spawn();
 			client
-				.pull("cam0", &origin, moq_net::Path::from_static("cam0"), &Default::default())
+				.pull(Pull::new("cam0", &origin, moq_net::Path::from_static("cam0")))
 				.await
 		});
 
@@ -821,7 +856,6 @@ mod tests {
 				session,
 				work: VecDeque::new(),
 				app: "live".into(),
-				delay: crate::DEFAULT_DELAY,
 				metadata: Default::default(),
 			};
 			let start = kio::clock::Instant::now();
@@ -864,7 +898,6 @@ mod tests {
 			session,
 			work,
 			app: "live".into(),
-			delay: crate::DEFAULT_DELAY,
 			metadata: crate::metadata::Dropped::new("metadata"),
 		};
 		let origin = moq_tokio::origin::spawn();
@@ -893,7 +926,7 @@ mod tests {
 		});
 	}
 
-	use crate::server::{Request, Server, accept_stream};
+	use crate::server::{Export, Import, Request, Server, accept_stream};
 
 	/// A broadcast with one AVC keyframe at `live/cam0` and its tracks finished, with the
 	/// importer that keeps them listed and the catalog to finish it with.
@@ -953,11 +986,15 @@ mod tests {
 			let server = tokio::spawn(async move {
 				match accept_stream(server_io, peer).await.unwrap().unwrap() {
 					Request::Publish(publish) => publish
-						.accept(&ingest, moq_net::Path::from_static("live/cam0"), &lingering(linger))
+						.accept(Import {
+							publisher: &ingest,
+							broadcast: moq_net::Path::from_static("live/cam0"),
+							ingest: lingering(linger),
+						})
 						.await
 						.unwrap(),
 					Request::Play(play) => play
-						.accept(&served, moq_net::Path::from_static("live/cam0"))
+						.accept(Export::new(&served, moq_net::Path::from_static("live/cam0")))
 						.await
 						.unwrap(),
 				}
@@ -966,14 +1003,14 @@ mod tests {
 			let client = tokio::spawn(async move {
 				let client = Client::with_stream(client_io, &live_url()).await.unwrap();
 				match push {
-					true => client.publish("cam0", exported(origin).await).await.unwrap(),
+					true => client.publish(Push::new("cam0", exported(origin).await)).await.unwrap(),
 					false => client
-						.pull(
-							"cam0",
-							&pulled,
-							moq_net::Path::from_static("live/cam0"),
-							&lingering(linger),
-						)
+						.pull(Pull {
+							stream_key: "cam0",
+							publisher: &pulled,
+							broadcast: moq_net::Path::from_static("live/cam0"),
+							ingest: lingering(linger),
+						})
 						.await
 						.unwrap(),
 				}
@@ -1026,16 +1063,13 @@ mod tests {
 			let err = match push {
 				true => {
 					let (_broadcast, _catalog, _importer) = source(&upstream);
-					client.publish("cam0", exported(upstream.consume()).await).await
+					client
+						.publish(Push::new("cam0", exported(upstream.consume()).await))
+						.await
 				}
 				false => {
 					client
-						.pull(
-							"cam0",
-							&upstream,
-							moq_net::Path::from_static("live/cam0"),
-							&Default::default(),
-						)
+						.pull(Pull::new("cam0", &upstream, moq_net::Path::from_static("live/cam0")))
 						.await
 				}
 			}
@@ -1098,13 +1132,13 @@ mod tests {
 				panic!("expected a publish request");
 			};
 			let _ = publish
-				.accept(&ingest, moq_net::Path::from_static("live/cam0"), &Default::default())
+				.accept(Import::new(&ingest, moq_net::Path::from_static("live/cam0")))
 				.await;
 		});
 		let origin = upstream.consume();
 		let pushed = tokio::spawn(async move {
 			let client = Client::with_stream(client_io, &live_url()).await.unwrap();
-			client.publish("cam0", exported(origin).await).await
+			client.publish(Push::new("cam0", exported(origin).await)).await
 		});
 
 		// Read what reaches the remote back out as FLV.
@@ -1196,7 +1230,7 @@ mod tests {
 			let Request::Play(play) = request else {
 				panic!("expected a play request");
 			};
-			play.accept(&consumer, moq_net::Path::from_static("live/cam0"))
+			play.accept(Export::new(&consumer, moq_net::Path::from_static("live/cam0")))
 				.await
 				.unwrap();
 		});
@@ -1209,12 +1243,11 @@ mod tests {
 			let url = format!("rtmp://{addr}/live").parse().unwrap();
 			let client = Client::connect(Connect::new(url)).await.unwrap();
 			client
-				.pull(
+				.pull(Pull::new(
 					"cam0",
 					&pull_origin,
 					moq_net::Path::from_static("pulled/cam0"),
-					&Default::default(),
-				)
+				))
 				.await
 				.unwrap();
 		});
@@ -1241,6 +1274,7 @@ mod tests {
 			.await
 			.expect("catalog read timed out")
 			.expect("catalog read")
+			.and_then(moq_net::track::Item::group)
 			.expect("a catalog group");
 		let frame = group
 			.read_frame()

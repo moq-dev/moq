@@ -1,0 +1,4 @@
+name: moq-route-algebra
+depend: standard-library-2.0 routing-library
+include: .
+flags: --safe

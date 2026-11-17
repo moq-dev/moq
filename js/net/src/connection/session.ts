@@ -3,7 +3,7 @@ import type * as announce from "../announce.ts";
 import type { RouteOptions, Routes } from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
-import type { Drain } from "./goaway.ts";
+import type { Goaway } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
@@ -89,7 +89,7 @@ export interface Session {
 	 * The URI is peer-controlled: apply a redirect policy you trust before dialing it or presenting
 	 * tokens to it, as the reconnecting `Connection` does with `goaway.redirect`.
 	 */
-	readonly draining: GetPromise<Drain>;
+	readonly draining: GetPromise<Goaway>;
 
 	/**
 	 * Settles when the session closes: `null` for a clean close, an `Error.Session` when the

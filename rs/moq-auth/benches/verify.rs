@@ -351,7 +351,11 @@ impl Bench {
 			}
 		};
 		let grant = runtime.block_on(post());
-		assert_eq!(grant.publish, ["**".parse().unwrap()].into_iter().collect(), "{name}");
+		assert_eq!(
+			grant.publish.path,
+			["**".parse().unwrap()].into_iter().collect(),
+			"{name}"
+		);
 		self.add(name, move || {
 			black_box(runtime.block_on(post()));
 		});

@@ -41,7 +41,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		const announcements = b.routes();
 		while ((await announcements.next())?.kind !== "start") {}
 		const request = b.request(Path.from("room"));
-		const remote = (await request).track("data");
+		const remote = (await request.broadcast()).track("data");
 		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : null);
 		const baseline = remote.subscribe();
 		const group = producer.appendGroup();

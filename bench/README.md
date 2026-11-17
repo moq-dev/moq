@@ -168,8 +168,9 @@ nix develop --command just bench origin/release "quic ws wss tcp"
 ```
 
 Beside relay CPU in cores, each case
-reports CPU microseconds per delivered frame and cores per delivered Gbps; base
-comparisons pair those too.
+reports CPU microseconds per delivered frame, cores per delivered Gbps, and the
+relay's peak RSS over the window; base comparisons pair those too. Only `chat`,
+with 2,001 connections, shows a per-connection memory change.
 
 The qmux micro-bench isolates the transport from the relay. It connects
 client/server pairs over loopback TCP, each echoing one message at a time on one
@@ -425,7 +426,7 @@ hides steps of a few percent. `just bench-fanout` counts the chat fan-out
 without a relay process or sockets, so the counts are the code's alone:
 
 ```bash
-nix develop --command just bench-fanout "cdff3c8f95 21d6da9fc1"
+nix develop --command just bench-fanout origin/main
 nix develop --command just bench-fanout "" "model" "1 512"
 ```
 
@@ -435,7 +436,8 @@ run by default:
 - `model`: one finished group a cycle through the track model, which every
   subscriber takes before parking again, as moq-net's `track_fanout_group`
   bench does. It builds against every revision since
-  [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95).
+  [moq-dev/moq#8961](https://github.com/moq-dev/moq/pull/8961) started groups at a
+  timestamp; an older revision reports it unsupported.
 - `session`: one publisher session into a relay origin and one viewer session
   out of it per subscriber, over `transport::memory`, on one current-thread
   runtime. It counts the publisher, relay, and viewer sessions together, but no

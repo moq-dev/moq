@@ -102,15 +102,16 @@ fn send(track: &track::Producer, payload: &'static [u8]) {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// Read the next message from a session, or `None` once the peer finished.
 async fn recv(reader: &mut track::Ordered) -> Result<Option<Vec<u8>>, Error> {
 	kio::clock::timeout(TIMEOUT, async {
-		let Some(mut group) = reader.next_group().await? else {
+		let Some(item) = reader.next_group().await? else {
 			return Ok(None);
 		};
+		let mut group = item.group().expect("a group, not a gap");
 		let frame = group.read_frame().await?.expect("a frame");
 		Ok(Some(frame.payload.to_vec()))
 	})
@@ -182,7 +183,7 @@ async fn track_messages_are_read_in_key() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	};
 	write(1, b"second");
 	// Let the later message arrive first.
@@ -212,7 +213,7 @@ async fn a_lost_track_message_does_not_block_later_ones() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	};
 	// Message 0 is never written: message 1 waits out the budget, then is read.
 	write(1, b"one");
@@ -520,7 +521,7 @@ async fn closing_an_endpoint_ends_its_sessions() {
 		matches!(ended, Err(Error::Stream(StreamError::Session(_)))),
 		"bob's half outlived his endpoint: {ended:?}"
 	);
-	assert!(accepted.producer.append_group(0).is_err());
+	assert!(accepted.producer.append_group(moq_net::Timestamp::unscaled(0)).is_err());
 	assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
 	assert!(matches!(bob.dial_track("alice", None), Err(Error::Closed)));
 }

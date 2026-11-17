@@ -1,8 +1,8 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
-import { ModeSchema } from "./mode";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { renditions } from "./section";
+import { u53Schema } from "./integers.ts";
+import { ModeSchema } from "./mode.ts";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
+import { renditions } from "./section.ts";
 
 /**
  * Schema for a single binary track: application data published as opaque payloads.
@@ -38,8 +38,8 @@ export const BinaryConfigSchema = z.looseObject({
 	// The maximum bitrate of the track in bits per second, if known.
 	bitrate: z.optional(u53Schema),
 
-	// The maximum delay between a payload being ready and the publisher flushing it, in whole
-	// milliseconds rounded up, with the same meaning as a video rendition's `jitter`.
+	// The largest media span the publisher hands to the transport behind a payload's timestamp, in
+	// whole milliseconds rounded up, with the same meaning as a video rendition's `jitter`.
 	jitter: z.optional(
 		z.pipe(
 			u53Schema,
@@ -47,9 +47,9 @@ export const BinaryConfigSchema = z.looseObject({
 		),
 	),
 
-	// How far this track's payloads reach the transport behind the broadcast's earliest rendition,
-	// with the same meaning and encoding as a video rendition's `delay`. Only measured for payloads
-	// that carry a capture time.
+	// How far this track's payloads persistently trail what the broadcast's other tracks already
+	// wrote, with the same meaning and encoding as a video rendition's `delay`. Only measured for
+	// payloads that carry a capture time.
 	delay: z.optional(
 		z.pipe(
 			u53Schema,

@@ -43,7 +43,7 @@ try {
 			if (event.kind === "present" && event.prefix === "age") break;
 		}
 		const request = origin.consume().request(Path.from("age"));
-		const broadcast = await request;
+		const broadcast = await request.broadcast();
 		for (const [i, age] of ages.entries()) {
 			const track = broadcast.track(String(i)).subscribe();
 			// moq-transport never sends MAX_CACHE_DURATION (it would expire the newest group too),

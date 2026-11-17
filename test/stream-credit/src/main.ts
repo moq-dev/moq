@@ -35,7 +35,7 @@ window.subscribe = async (plan) => {
 		websocket: { enabled: false },
 	});
 	const request = origin.request(Moq.Path.from(plan.broadcast));
-	const active = await request;
+	const active = await request.broadcast();
 
 	const subscribers = plan.tracks.map((track) =>
 		active.track(track.name).subscribe({

@@ -33,6 +33,10 @@ versions stay independent per package, including Rust: release-plz has no
 
 `kio`, `kio-macros`, `qmux`, and npm `@moq/qmux` keep their own version lines;
 `@moq/signals` joins the shared minor. New experiments start at `0.0.x`.
+Dart's `moq` wrapper keeps its own 0.x version too, since Dart is
+experimental: no interop client runs it and nobody has loaded it on iOS. An
+interop client or a passing iOS run ends the exemption. `moq_ffi` stays on the
+shared minor, as the artifact of `rs/moq-ffi`.
 A published library's normal or build dependency on an experimental package
 in the same ecosystem promotes that package into the shared minor, including
 optional and target-specific dependencies. Dev dependencies and binary-only

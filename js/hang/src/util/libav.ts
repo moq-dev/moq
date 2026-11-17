@@ -1,4 +1,4 @@
-import { objectType } from "./aac";
+import { objectType } from "./aac.ts";
 
 let loading: Promise<boolean> | undefined;
 

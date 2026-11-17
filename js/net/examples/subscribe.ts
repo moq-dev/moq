@@ -8,7 +8,7 @@ async function main() {
 	// Keep one publisher instance, or throw if none serves the path; wait.ts shows following
 	// publisher restarts. The request owns the broadcast, so close it when done.
 	const request = origin.request(Moq.Path.from("my-broadcast"));
-	const broadcast = await request;
+	const broadcast = await request.broadcast();
 
 	// Subscribe to a specific track (with the default subscription)
 	const track = broadcast.track("chat").subscribe();

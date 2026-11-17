@@ -273,7 +273,8 @@ test("a follower follows the reconnect on the same handle", async () => {
 	try {
 		const first = await clock.drive(waitFor(watched.active, (active) => active !== undefined));
 
-		// The session dies; the same request follows the next session's announcement.
+		// The session dies once healthy; the same request follows the next session's announcement.
+		await clock.advance(Duration.millis(1000));
 		sessions[0]?.abort();
 		await clock.drive(waitFor(watched.active, (active) => active !== undefined && active !== first));
 		expect(watched.closed.peek()).toBeUndefined();
@@ -319,6 +320,7 @@ test("an ended auth handle gives up instead of retrying", async () => {
 	const warned = spyOn(console, "warn").mockImplementation(() => {});
 	try {
 		await until(() => reload.established.peek() !== undefined);
+		await clock.advance(Duration.millis(1000));
 		const aborted = new Error("auth handle aborted");
 		reload.auth.abort(aborted);
 		(await servers[0])?.abort();
@@ -385,7 +387,7 @@ test("a page hide after give-up does not retry the failed URL", async () => {
 });
 
 for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, SessionCode.Expired]) {
-	test(`a session rejected with ${code} surfaces the code and redials`, async () => {
+	test(`a healthy session rejected with ${code} surfaces the code and redials`, async () => {
 		using clock = manual();
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
@@ -414,13 +416,15 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 				effect.spawn(async () => {
 					closes.push(await conn.closed);
 				});
-				// Reject at the MoQ layer once both sides are set up, the way a relay's
-				// Request::close does after it has already accepted the transport.
-				server?.close({ closeCode: code, reason: "unauthorized" });
 			}
 		});
 
 		try {
+			// Reject at the MoQ layer once the session has been healthy, the way a relay's
+			// Request::close does after it has already accepted the transport.
+			await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+			await clock.advance(Duration.millis(1000));
+			server?.close({ closeCode: code, reason: "unauthorized" });
 			// The code reaches the app rather than being flattened away, and the loop redials
 			// like after any other close instead of judging the error's kind.
 			await clock.drive(waitFor(dials, (n) => n >= 2));
@@ -456,7 +460,7 @@ function refusing(refused: string, release: Promise<void>) {
 	return { dialed, stub: stub as unknown as typeof WebTransport };
 }
 
-test("a refused credential replaced since its dial redials with the new one", async () => {
+test("a first session refused before it is healthy stops the URL, even for replaced tokens", async () => {
 	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
@@ -475,10 +479,14 @@ test("a refused credential replaced since its dial redials with the new one", as
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
 		tokens.set(["new"]);
 		resolve();
-		await clock.drive(waitFor(dialed, (jwts) => jwts.includes("new")));
-		expect(dialed.peek()).toEqual(["old", "new"]);
-		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
-		expect(reload.error.peek()).toBeUndefined();
+		// The refusal arrives after the session was accepted, as a relay rejects a token on
+		// moq-lite 03 or later, yet it stops the URL like a failed first attempt.
+		const err = await clock.drive(waitFor(reload.error, (error) => error !== undefined));
+		expect(err).toBeInstanceOf(SessionError);
+		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
+		await clock.advance(Duration.millis(100));
+		expect(dialed.peek()).toEqual(["old"]);
+		expect(reload.established.peek()).toBeUndefined();
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -501,8 +509,9 @@ test("a refused credential keeps redialing until the tokens change", async () =>
 		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	try {
-		// Refused only once a session is up: a URL's first attempt failing stops it whatever the cause.
+		// Refused only once a session was healthy: until then, a refusal stops the URL.
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		await clock.advance(Duration.millis(1000));
 		resolve();
 		await clock.drive(waitFor(dialed, (jwts) => jwts.length >= 3));
 		expect(dialed.peek().every((jwt) => jwt === "old")).toBe(true);
@@ -582,7 +591,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 	let dials = 0;
 	let first: Promise<{ abort(): void }> | undefined;
 	const stub = function StubWebTransport() {
-		// The first dial connects: a URL's first attempt failing stops it whatever the cause.
+		// The first dial connects and stays up: until then, a failure stops the URL whatever the cause.
 		if (dials++ === 0) {
 			const pair = createMockTransportPair(Lite.ALPN_06);
 			first = accept(pair.server, url);
@@ -614,6 +623,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 
 	try {
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		await clock.advance(Duration.millis(1000));
 		(await first)?.abort();
 		await clock.drive(waitFor(attempts, (n) => n >= 2));
 		expect(reload.error.peek()).toBeUndefined();
@@ -672,7 +682,8 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		const [first] = await clock.drive(waitFor(servers, (list) => list.length > 0));
 		await clock.drive(waitFor(first.saw, (paths) => paths.has(Path.from("mine"))));
 
-		// Kill the session: the remote entry retracts, the local publish stays put.
+		// Kill the session once healthy: the remote entry retracts, the local publish stays put.
+		await clock.advance(Duration.millis(1000));
 		first.session.abort();
 		await clock.drive(waitFor(remote, (paths) => !paths.has(Path.from("remote"))));
 
@@ -1165,6 +1176,7 @@ test("a watcher syncs with the server's initial set, and again after a reconnect
 			await clock.drive(waitFor(watching.synced, (synced) => synced));
 			expect([...seen].sort()).toEqual(["a", "b"]);
 
+			await clock.advance(Duration.millis(1000));
 			sessions[0]?.abort();
 			await clock.drive(waitFor(watching.synced, (synced) => !synced));
 			await clock.drive(waitFor(watching.synced, (synced) => synced));
@@ -1457,8 +1469,9 @@ test("retry window: a backoff that fires past the window gives up", async () => 
 	}
 });
 
-// Each session lives 100 ms, so the backoff between them shows how `healthy` scores its end and
-// how `max` caps the delay, matching moq-tokio's `connect.backoff`.
+// The first session lives past the default healthy bar so the URL retries at all; each later one
+// lives 100 ms, so the backoff between them shows how `healthy` scores its end and how `max` caps
+// the delay, matching moq-tokio's `connect.backoff`.
 const backoffs: [string, Backoff, number[]][] = [
 	// Past `initial` but short of the default bar, so each end is a failed attempt.
 	["a session short of the default healthy bar escalates", {}, [10, 20, 40]],
@@ -1498,7 +1511,7 @@ for (const [name, backoff, gaps] of backoffs) {
 			const waited: number[] = [];
 			for (let session = 0; session < gaps.length; session++) {
 				await waitUntil(() => reload.status.peek() === "connected");
-				await clock.advance(Duration.millis(100));
+				await clock.advance(Duration.millis(session === 0 ? 1000 : 100));
 				(await servers[session])?.abort();
 				waited.push(await elapse(clock, () => servers.length === session + 2));
 			}
@@ -1537,6 +1550,7 @@ test("backoff: an uncapped delay saturates instead of overflowing", async () => 
 	try {
 		for (let session = 0; session < 2; session++) {
 			await waitUntil(() => reload.status.peek() === "connected");
+			if (session === 0) await clock.advance(Duration.millis(1000));
 			(await servers[session])?.abort();
 			if (session === 0) await elapse(clock, () => servers.length === 2);
 		}
@@ -1840,8 +1854,8 @@ test("a WebSocket session ending restores WebTransport's head start", async () =
 		}
 		const first = servers[0];
 		if (!first) throw new Error("no fallback session");
-		// Let the server's half of the handshake finish before ending it.
-		await clock.advance(Duration.millis(100));
+		// Let the server's half of the handshake finish, and the session become healthy, before ending it.
+		await clock.advance(Duration.millis(1000));
 		(await first).abort();
 		const ended = now();
 		for (let i = 0; i < 20 && dials.length < 2; i++) {

@@ -14,6 +14,7 @@ use bytes::Bytes;
 
 mod consumer;
 mod declared;
+pub use declared::ReorderError;
 mod decode;
 mod group;
 mod input;

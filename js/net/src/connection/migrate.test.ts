@@ -144,6 +144,8 @@ test("a replacement that closes mid-handover hands back to the draining session"
 		const first = reload.established.peek();
 		const drained = dials[0];
 		if (!drained) throw new Error("no first dial");
+		// Healthy first, so a replacement's close reconnects rather than stopping the URL.
+		await clock.advance(Duration.millis(1000));
 		await goaway(drained.server, "");
 		await elapse(clock, () => reload.established.peek() !== first && reload.established.peek() !== undefined);
 		const replacement = dials[1];
@@ -310,6 +312,8 @@ test("a redirected connection falls back to the configured URL once its target d
 
 	try {
 		await waitUntil(() => handle.status.peek() === "connected");
+		// Healthy first, so the target's death reconnects rather than stopping the URL.
+		await clock.advance(Duration.millis(1000));
 		await goaway(dials[0]?.server as WebTransport, moved.href);
 		await elapse(clock, () => dials.length === 2 && handle.status.peek() === "connected");
 		expect(dials[1]?.url).toBe(moved.href);
@@ -713,6 +717,39 @@ test("a peer restarting through immediate GOAWAYs escalates the backoff but neve
 	} finally {
 		reload.close();
 		random.mockRestore();
+		installed.close();
+	}
+});
+
+test("a first session drained before it is healthy keeps retrying once its relay exits", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		backoff: { initial: Duration.millis(10), max: Duration.millis(10) },
+	});
+
+	try {
+		await waitUntil(() => dials.length === 1 && reload.status.peek() === "connected");
+		const started = clock.now();
+		// A page opened while its relay drains: the GOAWAY comes at once, which no refusal sends.
+		const predecessor = reload.established.peek();
+		await goaway(dials[0]?.server as WebTransport, "");
+		// The replacement serves, not merely dialed.
+		await elapse(clock, () => {
+			const serving = reload.established.peek();
+			return dials.length === 2 && serving !== undefined && serving !== predecessor;
+		});
+		// The relay exits before any session it served was healthy.
+		for (const dial of dials) dial.server.close();
+		await elapse(clock, () => dials.length === 3 || reload.error.peek() !== undefined);
+		expect(reload.error.peek()).toBeUndefined();
+		expect(clock.now().since(started).asMillis()).toBeLessThan(1000);
+	} finally {
+		reload.close();
 		installed.close();
 	}
 });

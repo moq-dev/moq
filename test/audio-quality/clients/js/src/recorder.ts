@@ -75,10 +75,10 @@ async function record(): Promise<void> {
 	});
 
 	const request = origin.request(Moq.Path.from(required("broadcast")));
-	const broadcast = await request;
+	const broadcast = await request.broadcast();
 
 	let root: Catalog.Root | undefined;
-	for await (const update of Catalog.watch(broadcast)) {
+	for await (const { value: update } of Catalog.watch(broadcast)) {
 		if (Object.keys(update.audio?.renditions ?? {}).length > 0) {
 			root = update;
 			break;

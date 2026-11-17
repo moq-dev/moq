@@ -61,28 +61,28 @@ impl Version {
 	///
 	/// This is the common feature boundary for TRACK_INFO, FETCH streams,
 	/// SUBSCRIBE_START/END, and per-frame timestamp prefixes.
-	pub fn has_track_stream(self) -> bool {
+	pub(crate) fn has_track_stream(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
 	/// Whether the PROBE message carries the RTT field. Added in lite-04; lite-03
 	/// carries the bitrate alone, so a report with only an RTT to give says nothing
 	/// there and must not be sent.
-	pub fn has_probe_rtt(self) -> bool {
+	pub(crate) fn has_probe_rtt(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03)
 	}
 
 	/// Whether the session opens a unidirectional Setup Stream carrying a single SETUP
 	/// message (capabilities + optional Path). Added in lite-05; the older bidirectional
 	/// setup exchange (Lite01/02) and the no-setup drafts (Lite03/04) don't use it.
-	pub fn has_setup_stream(self) -> bool {
+	pub(crate) fn has_setup_stream(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
 	/// Whether the session may carry unreliable QUIC datagrams (lite-05 §6.4): single-frame
 	/// groups on lite-05/06, a datagram track's datagrams on lite-07, which adds a leading
 	/// type and padding. Older than lite-05 never sends or accepts datagrams.
-	pub fn has_datagrams(self) -> bool {
+	pub(crate) fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
@@ -98,19 +98,19 @@ impl Version {
 
 	/// Whether announce streams begin with ANNOUNCE_OK and omit the sender's origin
 	/// from each announcement's hop chain. Added in lite-05.
-	pub fn has_announce_ok(self) -> bool {
+	pub(crate) fn has_announce_ok(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
 
 	/// Whether the session supports the GOAWAY control stream (0x5) for graceful
 	/// shutdown and migration. Added in lite-04.
-	pub fn has_goaway(self) -> bool {
+	pub(crate) fn has_goaway(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03)
 	}
 
 	/// Whether either endpoint may open an Auth Stream (0x7) to present a token and
 	/// learn its grant. Added in lite-07.
-	pub fn has_auth(self) -> bool {
+	pub(crate) fn has_auth(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -127,7 +127,7 @@ impl Version {
 
 	/// Whether a subscriber may open a Tracks Stream (0x8) to list a broadcast's
 	/// tracks. Added in lite-07.
-	pub fn has_tracks(self) -> bool {
+	pub(crate) fn has_tracks(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -137,7 +137,7 @@ impl Version {
 	/// Whether announcements carry implicit announce ids: each `active`
 	/// ANNOUNCE_BROADCAST assigns the next per-stream ordinal, and `ended`/`restart`
 	/// reference that id instead of repeating the path. Added in lite-06.
-	pub fn has_announce_id(self) -> bool {
+	pub(crate) fn has_announce_id(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05
@@ -156,7 +156,7 @@ impl Version {
 	///
 	/// Unlike the gates above, this lists the versions that *have* the field: it was
 	/// removed rather than added, so future versions default to not carrying it.
-	pub fn has_exclude_hop(self) -> bool {
+	pub(crate) fn has_exclude_hop(self) -> bool {
 		matches!(self, Self::Lite04 | Self::Lite05)
 	}
 
@@ -166,7 +166,7 @@ impl Version {
 	///
 	/// Older versions only address whole groups, so a route change has to wait for the
 	/// next group before it can resume.
-	pub fn has_frame_bounds(self) -> bool {
+	pub(crate) fn has_frame_bounds(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05
@@ -259,9 +259,9 @@ impl Version {
 		self.has_ranges()
 	}
 
-	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
-	/// requests decode as not opted in.
-	pub fn has_hidden(self) -> bool {
+	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in, one for each prefix it adds.
+	/// Added in lite-07; older requests decode as not opted in.
+	pub(crate) fn has_hidden(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -270,7 +270,7 @@ impl Version {
 
 	/// Whether ANNOUNCE_START may copy a path head from a live
 	/// announcement on the same stream. Added in lite-07.
-	pub fn has_announce_compression(self) -> bool {
+	pub(crate) fn has_announce_compression(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -350,7 +350,7 @@ impl Version {
 	/// Whether announcements carry their instance and epoch, and track requests the
 	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
 	/// receiving session mints an instance for each announcement.
-	pub fn has_instance(self) -> bool {
+	pub(crate) fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -378,18 +378,19 @@ impl Version {
 	/// Whether the announce stream has ANNOUNCE_RESTART: another publisher instance
 	/// replacing an advertisement in place. Added in lite-07. Older versions send an
 	/// ANNOUNCE_END then an ANNOUNCE_START.
-	pub fn has_announce_restart(self) -> bool {
+	pub(crate) fn has_announce_restart(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
 		)
 	}
 
-	/// Whether the announce stream carries the route layer: ROUTE_START, ROUTE_UPDATE,
-	/// ROUTE_HOLD, ROUTE_END, DEAD, and ANNOUNCE_FLOOR toward the subscriber, and nothing
-	/// back. A claim names its Route ID in place of a hop chain, ANNOUNCE_OK and SETUP
-	/// carry no Hop ID, and requests name the origin's Node ID and its route's depth.
-	/// Added in lite-07.
+	/// Whether each endpoint says everything about discovery and routing on one
+	/// unidirectional Announce Stream: ANNOUNCE_REQUEST edits of the prefixes it wants,
+	/// and ANNOUNCE_OK, ROUTE_START, ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, DEAD, the claims,
+	/// ANNOUNCE_FLOOR, and SYNCED answering its peer's. A claim names its Route ID in
+	/// place of a hop chain, ANNOUNCE_OK and SETUP carry no Hop ID, and requests name the
+	/// origin's Node ID and its route's depth. Added in lite-07.
 	pub(crate) fn has_routes(self) -> bool {
 		!matches!(
 			self,
@@ -418,7 +419,7 @@ impl Version {
 	}
 
 	/// Whether discovery streams end their initial set with SYNCED rather than a count.
-	pub fn has_synced(self) -> bool {
+	pub(crate) fn has_synced(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -429,7 +430,7 @@ impl Version {
 	/// the broadcast via this route, accumulated per link. Added in lite-06.
 	/// Older versions carry nothing, so a received route stays at zero and ranks
 	/// on hop count alone, exactly as before.
-	pub fn has_route_cost(self) -> bool {
+	pub(crate) fn has_route_cost(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05

@@ -55,52 +55,32 @@ pub struct Config {
 	/// one to close instead. The default sets no budget.
 	pub sessions: Sessions,
 
-	/// The VA-API render node the decoder and encoders open; see
-	/// [`encode::Config::vaapi`](moq_video::encode::Config::vaapi).
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	pub vaapi: Option<std::path::PathBuf>,
+	/// The hardware the decoder opens; see
+	/// [`decode::Config::device`](moq_video::decode::Config::device). Name the
+	/// encoders' device too, so a decoded frame reaches them without a copy.
+	pub decoder_device: moq_video::Device,
 
-	/// The V4L2 M2M node the decoder opens; see
-	/// [`decode::Config::v4l2`](moq_video::decode::Config::v4l2).
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	pub v4l2_decoder: Option<std::path::PathBuf>,
-
-	/// The V4L2 M2M node the encoders open; see
-	/// [`encode::Config::v4l2`](moq_video::encode::Config::v4l2).
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	pub v4l2_encoder: Option<std::path::PathBuf>,
+	/// The hardware the encoders open; see
+	/// [`encode::Config::device`](moq_video::encode::Config::device).
+	pub encoder_device: moq_video::Device,
 }
 
 impl Config {
-	/// The source decoder: the configured implementation and devices,
+	/// The source decoder: the configured implementation and device,
 	/// delivering frames where the resize expects them, at native size.
 	pub(crate) fn decoder(&self) -> moq_video::decode::Config {
 		let mut decoder = moq_video::decode::Config::new();
 		decoder.kind = self.decoder.clone();
 		decoder.output = self.resize.output;
-		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		{
-			decoder.vaapi = self.vaapi.clone();
-		}
-		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		{
-			decoder.v4l2 = self.v4l2_decoder.clone();
-		}
+		decoder.device = self.decoder_device.clone();
 		decoder
 	}
 
-	/// A rung encoder at `size` and `framerate`: the configured implementation and devices.
+	/// A rung encoder at `size` and `framerate`: the configured implementation and device.
 	pub(crate) fn encoder(&self, size: moq_video::Size, framerate: moq_video::FrameRate) -> moq_video::encode::Config {
 		let mut encoder = moq_video::encode::Config::new(size.width, size.height, framerate);
 		encoder.kind = self.encoder.clone();
-		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		{
-			encoder.vaapi = self.vaapi.clone();
-		}
-		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		{
-			encoder.v4l2 = self.v4l2_encoder.clone();
-		}
+		encoder.device = self.encoder_device.clone();
 		encoder
 	}
 }

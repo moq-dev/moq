@@ -734,7 +734,7 @@ class OriginState {
 			// Every request watches its own path, so the watches beneath the prefix name exactly
 			// the requests it can settle, without scanning the rest of the table.
 			let node: WatchNode | undefined = this.#watches;
-			for (const part of prefix === Path.empty() ? [] : prefix.split("/")) node = node?.children.get(part);
+			for (const part of Path.parts(prefix)) node = node?.children.get(part);
 			const stack = node ? [node] : [];
 			for (let next = stack.pop(); next; next = stack.pop()) {
 				if (visited.has(next)) continue;
@@ -781,7 +781,7 @@ class OriginState {
 
 	#watchOne(head: Path.Valid): void {
 		let node = this.#watches;
-		for (const part of head === Path.empty() ? [] : head.split("/")) {
+		for (const part of Path.parts(head)) {
 			let child = node.children.get(part);
 			if (!child) {
 				child = { path: Path.join(node.path, part as Path.Valid), parent: node, children: new Map(), count: 0 };
@@ -797,7 +797,7 @@ class OriginState {
 
 	#unwatchOne(head: Path.Valid): void {
 		let node: WatchNode | undefined = this.#watches;
-		for (const part of head === Path.empty() ? [] : head.split("/")) node = node?.children.get(part);
+		for (const part of Path.parts(head)) node = node?.children.get(part);
 		if (!node || node.count === 0) throw new Error("unwatched prefix released");
 		if (--node.count === 0 && !coveredAbove(node)) {
 			for (const narrower of frontier(node)) this.#emit(narrower, true);
@@ -805,7 +805,7 @@ class OriginState {
 		}
 		// Prune the segments nothing watches any more.
 		while (node.parent && node.count === 0 && node.children.size === 0) {
-			node.parent.children.delete(node.path.slice(node.path.lastIndexOf("/") + 1));
+			node.parent.children.delete(Path.parts(node.path).at(-1) ?? "");
 			node = node.parent;
 		}
 	}
@@ -2052,16 +2052,18 @@ let requestHandoff: (request: Request) => Handoff | undefined;
 /**
  * An owned request for one publisher instance at a broadcast path; see {@link Consumer.request}.
  *
- * Await it for the broadcast, as Rust awaits `request(path)`; read {@link active} and
- * {@link closed} to follow it reactively instead.
+ * Await {@link broadcast} for the broadcast, as Rust awaits `request(path)`; read {@link active} and
+ * {@link closed} to follow it reactively instead. The handle is not itself awaitable, so an
+ * `await` or an async return never takes the broadcast out from under the request that owns it.
  *
  * ```ts
- * const broadcast = await origin.request(Path.from("room"));
+ * const request = origin.request(Path.from("room"));
+ * const broadcast = await request.broadcast();
  * ```
  *
  * @public
  */
-export class Requesting implements PromiseLike<broadcast.Consumer> {
+export class Requesting {
 	/** The requested path. */
 	readonly path: Path.Valid;
 
@@ -2103,15 +2105,12 @@ export class Requesting implements PromiseLike<broadcast.Consumer> {
 	 * Resolves with the broadcast once {@link active} holds one. Rejects with the error
 	 * {@link closed} carries if the request ends first, such as `Unroutable`, or with a
 	 * `StreamCode.Cancel` error if it closed cleanly: this handle or its origin was closed. The
-	 * answer is fixed by the first await, and every later await gets the same one. The request
+	 * answer is fixed by the first call, and every later call gets the same one. The request
 	 * still owns the broadcast, so close the request, not only the broadcast, when done.
 	 */
-	// Read synchronously by `await`, before it schedules the call, so the answer starts from the
-	// state the caller just saw.
-	// biome-ignore lint/suspicious/noThenProperty: a request is awaitable, as in Rust.
-	get then(): Promise<broadcast.Consumer>["then"] {
+	broadcast(): Promise<broadcast.Consumer> {
 		this.#answer ??= answer(this.active, this.closed);
-		return this.#answer.then.bind(this.#answer);
+		return this.#answer;
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */

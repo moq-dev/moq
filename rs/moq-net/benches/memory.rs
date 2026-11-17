@@ -207,11 +207,11 @@ impl Link {
 		self.next += 1;
 		let timestamp = Timestamp::from_millis(key).unwrap();
 		for track in &self.tracks {
-			let mut group = track.append_group(key).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			for _ in 0..FRAMES {
 				group.write_frame(timestamp, self.payload.clone()).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let mut bytes = 0;
