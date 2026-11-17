@@ -68,15 +68,16 @@ are the record.
 
 ## Relay CPU (2026-11-16)
 
-`main`'s extra relay CPU in `chat` and `fanout` is contention on a track's
-shared state lock. Every subscriber of a track wakes on each group at once, and
-on each pass over the track the relay's publisher forwards drops
-([moq-dev/moq#5691](https://github.com/moq-dev/moq/pull/5691)) and judges
-misses for fills ([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171))
-for that subscriber, taking the track lock several times. `release` has
-neither, so its readers rarely meet on the lock. The cost grows with the
-workers that meet there, so it depends on the host:
-the 2026-11-05 pairing ran on 8 pinned CPUs, this one on 32.
+`main`'s extra relay CPU in `chat` and `fanout` is work under a track's
+shared state lock, and contention for it. Every subscriber of a track wakes on
+each group at once, and on each pass over the track the relay's publisher
+forwards drops ([moq-dev/moq#5691](https://github.com/moq-dev/moq/pull/5691))
+and judges misses for fills
+([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)) for that
+subscriber, taking the track lock several times. `release` has neither, so its
+readers rarely meet on the lock. The contention grows with the workers that
+meet there, so the gap depends on the host: the 2026-11-05 pairing ran on 8
+pinned CPUs, this one on 32.
 
 [moq-dev/moq#8867](https://github.com/moq-dev/moq/pull/8867) added one more
 lock per drop poll, reading the revision that says whether a stale run
@@ -90,52 +91,61 @@ All runs on `fedora` (32 CPUs, shared: one-minute load 24 to 66), `release`
 at [ca3b801a6c](https://github.com/moq-dev/moq/commit/ca3b801a6c), `main`
 at [ba9c4c6533](https://github.com/moq-dev/moq/commit/ba9c4c6533). By owner,
 in instructions per delivered frame
-(`just bench-profile instructions chat 8 tokio-workers`, relay on CPUs 0-7,
-fixed period 10,000,019, three alternating rounds at load 27 to 35):
+(`just bench-profile instructions <workload> 8 tokio-workers`, relay on CPUs
+0-7, three alternating rounds; `chat` at load 27 to 35, `fanout` 25 to 60):
 
-| Owner | release | main | Change |
-| --- | ---: | ---: | ---: |
-| transport (QUIC, TLS, sockets) | 79.1k | 49.8k | -29.3k |
-| session (`moq_net` protocol, `kio`) | 57.7k | 49.5k | -8.2k |
-| origin (`moq_net::model`) | 26.3k | 88.5k | +62.2k |
-| total | 163.2k | 187.8k | +24.6k (+15%) |
+| Owner | `chat` release | `chat` main | `fanout` release | `fanout` main |
+| --- | ---: | ---: | ---: | ---: |
+| transport (QUIC, TLS, sockets) | 79.1k | 49.8k | 77.9k | 51.0k |
+| session (`moq_net` protocol, `kio`) | 57.7k | 49.5k | 64.8k | 66.1k |
+| origin (`moq_net::model`) | 26.3k | 88.5k | 29.2k | 102.4k |
+| total | 163.2k | 187.8k (+15%) | 171.9k | 219.4k (+28%) |
 
-- **The lock.** Futex syscalls rose from 2.4k to 19.7k instructions per frame,
-  and user-side lock and unlock from 32.4k to 39.6k: the whole net growth.
-  Cycles per frame rose 25%, from 419k to 523k. On `main`, nearly every
-  contended acquire is the track's (`TrackState`), from the drop poll, its
-  miss judgement, the drift edge, and the read path.
+- **The lock.** In `chat`, futex syscalls rose from 2.4k to 19.7k
+  instructions per frame and user-side lock and unlock from 32.4k to 39.6k,
+  the whole net growth; cycles per frame rose 25%. In `fanout`, futex rose
+  from 12.6k to 33.8k and lock and unlock from 35.0k to 46.7k, most of it.
+  On `main`, nearly every contended acquire is the track's (`TrackState`),
+  from the drop poll, its miss judgement, the drift edge, and the read path.
 - **The passes.** Each subscriber's track side runs three passes per group
   (its arrival, the pass after serving it, its finish), forwarding drops five
   times and judging misses six (callgrind, `just bench-fanout`, `session` at
-  512 subscribers). The forward-drop path is 56k instructions per frame, 30%
-  of `main`'s relay.
-- **Workers.** Futex instructions per frame on `main` were 3.2k at 2 workers
-  and 8.7k at 8 in one run (load 31 to 66), against 2.3k for `release` at
-  both.
+  512 subscribers). The forward-drop path is 56k instructions per frame in
+  `chat` and 65k in `fanout`, 30% of `main`'s relay in each.
+- **Workers.** Futex instructions per frame in `chat` on `main` were 3.2k at
+  2 workers and 8.7k at 8 in one run (load 31 to 66), against 2.3k for
+  `release` at both.
 
-With the fix, four alternating rounds of the same count (load 24 to 53):
+With the fix, alternating rounds of the same count:
 
 | | release | main | main with the fix |
 | --- | ---: | ---: | ---: |
-| instructions per frame | 161.2k | 164.8k | 164.0k |
-| futex instructions per frame | 2.3k | 8.5k | 4.7k |
+| `chat` instructions per frame (4 rounds, load 24 to 53) | 161.2k | 164.8k | 164.0k |
+| `chat` futex instructions per frame | 2.3k | 8.5k | 4.7k |
+| `fanout` instructions per frame (3 rounds, load 25 to 60) | 170.7k | 219.7k | 218.7k |
+| `fanout` futex instructions per frame | 12.6k | 33.8k | 32.9k |
+
+The fix halves `chat`'s futex cost and barely moves `fanout`'s, whose 64
+subscribers per track contend in the passes themselves.
 
 Median relay CPU per delivered frame from `just bench-relay <base> quic`
 (the default shared runtime), with the range of paired changes:
 
-| Workload | main to the fix (5 rounds) | release to the fix (3 rounds) | release to the fix, 8 pinned CPUs (3 rounds) |
-| --- | --- | --- | --- |
-| `chat` | -11.5% (-31.8 to +1.6) | +13.9% (+2.3 to +75.7) | +10.4% (-17.4 to +84.6) |
-| `fanout` | +4.1% (-10.1 to +18.5) | +17.5% (+9.3 to +61.7) | +7.8% (-12.7 to +15.2) |
-| `video` | 0.0% (-14.3 to +17.3) | -35.7% (-47.3 to -9.0) | -45.4% (-52.8 to -35.9) |
+| Workload | main to the fix (5 rounds) | release to the fix (5 rounds) |
+| --- | --- | --- |
+| `chat` | -11.5% (-31.8 to +1.6) | +8.7% (-5.3 to +25.3) |
+| `fanout` | +4.1% (-10.1 to +18.5) | +18.8% (-6.8 to +38.2) |
+| `video` | 0.0% (-14.3 to +17.3) | -15.2% (-36.3 to -12.5) |
 
-These three runs also kept the spare chunk of sent packets below, about 0.4%
-of a `chat` frame. Four of five `chat` pairs read the fix lower; `fanout` and `video` moved within
-noise. The largest `chat` pairs against `release` are rounds where `main`
-lost 6.7% to 11.9% of groups during the startup ramp and was still draining
-the backlog in the measured window (delivered above the offered 20,000
-frames/s). [Chat startup loss](/quest/m3/chat-startup-loss.md) owns that loss.
+Four of five `chat` pairs read the fix lower than `main`; the first column
+also kept the spare chunk of sent packets below, about 0.4% of a `chat`
+frame. Against `release`, two of the fix's `chat` rounds delivered below the
+offered 20,000 frames/s in the window; the three at the offered rate read
++8.7%, +22.1%, and +25.3%. The fix lost 0.3% to 1.1% of `chat`'s groups
+over each run's lifetime, all during the startup ramp, and `release` none.
+Earlier runs in the same session saw `main` lose up to 11.9% there, with the
+window still draining the backlog, which read the largest CPU per frame of
+any pair. [Chat startup loss](/quest/m3/chat-startup-loss.md) owns that loss.
 
 The transport lead was measured and not taken. A connection with every packet
 acknowledged before it sends the next frees its 8 KiB chunk of sent packets
