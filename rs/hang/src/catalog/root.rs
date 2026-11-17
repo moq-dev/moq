@@ -8,15 +8,19 @@ use serde::{Deserialize, Serialize};
 
 /// A catalog track, created by a broadcaster to describe the tracks available in a broadcast.
 ///
-/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `media`
+/// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `sync`
 /// section (the broadcast's one wall-clock mapping and join interval), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
 /// `echo` soliciting viewer feedback under a relative broadcast prefix, and `include` naming
 /// whole broadcasts for explicit selection.
-/// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
+/// Applications extend it with their own root sections (e.g. `com.example.scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
+///
+/// Every section this crate defines must have its shape when present, or decoding refuses the
+/// whole catalog: a section that silently read as empty would hide a publisher bug. An
+/// application's own root data goes under a namespaced key (`com.example.telemetry`) instead.
 ///
 /// Marked `#[non_exhaustive]` so a future base section can be added without bumping the major
 /// version. External callers start from [`Catalog::default`] and fill in the sections they
@@ -39,35 +43,26 @@ pub struct Catalog<E = ()> {
 	/// wire when it has no renditions.
 	pub audio: Audio,
 
-	/// What applies to every audio and video track: the broadcast's clock and join interval.
+	/// The broadcast's timeline: its clock and join interval.
 	///
-	/// Omitted from the wire when it holds nothing. See [`Media`](crate::catalog::Media).
-	pub media: crate::catalog::Media,
+	/// Omitted from the wire when it holds nothing. See [`Timeline`](crate::catalog::Timeline).
+	pub sync: crate::catalog::Timeline,
 
 	/// Text (caption/subtitle) track information with multiple renditions.
 	///
 	/// Contains a map of text track renditions that the viewer can choose from
 	/// based on their preferences (language, role). Omitted from the wire when empty, so a
 	/// broadcast without captions stays byte-identical to before this section existed.
-	///
-	/// A `text` value that isn't a caption section decodes as empty rather than failing the
-	/// catalog, since applications could carry their own `text` key before this was reserved.
 	pub text: Text,
 
 	/// JSON tracks: application data published as live JSON documents or logs.
 	///
 	/// Omitted from the wire when empty, so a media-only catalog is unchanged.
-	///
-	/// A `json` value that isn't a data-track section decodes as empty rather than failing the
-	/// catalog, the same as [`text`](Self::text): `json` is a generic enough key that an
-	/// application could have been carrying its own before this one was reserved, and losing the
-	/// tracks we can't read beats losing the whole catalog.
 	pub json: Json,
 
 	/// Binary tracks: application data published as opaque payloads.
 	///
-	/// Omitted from the wire when empty, so a media-only catalog is unchanged. Decoded leniently
-	/// for the same reason as [`json`](Self::json).
+	/// Omitted from the wire when empty, so a media-only catalog is unchanged.
 	pub binary: Binary,
 
 	/// A transport stream carried whole rather than demultiplexed: the one track holding its
@@ -75,22 +70,16 @@ pub struct Catalog<E = ()> {
 	pub m2ts: Option<crate::catalog::M2ts>,
 
 	/// The publisher's optional media snapshot track.
-	///
-	/// A `stats` value without a string `track` decodes as absent rather than failing the
-	/// catalog, for the same reason as [`json`](Self::json).
 	pub stats: Option<crate::catalog::Stats>,
 
 	/// The optional prefix soliciting viewer feedback broadcasts.
-	///
-	/// An `echo` value without a string `path` decodes as absent, the same as [`stats`](Self::stats).
 	pub echo: Option<crate::catalog::Echo>,
 
 	/// Whole broadcasts listed for explicit, lazy selection, keyed by include ID.
 	///
-	/// Each shares this catalog's PTS timeline and root settings, including `media.clock` and
-	/// `media.join.interval`; its own settings are ignored. Listing one subscribes to nothing;
-	/// see [`Include`](crate::catalog::Include).
-	/// Omitted from the wire when empty. A malformed entry refuses the catalog.
+	/// Each shares this catalog's PTS timeline and root settings, including `sync.clock` and
+	/// `sync.interval`; its own settings are ignored. Listing one subscribes to nothing;
+	/// see [`Include`](crate::catalog::Include). Omitted from the wire when empty.
 	pub include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
@@ -132,42 +121,46 @@ struct Wire<E> {
 
 	#[serde(
 		default,
-		skip_serializing_if = "crate::catalog::Media::is_empty",
-		deserialize_with = "crate::catalog::deserialize_media"
+		skip_serializing_if = "crate::catalog::Timeline::is_empty",
+		deserialize_with = "crate::catalog::deserialize_object"
 	)]
-	media: crate::catalog::Media,
+	sync: crate::catalog::Timeline,
 
 	#[serde(
 		default,
 		skip_serializing_if = "Text::is_empty",
-		deserialize_with = "crate::catalog::deserialize_section"
+		deserialize_with = "crate::catalog::deserialize_object"
 	)]
 	text: Text,
 
 	#[serde(
 		default,
 		skip_serializing_if = "Json::is_empty",
-		deserialize_with = "crate::catalog::deserialize_section"
+		deserialize_with = "crate::catalog::deserialize_object"
 	)]
 	json: Json,
 
 	#[serde(
 		default,
 		skip_serializing_if = "Binary::is_empty",
-		deserialize_with = "crate::catalog::deserialize_section"
+		deserialize_with = "crate::catalog::deserialize_object"
 	)]
 	binary: Binary,
 
-	#[serde(default)]
+	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
 	m2ts: Option<crate::catalog::M2ts>,
 
-	#[serde(default, deserialize_with = "crate::catalog::deserialize_stats")]
+	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
 	stats: Option<crate::catalog::Stats>,
 
-	#[serde(default, deserialize_with = "crate::catalog::deserialize_echo")]
+	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
 	echo: Option<crate::catalog::Echo>,
 
-	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+	#[serde(
+		default,
+		skip_serializing_if = "std::collections::BTreeMap::is_empty",
+		deserialize_with = "crate::catalog::deserialize_entries"
+	)]
 	include: std::collections::BTreeMap<String, crate::catalog::Include>,
 
 	#[serde(flatten, serialize_with = "serialize_ext")]
@@ -197,7 +190,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			version: _,
 			video,
 			audio,
-			media,
+			sync,
 			text,
 			json,
 			binary,
@@ -210,7 +203,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 		Self {
 			video,
 			audio,
-			media,
+			sync,
 			text,
 			json,
 			binary,
@@ -253,13 +246,14 @@ impl Catalog<()> {
 	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	///
-	/// Keeps moq-net's default zero max age rather than the media one: the catalog is
-	/// snapshot mode, so a join reads the newest snapshot, which never goes stale.
-	/// Timed in milliseconds, so snapshots share the broadcast clock with media, and
+	/// Timed in milliseconds, so snapshots share the broadcast clock with media, fresh for the media's
+	/// [`MAX_AGE`](crate::container::MAX_AGE), so a reader playing behind the live edge still
+	/// receives each update it holds until its timestamp, and
 	/// [compressed](moq_net::track::Info::compression), since catalog JSON is small and repetitive.
 	pub fn default_track_info() -> moq_net::track::Info {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
+			.with_max_age(crate::container::MAX_AGE)
 			.with_priority(PRIORITY.catalog)
 			.with_compression(moq_net::track::Compression::Deflate)
 	}
@@ -277,7 +271,7 @@ impl<E> Catalog<E> {
 	///
 	/// Decoding already refuses an out-of-range rendition, so this catches a catalog built by hand.
 	pub fn check_renditions(&self) -> Result<()> {
-		use crate::catalog::Rendition;
+		use crate::catalog::Entry;
 
 		if let Some(id) = self
 			.video
@@ -321,7 +315,7 @@ impl<E> Catalog<E> {
 		Catalog {
 			video: self.video.clone(),
 			audio: self.audio.clone(),
-			media: self.media,
+			sync: self.sync,
 			text: self.text.clone(),
 			..Default::default()
 		}
@@ -341,10 +335,16 @@ impl<E: DeserializeOwned + Default> FromStr for Catalog<E> {
 }
 
 impl<E: DeserializeOwned + Default> Catalog<E> {
-	/// Subscribe to catalog updates on a broadcast.
+	/// Subscribe to catalog updates on a broadcast, reading only the newest.
+	///
+	/// For a reader that applies each update on arrival; one that holds updates until their
+	/// timestamp builds a [`Consumer`](super::Consumer) with its playout delay.
 	#[cfg(feature = "async")]
 	pub async fn subscribe(broadcast: &moq_net::broadcast::Consumer) -> Result<super::Consumer<E>> {
-		Ok(super::Consumer::new(broadcast.track(Catalog::DEFAULT_NAME)?))
+		Ok(super::Consumer::new(
+			broadcast.track(Catalog::DEFAULT_NAME)?,
+			std::time::Duration::ZERO,
+		))
 	}
 
 	/// Parse a catalog from a slice of bytes.
@@ -1039,35 +1039,6 @@ mod test {
 	}
 
 	#[test]
-	fn legacy_text_section_keeps_the_catalog() {
-		// `text` was an ordinary application section before captions reserved it, so a value with
-		// the wrong shape must cost its captions and nothing else. Audio and video keep playing.
-		for legacy in [
-			r#""a caption overlay""#,
-			r#"["a","b"]"#,
-			r#"{"overlay":{"x":1}}"#,
-			r#"{"renditions":42}"#,
-		] {
-			let json = format!(r#"{{"video":{{"renditions":{{}}}},"audio":{{"renditions":{{}}}},"text":{legacy}}}"#);
-			let catalog =
-				Catalog::<()>::from_str(&json).unwrap_or_else(|e| panic!("legacy text {legacy} broke it: {e}"));
-			assert!(catalog.text.is_empty(), "legacy text {legacy} decoded as captions");
-		}
-	}
-
-	/// The counterpart to the above: the fallback covers someone else's key, not our own bugs. A
-	/// value that *is* a text section still has to decode, or a rendition with no format would
-	/// silently cost a publisher every caption it advertised.
-	#[test]
-	fn a_malformed_text_section_still_fails() {
-		let json = r#"{"text":{"renditions":{"captions":{"container":{"kind":"legacy"}}}}}"#;
-		assert!(
-			Catalog::<()>::from_str(json).is_err(),
-			"a format-less text rendition decoded instead of failing"
-		);
-	}
-
-	#[test]
 	fn unknown_text_role_keeps_the_catalog() {
 		// A future `role` value must not take down the whole catalog: audio and video have to keep
 		// playing even when a caption rendition is classified with a vocabulary we don't know yet.
@@ -1084,59 +1055,6 @@ mod test {
 		assert!(!encoded.contains("\"audio\""), "empty audio section leaked: {encoded}");
 	}
 
-	/// A section name is only reserved from the version that defines it, and `json` and `binary` are
-	/// generic enough that an application could already be using one. Dropping the section we can't
-	/// read keeps video and audio playable, instead of failing the whole catalog over that key.
-	#[test]
-	fn a_foreign_data_section_does_not_fail_the_catalog() {
-		for section in ["json", "binary"] {
-			let wire = format!(r#"{{"video":{{"renditions":{{}}}},"{section}":{{"messages":"chat"}}}}"#);
-			let catalog =
-				Catalog::<()>::from_str(&wire).unwrap_or_else(|err| panic!("{section} took the catalog down: {err}"));
-			assert!(catalog.json.is_empty(), "{section}");
-			assert!(catalog.binary.is_empty(), "{section}");
-		}
-	}
-
-	/// The counterpart to the above: the fallback covers someone else's key, not our own bugs. A
-	/// value that *is* a data section still has to decode, or a mode-less track would silently cost
-	/// a publisher every data track it advertised.
-	#[test]
-	fn a_malformed_data_section_still_fails() {
-		for section in ["json", "binary"] {
-			let wire = format!(r#"{{"{section}":{{"tracks":{{"chat":{{"schema":"chat"}}}}}}}}"#);
-			assert!(
-				Catalog::<()>::from_str(&wire).is_err(),
-				"a mode-less {section} track decoded instead of failing"
-			);
-		}
-	}
-
-	/// `stats` and `echo` are as generic as `json`: a value without their string field is someone
-	/// else's and decodes as absent, while one with it is ours.
-	#[test]
-	fn a_foreign_stats_or_echo_value_does_not_fail_the_catalog() {
-		for foreign in ["{}", "5", r#""on""#, r#"{"track":5}"#, r#"{"path":["a"]}"#, "null"] {
-			for section in ["stats", "echo"] {
-				let wire = format!(r#"{{"video":{{"renditions":{{}}}},"{section}":{foreign}}}"#);
-				let catalog = Catalog::<()>::from_str(&wire)
-					.unwrap_or_else(|err| panic!("{section}: {foreign} took the catalog down: {err}"));
-				assert!(
-					catalog.stats.is_none() && catalog.echo.is_none(),
-					"{section}: {foreign}"
-				);
-			}
-		}
-		let catalog = Catalog::<()>::from_str(r#"{"stats":{"track":"stats.json"},"echo":{"path":"viewers"}}"#).unwrap();
-		assert_eq!(catalog.stats, Some(crate::catalog::Stats::new("stats.json")));
-		assert_eq!(
-			catalog.echo,
-			Some(crate::catalog::Echo::new(
-				moq_net::path::Relative::new("viewers").unwrap()
-			))
-		);
-	}
-
 	#[test]
 	fn data_sections_stay_off_the_wire_when_empty() {
 		// Empty sections stay off the wire, video and audio included.
@@ -1145,27 +1063,27 @@ mod test {
 	}
 
 	#[test]
-	fn media_roundtrips_at_the_root() {
+	fn sync_roundtrips_at_the_root() {
 		let clock =
 			crate::catalog::Clock::new(moq_net::Timestamp::from_micros(1_751_846_400_000_000).unwrap()).unwrap();
 		let mut catalog = Catalog::<()>::default();
-		catalog.media.clock = Some(clock);
-		catalog.media.join = crate::catalog::Join::new(std::time::Duration::from_secs(2));
+		catalog.sync.clock = Some(clock);
+		catalog.sync.interval = Some(std::time::Duration::from_secs(2));
 
 		let json = catalog.to_json().expect("failed to encode");
 		assert_eq!(
 			json,
-			r#"{"media":{"clock":{"wall":1751846400000000,"timescale":1000000},"join":{"interval":2000}}}"#
+			r#"{"sync":{"clock":{"wall":1751846400000000,"timescale":1000000},"interval":2000}}"#
 		);
 		assert_eq!(Catalog::<()>::from_str(&json).expect("failed to decode"), catalog);
 	}
 
-	/// The clock moved under `media`, and records are gone: a root `clock` and a rendition `hls`
-	/// field are someone else's keys, ignored rather than read.
+	/// Retired shapes are someone else's keys, ignored rather than read: the root `clock` and the
+	/// `media` section that each held the clock before `sync`, and a rendition `hls` record.
 	#[test]
-	fn a_retired_root_clock_and_hls_field_are_ignored() {
+	fn a_retired_clock_media_and_hls_field_are_ignored() {
 		let rendition = serde_json::json!({"codec": "avc1.64001f", "container": {"kind": "legacy"}});
-		let media =
+		let plain =
 			Catalog::<()>::from_str(&serde_json::json!({"video": {"renditions": {"video": rendition}}}).to_string())
 				.unwrap();
 		let mut retired = rendition.clone();
@@ -1173,22 +1091,21 @@ mod test {
 		let json = serde_json::json!({
 			"video": {"renditions": {"video": retired}},
 			"clock": {"wall": 1000, "timescale": 1000000},
+			"media": {"clock": {"wall": 1000}, "join": {"interval": 2000}},
 		});
 		let catalog = Catalog::<()>::from_str(&json.to_string()).expect("retired fields must not reject media");
-		assert_eq!(catalog, media);
-		assert_eq!(catalog.to_json().unwrap(), media.to_json().unwrap());
+		assert_eq!(catalog, plain);
+		assert_eq!(catalog.sync, crate::catalog::Timeline::default());
+		assert_eq!(catalog.to_json().unwrap(), plain.to_json().unwrap());
 	}
 
-	/// `media` is a generic key an application may have carried before it was reserved, so a value
-	/// that is not an object is someone else's; an object holding a malformed clock is ours.
+	/// A section with the wrong shape refuses the catalog rather than reading as absent. The shared
+	/// parity fixture holds the cases for every section both languages read; `m2ts` is Rust's alone.
 	#[test]
-	fn a_foreign_media_value_is_ignored_but_a_bad_clock_refuses() {
-		let catalog = Catalog::<()>::from_str(r#"{"media":"podcast"}"#).expect("a foreign media value");
-		assert!(catalog.media.is_empty());
-		Catalog::<()>::from_str(r#"{"media":{"clock":{"wall":0,"timescale":0}}}"#)
-			.expect_err("a malformed clock refuses the catalog");
-		let catalog = Catalog::<()>::from_str(r#"{"media":{"join":{"interval":0}}}"#).expect("a malformed join");
-		assert_eq!(catalog.media.join, None);
+	fn a_mis_shaped_m2ts_refuses_the_catalog() {
+		for value in ["null", "5", r#""0.m2ts""#, r#"["0.m2ts"]"#, "{}", r#"{"track":5}"#] {
+			Catalog::<()>::from_str(&format!(r#"{{"m2ts":{value}}}"#)).expect_err(value);
+		}
 	}
 
 	#[test]
@@ -1210,14 +1127,14 @@ mod test {
 
 	#[test]
 	fn packaged_clock_fixture_decodes() {
-		// The canonical shape: the clock and join interval under `media`. A reader maps media
+		// The canonical shape: the clock and join interval under `sync`. A reader maps media
 		// timestamps through the clock after timescale conversion.
 		let json = include_str!("../../fixtures/catalog-clock.json");
 		let catalog = Catalog::<()>::from_str(json).expect("the packaged fixture must decode");
 
-		let clock = catalog.media.clock.expect("the fixture carries a clock");
+		let clock = catalog.sync.clock.expect("the fixture carries a clock");
 		assert_eq!(clock.wall.scale().map(moq_net::Timescale::as_u64), Some(1_000_000));
-		assert_eq!(catalog.media.interval(), Some(std::time::Duration::from_secs(2)));
+		assert_eq!(catalog.sync.interval, Some(std::time::Duration::from_secs(2)));
 
 		// PTS 2000 ms lands 2s after the wall epoch, whatever the track timescale.
 		let expected = kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_millis(1_751_846_402_000);

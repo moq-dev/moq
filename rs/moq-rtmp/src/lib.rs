@@ -73,6 +73,8 @@ mod server;
 /// Default FLV release delay and stalled-group budget.
 const DEFAULT_DELAY: Duration = Duration::from_millis(500);
 
-pub use dial::{Client, Connect};
+pub use dial::{Client, Connect, Pull, Push};
 pub use error::{Error, Result};
-pub use server::{Conn, Play, Publish, Request, Server, Stream, accept_stream, configure_socket};
+pub use server::{
+	Conn, Export, Import, Play, Publish, Request, Server, Stream, accept_stream, configure_socket,
+};

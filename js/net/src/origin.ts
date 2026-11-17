@@ -734,7 +734,7 @@ class OriginState {
 			// Every request watches its own path, so the watches beneath the prefix name exactly
 			// the requests it can settle, without scanning the rest of the table.
 			let node: WatchNode | undefined = this.#watches;
-			for (const part of prefix === Path.empty() ? [] : prefix.split("/")) node = node?.children.get(part);
+			for (const part of Path.parts(prefix)) node = node?.children.get(part);
 			const stack = node ? [node] : [];
 			for (let next = stack.pop(); next; next = stack.pop()) {
 				if (visited.has(next)) continue;
@@ -781,7 +781,7 @@ class OriginState {
 
 	#watchOne(head: Path.Valid): void {
 		let node = this.#watches;
-		for (const part of head === Path.empty() ? [] : head.split("/")) {
+		for (const part of Path.parts(head)) {
 			let child = node.children.get(part);
 			if (!child) {
 				child = { path: Path.join(node.path, part as Path.Valid), parent: node, children: new Map(), count: 0 };
@@ -797,7 +797,7 @@ class OriginState {
 
 	#unwatchOne(head: Path.Valid): void {
 		let node: WatchNode | undefined = this.#watches;
-		for (const part of head === Path.empty() ? [] : head.split("/")) node = node?.children.get(part);
+		for (const part of Path.parts(head)) node = node?.children.get(part);
 		if (!node || node.count === 0) throw new Error("unwatched prefix released");
 		if (--node.count === 0 && !coveredAbove(node)) {
 			for (const narrower of frontier(node)) this.#emit(narrower, true);
@@ -805,7 +805,7 @@ class OriginState {
 		}
 		// Prune the segments nothing watches any more.
 		while (node.parent && node.count === 0 && node.children.size === 0) {
-			node.parent.children.delete(node.path.slice(node.path.lastIndexOf("/") + 1));
+			node.parent.children.delete(Path.parts(node.path).at(-1) ?? "");
 			node = node.parent;
 		}
 	}

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 /// A whole broadcast whose own catalog describes its renditions, listed without opening it.
 ///
-/// It shares the listing catalog's PTS timeline and root settings, including `media.clock` and
-/// `media.join.interval`; its own catalog's settings are ignored.
+/// It shares the listing catalog's PTS timeline and root settings, including `sync.clock` and
+/// `sync.interval`; its own catalog's settings are ignored.
 ///
 /// Listing one subscribes to nothing: a consumer opens the include's catalog only when it
 /// selects it, including an HLS master listing its renditions. An on-demand publisher answers
@@ -29,6 +29,8 @@ pub struct Include {
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 }
+
+impl crate::catalog::Entry for Include {}
 
 impl Include {
 	/// An include at `broadcast`, accepting whichever stream resolves.

@@ -552,9 +552,9 @@ playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
 The replacement case is quarantined from the default run on every engine: under CPU
-load it intermittently leaves the audio stalled past the switch bound after a route
-switch or fallback (the viewer logs `skipping missing groups` on the audio track first),
-and Firefox also showed intermittent missing tone samples. Run it explicitly with
+load its audio intermittently goes silent, as each group the viewer skips restarts the
+decoder and trims its 80 ms warmup, and Firefox also showed intermittent missing tone
+samples. Run it explicitly with
 `just test media --media-cases replacement`, or `--media-cases replacement --media-engines firefox` for Firefox;
 its content, sync, switch, and fallback assertions remain active.
 
@@ -713,6 +713,6 @@ inflated size. The harness enables the relay's `[stats]` and `[internal]` listen
 The HLS grid lane has the Rust publisher (moq-mux) and each native JS runtime
 (`@moq/hang`) publish one fixed frame schedule, with GOPs on and off the 2 s grid, a
 discontinuity, and a finish, and the Rust reader prints each broadcast's declared
-`media.join.interval` and every rendition's groups with their first pts, the input an HLS
+`sync.interval` and every rendition's groups with their first pts, the input an HLS
 edge numbers segments from. The two readouts must be identical, so a browser-published
 broadcast exports as HLS like a native one.

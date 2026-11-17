@@ -102,7 +102,7 @@ export type BroadcastInput = {
  */
 export type OnDemand = "off" | "retain" | "all";
 
-// The longest group among the video and audio renditions, the catalog's `media.join.interval`: the
+// The longest group among the video and audio renditions, the catalog's `sync.interval`: the
 // promise that every one starts a group at least that often. Undefined while none declares one, so a
 // later listing tries again; it reads every hint until then, since none is fixed yet.
 function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<unknown>>): Catalog.U53 | undefined {
@@ -133,7 +133,7 @@ export class Broadcast {
 
 	/**
 	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
-	 * `video`/`audio` sections and `media.join` are folded from the registered renditions (see
+	 * `video`/`audio` sections and `sync.interval` are folded from the registered renditions (see
 	 * {@link Rendition.join}); an application adds its own
 	 * root sections (e.g. `scte35`) by locking it too.
 	 */
@@ -175,7 +175,7 @@ export class Broadcast {
 	readonly #join = new Signal<Duration | undefined>(undefined);
 
 	/**
-	 * The catalog's `media.join.interval` the current network broadcast declared, in milliseconds:
+	 * The catalog's `sync.interval` the current network broadcast declared, in milliseconds:
 	 * the longest group any video or audio rendition promised when media was first listed. Fixed
 	 * for the network broadcast, so an encoder holds its groups within it. Undefined until declared.
 	 */
@@ -326,9 +326,9 @@ export class Broadcast {
 
 		this.catalog.mutate((catalog) => {
 			if (join !== undefined) {
-				catalog.media = { ...catalog.media, join: { interval: join } };
-			} else if (catalog.media) {
-				delete catalog.media.join;
+				catalog.sync = { ...catalog.sync, interval: join };
+			} else if (catalog.sync) {
+				delete catalog.sync.interval;
 			}
 
 			if (Object.keys(video).length > 0) {
@@ -502,13 +502,15 @@ export class Broadcast {
 			// is whatever the catalog holds at announce time.
 			if (!serving) {
 				serving = true;
-				// The zero default max age, as Rust's catalog track takes: a viewer needs only the newest
-				// snapshot. A catalog may publish once and stay unchanged for the broadcast's whole life,
-				// and a viewer arriving long after still bootstraps from it: max age only stales a
-				// superseded group, and the cache never ages out an open track's newest group.
+				// The media's max age, as Rust's catalog track takes: a viewer holding each update until
+				// its timestamp plays as far behind as the media, so a superseded snapshot stays
+				// deliverable as long. A catalog may publish once and stay unchanged for the broadcast's
+				// whole life, and a viewer arriving long after still bootstraps from it: max age only
+				// stales a superseded group, and the cache never ages out an open track's newest group.
 				const track = broadcast.createTrack(Broadcast.CATALOG_TRACK, {
 					// Each catalog snapshot is stamped when written.
 					timescale: Moq.Time.Timescale.MILLI,
+					maxAge: maxAge === undefined ? Container.MAX_AGE : maxAge,
 					priority: Catalog.PRIORITY.catalog,
 					// Catalog JSON is small and repetitive.
 					compression: "deflate",

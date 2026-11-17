@@ -1,10 +1,11 @@
 //! Status track: JSON state published to viewers each frame.
 //!
-//! Contains which buttons are held, how many viewers are playing, encoding
-//! stats, and an optional location label. Each viewer's latency travels on its
-//! own session instead (see [`crate::input`]). Published through
+//! Contains which buttons are held, per-viewer latency measurements,
+//! encoding stats, and an optional location label. Published through
 //! [`moq_json`], which skips unchanged values and emits merge-patch
 //! deltas between snapshots so frequent small changes stay cheap.
+
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
@@ -23,8 +24,9 @@ pub struct LatencyEntry {
 pub struct Status {
 	/// Currently pressed buttons (union across all viewers).
 	pub buttons: Vec<Button>,
-	/// How many viewers have a session open.
-	pub players: usize,
+	/// Per-viewer latency breakdown: viewer id to its ordered components. The player count is
+	/// the number of keys.
+	pub latency: BTreeMap<crate::input::ViewerId, Vec<LatencyEntry>>,
 	/// Encoding and emulation performance stats.
 	pub stats: StatsReport,
 	/// Optional server location label (e.g. "Dallas, TX").

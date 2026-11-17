@@ -10,7 +10,7 @@
 
 A crowd-controlled Game Boy Color emulator that streams video and audio over [Media over QUIC](https://moq.dev).
 
-Viewers connect via the [@moq/boy](https://github.com/moq-dev/moq/tree/main/js/moq-boy) web client, watch the stream with sub-second latency, and collectively send button inputs back to the emulator. The emulator auto-pauses when nobody is watching.
+Viewers connect via the `<moq-boy>` element in [`demo/boy`](https://github.com/moq-dev/moq/tree/main/demo/boy), watch the stream with sub-second latency, and collectively send button inputs back to the emulator. The emulator auto-pauses when nobody is watching.
 
 See the [demo](https://github.com/moq-dev/moq/tree/main/demo/boy) for the orchestration `justfile` and ROM hosting setup.
 

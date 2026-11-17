@@ -141,6 +141,13 @@ pub(super) enum Action {
 	/// arrived meanwhile: it went unread for the linger, or the source is local.
 	/// Feed back [`Event::Forgotten`] once it is gone.
 	Forget { track: Arc<str> },
+	/// Ask `source` for its copy of the finished `track`, for the reads still holding it:
+	/// a group read on it continues from that copy if its own route dies. Nothing to do
+	/// when nothing holds the track; else feed the answer back as [`Event::TrackInfo`].
+	Reroute { track: Arc<str>, source: u64 },
+	/// No source will replace the copy of the finished `track` any more: a group read on it
+	/// fails once its own route does, rather than wait for one.
+	Conclude { track: Arc<str> },
 	/// The logical track completed.
 	Finish { track: Arc<str> },
 	/// The logical track failed for good, with the Retry Interval of the upstream refusal it
@@ -200,9 +207,20 @@ struct Track {
 	/// table to move, rather than ask that source again at once or end; a draining copy
 	/// keeps feeding it meanwhile.
 	stranded: Option<u64>,
-	/// The track finished or aborted: nothing is spliced again, and it stays only
-	/// until it goes unread for the linger.
-	ended: bool,
+	/// How the track ended, once it did. It stays only until it goes unread for the linger.
+	ended: Option<Ended>,
+}
+
+/// How a logical track ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+	/// Completed: its readers have all it holds, but a group still read on it moves with
+	/// the serving source, from a copy only that group's reads use.
+	Finished,
+	/// Finished, and the serving source refused it since: nothing is spliced again.
+	Concluded,
+	/// Failed for good: nothing is spliced again.
+	Aborted,
 }
 
 /// One front's state; see the module docs.
@@ -324,7 +342,7 @@ impl Front {
 						refusal: None,
 						lost: None,
 						wanted: false,
-						ended: false,
+						ended: None,
 						draining: None,
 						stranded: None,
 					},
@@ -397,10 +415,13 @@ impl Front {
 		let serving_route = self.serving.map(|(_, serving)| serving.route);
 		match best {
 			// The serving route is still the best one. The table moved, which is the
-			// evidence a track it lost waits for: ask it again.
+			// evidence a track it lost waits for: ask it again, as for a track that waited
+			// on a switch given up on, however that switch ended (a refused request clears
+			// `upstream` before it reselects).
 			Some(candidate) if Some(candidate.route) == serving_route => {
 				self.upstream = None;
 				self.unstrand(actions);
+				self.redispatch_idle(actions);
 			}
 			// Already asking through it.
 			Some(candidate) if self.upstream.is_some_and(|upstream| upstream.route == candidate.route) => {}
@@ -465,14 +486,22 @@ impl Front {
 			self.resolved = true;
 			actions.push(Action::Resolve);
 		}
-		// A read track is never parked, so idle is the only state to re-query.
+		// A read track is never parked, so idle is the only state to re-query. A finished
+		// one keeps its state, lingering as before, while a read on it follows the source.
 		for (name, track) in &mut self.tracks {
-			if track.wanted && !track.ended && track.state == TrackState::Idle {
-				track.state = TrackState::Querying { source };
-				actions.push(Action::Query {
+			match track.ended {
+				None if track.wanted && track.state == TrackState::Idle => {
+					track.state = TrackState::Querying { source };
+					actions.push(Action::Query {
+						track: name.clone(),
+						source,
+					});
+				}
+				Some(Ended::Finished) => actions.push(Action::Reroute {
 					track: name.clone(),
 					source,
-				});
+				}),
+				_ => {}
 			}
 		}
 	}
@@ -520,9 +549,40 @@ impl Front {
 		result: Result<track::Info, (Error, Option<Duration>)>,
 		actions: &mut Vec<Action>,
 	) {
+		let serving = self.serving.is_some_and(|(serving, _)| serving == source);
+		let strands = self.strands();
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
+		// A rerouted copy of a finished track joins its reads only from the serving source,
+		// and only with the same metadata. The serving source refusing it is its verdict, as
+		// for an open track, so a read whose route dies fails rather than wait for another.
+		// A closing source's answer or a lost route's is none: its replacement is asked.
+		if track.ended == Some(Ended::Finished) {
+			if !serving {
+				return;
+			}
+			let verdict = match result {
+				Ok(info) if self.info.get(&name) == Some(&info) => Ok(()),
+				Ok(_) => Err(Error::Unsupported),
+				Err((err, _)) => Err(err),
+			};
+			match verdict {
+				Ok(()) => {
+					track.stranded = None;
+					actions.push(Action::Splice { track: name, source });
+				}
+				Err(_) if closing => {}
+				// The route lost it: ask again once the table moves, as for an open track. A
+				// local or minted route's word is the verdict, as it is there.
+				Err(err) if err.unroutable() && strands => track.stranded = Some(source),
+				Err(_) => {
+					track.ended = Some(Ended::Concluded);
+					actions.push(Action::Conclude { track: name });
+				}
+			}
+			return;
+		}
 		if track.state != (TrackState::Querying { source }) {
 			return;
 		}
@@ -564,19 +624,30 @@ impl Front {
 		actions: &mut Vec<Action>,
 	) {
 		let strands = self.strands();
+		let serving = self.serving.map(|(serving, _)| serving);
 		let Some(track) = self.tracks.get_mut(&name) else {
 			return;
 		};
 		let spliced = track.state == (TrackState::Spliced { source });
+		// A track finishing on a copy other than the serving source's asks that source for
+		// one anew, since finishing lets go of a query in flight: the group reads still
+		// holding the track continue from it, as after a later source change.
+		let reroute = serving.filter(|serving| track.state != (TrackState::Spliced { source: *serving }));
+		let finish = |name: Arc<str>, actions: &mut Vec<Action>| {
+			actions.push(Action::Finish { track: name.clone() });
+			if let Some(source) = reroute {
+				actions.push(Action::Reroute { track: name, source });
+			}
+		};
 		if track.draining == Some(source) {
 			track.draining = None;
 			// Every source of a front serves one broadcast, so a copy that completed ends
 			// the track whoever serves it now. One that failed leaves the track to the
 			// serving source.
-			if result.is_ok() && !track.ended {
+			if result.is_ok() && track.ended.is_none() {
 				track.state = TrackState::Idle;
-				track.ended = true;
-				actions.push(Action::Finish { track: name });
+				track.ended = Some(Ended::Finished);
+				finish(name, actions);
 				return;
 			}
 			if !spliced {
@@ -591,17 +662,21 @@ impl Front {
 			// once unread for the linger, like any other track.
 			Ok(()) => {
 				track.state = TrackState::Idle;
-				track.ended = true;
-				actions.push(Action::Finish { track: name });
+				track.ended = Some(Ended::Finished);
+				finish(name, actions);
 			}
-			// Died mid-serve after delivering from the same instance: normal
-			// failover, re-splice from the serving source at the first missing group.
+			// Died mid-serve after delivering from the same instance: normal failover,
+			// re-splice at the first missing group from the serving source, or from the
+			// route a switch already under way moves to, whatever the error, since the
+			// route it leaves may be what failed.
 			Err(err)
-				if delivered && err.transient() && self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
+				if delivered
+					&& (err.transient() || self.upstream.is_some())
+					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
 				track.lost = Some(err);
-				self.redispatch(name, actions);
+				self.fail_over(name, actions);
 			}
 			// The route lost the content, which another route of the instance continues:
 			// wait for one rather than ask this route again, which can only refuse. A copy
@@ -619,7 +694,7 @@ impl Front {
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
-				track.ended = true;
+				track.ended = Some(Ended::Aborted);
 				actions.push(Action::Abort {
 					track: name,
 					err,
@@ -678,7 +753,27 @@ impl Front {
 			track.state = TrackState::Spliced { source: draining };
 			return;
 		}
-		self.redispatch(name, actions);
+		self.fail_over(name, actions);
+	}
+
+	/// A copy of `name` failed: while a switch to another route is under way, the
+	/// track waits for it, and [`Self::attach`] asks the new source, since the failure
+	/// may be the route the switch leaves; otherwise the serving source is asked again.
+	fn fail_over(&mut self, name: Arc<str>, actions: &mut Vec<Action>) {
+		if self.upstream.is_none() {
+			self.redispatch(name, actions);
+		}
+	}
+
+	/// [`Self::redispatch`] every idle track.
+	fn redispatch_idle(&mut self, actions: &mut Vec<Action>) {
+		let idle: Vec<Arc<str>> = (self.tracks.iter())
+			.filter(|(_, track)| track.state == TrackState::Idle)
+			.map(|(name, _)| name.clone())
+			.collect();
+		for name in idle {
+			self.redispatch(name, actions);
+		}
 	}
 
 	/// Splice `name` from the serving source if it can serve it, or abort the
@@ -689,12 +784,12 @@ impl Front {
 			return;
 		};
 		let track = self.tracks.get_mut(&name).expect("dispatching a known track");
-		if !track.wanted || track.ended || track.state != TrackState::Idle || track.stranded == Some(source) {
+		if !track.wanted || track.ended.is_some() || track.state != TrackState::Idle || track.stranded == Some(source) {
 			return;
 		}
 		if track.refused.contains(&source) {
 			let (err, retry) = track.refusal.clone().unwrap_or((Error::NotFound, None));
-			track.ended = true;
+			track.ended = Some(Ended::Aborted);
 			actions.push(Action::Abort {
 				track: name,
 				err,
@@ -732,13 +827,24 @@ impl Front {
 			track.stranded = None;
 			match track.state {
 				TrackState::Spliced { source: draining }
-					if track.draining == Some(draining) && track.wanted && !track.ended && !self.serving_closing =>
+					if track.draining == Some(draining)
+						&& track.wanted && track.ended.is_none()
+						&& !self.serving_closing =>
 				{
 					track.state = TrackState::Querying { source };
 					actions.push(Action::Query {
 						track: name.clone(),
 						source,
 					});
+				}
+				// A finished track asks for a rerouted copy anew; its state stays as it lingers.
+				_ if track.ended == Some(Ended::Finished) => {
+					if !self.serving_closing {
+						actions.push(Action::Reroute {
+							track: name.clone(),
+							source,
+						});
+					}
 				}
 				_ => idle.push(name.clone()),
 			}
@@ -789,7 +895,7 @@ impl Front {
 				track.state = TrackState::Parked { since: now };
 				track.lost = None;
 				// An ended track has nothing to drop.
-				if !track.ended {
+				if track.ended.is_none() {
 					actions.push(Action::Park { track: name });
 				}
 			}
@@ -1756,6 +1862,120 @@ mod tests {
 		}
 	}
 
+	/// A copy that fails while a switch to another route is under way waits for it,
+	/// whatever its error: the route the switch leaves may be what failed, so the new
+	/// source continues the track rather than the old one refusing it.
+	#[test]
+	fn a_copy_failing_during_a_switch_waits_for_it() {
+		for err in [
+			Error::Unroutable,
+			Error::from(crate::StreamError::Unroutable),
+			Error::Dropped,
+		] {
+			let mut front = serving(remote(1), 100);
+			assert_actions(
+				front.step(Event::Selected {
+					best: Some(remote(2)),
+					serving_closing: false,
+				}),
+				&[Action::Request { route: 2 }],
+			);
+			assert_actions(
+				front.step(Event::TrackEnded {
+					track: name("video"),
+					source: 100,
+					closing: false,
+					result: Err(err.clone()),
+					delivered: true,
+				}),
+				&[],
+			);
+			let actions = front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			assert!(
+				actions
+					.iter()
+					.any(|action| matches!(action, Action::Query { track, source: 200 } if track.as_ref() == "video")),
+				"{err}: {actions:?}"
+			);
+			assert!(
+				!actions.iter().any(|action| matches!(action, Action::Abort { .. })),
+				"{err}: {actions:?}"
+			);
+		}
+	}
+
+	/// A switch given up on, with the serving route the best again, leaves a track that
+	/// waited on it to the serving source, which a lost copy re-asks.
+	#[test]
+	fn a_switch_given_up_on_asks_the_serving_source_again() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Err(Error::Dropped),
+			delivered: true,
+		});
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+	}
+
+	/// A switch the target retracted ends with a refusal that is not standing: the serving
+	/// route winning the reselect still asks the track that waited on it.
+	#[test]
+	fn a_switch_refused_without_standing_asks_the_serving_source_again() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Dropped),
+				delivered: true,
+			}),
+			&[],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Err(Refusal {
+					err: Error::NotFound,
+					standing: false,
+				}),
+			}),
+			&[Action::Reselect],
+		);
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(remote(1)),
+				serving_closing: false,
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 100,
+			}],
+		);
+	}
+
 	#[test]
 	fn a_copy_dying_before_delivering_is_a_refusal() {
 		let mut front = serving(remote(1), 100);
@@ -2015,7 +2235,8 @@ mod tests {
 	}
 
 	/// A finished track stays for readers still draining it and for the linger
-	/// after the last one, is never spliced again, and is then forgotten.
+	/// after the last one, and is then forgotten. A replacement source reroutes it for the
+	/// reads still holding it, without touching the linger.
 	#[test]
 	fn a_finished_track_lingers_then_is_forgotten() {
 		let mut front = serving(remote(1), 100);
@@ -2044,7 +2265,8 @@ mod tests {
 			front.step(Event::Wanted { track: name("video") }),
 			&[Action::Arm { at: None }],
 		);
-		// A replacement source does not re-splice it either.
+		// A replacement source asks for its copy, and splices the answer, for a group still
+		// read on the track. Nothing ends or lingers again.
 		front.step(Event::Selected {
 			best: Some(remote(2)),
 			serving_closing: false,
@@ -2054,10 +2276,39 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach {
-				source: 100,
-				drain: false,
+			&[
+				Action::Detach {
+					source: 100,
+					drain: false,
+				},
+				Action::Reroute {
+					track: name("video"),
+					source: 200,
+				},
+			],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
 			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(()),
+				delivered: false,
+			}),
+			&[],
 		);
 		let t1 = t0.saturating_add(LINGER);
 		front.step(Event::Unwanted {
@@ -2072,6 +2323,128 @@ mod tests {
 		);
 		front.step(Event::Forgotten { track: name("video") });
 		assert!(!front.tracks.contains_key(&name("video")));
+	}
+
+	/// A rerouted copy of a finished track joins its reads only from the serving source and
+	/// with the track's metadata. A lost route is asked again once the table moves. That
+	/// source refusing it, other than closing or losing the route, concludes the track:
+	/// nothing is rerouted again. A parked one keeps its linger either way.
+	#[test]
+	fn a_finished_track_splices_only_a_matching_copy_from_the_serving_source() {
+		for refusal in [None, Some(Ok(track::Info::default())), Some(Err(Error::NotFound))] {
+			let mut front = serving(remote(1), 100);
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Ok(()),
+				delivered: true,
+			});
+			let t0 = Instant::now();
+			front.step(Event::Unwanted {
+				track: name("video"),
+				now: t0,
+			});
+			front.step(Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			});
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			});
+			let answer = |source, closing, result| Event::TrackInfo {
+				track: name("video"),
+				source,
+				closing,
+				result,
+				retry: None,
+			};
+
+			// From a source the front no longer serves from, a closing one's refusal, or a
+			// lost route's.
+			assert_actions(front.step(answer(100, false, Ok(info()))), &[]);
+			assert_actions(front.step(answer(200, true, Err(Error::NotFound))), &[]);
+			assert_actions(front.step(answer(200, false, Err(Error::Unroutable))), &[]);
+			// The lost route is asked again once the table moves, and only then.
+			let moved = || Event::Selected {
+				best: Some(remote(2)),
+				serving_closing: false,
+			};
+			assert_actions(
+				front.step(moved()),
+				&[Action::Reroute {
+					track: name("video"),
+					source: 200,
+				}],
+			);
+			assert_actions(front.step(moved()), &[]);
+			match refusal {
+				// Other metadata, or a refusal.
+				Some(result) => {
+					assert_actions(
+						front.step(answer(200, false, result)),
+						&[Action::Conclude { track: name("video") }],
+					);
+					assert_actions(front.step(answer(200, false, Ok(info()))), &[]);
+					front.step(Event::Selected {
+						best: Some(remote(1)),
+						serving_closing: false,
+					});
+					assert_actions(
+						front.step(Event::Resolved {
+							route: 1,
+							result: Ok(300),
+						}),
+						&[Action::Detach {
+							source: 200,
+							drain: false,
+						}],
+					);
+				}
+				None => assert_actions(
+					front.step(answer(200, false, Ok(info()))),
+					&[Action::Splice {
+						track: name("video"),
+						source: 200,
+					}],
+				),
+			}
+			assert_index_matches_scan(&front);
+			assert_eq!(front.next_deadline(), Some(t0.saturating_add(LINGER)));
+		}
+	}
+
+	/// A local route has no stale view to wait out: its unroutable answer for a finished
+	/// track's rerouted copy concludes the track, as any other refusal does.
+	#[test]
+	fn a_local_routes_unroutable_answer_concludes_a_finished_track() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::TrackEnded {
+			track: name("video"),
+			source: 100,
+			closing: false,
+			result: Ok(()),
+			delivered: true,
+		});
+		front.step(Event::Selected {
+			best: Some(local(2)),
+			serving_closing: false,
+		});
+		front.step(Event::Resolved {
+			route: 2,
+			result: Ok(200),
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Err(Error::Unroutable),
+				retry: None,
+			}),
+			&[Action::Conclude { track: name("video") }],
+		);
 	}
 
 	/// An aborted track lingers the same way rather than staying for the life of
@@ -2606,6 +2979,45 @@ mod tests {
 				delivered: true,
 			}),
 			&[Action::Finish { track: name("video") }],
+		);
+	}
+
+	/// A draining copy ending cleanly while the serving source's query is in flight finishes
+	/// the track, and asks that source again: finishing lets go of the query, and a group
+	/// read still holding the track continues from the serving source's copy.
+	#[test]
+	fn a_drained_clean_end_reroutes_to_the_serving_source() {
+		let mut front = serving(remote(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Ok(()),
+				delivered: true,
+			}),
+			&[
+				Action::Finish { track: name("video") },
+				Action::Reroute {
+					track: name("video"),
+					source: 200,
+				},
+			],
 		);
 	}
 }

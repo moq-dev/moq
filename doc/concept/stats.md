@@ -333,10 +333,7 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
     "fetches": 0,
     "bytes": 1048576, "frames": 900, "groups": 30, "datagrams": 0,
     "inflated": 0,
-    "stale": { "bytes": 0, "frames": 0, "groups": 0 },
-    "announced": 1, "announced_closed": 0,
-    "broadcasts": 3, "broadcasts_closed": 1,
-    "subscriptions": 6, "subscriptions_closed": 2
+    "stale": { "bytes": 0, "frames": 0, "groups": 0 }
   }
 }
 ```
@@ -353,17 +350,12 @@ limit: the track then ends with `FRAME_TOO_LARGE` instead of going stale.
 | `inflated` | Bytes inflated from compressed groups for plain readers, counted once per group however many share the copy. Not part of `bytes`, which counts payload as stored or sent. |
 | `stale` | Payload skipped because it aged past a subscriber's latency budget, with `bytes`, `frames`, and `groups`. Disjoint from the top-level payload counters. |
 
-The last six fields are legacy spellings of the `*_started` and `*_ended`
-counters, still written so an older consumer reads a newer relay. A reader
-should prefer the canonical name and fall back to the legacy one.
-
 ### Presence
 
 ```json
 {
   "acme": {
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
-    "sessions": 12, "sessions_closed": 10,
     "sent_bytes": 1048576, "received_bytes": 524288,
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "membership": 0, "expired": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
@@ -376,8 +368,7 @@ should prefer the canonical name and fall back to the legacy one.
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
 or not any data flows: under a stats label on the tier for a bucket's `labels`,
 under the label on each tier for `presence.json`, and under every label in the
-bucket or node on the tier for its totals. `sessions` and `sessions_closed` are their
-legacy spellings. A session moved to a new tier ends on the old one and starts
+bucket or node on the tier for its totals. A session moved to a new tier ends on the old one and starts
 on the new. `sent_bytes` and `received_bytes` count the payload this node sent
 to and received from those sessions and HTTP requests, the same bytes a
 bucket's `paths` count. A changed label moves later presence and bytes; bytes

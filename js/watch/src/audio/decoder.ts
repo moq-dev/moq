@@ -206,6 +206,9 @@ export class Decoder {
 
 	// The subscription's max delay: the shared budget, raised to the delay plus the estimator's ceiling.
 	#subscribeMaxDelay = new Signal<Duration>(Duration.ZERO);
+	// The subscription's min delay: the playout delay plus the warmup, where the publisher starts a
+	// live join.
+	#subscribeMinDelay = new Signal<Duration>(Duration.ZERO);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
 	#delay = new Signal<Moq.Track.Delay>({});
@@ -369,6 +372,7 @@ export class Decoder {
 		const max = maxDelay(budget);
 		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0).min(DELAY_MAX);
 		this.#delay.set({ min: delay, max });
+		this.#subscribeMinDelay.set(delay.add(warmup));
 		this.#subscribeMaxDelay.set(max.add(warmup));
 	}
 
@@ -641,7 +645,7 @@ export class Decoder {
 				broadcast: active,
 				track: Catalog.track(track, identity),
 				priority: Catalog.PRIORITY.audio,
-				delay: new Derived([this.sync.out.delay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
+				delay: new Derived([this.#subscribeMinDelay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
 			});
 			if (!sub) {
 				this.#retire();

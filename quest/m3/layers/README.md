@@ -19,8 +19,8 @@ and with the child's sound mixed in.
 Replanned 2026-11-12 (maintainer, moq-dev/studio /quest-plan), after the
 studio chose a composition over a layer layout track for naming guests (its
 `quest/m2/compose/layout.md`). hang's `include` requires an included
-broadcast to share the listing catalog's PTS timeline, `media.clock`, and
-`media.join.interval`, which a guest's broadcast does not.
+broadcast to share the listing catalog's PTS timeline, `sync.clock`, and
+`sync.interval`, which a guest's broadcast does not.
 
 - **What:** ✅ a composition (rejected: a layer layout track naming tracks of
   one broadcast, the 2026-11-08 plan). Every independently published source
@@ -33,9 +33,9 @@ broadcast to share the listing catalog's PTS timeline, `media.clock`, and
 - **Shape:** ✅ all in the composition broadcast's catalog, its updates timed
   (rejected: the catalog listing children with a separate timed track for
   placement; everything in one track). A catalog update applies at its
-  timestamp ([that rule](/quest/m2/catalog-at-timestamp.md), m2).
+  timestamp (the hang draft's Catalog section, landed in m2).
 - **Clock:** ✅ each child carries the composer's offset from its PTS to the
-  composition's (rejected: aligning children by their `media.clock` wall
+  composition's (rejected: aligning children by their `sync.clock` wall
   times, which depends on publishers' clocks agreeing and drops the latency
   the composer saw). A child that restarts gets a new offset in a new update.
 - **Older players:** ✅ the composition names one child as main, and its

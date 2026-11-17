@@ -984,10 +984,13 @@ else
     METRICS_URL="http://127.0.0.1:${HARNESS_PORT}/metrics"
     printf '\n[internal]\nlisten = "127.0.0.1:%s"\n\n[stats]\nenabled = true\n' "$HARNESS_PORT" >>"$HARNESS_RUN/relay.toml"
 fi
-# Connection spans and clean closes must survive an inherited warn-only filter. The route key lane
-# reads the relay's debug line for each verified proof.
+# info stays the base, ahead of the inherited RUST_LOG so its own level still wins: a filter naming
+# only targets, such as quinn=debug, would otherwise silence every other warning, such as why the
+# relay refused a request. Connection spans and clean closes must survive an
+# inherited warn-only filter. The route key lane reads the relay's debug line for each verified proof,
+# and the idle-out check its upstream subscribe and fetch starts.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
-    "RUST_LOG=${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::setup=debug" \
+    "RUST_LOG=info,${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::setup=debug,moq_net::lite::subscriber=debug" \
     "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -1035,7 +1038,7 @@ subscribe_grant() {
 }
 
 # moq-cli logs each grant it receives over AUTH at debug, under `moq_net::auth`.
-CLI_LOG="${RUST_LOG:-info},moq_net::auth=debug"
+CLI_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net::auth=debug"
 
 # The lite version with AUTH, which no client offers by default. The clients the
 # harness reads a grant or a refusal from dial it. Compat dials its pinned version.
@@ -1044,8 +1047,10 @@ AUTH_VERSION="${INTEROP_VERSION:-moq-lite-07-wip}"
 # The `auth granted` line a token minted with at most one publish and one
 # subscribe pattern implies. Every client that prints one dials $AUTH_VERSION,
 # which carries AUTH, so a client that prints nothing never got its grant.
+# Each pattern is a JSON string, so a `\` in one reads `\\`.
 grant_line() {
-    local publish="${1:+\"$1\"}" subscribe="${2:+\"$2\"}"
+    local publish="${1//\\/\\\\}" subscribe="${2//\\/\\\\}"
+    publish="${publish:+\"$publish\"}" subscribe="${subscribe:+\"$subscribe\"}"
     printf 'auth granted publish=[%s] subscribe=[%s]' "$publish" "$subscribe"
 }
 
@@ -1275,9 +1280,10 @@ run_gst_audio() {
         pads+=("s.audio_$i" ! decodebin "name=decode$i" ! audioconvert ! "audio/x-raw,format=F32LE,layout=interleaved"
             ! identity "name=frames$i" ! filesink "location=$out.$i.pcm" buffer-mode=2)
     done
+    # gst-launch unescapes a `\` in a property value, so the name's are doubled to survive it.
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
         GST_TRACERS=log GST_DEBUG=GST_BUFFER:7,GST_EVENT:7 GST_DEBUG_NO_COLOR=1 GST_DEBUG_FILE="$out.trace" \
-        gst-launch-1.0 moqsrc name=s url="$url" broadcast="$broadcast" max-delay=5000 ${version:+connect-version="$version"} \
+        gst-launch-1.0 moqsrc name=s url="$url" broadcast="${broadcast//\\/\\\\}" max-delay=5000 ${version:+connect-version="$version"} \
         s.video_0 ! filesink location="$out.video" buffer-mode=2 "${pads[@]}" >"$out.gst" 2>&1 &
     pid=$!
     while :; do
@@ -1413,10 +1419,10 @@ PYCODE
                 (timeout -k 3 "$TIMEOUT" "${INTEROP_SUB_MOQ:-$MOQ}" --connect "$URL" \
                     ${INTEROP_VERSION:+--connect-version "$INTEROP_VERSION"} --broadcast "$broadcast" export fmp4 || [[ "$?" == 141 ]]) |
                     ffmpeg -hide_banner -loglevel error -copyts -i - \
-                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/$broadcast.raw" \
+                        -map 0:v:0 -frames:v 1 -f rawvideo -pix_fmt gray "$HARNESS_RUN/${broadcast//[^[:alnum:]._-]/-}.raw" \
                         -map 0:a:0 -af "atrim=duration=${AUDIO_MS}ms" -c:a pcm_f32le \
                         -stats_enc_pre "$audio_out.stats" -stats_enc_pre_fmt '{tb} {pts} {samp}' -f wav "$audio_out.wav"
-                [[ -s "$HARNESS_RUN/$broadcast.raw" ]] || return
+                [[ -s "$HARNESS_RUN/${broadcast//[^[:alnum:]._-]/-}.raw" ]] || return
                 python3 - "$audio_out" "$codecs" <<'PYCODE'
 import struct, sys
 out, codec = sys.argv[1:]
@@ -1493,7 +1499,7 @@ PYCODE
                 trap '' PIPE
                 GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
                     timeout -k 3 "$TIMEOUT" gst-launch-1.0 -q \
-                    moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} \
+                    moqsrc name=s url="$url" broadcast="${broadcast//\\/\\\\}" ${version:+connect-version="$version"} \
                     s.video_0 ! filesink location=/dev/stdout buffer-mode=2 \
                     2>/dev/null | head -c 1 | wc -c | tr -d ' ' || true
             )
@@ -2109,7 +2115,7 @@ run_fetch_round() {
     local pub="$1" sub="$2" mode="${3:-cached}" pid from version
     local name="fetch-$1-$2${3:+-$3}" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM"
     local label="CLI FETCH${3:+ $3}"
-    local started=$SECONDS why=""
+    local started=$SECONDS why="" fetch_failed=0
     local cell=(case="$label" publisher="$pub" subscriber="$sub" log="$LOGS/$name-sub.log")
     # The relay fills its miss with an upstream FETCH, which a JS publisher refuses on
     # moq-transport by design: it serves FETCH only over moq-lite.
@@ -2146,6 +2152,7 @@ run_fetch_round() {
         why="incorrect or missing FETCH payload"
         overall=1
         cat "$LOGS/$name-pub.log" "$LOGS/$name-sub.log"
+        fetch_failed=1
         harness_reap "$pid"
     fi
     exec 9>&-
@@ -2154,6 +2161,11 @@ run_fetch_round() {
     if [[ -n "$version" ]] && ! check_versions "$name" "$from" "$version"; then
         why="${why:-a relay connection negotiated another version}"
         overall=1
+    fi
+    # The run's last lines may be a later round's, so print the relay's side of this one. Printed
+    # after check_idle_outs waited for the round's connections, so it includes how each closed.
+    if ((fetch_failed)); then
+        relay_log_since "$from" | sed 's/^/  relay: /'
     fi
     cell+=(seconds=$((SECONDS - started)))
     if [[ -z "$why" ]]; then record pass "${cell[@]}"; else record fail "${cell[@]}" detail="$why"; fi
@@ -2166,7 +2178,8 @@ run_fetch_subscriber() {
             grep -qx 'fetch clean group=1 frames=3 bytes=196608' "$LOGS/$name-sub.log"
         return
     fi
-    timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
+    # At debug, a failed fetch says whether it went on the wire and how the relay answered it.
+    RUST_LOG="info,${RUST_LOG:+$RUST_LOG,}moq_net=debug" timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
         --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" 2>"$LOGS/$name-sub.log" &&
         python3 - "$LOGS/$name.json" <<'PYCODE'
 import base64, json, sys
@@ -2248,7 +2261,11 @@ check_denied() {
 run_matrix() {
     local pub sub broadcast from why allowed log started
     for pub in "${PUB_LIST[@]}"; do
-        broadcast="interop-${pub}-$$-${RANDOM}.hang"
+        # An escaped `/` in the name, one segment holding a slash (one moq-transport namespace
+        # field), so every client, grant, and relay carries it whole. Compat may run released
+        # binaries that split it, and names scratch files after the broadcast, so it keeps a plain one.
+        broadcast="interop-${pub}\\/$$-${RANDOM}.hang"
+        [[ "$COMPAT" -eq 0 ]] || broadcast="interop-${pub}-$$-${RANDOM}.hang"
         echo "=== publisher: $pub  broadcast: $broadcast ==="
         if is_broken "$pub"; then
             for sub in "${SUB_LIST[@]}"; do

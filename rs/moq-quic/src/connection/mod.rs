@@ -1646,9 +1646,9 @@ impl Connection {
 	/// fills the inflight it allows
 	/// ([`probe_inflight`](crate::congestion::Metrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
-	/// measures the path. A controller that paces its own probe cluster
-	/// ([`Controller::paces_probe`]) gets it filled at its pace instead, and may aim its probes at
-	/// the target ([`Controller::on_probe_target`]). Duplicates count against congestion control,
+	/// measures the path. A controller that paces its own probe cluster, which only the `lab`
+	/// feature's GoogCC does, gets it filled at its pace instead, and may aim its probes at the
+	/// target. Duplicates count against congestion control,
 	/// as [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
 	/// attempt that misses the target sits out a few seconds before retrying it, and a changed
 	/// target is retried at once. A controller that never probes ([`Controller::probes`])
@@ -1658,9 +1658,9 @@ impl Connection {
 			return;
 		}
 		self.bandwidth_probe.set_target(bytes_per_second);
-		self.path.congestion.on_probe_target(bytes_per_second);
+		bandwidth_probe::report_target(&mut *self.path.congestion, bytes_per_second);
 		if let Some((_, prev)) = &mut self.prev_path {
-			prev.congestion.on_probe_target(bytes_per_second);
+			bandwidth_probe::report_target(&mut *prev.congestion, bytes_per_second);
 		}
 	}
 
@@ -1677,7 +1677,7 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn path_changed(&mut self, now: Instant) {
 		self.path.reset(now, self.rng.random(), &self.config);
-		self.path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *self.path.congestion, self.bandwidth_probe.target());
 		// The rebuilt controller never sees state the old one gave packets still in flight.
 		for space in SpaceId::iter() {
 			for info in self.spaces[space].sent_packets.values_mut() {
@@ -3454,7 +3454,7 @@ impl Connection {
 				&self.config,
 			)
 		};
-		new_path.congestion.on_probe_target(self.bandwidth_probe.target());
+		bandwidth_probe::report_target(&mut *new_path.congestion, self.bandwidth_probe.target());
 		new_path.challenge = Some(Challenge::new(self.rng.random()));
 		let prev_pto = self.pto(SpaceId::Data);
 
