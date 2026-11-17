@@ -1,8 +1,8 @@
-# [S] moq-c's server session test closes its client after the server did
+# [S] moq-c's session tests close their client after the server did
 
 ## Goal
 
-`rs/moq-c/src/test.rs::server_accepts_a_session` passes every run.
+`rs/moq-c/src/test.rs::server_accepts_a_session` and `rs/moq-c/src/test/parity.rs::session_tokens_and_grants` pass every run.
 
 ## Plan
 
@@ -23,5 +23,10 @@ the accepted session, its early end is a library bug, fixed there with a
 regression test. Otherwise the test changes: it waits on the client's terminal
 callback and drops the `moq_session_close(client) == 0` assertion, or asserts
 the close is negative after that callback, as `moq_server_close` already does.
+
+`session_tokens_and_grants` has the same shape: it closes the accepted session,
+waits for its terminal callback, then asserts `moq_session_close(client) == 0`
+(`parity.rs:530`). It fails 3 of 8 runs alone at main a79bbae919, found while
+merging main into #8964. Fix both the same way.
 
 Public API: none. Wire: none.
