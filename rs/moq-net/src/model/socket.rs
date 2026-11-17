@@ -68,7 +68,7 @@ fn endpoint_path(prefix: &Path, role: Role, id: &str) -> Result<Path, Error> {
 /// Whether `path` is an endpoint's broadcast, which only routes sessions and carries no
 /// media, so a worker that acts on every announced broadcast can skip it.
 pub fn is_endpoint(path: &Path) -> bool {
-	let parent = path.as_str().rsplit('/').nth(1);
+	let parent = path.parts().nth_back(1);
 	[Role::Server, Role::Client]
 		.into_iter()
 		.any(|role| parent == Some(role.segment()))
@@ -1134,7 +1134,7 @@ mod tests {
 		server.broadcast().close();
 		assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
 		assert!(
-			accepted.producer.append_group(0).is_err(),
+			accepted.producer.append_group(crate::Timestamp::unscaled(0)).is_err(),
 			"a handed-out half outlived the end"
 		);
 		assert!(matches!(bob.dial_track("alice", None), Err(Error::Closed)));

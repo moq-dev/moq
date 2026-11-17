@@ -3,7 +3,7 @@ import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals
 import * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway as Received } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
@@ -166,7 +166,7 @@ export class Connection implements Session {
 	readonly peerImplementation = this.#peerImplementation.promise;
 
 	// The peer's GOAWAY. Lite carries no deadline, so only the URI is set.
-	#goaway = new Once<Drain>();
+	#goaway = new Once<Received>();
 
 	/**
 	 * The {@link Role} the peer advertised in its SETUP, for a server deciding whether the
@@ -229,6 +229,8 @@ export class Connection implements Session {
 			},
 			handle,
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
+			// Without AUTH, the server checks a client's credential before its SETUP, which the client reads after going live.
+			awaiting: client && hasSetupStream(version) && !hasAuth(version),
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -608,6 +610,7 @@ export class Connection implements Session {
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
+			this.#auth.accepted();
 			this.#peerRole.set(setup.role);
 			this.#peerImplementation.resolve(setup.implementation);
 		} else {
@@ -648,7 +651,7 @@ export class Connection implements Session {
 	}
 
 	/** Settles with the peer's GOAWAY; see {@link Session.draining}. */
-	get draining(): GetPromise<Drain> {
+	get draining(): GetPromise<Received> {
 		return this.#goaway;
 	}
 

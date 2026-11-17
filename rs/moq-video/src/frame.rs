@@ -613,7 +613,7 @@ impl Surface {
 			// download and resize on the CPU.
 			#[cfg(all(target_os = "linux", feature = "vaapi"))]
 			Surface::DmaBuf(buffer) if output == crate::Output::Native => {
-				match vaapi::resize(buffer, size, config.vaapi.as_deref()) {
+				match vaapi::resize(buffer, size, config.device.render()) {
 					Ok(scaled) => Surface::DmaBuf(scaled),
 					Err(err) => {
 						static WARN_ONCE: std::sync::Once = std::sync::Once::new();

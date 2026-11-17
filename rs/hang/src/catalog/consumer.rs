@@ -151,9 +151,9 @@ mod test {
 				.unwrap();
 			let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
 			let published = serde_json::json!({ "echo": { "path": reference } }).to_string();
-			let mut group = track.append_group(0).unwrap();
+			let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 			group.write_frame(moq_net::Timestamp::ZERO, published).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let result = consumer.next().await;
 			if accepted {
 				assert!(result.unwrap().unwrap().value.echo.is_some());
@@ -177,9 +177,9 @@ mod test {
 				crate::catalog::AudioConfig::new(crate::catalog::AudioCodec::Opus, 48_000, channels),
 			);
 			let at = moq_net::Timestamp::from_millis(ms).unwrap();
-			let mut group = track.append_group(ms).unwrap();
+			let mut group = track.append_group(at).unwrap();
 			group.write_frame(at, published.to_json().unwrap()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			assert_eq!(
 				consumer.next().await.unwrap(),
 				Some(moq_json::Timed::new(published, at)),
@@ -209,12 +209,14 @@ mod test {
 			);
 			for ms in [1_000, 2_000, 3_000] {
 				let mut catalog = Catalog::<()>::default();
-				catalog.media.join = crate::catalog::Join::new(std::time::Duration::from_millis(ms));
-				let mut group = track.append_group(ms).unwrap();
+				catalog.sync.interval = Some(std::time::Duration::from_millis(ms));
+				let mut group = track
+					.append_group(moq_net::Timestamp::from_millis(ms).unwrap())
+					.unwrap();
 				group
 					.write_frame(moq_net::Timestamp::from_millis(ms).unwrap(), catalog.to_json().unwrap())
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 			drop(track.finish().unwrap());
 
@@ -247,11 +249,11 @@ mod test {
 			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
 			.unwrap();
 		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5,"video":[]}"#)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(matches!(
 			consumer.next().await,
 			Err(crate::Error::UnsupportedVersion(5))

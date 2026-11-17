@@ -204,12 +204,12 @@ async fn a_recording_round_trips() {
 				.write_frame(pts, Bytes::from(vec![sequence as u8, index as u8, 0xff]))
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		sleep(Duration::from_millis(10)).await;
 	}
 	let mut group = log.create_group(group::Info { start: 0 }).unwrap();
 	group.write_frame(moq_net::Timestamp::unscaled(0), "a").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	sleep(Duration::from_millis(10)).await;
 	let _video = video.finish().unwrap();
 	let _log = log.finish().unwrap();
@@ -615,7 +615,7 @@ async fn a_re_added_track_replays_both_runs() {
 			let mut group = track.create_group(group::Info { start: sequence }).unwrap();
 			let pts = Timestamp::from_millis(sequence * 1000).unwrap();
 			group.write_frame(pts, format!("run{run}/{sequence}")).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let track = track.finish().unwrap();
 		sleep(Duration::from_secs(2)).await;

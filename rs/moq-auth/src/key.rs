@@ -781,11 +781,9 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
@@ -944,12 +942,12 @@ mod tests {
 			.unwrap();
 		let allowed = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["allowed/room/**"]),
+			publish: patterns(&["allowed/room/**"]).into(),
 			..Default::default()
 		};
 		let denied = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["other/**"]),
+			publish: patterns(&["other/**"]).into(),
 			..Default::default()
 		};
 
@@ -967,7 +965,7 @@ mod tests {
 		let key = create_test_key();
 		let claims = |root: &str| Claims {
 			root: root.into(),
-			publish: patterns(&["**"]),
+			publish: patterns(&["**"]).into(),
 			..Default::default()
 		};
 		let scope = |root: &str| crate::Scope {
@@ -1000,7 +998,7 @@ mod tests {
 	fn test_key_derived_material_never_stale() {
 		let claims = Claims {
 			root: "test-path".into(),
-			publish: patterns(&["test-pub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
 			..Default::default()
 		};
 
@@ -1062,11 +1060,9 @@ mod tests {
 	fn test_key_sign_invalid_claims() {
 		let key = create_test_key();
 		let invalid_claims = Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&[]),
-			subscribe: patterns(&[]),
+			publish: patterns(&[]).into(),
+			subscribe: patterns(&[]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1242,11 +1238,9 @@ mod tests {
 	fn test_key_verify_token_without_exp() {
 		let key = create_test_key();
 		let claims = Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["**"]),
-			subscribe: patterns(&["**"]),
+			publish: patterns(&["**"]).into(),
+			subscribe: patterns(&["**"]).into(),
 			expires: None,
 			issued: None,
 			not_before: None,
@@ -1264,11 +1258,9 @@ mod tests {
 	fn test_key_round_trip() {
 		let key = create_test_key();
 		let original_claims = Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
@@ -1866,12 +1858,12 @@ mod tests {
 
 		let inside = Claims {
 			root: "demo/room".into(),
-			publish: patterns(&["alice"]),
+			publish: patterns(&["alice"]).into(),
 			..Default::default()
 		};
 		let outside = Claims {
 			root: "demo".into(),
-			publish: patterns(&["lobby/**"]),
+			publish: patterns(&["lobby/**"]).into(),
 			..Default::default()
 		};
 		assert!(key.verify(&key.sign(&inside).unwrap()).is_ok());

@@ -176,7 +176,7 @@ export default defineConfig({
 							items: [
 								{ text: "RTMP", link: "/bin/rtmp" },
 								{ text: "SRT", link: "/bin/srt" },
-								{ text: "WebRTC", link: "/bin/rtc" },
+								{ text: "WebRTC", link: "/bin/webrtc" },
 								{ text: "HLS", link: "/bin/hls" },
 							],
 						},

@@ -7,6 +7,8 @@ import dev.moq.audio.ReadFrame as AudioReadFrame
 import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
+import dev.moq.json.StreamConsumer
+import dev.moq.json.StreamProducer
 import dev.moq.json.Timed
 import dev.moq.json.WindowConfig
 import dev.moq.json.WindowConsumer
@@ -315,7 +317,11 @@ class SmokeTest {
     @Test
     fun `broadcast consumer fetches cached group`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "events",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
             val group = track.appendGroup()
             group.writeFrame(
                 Frame(
@@ -333,7 +339,7 @@ class SmokeTest {
                         0uL,
                         FetchGroupOptions(priority = 3),
                     )
-            assertEquals(0uL, fetched.sequence())
+            assertEquals(0uL, fetched.start())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
         }
@@ -351,7 +357,7 @@ class SmokeTest {
             val track =
                 broadcast.publishTrack(
                     "backlog",
-                    TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL),
+                    TrackInfo(maxAge = null, timescale = 1_000_000uL),
                 )
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
@@ -372,8 +378,8 @@ class SmokeTest {
                         order = Order.ASCENDING,
                     )
                 )
-            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
-            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
+            val starts = List(3) { checkNotNull(consumer.recvGroup()).start() }
+            assertEquals(listOf(0uL, 1uL, 2uL), starts)
         }
     }
 
@@ -405,7 +411,11 @@ class SmokeTest {
     @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
             val consumer = track.consume(null)
             track.appendGroup().finish()
             track.appendGroup().finish()
@@ -439,17 +449,13 @@ class SmokeTest {
     }
 
     @Test
-    fun `an omitted max age is zero and the unlimited flag sets none`() {
+    fun `an omitted info has a zero max age and a null one sets none`() {
         BroadcastProducer().use { broadcast ->
             val omitted = broadcast.publishTrack("omitted", null).consume(null).info()
             assertEquals(java.time.Duration.ZERO, omitted.maxAge)
             val unlimited =
-                broadcast
-                    .publishTrack("unlimited", TrackInfo(maxAgeUnlimited = true))
-                    .consume(null)
-                    .info()
+                broadcast.publishTrack("unlimited", TrackInfo(maxAge = null)).consume(null).info()
             assertNull(unlimited.maxAge)
-            assertTrue(unlimited.maxAgeUnlimited)
         }
     }
 
@@ -526,7 +532,7 @@ class SmokeTest {
                     consumer,
                     dev.moq.media.GroupConfig(
                         rendition = dev.moq.media.AudioRendition(name, audio),
-                        sequence = 5_000_000uL,
+                        start = 5_000_000uL,
                         options = FetchGroupOptions(priority = 3),
                     ),
                 )
@@ -535,7 +541,7 @@ class SmokeTest {
             media.finish()
 
             fetched.use {
-                assertEquals(5_000_000uL, it.sequence())
+                assertEquals(5_000_000uL, it.start())
                 val frames = it.frames().toList()
                 assertEquals(1, frames.size)
                 val frame = frames.single()
@@ -572,7 +578,9 @@ class SmokeTest {
                 val track =
                     broadcast.publishTrack(
                         "ticks",
-                        timestamp.scale?.let { TrackInfo(timescale = it) },
+                        timestamp.scale?.let {
+                            TrackInfo(maxAge = java.time.Duration.ZERO, timescale = it)
+                        },
                     )
                 val consumer = track.consume(null)
                 track.writeFrame(Frame(payload = ByteArray(0), timestamp = timestamp))
@@ -585,7 +593,11 @@ class SmokeTest {
     @Test
     fun `out of range timestamps are refused`() {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("ticks", TrackInfo(timescale = 90_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "ticks",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 90_000uL),
+                )
             for (timestamp in
                 listOf(
                     Timestamp(1uL, 0uL),
@@ -627,7 +639,11 @@ class SmokeTest {
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = true)
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 for (n in 1..4) producer.update(
@@ -653,13 +669,42 @@ class SmokeTest {
     }
 
     @Test
+    fun `json abortUnwanted keeps a reader that joined late`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track =
+                broadcast.publishTrack(
+                    "events",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
+            val producer = StreamProducer(broadcast, track)
+            val demand = producer.demand()
+            while (demand.wantedChanged() != null) {}
+
+            val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
+            assertFalse(producer.abortUnwanted(7u))
+            producer.append("\"still serving\"", Timestamp(0uL, 1_000uL))
+            assertEquals("\"still serving\"", late.next()?.value)
+
+            while (demand.wantedChanged() == null) {}
+            late.cancel()
+            while (demand.wantedChanged() != null) {}
+            assertTrue(producer.abortUnwanted(7u))
+            assertFailsWith<MoqException.Closed> { producer.abortUnwanted(7u) }
+        }
+    }
+
+    @Test
     fun `json window yields pushes and pops in order`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = WindowConfig()
             val track =
                 broadcast.publishTrack(
                     "log",
-                    TrackInfo(timescale = 1_000_000uL, compression = Compression.DEFLATE),
+                    TrackInfo(
+                        maxAge = java.time.Duration.ZERO,
+                        timescale = 1_000_000uL,
+                        compression = Compression.deflate(),
+                    ),
                 )
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
@@ -696,7 +741,11 @@ class SmokeTest {
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 assertEquals("status", demand.name())
@@ -715,7 +764,11 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
             // A demand watcher does not own the writer; keep it alive through collection.
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
@@ -738,7 +791,11 @@ class SmokeTest {
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 producer.update("""{"state":"raw"}""", Timestamp(1uL, 1_000uL))
 
@@ -1354,7 +1411,7 @@ class SmokeTest {
                                     ),
                                 output =
                                     VideoEncoderOutput(
-                                        codec = VideoCodec.H264,
+                                        codec = VideoCodec.h264(),
                                         kind = softwareEncoder,
                                     ),
                                 track = "camera",

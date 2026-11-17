@@ -712,6 +712,6 @@ inflated size. The harness enables the relay's `[stats]` and `[internal]` listen
 The HLS grid lane has the Rust publisher (moq-mux) and each native JS runtime
 (`@moq/hang`) publish one fixed frame schedule, with GOPs on and off the 2 s grid, a
 discontinuity, and a finish, and the Rust reader prints each broadcast's declared
-`media.join.interval` and every rendition's groups with their first pts, the input an HLS
+`sync.interval` and every rendition's groups with their first pts, the input an HLS
 edge numbers segments from. The two readouts must be identical, so a browser-published
 broadcast exports as HLS like a native one.

@@ -50,9 +50,9 @@ pub struct MoqRouteOptions {
 	pub cost: u64,
 	/// A stable instance for the stream, or `None` to mint a fresh one.
 	///
-	/// Set one only for a publisher that continues its group sequences across restarts and
+	/// Set one only for a publisher that continues its group starts across restarts and
 	/// raises `epoch` on each, or to forward an observed route's stream as is: readers stitch
-	/// every route of one instance together, so restarting the sequences under an old instance
+	/// every route of one instance together, so restarting the starts under an old instance
 	/// splices unrelated groups into their tracks. Naming an instance grants nothing:
 	/// publishing still needs the path's grant.
 	#[uniffi(default = None)]
@@ -712,7 +712,7 @@ impl MoqBroadcastRequest {
 
 	/// Serve a held broadcast under the claim's instance without announcing an exact route.
 	///
-	/// Every answer at this path must continue the same sequences and bytes. Start a new
+	/// Every answer at this path must continue the same group starts and bytes. Start a new
 	/// claim for different content, or route a job, whose end moves the claim to another
 	/// instance.
 	pub fn serve(&self, broadcast: &Arc<MoqBroadcastConsumer>) -> Result<(), MoqError> {

@@ -133,8 +133,9 @@ Any broadcasts and subscriptions are transparently proxied by the CDN behind the
 ## Broadcast
 A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
-A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with `/` or contains two in a row; the empty path has no segments and prefixes every path.
+A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with a separator or contains two in a row; the empty path has no segments and prefixes every path.
 A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION, or in a claim refused (see [Refused Content](#refused-content)).
+A segment is the text between two `/` that no `\` escapes, so `a\/b` is one segment, one namespace field holding a `/`; every rule that counts, matches, or compares segments reads them this way, and a prefix never ends inside an escape.
 A continuous stream is named by an Instance, carried on its claims (see [ANNOUNCE_START](#announce-start)): a path and an Instance name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
 Within one Instance, group sequences never restart and never name two different groups, so claims sharing it serve the same bytes; two Instances are independent streams, never stitched together.
 A publisher that starts its group sequences over, such as a restarted process, uses a new Instance, while replicas of the same content share one.
@@ -2322,7 +2323,7 @@ A value greater than 2^53 - 1 is invalid and MUST close the session with PROTOCO
 The acceptor revokes a lapsed grant with AUTH_ERROR; the opener uses Expires to present a replacement token in time.
 
 ### Path Pattern {#path-pattern}
-A pattern is a set of broadcast paths, written as `/`-separated segments.
+A pattern is a set of broadcast paths, written as `/`-separated segments split as a path's are, so a literal names a segment holding a `/` by escaping it.
 Each segment is one of:
 
 - a literal, matching that segment exactly;
@@ -2477,7 +2478,7 @@ An application-specific payload.
 
 - Limited a broadcast path to 32 segments and 4,096 bytes.
 - A path never has an empty segment, so a leading, trailing, or doubled `/` is a PROTOCOL_VIOLATION rather than a second spelling of the same path.
-- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field.
+- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field. An escaped `/` never splits a segment, so one namespace field is one segment wherever segments are counted or matched.
 - Hid claims with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Replaced ANNOUNCE_OK Active Count with an ordered SYNCED event (0x4), marking the initial set of the prefix it names without retaining claims that end before delivery.
 - Added `Instance` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Instance` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Instance is non-empty UTF-8 text naming one continuous stream, and a path and an Instance name one Broadcast; the Epoch is a counter within one Instance. A relay MAY move a subscription between claims with the same Instance, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between claims with different Instances. Within one Instance only its highest Epoch is eligible. A request's Instance is empty when it pins none. Replaces the first-hop identity.

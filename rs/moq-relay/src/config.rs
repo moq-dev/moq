@@ -370,7 +370,7 @@ impl Config {
 		let implementation = self
 			.listen
 			.implementation
-			.get_or_insert_with(|| format!("moq-relay/{} {}", env!("CARGO_PKG_VERSION"), moq_net::IMPLEMENTATION))
+			.get_or_insert_with(|| format!("{} {}", crate::auth::RELAY, moq_net::IMPLEMENTATION))
 			.clone();
 		self.connect.implementation = Some(implementation);
 		Ok(Resolved(self))
@@ -509,7 +509,7 @@ mod tests {
 			"--cluster-connect-api-tls-root",
 			"MOQ_CLUSTER_CONNECT_API_TLS_ROOT",
 			"api.pem",
-			"--cluster-api-tls-root",
+			"--cluster-api-root",
 		),
 	];
 
@@ -544,7 +544,7 @@ mod tests {
 		let path = dir.path().join("obsolete.toml");
 		for (body, replacement) in [
 			("[cluster]\nconnect_api = 'peers.json'", "[cluster.api] url"),
-			("[cluster]\nconnect_api_tls_root = []", "[cluster.api.tls] root"),
+			("[cluster]\nconnect_api_tls_root = []", "[cluster.api] root"),
 		] {
 			std::fs::write(&path, body).unwrap();
 			let error =
@@ -1792,8 +1792,13 @@ ws = false
 		);
 	}
 
-	/// The variables a QUIC-LB setting could also be read from.
-	const QUIC_LB_ENV: &[&str] = &["MOQ_LISTEN_QUIC_LB_ID", "MOQ_LISTEN_QUIC_LB_NONCE"];
+	/// The variables a QUIC-LB setting could also be read from, current and released.
+	const QUIC_LB_ENV: &[&str] = &[
+		"MOQ_LISTEN_LB_ID",
+		"MOQ_LISTEN_LB_NONCE",
+		"MOQ_LISTEN_QUIC_LB_ID",
+		"MOQ_LISTEN_QUIC_LB_NONCE",
+	];
 
 	/// Merge `body` as the config file named `name` with `cli`, and require that the
 	/// listener refuses to start with an error containing `needle`.
@@ -1813,7 +1818,7 @@ ws = false
 	/// A QUIC-LB nonce with no server id stops startup from TOML, and CLI
 	/// assignments override the same nested fields.
 	///
-	/// The CLI flag pair already requires `--listen-quic-lb-id`, so this does not
+	/// The CLI flag pair already requires `--listen-lb-id`, so this does not
 	/// add a second command-line error for that spelling.
 	#[test]
 	fn quic_lb_nonce_and_conflicts_refuse_to_start() {
@@ -1821,16 +1826,11 @@ ws = false
 			return;
 		}
 
-		let err = Config::parse_and_merge(["moq-relay", "--listen-quic-lb-nonce", "8"])
+		let err = Config::parse_and_merge(["moq-relay", "--listen-lb-nonce", "8"])
 			.expect_err("the flag pair is already required");
-		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
+		assert!(err.to_string().contains("--listen-lb-id"), "{err}");
 
-		refuse_quic_lb(
-			"nonce.toml",
-			"[listen.lb]\nnonce = 8\n",
-			&[],
-			"requires --listen-quic-lb-id",
-		);
+		refuse_quic_lb("nonce.toml", "[listen.lb]\nnonce = 8\n", &[], "requires --listen-lb-id");
 
 		{
 			let dir = tempfile::tempdir().unwrap();
@@ -1844,7 +1844,7 @@ ws = false
 			let config = Config::parse_and_merge([
 				std::ffi::OsString::from("moq-relay"),
 				path.into(),
-				"--listen-quic-lb-id".into(),
+				"--listen-lb-id".into(),
 				"ee".into(),
 			])
 			.expect("CLI overrides the same nested config field");
@@ -1858,12 +1858,33 @@ ws = false
 	#[test]
 	fn quic_lb_env_nonce_without_an_id_refuses_to_start() {
 		if !test_env::Env::without(QUIC_LB_ENV)
-			.set("MOQ_LISTEN_QUIC_LB_NONCE", "8")
+			.set("MOQ_LISTEN_LB_NONCE", "8")
 			.isolate()
 		{
 			return;
 		}
 		let err = Config::parse_and_merge(["moq-relay"]).expect_err("env nonce without id");
-		assert!(err.to_string().contains("--listen-quic-lb-id"), "{err}");
+		assert!(err.to_string().contains("--listen-lb-id"), "{err}");
+	}
+
+	/// The released `--listen-quic-lb-*` spellings stop startup naming their
+	/// replacement, from the command line and the environment alike.
+	#[test]
+	fn released_quic_lb_spellings_name_their_replacement() {
+		if !test_env::Env::without(QUIC_LB_ENV)
+			.set("MOQ_LISTEN_QUIC_LB_NONCE", "8")
+			.isolate()
+		{
+			return;
+		}
+		let err = Config::parse_and_merge(["moq-relay", "--listen-quic-lb-id", "ab"])
+			.expect_err("released spellings are refused")
+			.to_string();
+		for line in [
+			"--listen-quic-lb-id / MOQ_LISTEN_QUIC_LB_ID -> --listen-lb-id / MOQ_LISTEN_LB_ID",
+			"--listen-quic-lb-nonce / MOQ_LISTEN_QUIC_LB_NONCE -> --listen-lb-nonce / MOQ_LISTEN_LB_NONCE",
+		] {
+			assert!(err.contains(line), "missing {line:?} from {err}");
+		}
 	}
 }

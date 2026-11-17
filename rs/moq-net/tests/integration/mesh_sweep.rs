@@ -367,7 +367,7 @@ impl Mesh {
 			group
 				.write_frame(group.at_start(), bytes::Bytes::from(path.clone()))
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			route.announce().unwrap();
 			Held { route, _track: track }
 		};

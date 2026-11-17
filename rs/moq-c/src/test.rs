@@ -3882,7 +3882,7 @@ fn double_close_all_resource_types() {
 
 /// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
 /// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
-/// what a live publisher does, and `_seek` does the same with a chosen sequence number.
+/// what a live publisher does, and `_seek` does the same with a chosen start.
 #[test]
 fn media_cut_bounds_audio_groups() {
 	let origin = id(moq_origin_create());
@@ -4865,7 +4865,7 @@ fn track_request_accepted_after_the_broadcast_closes_is_refused() {
 fn fetch_group(
 	broadcast: u32,
 	name: &str,
-	sequence: u64,
+	start: u64,
 	priority: i8,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -4879,7 +4879,7 @@ fn fetch_group(
 		let res = async {
 			let track = consumer.track(&name)?;
 			let options = moq_net::group::Fetch::default().with_priority(priority);
-			let mut group = track.fetch_group(sequence, options).await?;
+			let mut group = track.fetch_group(start, options).await?;
 			let index = group.index();
 			let frame = group.read_frame().await?.expect("expected a fetched frame");
 			Ok((index, frame.payload.to_vec()))
@@ -4903,13 +4903,13 @@ fn track_dynamic_serves_a_fetch_miss() {
 
 	let fetch = fetch_group(broadcast, "data", 5, 11);
 	let request = id(group_cb.recv());
-	let mut sequence = 0u64;
+	let mut start = 0u64;
 	let mut priority = 0i8;
 	let mut frame_start = 1u64;
-	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
+	assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
 	assert_eq!(unsafe { moq_group_request_frame_start(request, &mut frame_start) }, 0);
-	assert_eq!(sequence, 5);
+	assert_eq!(start, 5);
 	assert_eq!(priority, 11);
 	assert_eq!(frame_start, 0);
 
@@ -4980,19 +4980,19 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		reader
 	};
 	let first = id(group_cb.recv_reading(&mut reader));
-	let mut sequence = 0u64;
-	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
-	assert_eq!(sequence, 7);
+	let mut start = 0u64;
+	assert_eq!(unsafe { moq_group_request_start(first, &mut start) }, 0);
+	assert_eq!(start, 7);
 
 	// Reading only 8, so the fill owes nothing once 8 is let go.
 	reader.update(ascending(8, Some(8))).unwrap();
 	let next = id(group_cb.recv_reading(&mut reader));
-	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
-	assert_eq!(sequence, 8, "group 7, which nobody reads, held the fill back");
+	assert_eq!(unsafe { moq_group_request_start(next, &mut start) }, 0);
+	assert_eq!(start, 8, "group 7, which nobody reads, held the fill back");
 	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
 
 	assert_eq!(moq_group_request_free(next), 0);
@@ -5025,7 +5025,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
@@ -5041,15 +5041,15 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	};
 	let waiter = kio::Waiter::noop();
 
-	let mut sequence = 0u64;
+	let mut start = 0u64;
 	for reject in [
 		|request| moq_group_request_abort(request, 9),
 		|request| moq_group_request_free(request),
 	] {
 		let mut reader = subscribe();
 		let request = id(group_cb.recv_reading(&mut reader));
-		assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
-		assert_eq!(sequence, 6);
+		assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
+		assert_eq!(start, 6);
 		assert_eq!(reject(request), 0);
 	}
 
@@ -5090,9 +5090,9 @@ fn track_request_dynamic_survives_accept() {
 	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
 
 	let group_request = id(group_cb.recv());
-	let mut sequence = 0u64;
-	assert_eq!(unsafe { moq_group_request_sequence(group_request, &mut sequence) }, 0);
-	assert_eq!(sequence, 9);
+	let mut start = 0u64;
+	assert_eq!(unsafe { moq_group_request_start(group_request, &mut start) }, 0);
+	assert_eq!(start, 9);
 	let group = id(moq_group_request_accept(group_request));
 	let payload = b"archive";
 	assert_eq!(
@@ -7406,16 +7406,16 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
-	assert!(config.has_backoff_max);
 	assert_eq!(
-		config.backoff_max_us,
-		expected.connect.backoff.max().unwrap_or_default().as_micros() as u64
+		config
+			.has_backoff_max
+			.then(|| std::time::Duration::from_micros(config.backoff_max_us)),
+		expected.connect.backoff.max()
 	);
-	assert!(config.has_backoff_timeout);
-	assert_eq!(
-		expected.connect.backoff.timeout().unwrap_or_default(),
-		std::time::Duration::from_micros(config.backoff_timeout_us)
-	);
+	assert!(!config.backoff_max_unlimited);
+	// No give-up is both the default and the absent value.
+	assert!(!config.has_backoff_timeout);
+	assert_eq!(expected.connect.backoff.timeout(), None);
 
 	let websocket = expected.connect.websocket.resolve();
 	assert!(config.has_websocket_enabled);
@@ -7454,30 +7454,53 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 }
 
-/// Presence flags preserve explicit zero durations; backoff zero retries forever,
-/// while keep-alive zero resolves to the derived interval.
+/// Presence flags preserve explicit zero durations; keep-alive zero resolves to the
+/// derived interval.
 #[test]
 fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();
-	config.backoff_timeout_us = 0;
-	config.has_backoff_timeout = true;
 	config.quic_keep_alive_us = 0;
 	config.has_quic_keep_alive = true;
-
-	let explicit = parsed(&config);
 	assert_eq!(
-		explicit.connect.backoff.timeout,
+		parsed(&config).quic.keep_alive,
 		Some((std::time::Duration::ZERO).into())
 	);
-	assert_eq!(explicit.quic.keep_alive, Some((std::time::Duration::ZERO).into()));
 
-	// Without the flags the same zeroes mean nothing at all.
-	let defaults = parsed(&client_config());
-	assert_ne!(
-		defaults.connect.backoff.timeout,
-		Some((std::time::Duration::ZERO).into())
-	);
-	assert_eq!(defaults.quic.resolve().keep_alive, None);
+	// Without the flag the same zero means nothing at all.
+	assert_eq!(parsed(&client_config()).quic.resolve().keep_alive, None);
+}
+
+/// The backoff's `max` and `timeout` each read absent as the default, off as no bound, and
+/// zero as zero, resolving to what moq-tokio's flags `none` and `0s` do.
+#[test]
+fn a_backoff_bound_is_unset_off_zero_or_a_value() {
+	let defaults = crate::client::Config::default().connect.backoff;
+	let three = std::time::Duration::from_secs(3);
+	let bounds = |config: &moq_client_config| {
+		let backoff = parsed(config).connect.backoff;
+		(backoff.max(), backoff.timeout())
+	};
+
+	assert_eq!(bounds(&client_config()), (defaults.max(), defaults.timeout()));
+	assert_eq!(defaults.timeout(), None, "absent is already off");
+
+	let mut off = client_config();
+	off.backoff_max_unlimited = true;
+	assert_eq!(bounds(&off), (None, None));
+
+	for value in [std::time::Duration::ZERO, three] {
+		let mut set = client_config();
+		set.backoff_max_us = value.as_micros() as u64;
+		set.has_backoff_max = true;
+		set.backoff_timeout_us = value.as_micros() as u64;
+		set.has_backoff_timeout = true;
+		assert_eq!(bounds(&set), (Some(value), Some(value)), "{value:?}");
+	}
+
+	let mut both = client_config();
+	both.has_backoff_max = true;
+	both.backoff_max_unlimited = true;
+	assert!(unsafe { crate::parse_client(Some(&both)) }.is_err());
 }
 
 #[test]
@@ -8952,7 +8975,7 @@ fn join_hint_declares_the_join_interval() {
 	for i in 0..60u64 {
 		if i == 50 {
 			assert_eq!(
-				published_catalog(broadcast).media.join,
+				published_catalog(broadcast).sync.interval,
 				None,
 				"no window has closed yet"
 			);
@@ -8966,7 +8989,7 @@ fn join_hint_declares_the_join_interval() {
 		}
 	}
 	assert_eq!(
-		published_catalog(broadcast).media.interval(),
+		published_catalog(broadcast).sync.interval,
 		Some(std::time::Duration::from_millis(500)),
 		"the hint, not the 100 ms groups measured"
 	);

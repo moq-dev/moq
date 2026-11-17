@@ -23,10 +23,10 @@ fun dev.moq.video.Consumer.reads(): Flow<dev.moq.video.Read> = pull({ cancel() }
 /** Stream of encoded media frames, gaps, and encoder ends in delivery order. */
 fun dev.moq.media.TrackConsumer.reads(): Flow<dev.moq.media.Read> = pull({ cancel() }) { next() }
 
-/** Stream of groups in sequence order, skipping forward if the reader falls behind. */
+/** Stream of groups in start order, skipping forward if the reader falls behind. */
 fun TrackConsumer.groups(): Flow<GroupConsumer> = pull({ cancel() }) { nextGroup() }
 
-/** Stream of groups in arrival order, including out-of-sequence deliveries. */
+/** Stream of groups in arrival order, including out-of-order deliveries. */
 fun TrackConsumer.groupsAsArrived(): Flow<GroupConsumer> = pull({ cancel() }) { recvGroup() }
 
 /**
