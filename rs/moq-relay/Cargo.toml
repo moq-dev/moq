@@ -39,7 +39,7 @@ doc = false
 # `cluster::Options::network`, which routes peer dials over in-memory links, the `sim`
 # network of named relays those links join, and `cluster::Options::sim`, which binds
 # them on a simulated QUIC host.
-test-support = ["kio/sim", "moq-tokio/sim"]
+test-support = ["kio/sim", "moq-tokio/test-support"]
 jemalloc = ["moq-tokio/jemalloc"]
 
 [dependencies]
@@ -65,7 +65,8 @@ moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true }
 moq-stats = { workspace = true, features = ["async"] }
-moq-tokio = { workspace = true }
+# `relay` offers the lite-07 `ietf` extension on the relay's own links.
+moq-tokio = { workspace = true, features = ["relay"] }
 # The /metrics text encoder; the protobuf features stay off.
 prometheus-client = "0.25.2"
 qmux = { workspace = true }
@@ -89,15 +90,18 @@ tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 usage-rs = { workspace = true, features = ["completions", "config"] }
 
+# Serves QUIC from io_uring workers (`--runtime-io-uring`), on the architectures
+# io-uring ships prebuilt kernel bindings for; build.rs sets `cfg(uring)` to match.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64", target_arch = "powerpc64")))'.dependencies]
+moq-uring = { workspace = true, features = ["quic"] }
+# The WebTransport CONNECT response the io_uring listener answers with.
+web-transport-proto = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # `geteuid`, so a handoff only trusts a relay of the same user.
 libc = { workspace = true }
 # The reuseport group and descriptor passing a handoff carries the sockets with.
 moq-sock = { workspace = true }
-# Serves QUIC from io_uring workers (`--runtime-io-uring`).
-moq-uring = { workspace = true, features = ["quic"] }
-# The WebTransport CONNECT response the io_uring listener answers with.
-web-transport-proto = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 sd-notify = { workspace = true }
@@ -110,9 +114,12 @@ h2 = { workspace = true }
 kio = { path = "../kio", features = ["manual", "sim"] }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-congestion = { path = "../moq-congestion" }
-# The shared session bench fills FETCH runs through the `fuzz` module.
-moq-net = { path = "../moq-net", features = ["fuzz"] }
+# The shared session bench fills FETCH runs through the `fuzz` module and sets the
+# extensions each side offers.
+moq-net = { path = "../moq-net", features = ["fuzz", "relay", "test-support"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
+# The tests dial and serve bare QUIC and WebTransport through moq-tokio's driver.
+moq-tokio = { path = "../moq-tokio", features = ["test-support"] }
 pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }
@@ -126,9 +133,11 @@ tracing-subscriber = { workspace = true }
 web-transport-proto = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
-[target.'cfg(target_os = "linux")'.dev-dependencies]
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64", target_arch = "powerpc64")))'.dev-dependencies]
 # Workers built inside a runtime with a manual clock installed run on that clock.
 moq-uring = { workspace = true, features = ["_manual"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
 # Which sockets the process still holds, so the embed tests can prove a stopped
 # relay closed its own without rebinding a port another test could take.
 socket2 = { workspace = true, features = ["all"] }

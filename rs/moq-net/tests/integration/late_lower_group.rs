@@ -51,7 +51,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 		let timestamp = Timestamp::from_millis(key * 1000 + frame).unwrap();
 		group.write_frame(timestamp, &b"x"[..]).unwrap();
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {

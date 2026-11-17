@@ -27,8 +27,6 @@ pub enum ParameterVarInt {
 	Hidden = super::hidden::HIDDEN,
 	/// ACTIVE_COUNT, from the MoQ Active Count extension.
 	ActiveCount = super::active_count::ACTIVE_COUNT,
-	/// Subscriber max age, from the MoQ Timestamp extension.
-	MaxAge = super::max_age::OPTION,
 	/// DEFLATE-compressed tracks, from the MoQ Flate extension.
 	Flate = super::flate::OPTION,
 	#[num_enum(catch_all)]

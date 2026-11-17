@@ -72,7 +72,8 @@ libc = { workspace = true }
 moq-shaper = { path = "../moq-shaper" }
 # The control-message fuzz target's input format, which its tests replay.
 moq-sock = { path = "../moq-sock", features = ["fuzz"] }
-moq-tokio = { path = "../moq-tokio" }
+# The reference QUIC and WebTransport peers the interop tests and benches dial.
+moq-tokio = { path = "../moq-tokio", features = ["test-support"] }
 # Tests run workers on a manual clock.
 moq-uring = { path = ".", features = ["_manual"] }
 nix = { workspace = true }

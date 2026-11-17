@@ -31,10 +31,8 @@ reaches them when a binding user needs it, so the sweep mirrors nothing new
 into moq-ffi.
 
 Not part of the sweep, because each has its own quest: socket endpoints
-([removed for Kixel](/quest/m2/sockets/README.md)), `setup::Extensions`
-([the ietf extension](/quest/m2/ietf-records-per-track.md)), the public
-route API ([the route switch](/quest/m2/multicast/switch.md)), and the
-bindings' selectors ([open selectors](/quest/m2/ffi-open-selectors.md)).
+([removed for Kixel](/quest/m2/sockets/README.md)), the public
+route API ([the route switch](/quest/m2/multicast/switch.md)).
 
 Public API: each child lists what leaves. Wire: none.
 

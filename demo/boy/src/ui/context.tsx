@@ -3,7 +3,7 @@ import type { JSX } from "solid-js";
 import { createContext, onCleanup } from "solid-js";
 import type MoqBoy from "../element";
 import type { Game } from "../game.ts";
-import type { GameStatus, LatencyEntry } from "../schemas.ts";
+import type { GameStatus } from "../schemas.ts";
 import { createAccessor } from "./solid.ts";
 
 export type BoyUIContextValues = {
@@ -50,7 +50,7 @@ export type GameUIContextValues = {
 	game: Game;
 	active: () => boolean;
 	status: () => GameStatus | undefined;
-	latency: () => LatencyEntry[] | undefined;
+	viewerId: () => string | undefined;
 	expanded: () => boolean;
 };
 
@@ -64,7 +64,7 @@ type GameUIContextProviderProps = {
 export function GameUIContextProvider(props: GameUIContextProviderProps) {
 	const active = createAccessor(props.game.active);
 	const status = createAccessor(props.game.status);
-	const latency = createAccessor(props.game.latency);
+	const viewerId = createAccessor(props.game.viewerId);
 	const globalExpanded = createAccessor(props.game.expanded);
 
 	const expanded = () => globalExpanded() === props.game.sessionId;
@@ -73,7 +73,7 @@ export function GameUIContextProvider(props: GameUIContextProviderProps) {
 		game: props.game,
 		active,
 		status,
-		latency,
+		viewerId,
 		expanded,
 	};
 

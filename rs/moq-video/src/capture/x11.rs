@@ -293,7 +293,7 @@ impl Capture {
 		tracing::debug!(source = %name, shared_memory = shm.is_some(), "X11 capture opened");
 		let framerate = config.framerate.unwrap_or(crate::FrameRate::integer(DEFAULT_FRAMERATE));
 		let interval = Duration::from_secs_f64(1.0 / framerate.as_f64());
-		let cursor = config.cursor
+		let cursor = config.cursor.drawn()
 			&& connection
 				.xfixes_query_version(5, 0)
 				.ok()
@@ -1195,7 +1195,7 @@ mod tests {
 			"the X11 benchmark needs a screen of at least 1920x1080"
 		);
 		let config = Config {
-			cursor: false,
+			cursor: crate::capture::Cursor::Hidden,
 			..Default::default()
 		};
 		for (width, height) in [(640u16, 480u16), (1280, 720), (1920, 1080)] {

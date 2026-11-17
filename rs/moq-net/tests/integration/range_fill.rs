@@ -62,12 +62,14 @@ impl Fixture {
 		for index in 0..groups {
 			let mut group = match spacing {
 				1 => track.create_group(moq_net::group::Info { start: index }).unwrap(),
-				spacing => track.append_group(index * spacing).unwrap(),
+				spacing => track
+					.append_group(Timestamp::from_millis(index * spacing).unwrap())
+					.unwrap(),
 			};
 			group
 				.write_frame(Timestamp::from_millis(index * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let copy = origin(2, None);
@@ -154,7 +156,7 @@ async fn evicted_history_is_recovered_once_on_its_own_subscription() {
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6].into());
 		assert_eq!(fixture.opened(SUBSCRIBE), subscribes + 1, "recovered once");
 
@@ -193,11 +195,14 @@ async fn sparse_history_is_recovered_across_its_skips() {
 
 		// The session survives the skips, so the live subscription goes on.
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		let mut group = fixture.track.append_group(6000).unwrap();
+		let mut group = fixture
+			.track
+			.append_group(Timestamp::from_millis(6000).unwrap())
+			.unwrap();
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6000].into());
 	})
 	.await
@@ -235,7 +240,7 @@ async fn a_recovery_takes_a_skip_inside_it() {
 			group
 				.write_frame(Timestamp::from_millis(start * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut first = fixture.subscribe([Range::oldest()]).await;
 		assert_eq!(receive(&mut first, 5).await, [0, 1, 3, 4, 5].into());
@@ -251,7 +256,7 @@ async fn a_recovery_takes_a_skip_inside_it() {
 		group
 			.write_frame(Timestamp::from_millis(6000).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(receive(&mut first, 1).await, [6].into());
 	})
 	.await

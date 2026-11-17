@@ -481,7 +481,7 @@ for (const description of [undefined, "1190"]) {
 }
 
 for (const cmaf of [false, true]) {
-	it(`a ${cmaf ? "CMAF" : "legacy"} gap releases accounting for codec outputs it discarded`, async () => {
+	it(`a ${cmaf ? "CMAF" : "legacy"} gap lands the codec outputs still pending before restarting it`, async () => {
 		const clock = new Manual();
 		const installed = clock.install();
 		deferAudioOutput = true;
@@ -496,15 +496,9 @@ for (const cmaf of [false, true]) {
 			expect(playback.inserted()).toHaveLength(0);
 			playback.push({ kind: "gap", timestamp: Duration.micros(140_000), duration: Duration.micros(20_000) });
 			await microtasks();
+			// A starved decoder can hold everything since the last gap, which a reset alone would drop.
 			expect(pendingAudio).toHaveLength(0);
-			deferAudioOutput = false;
-			frameTimestamp = 160_000;
-			const resumed = frame();
-			playback.push({ ...resumed, group: 2n });
-			await microtasks();
-			expect(audioInputs).toHaveLength(7);
-			expect(playback.inserted()).toContain(resumed.frame.timestamp.asMicros());
-			await playback.play(5);
+			expect(playback.inserted()).toHaveLength(6);
 			expect(playback.sync.playing.peek()).toBe(true);
 		} finally {
 			playback.close();
@@ -524,6 +518,69 @@ it("decodes an audio packet inside a group after a gap", async () => {
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp.asMicros());
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
+
+// The warmup the restarted decoder needs is the last frames before the gap, restamped to end where
+// the frame after it starts, so it trims their output instead of the frame's.
+it("re-primes the decoder on the warmup before a gap, so the frame after it plays", async () => {
+	const playback = await play(Duration.millis(100));
+	try {
+		playback.restore({ warmup: 80 });
+		await microtasks();
+		await playback.play();
+		const played = audioChunks.length;
+		const decoded = playback.feedback().audio?.decoded ?? 0;
+		playback.push({
+			kind: "gap",
+			timestamp: Duration.micros(frameTimestamp + 20_000),
+			duration: Duration.millis(100),
+		});
+		frameTimestamp += 100_000;
+		const next = frame();
+		playback.push({ ...next, group: 1n });
+		await microtasks();
+		const at = next.frame.timestamp.asMicros();
+		expect(audioChunks.slice(played).map((chunk) => chunk.timestamp)).toEqual([
+			at - 80_000,
+			at - 60_000,
+			at - 40_000,
+			at - 20_000,
+			at,
+		]);
+		expect(playback.inserted()).toContain(at);
+		// The pre-roll's output is not counted as decoded again; only the frame after the gap is.
+		expect(playback.feedback().audio?.decoded).toBe(decoded + 1);
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
+
+// AAC frames state no duration, so the codec's frame length (1024 samples) is what the pre-roll covers.
+it("re-primes an AAC decoder on frames that state no duration", async () => {
+	const playback = await play(Duration.millis(100));
+	try {
+		playback.restore({ codec: "mp4a.40.2", sampleRate: 48_000, numberOfChannels: 2, warmup: 80 });
+		await microtasks();
+		await playback.play();
+		const played = audioChunks.length;
+		playback.push({
+			kind: "gap",
+			timestamp: Duration.micros(frameTimestamp + 20_000),
+			duration: Duration.millis(100),
+		});
+		frameTimestamp += 100_000;
+		const next = frame();
+		playback.push({ ...next, group: 1n });
+		await microtasks();
+		// Four 21.3 ms frames cover the 80 ms warmup, ahead of the frame after the gap.
+		const chunks = audioChunks.slice(played).map((chunk) => chunk.timestamp);
+		expect(chunks).toHaveLength(5);
+		expect(chunks.at(-1)).toBe(next.frame.timestamp.asMicros());
 	} finally {
 		playback.close();
 		await microtasks();

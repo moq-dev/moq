@@ -737,7 +737,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					};
 					chunk = rest;
 					block.remaining -= 1;
-					let Some(sizes) = lacing.push(byte, block.remaining).map_err(anyhow::Error::new)? else {
+					let Some(sizes) = lacing.push(byte, block.remaining)? else {
 						continue;
 					};
 					let fixed = lacing.block;
@@ -783,11 +783,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			.ok_or(Error::TimestampOverflow)?;
 
 		let duration = match laced {
-			true => Some(
-				track
-					.default_duration
-					.ok_or_else(|| anyhow::Error::new(LacingError::MissingDuration))?,
-			),
+			true => Some(track.default_duration.ok_or(Error::LacingDuration)?),
 			false => None,
 		};
 		// Validate the last timestamp before publishing any part of this block.
@@ -871,7 +867,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 				.into());
 			}
-			BlockState::Lacing(_) => return Err(anyhow::Error::new(LacingError::Invalid).into()),
+			BlockState::Lacing(_) => return Err(Error::InvalidLacing.into()),
 			BlockState::Frames(frames) => {
 				// The frame sizes add up to the body, so every frame was written as its bytes arrived.
 				debug_assert!(frames.open.is_none() && frames.index == frames.sizes.len());
@@ -1502,21 +1498,13 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	Ok(config)
 }
 
-#[derive(Debug, thiserror::Error)]
-enum LacingError {
-	#[error("invalid MKV lacing")]
-	Invalid,
-	#[error("MKV lacing requires a positive TrackEntry DefaultDuration")]
-	MissingDuration,
-}
-
 impl Lacing {
 	/// Take the next lace header byte, returning every frame's size once the header ends.
 	/// `remaining` counts the body bytes after `byte`; the last frame takes what the others leave.
 	// webm-iterable's splitter uses unchecked indexing and size arithmetic on malformed laces, so
 	// sizes and signed EBML deltas stay checked here.
-	fn push(&mut self, byte: u8, remaining: u64) -> std::result::Result<Option<Vec<u64>>, LacingError> {
-		let invalid = LacingError::Invalid;
+	fn push(&mut self, byte: u8, remaining: u64) -> std::result::Result<Option<Vec<u64>>, Error> {
+		let invalid = Error::InvalidLacing;
 		let Some(count) = self.count else {
 			let count = usize::from(byte) + 1;
 			if count < 2 {
@@ -1573,8 +1561,8 @@ impl Lacing {
 			.sizes
 			.iter()
 			.try_fold(0u64, |sum, size| sum.checked_add(*size))
-			.ok_or(LacingError::Invalid)?;
-		let last = remaining.checked_sub(sum).ok_or(LacingError::Invalid)?;
+			.ok_or(Error::InvalidLacing)?;
+		let last = remaining.checked_sub(sum).ok_or(Error::InvalidLacing)?;
 		let mut sizes = std::mem::take(&mut self.sizes);
 		sizes.push(last);
 		Ok(Some(sizes))

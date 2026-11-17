@@ -64,7 +64,7 @@ async fn control_classes_cross_lite_and_ietf_sessions_without_counting_payload()
 		group
 			.write_frame(group.at_start(), bytes::Bytes::from(vec![7; 64 * 1024]))
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.len(), 64 * 1024);
 		let rows = registry.snapshot().control();

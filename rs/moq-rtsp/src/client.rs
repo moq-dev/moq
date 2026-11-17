@@ -289,13 +289,14 @@ enum Track {
 }
 
 impl Track {
-	fn finish(&mut self) -> moq_mux::Result<()> {
+	/// End the track cleanly. It leaves the broadcast with this handle.
+	fn finish(self) -> moq_mux::Result<()> {
 		match self {
-			Self::Video(video) => match &mut **video {
-				Video::H264 { import, .. } => import.finish(),
-				Video::H265 { import, .. } => import.finish(),
+			Self::Video(video) => match *video {
+				Video::H264 { import, .. } => import.finish().map(drop),
+				Video::H265 { import, .. } => import.finish().map(drop),
 			},
-			Self::Aac(import) => import.finish(),
+			Self::Aac(import) => import.finish().map(drop),
 		}
 	}
 
@@ -525,7 +526,7 @@ impl Ingest {
 	/// Flush every track and end it cleanly, reporting the first failure.
 	fn finish(&mut self) -> Result<()> {
 		let mut result = Ok(());
-		for mut stream in self.streams.drain(..).flatten() {
+		for stream in self.streams.drain(..).flatten() {
 			result = result.and(stream.track.finish().map_err(Error::from));
 		}
 		result

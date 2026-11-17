@@ -8,8 +8,9 @@ use std::collections::VecDeque;
 use bytes::{Buf, Bytes, BytesMut};
 use moq_net::Timestamp;
 
-use super::{Pending, Retained, on_clock, reorder_delay, unit_error};
+use super::{Fault, Pending, Retained, on_clock, reorder_delay, unit_error};
 use crate::codec::annexb::{START_CODE, after_start_code, find_start_code};
+use crate::container::ts::error::{Error, Result, ensure, ensure_supported, malformed};
 
 #[derive(Clone, Copy)]
 pub(super) enum Codec {
@@ -27,7 +28,7 @@ impl Codec {
 
 	/// Whether this NAL begins a picture or its leading non-VCL data
 	/// (H.264 7.4.1.2.3, H.265 7.4.2.4.4), and whether it is a slice.
-	fn boundary(self, nal: &[u8]) -> anyhow::Result<(bool, bool)> {
+	fn boundary(self, nal: &[u8]) -> Result<(bool, bool), Fault> {
 		match self {
 			Self::Avc => {
 				let header = *nal
@@ -98,7 +99,7 @@ mod timing;
 
 pub(super) struct Assembly {
 	pub clock: timing::Clock,
-	damage: Option<(u64, anyhow::Error)>,
+	damage: Option<(u64, Error)>,
 	codec: Codec,
 	tail: BytesMut,
 	searched: usize,
@@ -129,7 +130,7 @@ impl Assembly {
 		}
 	}
 
-	pub fn push(&mut self, mut pending: Pending) -> anyhow::Result<()> {
+	pub fn push(&mut self, mut pending: Pending) -> Result<()> {
 		let pts = on_clock(pending.pts, pending.offset)?;
 		let reorder = reorder_delay(pending.pts, pending.dts);
 		if pending.data.is_empty() {
@@ -160,7 +161,7 @@ impl Assembly {
 		self.account()
 	}
 
-	fn account(&mut self) -> anyhow::Result<()> {
+	fn account(&mut self) -> Result<()> {
 		if let Some(retained) = &mut self.retained {
 			retained.resize(
 				self.tail.len() + self.current.len(),
@@ -171,7 +172,7 @@ impl Assembly {
 	}
 
 	/// Return one AU at a time so later parameter sets cannot precede its validation.
-	pub fn next(&mut self, eof: bool) -> anyhow::Result<Option<Unit>> {
+	pub fn next(&mut self, eof: bool) -> Result<Option<Unit>, Fault> {
 		loop {
 			if self.tail.is_empty() {
 				return if eof { self.emit() } else { Ok(None) };
@@ -288,7 +289,7 @@ impl Assembly {
 		}
 	}
 
-	fn emit(&mut self) -> anyhow::Result<Option<Unit>> {
+	fn emit(&mut self) -> Result<Option<Unit>, Fault> {
 		if !self.has_slice {
 			return Ok(None);
 		}
@@ -310,7 +311,7 @@ impl Assembly {
 		}))
 	}
 
-	pub fn take_damage(&mut self) -> Option<(u64, anyhow::Error)> {
+	pub fn take_damage(&mut self) -> Option<(u64, Error)> {
 		self.damage.take()
 	}
 
@@ -337,22 +338,22 @@ impl Assembly {
 
 /// One proportional AVC clock must be declared explicitly by the TS descriptor;
 /// an SPS fixed frame rate alone says nothing about numeric POC distance.
-pub(super) fn temporal_poc(descriptors: &[super::catalog::Descriptor]) -> anyhow::Result<bool> {
+pub(super) fn temporal_poc(descriptors: &[super::catalog::Descriptor]) -> Result<bool> {
 	let mut proportional = false;
 	for descriptor in descriptors.iter().filter(|d| d.tag == 0x2a) {
 		let data = &descriptor.data;
 		let first = *data
 			.first()
-			.ok_or_else(|| anyhow::anyhow!("truncated AVC timing descriptor"))?;
+			.ok_or_else(|| malformed!("truncated AVC timing descriptor"))?;
 		let len = if first & 1 == 0 {
 			2
 		} else {
 			let clock = *data
 				.get(1)
-				.ok_or_else(|| anyhow::anyhow!("truncated AVC timing descriptor"))?;
+				.ok_or_else(|| malformed!("truncated AVC timing descriptor"))?;
 			if clock & 0x80 != 0 { 7 } else { 15 }
 		};
-		anyhow::ensure!(data.len() == len, "invalid AVC timing descriptor length");
+		ensure!(data.len() == len, "invalid AVC timing descriptor length");
 		proportional |= data[len - 1] & 0xc0 == 0xc0;
 	}
 	Ok(proportional)
@@ -367,7 +368,7 @@ macro_rules! publish {
 			import: &mut crate::codec::$codec::Import,
 			assembly: &mut Assembly,
 			eof: bool,
-		) -> anyhow::Result<u64> {
+		) -> Result<u64, Fault> {
 			let mut published = 0;
 			let result = (|| {
 				while let Some(unit) = assembly.next(eof)? {
@@ -378,7 +379,7 @@ macro_rules! publish {
 						let provisional = unit.pts.unwrap_or(Timestamp::ZERO);
 						let mut frames = split.decode(&unit.data, provisional).map_err(unit_error)?;
 						frames.extend(split.flush(provisional).map_err(unit_error)?);
-						anyhow::ensure!(frames.len() == 1, "unsupported TS video access-unit framing");
+						ensure_supported!(frames.len() == 1, "unsupported TS video access-unit framing");
 						for frame in &frames {
 							if frame.keyframe {
 								crate::codec::$codec::config(&frame.payload)
@@ -395,14 +396,14 @@ macro_rules! publish {
 							frame.timestamp = pts;
 							published += u64::from(super::skip_missing_keyframe(import.decode([frame]))?);
 						}
-						anyhow::Ok(published)
+						Ok::<_, Fault>(published)
 					})();
 					match result {
 						Ok(units) => {
 							published += units;
 							assembly.clock.commit();
 						}
-						Err(err) if err.is::<super::Damaged>() => {
+						Err(Fault::Damaged { cause, .. }) => {
 							// This AU has a known end. Keep the next AU's bytes,
 							// which may already be here in the same or following PES.
 							if let Some(params) = params {
@@ -412,7 +413,7 @@ macro_rules! publish {
 							assembly.clock.reset();
 							import.cut(None)?;
 							let count = assembly.damage.take().map_or(1, |(count, _)| count + 1);
-							assembly.damage = Some((count, err));
+							assembly.damage = Some((count, cause));
 							continue;
 						}
 						Err(err) => return Err(err),
@@ -424,26 +425,18 @@ macro_rules! publish {
 						assembly.clock.reset();
 					}
 				}
-				anyhow::Ok(())
+				Ok::<_, Fault>(())
 			})();
 			match result {
 				Ok(()) => Ok(published),
-				Err(err) if err.is::<super::Damaged>() => Err(err.context(Published(published))),
-				Err(err) => Err(err),
+				Err(Fault::Damaged { cause, .. }) => Err(Fault::Damaged { cause, published }),
+				Err(Fault::Fatal(err)) => Err(Fault::Fatal(err)),
 			}
 		}
 	};
 }
 publish!(avc, h264);
 publish!(hevc, h265);
-
-#[derive(Debug, thiserror::Error)]
-#[error("damaged TS video after {0} published access units")]
-struct Published(u64);
-
-pub(super) fn published(err: &anyhow::Error) -> u64 {
-	err.downcast_ref::<Published>().map_or(0, |published| published.0)
-}
 
 #[cfg(test)]
 mod tests {

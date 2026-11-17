@@ -58,6 +58,7 @@ impl Projection {
 }
 
 /// The projections this build knows, split out so the tagged representation stays derived.
+#[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -65,6 +66,7 @@ enum Known {
 	Rectilinear,
 	Equirectangular {
 		#[serde(default)]
+		#[serde_as(as = "crate::catalog::NotNull")]
 		fov: Option<f64>,
 	},
 }

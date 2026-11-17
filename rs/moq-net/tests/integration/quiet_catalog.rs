@@ -55,7 +55,7 @@ fn publish(origin: &origin::Producer) -> (moq_net::origin::Route, track::Produce
 	broadcast.announce().unwrap();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), b"snapshot").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	(broadcast, track)
 }
 

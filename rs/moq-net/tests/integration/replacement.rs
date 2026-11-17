@@ -52,7 +52,7 @@ async fn next_event(announced: &mut origin::Routes) -> origin::RouteEvent {
 fn write(track: &track::Producer, tag: &str) {
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), tag.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next frame a subscription delivers, as text.

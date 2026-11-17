@@ -156,7 +156,7 @@ async fn close_delivers_a_finished_track_for(version: &str) {
 
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let _track = track.finish().unwrap();
 
 	let started = kio::clock::now();
@@ -312,7 +312,7 @@ async fn close_tail_for(version: &str) {
 	pair.client_transport.hold_unis();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let _track = track.finish().unwrap();
 	let close = kio::clock::sim::spawn(pair.client.close());
 	kio::clock::sleep(Duration::from_millis(100)).await;
@@ -350,7 +350,7 @@ async fn close_requires_subscriber_fin_for(version: &str) {
 	pair.server_transport.withhold_bidi_fins();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let _track = track.finish().unwrap();
 	let started = kio::clock::now();
 	let res = pair.client.close().await;
@@ -383,7 +383,7 @@ async fn peer_close_reads_buffered_tail(version: &str) {
 	pair.client_transport.ack_fins();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	let _track = track.finish().unwrap();
 	pair.client.close().await.expect("released draft still drains on ACKs");
 	let (got, _) = reader.await.unwrap();
@@ -409,7 +409,7 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 		pair.client_transport.ack_fins();
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), b"last".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 		let res = pair.client.close().await;
 		// From lite-05 the close waits for the subscriber's FIN, which the gate holds back.

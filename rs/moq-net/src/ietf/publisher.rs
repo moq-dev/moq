@@ -16,8 +16,8 @@ use crate::transport::poll::SendGroup as _;
 use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
-	DecodeError, Error, StreamError, Timescale, Timestamp,
-	coding::{Encode as _, Encoder, Stream, StreamCodes as _, Writer},
+	DecodeError, Error, StreamError,
+	coding::{Encode as _, Stream, StreamCodes as _, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
@@ -77,8 +77,8 @@ fn serving_datagrams(
 /// TRACK_STATUS_OK, and FETCH_OK. Empty when the requester opted out with
 /// INCLUDE_PROPERTIES=0, which keeps the block present but empty.
 ///
-/// Declaring the timescale is what opts the track into timestamps; every object Timestamp
-/// is in these units. A draft without room for a property drops it on encode.
+/// The timescale declares the units of the track's Group IDs, which are its groups' starts.
+/// A draft without room for a property drops it on encode.
 ///
 /// Fails with [`Error::Unsupported`] for Immutable Properties the draft cannot carry:
 /// rewriting them for its encoding would break them, and forwarding them unchanged would
@@ -404,9 +404,7 @@ struct FetchObjectInfo<'a> {
 	prior: FetchPrior,
 	/// The track's Publisher Priority on the wire, which the first object states for all.
 	priority: u8,
-	timestamp: Option<Timestamp>,
 	inflated: Option<u64>,
-	timescale: Option<Timescale>,
 	version: Version,
 	fields: Option<&'a crate::model::object::Fields>,
 	/// The draft the track's publisher spoke, which serialized `fields`.
@@ -1661,7 +1659,6 @@ impl Serving {
 									request.msg.request_id,
 									version,
 									ServeRange::default(),
-									info.timescale.filter(|_| request.msg.properties_wanted),
 								);
 								serve.datagram_track = Some(producer);
 								*track = Ok(cache);
@@ -1689,11 +1686,7 @@ impl Serving {
 						.take()
 						.or_else(|| broadcast.datagrams_live(&request.msg.track_name));
 					if let Some(datagrams) = datagrams {
-						serve = serve.with_datagrams(
-							datagrams,
-							request.msg.properties_wanted,
-							broadcast.has_local_datagrams(),
-						);
+						serve = serve.with_datagrams(datagrams, broadcast.has_local_datagrams());
 					}
 					if self.resuming {
 						serve.opened = request.acked.clone().expect("acked before serving");
@@ -1732,8 +1725,6 @@ impl Serving {
 							run: RunFill::new(
 								fill_range(fill, request.msg.filter, edge.largest),
 								cache,
-								// The fill stamps its objects as the subscription does.
-								serve.timescale,
 								serve.ranking.request_id,
 							),
 							ranking: serve.ranking.clone(),
@@ -1885,7 +1876,6 @@ impl Serving {
 			let msg = &mut request.msg;
 			msg.subscriber_priority = super::priority::to_wire(applied.priority);
 			msg.filter = serve.filter;
-			msg.max_age = applied.delay.max.and_then(|delay| delay.as_millis().try_into().ok());
 			let mut serve = serve;
 			serve.close_groups();
 			request.publisher.pause_join(request.join.as_ref());
@@ -1988,9 +1978,6 @@ impl SubscribeTrack {
 		// which the track's refresh ratio judges.
 		let mut subscription: Subscription =
 			serving_subscription(msg.subscriber_priority).with_order(msg.group_order.to_order());
-		if let Some(max_age) = msg.max_age {
-			subscription.delay.max = Some(Duration::from_millis(max_age));
-		}
 		// A range that resolves without the live edge has a fixed start, which is no join:
 		// bound the subscription before subscribing so the ratio never judges it. From the
 		// start of its group, so a relay's copy holds the group's head for its other readers,
@@ -2049,10 +2036,6 @@ impl SubscribeTrack {
 		}
 		range.apply(&mut subscription);
 		let _ = subscribed.update(subscription);
-		// Only the TIMESCALE in SUBSCRIBE_OK opts the answer into timestamps, so an untimed
-		// track, or a subscriber that opted out of the properties, gets unstamped objects.
-		let timescale = subscribed.info().timescale.filter(|_| msg.properties_wanted);
-
 		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
 		let mut serve = TrackServe::new(
@@ -2061,7 +2044,6 @@ impl SubscribeTrack {
 			msg.request_id,
 			publisher.version,
 			range,
-			timescale,
 		)
 		.compression(flate)
 		.ranked(publisher.priority.clone());
@@ -2335,7 +2317,7 @@ impl RunSubscription {
 		}
 		let publisher = publisher.clone();
 		let mut fill = Fill {
-			run: RunFill::new(fill.fill, fill.track, fill.timescale, fill.request_id),
+			run: RunFill::new(fill.fill, fill.track, fill.request_id),
 			ranking: fill.ranking,
 			opened: fill.opened,
 		};
@@ -2505,9 +2487,6 @@ impl WaitResume {
 			if let Some(priority) = update.priority {
 				msg.subscriber_priority = priority;
 			}
-			if let Some(max_age) = update.max_age {
-				msg.max_age = Some(max_age);
-			}
 			self.resuming = update.forward == Some(true);
 			if let (Some(token), Some(rg)) = (
 				update
@@ -2661,7 +2640,6 @@ impl WritePublishDone {
 struct RunFill {
 	fill: FillServe,
 	track: track::Consumer,
-	timescale: Option<Timescale>,
 	request_id: RequestId,
 	open: crate::transport::open::Open,
 	state: RunFillState,
@@ -2672,11 +2650,10 @@ type FillStream = Writer<Ranked<crate::transport::boxed::SendStream>, Version>;
 
 #[kio::machine(self.state: RunFillState)]
 impl RunFill {
-	fn new(fill: FillServe, track: track::Consumer, timescale: Option<Timescale>, request_id: RequestId) -> Self {
+	fn new(fill: FillServe, track: track::Consumer, request_id: RequestId) -> Self {
 		Self {
 			fill,
 			track,
-			timescale,
 			request_id,
 			open: Default::default(),
 			state: RunFillState::Start,
@@ -2757,8 +2734,7 @@ impl RunFill {
 		};
 		let setup = wait!(Setup => publisher.peer_setup.poll_get(waiter));
 		let compressed = if setup.flate { group.compressed() } else { group };
-		let (timescale, version) = (self.timescale, publisher.version);
-		let started = FetchGroupWrite::new(compressed, filled, slice, timescale, version, publisher_priority);
+		let started = FetchGroupWrite::new(compressed, filled, slice, publisher.version, publisher_priority);
 		let mut write: FetchGroupWrite = match started {
 			Ok(write) => write,
 			Err(err) => return self.fail(writer, err),
@@ -3374,11 +3350,6 @@ impl Publisher {
 		if let Some(priority) = update.priority {
 			serve.set_priority(super::priority::from_wire(priority))?;
 		}
-		if let Some(max_age) = update.max_age {
-			let mut subscription = serve.track.subscription();
-			subscription.delay.max = Some(Duration::from_millis(max_age));
-			serve.track.update(subscription)?;
-		}
 		if let Some(value) = update.new_group {
 			serve.request_new_group(value);
 		}
@@ -3448,15 +3419,14 @@ impl Publisher {
 		fill: FillServe,
 		ranking: &Ranking<GroupOf<Transport>>,
 		track: track::Consumer,
-		timescale: Option<Timescale>,
 		opened: &AtomicU64,
 		request_id: RequestId,
 	) {
-		let mut run = RunFill::new(fill, track, timescale, request_id);
+		let mut run = RunFill::new(fill, track, request_id);
 		kio::wait(|waiter| run.poll(waiter, self, ranking, opened)).await
 	}
 
-	/// Buffer one fetch object's header and timestamp properties in the negotiated layout.
+	/// Buffer one fetch object's header and properties in the negotiated layout.
 	fn buffer_fetch_object(
 		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
 		header: FetchObjectInfo<'_>,
@@ -3466,32 +3436,17 @@ impl Publisher {
 			object,
 			prior,
 			priority,
-			timestamp,
 			inflated,
-			timescale,
 			version,
 			fields,
 			source,
 		} = header;
-		// Relayed properties survive without a timescale. Plain frames generate a
-		// timestamp only on a timed track.
-		let properties = if let Some(fields) = fields {
-			let properties = super::object::write(&fields.properties, source, timestamp, version, timescale)?;
-			(!properties.is_empty()).then_some(properties)
-		} else {
-			match timescale {
-				Some(timescale) => {
-					// Every frame on a timed track is timed (see `track::Info::timescale`).
-					let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
-					let mut properties = Vec::new();
-					ietf::encode_object_time(&mut Encoder::new(&mut properties, version.into()), timestamp, timescale)?;
-					Some(properties)
-				}
-				None => None,
-			}
+		// Only a relayed object has properties of its own.
+		let properties = match fields {
+			Some(fields) => super::object::write(&fields.properties, source, version)?,
+			None => Vec::new(),
 		};
-
-		let properties = super::object::compression(properties.unwrap_or_default(), version, inflated)?;
+		let properties = super::object::compression(properties, version, inflated)?;
 		let properties = (!properties.is_empty()).then_some(properties);
 
 		let header = match prior {
@@ -4388,7 +4343,6 @@ struct SubscriptionFill {
 	request_id: RequestId,
 	track: track::Consumer,
 	ranking: Ranking<GroupOf<Transport>>,
-	timescale: Option<Timescale>,
 	opened: Arc<AtomicU64>,
 }
 
@@ -5115,9 +5069,6 @@ impl FetchOpen {
 		} = prepared;
 		let key = range.start.group;
 		let (skip, until) = (range.skip(key), range.until(key));
-		// Only the TIMESCALE in FETCH_OK opts the answer into timestamps, so a requester that
-		// opted out of the properties gets an untimed track.
-		let timescale = info.timescale.filter(|_| self.properties_wanted);
 		let properties = match track_properties(&info, self.properties_wanted, version, compression) {
 			Ok(properties) => properties,
 			Err(err) => return self.reject(&err, &err.to_string()),
@@ -5177,7 +5128,7 @@ impl FetchOpen {
 		// or the Group ends, after the last object (section 3.2.2).
 		let tail = (ietf::FetchObject::has_group_end(version) && complete)
 			.then_some(ietf::FetchObject::EndOfGroup { track: end_of_track });
-		let write = match FetchGroupWrite::new(group, key, slice, timescale, version, priority) {
+		let write = match FetchGroupWrite::new(group, key, slice, version, priority) {
 			Ok(write) => write.ending(tail),
 			Err(err) => return self.reject(&err, &err.to_string()),
 		};
@@ -6684,7 +6635,6 @@ struct TrackServe {
 	/// Active group streams also observe narrowing, even while waiting for another frame.
 	bounds: kio::Producer<ServeRange>,
 	filter: Filter,
-	timescale: Option<Timescale>,
 	/// The one group waiting for stream credit. The cursor hands out no other meanwhile, so
 	/// the backlog stays in the cache, which bills, ages, and evicts it, and the cursor's
 	/// budget skips whatever went stale.
@@ -6729,7 +6679,6 @@ struct DatagramForward {
 	consumer: crate::datagram::Consumer,
 	/// Counts each datagram the transport takes, under the session's current tier.
 	stats: crate::stats::Scope,
-	timescale: Option<Timescale>,
 	/// The datagram track's priority, once its info resolved.
 	publisher: Option<i8>,
 	demand: bool,
@@ -6742,7 +6691,6 @@ impl TrackServe {
 		request_id: RequestId,
 		version: Version,
 		range: ServeRange,
-		timescale: Option<Timescale>,
 	) -> Self {
 		let floor = match range.start {
 			Some(start) => start.group,
@@ -6777,7 +6725,6 @@ impl TrackServe {
 			floor,
 			bounds: kio::Producer::new(range),
 			filter: Filter::Unfiltered,
-			timescale,
 			opening: None,
 			tail: None,
 			live: None,
@@ -6793,7 +6740,7 @@ impl TrackServe {
 	}
 
 	/// Also forward `datagrams` as OBJECT_DATAGRAM with object ID 0.
-	fn with_datagrams(mut self, mut datagrams: crate::datagram::Consumer, stamp: bool, demand: bool) -> Self {
+	fn with_datagrams(mut self, mut datagrams: crate::datagram::Consumer, demand: bool) -> Self {
 		if demand {
 			datagrams.set_priority(self.track.subscription().priority);
 		}
@@ -6802,7 +6749,6 @@ impl TrackServe {
 			stats,
 			consumer: datagrams,
 			demand,
-			timescale: self.timescale.filter(|_| stamp),
 			publisher: None,
 		});
 		self
@@ -6903,7 +6849,6 @@ impl TrackServe {
 			request_id: update.request_id,
 			track: cache,
 			ranking: self.ranking.clone(),
-			timescale: self.timescale,
 			opened: self.opened.clone(),
 		}))
 	}
@@ -6996,11 +6941,11 @@ impl TrackServe {
 			// prefers when it can't pick between its subscribers' priorities. The
 			// model ranks higher-first and this wire field lower-first.
 			publisher_priority: super::priority::to_wire(self.track.info().priority),
-			// Carry per-object timestamps as extension headers (the Timestamp
-			// Object Property) only when TIMESCALE was declared. The relay state adds
-			// to these once it settles (see `GroupState::Describe`).
+			// A compressed object declares its inflated size among its properties. The
+			// relay state and the Prior Group ID Gap add to these once the group settles
+			// (see `GroupState::Describe`).
 			flags: ietf::GroupFlags {
-				has_extensions: self.compression || self.timescale.is_some(),
+				has_extensions: self.compression,
 				..Default::default()
 			},
 		};
@@ -7017,19 +6962,13 @@ impl TrackServe {
 				retired: retired.clone(),
 			});
 		}
-		GroupServe::new(
-			self.session.clone(),
-			msg,
-			rank,
-			group,
-			self.timescale,
-			self.version,
-			slice,
-		)
-		.counted(self.opened.clone())
-		.terminal(self.terminal.clone())
-		.lapsing(self.ranking.lapse.clone())
-		.bounded(self.bounds.consume(), retired)
+		let gap = self.track.skipped_below(key);
+		GroupServe::new(self.session.clone(), msg, rank, group, self.version, slice)
+			.gapped(gap)
+			.counted(self.opened.clone())
+			.terminal(self.terminal.clone())
+			.lapsing(self.ranking.lapse.clone())
+			.bounded(self.bounds.consume(), retired)
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
@@ -7153,7 +7092,6 @@ impl TrackServe {
 				Some(publisher) => publisher,
 				None => match forward.consumer.poll_info(waiter) {
 					Poll::Pending => return,
-					// Object times use the stream subscription's advertised timescale.
 					Poll::Ready(Ok(info)) => *forward.publisher.insert(info.priority),
 					Poll::Ready(Err(err)) => {
 						tracing::debug!(%err, "datagram track ended before it started");
@@ -7181,7 +7119,6 @@ impl TrackServe {
 					return;
 				}
 			};
-			let timescale = forward.timescale;
 			let sent = emit_datagram(
 				&self.session,
 				self.version,
@@ -7190,7 +7127,6 @@ impl TrackServe {
 					group: self.ranking.group.as_ref(),
 					priority: crate::priority::in_group(datagram.sequence, 0, self.ranking.order),
 				},
-				timescale,
 				publisher,
 				&datagram,
 			);
@@ -7208,31 +7144,16 @@ fn emit_datagram(
 	version: Version,
 	alias: u64,
 	options: SendOptions<'_, GroupOf<Transport>>,
-	timescale: Option<Timescale>,
 	publisher: i8,
 	datagram: &crate::datagram::Datagram,
 ) -> bool {
-	let mut properties = Vec::new();
-	if let Some(timescale) = timescale {
-		let Some(timestamp) = datagram.timestamp.timed() else {
-			tracing::debug!(sequence = datagram.sequence, "dropping a datagram without a timestamp");
-			return false;
-		};
-		if ietf::encode_object_time(&mut Encoder::new(&mut properties, version.into()), timestamp, timescale).is_err() {
-			tracing::debug!(
-				sequence = datagram.sequence,
-				"dropping a datagram whose timestamp does not encode"
-			);
-			return false;
-		}
-	}
 	let body = ietf::ObjectDatagram {
 		track_alias: alias,
 		group_id: datagram.sequence,
 		object_id: None,
 		publisher_priority: Some(super::priority::to_wire(publisher)),
 		end_of_group: true,
-		properties: (!properties.is_empty()).then_some(properties),
+		properties: None,
 		body: ietf::DatagramBody::Payload(datagram.payload.clone()),
 	};
 	let Ok(body) = body.encode_bytes(version) else {
@@ -7412,14 +7333,13 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 /// Write one group's frames in the negotiated draft's FETCH object layout.
 ///
 /// The first object carries its absolute Group and Object IDs plus the priority;
-/// every later one inherits them and increments the Object ID, so only the
-/// properties (the timestamp) and the payload go on the wire. A fetch object has no
-/// status field.
+/// every later one inherits them and increments the Object ID, so only a relayed
+/// object's properties and the payload go on the wire. A fetch object has no status
+/// field.
 struct FetchGroupWrite {
 	group: group::Consumer,
 	key: u64,
 	slice: GroupSlice,
-	timescale: Option<Timescale>,
 	version: Version,
 	priority: u8,
 	/// The Object ID of the frame being read or written.
@@ -7462,7 +7382,6 @@ impl FetchGroupWrite {
 		mut group: group::Consumer,
 		key: u64,
 		slice: GroupSlice,
-		timescale: Option<Timescale>,
 		version: Version,
 		priority: u8,
 	) -> Result<Self, Error> {
@@ -7476,7 +7395,6 @@ impl FetchGroupWrite {
 			group,
 			key,
 			slice,
-			timescale,
 			version,
 			priority,
 			prior: None,
@@ -7515,9 +7433,7 @@ impl FetchGroupWrite {
 			object: self.index,
 			prior: fetch_prior(self.prior, self.index)?,
 			priority: self.priority,
-			timestamp: frame.timestamp.timed(),
 			inflated: frame.inflated,
-			timescale: self.timescale,
 			version: self.version,
 			fields: frame.fields.as_deref(),
 			source: self.group.ietf(),
@@ -7610,9 +7526,7 @@ impl FetchGroupWrite {
 								object: self.index,
 								prior: fetch_prior(self.prior, self.index)?,
 								priority: self.priority,
-								timestamp: frame.timestamp.timed(),
 								inflated: frame.inflated,
-								timescale: self.timescale,
 								version: self.version,
 								fields: frame.fields.as_deref(),
 								source: self.group.ietf(),
@@ -7878,7 +7792,9 @@ struct GroupServe {
 	/// Its place in line for the peer's stream credit while it waits to open.
 	open: crate::transport::open::Open,
 	group: group::Consumer,
-	timescale: Option<Timescale>,
+	/// The keys just below this group its track's publisher declared it never produced,
+	/// which the group's first object names as its Prior Group ID Gap.
+	group_gap: u64,
 	version: Version,
 	prior_object: Option<u64>,
 	slice: GroupSlice,
@@ -7956,7 +7872,6 @@ impl GroupServe {
 		msg: ietf::GroupHeader,
 		rank: Rank<GroupOf<Transport>>,
 		mut group: group::Consumer,
-		timescale: Option<Timescale>,
 		version: Version,
 		slice: GroupSlice,
 	) -> Self {
@@ -7968,7 +7883,7 @@ impl GroupServe {
 			rank,
 			open: Default::default(),
 			group,
-			timescale,
+			group_gap: 0,
 			version,
 			prior_object: None,
 			slice,
@@ -7986,6 +7901,12 @@ impl GroupServe {
 	fn bounded(mut self, bounds: kio::Consumer<ServeRange>, retired: Arc<AtomicBool>) -> Self {
 		self.bounds = Some(bounds);
 		self.retired = retired;
+		self
+	}
+
+	/// Name `gap` keys below this group as never produced, on its first object.
+	fn gapped(mut self, gap: u64) -> Self {
+		self.group_gap = gap;
 		self
 	}
 
@@ -8030,16 +7951,48 @@ impl GroupServe {
 		self
 	}
 
+	/// The END_OF_GROUP status this stream ends with, once every frame is written: the one a
+	/// moq-transport publisher sent, or for our own group, one past its last frame once it
+	/// finished whole, unless the track's END_OF_TRACK marks the same place.
+	fn end_object(
+		group: &group::Consumer,
+		terminal: Option<&Terminal>,
+		key: u64,
+	) -> Option<Arc<crate::model::object::Fields>> {
+		if let Some(end) = group.end_object() {
+			return Some(status_fields(end));
+		}
+		if group.wire().is_some() || group.end().is_none() {
+			return None;
+		}
+		let id = group.index();
+		let marked = terminal
+			.and_then(|terminal| terminal.end.get())
+			.is_some_and(|end| end.group == key && end.frame == id);
+		(!marked).then(|| {
+			Arc::new(crate::model::object::Fields {
+				id,
+				properties: Default::default(),
+			})
+		})
+	}
+
 	/// Fill in the header flags and the read slice from the group's relay state.
 	fn describe(&mut self, wire: Option<group::Wire>) {
+		// A moq-transport publisher's objects carry its own Prior Group ID Gap, which passes
+		// through untouched, and only object 0 names ours.
+		if wire.is_some() || self.slice.skip > 0 {
+			self.group_gap = 0;
+		}
 		let flags = &mut self.msg.flags;
-		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions);
+		flags.has_extensions |= wire.as_ref().is_some_and(|wire| wire.extensions) || self.group_gap > 0;
 		flags.first_object = wire.as_ref().map_or(self.slice.skip == 0, |wire| {
 			wire.first_object && self.slice.skip <= wire.first_id
 		});
 		// A stream capped by the range stops before the group may end, so its FIN cannot
-		// claim END_OF_GROUP.
-		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end);
+		// claim END_OF_GROUP. Our own group may close without saying it is whole, which only
+		// an explicit END_OF_GROUP once it finished does, so its FIN claims nothing either.
+		flags.has_end = self.slice.until.is_none() && wire.as_ref().is_some_and(|wire| wire.has_end);
 		if wire.is_none() {
 			// Only the end: a start would clamp past a prefix the group never held, which
 			// `skip_to` leaves to fail as `Lagged`.
@@ -8226,7 +8179,7 @@ impl GroupServe {
 									writer,
 									Object {
 										delta,
-										timestamp: batched.timestamp.timed(),
+										group_gap: (id == 0 && self.group_gap > 0).then_some(self.group_gap),
 										size: batched.payload.len() as u64,
 										inflated: batched.inflated,
 										status: 0,
@@ -8234,7 +8187,6 @@ impl GroupServe {
 									},
 									ObjectEncoding {
 										extensions: self.msg.flags.has_extensions,
-										timescale: self.timescale,
 										version: self.version,
 										source: self.group.ietf(),
 									},
@@ -8274,7 +8226,7 @@ impl GroupServe {
 											writer,
 											Object {
 												delta: object_delta(self.prior_object, id)?,
-												timestamp: next.timestamp.timed(),
+												group_gap: (id == 0 && self.group_gap > 0).then_some(self.group_gap),
 												size: next.size,
 												inflated: next.inflated,
 												status: 0,
@@ -8282,7 +8234,6 @@ impl GroupServe {
 											},
 											ObjectEncoding {
 												extensions: self.msg.flags.has_extensions,
-												timescale: self.timescale,
 												version: self.version,
 												source: self.group.ietf(),
 											},
@@ -8295,8 +8246,11 @@ impl GroupServe {
 									}
 									Poll::Ready(Ok(None)) => {
 										if !self.ended
-											&& let Some(end) = self.group.end_object().map(status_fields)
-											&& end.id >= self.slice.skip && self
+											&& let Some(end) = Self::end_object(
+												&self.group,
+												self.terminal.as_deref(),
+												self.msg.group_id,
+											) && end.id >= self.slice.skip && self
 											.slice
 											.until
 											.is_none_or(|until| end.id < until)
@@ -8305,7 +8259,7 @@ impl GroupServe {
 												writer,
 												Object {
 													delta: object_delta(self.prior_object, end.id)?,
-													timestamp: None,
+													group_gap: None,
 													size: 0,
 													inflated: None,
 													status: 3,
@@ -8313,7 +8267,6 @@ impl GroupServe {
 												},
 												ObjectEncoding {
 													extensions: self.msg.flags.has_extensions,
-													timescale: self.timescale,
 													version: self.version,
 													source: self.group.ietf(),
 												},
@@ -8324,9 +8277,12 @@ impl GroupServe {
 										}
 										// The track ends right after this group's last object, so
 										// the marker rides this stream rather than a separate one.
+										// Not after an END_OF_GROUP already took that Object ID: a
+										// track finished while it waited to flush ends on its own
+										// stream instead.
 										if !self.marked
-											&& let Some(end) =
-												self.terminal.as_ref().and_then(|terminal| terminal.end.get())
+											&& !self.ended && let Some(end) =
+											self.terminal.as_ref().and_then(|terminal| terminal.end.get())
 											&& end.group == self.msg.group_id && end.frame == self.group.index()
 										{
 											writer.buffer_varint(object_delta(self.prior_object, end.frame)?)?;
@@ -8398,12 +8354,15 @@ impl GroupServe {
 	}
 }
 
+#[cfg(test)]
+use super::object::END_OF_GROUP;
 use super::object::END_OF_TRACK;
 
 /// An object's header, with private relay fields when it came from an IETF peer.
 struct Object<'a> {
 	delta: u64,
-	timestamp: Option<Timestamp>,
+	/// The Prior Group ID Gap our own object names, if any.
+	group_gap: Option<u64>,
 	size: u64,
 	inflated: Option<u64>,
 	status: u64,
@@ -8412,7 +8371,6 @@ struct Object<'a> {
 
 struct ObjectEncoding {
 	extensions: bool,
-	timescale: Option<Timescale>,
 	version: Version,
 	/// The draft the track's publisher spoke, which serialized the objects' properties.
 	source: Option<Version>,
@@ -8454,26 +8412,10 @@ fn buffer_object<W: crate::transport::poll::SendStream>(
 ) -> Result<(), Error> {
 	writer.buffer_varint(object.delta)?;
 	if encoding.extensions {
-		let ext = match object.fields {
-			Some(fields) => super::object::write(
-				&fields.properties,
-				encoding.source,
-				object.timestamp,
-				encoding.version,
-				encoding.timescale,
-			)?,
-			None => {
-				let mut ext = Vec::new();
-				if let Some(timescale) = encoding.timescale {
-					let timestamp = object.timestamp.ok_or(Error::TimestampMismatch)?;
-					ietf::encode_object_time(
-						&mut Encoder::new(&mut ext, encoding.version.into()),
-						timestamp,
-						timescale,
-					)?;
-				}
-				ext
-			}
+		let ext = match (object.fields, object.group_gap) {
+			(Some(fields), _) => super::object::write(&fields.properties, encoding.source, encoding.version)?,
+			(None, Some(gap)) => super::object::group_gap(gap, encoding.version)?,
+			(None, None) => Vec::new(),
 		};
 		let ext = super::object::compression(ext, encoding.version, object.inflated)?;
 		writer.buffer_varint(ext.len() as u64)?;
@@ -8541,7 +8483,6 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft22,
 			ServeRange::default(),
-			None,
 		);
 		serve.write_end_of_track(track::Position::group(0)).await.unwrap();
 		let bytes = log.writes.lock().unwrap().clone();
@@ -8570,7 +8511,6 @@ mod group_priority_test {
 			RequestId(1),
 			Version::Draft22,
 			ServeRange::default(),
-			None,
 		)
 		.ranked(queue.clone());
 		let _higher = queue.insert(Priority::new(i8::MAX, 0, 0));
@@ -8595,7 +8535,6 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft22,
 			ServeRange::default(),
-			None,
 		)
 		.ranked(queue.clone());
 		let mut rival = queue.insert(Priority::new(0, 1, 0));
@@ -8635,18 +8574,17 @@ mod group_priority_test {
 					RequestId(0),
 					version,
 					ServeRange::default(),
-					None,
 				);
 				assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 				let mut group = Some(group);
 				if finished {
-					group.take().unwrap().close().unwrap();
+					group.take().unwrap().finish().unwrap();
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
-				track.finish_at(track::Position { group: 5, frame: 5 }, None).unwrap();
+				track.finish_at(track::Position { group: 5, frame: 5 }).unwrap();
 				if let Some(group) = group {
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 				kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 				if let Some(end) = serve.end() {
@@ -8667,7 +8605,8 @@ mod group_priority_test {
 				let header =
 					crate::coding::decode_buf(&mut bytes, version, |r, v| ietf::GroupHeader::decode(r, v)).unwrap();
 				assert_eq!(header.group_id, 5);
-				assert_eq!(header.flags.has_end, !finished);
+				// Our own group's FIN never claims its end: only END_OF_GROUP says it is whole.
+				assert!(!header.flags.has_end);
 				if !finished {
 					for _ in 0..5 {
 						assert_eq!(&bytes.split_to(3)[..], &[0, 1, b'x']);
@@ -8696,7 +8635,7 @@ mod group_priority_test {
 			let mut subscriber = track.subscribe(None);
 			let mut old = track.append_next().unwrap();
 			old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
-			old.close().unwrap();
+			old.finish().unwrap();
 			let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 			// Set directly rather than through the track, which a later group expires.
@@ -8713,7 +8652,6 @@ mod group_priority_test {
 				},
 				Rank::solo(kio::Producer::new(0).consume()),
 				group,
-				Some(Timescale::MILLI),
 				Version::Draft18,
 				GroupSlice::default(),
 			)
@@ -8739,7 +8677,7 @@ mod group_priority_test {
 			let mut edge = track.append_next().unwrap();
 			edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 				.unwrap();
-			edge.close().unwrap();
+			edge.finish().unwrap();
 			assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Err(Error::Old))));
 			assert!(
 				!terminal.sent.load(Ordering::Relaxed),
@@ -8777,7 +8715,7 @@ mod group_priority_test {
 		group
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"hello".as_slice())
 			.unwrap();
-		let group = group.close().unwrap();
+		let group = group.finish().unwrap();
 
 		let msg = ietf::GroupHeader {
 			track_alias: 0,
@@ -8796,7 +8734,6 @@ mod group_priority_test {
 				msg.clone(),
 				rank_in(&queue, priority, subscribe),
 				group.consume(),
-				Some(Timescale::MILLI),
 				Version::Draft18,
 				GroupSlice::default(),
 			)
@@ -8910,7 +8847,6 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),
-			None,
 		);
 		let opened = serve.opened.clone();
 
@@ -8922,7 +8858,7 @@ mod group_priority_test {
 				group
 					.write_frame(crate::Timestamp::from_millis(appended).unwrap(), b"x".as_slice())
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				appended += 1;
 			}
 			appended == GROUPS
@@ -8960,14 +8896,13 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),
-			None,
 		);
 		for key in 0..2 {
 			let mut group = track.create_group(group::Info { start: key }).unwrap();
 			group
 				.write_frame(crate::Timestamp::from_millis(key).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let waiter = kio::Waiter::noop();
@@ -9016,14 +8951,13 @@ mod group_priority_test {
 				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), vec![0u8; PAYLOAD])
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		let serve = TrackServe::new(
 			crate::driver::Transport::new(session.clone()),
 			subscriber,
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),
-			None,
 		);
 
 		// An object's header takes well under a payload more, and a poll may also flush what
@@ -9058,7 +8992,6 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),
-			None,
 		);
 
 		let group = track.create_group(group::Info { start: 0 }).unwrap();
@@ -9068,7 +9001,7 @@ mod group_priority_test {
 		later
 			.write_frame(crate::Timestamp::unscaled(later.start), b"later".as_slice())
 			.unwrap();
-		later.close().unwrap();
+		later.finish().unwrap();
 		for _ in 0..8 {
 			assert!(futures::poll!(kio::wait(|waiter| serve.poll(waiter))).is_pending());
 			kio::clock::sim::yield_now().await;
@@ -9101,7 +9034,7 @@ mod group_priority_test {
 			})
 			.unwrap();
 		frame.write(b"x".as_slice()).unwrap();
-		frame.finish().unwrap().close().unwrap();
+		frame.finish().unwrap().finish().unwrap();
 		let _finished = track.finish().unwrap();
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
@@ -9133,7 +9066,7 @@ mod group_priority_test {
 
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.key_time(), b"hello".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _track = track.finish().unwrap();
 
 		let mut serve = TrackServe::new(
@@ -9142,7 +9075,6 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft18,
 			ServeRange::default(),
-			Some(Timescale::MILLI),
 		);
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
@@ -9197,7 +9129,6 @@ mod group_priority_test {
 						RequestId(id),
 						Version::Draft22,
 						ServeRange::default(),
-						Some(Timescale::MILLI),
 					);
 					(track, serve)
 				})
@@ -9209,7 +9140,7 @@ mod group_priority_test {
 					group
 						.write_frame(crate::Timestamp::from_millis(key).unwrap(), b"x".as_slice())
 						.unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 					settle_serve(serve).await;
 				}
 				let held = serves.iter().map(|(_, serve)| serve.machines() as u64).sum::<u64>();
@@ -9244,7 +9175,6 @@ mod group_priority_test {
 			RequestId(0),
 			Version::Draft22,
 			ServeRange::default(),
-			Some(Timescale::MILLI),
 		);
 
 		let mut group = track.append_next().unwrap();
@@ -9259,7 +9189,7 @@ mod group_priority_test {
 		let mut next = track.append_next().unwrap();
 		next.write_frame(crate::Timestamp::from_millis(1).unwrap(), b"x".as_slice())
 			.unwrap();
-		next.close().unwrap();
+		next.finish().unwrap();
 		settle_serve(&mut serve).await;
 		assert_eq!(serve.machines(), 1, "group 1 takes its place");
 
@@ -9293,7 +9223,7 @@ mod group_priority_test {
 			crate::track::Info::timed(),
 		);
 		let mut subscriber = track.subscribe(None);
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(crate::Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(crate::Timestamp::ZERO, vec![b'x'; FRAME]).unwrap();
 		let meter = registry.publisher_meter(crate::Path::from_static("demo"), &crate::stats::Tier::default());
 		let consumer = subscriber
@@ -9314,7 +9244,6 @@ mod group_priority_test {
 			},
 			Rank::solo(kio::Producer::new(0).consume()),
 			consumer,
-			Some(Timescale::MILLI),
 			Version::Draft18,
 			GroupSlice::default(),
 		);
@@ -9363,7 +9292,7 @@ mod group_priority_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
-		old.close().unwrap();
+		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let mut serve = GroupServe::new(
@@ -9377,7 +9306,6 @@ mod group_priority_test {
 			},
 			Rank::solo(kio::Producer::new(0).consume()),
 			group,
-			Some(Timescale::MILLI),
 			Version::Draft18,
 			GroupSlice::default(),
 		);
@@ -9391,7 +9319,7 @@ mod group_priority_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
 	}
@@ -9421,7 +9349,6 @@ mod group_priority_test {
 			},
 			Rank::solo(kio::Producer::new(0).consume()),
 			group,
-			None,
 			Version::Draft18,
 			GroupSlice::default(),
 		);
@@ -9434,7 +9361,7 @@ mod group_priority_test {
 		let mut edge = track.create_group(group::Info { start: 1 }).unwrap();
 		edge.write_frame(crate::Timestamp::unscaled(edge.start), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
 	}
@@ -9455,7 +9382,7 @@ mod group_priority_test {
 			producer
 				.write_frame(crate::Timestamp::ZERO, b"tail".as_slice())
 				.unwrap();
-			producer.close().unwrap();
+			producer.finish().unwrap();
 			let group = subscriber.recv_group().await.unwrap().expect("the group");
 
 			let mut serve = GroupServe::new(
@@ -9469,7 +9396,6 @@ mod group_priority_test {
 				},
 				Rank::solo(kio::Producer::new(0).consume()),
 				group,
-				Some(Timescale::MILLI),
 				Version::Draft18,
 				GroupSlice { skip: 0, until },
 			);
@@ -9492,7 +9418,7 @@ mod group_priority_test {
 		let mut subscriber = track.subscribe(None);
 		let mut old = track.append_next().unwrap();
 		old.write_frame(old.key_time(), b"old".as_slice()).unwrap();
-		old.close().unwrap();
+		old.finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("old group");
 
 		let mut serve = GroupServe::new(
@@ -9506,7 +9432,6 @@ mod group_priority_test {
 			},
 			Rank::solo(kio::Producer::new(0).consume()),
 			group,
-			Some(Timescale::MILLI),
 			Version::Draft18,
 			GroupSlice::default(),
 		);
@@ -9521,7 +9446,7 @@ mod group_priority_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(futures::poll!(serving.as_mut()), Poll::Ready(Err(Error::Old))));
 		assert_eq!(log.resets(), vec![crate::StreamError::Cancel.to_code()]);
@@ -9540,7 +9465,7 @@ mod group_priority_test {
 		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"done".as_slice()).unwrap();
 		let consumer = group.consume();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		// Another subscription's group at 22 sits in the same queue, so each update
 		// moves this stream across it.
@@ -9558,7 +9483,6 @@ mod group_priority_test {
 			},
 			rank_in(&queue, &priority, 0),
 			consumer,
-			Some(Timescale::MILLI),
 			Version::Draft18,
 			GroupSlice::default(),
 		);
@@ -9609,7 +9533,6 @@ mod group_priority_test {
 			},
 			Rank::solo(kio::Producer::new(0).consume()),
 			group,
-			Some(Timescale::MILLI),
 			Version::Draft18,
 			GroupSlice::default(),
 		);
@@ -9623,7 +9546,7 @@ mod group_priority_test {
 		*open = false;
 		drop(open);
 		frame.write(b"b".as_slice()).unwrap();
-		frame.finish().unwrap().close().unwrap();
+		frame.finish().unwrap().finish().unwrap();
 		assert!(
 			futures::poll!(serving.as_mut()).is_pending(),
 			"the final byte is transport-blocked"
@@ -9633,7 +9556,7 @@ mod group_priority_test {
 		let mut edge = track.append_next().unwrap();
 		edge.write_frame(crate::Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
 			.unwrap();
-		edge.close().unwrap();
+		edge.finish().unwrap();
 
 		assert!(matches!(serving.await, Err(Error::Old)));
 	}
@@ -9660,7 +9583,7 @@ mod subscribe_cursor_test {
 		for key in 0..4 {
 			let mut group = track.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let subscriber = track.subscribe(None);
@@ -9672,7 +9595,6 @@ mod subscribe_cursor_test {
 			RequestId(1),
 			Version::Draft18,
 			ServeRange::default(),
-			Some(Timescale::MILLI),
 		);
 		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
@@ -9684,6 +9606,7 @@ mod subscribe_cursor_test {
 #[cfg(test)]
 mod serve_tests {
 	use super::*;
+	use crate::coding::Encoder;
 	use crate::coding::{Decode, Decoder};
 	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::{Close, Log, ScriptedSession, Sent, SinkSession};
@@ -9752,7 +9675,6 @@ mod serve_tests {
 			RequestId(0),
 			version,
 			ServeRange::default(),
-			None,
 		);
 		let mut updates = subscription_updates();
 		let served = h
@@ -9785,7 +9707,6 @@ mod serve_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				None,
 			);
 			let mut finished = false;
 			let mut goaways =
@@ -9897,7 +9818,6 @@ mod serve_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				None,
 			);
 			let mut finished = false;
 			let mut updates = subscription_updates();
@@ -9916,7 +9836,7 @@ mod serve_tests {
 			if !super::super::request_stream::fin_cancels(version) {
 				let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 				group.write_frame(group.key_time(), b"after FIN".as_slice()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				assert!(futures::poll!(run.as_mut()).is_pending());
 				assert_eq!(occurrences(&h.log, b"after FIN"), 1, "{version}");
 			}
@@ -9942,7 +9862,6 @@ mod serve_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				None,
 			);
 			let mut finished = false;
 			let mut updates = subscription_updates();
@@ -10041,7 +9960,6 @@ mod serve_tests {
 			RequestId(0),
 			version,
 			ServeRange::default(),
-			None,
 		);
 		let mut finished = false;
 		let mut updates = subscription_updates();
@@ -10081,7 +9999,6 @@ mod serve_tests {
 			RequestId(0),
 			version,
 			ServeRange::default(),
-			None,
 		)
 		.ranked(queue);
 		let mut finished = false;
@@ -10337,7 +10254,7 @@ mod serve_tests {
 		})
 		.await;
 
-		group.close().unwrap();
+		group.finish().unwrap();
 		h.track.finish_shared().unwrap();
 		kio::clock::timeout(std::time::Duration::from_secs(10), serve)
 			.await
@@ -10359,11 +10276,10 @@ mod serve_tests {
 	async fn publish_done_waits_on_an_unacknowledged_fin_until_the_group_is_stale() {
 		let version = Version::Draft22;
 		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_uni_fins(1);
-		let h = serve_session(version, crate::track::Info::timed(), session);
 		// Well past the cache window, which only dates idleness once a sweep passes.
 		let budget = crate::cache::DEFAULT_EXPIRY * 4;
-		let mut msg = subscribe(Filter::NextObject, None);
-		msg.max_age = Some(budget.as_millis() as u64);
+		let h = serve_session(version, crate::track::Info::timed().with_max_age(Some(budget)), session);
+		let msg = subscribe(Filter::NextObject, None);
 
 		// `create_broadcast` registers the broadcast from a spawned task.
 		kio::clock::sleep(Duration::from_millis(1)).await;
@@ -10380,7 +10296,7 @@ mod serve_tests {
 		let append = || {
 			let mut group = h.track.append_next().unwrap();
 			group.write_frame(group.key_time(), b"x".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let finished = || {
 			data_streams(&h.log)
@@ -10446,7 +10362,6 @@ mod serve_tests {
 			RequestId(0),
 			version,
 			ServeRange::default(),
-			None,
 		);
 		h.track.clone().abort(Error::Unsupported).unwrap();
 		let mut finished = false;
@@ -10554,7 +10469,6 @@ mod serve_tests {
 	fn forward_update(version: Version, id: u64, forward: bool) -> Vec<u8> {
 		let mut body = Vec::new();
 		ietf::SubscribeUpdate {
-			max_age: None,
 			new_group: None,
 			request_id: RequestId(id),
 			subscriber_priority: None,
@@ -10639,7 +10553,7 @@ mod serve_tests {
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), &b"bounded"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut datagrams = broadcast.create_datagrams("audio", Default::default()).unwrap();
 		let consumer = broadcast.consume().datagrams("audio").unwrap();
 		let session = ScriptedSession::new(Vec::new()).with_datagrams(1200);
@@ -10652,9 +10566,8 @@ mod serve_tests {
 				end: Some(EndLocation { group: 0, object: None }),
 				..Default::default()
 			},
-			None,
 		)
-		.with_datagrams(consumer, false, true);
+		.with_datagrams(consumer, true);
 		let _group = kio::wait(|waiter| serving.track.poll_recv_group(waiter))
 			.await
 			.unwrap()
@@ -10795,7 +10708,6 @@ mod serve_tests {
 	fn new_group_update(version: Version, id: u64, value: u64) -> Vec<u8> {
 		let mut body = Vec::new();
 		ietf::SubscribeUpdate {
-			max_age: None,
 			new_group: Some(value),
 			request_id: RequestId(id),
 			subscriber_priority: None,
@@ -10933,7 +10845,6 @@ mod serve_tests {
 					RequestId(0),
 					version,
 					ServeRange::default(),
-					None,
 				);
 				let mut finished = false;
 				let mut goaways = super::super::request_stream::Messages::new(
@@ -10976,7 +10887,6 @@ mod serve_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				None,
 			);
 			let mut finished = false;
 			let mut updates = subscription_updates();
@@ -11038,7 +10948,6 @@ mod serve_tests {
 					RequestId(0),
 					version,
 					ServeRange::default(),
-					None,
 				);
 				let mut finished = false;
 				let mut updates = subscription_updates();
@@ -11141,7 +11050,6 @@ mod serve_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				None,
 			);
 			let mut finished = false;
 			let mut updates = subscription_updates();
@@ -11192,7 +11100,6 @@ mod serve_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				None,
 			);
 			let mut updates = subscription_updates();
 			let result = h
@@ -11231,7 +11138,6 @@ mod serve_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				None,
 			);
 			h.track.clone().abort(Error::Decode(DecodeError::InvalidValue)).unwrap();
 			let mut updates = subscription_updates();
@@ -11770,7 +11676,6 @@ mod serve_tests {
 
 	fn subscribe(filter: Filter, fill: Option<ietf::Fill>) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
-			max_age: None,
 			new_group: None,
 			request_id: RequestId(REQUEST_ID),
 			track_namespace: crate::Path::from_static("room"),
@@ -12198,36 +12103,29 @@ mod serve_tests {
 		}
 	}
 
-	/// Opting out of SUBSCRIBE_OK's properties also opts out of timestamps: with no
-	/// TIMESCALE declared, the objects go out unstamped.
+	/// Nothing sends a Timestamp object property: a timed track's frame times stay on the
+	/// track's side, whether or not SUBSCRIBE_OK declares its TIMESCALE.
 	#[kio::test]
-	async fn the_properties_opt_out_strips_object_timestamps() {
+	async fn objects_carry_no_timestamp() {
 		let version = Version::Draft22;
 		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
-		let mut properties = Vec::new();
-		ietf::encode_object_time(
-			&mut Encoder::new(&mut properties, version.into()),
-			stamp,
-			track::Info::timed().timescale.expect("a timed track"),
-		)
-		.unwrap();
+		let mut timestamp = Vec::new();
+		let mut encoder = Encoder::new(&mut timestamp, version.into());
+		encoder.varint(0x10).unwrap();
+		encoder.varint(stamp.value()).unwrap();
 
 		for wanted in [true, false] {
 			let mut h = serve(version);
 			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(stamp, b"stamped".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 
 			let mut msg = subscribe(Filter::Unfiltered, None);
 			msg.properties_wanted = wanted;
 			run_live(&mut h, msg).await;
 
 			assert_eq!(occurrences(&h.log, b"stamped"), 1, "wanted={wanted}");
-			assert_eq!(
-				occurrences(&h.log, &properties),
-				usize::from(wanted),
-				"wanted={wanted}: stamped only when TIMESCALE is declared"
-			);
+			assert_eq!(occurrences(&h.log, &timestamp), 0, "wanted={wanted}");
 		}
 	}
 
@@ -12516,13 +12414,13 @@ mod serve_tests {
 			let mut h = serve(Version::Draft22);
 			let mut earlier = h.track.create_group(group::Info { start: 0 }).unwrap();
 			earlier.write_frame(earlier.key_time(), b"earlier".as_slice()).unwrap();
-			earlier.close().unwrap();
+			earlier.finish().unwrap();
 
 			let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
 			for payload in [b"head-0", b"head-1", b"head-2"] {
 				group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 
 			run_live(
 				&mut h,
@@ -12598,7 +12496,6 @@ mod serve_tests {
 				filter: Some(Filter::Absolute { start, end }),
 				authorization_token: None,
 				new_group: None,
-				max_age: None,
 				fill: None,
 			};
 			let mut bytes = Vec::new();
@@ -12611,10 +12508,10 @@ mod serve_tests {
 			})
 			.await;
 			group.write_frame(group.key_time(), b"after-update".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			let mut later = h.track.create_group(group::Info { start: 4 }).unwrap();
 			later.write_frame(later.key_time(), b"wanted".as_slice()).unwrap();
-			later.close().unwrap();
+			later.finish().unwrap();
 			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(
@@ -12657,7 +12554,7 @@ mod serve_tests {
 			let h = serve(version);
 			let mut history = h.track.create_group(group::Info { start: 0 }).unwrap();
 			history.write_frame(history.key_time(), b"history".as_slice()).unwrap();
-			history.close().unwrap();
+			history.finish().unwrap();
 			let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
 			group
 				.write_frame(group.key_time(), b"before-update".as_slice())
@@ -12689,7 +12586,6 @@ mod serve_tests {
 					filter: Some(Filter::Absolute { start, end: None }),
 					authorization_token: None,
 					new_group: None,
-					max_age: None,
 					fill: fill.then_some(ietf::Fill {
 						group_order: None,
 						filter: None,
@@ -12713,7 +12609,7 @@ mod serve_tests {
 			for payload in [b"after-1", b"after-2"] {
 				group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
 			assert_eq!(
@@ -12780,7 +12676,6 @@ mod serve_tests {
 			filter: Some(at_head),
 			authorization_token: None,
 			new_group: None,
-			max_age: None,
 			fill: Some(ietf::Fill {
 				group_order: None,
 				filter: None,
@@ -12805,7 +12700,7 @@ mod serve_tests {
 		})
 		.await;
 		group.write_frame(group.key_time(), b"tail".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		serving.await.unwrap();
 		assert_eq!(occurrences(&h.log, b"tail"), 1, "the update's tail is served");
 	}
@@ -12818,7 +12713,7 @@ mod serve_tests {
 		let h = serve(version);
 		let mut history = h.track.create_group(group::Info { start: 0 }).unwrap();
 		history.write_frame(history.key_time(), b"history".as_slice()).unwrap();
-		history.close().unwrap();
+		history.finish().unwrap();
 		let mut group = h.track.create_group(group::Info { start: 1 }).unwrap();
 		group.write_frame(group.key_time(), b"live".as_slice()).unwrap();
 		kio::clock::sim::yield_now().await;
@@ -12843,7 +12738,6 @@ mod serve_tests {
 			filter: None,
 			authorization_token: None,
 			new_group: None,
-			max_age: None,
 			fill: Some(ietf::Fill {
 				group_order: None,
 				filter: Some(Filter::Absolute {
@@ -12862,7 +12756,7 @@ mod serve_tests {
 			Wire::read(&h.log, version).sent(ietf::RequestOk::ID).is_some()
 		})
 		.await;
-		group.close().unwrap();
+		group.finish().unwrap();
 		h.track.finish_shared().unwrap();
 		serving.await.unwrap();
 		assert_eq!(occurrences(&h.log, b"history"), 0, "the historical fill is refused");
@@ -12910,7 +12804,6 @@ mod serve_tests {
 				}),
 				authorization_token: None,
 				new_group: None,
-				max_age: None,
 				fill: Some(ietf::Fill {
 					group_order: None,
 					filter: Some(Filter::Unfiltered),
@@ -12929,11 +12822,11 @@ mod serve_tests {
 			group
 				.write_frame(group.key_time(), b"later-current".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			for (key, payload) in [(2, b"excluded".as_slice()), (4, b"wanted".as_slice())] {
 				let mut group = h.track.create_group(group::Info { start: key }).unwrap();
 				group.write_frame(group.key_time(), payload).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 			h.track.finish_shared().unwrap();
 			serving.await.unwrap();
@@ -12958,7 +12851,7 @@ mod serve_tests {
 		for payload in [b"head-0", b"head-1", b"head-2"] {
 			group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		run_live(&mut h, subscribe(Filter::Relative(1), None)).await;
 
@@ -12978,7 +12871,7 @@ mod serve_tests {
 		for payload in [b"head-0", b"head-1", b"head-2"] {
 			group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		run_live(&mut h, subscribe(Filter::NextObject, None)).await;
 
@@ -13006,7 +12899,7 @@ mod serve_tests {
 				for (key, payload) in [(0, b"history"), (1, b"latest!")] {
 					let mut group = h.track.create_group(group::Info { start: key }).unwrap();
 					group.write_frame(group.key_time(), payload.as_slice()).unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 
 				run_live(&mut h, subscribe(filter, None)).await;
@@ -13041,7 +12934,7 @@ mod serve_tests {
 				for (key, payload) in [(0, b"history"), (1, b"latest!")] {
 					let mut group = track.create_group(group::Info { start: key }).unwrap();
 					group.write_frame(group.key_time(), payload.as_slice()).unwrap();
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 				let (relay, _sessions) = crate::lite::ietf::test_hop(&upstream, "room", [false, false]).await;
 
@@ -13062,14 +12955,18 @@ mod serve_tests {
 				.await
 				.expect("no subscription")
 				.unwrap();
-				for expected in [0, 1] {
+				// Read in arrival order, which the hop's streams do not fix.
+				let mut warmed = Vec::new();
+				for _ in 0..2 {
 					let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
 						.await
 						.expect("no group")
 						.unwrap()
 						.expect("track finished");
-					assert_eq!(group.start, expected, "{version} {filter:?}");
+					warmed.push(group.start);
 				}
+				warmed.sort_unstable();
+				assert_eq!(warmed, [0, 1], "{version} {filter:?}");
 
 				let session = ScriptedSession::per_stream(vec![Vec::new()]);
 				let peer_setup = peer::PeerSetup::default();
@@ -13107,7 +13004,7 @@ mod serve_tests {
 		for key in 0..2 {
 			let mut group = h.track.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		run_live(
@@ -13175,7 +13072,7 @@ mod serve_tests {
 		let mut fill =
 			std::pin::pin!(
 				h.publisher
-					.run_fill(fill, &ranking, h.track.consume(), None, &opened, ranking.request_id)
+					.run_fill(fill, &ranking, h.track.consume(), &opened, ranking.request_id)
 			);
 		assert!(futures::poll!(fill.as_mut()).is_pending(), "the group is still open");
 		assert_eq!(
@@ -13200,7 +13097,7 @@ mod serve_tests {
 			"a REQUEST_UPDATE moved it to the top"
 		);
 
-		group.close().unwrap();
+		group.finish().unwrap();
 		fill.await;
 		assert_eq!(occurrences(&h.log, b"fill"), 1);
 		assert!(h.log.resets().is_empty(), "a served fill must not reset");
@@ -13236,7 +13133,7 @@ mod serve_tests {
 			until: Some(1),
 		};
 		h.publisher
-			.run_fill(fill, &ranking, h.track.consume(), None, &opened, ranking.request_id)
+			.run_fill(fill, &ranking, h.track.consume(), &opened, ranking.request_id)
 			.await;
 		assert_eq!(h.log.priorities(), [255], "the start of the group goes first");
 		assert_eq!(occurrences(&h.log, b"head"), 1);
@@ -13331,7 +13228,7 @@ mod serve_tests {
 		for key in 0..=latest {
 			let mut group = h.track.create_group(group::Info { start: key }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 
@@ -13445,7 +13342,7 @@ mod serve_tests {
 				if streamed {
 					assert!(futures::poll!(serving.as_mut()).is_pending());
 				}
-				frame.finish().unwrap().close().unwrap();
+				frame.finish().unwrap().finish().unwrap();
 				h.track.finish_shared().unwrap();
 				served(&h, serving.as_mut()).await;
 				assert_eq!(occurrences(&h.log, payload), 1, "{version} streamed={streamed}");
@@ -13567,7 +13464,8 @@ mod serve_tests {
 				FETCH_ID
 			);
 			for (index, payload) in payloads.iter().enumerate() {
-				let flags = if index == 0 { 0x3c } else { 0x20 };
+				// GROUP_ID | OBJECT_ID | PRIORITY on the first, then nothing: no properties.
+				let flags = if index == 0 { 0x1c } else { 0x00 };
 				assert_eq!(
 					crate::coding::decode_varint(&mut buf, version).unwrap(),
 					flags,
@@ -13579,8 +13477,6 @@ mod serve_tests {
 					// The track's Publisher Priority, as FETCH_OK states it: unset is wire 127.
 					assert_eq!(bytes::Buf::try_get_u8(&mut buf).unwrap(), 127);
 				}
-				let properties = crate::coding::decode_buf(&mut buf, version, |r, _| Ok(r.bytes()?.to_vec())).unwrap();
-				assert!(!properties.is_empty(), "{version}: missing Timestamp");
 				let size = crate::coding::decode_varint(&mut buf, version).unwrap() as usize;
 				assert_eq!(size, payload.len());
 				assert_eq!(buf.split_to(size).as_ref(), *payload);
@@ -13735,7 +13631,7 @@ mod serve_tests {
 		let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
 		group.start_at(1).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 			.await
@@ -13891,7 +13787,7 @@ mod serve_tests {
 			publish_groups(&mut h, 4);
 			let mut group = h.track.create_group(group::Info { start: 5 }).unwrap();
 			group.write_frame(group.key_time(), b"the-head".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			settle().await;
 
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
@@ -13988,7 +13884,7 @@ mod serve_tests {
 				.unwrap();
 			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"frame".to_vec()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			settle().await;
 
 			let bi = kio::Producer::new(true);
@@ -14362,7 +14258,7 @@ mod serve_tests {
 					.write_frame(group.key_time(), format!("{key}-{object}").into_bytes())
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 
@@ -14383,7 +14279,7 @@ mod serve_tests {
 			for _ in 0..256 {
 				group.write_frame(group.key_time(), vec![7; 1024]).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			settle().await;
 
 			let done = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -14826,8 +14722,7 @@ mod serve_tests {
 	}
 
 	/// FETCH_OK carries the properties SUBSCRIBE_OK would, as far as each draft has room for
-	/// them, and INCLUDE_PROPERTIES=0 empties the block. The objects carry Timestamps only
-	/// when that block declares their units.
+	/// them, and INCLUDE_PROPERTIES=0 empties the block. The objects never carry a Timestamp.
 	#[kio::test]
 	async fn fetch_ok_carries_the_track_properties() {
 		let info = track::Info {
@@ -14846,7 +14741,7 @@ mod serve_tests {
 				let track = h._broadcast.broadcast().create_track("timed", info.clone()).unwrap();
 				let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 				group.write_frame(stamp, b"stamped".as_slice()).unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 				settle().await;
 
 				let range = fetch_range(
@@ -14861,18 +14756,11 @@ mod serve_tests {
 				let expected = track_properties(&info, wanted, version, true).unwrap();
 				assert_eq!(ok.properties, expected, "{version} wanted={wanted}");
 
-				let mut properties = Vec::new();
-				ietf::encode_object_time(
-					&mut Encoder::new(&mut properties, version.into()),
-					stamp,
-					info.timescale.expect("a timed track"),
-				)
-				.unwrap();
-				assert_eq!(
-					occurrences(&h.log, &properties),
-					usize::from(wanted),
-					"{version} wanted={wanted}: stamped only with a TIMESCALE"
-				);
+				let mut timestamp = Vec::new();
+				let mut encoder = Encoder::new(&mut timestamp, version.into());
+				encoder.varint(0x10).unwrap();
+				encoder.varint(stamp.value()).unwrap();
+				assert_eq!(occurrences(&h.log, &timestamp), 0, "{version} wanted={wanted}");
 			}
 		}
 	}
@@ -14946,7 +14834,7 @@ mod serve_tests {
 		);
 		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
 		group.write_frame(group.key_time(), b"fill".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let ranking = Ranking {
 			queue: h.publisher.priority.clone(),
@@ -14964,7 +14852,7 @@ mod serve_tests {
 			until: None,
 		};
 		h.publisher
-			.run_fill(fill, &ranking, h.track.consume(), None, &opened, ranking.request_id)
+			.run_fill(fill, &ranking, h.track.consume(), &opened, ranking.request_id)
 			.await;
 		let wire = bytes::Bytes::from(h.log.writes.lock().unwrap().to_vec());
 		let mut buf = Decoder::new(&wire, version.into());
@@ -15014,7 +14902,7 @@ mod serve_tests {
 			let h = serve_track(version, info.clone());
 			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"a".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			settle().await;
 			let range = fetch_range(
 				version,
@@ -15241,7 +15129,7 @@ mod serve_tests {
 			}
 			Largest::IdleEnded => {
 				h.track.set_idle();
-				h.track.finish_at(track::Position::group(10), None).unwrap();
+				h.track.finish_at(track::Position::group(10)).unwrap();
 				None
 			}
 			Largest::IdleFinished => {
@@ -15315,7 +15203,7 @@ mod serve_tests {
 		let mut h = serve(version);
 		publish_pairs(&mut h, 5, None);
 		let empty = h.track.create_group(group::Info { start: 5 }).unwrap();
-		empty.close().unwrap();
+		empty.finish().unwrap();
 		settle().await;
 
 		let buf = standalone_fetch(
@@ -15385,7 +15273,7 @@ mod serve_tests {
 				)
 				.unwrap();
 		}
-		fetched.close().unwrap();
+		fetched.finish().unwrap();
 		fetching.await.unwrap();
 
 		let fetch_type = fetch_range(
@@ -15606,7 +15494,7 @@ mod serve_tests {
 			let finish = async {
 				settle().await;
 				older.write_frame(older.key_time(), b"4-1".to_vec()).unwrap();
-				older.close().unwrap();
+				older.finish().unwrap();
 			};
 			let (buf, ()) = futures::join!(fetch, finish);
 			let (ok, objects) = fetch_answer(buf, version);
@@ -15744,7 +15632,7 @@ mod serve_tests {
 				.unwrap();
 			let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"0-0".to_vec()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			settle().await;
 
 			// Request streams flow, but no uni stream credit is ever granted.
@@ -16153,7 +16041,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), ANSWERED_HEAD.to_vec()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -16320,7 +16208,7 @@ mod serve_tests {
 					Parked::Acking => {
 						let mut group = track.create_group(group::Info { start: 0 }).unwrap();
 						group.write_frame(group.key_time(), b"frame".to_vec()).unwrap();
-						group.close().unwrap();
+						group.finish().unwrap();
 					}
 					// An empty finished track: nothing to serve but the marker.
 					_ => {
@@ -17022,7 +16910,7 @@ mod serve_tests {
 		for payload in [b"5-0", b"5-1", b"5-2", b"5-3"] {
 			group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		run_live(&mut h, subscribe(Filter::Unfiltered, None)).await;
 
@@ -17116,14 +17004,13 @@ mod serve_tests {
 				group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 			}
 			let consumer = group.consume();
-			group.close().unwrap();
+			group.finish().unwrap();
 
 			let mut serve = GroupServe::new(
 				crate::driver::Transport::new(session.clone()),
 				header(),
 				Rank::solo(kio::Producer::new(0).consume()),
 				consumer,
-				Some(Timescale::MILLI),
 				Version::Draft22,
 				slice,
 			);
@@ -17157,14 +17044,13 @@ mod serve_tests {
 	}
 
 	/// A stream cut short by the range's end Location does not claim END_OF_GROUP, since
-	/// the group goes on past it. A range ending on a whole group still does. A cap at or past
-	/// the group's real end clears the bit too, since the header is written before we know.
+	/// the group goes on past it, and neither does our own group's FIN, which a closed group
+	/// also sends. Only a group finished whole ends with an explicit END_OF_GROUP.
 	#[kio::test]
-	async fn capped_group_does_not_claim_its_end() {
-		async fn serve(object: Option<u64>) -> ietf::GroupHeader {
+	async fn only_a_whole_group_claims_its_end() {
+		async fn serve(object: Option<u64>, whole: bool) -> (ietf::GroupHeader, bytes::Bytes) {
 			let log = crate::lite::test_transport::Log::default();
 			let session = SinkSession::new(log.clone());
-
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"test",
@@ -17176,7 +17062,17 @@ mod serve_tests {
 			for payload in [b"aa", b"bb", b"cc"] {
 				group.write_frame(group.key_time(), payload.as_slice()).unwrap();
 			}
-			group.close().unwrap();
+			match whole {
+				true => {
+					let end = group.start + 1;
+					group.finish_at(end).unwrap()
+				}
+				false => group.finish().unwrap(),
+			};
+			// The track goes on past the range, so no END_OF_TRACK marks the group's end.
+			let mut next = track.append_next().unwrap();
+			next.write_frame(next.key_time(), b"dd".as_slice()).unwrap();
+			next.finish().unwrap();
 			let _track = track.finish().unwrap();
 
 			let range = ServeRange {
@@ -17189,19 +17085,101 @@ mod serve_tests {
 				RequestId(0),
 				Version::Draft22,
 				range,
-				None,
 			);
 			kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
 
 			let mut buf = bytes::Bytes::from(log.writes.lock().unwrap().clone());
-			crate::coding::decode_buf(&mut buf, Version::Draft22, |r, v| ietf::GroupHeader::decode(r, v))
-				.expect("a group header")
+			let header = crate::coding::decode_buf(&mut buf, Version::Draft22, |r, v| ietf::GroupHeader::decode(r, v))
+				.expect("a group header");
+			(header, buf)
 		}
 
-		assert!(!serve(Some(0)).await.flags.has_end, "capped at object 0 of 3");
-		assert!(!serve(Some(2)).await.flags.has_end, "capped at the last object");
-		assert!(!serve(Some(3)).await.flags.has_end, "capped past the last object");
-		assert!(serve(None).await.flags.has_end, "the whole group");
+		const FRAMES: [u8; 12] = [0, 2, b'a', b'a', 0, 2, b'b', b'b', 0, 2, b'c', b'c'];
+		for whole in [false, true] {
+			for (object, frames) in [(Some(0), 4), (Some(2), 12), (Some(3), 12), (None, 12)] {
+				let (header, body) = serve(object, whole).await;
+				assert!(!header.flags.has_end, "{object:?} whole={whole}");
+				let mut expected = FRAMES[..frames].to_vec();
+				// A range reaching one past the last Object ID covers the END_OF_GROUP there.
+				if whole && object.is_none_or(|object| object >= 3) {
+					expected.extend([0, 0, END_OF_GROUP as u8]);
+				}
+				assert_eq!(&body[..], expected, "{object:?} whole={whole}");
+			}
+		}
+	}
+
+	/// A group's first object names the keys just below it that the publisher declared it
+	/// never produced, as a Prior Group ID Gap: what `append_group` skips, or `skip_groups`.
+	/// Only object 0 carries it, so a group with none sends no properties at all.
+	#[kio::test]
+	async fn the_first_object_names_the_skipped_keys_below() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone());
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			// Keeps a superseded group, so a later one landing does not give up on it.
+			track::Info::default().with_max_age(None),
+		);
+		let subscriber = track.subscribe(Some(
+			track::Subscription::default()
+				.with_order(track::Order::Ascending)
+				.with_delay(track::Delay::default().with_max(None)),
+		));
+		let write = |group: group::Producer| {
+			let mut group = group;
+			for payload in [b"aa", b"bb"] {
+				group
+					.write_frame(crate::Timestamp::unscaled(group.start), payload.as_slice())
+					.unwrap();
+			}
+			group.finish().unwrap();
+		};
+		write(track.append_group(crate::Timestamp::unscaled(2)).unwrap());
+		// Appending says the producer will not go back, so keys 3 and 4 never exist.
+		write(track.append_group(crate::Timestamp::unscaled(5)).unwrap());
+		// A gap between created groups says nothing.
+		write(track.create_group(group::Info { start: 7 }).unwrap());
+		let _track = track.finish().unwrap();
+
+		let mut serve = TrackServe::new(
+			crate::driver::Transport::new(session.clone()),
+			subscriber,
+			RequestId(0),
+			Version::Draft22,
+			ServeRange {
+				start: Some(Location { group: 2, object: 0 }),
+				end: Some(EndLocation { group: 7, object: None }),
+			},
+		);
+		kio::wait(|waiter| serve.poll(waiter)).await.unwrap();
+
+		let mut streams = std::collections::BTreeMap::<u64, Vec<u8>>::new();
+		for (id, event) in log.trail() {
+			if let Sent::Write(bytes) = event {
+				streams.entry(id as u64).or_default().extend(bytes);
+			}
+		}
+		let mut groups = std::collections::BTreeMap::new();
+		for bytes in streams.into_values() {
+			let mut buf = bytes::Bytes::from(bytes);
+			let header =
+				crate::coding::decode_buf(&mut buf, Version::Draft22, |r, v| ietf::GroupHeader::decode(r, v)).unwrap();
+			groups.insert(header.group_id, (header.flags.has_extensions, buf));
+		}
+		assert_eq!(groups.keys().copied().collect::<Vec<_>>(), [2, 5, 7]);
+		let plain = [0, 2, b'a', b'a', 0, 2, b'b', b'b'];
+		let (extensions, body) = &groups[&2];
+		assert!(!extensions);
+		assert_eq!(&body[..], plain);
+		// Object 0 with a one-property block, 0x3c = 2; object 1 with an empty one.
+		let (extensions, body) = &groups[&5];
+		assert!(extensions);
+		assert_eq!(&body[..], [0, 2, 0x3c, 2, 2, b'a', b'a', 0, 0, 2, b'b', b'b']);
+		let (extensions, body) = &groups[&7];
+		assert!(!extensions);
+		assert_eq!(&body[..], plain);
 	}
 
 	fn subscription_updates() -> SubscriptionUpdates {
@@ -17299,7 +17277,6 @@ mod serve_tests {
 			version,
 		);
 		let msg = ietf::SubscribeUpdate {
-			max_age: None,
 			new_group: None,
 			request_id: RequestId(0x40),
 			subscriber_priority: Some(128),
@@ -17377,7 +17354,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -17520,7 +17497,6 @@ mod serve_tests {
 			version,
 		);
 		let msg = ietf::SubscribeUpdate {
-			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscriber_priority: Some(128),
@@ -17547,7 +17523,6 @@ mod serve_tests {
 			version,
 		);
 		let msg = ietf::SubscribeUpdate {
-			max_age: None,
 			new_group: None,
 			request_id: RequestId(rid),
 			subscriber_priority: Some(128),
@@ -17578,7 +17553,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -17653,7 +17628,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -17708,7 +17683,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -17755,7 +17730,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -17802,7 +17777,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -17873,7 +17848,7 @@ mod serve_tests {
 
 			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 			group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			settle().await;
 
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
@@ -17942,7 +17917,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -17999,7 +17974,7 @@ mod serve_tests {
 	) {
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let renewal = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -18072,7 +18047,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -18146,7 +18121,7 @@ mod serve_tests {
 
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -18251,7 +18226,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth, Vec::new());
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -18305,7 +18280,7 @@ mod serve_tests {
 		let h = serve_with_auth(VERSION, auth.clone(), Vec::new());
 		let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
 		group.write_frame(group.key_time(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		settle().await;
 
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), VERSION)
@@ -18801,7 +18776,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(millis).unwrap(), b"frame".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let subscription = serving_subscription(128);
@@ -19899,7 +19874,6 @@ mod tests {
 			},
 			solicit,
 			hidden: false,
-			max_age: false,
 			active_count: false,
 			flate: false,
 		});
@@ -21179,7 +21153,6 @@ mod tests {
 			.run_subscribe_stream(
 				stream,
 				ietf::Subscribe {
-					max_age: None,
 					new_group: None,
 					request_id: RequestId(1),
 					track_namespace: crate::Path::from_static("nothing/here"),
@@ -21617,7 +21590,6 @@ mod range_tests {
 
 	fn subscribe(filter: Filter) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
-			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::from_static("broadcast"),
@@ -21655,8 +21627,8 @@ mod range_tests {
 			"video",
 			crate::track::Info::timed(),
 		);
-		track.create_group(group::Info { start: 7 }).unwrap().close().unwrap();
-		track.create_group(group::Info { start: 8 }).unwrap().close().unwrap();
+		track.create_group(group::Info { start: 7 }).unwrap().finish().unwrap();
+		track.create_group(group::Info { start: 8 }).unwrap().finish().unwrap();
 
 		// Next Group against a live edge of 8 asks for 9, which does not exist yet.
 		let mut subscriber = track.subscribe(None);
@@ -21667,7 +21639,7 @@ mod range_tests {
 		);
 
 		// The group it asked for is what it gets once published.
-		track.create_group(group::Info { start: 9 }).unwrap().close().unwrap();
+		track.create_group(group::Info { start: 9 }).unwrap().finish().unwrap();
 		let group = subscriber.recv_group().await.unwrap().expect("group 9");
 		assert_eq!(group.start, 9);
 	}
@@ -21897,7 +21869,7 @@ mod range_tests {
 						.write_frame(crate::Timestamp::from_millis(key).unwrap(), b"frame".as_slice())
 						.unwrap();
 				}
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 			let _track = staged.commit();
 			assert_eq!(snapshot.join().unwrap(), Some(Location { group: 2, object: 1 }));
@@ -21917,7 +21889,7 @@ mod range_tests {
 		first
 			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
 			.unwrap();
-		first.close().unwrap();
+		first.finish().unwrap();
 		// Key 1 never exists; the newest group is empty.
 		let _open = track.create_group(group::Info { start: 2 }).unwrap();
 
@@ -21943,7 +21915,7 @@ mod range_tests {
 				.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"frame".as_slice())
 				.unwrap();
 		}
-		first.close().unwrap();
+		first.finish().unwrap();
 		let mut newest = track.create_group(group::Info { start: 1 }).unwrap();
 		newest.write_frame(newest.key_time(), b"frame".as_slice()).unwrap();
 		newest.abort(Error::Cancel).unwrap();
@@ -22187,6 +22159,7 @@ mod fill_range_tests {
 #[cfg(test)]
 mod compression_tests {
 	use super::*;
+	use crate::coding::Encoder;
 	#[test]
 	fn sealed_compression_refuses_incompatible_egress() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22, Version::Draft23] {
@@ -22261,7 +22234,7 @@ mod compression_tests {
 			for payload in &frames {
 				group.write_frame(group.key_time(), payload.clone()).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 			track.finish_shared().unwrap();
 			let response = ietf::SubscribeOk {
 				track_alias: 0,
@@ -22277,7 +22250,6 @@ mod compression_tests {
 				RequestId(0),
 				version,
 				ServeRange::default(),
-				Some(Timescale::MILLI),
 			)
 			.compression(negotiated);
 			kio::wait(|waiter| serve.poll(waiter)).await.unwrap();

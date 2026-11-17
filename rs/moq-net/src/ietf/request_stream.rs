@@ -333,7 +333,6 @@ pub(crate) struct Update {
 	/// The update's own Request ID.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
-	pub(super) max_age: Option<u64>,
 	/// Why the update is refused, which fails the subscription: [`Error::GoingAway`],
 	/// [`Error::Unsupported`], a
 	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
@@ -371,7 +370,6 @@ impl Update {
 			0x28 => property_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x29 => track_filter: Vec<Opaque> where super::subscribe::has_range_filters(version),
 			0x32 => new_group: Option<u64>,
-			super::max_age::PARAMETER => max_age: Option<u64>,
 		);
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
@@ -388,7 +386,6 @@ impl Update {
 		Ok(Self {
 			request_id,
 			priority,
-			max_age: super::max_age::validate(max_age)?,
 			refused,
 			authorization_token,
 			new_group,

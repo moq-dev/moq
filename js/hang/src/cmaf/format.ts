@@ -1,8 +1,8 @@
 import { Duration } from "@moq/clock";
 import type { Time } from "@moq/net";
-import type { Format as ContainerFormat } from "../container/format";
-import type { Frame } from "../container/types";
-import { decodeDataSegment, type InitSegment } from "./decode";
+import type { Format as ContainerFormat } from "../container/format.ts";
+import type { Frame } from "../container/types.ts";
+import { decodeDataSegment, type InitSegment } from "./decode.ts";
 
 /** CMAF container format: decodes each MoQ frame as a moof+mdat fragment using the parsed init segment. */
 export class Format implements ContainerFormat {

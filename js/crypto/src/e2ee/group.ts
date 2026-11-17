@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { Datagram as NetDatagram, type Group as NetGroup, type Time } from "@moq/net";
+import { type Group as NetGroup, Track as NetTrack, type Time } from "@moq/net";
 import { Failure } from "./failure.ts";
 import type { Reader, Writer } from "./internal.ts";
 import { MAX_GROUPED_PAYLOAD, TAG_LEN } from "./limits.ts";
@@ -64,7 +64,7 @@ export class Producer {
 		if (this.#closed || this.#writer.closed)
 			throw this.#aborted ?? this.#writer.aborted ?? new Error("group is closed");
 		if (plaintext.byteLength + TAG_LEN > MAX_GROUPED_PAYLOAD) throw new Failure("oversize");
-		const at = NetDatagram.rescaleIn(this.#writer.track, timestamp, this.sequence);
+		const at = NetTrack.rescaleIn(this.#writer.track, timestamp, this.sequence);
 		const owned = plaintext.slice();
 		return this.#writer.pump.run(() => this.#write(at, owned));
 	}
@@ -88,7 +88,7 @@ export class Producer {
 	#check(): void {
 		const aborted = this.#aborted ?? this.#writer.aborted;
 		if (aborted) throw aborted;
-		if (this.#inner.isClosed) throw new Error("group is closed");
+		if (this.#inner.closed.peek() !== undefined) throw new Error("group is closed");
 	}
 
 	/**
