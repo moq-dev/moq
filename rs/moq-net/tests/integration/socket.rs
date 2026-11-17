@@ -108,9 +108,10 @@ fn send(track: &track::Producer, payload: &'static [u8]) {
 /// Read the next message from a session, or `None` once the peer finished.
 async fn recv(reader: &mut track::Ordered) -> Result<Option<Vec<u8>>, Error> {
 	kio::clock::timeout(TIMEOUT, async {
-		let Some(mut group) = reader.next_group().await? else {
+		let Some(item) = reader.next_group().await? else {
 			return Ok(None);
 		};
+		let mut group = item.group().expect("a group, not a gap");
 		let frame = group.read_frame().await?.expect("a frame");
 		Ok(Some(frame.payload.to_vec()))
 	})

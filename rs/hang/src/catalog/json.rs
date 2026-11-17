@@ -68,6 +68,7 @@ pub struct JsonConfig {
 	/// broadcast that served this catalog (e.g. `./source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -78,6 +79,7 @@ pub struct JsonConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
 	/// The instance of the stream the reference names, when the catalog knows it. Absent names
@@ -88,7 +90,7 @@ pub struct JsonConfig {
 	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
 	/// catalog's own stream.
 	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 
 	/// Whether the track is a latest-value document or an append log. Always stated: see [`Mode`].
@@ -98,10 +100,12 @@ pub struct JsonConfig {
 	/// An optional identifier for the shape of each value, typically a JSON Schema URL. Purely
 	/// descriptive: a consumer that doesn't recognize it can still read the track.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub schema: Option<String>,
 
 	/// The maximum bitrate of the track in bits per second, if known.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub bitrate: Option<u64>,
 
 	/// The largest media span the publisher hands to the transport behind a payload's timestamp,

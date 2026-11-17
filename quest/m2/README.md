@@ -27,7 +27,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   gains its reader, reversing 2026-11-14; and
   [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries the
   smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
-  [group drops](/quest/m2/group-drops.md) took simpler contracts.
+  group drops took simpler contracts.
   [moq-transport time addressing](/quest/m2/ietf-time-addressing.md)
   returned from m4, and the two moq-transport interop quests in m3 were
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
@@ -41,8 +41,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
-- **Relay and transports.** [CPU](/quest/m2/relay-cpu.md), which the
-  memory pairing found; [congestion names](/quest/m2/congestion-names.md);
+- **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md)
   and [transport names](/quest/m2/transport-names.md).
 - **Auth and crypto.** [Claims](/quest/m2/auth-claims.md). End-to-end encryption
   [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
@@ -51,13 +50,11 @@ removal, a rename, or a wire, catalog, or format change that is free until
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
-  [finish](/quest/m2/finish-sweep.md), [TS outcomes](/quest/m2/ts-typed-outcomes.md),
-  and [moq-json writes](/quest/m2/json-write-at.md).
+  [finish](/quest/m2/finish-sweep.md), and
+  [moq-json writes](/quest/m2/json-write-at.md).
 - **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
   [the hole wait](/quest/m2/delay-hole-wait.md),
-  [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
-  [the WebRTC bind](/quest/m2/webrtc-bind.md),
   [the WHEP pull's announcement](/quest/m2/whep-pull-announce.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
@@ -320,7 +317,7 @@ what would need a breaking release had it landed right after the cut:
   the routes epic and gates the cut, per the 2026-10-13 rule that routes'
   tier and partition tests run before it (maintainer; rejected: moving it to
   m3 and fixing late routing flaws in lite-08).
-- ✅ [Group drops](/quest/m2/group-drops.md) split: its lite-07 wire question
+- ✅ Group drops split: its lite-07 wire question
   was its own quest, settled without a wire-format change in
   [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
   `Ordered` API waits for the model.

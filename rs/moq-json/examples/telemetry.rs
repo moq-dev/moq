@@ -111,7 +111,10 @@ fn frame_bytes(config: snapshot::Config, ticks: u64) -> usize {
 	let waiter = kio::Waiter::noop();
 	let mut total = 0;
 	let mut track = consumer.ordered();
-	while let Poll::Ready(Ok(Some(mut group))) = track.poll_next_group(&waiter) {
+	while let Poll::Ready(Ok(Some(item))) = track.poll_next_group(&waiter) {
+		let moq_net::track::Item::Group(mut group) = item else {
+			continue;
+		};
 		while let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) {
 			total += frame.payload.len();
 		}
