@@ -1,6 +1,6 @@
 # moq-congestion
 
-BBR3, Cubic, and Unlimited congestion controllers, consumed by moq-quic and the native transport drivers. Applications pick one through `moq_tokio::quic::CongestionControl`, where `delay` is BBR3 and the default.
+BBR3, Cubic, and Unlimited congestion controllers, consumed by moq-quic and the native transport drivers. Applications pick one through `moq_tokio::quic::CongestionControl`, by algorithm name: `bbr` (BBR3, the default), `cubic`, or `unlimited`.
 
 Candidates still under test compile only with the `lab` test-support feature, which the comparisons in moq-quic and moq-tokio enable as a dev-dependency: the `gcc` and `scream` modules, and BBR3's delay bound (`bbr3::Config::delay_bound`), which brakes when the peer's receive timestamps show the bottleneck queue growing. A winner joins `CongestionControl` as a new variant, or BBR3 as an option, and leaves the feature.
 

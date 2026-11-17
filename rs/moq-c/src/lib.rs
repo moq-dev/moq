@@ -34,7 +34,6 @@ mod origin;
 mod publish;
 mod server;
 mod session;
-mod socket;
 mod state;
 mod task;
 mod video;
@@ -49,7 +48,6 @@ pub use encoder::*;
 pub use error::*;
 pub use ffi::{moq_follow_callback, moq_state_callback, moq_status_callback};
 pub use id::*;
-pub use socket::*;
 pub use video::*;
 
 pub(crate) use client::*;

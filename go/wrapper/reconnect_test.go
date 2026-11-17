@@ -330,7 +330,7 @@ func TestDialConnectionOptions(t *testing.T) {
 			KeepAlive:         ptr(time.Duration(0)),
 			GSO:               ptr(false),
 			MTUDiscovery:      ptr(true),
-			CongestionControl: moq.LossCongestionControl(),
+			CongestionControl: moq.CubicCongestionControl(),
 		},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
 	})

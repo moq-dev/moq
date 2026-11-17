@@ -693,6 +693,9 @@ pub(crate) struct TrackState {
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
 	// one entry.
 	drops: RangeMap<u64, Hole>,
+	// The keys in `drops`, whatever the reason, as coalesced runs, so whether drops cover a
+	// span is one lookup rather than a walk of every run in it.
+	dropped: RangeSet<u64>,
 	// What this track's own publisher produced since its last `append_group`, which skips
 	// every key below it that never arrived and was not given up: the producer moved on.
 	// Arrivals cannot say so, since a gap folds into them once nobody waits for it. Only
@@ -998,12 +1001,15 @@ impl Slot {
 pub(super) const CACHE_OVERHEAD: u64 =
 	2 * (2 * size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
 
-/// Heap the track keeps per run of its drop set: the run and its reason in `drops`, and its
-/// two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
+/// Heap the track keeps per run of its drop set: the run and its reason in `drops`, at most
+/// one coalesced run in `dropped`, and its two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
 /// [`CACHE_OVERHEAD`] is. Billed to the pool, so a peer fragmenting its drops into runs costs
 /// what the cache would hold, never more.
-pub(super) const RUN_OVERHEAD: u64 =
-	2 * (size_of::<(ops::Range<u64>, Hole)>() + size_of::<(u64, (u64, u64))>() + size_of::<(u64, u64)>()) as u64;
+pub(super) const RUN_OVERHEAD: u64 = 2
+	* (size_of::<(ops::Range<u64>, Hole)>()
+		+ size_of::<ops::Range<u64>>()
+		+ size_of::<(u64, (u64, u64))>()
+		+ size_of::<(u64, u64)>()) as u64;
 
 /// Heap the track keeps per entry of its drop set's expiry index, `drops_born`, doubled as
 /// [`RUN_OVERHEAD`] is.
@@ -1031,7 +1037,7 @@ impl Holdings for TrackState {
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _)) => Containing::Group(key),
 			// Every key at or before it is gone, so whichever group held it will never arrive.
-			None if self.holes_cover(0..time.saturating_add(1), |_| true) => Containing::Before,
+			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
 			None if self.lookup.is_empty() => Containing::Unknown,
 			None => Containing::Before,
 		}
@@ -1099,7 +1105,11 @@ impl Holdings for TrackState {
 	fn never_produced(&self, keys: ops::Range<u64>) -> bool {
 		// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 		// evicted a group inside it.
-		self.holes_cover(keys, |hole| *hole == Hole::Skip)
+		keys.is_empty()
+			|| self
+				.drops
+				.get_key_value(&keys.start)
+				.is_some_and(|(run, hole)| *hole == Hole::Skip && run.end >= keys.end)
 	}
 }
 
@@ -1137,30 +1147,19 @@ impl TrackState {
 		}
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _))
-				if self.holes_cover(key.saturating_add(1)..time.saturating_add(1), |_| true)
+				if self.dropped_cover(key.saturating_add(1)..time.saturating_add(1))
 					|| self.lookup.range(time..).next().is_some() =>
 			{
 				Containing::Group(key)
 			}
-			None if self.holes_cover(0..time.saturating_add(1), |_| true) => Containing::Before,
+			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
 			_ => Containing::Unknown,
 		}
 	}
 
-	/// Whether drops of a kind `kind` accepts cover every key in `keys`. An empty run is
-	/// covered, though it may overlap a drop around its start.
-	fn holes_cover(&self, keys: ops::Range<u64>, kind: impl Fn(&Hole) -> bool) -> bool {
-		if keys.is_empty() {
-			return true;
-		}
-		let mut at = keys.start;
-		for (run, hole) in self.drops.overlapping(&keys) {
-			if !kind(hole) || run.start > at {
-				return false;
-			}
-			at = run.end;
-		}
-		at >= keys.end
+	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
+	fn dropped_cover(&self, keys: ops::Range<u64>) -> bool {
+		keys.is_empty() || self.dropped.get(&keys.start).is_some_and(|run| run.end >= keys.end)
 	}
 
 	/// The upstream publisher's Largest Object, unless a frame or group received since its
@@ -1480,6 +1479,7 @@ impl TrackState {
 		match hole {
 			Some(hole) => {
 				self.drops.insert(groups.clone(), hole);
+				self.dropped.insert(groups.clone());
 				let max_ticks = self.cache.pool().expiry_ticks();
 				if max_ticks != u64::MAX {
 					// Rounded up to a quarter of the window, so a run is forgotten no sooner
@@ -1496,6 +1496,7 @@ impl TrackState {
 			}
 			None => {
 				self.drops.remove(groups.clone());
+				self.dropped.remove(groups.clone());
 				self.drops_born.remove(groups);
 			}
 		}
@@ -5160,6 +5161,12 @@ impl Producer {
 		}
 	}
 
+	/// A handle that aborts the track without keeping it open, for an owner that hands this
+	/// producer out and must end the track on its own shutdown.
+	pub fn abort_handle(&self) -> AbortHandle {
+		AbortHandle(Arc::downgrade(&self.alive))
+	}
+
 	/// Create a [`Demand`]: a cloneable, watch-only handle to this track's
 	/// subscriber demand.
 	///
@@ -5633,6 +5640,33 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 	Some(combined)
 }
 
+/// Aborts a track without keeping it open, from [`Producer::abort_handle`].
+///
+/// Holding one neither keeps the track alive nor counts as its producer, so a track whose
+/// producers all dropped closes as usual and the handle then does nothing.
+#[derive(Clone)]
+pub struct AbortHandle(std::sync::Weak<Alive>);
+
+impl AbortHandle {
+	/// Whether the track closed: aborted, or every producer gone.
+	pub fn is_closed(&self) -> bool {
+		self.0.upgrade().is_none_or(|alive| alive.state.is_closed())
+	}
+
+	/// Abort the track with `err`, as [`Producer::abort`] does, unless it already closed.
+	pub fn abort(&self, err: Error) {
+		let Some(alive) = self.0.upgrade() else {
+			return;
+		};
+		// Unlisted first, as `Producer::abort` does, so the name is free only once it left.
+		alive.unlist(false);
+		let Ok(state) = alive.state.write() else {
+			return;
+		};
+		commit_abort(state, err, None).abort();
+	}
+}
+
 /// A weak reference to a track that doesn't prevent auto-close.
 #[derive(Clone)]
 pub(super) struct TrackWeak {
@@ -5695,21 +5729,6 @@ impl TrackWeak {
 		state.reject(err, None);
 		state.close();
 		true
-	}
-
-	/// Abort the track with `err`, as [`Producer::abort`] does, unless it already closed.
-	///
-	/// For an owner that hands a track's [`Producer`] out and must end it on its own
-	/// shutdown without keeping it alive. Leaves the listing alone: such a track is one
-	/// served on request, which is never listed.
-	pub(super) fn abort(&self, err: Error) {
-		let Some(producer) = self.state.produce() else {
-			return;
-		};
-		let Ok(state) = producer.write() else {
-			return;
-		};
-		commit_abort(state, err, None).abort();
 	}
 
 	/// Whether its producer declared the track's end, which is how its listing ends too.
@@ -11593,6 +11612,51 @@ mod test {
 			producer.state.read().drops_changes.since(0).collect::<Vec<_>>(),
 			vec![10..30]
 		);
+	}
+
+	proptest::proptest! {
+		/// The coalesced drop set answers coverage as a walk of the drop runs would, through
+		/// every way a run is given up, split, replaced, or forgotten.
+		#[test]
+		fn dropped_cover_matches_a_walk_of_the_drops(
+			ops in proptest::collection::vec((0u8..4, 0u64..40, 1u64..8), 1..40),
+			probes in proptest::collection::vec((0u64..48, 0u64..48), 16),
+		) {
+			let producer = track_producer("test", Info::default());
+			for (op, start, len) in ops {
+				let groups = start..start + len;
+				match op {
+					0 => producer.drop_groups(groups, StreamError::Cancel),
+					1 => producer.drop_groups(groups, StreamError::Old),
+					2 => producer.skip_groups(groups),
+					_ => producer.modify().unwrap().forget_drops(groups),
+				}
+				let state = producer.state.read();
+				let mut union = RangeSet::new();
+				for (run, _) in state.drops.iter() {
+					union.insert(run.clone());
+				}
+				proptest::prop_assert_eq!(&union, &state.dropped);
+				for &(start, len) in &probes {
+					let keys = start..start + len;
+					let walk = |kind: &dyn Fn(&Hole) -> bool| {
+						if keys.is_empty() {
+							return true;
+						}
+						let mut at = keys.start;
+						for (run, hole) in state.drops.overlapping(&keys) {
+							if !kind(hole) || run.start > at {
+								return false;
+							}
+							at = run.end;
+						}
+						at >= keys.end
+					};
+					proptest::prop_assert_eq!(state.dropped_cover(keys.clone()), walk(&|_| true));
+					proptest::prop_assert_eq!(state.never_produced(keys.clone()), walk(&|hole| *hole == Hole::Skip));
+				}
+			}
+		}
 	}
 
 	/// A final drop ends a group still arriving, but leaves one that finished here to every

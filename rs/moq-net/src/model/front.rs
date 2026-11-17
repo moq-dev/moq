@@ -1367,10 +1367,9 @@ mod tests {
 		);
 	}
 
-	/// A copy reset before delivering, seen only once its source began closing, such as a
-	/// session of a closing socket endpoint, is no refusal, yet ends the track with the reset
-	/// rather than `Unroutable` when nothing replaces the source, or when its replacement
-	/// refuses. The driver reports it as the copy's end once spliced, or as the answer to
+	/// A copy reset before delivering, seen only once its source began closing, is no
+	/// refusal, yet ends the track with the reset rather than `Unroutable` when nothing
+	/// replaces the source, or when its replacement refuses. The driver reports it as the copy's end once spliced, or as the answer to
 	/// its query when the reset came before the metadata was read.
 	#[test]
 	fn a_closing_source_reset_reports_the_loss() {
@@ -1441,7 +1440,7 @@ mod tests {
 	}
 
 	/// A source that loses a copy mid-serve and then refuses its re-splice, such as a
-	/// closing socket endpoint, ends the track with the loss, not the refusal.
+	/// closing publisher, ends the track with the loss, not the refusal.
 	#[test]
 	fn a_refused_resplice_reports_the_loss() {
 		let mut front = serving(remote(1), 100);

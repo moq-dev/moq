@@ -332,6 +332,12 @@ export namespace Error {
 	export class RefusedRedirect extends Error {
 		constructor(reason: string);
 	}
+	export const Retry: Readonly<{
+		readonly Never: "never";
+		readonly Reroute: "reroute";
+		readonly Same: "same";
+	}>;
+	export type Retry = typeof Error.Retry[keyof typeof Error.Retry];
 	export class Session extends Error {
 		constructor(code: SessionCode, options?: {
 			cause?: unknown;
@@ -362,6 +368,7 @@ export namespace Error {
 			cause?: unknown;
 		});
 	}
+	export function retry(err: unknown): Error.Retry;
 }
 
 export namespace Frame {
@@ -578,22 +585,15 @@ export namespace Path {
 }
 
 export const SessionCode: ((code: number) => SessionCode) & {
-	readonly AuthTokenCacheOverflow: SessionCode;
 	readonly Cancel: SessionCode;
 	readonly Expired: SessionCode;
 	readonly GoawayTimeout: SessionCode;
 	readonly Internal: SessionCode;
-	readonly InvalidAuthority: SessionCode;
-	readonly InvalidPath: SessionCode;
-	readonly InvalidRequestId: SessionCode;
-	readonly KeyValueFormatting: SessionCode;
 	readonly MalformedAuthToken: SessionCode;
 	readonly ProtocolViolation: SessionCode;
 	readonly Timeout: SessionCode;
-	readonly TooManyRequestUpdates: SessionCode;
 	readonly TooManyRequests: SessionCode;
 	readonly Unauthorized: SessionCode;
-	readonly UnknownAuthTokenAlias: SessionCode;
 	readonly Unsupported: SessionCode;
 	readonly Version: SessionCode;
 };
@@ -603,34 +603,6 @@ export type SessionCode = number & {
 };
 
 export * as Signals from "@moq/signals";
-
-export namespace Socket {
-	export class Endpoint {
-		constructor(origin: Origin.Producer, prefix: Path.Valid, id: string);
-		acceptTrack(options?: Socket.Options): Promise<Socket.Incoming>;
-		close(): void;
-		get closed(): Signals.GetPromise<Error | null>;
-		dialTrack(peer: string, info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
-		readonly id: string;
-		readonly prefix: Path.Valid;
-	}
-	export class Incoming {
-		accept(info?: Track.InfoInit, options?: Socket.Options): Promise<Socket.TrackStream>;
-		readonly peer: string;
-		reject(): void;
-		readonly session: string;
-	}
-	export interface Options {
-		signal?: AbortSignal;
-	}
-	export class TrackStream {
-		readonly consumer: Track.Subscriber;
-		readonly peer: string;
-		readonly producer: Track.Producer;
-		readonly session: string;
-	}
-	export function isEndpoint(path: Path.Valid): boolean;
-}
 
 export const StreamCode: ((code: number) => StreamCode) & {
 	readonly Cancel: StreamCode;

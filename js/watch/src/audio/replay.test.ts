@@ -197,6 +197,23 @@ describe("replay against the shared clock", () => {
 	const flushed = paced(60, (i) => 30 + (4 - (i % 5)) * 20);
 	const fixed = { rate: RATE, config: CONFIG, delay: Duration.millis(40), duration: observed(60) };
 
+	// A late burst lands out of order: the group before lands a moment after the one past it, which the
+	// clock already passed. The ring still plays audio trailing the clock within the stretch, so the
+	// consumer waits for that group rather than skipping a hole the burst fills; with the stretch off,
+	// the ring would skip it anyway.
+	it("keeps a hole a late burst fills once the clock passed the group past it", async () => {
+		// Groups 250 to 259 are held and released together at 5230 ms, 250 a millisecond after the rest.
+		const held = (i: number) => (i >= 250 && i < 260 ? 5230 - i * 20 + (i === 250 ? 1 : 0) : 30);
+		const trace = paced(10, held).sort((a, b) => a.at - b.at);
+		const options = { rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(10) };
+
+		// The consumer warns on every group it skips.
+		await lag(trace, options, 0);
+		expect(warn).not.toHaveBeenCalled();
+		await lag(trace, { ...options, stretch: 0 }, 0);
+		expect(warn).toHaveBeenCalled();
+	});
+
 	it("underruns a fixed target short of the spread with the stretch off, rather than trailing the clock", async () => {
 		const { lags, median, underruns, accelerated } = await lag(flushed, { ...fixed, stretch: 0 }, 30_000);
 		expect(underruns).toBeGreaterThanOrEqual(flushed.length / 5);

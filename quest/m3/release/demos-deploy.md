@@ -16,7 +16,7 @@ chosen: an m2 cut gate; deploying now in m0.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ the
 demos go back to their format before sockets, since
-[socket endpoints leave moq](/quest/m2/sockets/README.md) (rejected: the
+[socket endpoints leave moq](https://github.com/moq-dev/moq/pull/9029) (rejected: the
 2026-11-06 plan, which deployed socket grants and lite-07 on every hop for
 them). This quest was "moq.dev's hosted demos run on sockets" until then.
 
