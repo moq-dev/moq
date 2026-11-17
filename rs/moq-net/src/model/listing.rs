@@ -1094,6 +1094,68 @@ mod tests {
 		assert_eq!(drain(&mut tracks), ["-a"]);
 	}
 
+	/// A reservation that is never listed is still read by anyone who names it.
+	#[test]
+	fn an_unlisted_track_is_read_by_name_but_never_listed() {
+		let broadcast = Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut tracks = consumer.tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["synced"]);
+		let request = broadcast.reserve_unlisted_track("a").unwrap();
+		let a = request.accept(None);
+		let mut group = a.append_group(crate::Timestamp::unscaled(0)).unwrap();
+		group.write_frame(crate::Timestamp::unscaled(0), vec![7]).unwrap();
+		group.finish().unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let Poll::Ready(Ok(mut reader)) = consumer.track("a").unwrap().subscribe(None).poll_ok(&waiter) else {
+			panic!("the track is read by name");
+		};
+		let Poll::Ready(Ok(Some(mut group))) = reader.poll_recv_group(&waiter) else {
+			panic!("expected the group");
+		};
+		let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("expected the frame");
+		};
+		assert_eq!(&frame.payload[..], [7]);
+		drop(a);
+		assert_eq!(drain(&mut tracks), NONE);
+	}
+
+	/// An abort handle ends a listed track the way its producer's abort does: unlisted, with
+	/// its name free for a new track.
+	#[test]
+	fn an_abort_handle_unlists_the_track_it_ends() {
+		let broadcast = Info::new().produce();
+		let a = broadcast.create_track("a", None).unwrap();
+		let handle = a.abort_handle();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
+		assert!(!handle.is_closed());
+		handle.abort(Error::Cancel);
+		assert!(handle.is_closed());
+		assert_eq!(drain(&mut tracks), ["-a"]);
+		assert!(a.append_group(crate::Timestamp::unscaled(0)).is_err());
+		let _again = broadcast.create_track("a", None).unwrap();
+		assert_eq!(drain(&mut tracks), ["+a"]);
+	}
+
+	/// An abort handle keeps no track open: once every producer dropped, the track closed and
+	/// the handle does nothing.
+	#[test]
+	fn an_abort_handle_keeps_no_dropped_track_alive() {
+		let broadcast = Info::new().produce();
+		let a = broadcast.create_track("a", None).unwrap();
+		let handle = a.abort_handle();
+		let mut tracks = broadcast.consume().tracks().unwrap();
+		assert_eq!(drain(&mut tracks), ["+a", "synced"]);
+		drop(a);
+		assert!(handle.is_closed());
+		assert_eq!(drain(&mut tracks), ["-a"]);
+		handle.abort(Error::Cancel);
+		assert_eq!(drain(&mut tracks), NONE);
+	}
+
 	#[test]
 	fn a_staged_track_is_listed_until_dropped_uncommitted() {
 		let broadcast = Info::new().produce();

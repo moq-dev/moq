@@ -19,9 +19,9 @@ type (
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
 	// AudioFrame is one audio frame: PCM payload plus a presentation Timestamp.
 	AudioFrame = ffi.MoqAudioFrame
-	// CongestionControl is the congestion control family for a QUIC connection. Build one with
-	// DelayCongestionControl, LossCongestionControl, or NoneCongestionControl; a new algorithm
-	// joins as a new builder.
+	// CongestionControl is the congestion control algorithm for a QUIC connection. Build one with
+	// BBRCongestionControl, CubicCongestionControl, or UnlimitedCongestionControl; a new algorithm
+	// joins as a new builder named after it.
 	CongestionControl = ffi.MoqCongestionControl
 	// ErrorScope is whether a protocol code is from the session or stream registry.
 	ErrorScope = ffi.MoqErrorScope
@@ -170,19 +170,19 @@ func DeflateCompression() *Compression {
 	return ffi.MoqCompressionDeflate()
 }
 
-// LossCongestionControl is loss-based (CUBIC): it chases throughput, so the send rate sawtooths.
-func LossCongestionControl() *CongestionControl {
-	return ffi.MoqCongestionControlLoss()
+// BBRCongestionControl is BBR v3, the default: it keeps queues short and the send rate steady.
+func BBRCongestionControl() *CongestionControl {
+	return ffi.MoqCongestionControlBbr()
 }
 
-// DelayCongestionControl is delay-based (BBR v3), the default: it keeps queues short and the send rate steady.
-func DelayCongestionControl() *CongestionControl {
-	return ffi.MoqCongestionControlDelay()
+// CubicCongestionControl is CUBIC: it chases throughput, so the send rate sawtooths.
+func CubicCongestionControl() *CongestionControl {
+	return ffi.MoqCongestionControlCubic()
 }
 
-// NoneCongestionControl runs no congestion control and no pacing, for tests and controlled links.
-func NoneCongestionControl() *CongestionControl {
-	return ffi.MoqCongestionControlNone()
+// UnlimitedCongestionControl runs no congestion control and no pacing, for tests and controlled links.
+func UnlimitedCongestionControl() *CongestionControl {
+	return ffi.MoqCongestionControlUnlimited()
 }
 
 // ParseInstance names an instance with text, failing with ErrInvalidInstance when it is empty.

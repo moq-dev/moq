@@ -16,7 +16,6 @@ import type { Consumer as FrameConsumer } from "./frame.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import type { Consumer as OriginConsumer, Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type {
@@ -1011,13 +1010,6 @@ export const hooks: {
 	keepRequest: (request: Request) => void;
 	/** Observe the peer's reset without waiting for routed delivery recovery. */
 	watchSubscriberError: (subscriber: Subscriber, fn: (error: Error) => void) => Dispose;
-	/**
-	 * Count a session withholding the origin's hidden broadcasts from its peer, such as a
-	 * moq-lite client before 07, whose peer can't ask for them, until disposed.
-	 */
-	withholdHidden: (origin: OriginConsumer) => Dispose;
-	/** How many sessions withhold the origin's hidden broadcasts from their peer. */
-	hiddenWithheld: (origin: OriginProducer) => Getter<number>;
 	/** Name a broadcast handle by the path an origin created or resolved it at. */
 	stampPath: (target: BroadcastProducer | BroadcastConsumer, path: Path.Valid) => void;
 	/** Name the instance of the route an origin resolved a broadcast handle through. */
@@ -1401,12 +1393,6 @@ export const hooks: {
 	},
 	watchSubscriberError: () => {
 		throw new Error("track.ts not loaded");
-	},
-	withholdHidden: () => {
-		throw new Error("origin.ts not loaded");
-	},
-	hiddenWithheld: () => {
-		throw new Error("origin.ts not loaded");
 	},
 	stampPath: () => {
 		throw new Error("broadcast.ts not loaded");

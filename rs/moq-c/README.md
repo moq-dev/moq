@@ -194,21 +194,6 @@ int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_cancel(uint32_t track);
 
-// Sockets: two-way sessions between endpoints sharing an origin
-int32_t moq_socket_create(uint32_t origin, const char *prefix, uintptr_t prefix_len, const char *id, uintptr_t id_len);
-int32_t moq_socket_is_endpoint(const char *path, uintptr_t path_len);  // 1, 0, or a negative code
-int32_t moq_socket_close(uint32_t endpoint);
-int32_t moq_socket_dial_track(uint32_t endpoint, const char *peer, uintptr_t peer_len, const moq_track_info *info, moq_status_callback on_stream, void *user_data);
-int32_t moq_socket_accept_track(uint32_t endpoint, moq_status_callback on_incoming, void *user_data);
-int32_t moq_socket_cancel(uint32_t task);
-int32_t moq_socket_incoming_info(uint32_t incoming, moq_string *peer, moq_string *session);
-int32_t moq_socket_incoming_accept(uint32_t incoming, const moq_track_info *info, moq_status_callback on_stream, void *user_data);
-int32_t moq_socket_incoming_reject(uint32_t incoming);
-int32_t moq_socket_stream_info(uint32_t stream, moq_string *peer, moq_string *session);
-int32_t moq_socket_stream_writer(uint32_t stream);  // a raw track handle
-int32_t moq_socket_stream_reader(uint32_t stream, moq_status_callback on_frame, void *user_data);  // read like moq_consume_track
-int32_t moq_socket_stream_free(uint32_t stream);
-
 // Codecs without a broadcast: encode, then publish or store the packets yourself
 int32_t moq_audio_encoder_create(const moq_audio_encoder_output *output);
 int32_t moq_audio_encoder_frame_size(uint32_t encoder);

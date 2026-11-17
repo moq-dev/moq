@@ -44,9 +44,9 @@ impl Quic<'_> {
 		quic.keep_alive = self.keep_alive_us.map(micros);
 		quic.gso = self.gso;
 		quic.mtu_discovery = self.mtu_discovery;
-		if let Some(family) = self.congestion_control {
+		if let Some(algorithm) = self.congestion_control {
 			quic.congestion_control =
-				Some(moq_tokio::quic::CongestionControl::from_str(family).map_err(Error::InvalidConfig)?);
+				Some(moq_tokio::quic::CongestionControl::from_str(algorithm).map_err(Error::InvalidConfig)?);
 		}
 		quic.qlog = self.qlog.map(Into::into);
 		quic.keylog = self

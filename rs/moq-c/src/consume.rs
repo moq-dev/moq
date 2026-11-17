@@ -946,32 +946,6 @@ impl Consume {
 		}
 	}
 
-	/// Read a socket stream's peer half as a raw track reader.
-	///
-	/// It keeps the reliable, oldest-first subscription the socket opened it with until
-	/// [`Self::raw_track_update`] changes it.
-	pub(crate) fn socket_read(
-		&mut self,
-		half: moq_net::track::Subscriber,
-		driver: crate::ffi::Background,
-		on_frame: OnStatus,
-	) -> Result<Id, Error> {
-		let (task, close) = Task::new(on_frame);
-		let control = RawControl::Live(half.control());
-		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
-
-		tokio::spawn(async move {
-			let res = crate::ffi::run(driver.watch(Self::run_raw(on_frame, half.ordered(), close))).await;
-
-			let entry = State::lock().consume.raw_task.remove(id);
-			if let Some(entry) = entry {
-				entry.task.callback.call(res);
-			}
-		});
-
-		Ok(id)
-	}
-
 	pub fn raw_track_update(
 		&mut self,
 		track: Id,
