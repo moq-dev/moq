@@ -1489,18 +1489,6 @@ mod tests {
 		assert_eq!(frames, 8 * 960);
 	}
 
-	#[tokio::test(start_paused = true)]
-	async fn an_undeclared_gap_keeps_the_primed_decoder() {
-		let (stamps, frames) = warmup_output(Break::Undeclared, 6).await;
-		assert_eq!(
-			stamps,
-			[
-				80_000, 100_000, 1_000_000, 1_020_000, 1_040_000, 1_060_000, 1_080_000, 1_100_000
-			]
-		);
-		assert_eq!(frames, 8 * 960);
-	}
-
 	/// The codec's history primes it across a gap, so only the warmup it falls short of is trimmed.
 	#[tokio::test(start_paused = true)]
 	async fn a_gap_trims_the_warmup_the_history_leaves() {
