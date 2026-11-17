@@ -8204,6 +8204,51 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	broadcast.close().unwrap();
 }
 
+/// `finish` releases the producer's claim even while the caller keeps its reservation handle,
+/// so a sibling gets the room back.
+#[tokio::test]
+async fn finish_releases_a_reservation_the_caller_keeps() {
+	use crate::bandwidth::MoqAllocator;
+
+	let estimate = moq_net::bandwidth::Producer::new();
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
+		estimate.consume(),
+	)));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (input, output) = software_camera(4_000_000);
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::video::MoqVideoProducerOptions {
+			input,
+			output,
+			track: Some("camera".into()),
+			bandwidth: Some(bandwidth.clone()),
+			lower: None,
+		},
+	)
+	.unwrap();
+	let reservation = video.reservation().expect("published against an allocator");
+
+	let consumer = broadcast.consume().unwrap();
+	let _sub = consumer.subscribe_track("camera".into(), None).await.unwrap();
+	let sibling = broadcast.publish_track("sibling".into(), None).unwrap();
+	let _sibling_sub = sibling.consume(None).unwrap();
+	let sibling = bandwidth.reserve(&sibling.demand().unwrap(), 4_000_000);
+	// Video outranks a default track, so its tier takes the whole estimate.
+	assert_eq!(reservation.rate(), Some(4_000_000));
+	assert_eq!(sibling.rate(), Some(0));
+
+	video.finish().unwrap();
+	assert_eq!(sibling.rate(), Some(4_000_000));
+	assert_eq!(reservation.rate(), None);
+	reservation.update(1_000_000);
+
+	broadcast.close().unwrap();
+}
+
 async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) {
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),

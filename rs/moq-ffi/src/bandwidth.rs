@@ -54,18 +54,43 @@ impl MoqAllocator {
 /// means no estimate, so hold the current rate, and `Some(0)` is a real zero rate.
 #[derive(uniffi::Object)]
 pub struct MoqReservation {
-	/// Shared with the producer that holds the claim, such as a video producer's.
-	inner: Arc<moq_net::bandwidth::Reservation>,
+	claim: Claim,
+}
+
+/// Who keeps a [`MoqReservation`]'s claim alive.
+enum Claim {
+	/// From [`MoqAllocator::reserve`]: the handle is the claim.
+	Owned(Arc<moq_net::bandwidth::Reservation>),
+	/// A producer's own claim, such as a video producer's. Weak, so a handle the caller keeps
+	/// cannot hold the room after the producer finishes or moves to another track.
+	Borrowed(std::sync::Weak<moq_net::bandwidth::Reservation>),
 }
 
 impl MoqReservation {
-	pub(crate) fn new(inner: impl Into<Arc<moq_net::bandwidth::Reservation>>) -> Self {
-		Self { inner: inner.into() }
+	pub(crate) fn new(inner: moq_net::bandwidth::Reservation) -> Self {
+		Self {
+			claim: Claim::Owned(Arc::new(inner)),
+		}
+	}
+
+	/// A view of a claim `owner` holds, released when the owner drops it.
+	pub(crate) fn borrowed(owner: &Arc<moq_net::bandwidth::Reservation>) -> Self {
+		Self {
+			claim: Claim::Borrowed(Arc::downgrade(owner)),
+		}
+	}
+
+	/// The claim, or `None` once its owner released it.
+	fn get(&self) -> Option<Arc<moq_net::bandwidth::Reservation>> {
+		match &self.claim {
+			Claim::Owned(inner) => Some(inner.clone()),
+			Claim::Borrowed(inner) => inner.upgrade(),
+		}
 	}
 
 	#[cfg(test)]
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
-		self.inner.consume()
+		self.get().expect("reservation released").consume()
 	}
 }
 
@@ -75,16 +100,20 @@ impl MoqReservation {
 	///
 	/// `None` means no estimate: hold the current rate. `Some(0)` is a real zero
 	/// rate. While nothing subscribes to the track, this is the slice it would get
-	/// back, without claiming it from the others.
+	/// back, without claiming it from the others. `None` too once a producer that
+	/// owns this claim releases it.
 	pub fn rate(&self) -> Option<u64> {
 		let _guard = crate::ffi::enter();
-		self.inner.rate().map(moq_net::bandwidth::Rate::as_bps)
+		self.get()?.rate().map(moq_net::bandwidth::Rate::as_bps)
 	}
 
-	/// Change the ceiling, keeping the same claim.
+	/// Change the ceiling, keeping the same claim. Does nothing once a producer that
+	/// owns this claim releases it.
 	pub fn update(&self, max_bps: u64) {
 		let _guard = crate::ffi::enter();
-		self.inner.update(moq_net::bandwidth::Rate::from_bps(max_bps));
+		if let Some(inner) = self.get() {
+			inner.update(moq_net::bandwidth::Rate::from_bps(max_bps));
+		}
 	}
 }
 
@@ -250,7 +279,8 @@ impl MoqRateControl {
 	/// else could raise the grant to resume it. A missing grant (no estimate) holds the target.
 	pub fn update(&self, reservation: &MoqReservation) -> Option<MoqRateTarget> {
 		let _guard = crate::ffi::enter();
-		let grant = reservation.inner.consume();
+		// A released claim has no grant, which holds the target like a missing estimate.
+		let grant = reservation.get()?.consume();
 		let mut control = self.inner.lock().unwrap();
 		control.set_probed(grant.probed());
 		control.update(grant.peek(), kio::clock::now()).map(Into::into)

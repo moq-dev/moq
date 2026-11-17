@@ -307,8 +307,9 @@ impl Producer {
 	/// keyframe is forced. The reservation moves with it, so a later grant never retunes above it.
 	///
 	/// Some backends cannot raise past the bitrate they opened at (openh264), so configure the
-	/// highest you will ask for and adapt downwards. Errors, changing nothing, when the encoder
-	/// cannot retune while running; it keeps encoding at its current rate.
+	/// highest you will ask for and adapt downwards. [`Error::BitrateUnsupported`], when the
+	/// encoder cannot retune while running, changes nothing: it keeps encoding at its current
+	/// rate. Any other error means the encoder stopped.
 	pub async fn set_bitrate(&mut self, bitrate: Rate) -> Result<(), Error> {
 		if let Encoding::Open(sink) = &mut self.encoding {
 			sink.set_bitrate(bitrate).await?;

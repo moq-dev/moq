@@ -435,7 +435,7 @@ impl MoqVideoProducer {
 	///
 	/// Errors if this backend cannot retune while running. That is not fatal: the
 	/// encoder keeps running at its current rate, so stop adapting rather than
-	/// stop publishing.
+	/// stop publishing. Any other error means the encoder stopped.
 	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
 		let _guard = crate::ffi::runtime().enter();
 		self.with(|producer| {
@@ -446,14 +446,15 @@ impl MoqVideoProducer {
 	}
 
 	/// This encoder's bandwidth reservation, if it was published against a
-	/// [`MoqAllocator`]. Dropping the handle does not release the claim; the
-	/// producer holds it until [`finish`](Self::finish). A frame that changes the
-	/// decoder identity publishes under a new track name and reserves against that
-	/// track instead, so read this again after [`write`](Self::write).
+	/// [`MoqAllocator`]. The producer owns the claim, not the handle: dropping the
+	/// handle keeps it, and [`finish`](Self::finish) releases it however many handles
+	/// remain, after which they read no rate. A frame that changes the decoder
+	/// identity publishes under a new track name and reserves against that track
+	/// instead, releasing the old claim, so read this again after [`write`](Self::write).
 	pub fn reservation(&self) -> Option<Arc<MoqReservation>> {
 		self.bandwidth.as_ref()?;
 		let guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		Some(Arc::new(MoqReservation::new(guard.as_ref()?.reservation().clone())))
+		Some(Arc::new(MoqReservation::borrowed(guard.as_ref()?.reservation())))
 	}
 
 	/// Abort this track with an application error code, but only while nobody wants it.
