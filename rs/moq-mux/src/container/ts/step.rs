@@ -57,7 +57,6 @@ pub struct Restart {
 /// that drops it, such as `import.decode(data)?;`.
 #[derive(Clone, Debug)]
 #[must_use = "a restart ends the import: read its remainder into a new one, or assert there was none"]
-#[non_exhaustive]
 pub enum Decoded {
 	/// The input was read, and the import carries on.
 	Continue,
