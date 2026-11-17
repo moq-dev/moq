@@ -61,8 +61,66 @@ struct WireClaim {
 /// A change to the claim with an Announce ID, waiting for the floor that closes its batch.
 struct Pending {
 	id: u64,
-	broadcast: Option<node::Broadcast>,
+	broadcast: node::Broadcast,
 	change: Change,
+}
+
+/// The claim changes since the last floor, at most one per claim, in the order each
+/// claim first changed. A peer that withholds the floor then holds no more here than
+/// the claims it keeps live and those the last floor left it.
+#[derive(Default)]
+struct Batch {
+	changes: BTreeMap<u64, Pending>,
+	/// Where each live claim's change is.
+	live: HashMap<u64, u64>,
+	next: u64,
+}
+
+impl Batch {
+	fn is_empty(&self) -> bool {
+		self.changes.is_empty()
+	}
+
+	fn push(&mut self, pending: Pending) -> u64 {
+		let at = self.next;
+		self.next += 1;
+		self.changes.insert(at, pending);
+		at
+	}
+
+	/// The claim `id` started or changed: only its latest state is kept.
+	fn live(&mut self, id: u64, broadcast: node::Broadcast, change: Change) {
+		match self.live.get(&id).and_then(|at| self.changes.get_mut(at)) {
+			Some(pending) => pending.change = change,
+			None => {
+				let at = self.push(Pending { id, broadcast, change });
+				self.live.insert(id, at);
+			}
+		}
+	}
+
+	/// The claim `id` ended. One the node was never `told`, started within this batch,
+	/// leaves nothing to tell.
+	fn end(&mut self, id: u64, broadcast: node::Broadcast, change: Change, told: bool) {
+		match (self.live.remove(&id), told) {
+			(Some(at), false) => {
+				self.changes.remove(&at);
+			}
+			(Some(at), true) => {
+				if let Some(pending) = self.changes.get_mut(&at) {
+					pending.change = change;
+				}
+			}
+			(None, _) => {
+				self.push(Pending { id, broadcast, change });
+			}
+		}
+	}
+
+	fn take(&mut self) -> impl Iterator<Item = Pending> + use<> {
+		self.live.clear();
+		std::mem::take(&mut self.changes).into_values()
+	}
 }
 
 /// A claim the node serves through this session.
@@ -119,7 +177,7 @@ pub(in crate::lite) struct Routed {
 	next_route: u64,
 	claims: HashMap<u64, WireClaim>,
 	/// The claim changes since the last floor.
-	pending: Vec<Pending>,
+	pending: Batch,
 	decoder: lite::AnnounceDecoder,
 	/// The session's announce cap: one slot per live route and claim.
 	slots: crate::session::Slots,
@@ -206,7 +264,7 @@ impl Routed {
 			named: HashMap::new(),
 			next_route: 0,
 			claims: HashMap::new(),
-			pending: Vec::new(),
+			pending: Batch::default(),
 			decoder: Default::default(),
 			slots: subscriber.announces.clone(),
 			held: Vec::new(),
@@ -236,6 +294,11 @@ impl Routed {
 	/// neighbour is always asked for the whole tree.
 	fn reask(&mut self) {
 		if self.routing || self.finished || self.silent {
+			return;
+		}
+		// One edit at a time: its answer asks again for what the readers want by then, so
+		// a peer slow to answer holds one edit here, however often they come and go.
+		if !self.stream.answered() {
 			return;
 		}
 		let wanted = asks(&self.root, &self.permit, &self.wants);
@@ -377,7 +440,9 @@ impl Routed {
 				self.named.clear();
 			}
 		}
-		self.stream.recv(Msg::Edited).map_err(refused)
+		self.stream.recv(Msg::Edited).map_err(refused)?;
+		self.reask();
+		Ok(())
 	}
 
 	/// Apply one message the peer sent on its stream as a publisher.
@@ -484,7 +549,9 @@ impl Routed {
 					{
 						claims.remove(&id);
 					}
-					self.pending.push(Pending { id, broadcast, change });
+					// Every forwarding node holds every path another does.
+					let broadcast = broadcast.ok_or(Error::ProtocolViolation)?;
+					self.pending.end(id, broadcast, change, wire.origin.is_some());
 				} else if let (true, Some(broadcast)) = (wire.filed, broadcast) {
 					let changes = vec![(broadcast, change)];
 					self.stream.recv(Msg::Announce { changes }).map_err(refused)?;
@@ -520,7 +587,9 @@ impl Routed {
 		let broadcast = wire.path.clone().map(|path| (path, wire.instance.clone()));
 		let change = Change::Live(wire.claim.clone());
 		if self.routing {
-			self.pending.push(Pending { id, broadcast, change });
+			// Every forwarding node holds every path another does.
+			let broadcast = broadcast.ok_or(Error::ProtocolViolation)?;
+			self.pending.live(id, broadcast, change);
 			return Ok(());
 		}
 		// A claim at no path this node can hold reaches no reader here.
@@ -543,10 +612,9 @@ impl Routed {
 	fn floor(&mut self, id: u64, revision: route::Rev) -> Result<(), Error> {
 		let (origin, claims) = self.routes.get_mut(&id).ok_or(Error::ProtocolViolation)?;
 		let origin = *origin;
-		let mut changes = Vec::with_capacity(self.pending.len());
-		for pending in self.pending.drain(..) {
-			// Every forwarding node holds every path another does.
-			let broadcast = pending.broadcast.ok_or(Error::ProtocolViolation)?;
+		let mut changes = Vec::new();
+		for pending in self.pending.take() {
+			let broadcast = pending.broadcast;
 			if let Some(wire) = self.claims.get_mut(&pending.id) {
 				// A claim stays under the route it started under.
 				if wire.origin.is_some_and(|was| was != origin) {

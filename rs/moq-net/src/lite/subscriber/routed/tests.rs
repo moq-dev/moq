@@ -173,6 +173,38 @@ async fn a_session_asks_for_what_its_readers_want() {
 	);
 }
 
+/// A peer slow to answer an edit is sent no more of them: what the readers want by
+/// the time it answers goes out as the next one.
+#[kio::test]
+async fn interest_changes_wait_for_the_unanswered_edit() {
+	let (subscriber, _consumer) = subscriber();
+	let mut routed = Routed::new(&subscriber, 1, &Permit::default(), None, None).unwrap();
+	let stream = routed.stream();
+	let room = Path::from_static("room");
+	routed.want(room.clone(), subscriber.origin.snapshot("room"));
+	let Some(Msg::Ask(edit)) = stream.try_wire() else {
+		panic!("the node asks for the prefix");
+	};
+	routed.ask(edit);
+
+	// Unanswered: readers come and go, and nothing more is asked.
+	let other = Path::from_static("other");
+	for _ in 0..8 {
+		routed.want(other.clone(), subscriber.origin.snapshot("other"));
+		routed.unwant(&other);
+	}
+	routed.want(other.clone(), subscriber.origin.snapshot("other"));
+	assert_eq!(stream.try_wire(), None, "an edit is still unanswered");
+	assert_eq!(routed.edits.len(), 1);
+
+	routed.receive(Wire::Ok).unwrap();
+	let Some(Msg::Ask(edit)) = stream.try_wire() else {
+		panic!("the answer asks for what is wanted now");
+	};
+	assert_eq!((edit.remove.as_slice(), edit.add.as_slice()), (&[][..], &[other][..]));
+	assert_eq!(stream.try_wire(), None);
+}
+
 /// Both ends drop every claim within a prefix an edit removes when its ANNOUNCE_OK
 /// arrives: the claim's Announce ID is retired with no ANNOUNCE_END, and no route
 /// reaches it any longer.
@@ -253,6 +285,38 @@ async fn a_routing_neighbours_claims_wait_for_their_floor() {
 	assert_eq!(served(&routed), ["live/a"]);
 	let shown = cursor.expect_next_active("live/a").await;
 	assert!(shown.available);
+}
+
+/// A routing neighbour that withholds the floor holds one change per claim here,
+/// however often it updates the claim, and none for a claim it starts and ends.
+#[kio::test]
+async fn a_batch_keeps_one_change_per_claim() {
+	let (subscriber, _consumer) = forwarding();
+	let mut routed = routing(&subscriber);
+	routed.receive(route(PEER)).unwrap();
+	routed.receive(start("live/a")).unwrap();
+	for cost in 0..64 {
+		let mut claim = claim(0);
+		claim.cost = cost;
+		routed.receive(Wire::Change { id: 0, claim }).unwrap();
+	}
+	assert_eq!(routed.pending.changes.len(), 1);
+	for id in 1..64 {
+		routed.receive(start("live/b")).unwrap();
+		routed.receive(Wire::End { id, lost: false }).unwrap();
+	}
+	assert_eq!(routed.pending.changes.len(), 1);
+
+	routed.receive(Wire::Floor { id: 0, revision: 1 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["live/a"]);
+
+	// One the node was told ends at the next floor.
+	routed.receive(Wire::End { id: 0, lost: false }).unwrap();
+	assert_eq!(routed.pending.changes.len(), 1);
+	routed.receive(Wire::Floor { id: 0, revision: 2 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty());
 }
 
 /// Only its floor closes a batch of claim messages: anything else between them closes

@@ -938,7 +938,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			self.done();
 			return Ok(());
 		}
-		for prefix in old.difference(&new) {
+		// As the edit names them, not as the sets differ: a prefix removed and added again
+		// is another prefix to the peer, which dropped what the first one covered.
+		for prefix in &edit.remove {
 			// Both sides drop what it covered at the marker.
 			let state = self.peers.get_mut(&peer).expect("a neighbour");
 			let inside: Vec<Path> = (state.told.get_key_value(prefix).map(|(path, _)| path).into_iter())
@@ -950,7 +952,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 			self.unask(prefix, peer);
 		}
-		let added: Vec<Path> = new.difference(&old).cloned().collect();
+		let added = edit.add;
 		for prefix in &added {
 			let askers = self.askers.entry(prefix.clone()).or_default();
 			askers.insert(peer);
@@ -3549,6 +3551,25 @@ mod tests {
 		let out = router.drain();
 		assert!(out.iter().any(|(to, msg)| *to == 3
 			&& matches!(msg, Msg::Announce { changes } if changes == &vec![((p("live/a"), 7), Change::Ended)])));
+		// Removing a prefix and adding it again in one edit, as a peer changing what it
+		// asks of the prefix does, tells what it covers again: the peer dropped it.
+		router
+			.edit(
+				3,
+				Edit {
+					remove: vec![p("live/a")],
+					add: vec![p("live/a")],
+				},
+			)
+			.unwrap();
+		let out = router.drain();
+		let told: Vec<&Msg<u64, u64>> = (out.iter()).filter(|(to, _)| *to == 3).map(|(_, msg)| msg).collect();
+		assert_eq!(told.first(), Some(&&Msg::Edited));
+		assert!(
+			told.iter().any(|msg| matches!(msg, Msg::Announce { changes } if changes.iter().any(|((at, id), change)| *at == p("live/a/x") && *id == 8 && matches!(change, Change::Live(_))))),
+			"the claim inside is told again: {told:?}"
+		);
+		assert_eq!(told.last(), Some(&&Msg::Synced(p("live/a"))));
 		// Swapping its prefix in place drops what the old one covered, silently.
 		router
 			.edit(
