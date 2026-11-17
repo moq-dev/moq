@@ -24,12 +24,8 @@ const catalog = new Signals.Signal<Catalog.Root>({
 	},
 });
 const broadcast = { out: { catalog } } as unknown as Broadcast;
-const audio = new Audio.Source({ broadcast, supported: Audio.Decoder.supported });
-const video = new Video.Source({
-	broadcast,
-	supported: Video.Decoder.supported,
-	target: { width: 640, height: 360, bitrate: 1000000 },
-});
+const audio = new Audio.Source({ broadcast });
+const video = new Video.Source({ broadcast, target: { width: 640, height: 360, bitrate: 1000000 } });
 const effect = new Signals.Effect();
 effect.cleanup(() => {
 	audio.close();
