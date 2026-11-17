@@ -27,8 +27,8 @@ const LEAST: Duration = Duration::from_millis(700);
 fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
 	let all: moq_auth::Patterns = moq_auth::Pattern::all().into();
 	let mut grant = moq_auth::Grant::new(all.clone(), all);
-	grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
-	grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.publish.rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.subscribe.rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
 	grant
 }
 
@@ -167,12 +167,12 @@ async fn transfer(
 
 	let start = kio::clock::now();
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![7u8; FRAME])
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 	let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")

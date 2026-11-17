@@ -8,7 +8,7 @@ export const MOQ_EPOCH_UNIX_MILLIS = 1_577_836_800_000;
 const clockTimescaleSchema = z.number().check(z.int(), z.positive(), z.lte(4_294_967_295));
 
 /**
- * The broadcast's one continuous clock, advertised as the catalog's `media.clock`.
+ * The broadcast's one continuous clock, advertised as the catalog's `sync.clock`.
  *
  * `wall` is the wall-clock time of PTS zero, in `timescale` units since the moq epoch
  * ({@link MOQ_EPOCH_UNIX_MILLIS}, 2020-01-01). Every media track refers to this one mapping

@@ -1115,9 +1115,9 @@ fn bench_handoff(c: &mut Criterion) {
 							.route("room/live", moq_net::origin::RouteOptions::default())
 							.unwrap();
 						let track = incumbent.broadcast().create_track("video", timed()).unwrap();
-						let mut first = track.append_group(0).unwrap();
+						let mut first = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
-						first.close().unwrap();
+						first.finish().unwrap();
 
 						let resolved = consumer.request("room/live", None).await.unwrap();
 						let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
@@ -1130,7 +1130,7 @@ fn bench_handoff(c: &mut Criterion) {
 						let track = standby.broadcast().create_track("video", timed()).unwrap();
 						let mut second = track.create_group(moq_net::group::Info { start: 1 }).unwrap();
 						second.write_frame(at(1), b"two".as_ref()).unwrap();
-						second.close().unwrap();
+						second.finish().unwrap();
 						// Announcing is what makes the standby a route the front can take.
 						standby.announce().unwrap();
 						let replaced = consumer.request("room/live", None).await.unwrap();
@@ -1236,9 +1236,9 @@ impl Watching {
 		let key = self.next;
 		self.next += 1;
 		for track in &self.tracks[..self.subscriptions.len()] {
-			let mut group = track.append_group(key).unwrap();
+			let mut group = track.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 			group.write_frame(at(key), b"frame".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		for subscription in &mut self.subscriptions {
 			subscription.recv_group().await.unwrap().expect("track ended");
@@ -1362,11 +1362,11 @@ fn bench_relay(c: &mut Criterion) {
 						let key = next;
 						next += 1;
 						for source in &sources {
-							let mut group = source.append_group(key).unwrap();
+							let mut group = source.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 							for _ in 0..RELAY_FRAMES {
 								group.write_frame(at(key), b"frame".as_ref()).unwrap();
 							}
-							group.close().unwrap();
+							group.finish().unwrap();
 						}
 						for subscription in &mut subscriptions {
 							let mut group = subscription.recv_group().await.unwrap().expect("group");
@@ -1425,9 +1425,9 @@ fn bench_passthrough(c: &mut Criterion) {
 						for _ in 0..open {
 							let key = next;
 							next += 1;
-							let mut group = source.append_group(key).unwrap();
+							let mut group = source.append_group(Timestamp::from_millis(key).unwrap()).unwrap();
 							group.write_frame(at(key), b"frame".as_ref()).unwrap();
-							group.close().unwrap();
+							group.finish().unwrap();
 							for (subscription, held) in subscriptions.iter_mut().zip(&mut held) {
 								held.push(subscription.recv_group().await.unwrap().expect("group"));
 							}
@@ -1472,7 +1472,10 @@ fn bench_parked(c: &mut Criterion) {
 							.unwrap()
 					})
 					.collect();
-				let _writers: Vec<_> = sources.iter().map(|source| source.append_group(0).unwrap()).collect();
+				let _writers: Vec<_> = sources
+					.iter()
+					.map(|source| source.append_group(Timestamp::unscaled(0)).unwrap())
+					.collect();
 				let (subscriptions, mut groups) = runtime.block_on(async {
 					let resolved = producer.consume().request("room/live", None).await.unwrap();
 					let mut subscriptions = Vec::new();
@@ -1530,9 +1533,9 @@ impl Generation {
 		let mut held = Vec::with_capacity(tracks);
 		for i in 0..tracks {
 			let track = broadcast.broadcast().create_track(format!("{i}"), timed()).unwrap();
-			let mut written = track.append_group(0).unwrap();
+			let mut written = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
-			written.close().unwrap();
+			written.finish().unwrap();
 			held.push(track);
 		}
 		Self {
@@ -1704,7 +1707,13 @@ impl ResumeReader {
 	fn poll_group(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Option<moq_net::group::Consumer>>> {
 		match self {
 			Self::Arrival(reader) => reader.poll_recv_group(waiter),
-			Self::Key(reader) => reader.poll_next_group(waiter),
+			Self::Key(reader) => loop {
+				match std::task::ready!(reader.poll_next_group(waiter))? {
+					Some(track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
+					Some(track::Item::Gap { .. }) => continue,
+					None => return Poll::Ready(Ok(None)),
+				}
+			},
 		}
 	}
 }
@@ -1737,7 +1746,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 		for key in order {
 			let mut group = track.create_group(moq_net::group::Info { start: key as u64 }).unwrap();
 			group.write_frame(at(key as u64), b"f".as_ref()).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		broadcast.announce().unwrap();
 		(broadcast, track)

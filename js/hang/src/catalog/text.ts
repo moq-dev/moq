@@ -60,8 +60,8 @@ export const TextConfigSchema = z.object({
 	// The container format, used to decode the timestamp and frame the payload.
 	container: ContainerSchema,
 
-	// The maximum jitter before the next cue is flushed, in milliseconds. The player's jitter buffer
-	// should be at least this large; absent means each cue is flushed immediately.
+	// The largest media span the publisher hands to the transport behind a cue's timestamp, with
+	// the same meaning as a video rendition's `jitter`. A cue written in timestamp order adds nothing.
 	jitter: z.optional(
 		z.pipe(
 			u53Schema,
@@ -69,10 +69,11 @@ export const TextConfigSchema = z.object({
 		),
 	),
 
-	// How far this rendition's frames reach the transport behind the broadcast's earliest
-	// rendition, in whole milliseconds rounded up. A player holds `delay + jitter` for it and never
-	// subtracts one rendition's `delay` from another's. Absent on the earliest rendition. It only
-	// ever grows over the life of a stream.
+	// How far this rendition's frames persistently trail what the broadcast's other renditions
+	// already wrote: the least any frame trails within a window of a second or more, and the
+	// largest of those windows, in whole milliseconds rounded up. A player holds `delay + jitter`
+	// for it and never subtracts one rendition's `delay` from another's. Absent on a rendition that
+	// trails nothing. It only ever grows over the life of a stream.
 	delay: z.optional(
 		z.pipe(
 			u53Schema,

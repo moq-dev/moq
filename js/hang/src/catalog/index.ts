@@ -1,7 +1,7 @@
 /**
  * JSON catalog schema and types describing a broadcast's tracks: audio/video decoder configs for
- * WebCodecs, container format, rendition layout, the `media` section (the broadcast's `clock` and
- * `join` interval),
+ * WebCodecs, container format, rendition layout, the `sync` section (the broadcast's `clock` and
+ * join `interval`),
  * plus the `json` and `binary` data sections, optional `stats` and `echo` discovery, and
  * broadcasts listed in `include` without opening them.
  *
@@ -32,13 +32,13 @@ export * from "./hex.ts";
 export * from "./include.ts";
 export * from "./integers.ts";
 export * from "./json.ts";
-export * from "./media.ts";
 export * from "./mode.ts";
 export * from "./path.ts";
 export * from "./priority.ts";
 export * from "./root.ts";
 export * from "./stats.ts";
 export * from "./text.ts";
+export * from "./timeline.ts";
 export * from "./track.ts";
 export type { Color, Projection, VideoConfig } from "./video.ts";
 export { ColorSchema, ProjectionSchema, VideoConfigSchema, VideoSchema } from "./video.ts";

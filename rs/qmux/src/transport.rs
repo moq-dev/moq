@@ -74,5 +74,5 @@ pub use stream::Stream;
 pub(crate) use stream::build as build_stream_session;
 
 mod websocket;
-// Public for `Driver<WsTransport<_>>`, though callers never need to name it.
-pub(crate) use websocket::WsTransport;
+// Named only in `Driver<WsTransport<_>>`, so a caller can hold or wrap a WebSocket driver.
+pub use websocket::WsTransport;

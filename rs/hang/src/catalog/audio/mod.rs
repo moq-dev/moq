@@ -36,7 +36,7 @@ pub struct Audio {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
+	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
 	pub renditions: BTreeMap<String, AudioConfig>,
 }
 
@@ -104,6 +104,7 @@ pub struct AudioConfig {
 	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -114,6 +115,7 @@ pub struct AudioConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
 	/// The instance of the stream the reference names, when the catalog knows it. Absent names
@@ -124,11 +126,12 @@ pub struct AudioConfig {
 	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
 	/// catalog's own stream.
 	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub label: Option<String>,
 
 	/// The codec, see the registry for details:
@@ -147,12 +150,12 @@ pub struct AudioConfig {
 	///
 	/// Live state, like video `color`.
 	#[serde(default)]
-	#[serde_as(as = "Option<DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<DisplayFromStr>")]
 	pub layout: Option<AudioLayout>,
 
 	/// The maximum bitrate of the audio track in bits per second, at most 2^53 - 1.
 	#[serde(default)]
-	#[serde_as(as = "Option<crate::snapshot::Number>")]
+	#[serde_as(as = "crate::catalog::NotNull<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
@@ -166,7 +169,7 @@ pub struct AudioConfig {
 	/// Some codecs include a description so the decoder can be initialized without extra data.
 	/// If not provided, there may be in-band metadata (marginally higher overhead).
 	#[serde(default)]
-	#[serde_as(as = "Option<Hex>")]
+	#[serde_as(as = "crate::catalog::NotNull<Hex>")]
 	pub description: Option<Bytes>,
 
 	/// Container format for frame encoding.
@@ -174,25 +177,25 @@ pub struct AudioConfig {
 	#[serde(default)]
 	pub container: Container,
 
-	/// The maximum delay between a frame being ready and the publisher flushing it.
-	/// The player's jitter buffer should be larger than this value.
-	/// If not provided, the player should assume each frame is flushed immediately.
+	/// The largest media span the publisher hands to the transport behind a frame's presentation
+	/// timestamp: the reorder delay of a frame presented after frames decoded behind it, or the span
+	/// of a batch written together, such as a run of audio packets between video packets in TS. A
+	/// consumer's jitter buffer should be at least this large. Absent when the publisher measured
+	/// none.
 	///
-	/// This is measured at the publisher (encoder latency, packet packing, reordering),
-	/// never on the network a consumer sees. It only ever grows over the life of a stream.
+	/// Measured from media timestamps alone, so a frame written in presentation order adds nothing,
+	/// whatever the frame rate; encoder latency and the network don't count. It only ever grows
+	/// over the life of a stream.
 	///
 	/// Serialized as a whole number of milliseconds, rounded up, so an upper bound never
 	/// rounds down into a promise the publisher can't keep.
-	///
-	/// NOTE: The audio "frame" duration depends on the codec, sample rate, etc.
-	/// ex: AAC often uses 1024 samples per frame, so at 44100Hz, this would be 1024/44100 = 24ms
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 
 	/// After a non-continuous join, decode from the group start, present at start plus warmup, and join that much earlier.
 	/// Serialized as whole milliseconds, rounded up so presentation never starts early.
-	#[serde_as(as = "Option<MillisCeil>")]
+	#[serde_as(as = "crate::catalog::NotNull<MillisCeil>")]
 	#[serde(default)]
 	pub warmup: Option<std::time::Duration>,
 
@@ -261,7 +264,7 @@ impl AudioConfig {
 	}
 }
 
-impl crate::catalog::Rendition for AudioConfig {
+impl crate::catalog::Entry for AudioConfig {
 	fn check(&self) -> crate::Result<()> {
 		if self.sample_rate == 0 {
 			return Err(crate::Error::Zero("sampleRate"));

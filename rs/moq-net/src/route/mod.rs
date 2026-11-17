@@ -20,6 +20,8 @@ pub(crate) mod node;
 pub(crate) mod path;
 mod proof;
 mod reader;
+#[cfg_attr(not(test), allow(dead_code, reason = "driven only by tests until the switch"))]
+pub(crate) mod relay;
 mod view;
 
 #[cfg(test)]
@@ -45,6 +47,17 @@ pub(crate) trait Item: Clone + Eq + fmt::Debug {
 	/// much broader it is, so the claim keeps that distance: a claim exactly at a prefix
 	/// outranks every broader one there. `lowered(0)` is the claim itself.
 	fn lowered(&self, by: u64) -> Self;
+
+	/// How many segments the claim's own prefix lacks of the path it is shown at, as
+	/// [`Self::lowered`] counts them: 0 for a claim exactly there, which outranks every
+	/// broader one whatever their epochs or routes.
+	fn above(&self) -> u64;
+
+	/// Which run of its Instance the publisher is on: among claims of one Instance at one
+	/// path and distance, a higher epoch supersedes a lower one whatever either's route
+	/// costs, or whether a route reaches it, as `model::origin` ranks them. 0 for
+	/// attributes that carry none.
+	fn epoch(&self) -> u64;
 }
 
 /// Opaque attributes that cover nothing broader than their own path.
@@ -54,6 +67,14 @@ macro_rules! opaque {
 		impl Item for $ty {
 			fn lowered(&self, _: u64) -> Self {
 				self.clone()
+			}
+
+			fn above(&self) -> u64 {
+				0
+			}
+
+			fn epoch(&self) -> u64 {
+				0
 			}
 		}
 	)*};
@@ -106,6 +127,12 @@ pub(crate) struct Link {
 	pub proxy: bool,
 	/// Set when the neighbor publishes under a scoped grant.
 	pub scope: Option<Scope>,
+	/// The prefixes this side wants of the neighbor, which it asks for where they meet
+	/// the node's own interest and the scope.
+	pub interest: std::collections::BTreeSet<Path>,
+	/// The prefix the session names its paths beneath: an asked prefix travels as what
+	/// follows it.
+	pub root: Path,
 	/// Which of the neighbor's sessions the stream belongs to: every stream of one session
 	/// shares it, and a later session has a higher one. [`node::Node`] sets it. Among equal
 	/// routes through one neighbor a node takes its latest session's, since an earlier one
@@ -121,6 +148,8 @@ impl Default for Link {
 			upstream: false,
 			proxy: true,
 			scope: None,
+			interest: [Path::empty()].into(),
+			root: Path::empty(),
 			session: 0,
 		}
 	}
@@ -208,9 +237,11 @@ pub(crate) enum Kind {
 	Unavailable,
 }
 
+/// A change the reader sees: `id` is the publisher a path router keys claims by, or
+/// the Instance under [`relay::Router`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Event<A> {
-	pub id: Id,
+pub(crate) struct Event<A, K = Id> {
+	pub id: K,
 	pub claim: Path,
 	pub kind: Kind,
 	pub item: A,
@@ -233,4 +264,16 @@ pub(crate) enum Error {
 	Nested,
 	#[error("no such interest prefix")]
 	UnknownPrefix,
+	#[error("a neighbor connected twice")]
+	Duplicate,
+	#[error("a routing neighbor asked for part of the tree")]
+	Partial,
+	#[error("a claim outside what was asked, or anything before the answer began")]
+	Unasked,
+	#[error("claims or news about no route the neighbor offered")]
+	Unrouted,
+	#[error("a route or chain the rule never builds")]
+	Malformed,
+	#[error("a message the neighbor's role never sends")]
+	Role,
 }
