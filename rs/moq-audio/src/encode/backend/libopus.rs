@@ -4,13 +4,14 @@ use std::collections::VecDeque;
 
 use bytes::Bytes;
 use unsafe_libopus::{
-	OPUS_APPLICATION_AUDIO, OPUS_GET_BITRATE_REQUEST, OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE,
-	OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST, OpusEncoder, opus_encode_float, opus_encoder_create,
+	OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_VOIP, OPUS_GET_BITRATE_REQUEST, OPUS_GET_IN_DTX_REQUEST,
+	OPUS_GET_LOOKAHEAD_REQUEST, OPUS_OK, OPUS_RESET_STATE, OPUS_SET_BITRATE_REQUEST, OPUS_SET_DTX_REQUEST,
+	OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_MUSIC, OPUS_SIGNAL_VOICE, OpusEncoder, opus_encode_float, opus_encoder_create,
 	opus_encoder_ctl_impl, opus_encoder_destroy, varargs,
 };
 
 use super::Backend;
-use crate::encode::{Config, Encoded};
+use crate::encode::{Config, Encoded, Kind};
 use crate::{Error, opus};
 
 pub(super) const NAME: &str = "libopus";
@@ -28,6 +29,8 @@ pub(super) struct Libopus {
 	frame_size: usize,
 	bitrate: u64,
 	lookahead: usize,
+	/// Whether discontinuous transmission is on, which only voice turns on.
+	dtx: bool,
 }
 
 // SAFETY: OpusEncoder is heap-allocated state owned exclusively by this
@@ -46,6 +49,14 @@ impl Libopus {
 		let sample_rate = config.sample_rate;
 		let channels = config.layout.channels();
 		let frame_size = opus::frame_size(sample_rate, config.frame_duration)?;
+		// The same application and signal WebCodecs gets from `@moq/publish` for each kind. libopus
+		// has no default application, so an unknown kind takes the general-purpose one.
+		let (application, signal) = match config.kind {
+			Some(Kind::Voice) => (OPUS_APPLICATION_VOIP, Some(OPUS_SIGNAL_VOICE)),
+			Some(Kind::Music) => (OPUS_APPLICATION_AUDIO, Some(OPUS_SIGNAL_MUSIC)),
+			None => (OPUS_APPLICATION_AUDIO, None),
+		};
+		let dtx = config.kind == Some(Kind::Voice);
 
 		let mut err = 0i32;
 		// SAFETY: out-pointer `err` is valid; inner is checked for null below.
@@ -53,7 +64,7 @@ impl Libopus {
 			opus_encoder_create(
 				sample_rate as i32,
 				opus::validate_channels(channels)?,
-				OPUS_APPLICATION_AUDIO,
+				application,
 				&mut err,
 			)
 		};
@@ -71,12 +82,16 @@ impl Libopus {
 			frame_size,
 			bitrate: 0,
 			lookahead: 0,
+			dtx,
 		};
 
 		if let Some(bitrate) = config.bitrate {
 			backend.set_rate(bitrate.as_bps())?;
 		}
-		backend.set_ctl(OPUS_SET_DTX_REQUEST, i32::from(config.dtx), "OPUS_SET_DTX")?;
+		if let Some(signal) = signal {
+			backend.set_ctl(OPUS_SET_SIGNAL_REQUEST, signal, "OPUS_SET_SIGNAL")?;
+		}
+		backend.set_ctl(OPUS_SET_DTX_REQUEST, i32::from(dtx), "OPUS_SET_DTX")?;
 
 		let bitrate = backend.get_ctl(OPUS_GET_BITRATE_REQUEST, "OPUS_GET_BITRATE")?;
 		backend.bitrate = u64::try_from(bitrate)
@@ -140,7 +155,14 @@ impl Backend for Libopus {
 		}
 		let payload = Bytes::copy_from_slice(&self.scratch[..n as usize]);
 		let activity = opus::activity(&payload, false);
-		self.ready.push_back(Encoded { payload, activity });
+		// Asked after the frame, so it describes this packet: its keep-alives code a frame while
+		// the encoder stays in discontinuous transmission.
+		let in_dtx = self.dtx && self.get_ctl(OPUS_GET_IN_DTX_REQUEST, "OPUS_GET_IN_DTX")? != 0;
+		self.ready.push_back(Encoded {
+			payload,
+			activity,
+			in_dtx,
+		});
 		Ok(())
 	}
 
@@ -190,7 +212,7 @@ impl Drop for Libopus {
 
 #[cfg(test)]
 mod tests {
-	use unsafe_libopus::OPUS_GET_DTX_REQUEST;
+	use unsafe_libopus::{OPUS_AUTO, OPUS_GET_APPLICATION_REQUEST, OPUS_GET_DTX_REQUEST, OPUS_GET_SIGNAL_REQUEST};
 
 	use super::*;
 
@@ -210,14 +232,30 @@ mod tests {
 		);
 	}
 
+	/// Each kind reaches libopus as the application, signal, and transmission `@moq/publish` asks
+	/// WebCodecs for.
 	#[test]
-	fn applies_dtx_control() {
-		let backend = Libopus::new(&Config {
-			dtx: true,
-			..Config::default()
-		})
-		.unwrap();
+	fn kind_tunes_libopus() {
+		let cases = [
+			(Some(Kind::Voice), OPUS_APPLICATION_VOIP, OPUS_SIGNAL_VOICE, 1),
+			(Some(Kind::Music), OPUS_APPLICATION_AUDIO, OPUS_SIGNAL_MUSIC, 0),
+			(None, OPUS_APPLICATION_AUDIO, OPUS_AUTO, 0),
+		];
+		for (kind, application, signal, dtx) in cases {
+			let backend = Libopus::new(&Config {
+				kind,
+				..Config::default()
+			})
+			.unwrap();
 
-		assert_eq!(backend.get_ctl(OPUS_GET_DTX_REQUEST, "OPUS_GET_DTX").unwrap(), 1);
+			let get = |request, name| backend.get_ctl(request, name).unwrap();
+			assert_eq!(
+				get(OPUS_GET_APPLICATION_REQUEST, "OPUS_GET_APPLICATION"),
+				application,
+				"{kind:?}"
+			);
+			assert_eq!(get(OPUS_GET_SIGNAL_REQUEST, "OPUS_GET_SIGNAL"), signal, "{kind:?}");
+			assert_eq!(get(OPUS_GET_DTX_REQUEST, "OPUS_GET_DTX"), dtx, "{kind:?}");
+		}
 	}
 }

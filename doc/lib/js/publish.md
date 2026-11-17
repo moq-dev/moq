@@ -32,7 +32,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Stop sending audio, or stop publishing video. A muted rendition stays in the catalog and its listeners stay subscribed, so the next word reaches them at once, as push-to-talk needs; they play the pause as comfort noise. By default the microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit. |
-| `capture` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
+| `idle` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
@@ -62,7 +62,7 @@ busy, and the target bitrate. Its `transport` carries only the PROBE round-trip
 time, since browsers report no usable WebTransport statistics. The encoders'
 `out.stats` and the stats panel read the same counters, and a custom producer
 reports through its rendition's `stats` signal. The `Broadcast` takes the same
-options as `stats`, `probe`, and `echo` inputs.
+options as `stats`, `probe`, and `echoPath` inputs.
 
 `echo-path` only asks for feedback: a `<moq-watch echo="alice">` that reads the
 catalog publishes `room/viewers/alice.echo`, and `moq export echo` or a dashboard

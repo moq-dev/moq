@@ -319,14 +319,13 @@ fn drain(
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
 	children: &crate::producer::Children,
 ) -> Result<(), MoqError> {
 	match drained {
 		Ok(()) => {
-			producer.finish()?;
-			children.keep(producer);
+			children.keep(producer.finish()?);
 			Ok(())
 		}
 		Err(err) => {

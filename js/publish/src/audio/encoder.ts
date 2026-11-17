@@ -556,7 +556,7 @@ export class Encoder {
 		// Set before the config is listed, so the catalog's first listing declares it.
 		this.#spacing.set(groupSpacing(join, resolved));
 		const source = capture ? effect.get(capture.in.source) : undefined;
-		const kind = source ? sourceKind(source) : "auto";
+		const kind = source ? sourceKind(source) : undefined;
 		const voice = kind === "voice";
 		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
 		if (resolved.catalog.codec !== "opus") {
@@ -1096,15 +1096,15 @@ interface OpusEncoderConfigExt extends OpusEncoderConfig {
 }
 
 // Opus settings implied by the audio kind. These are only defaults: any field set explicitly via
-// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. "auto" leaves
+// OpusConfig (carried in opusOptions) overrides them, so a caller can always opt out. No kind leaves
 // every knob to the browser.
-function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
+function opusKindDefaults(kind: Kind | undefined): OpusEncoderConfigExt {
 	switch (kind) {
 		case "voice":
 			return { application: "voip", signal: "voice" };
 		case "music":
 			return { application: "audio", signal: "music" };
-		default:
+		case undefined:
 			return {};
 	}
 }
@@ -1115,7 +1115,11 @@ function opusKindDefaults(kind: Kind): OpusEncoderConfigExt {
  * no such knobs, so it just uses the shared base fields (codec/sampleRate/channels/bitrate).
  * @internal
  */
-export function toEncoderConfig(resolved: Resolved, kind: Kind, opusOptions: OpusEncoderConfigExt): AudioEncoderConfig {
+export function toEncoderConfig(
+	resolved: Resolved,
+	kind: Kind | undefined,
+	opusOptions: OpusEncoderConfigExt,
+): AudioEncoderConfig {
 	const config = resolved.catalog;
 	const encoderConfig: AudioEncoderConfig = {
 		codec: config.codec,

@@ -595,11 +595,16 @@ fn media_time_to_micros(time: &str0m::media::MediaTime) -> u64 {
 /// events arrive on the ingest side.
 pub(crate) struct Bridges {
 	inner: HashMap<str0m::media::Mid, Box<dyn codec::Bridge>>,
+	/// The finished bridges' tracks, served until the bridges are dropped.
+	finished: Vec<codec::Finished>,
 }
 
 impl Bridges {
 	pub fn new() -> Self {
-		Self { inner: HashMap::new() }
+		Self {
+			inner: HashMap::new(),
+			finished: Vec::new(),
+		}
 	}
 
 	pub fn insert(&mut self, mid: str0m::media::Mid, bridge: Box<dyn codec::Bridge>) {
@@ -615,8 +620,8 @@ impl Bridges {
 
 	/// Finish every bridge's track after the final frame.
 	pub fn finish(&mut self) -> Result<()> {
-		for bridge in self.inner.values_mut() {
-			bridge.finish()?;
+		for bridge in std::mem::take(&mut self.inner).into_values() {
+			self.finished.push(bridge.finish()?);
 		}
 		Ok(())
 	}
