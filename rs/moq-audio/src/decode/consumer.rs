@@ -2664,11 +2664,11 @@ mod tests {
 	}
 
 	/// Groups lost past a declared end were the fresh encoder's, so the packet after them
-	/// still starts it, and its pre-skip is trimmed.
+	/// still starts it, and its pre-skip is trimmed, leaving its media at the packet's stamp.
 	#[tokio::test(start_paused = true)]
 	async fn a_loss_after_a_declared_end_trims_the_fresh_encoders_pre_skip() {
-		let (_, frames) = first_after_loss(true).await;
-		assert_eq!(frames, 960 - 312);
+		let (at, frames) = first_after_loss(true).await;
+		assert_eq!((at, frames), (1_000_000, 960 - 312));
 	}
 
 	/// Decodes two Opus packets, then, past lost groups and a declared end if `declared`,
