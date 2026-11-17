@@ -109,7 +109,11 @@ class TrackDemand:
         return self._inner.wanted()
 
     async def wanted_changed(self) -> int | None:
-        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        """Wait for ``wanted`` to change and return it. The first call returns at once.
+
+        End a track nobody wants with :meth:`TrackProducer.abort_unwanted`, which keeps it for
+        a reader that joined since.
+        """
         return await self._inner.wanted_changed()
 
 
@@ -169,6 +173,16 @@ class TrackProducer:
     def abort(self, error_code: int) -> None:
         """Abort this track with an application error code."""
         self._inner.abort(error_code)
+
+    def abort_unwanted(self, error_code: int) -> bool:
+        """Abort this track with an application error code, but only while nobody wants it.
+
+        Call it once :meth:`TrackDemand.wanted_changed` returns ``None``. Returns ``True`` once
+        the track is closed, and ``False``, leaving the track open, when a reader joined since;
+        keep serving and wait for the next ``None`` on a fresh ``demand()``: one that already
+        returned ``None`` misses a reader that came and went, and waits on.
+        """
+        return self._inner.abort_unwanted(error_code)
 
     def finish(self) -> None:
         """Finish publishing and flush a clean end to subscribers.

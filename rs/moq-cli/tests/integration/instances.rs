@@ -48,12 +48,13 @@ fn client(version: &str) -> moq_tokio::Client {
 }
 
 fn write(track: &track::Producer, tag: &str) {
-	let start = track.largest().map_or(0, |largest| largest.group + 1);
-	let mut group = track.append_group(start).unwrap();
-	group
-		.write_frame(Timestamp::from_millis(start).unwrap(), tag.as_bytes().to_vec())
+	let mut group = track
+		.append_group(Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.unwrap();
-	group.close().unwrap();
+	group
+		.write_frame(Timestamp::from_millis(group.start).unwrap(), tag.as_bytes().to_vec())
+		.unwrap();
+	group.finish().unwrap();
 }
 
 async fn read(subscription: &mut track::Subscriber) -> String {

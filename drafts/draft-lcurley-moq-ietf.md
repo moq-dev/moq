@@ -261,14 +261,6 @@ A high, distinctive value is used to avoid collisions with the low values {{moql
 
 --- back
 
-# Changelog
-
-## Since draft-lcurley-moq-ietf-00 (in progress)
-
-- A relay never restates the Max Age as MAX_CACHE_DURATION, and a sealed MAX_CACHE_DURATION is advisory.
-- Preserve relayed track timestamps and their unchecked MoQ Transport provenance across negotiated hops. Without the extension a relay serves them as native moq-lite timestamps rather than untimed.
-- Initial version.
-
 # Acknowledgments
 {:numbered="false"}
 

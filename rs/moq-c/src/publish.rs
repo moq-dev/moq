@@ -35,7 +35,7 @@ enum Request {
 /// One group of a fill, handed to C as a group request: the frozen ABI answers fills a
 /// group at a time.
 struct GroupRequest {
-	fill: Arc<moq_net::track::Fill>,
+	fill: Arc<moq_net::track::FillGroups>,
 	sequence: u64,
 	/// Dropped once the request is answered or freed, so its fill's next group follows.
 	_pending: oneshot::Sender<()>,
@@ -102,6 +102,17 @@ enum Family {
 	Closed,
 }
 
+/// One past the newest group's start, or 0 on an empty track, in the track's timescale: where a
+/// group the caller gave no start for begins, which stands in until every write carries a
+/// timestamp.
+fn next_start(track: &moq_net::track::Producer) -> moq_net::Result<moq_net::Timestamp> {
+	let key = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
+	match track.info().timescale {
+		Some(scale) => moq_net::Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch),
+		None => Ok(moq_net::Timestamp::unscaled(key)),
+	}
+}
+
 /// The track-publishing handles of one broadcast.
 ///
 /// Closing the broadcast ends every child still open with `Unroutable` (`Internal` to a
@@ -111,12 +122,6 @@ enum Family {
 /// [`State::publish_close`].
 #[derive(Clone)]
 pub struct Children(Arc<std::sync::Mutex<Family>>);
-
-/// One past the newest group's start, or 0 on an empty track: where a group the caller gave
-/// no start for begins, which stands in until every write carries a timestamp.
-fn next_start(track: &moq_net::track::Producer) -> u64 {
-	track.largest().map_or(0, |largest| largest.group.saturating_add(1))
-}
 
 /// The family of a standalone broadcast of its own.
 #[cfg(test)]
@@ -825,7 +830,8 @@ impl Publish {
 	/// Insert or replace a top-level application catalog section by name.
 	///
 	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `media`, `text`,
-	/// `archive`, `clock`, `json`, `binary`, or retired `timeline`) or an MSF root (`version`,
+	/// `json`, `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, and
+	/// `timeline`) or an MSF root (`version`,
 	/// `generatedAt`, `isComplete`, `tracks`, or `initDataList`). The catalog is republished
 	/// automatically.
 	pub fn catalog_section_set(&mut self, broadcast: Id, name: &str, value: serde_json::Value) -> Result<(), Error> {
@@ -1032,6 +1038,12 @@ impl Publish {
 				Request::Track(request) => State::lock().publish.track_request.insert(*request)?,
 				Request::Datagram(request) => State::lock().publish.datagram_request.insert(request)?,
 				Request::Fill(fill) => {
+					// A lookup of a time owes no group, and a request names one: drop it
+					// unanswered, as a handler that can't resolve times does, so the reader
+					// falls back to the groups held.
+					let moq_net::track::Fill::Groups(fill) = fill else {
+						continue;
+					};
 					let mut serve = Box::pin(Self::serve_fill(callback, Arc::new(fill)));
 					fills.push(move |waiter: &kio::Waiter| waiter.poll_future(serve.as_mut()));
 					continue;
@@ -1043,12 +1055,7 @@ impl Publish {
 
 	/// Hand `fill` to C a group at a time, each once the one before it reached a reader or
 	/// nobody reads it any more, until every group is answered or nobody waits on the fill.
-	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::Fill>) {
-		// A lookup of a time owes no group, and a request names one: drop it unanswered, as a
-		// handler that can't resolve times does, so the reader falls back to the groups held.
-		if fill.time().is_some() {
-			return;
-		}
+	async fn serve_fill(callback: OnStatus, fill: Arc<moq_net::track::FillGroups>) {
 		let mut changes = (*fill).clone();
 		while let Some(sequence) = changes.wanted_changed().await {
 			let (pending, answered) = oneshot::channel();
@@ -1224,7 +1231,7 @@ impl Publish {
 	/// group producer.
 	pub fn track_group(&mut self, track: Id) -> Result<Id, Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let group = raw.inner.append_group(next_start(&raw.inner))?;
+		let group = raw.inner.append_group(next_start(&raw.inner)?)?;
 		self.insert_group(group)
 	}
 
@@ -1275,8 +1282,7 @@ impl Publish {
 	/// Declare a raw track's exclusive final group sequence.
 	pub fn track_finish_at(&mut self, track: Id, final_sequence: u64) -> Result<(), Error> {
 		let raw = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		raw.inner
-			.finish_at(moq_net::track::Position::group(final_sequence), None)?;
+		raw.inner.finish_at(moq_net::track::Position::group(final_sequence))?;
 		Ok(())
 	}
 
@@ -1558,7 +1564,7 @@ impl Publish {
 			.remove(group)
 			.and_then(|group| group.inner.take())
 			.ok_or(Error::GroupNotFound)?;
-		group.close()?;
+		group.finish()?;
 		Ok(())
 	}
 

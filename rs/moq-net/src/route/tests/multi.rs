@@ -79,7 +79,7 @@ pub(super) struct Tune {
 
 /// The relay a simulated node identity names and how many times it had started,
 /// as [`hop`] numbers them. A real identity would carry a start that only grows.
-fn started(id: Id) -> (Id, u64) {
+pub(super) fn started(id: Id) -> (Id, u64) {
 	(id % 1_000, id / 1_000)
 }
 
@@ -114,6 +114,100 @@ impl Offer {
 	/// raises the cost.
 	fn rank(&self) -> (bool, Reverse<i8>, Metric) {
 		(self.draining, Reverse(self.priority), self.cost)
+	}
+
+	/// The route a node offers to itself, once it has a claim when `tune.claimed`.
+	pub fn own(me: Id, tune: Tune, announced: bool) -> Option<Self> {
+		if tune.claimed && !announced {
+			return None;
+		}
+		Some(Self {
+			path: vec![Hop { node: me, session: 0 }],
+			draining: false,
+			priority: i8::MAX,
+			cost: 0,
+			marked: false,
+		})
+	}
+
+	/// The route `me` holds over its session `session`, as it sends it to neighbour
+	/// `to` over a link it marked `upstream`: never to a node already on its path,
+	/// or from one marked link to another.
+	pub fn onward(&self, me: Id, session: u64, to: Id, upstream: bool) -> Option<Self> {
+		if self.names(to) || (self.marked && upstream) {
+			return None;
+		}
+		let mut offer = self.clone();
+		offer.path.push(Hop { node: me, session });
+		Some(offer)
+	}
+}
+
+/// Everything a node holds that decides whether it takes a route and how it ranks it.
+pub(super) struct Here<'a> {
+	pub me: Id,
+	pub tune: Tune,
+	pub closed: &'a BTreeMap<(Id, Id), (u64, u64)>,
+	pub dead: &'a BTreeMap<Hop, Id>,
+	pub suspects: &'a BTreeMap<Id, BTreeSet<Hop>>,
+	pub draining: &'a BTreeSet<Id>,
+}
+
+impl Here<'_> {
+	/// `offer`, heard from a neighbour on `port` that sent GOAWAY when `draining`, as
+	/// it stands here, and whether it crosses a suspected node; `None` when this node
+	/// refuses it.
+	pub fn arrive(&self, port: &Port, draining: bool, offer: &Offer) -> Option<(Offer, bool)> {
+		let floored = offer.path.windows(2).any(|pair| {
+			let (key, at) = floor_of(self.tune, pair[1], pair[0].node);
+			self.closed.get(&key).is_some_and(|highest| at <= *highest)
+		});
+		if floored
+			|| offer.names(self.me)
+			|| offer.path.len() >= MAX_HOPS
+			|| offer.path.iter().any(|hop| self.dead.contains_key(hop))
+		{
+			return None;
+		}
+		let named = |nodes: &dyn Fn(&Id) -> bool| offer.path.iter().any(|hop| nodes(&hop.node));
+		let suspect = named(&|node| self.suspects.contains_key(node));
+		let flagged = suspect && self.tune.suspect == Suspect::Flagged;
+		let offer = Offer {
+			path: offer.path.clone(),
+			draining: offer.draining || draining || flagged || named(&|node| self.draining.contains(node)),
+			priority: offer.priority.min(port.priority),
+			cost: offer.cost + port.cost,
+			marked: offer.marked || port.upstream,
+		};
+		Some((offer, suspect))
+	}
+}
+
+/// How a candidate route orders, lower first: rank, then one with no marked link
+/// on its path, which more neighbours may be sent, then the next hop in use
+/// (`current`), the shorter path, and the neighbour.
+pub(super) fn order<N: Key>(best: &Best<N>, current: Option<N>) -> Order<N> {
+	let (draining, priority, cost) = best.rank();
+	(
+		draining,
+		priority,
+		cost,
+		best.offer.marked,
+		current != Some(best.via),
+		best.offer.path.len(),
+		best.via,
+	)
+}
+
+/// The pair of nodes `hop`'s session joins, as the floor files it, and where the
+/// session stands in that pair's order.
+pub(super) fn floor_of(tune: Tune, hop: Hop, far: Id) -> ((Id, Id), (u64, u64)) {
+	match tune.epoch {
+		true => {
+			let ((near, start), (far, _)) = (started(hop.node), started(far));
+			((near, far), (start, hop.session))
+		}
+		false => ((hop.node, far), (0, hop.session)),
 	}
 }
 
@@ -201,15 +295,15 @@ struct Heard {
 
 /// The route this node uses, as it stands here: the heard offer with the link added.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Best<N> {
-	via: N,
-	offer: Offer,
+pub(super) struct Best<N> {
+	pub via: N,
+	pub offer: Offer,
 	/// It crosses a node this node suspects, which no offer says.
-	suspect: bool,
+	pub suspect: bool,
 }
 
 impl<N> Best<N> {
-	fn rank(&self) -> (bool, Reverse<i8>, Metric) {
+	pub fn rank(&self) -> (bool, Reverse<i8>, Metric) {
 		let (draining, priority, cost) = self.offer.rank();
 		(draining || self.suspect, priority, cost)
 	}
@@ -234,9 +328,9 @@ impl<N> Default for Known<N> {
 	}
 }
 
-/// How candidate routes order, lower first: rank, then the next hop in use, the
-/// shorter path, and the neighbour.
-type Order<N> = (bool, Reverse<i8>, Metric, bool, usize, N);
+/// How candidate routes order, lower first: rank, then unmarked, the next hop in
+/// use, the shorter path, and the neighbour.
+pub(super) type Order<N> = (bool, Reverse<i8>, Metric, bool, bool, usize, N);
 
 /// Where a request for a broadcast goes next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -352,6 +446,18 @@ impl<N: Key> Router<N> {
 		};
 		router.known.insert(me, Known::default());
 		router
+	}
+
+	/// What this node holds that decides how it takes a route.
+	fn here(&self) -> Here<'_> {
+		Here {
+			me: self.me,
+			tune: self.tune,
+			closed: &self.closed,
+			dead: &self.dead,
+			suspects: &self.suspects,
+			draining: &self.draining,
+		}
 	}
 
 	/// What to send, with every route as it stands now.
@@ -788,18 +894,6 @@ impl<N: Key> Router<N> {
 		self.publish(me, vec![(broadcast, change)]);
 	}
 
-	/// The pair of nodes `hop`'s session joins, as the floor files it, and where the
-	/// session stands in that pair's order.
-	fn floor_of(&self, hop: Hop, far: Id) -> ((Id, Id), (u64, u64)) {
-		match self.tune.epoch {
-			true => {
-				let ((near, start), (far, _)) = (started(hop.node), started(far));
-				((near, far), (start, hop.session))
-			}
-			false => ((hop.node, far), (0, hop.session)),
-		}
-	}
-
 	/// A session closed: this node's own when `from` is `None`.
 	fn closed(&mut self, hop: Hop, far: Id, from: Option<N>) {
 		self.work += 1;
@@ -810,7 +904,7 @@ impl<N: Key> Router<N> {
 			}
 		}
 		if self.tune.floor {
-			let (pair, at) = self.floor_of(hop, far);
+			let (pair, at) = floor_of(self.tune, hop, far);
 			let highest = self.closed.entry(pair).or_default();
 			*highest = (*highest).max(at);
 		}
@@ -882,69 +976,49 @@ impl<N: Key> Router<N> {
 	}
 
 	fn reselect_all(&mut self) {
-		let origins: BTreeSet<Id> = self.heard.keys().chain(self.best.keys()).copied().collect();
-		for origin in origins {
+		for origin in self.origins() {
 			self.reselect(origin);
 		}
 	}
 
-	/// The route to `origin` through `via` as it stands here, unless it is unusable.
-	fn candidate(&self, origin: Id, via: N, heard: &Heard) -> Option<Best<N>> {
-		let peer = self.peers.get(&via)?;
-		let offer = &heard.offer;
-		let floored = offer.path.windows(2).any(|pair| {
-			let (key, at) = self.floor_of(pair[1], pair[0].node);
-			self.closed.get(&key).is_some_and(|highest| at <= *highest)
-		});
-		if heard.ended
-			|| floored
-			|| offer.names(self.me)
-			|| offer.path.len() >= MAX_HOPS
-			|| offer.path.iter().any(|hop| self.dead.contains_key(hop))
-			|| (self.tune.agree && !self.agrees(origin, via, offer))
-		{
-			return None;
+	/// The routes to `origin` this node may take from what its neighbours last said.
+	pub fn candidates(&self, origin: Id) -> Vec<Best<N>> {
+		let here = self.here();
+		let mut out = Vec::new();
+		for (&via, heard) in self.heard.get(&origin).into_iter().flatten() {
+			let Some(peer) = self.peers.get(&via) else {
+				continue;
+			};
+			if heard.ended || (self.tune.agree && !self.agrees(origin, via, &heard.offer)) {
+				continue;
+			}
+			if let Some((offer, suspect)) = here.arrive(&peer.port, peer.draining, &heard.offer) {
+				out.push(Best { via, offer, suspect });
+			}
 		}
-		let named = |nodes: &dyn Fn(&Id) -> bool| offer.path.iter().any(|hop| nodes(&hop.node));
-		let suspect = named(&|node| self.suspects.contains_key(node));
-		let flagged = suspect && self.tune.suspect == Suspect::Flagged;
-		Some(Best {
-			via,
-			offer: Offer {
-				path: offer.path.clone(),
-				draining: offer.draining || peer.draining || flagged || named(&|node| self.draining.contains(node)),
-				priority: offer.priority.min(peer.port.priority),
-				cost: offer.cost + peer.port.cost,
-				marked: offer.marked || peer.port.upstream,
-			},
-			suspect,
-		})
+		out
+	}
+
+	/// Whether it offers a route to itself under `tune.claimed`: it has announced a claim.
+	pub fn announced(&self) -> bool {
+		self.announced
+	}
+
+	/// The route this node uses to `origin`.
+	pub fn best(&self, origin: Id) -> Option<&Best<N>> {
+		self.best.get(&origin)
+	}
+
+	/// Every forwarding node this node has heard a route to or uses one to.
+	pub fn origins(&self) -> BTreeSet<Id> {
+		self.heard.keys().chain(self.best.keys()).copied().collect()
 	}
 
 	/// Pick the route to `origin` and tell every neighbour what changed.
 	fn reselect(&mut self, origin: Id) {
 		let current = self.best.get(&origin).map(|best| best.via);
-		let mut pick: Option<(Best<N>, Order<N>)> = None;
 		self.work += self.heard.get(&origin).map_or(0, BTreeMap::len);
-		for (&via, heard) in self.heard.get(&origin).into_iter().flatten() {
-			let Some(mine) = self.candidate(origin, via, heard) else {
-				continue;
-			};
-			let (draining, priority, cost) = mine.rank();
-			// Among equal ranks a node stays on its next hop.
-			let key = (
-				draining,
-				priority,
-				cost,
-				current != Some(via),
-				mine.offer.path.len(),
-				via,
-			);
-			if pick.as_ref().is_none_or(|(_, best)| key < *best) {
-				pick = Some((mine, key));
-			}
-		}
-		let pick = pick.map(|(best, _)| best);
+		let pick = (self.candidates(origin).into_iter()).min_by_key(|best| order(best, current));
 		if self.best.get(&origin) == pick.as_ref() {
 			return;
 		}
@@ -986,32 +1060,16 @@ impl<N: Key> Router<N> {
 	fn offer_for(&self, origin: Id, peer: N) -> Option<Offer> {
 		let to = self.peers.get(&peer).filter(|to| to.port.role == Role::Routing)?;
 		if origin == self.me {
-			if self.tune.claimed && !self.announced {
-				return None;
-			}
-			return Some(Offer {
-				path: vec![Hop {
-					node: self.me,
-					session: 0,
-				}],
-				draining: false,
-				priority: i8::MAX,
-				cost: 0,
-				marked: false,
-			});
+			return Offer::own(self.me, self.tune, self.announced);
 		}
 		let best = self.best.get(&origin)?;
-		// Never back over the session it came on, to a node already on its path, or
-		// from one marked link to another.
-		if best.via == peer || best.offer.names(to.id) || (best.offer.marked && to.port.upstream) {
+		// Never back over the session it came on: its sender is the last hop on its
+		// path, so `onward` refuses it too.
+		if best.via == peer {
 			return None;
 		}
-		let mut offer = best.offer.clone();
-		offer.path.push(Hop {
-			node: self.me,
-			session: self.peers[&best.via].session,
-		});
-		Some(offer)
+		best.offer
+			.onward(self.me, self.peers[&best.via].session, to.id, to.port.upstream)
 	}
 
 	fn advertise_to(&mut self, origin: Id, peer: N) {
@@ -1102,8 +1160,7 @@ impl<N: Key> Router<N> {
 		let Some(best) = self.best.get(&origin) else {
 			return Vec::new();
 		};
-		(self.heard.get(&origin).into_iter().flatten())
-			.filter_map(|(&via, heard)| self.candidate(origin, via, heard))
+		(self.candidates(origin).into_iter())
 			.filter(|candidate| candidate.rank() == best.rank())
 			.map(|candidate| candidate.via)
 			.collect()
@@ -1491,6 +1548,15 @@ impl MultiSim {
 
 	pub fn hold(&mut self, from: Node, to: Node) {
 		self.held.insert((from, to));
+	}
+
+	pub fn release(&mut self, from: Node, to: Node) {
+		self.held.remove(&(from, to));
+	}
+
+	/// Whether `a` and `b` have a session open.
+	pub fn is_up(&self, a: Node, b: Node) -> bool {
+		self.up.contains(&Self::pair(a, b))
 	}
 
 	pub fn ready(&self) -> Vec<((Node, Node), usize)> {

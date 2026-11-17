@@ -26,6 +26,9 @@ class Paired(unittest.TestCase):
     def test_known_degradation(self):
         self.assertAlmostEqual(compare.reduce([pair(-20)] * 3)["metrics"]["recv_mbps"]["delta_pct"], -20)
 
+    def test_memory_is_compared(self):
+        self.assertAlmostEqual(compare.reduce([pair(17)] * 3)["metrics"]["rss_bytes"]["delta_pct"], 17)
+
     def test_noisy(self):
         metric = compare.reduce([pair(-10), pair(), pair(10)])["metrics"]["recv_mbps"]
         self.assertEqual(metric["status"], "sign varies across pairs")
@@ -34,12 +37,14 @@ class Paired(unittest.TestCase):
     def test_insufficient(self):
         self.assertEqual(compare.reduce([pair()])["metrics"]["recv_mbps"]["status"], "insufficient samples")
 
-    def test_cpu_unavailable_on_both_sides_is_explicit(self):
+    def test_host_metrics_unavailable_on_both_sides_are_explicit(self):
         p = pair()
-        del p["base"]["cpu_cores"]
-        del p["current"]["cpu_cores"]
+        for metric in ("cpu_cores", "rss_bytes"):
+            del p["base"][metric]
+            del p["current"][metric]
         result = compare.reduce([p] * 3)
-        self.assertEqual(result["metrics"]["cpu_cores"]["status"], "unavailable: no host CPU samples")
+        for metric in ("cpu_cores", "rss_bytes"):
+            self.assertEqual(result["metrics"][metric]["status"], "unavailable: no host samples")
         self.assertEqual(result["metrics"]["recv_mbps"]["delta_pct"], 0)
 
     def test_missing_invalid(self):

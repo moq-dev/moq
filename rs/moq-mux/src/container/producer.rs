@@ -691,7 +691,7 @@ where
 					if self.inner.largest().is_none() {
 						self.inner.skip_groups(0..start);
 					}
-					self.inner.append_group(start)?
+					self.inner.append_group(timestamp)?
 				}
 				(None, None) => unreachable!("a keyframe without a pending start has one"),
 			};
@@ -804,8 +804,8 @@ where
 		}
 		if let Some(group) = self.group.take() {
 			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
-				Some(end) => group.finish(end)?,
-				None => group.close()?,
+				Some(end) => group.finish_at(end)?,
+				None => group.finish()?,
 			};
 			// Only a closed group reaches anything; a cut with none open names a point nothing reached.
 			if let Some(end) = reached {
@@ -949,7 +949,7 @@ where
 		};
 		self.pending_start = None;
 		let mut group = match appended {
-			true => self.inner.append_group(start)?,
+			true => self.inner.append_group(timestamp)?,
 			false => self.inner.create_group(moq_net::group::Info { start })?,
 		};
 		match self.container.kind() {
@@ -964,7 +964,7 @@ where
 				}],
 			)?,
 		}
-		group.close()?;
+		group.finish()?;
 		Ok(())
 	}
 
@@ -1068,16 +1068,10 @@ where
 			let _ = self.inner.clone().abort(cause.reason());
 			return Err(cause);
 		}
+		// The producer keeps its own clone, whose appends the end refuses.
 		match err {
-			// The producer keeps its own clone, whose appends the end refuses.
 			None => drop(self.inner.clone().finish()?),
-			Some(err) => {
-				let next = self
-					.inner
-					.largest()
-					.map_or(0, |largest| largest.group.saturating_add(1));
-				self.inner.finish_at(moq_net::track::Position::group(next), Some(err))?;
-			}
+			Some(err) => drop(self.inner.clone().fail(err)?),
 		}
 		let published = self.publish_estimate();
 		// A track that ended before measuring declares what it saw, and no longer holds the join
@@ -1110,6 +1104,25 @@ where
 			let _ = group.abort(err.clone());
 		}
 		let _ = self.inner.abort(err);
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the producer back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the producer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
+		// The check and the abort are one step on the track; the rest is the same cleanup.
+		if self.inner.clone().abort_unwanted(err.clone()).is_err() {
+			return Err(self);
+		}
+		self.abort(err);
+		Ok(())
 	}
 
 	/// Create a consumer for this track.

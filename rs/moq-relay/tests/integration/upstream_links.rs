@@ -160,12 +160,14 @@ fn publish(origin: &origin::Producer, path: &str) -> Publisher {
 	let track = route.broadcast().create_track("video", timed()).expect("create track");
 	let writer = tokio::spawn(async move {
 		loop {
-			let Ok(mut group) = track.append_group(track.largest().map_or(0, |largest| largest.group + 1)) else {
+			let Ok(mut group) = track.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			) else {
 				break;
 			};
 			if group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
-				.is_err() || group.close().is_err()
+				.is_err() || group.finish().is_err()
 			{
 				break;
 			}

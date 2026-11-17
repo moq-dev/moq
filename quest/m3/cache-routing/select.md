@@ -66,9 +66,9 @@ sweeps measure the drift:
 |---|---|---|---|---|
 | settled trees over the cheapest, 400 churned random / drone / region meshes | +3.4% / +16.2% / +5.4% | +3.4% / +16.2% / +5.0% | +2.7% / +9.4% / +4.9% | +2.7% / +28.9% / +5.0% |
 | unsettled of 2,000 per kind | 0 / 0 / 0 | 0 / 0 / 0 | 1 / 0 / 0 (random case 503) | 0 / 0 / 0 |
-| longest cycle under churn, deliveries | 20 / 18 / 14 | 20 / 18 / 19 | 18 / 39 / 24 | 9 / 14 / 17 |
-| unfed reader-hops | 19,008 / 11,691 / 17,458 | 19,008 / 11,691 / 23,097 | 18,000 / 12,381 / 22,477 | 15,657 / 7,723 / 15,731 |
-| warm messages, 400 churned regions | 4,653 | 21,014 | 21,182 | 0 |
+| longest cycle under churn, deliveries | 20 / 18 / 14 | 20 / 18 / 19 | 18 / 39 / 24 | 16 / 14 / 17 |
+| unfed reader-hops | 19,008 / 11,691 / 17,520 | 19,008 / 11,691 / 23,080 | 18,000 / 12,381 / 22,446 | 15,700 / 7,725 / 15,715 |
+| warm messages, 400 churned regions | 4,642 | 20,993 | 21,138 | 0 |
 | pops, summed over its five phases (cheapest 59) | 71 | 71 | 61 | 69 |
 | drones in turn | 75, one uplink | 75, one uplink | 75, one uplink | 155, five |
 | drones one / two hops apart | 41 / 33, at 69 / 62 ms | as the first cut | 33 / 25, at 81 / 69 ms | 41 / 41, at 69 / 62 ms |
@@ -77,6 +77,11 @@ sweeps measure the drift:
 
 Random and drone meshes have no relay with two upstreams, so the query
 changes nothing there.
+
+The table is the rerun of 2026-11-16, after the route order gained the mark
+([moq-dev/moq#8904](https://github.com/moq-dev/moq/pull/8904)). Every
+settled tree and unsettled count is as first measured; the churn rows moved
+by under 1%, apart from path joins' longest cycle on random meshes, 9 before.
 
 Its drift is a relay that stays on a detour once the warm copy that drew it
 loses its other readers: on pops, the middle pop keeps pulling through the
@@ -152,8 +157,8 @@ upstream uses.
   join lands on the same core.
 - **What it costs:** a request and an answer on the wire, and exactly 1.0
   warm message per reader change on an unpeered CDN against none. Under
-  churn, per 400 regions, 21,014 warm messages against 4,653, 59,924
-  messages against 45,254, and 23,097 unfed reader-hops against 17,458, much
+  churn, per 400 regions, 20,993 warm messages against 4,642, 59,896
+  messages against 45,266, and 23,080 unfed reader-hops against 17,520, much
   of that from the simulator delivering one control message per step across
   the mesh. The edge holds one answer per extra upstream per demanded
   Instance; the upstream holds nothing and carries no traffic. It also adds a
