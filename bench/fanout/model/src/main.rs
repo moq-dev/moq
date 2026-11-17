@@ -31,9 +31,10 @@ fn main() {
 	let payload = Bytes::from(vec![0; 64]);
 	// Warm up past the first groups' one-time work, so both runs share it.
 	for start in 0..(16 + cycles) as u64 {
-		let mut group = track.append_group(start).unwrap();
-		group.write_frame(Timestamp::from_millis(start).unwrap(), payload.clone()).unwrap();
-		group.close().unwrap();
+		let at = Timestamp::from_millis(start).unwrap();
+		let mut group = track.append_group(at).unwrap();
+		group.write_frame(at, payload.clone()).unwrap();
+		group.finish().unwrap();
 		for (s, w) in subs.iter_mut().zip(&waiters) {
 			match s.poll_recv_group(w) {
 				Poll::Ready(Ok(Some(g))) => {

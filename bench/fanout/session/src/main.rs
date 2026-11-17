@@ -97,9 +97,10 @@ fn main() {
 		let payload = Bytes::from(vec![0; 64]);
 		// Past the first groups' one-time work, so the zero-cycle run shares it.
 		for start in 0..(16 + cycles) as u64 {
-			let mut group = track.append_group(start).unwrap();
-			group.write_frame(Timestamp::from_millis(start).unwrap(), payload.clone()).unwrap();
-			group.close().unwrap();
+			let at = Timestamp::from_millis(start).unwrap();
+			let mut group = track.append_group(at).unwrap();
+			group.write_frame(at, payload.clone()).unwrap();
+			group.finish().unwrap();
 			for (_, _, subscriber) in &mut audience {
 				let mut group = subscriber.recv_group().await.unwrap().expect("a group");
 				black_box(group.read_frame().await.unwrap().expect("a frame"));
