@@ -14,11 +14,14 @@ main 73d65edbf7: `moq_session_close(client)`, after the accepted session
 closed and its tail drained, returns -21 where the test expects 0.
 
 The client's session likely already ended on its own once the server side
-closed, so its id is gone by the time the test closes it. Find which: if a
-closed peer is meant to leave the handle valid until `moq_session_close`, as
-the session's terminal callback contract suggests, the early release is a
-library bug, fixed there with a regression test. Only if releasing it is the
-contract does the test change, by waiting on the client's terminal callback
-before it closes the handle.
+closed, so its id is gone by the time the test closes it. That release is the
+contract: `rs/moq-c/src/session.rs` removes a session's entry before its
+terminal `CLOSED` callback, so `moq_session_close` on a handle whose terminal
+callback has fired (or is about to) returns a negative code. Find why the client
+ends: if a dialed client is meant to keep reconnecting after its server closes
+the accepted session, its early end is a library bug, fixed there with a
+regression test. Otherwise the test changes: it waits on the client's terminal
+callback and drops the `moq_session_close(client) == 0` assertion, or asserts
+the close is negative after that callback, as `moq_server_close` already does.
 
 Public API: none. Wire: none.
