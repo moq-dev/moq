@@ -31,7 +31,7 @@ const SEGMENT: Record<Role, string> = { server: ".server", client: ".client" };
 const reliable = (): Track.Subscription => ({
 	order: "ascending",
 	delay: { max: null },
-	ranges: [{ start: { absolute: 0n } }],
+	ranges: [{ start: { time: 0n } }],
 });
 const cancelled = () => new StreamError(StreamCode.Cancel, { message: "socket operation cancelled" });
 const ended = () => new StreamError(StreamCode.SessionClosed, { message: "socket endpoint closed" });

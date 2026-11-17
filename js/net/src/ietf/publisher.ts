@@ -2479,12 +2479,11 @@ async function servingGroup(track: TrackSubscriber): Promise<group.Consumer | un
 	}
 }
 
-/** The model's group bounds for a {@link ServeRange}: an absent start joins at the latest group. */
 /** The model ranges a {@link ServeRange} asks for, whole groups through its last one. */
 function serveRanges(range: ServeRange): Range[] {
 	const out: Range = {};
-	if (range.start) out.start = { absolute: range.start.group };
-	if (range.end) out.end = { absolute: range.end.group + 1n };
+	if (range.start) out.start = { time: range.start.group };
+	if (range.end) out.end = { time: range.end.group };
 	return [out];
 }
 

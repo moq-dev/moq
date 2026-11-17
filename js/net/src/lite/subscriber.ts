@@ -58,7 +58,7 @@ import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/deman
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
 import { max, min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
-import { hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
+import { AT_KEYS, EMPTY, rangesStart, sameRanges, span, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	type AnnounceBroadcast,
@@ -1641,14 +1641,7 @@ export class Subscriber {
 				settle = resolve;
 			}),
 		);
-		const timed = hasRanges(this.version) && hasTime(ranges);
-		const sending = timed
-			? info.then((answered) => {
-					// Refused on an untimed track before anything is accepted.
-					msg.ranges = toWireRanges(ranges, this.#toModelInfo(answered.info).timescale ?? undefined);
-					return this.#sendSubscribe(state, msg, deadline);
-				})
-			: this.#sendSubscribe(state, this.#withRanges(msg, ranges, undefined), deadline);
+		const sending = this.#sendSubscribe(state, this.#withRanges(msg, ranges), deadline);
 		try {
 			// Either failing fails the subscription: a reset TRACK rejects the request, so the
 			// origin can try another route, and the caller resets the SUBSCRIBE.
@@ -1686,8 +1679,8 @@ export class Subscriber {
 
 	// `msg` asking for `ranges` on a wire that carries them, its time anchors counted in `scale`,
 	// the timescale the track declares: refused on an untimed one.
-	#withRanges(msg: Subscribe, ranges: readonly track.Range[], scale: Time.Timescale | undefined): Subscribe {
-		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges, scale);
+	#withRanges(msg: Subscribe, ranges: readonly track.Range[]): Subscribe {
+		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges);
 		return msg;
 	}
 
@@ -1707,7 +1700,12 @@ export class Subscriber {
 		});
 		// A new upstream subscription: stale runs an earlier one reported were judged under other terms.
 		hooks.supersedeStale(producer);
-		if (!hasRanges(this.version)) hooks.dropAnchors(producer);
+		if (!hasRanges(this.version)) {
+			hooks.dropAnchors(producer);
+			// A wire without ranges starts a time anchor at the first group at or after it, so its
+			// readers do too, rather than at an earlier group the copy happens to hold.
+			hooks.startsAtKeys(producer);
+		}
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
@@ -2172,7 +2170,7 @@ export class Subscriber {
 	): RecoveryHandle {
 		const producer = copy.track;
 		const id = this.#subscribeNext++;
-		const ranges: track.Range[] = [{ start: { absolute: groups.start }, end: { absolute: groups.end } }];
+		const ranges: track.Range[] = [span(groups.start, groups.end) ?? EMPTY];
 		const msg = this.#withRanges(
 			this.#subscribeMessage(
 				id,
@@ -2183,7 +2181,6 @@ export class Subscriber {
 				ranges,
 			),
 			ranges,
-			undefined,
 		);
 		const entry: SubscribeEntry = {
 			track: producer,
@@ -2705,9 +2702,10 @@ export class Subscriber {
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
 				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
-				owed.push({ ...model, start: { absolute: at } });
+				owed.push({ ...model, start: { time: at } });
 			}
-			const window = new Window(owed, entry.track.largest()?.group);
+			// Each starts at the group its publisher reported starting it at.
+			const window = new Window(owed, entry.track.largest()?.group, AT_KEYS);
 			return window.runs(0n, end).every((run) => entry.tail.covers(run.start, run.end));
 		}
 		// Without SUBSCRIBE_START the publisher served no group at all. Otherwise each group is owed
@@ -2811,14 +2809,14 @@ export class Subscriber {
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
 			// started. The retired ones owe nothing more.
 			let edit: { remove: bigint[]; add: WireRange[] } | undefined;
-			const fillRanges: track.Range[] = fillGroups.map((run) => ({
+			const fillRanges: WireRange[] = fillGroups.map((run) => ({
 				start: { absolute: run.start },
 				end: { absolute: run.end },
 			}));
 			if (hasRanges(this.version)) {
 				// The demand's ranges, then the fills'.
 				const edited = entry.live.edit(
-					[...toWireRanges(ranges, entry.scale), ...toWireRanges(fillRanges, undefined)],
+					[...toWireRanges(ranges), ...fillRanges],
 					fillRanges.length,
 					(id) => entry.fillIds.has(id),
 				);
@@ -2873,6 +2871,18 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
+		// Where the publisher started each live range asked from a group's start, which a reader's
+		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
+		// `report_time_starts`.
+		const times: [bigint, bigint][] = [];
+		for (const id of entry.live.ids()) {
+			const range = entry.live.get(id);
+			const time = range?.start?.time ?? range?.start?.absolute;
+			const at = entry.starts.get(id);
+			if (time !== undefined && at !== undefined) times.push([time, at]);
+		}
+		hooks.timeStarts(entry.track, times);
+
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;
 

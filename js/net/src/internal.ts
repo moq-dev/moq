@@ -501,6 +501,10 @@ export interface ResumeSource {
 	resolved(): (Resolved | undefined)[] | undefined;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
+	/** Whether a route's copy serves the reader now. */
+	serving(): boolean;
+	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
+	holeEnd(key: bigint, dropped: boolean): bigint | undefined;
 	/**
 	 * The exclusive end past every group the serving copy reads: undefined while one of its
 	 * ranges stays open or without a serving copy.
@@ -699,6 +703,19 @@ export const hooks: {
 	 * partial copy. Mirrors the Rust `Holdings::drops_anchors`; assigned by `track.ts`.
 	 */
 	dropAnchors: (producer: Producer) => void;
+	/**
+	 * Have a received copy's readers start a time anchor at the group starting there, held or
+	 * not, for a wire whose publisher starts one at the first group at or after it. Mirrors the
+	 * Rust `track::Producer::starts_at_keys`; assigned by `track.ts`.
+	 */
+	startsAtKeys: (producer: Producer) => void;
+	/**
+	 * Record where the upstream publisher started each of a lite-07 copy's live wire ranges, as
+	 * `[time, start]` pairs by the time each asked from, replacing the last set: a reader's time
+	 * start the copy cannot place among its own groups resolves to it. Mirrors the Rust
+	 * `track::Producer::time_starts`; assigned by `track.ts`.
+	 */
+	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -819,6 +836,12 @@ export const hooks: {
 	 * crate-private `track::Subscriber::previous_start`.
 	 */
 	previousStart: (subscriber: Subscriber, start: bigint) => bigint | undefined;
+	/**
+	 * Where the run of keys from `key` that no group can arrive at on the subscriber's track ends:
+	 * a skip, or with `dropped` a drop given up for good. Mirrors the Rust crate-private
+	 * `track::Subscriber::hole_end`.
+	 */
+	holeEnd: (subscriber: Subscriber, key: bigint, dropped: boolean) => bigint | undefined;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
 	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown>[] };
 	/**
@@ -1067,6 +1090,12 @@ export const hooks: {
 	dropAnchors: () => {
 		throw new Error("track.ts not loaded");
 	},
+	startsAtKeys: () => {
+		throw new Error("track.ts not loaded");
+	},
+	timeStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
 	servingRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1167,6 +1196,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	previousStart: () => {
+		throw new Error("track.ts not loaded");
+	},
+	holeEnd: () => {
 		throw new Error("track.ts not loaded");
 	},
 	staleHeld: () => {

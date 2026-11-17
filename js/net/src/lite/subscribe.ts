@@ -3,15 +3,14 @@ import {
 	ProtocolViolation,
 	StreamCode,
 	StreamError,
-	TimestampMismatch,
 	toStreamCode,
 } from "../error.ts";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { floorAt, type Timescale } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
 import { UNBOUNDED } from "../util/sequence.ts";
+import { EMPTY } from "../window.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
 import * as Duration from "./duration.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
@@ -136,10 +135,9 @@ interface Span {
 }
 
 /**
- * One end of a lite-07 range: a model {@link Anchor}, except that a time counts in the track's
- * `Timescale` as the peer was told it, or bare units on a scale-less track. The wire has no
- * absolute anchor: a group's start is its time, so `absolute` goes out as a time, an end as the
- * time just before it, and decodes as one.
+ * One end of a lite-07 range: a model {@link Anchor}, or a group by its start (`absolute`), as
+ * the Rust `lite::Anchor` holds. The wire has no absolute anchor: a group's start is its time, so
+ * `absolute` goes out as a time, an end (exclusive) as the time just before it, and decodes as one.
  */
 export type WireAnchor =
 	| { absolute: bigint; relative?: never; time?: never }
@@ -152,24 +150,9 @@ export interface WireRange {
 	end?: WireAnchor;
 }
 
-/**
- * The wire form of `ranges`, with time anchors in `timescale`, the track's as the publisher
- * declared it. Throws {@link TimestampMismatch} for a time anchor on an untimed track.
- */
-export function toWireRanges(ranges: readonly Range[], timescale: Timescale | undefined): WireRange[] {
-	const anchor = (anchor: Anchor | undefined): WireAnchor | undefined => {
-		if (anchor?.time === undefined) return anchor as WireAnchor | undefined;
-		if (timescale === undefined) throw new TimestampMismatch();
-		return { time: BigInt(floorAt(anchor.time, timescale)) };
-	};
-	return ranges.map((range) => {
-		const out: WireRange = {};
-		const start = anchor(range.start);
-		const end = anchor(range.end);
-		if (start) out.start = start;
-		if (end) out.end = end;
-		return out;
-	});
+/** The wire form of model `ranges`: the same anchors, a time being a group start. */
+export function toWireRanges(ranges: readonly Range[]): WireRange[] {
+	return ranges.map((range) => ({ ...range }));
 }
 
 /**
@@ -224,40 +207,37 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 		throw new Error("frame bounds not supported for this version");
 	await w.u53(1);
 	const range: WireRange = {};
-	if (span.startGroup !== undefined) range.start = { absolute: span.startGroup };
-	if (span.endGroup !== undefined) range.end = { absolute: span.endGroup + 1n };
+	if (span.startGroup !== undefined) range.start = { time: span.startGroup };
+	if (span.endGroup !== undefined) range.end = { time: span.endGroup };
 	await encodeRange(w, range);
 }
 
 /**
  * The model ranges a decoded SUBSCRIBE or SUBSCRIBE_UPDATE asks for: its lite-07 list, or the one
- * span an older wire carries, whole groups either way.
+ * span an older wire carries, whole groups either way. Mirrors the Rust `Bounds::new`.
  *
- * A lite-07 time names a group by its key: the wire's group ID is its start time. The JS model
- * still keys groups by sequence, so a time decodes as that absolute key, an end exclusive, on
- * every track; resolving it against frame timestamps waits on the model keying groups by start.
+ * A group ID is a group's start, so an absolute anchor and a time anchor both name one: a time
+ * start resolves to the group containing it. An older wire means its start as the first group
+ * starting at or after it, which the publisher's floor keeps (see `cursorFloor`).
  */
 export function requestedRanges(msg: Span & { ranges?: WireRange[] }): Range[] {
 	if (msg.ranges) {
-		const anchor = (anchor: WireAnchor | undefined, end: boolean): Anchor | undefined => {
-			if (anchor?.time === undefined) return anchor as Anchor | undefined;
-			return { absolute: end ? anchor.time + 1n : anchor.time };
-		};
 		return msg.ranges.map((range) => {
+			// Empty, as group bounds say it: keep its place, covering no group.
+			const start = range.start?.absolute;
+			const end = range.end?.absolute;
+			if (start !== undefined && end !== undefined && end <= start) return { ...EMPTY };
+			if (end === 0n) return { ...EMPTY };
 			const out: Range = {};
-			const start = anchor(range.start, false);
-			let end = anchor(range.end, true);
-			// Ending before its start: keep its place, covering no group, as the Rust publisher does.
-			if (start?.absolute !== undefined && end?.absolute !== undefined && end.absolute < start.absolute)
-				end = { absolute: start.absolute };
-			if (start) out.start = start;
-			if (end) out.end = end;
+			if (range.start) out.start = start === undefined ? (range.start as Anchor) : { time: start };
+			// An absolute end is exclusive; every model end includes its group.
+			if (range.end) out.end = end === undefined ? (range.end as Anchor) : { time: end - 1n };
 			return out;
 		});
 	}
 	const range: Range = {};
-	if (msg.startGroup !== undefined) range.start = { absolute: msg.startGroup };
-	if (msg.endGroup !== undefined) range.end = { absolute: msg.endGroup + 1n };
+	if (msg.startGroup !== undefined) range.start = { time: msg.startGroup };
+	if (msg.endGroup !== undefined) range.end = { time: msg.endGroup };
 	return [range];
 }
 
@@ -304,7 +284,7 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	let floor = true;
 	let live = false;
 	for (const range of ranges) {
-		// A time is the key of the group it names, inclusive as an end.
+		// A time is the start of the group it names, inclusive as an end.
 		const from = range.start?.absolute ?? range.start?.time;
 		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
 		if (from === undefined) floor = false;

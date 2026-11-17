@@ -15,7 +15,6 @@ import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { cutRun, insertRun, NO_MAX_DELAY, runGaps, runsFrom } from "./internal.ts";
-import type { Timestamp } from "./time.ts";
 import type { Info, Order } from "./track.ts";
 import { checkEnd, checkSequence, max, min } from "./util/sequence.ts";
 
@@ -100,11 +99,11 @@ class Pending {
 	// Bumped on every change to what the fill owes, for its handler to wake on.
 	readonly revision = new Signal(0);
 	// The time a lookup asks for, which owes no group.
-	readonly time?: Timestamp;
+	readonly time?: bigint;
 	// The first group a lookup's handler accepted.
 	answer?: bigint;
 
-	constructor(start: bigint, end: bigint, time?: Timestamp) {
+	constructor(start: bigint, end: bigint, time?: bigint) {
 		this.start = start;
 		this.end = end;
 		this.time = time;
@@ -201,7 +200,7 @@ export class FillState {
 	 * Queue a fill looking up `time` among the groups below `end` for `asker`, as the Rust
 	 * `FillState::queue_lookup` does. Undefined while no handler is open to answer it.
 	 */
-	lookup(time: Timestamp, end: bigint, asker: Asker): Lookup | undefined {
+	lookup(time: bigint, end: bigint, asker: Asker): Lookup | undefined {
 		if (this.#handlers === 0 || this.#track.closed()) return undefined;
 		const pending = new Pending(0n, end, time);
 		pending.askers.add(asker);
@@ -488,7 +487,7 @@ export let rejectGroups: (
 
 // Constructs the public handles from within this module; assigned in their static blocks.
 let makeGroups: (state: FillState, pending: Pending) => FillGroups;
-let makeLookup: (state: FillState, pending: Pending, time: Timestamp) => FillLookup;
+let makeLookup: (state: FillState, pending: Pending, time: bigint) => FillLookup;
 let makeRequests: (state: FillState) => Requests;
 
 // The most urgent delivery priority among the readers waiting on `pending` now.
@@ -696,9 +695,9 @@ export class FillGroups {
 	 * replaced. Throws a `RangeError` outside the fill, and an error if the group was already
 	 * answered or cached whole, or the track is closed.
 	 */
-	accept(sequence: bigint, info?: Info): GroupProducer {
-		checkSequence(sequence);
-		return fillOps.accept(this.#state, this.#pending, sequence, info);
+	accept(start: bigint, info?: Info): GroupProducer {
+		checkSequence(start);
+		return fillOps.accept(this.#state, this.#pending, start, info);
 	}
 
 	/**
@@ -750,13 +749,13 @@ export class FillGroups {
 export class FillLookup {
 	/** Tells it apart from a {@link FillGroups}. */
 	readonly kind = "lookup";
-	/** The presentation time to look up. */
-	readonly time: Timestamp;
+	/** The time to look up, in the track's timescale (a bare start on a track without one). */
+	readonly time: bigint;
 
 	#state: FillState;
 	#pending: Pending;
 
-	private constructor(state: FillState, pending: Pending, time: Timestamp) {
+	private constructor(state: FillState, pending: Pending, time: bigint) {
 		this.#state = state;
 		this.#pending = pending;
 		this.time = time;
@@ -780,14 +779,14 @@ export class FillLookup {
 	}
 
 	/**
-	 * Insert group `sequence`, the one containing {@link time}, into the track's cache, answering
-	 * the lookup, and return the producer to write its frames into. `info` commits the track's
+	 * Insert the group starting at `start`, the one containing {@link time}, into the track's
+	 * cache, answering the lookup, and return the producer to write its frames into. `info` commits the track's
 	 * {@link Info} if it has none yet. Throws a `RangeError` at or past the live edge the lookup
 	 * was asked below, and an error if the group is cached whole or the track is closed.
 	 */
-	accept(sequence: bigint, info?: Info): GroupProducer {
-		checkSequence(sequence);
-		return fillOps.accept(this.#state, this.#pending, sequence, info);
+	accept(start: bigint, info?: Info): GroupProducer {
+		checkSequence(start);
+		return fillOps.accept(this.#state, this.#pending, start, info);
 	}
 
 	/** Done serving: unanswered, the reader's range falls back to the groups cached. Idempotent. */

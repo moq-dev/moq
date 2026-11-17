@@ -1653,6 +1653,9 @@ export class Subscriber {
 		const producer = known ?? staged?.producer;
 		if (!producer) throw new Error("subscription has no track");
 		hooks.receiveTrack(producer);
+		// Its publisher starts a time anchor at the first group at or after it, so its readers do
+		// too, rather than at an earlier group the copy happens to hold.
+		hooks.startsAtKeys(producer);
 		if (!known) state.requests = producer.requests();
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };

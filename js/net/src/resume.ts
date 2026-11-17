@@ -1338,7 +1338,19 @@ class Reader implements ResumeSource {
 		return this.#copies.reduce((longest, copy) => max(longest, hooks.skippedBelow(copy.sub, key)), 0n);
 	}
 
-	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
+	/** Whether a route's copy serves the reader now. */
+	serving(): boolean {
+		this.sync();
+		return this.#serving() !== undefined;
+	}
+
+	// The serving route's copy holds what its publisher skipped or gave up.
+	holeEnd(key: bigint, dropped: boolean): bigint | undefined {
+		const serving = this.#serving();
+		return serving && hooks.holeEnd(serving.sub, key, dropped);
+	}
+
+		// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
 	starts(from: bigint): (bigint | undefined)[] | undefined {
 		this.sync();
 		const serving = this.#serving();
