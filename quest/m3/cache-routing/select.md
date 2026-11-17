@@ -11,8 +11,8 @@ reader ranked below every reader it feeds, and moves, make before break,
 whenever that set or its own rank changes. Once readers, links, and
 publishers stop changing, the pulls settle. A later step lets an edge query
 its other upstreams when it gains demand, once the conditions below hold. A
-peer that sends no rank or warm signal ranks below every ranked reader and
-is treated as cold, behaving as it does today. Relays export how many
+relay that sends no rank or warm signal is treated as cold and behaves as it
+does today, and a relay it pulls through takes its route. Relays export how many
 upstream copies they hold and what each choice was for. The wire lands in
 the first wip version after the lite-07 cut.
 
@@ -56,8 +56,13 @@ model and sweeps cover that), every rank is fixed; then the lowest rank's
 pulls settle, then the next, by induction on the rank. No relay's demand
 comes back to it as a price, the reflection every fence of the pick chased.
 `rs/moq-net/verify/warm/` (the `verify-warm` skill) checks it with TLA+ from
-every state the bounded outside events reach, delivering every word late
-and in any order: three drones with three reader changes, two fixed readers
+every state the bounded outside events reach, delivering each neighbour's
+words late: what one relay tells a neighbour (its pull's rank, its answer,
+its advert) arrives together as that neighbour's newest word, any number of
+steps stale, and neighbours fall behind independently. It never delivers one
+neighbour's new rank beside its old advert or answer, which the wire can,
+since they ride separate streams; the port covers that, below. The model
+checks three drones with three reader changes, two fixed readers
 while an uplink closes and reopens, and churned random mesh 503's six
 relays. With the rank check removed it fails on the three drones: two
 readers' relays each take the other's copy, find their own path in it, drop
@@ -275,10 +280,16 @@ outright.
   replaces the pull outright with a fresh choice. A pending pull whose
   target is no longer the best is replaced: two relays that each turned to
   the other on stale adverts otherwise wait on each other for good.
-- **A peer that sends no rank** ranks below every ranked reader: a relay it
-  pulls from never takes a warm copy for its sake and pulls along its route,
-  as today. Its adverts are never taken, since nothing says the copy is fed
-  regardless.
+- **A subscription with no rank.** From an endpoint it is a reader of the
+  relay it reaches, which ranks it as its own. From a relay, one on a version
+  before the warm wire, it pins the relay it reaches to its route for that
+  Instance while it lasts: nothing carries a rank or a path through the older
+  relay, so no rule here can say a warm copy does not loop back through it.
+  The older relay sends no advert, so its copy is never taken.
+  The spike never had such a relay in a mesh, and its simulator does not
+  build this rule: `WarmSim::rank` drops a pull with no rank, so a relay
+  feeding an older relay and a ranked reader of its own would still take a
+  warm copy. Build the rule above, and test the mix as below.
 
 ### Simultaneous starts
 
@@ -314,6 +325,18 @@ uplink hands it to one other drone, not four (94 against settled pulls'
   checks the flap with fixed readers only (`Flap.cfg`). Get it to finish, by
   a smaller mesh (two drones and the publisher's relay) or a symmetry
   reduction, or say why it cannot and what covers it instead.
+- Put a relay that sends no rank, path, or advert in the churn sweep and the
+  model, beside ranked relays and with a ranked reader on the relay it pulls
+  through: the mix a rollout with two releases side by side produces. The
+  rule above pins that relay to its route. Counting the older relay's pull
+  as a reader of the relay it reaches, as an endpoint's is, would keep warmth
+  for the pinned relay's own readers; take it only if the sweep and the
+  model hold with it.
+- Cover independent delivery, which the model's one register per neighbour
+  cannot: a neighbour's new rank arriving before or after its advert and
+  its answer, a stale advert outliving a rank's withdrawal or replacement
+  included. Split the register in the model, or pin the cases in the port's
+  acceptance tests with each stream delivering at its own pace.
 - Measure what the moves cost readers before reading the simulator's unfed
   figure as production behaviour. Under churn ranked readers leave 15% to
   25% more reader-hops unfed than settled pulls in the simulator, yet readers
