@@ -33,6 +33,10 @@ const EGRESS_SEND_BUFFER_VIDEO: usize = 3000;
 /// at most this long, and an encoder that drifted up is pulled back.
 const REMB_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How often an ingest repeats its keyframe request while a video line waits on its first
+/// keyframe, so a lost PLI costs at most this long rather than a whole GOP.
+const KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
 /// for any flow where RTP arrives from the peer (`server publish` / WHIP
@@ -112,6 +116,8 @@ pub struct Session {
 	/// The ingest's cap, metered and steered through REMB. `None` until
 	/// [`Session::with_rate`], so always for egress sessions.
 	rate: Option<IngestRate>,
+	/// Which ingested frames may reach the sink. Unused by egress sessions.
+	ingest_order: IngestOrder,
 }
 
 impl Session {
@@ -127,6 +133,7 @@ impl Session {
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 			rate: None,
+			ingest_order: IngestOrder::default(),
 		})
 	}
 
@@ -144,6 +151,7 @@ impl Session {
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 			rate: None,
+			ingest_order: IngestOrder::default(),
 		})
 	}
 
@@ -280,6 +288,21 @@ impl Session {
 					}
 					let media_us = media_time_to_micros(&data.time);
 					let timestamp_us = self.ingest_clock.normalize(data.mid, arrival, media_us);
+					match self
+						.ingest_order
+						.admit(data.mid, data.is_keyframe(), timestamp_us, Instant::now())
+					{
+						Admit::Forward => {}
+						Admit::Drop => return Ok(()),
+						Admit::Request => {
+							if let Some(mut writer) = self.agent.rtc_mut().writer(data.mid) {
+								writer
+									.request_keyframe(data.rid, str0m::media::KeyframeRequestKind::Pli)
+									.map_err(Error::rtc)?;
+							}
+							return Ok(());
+						}
+					}
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -357,6 +380,9 @@ impl Session {
 					None
 				};
 				sink.on_track(mid, kind, codec, audio_params)?;
+				let video = kind == str0m::media::MediaKind::Video;
+				let pli = negotiated.iter().any(|params| params.fb_pli());
+				self.ingest_order.open(mid, video, pli, Instant::now());
 				// REMB only where the publisher negotiated it; str0m offers it on video alone.
 				if let Some(rate) = &mut self.rate
 					&& negotiated.iter().any(|params| params.fb_remb())
@@ -429,6 +455,87 @@ impl IngestRate {
 	/// When the next REMB is due, once a cap was set and there is a line to send it on.
 	fn remb_at(&self) -> Option<Instant> {
 		(self.steered && !self.remb.is_empty()).then_some(self.next_remb)
+	}
+}
+
+/// Which ingested frames may reach the sink, line by line.
+///
+/// RTP can join a publisher mid-group, and deliver a packet late, as a retransmission does. A
+/// frame that depends on a keyframe never seen cannot open a group, so a video line drops its
+/// frames until its first keyframe, asking the publisher for one meanwhile where it negotiated
+/// PLI. A late frame would rewind a group already published, so a line drops it too: audio,
+/// whose every frame opens a group, anything not after its last frame, and video anything
+/// before its last keyframe.
+#[derive(Default)]
+struct IngestOrder {
+	lines: HashMap<str0m::media::Mid, IngestLine>,
+}
+
+/// Where one ingested line stands.
+enum IngestLine {
+	/// Video yet to see a keyframe, with when it may next ask for one: `None` without PLI.
+	Keyless { request_at: Option<Instant> },
+	/// Video forwarding, refusing anything before its last keyframe at `keyframe`.
+	Video { keyframe: u64 },
+	/// Audio forwarding, refusing anything not after its last frame at `last`.
+	Audio { last: Option<u64> },
+}
+
+/// What to do with an ingested frame.
+#[derive(Debug, PartialEq, Eq)]
+enum Admit {
+	/// Hand it to the sink.
+	Forward,
+	/// Drop it.
+	Drop,
+	/// Drop it and ask the publisher for a keyframe.
+	Request,
+}
+
+impl IngestOrder {
+	/// Start ordering `mid`'s frames; a video line asks for its first keyframe with PLI if `pli`.
+	fn open(&mut self, mid: str0m::media::Mid, video: bool, pli: bool, now: Instant) {
+		let line = match video {
+			true => IngestLine::Keyless {
+				request_at: pli.then_some(now),
+			},
+			false => IngestLine::Audio { last: None },
+		};
+		self.lines.insert(mid, line);
+	}
+
+	/// Whether a frame on `mid` at `timestamp_us` reaches the sink, and whether to ask for a keyframe.
+	fn admit(&mut self, mid: str0m::media::Mid, keyframe: bool, timestamp_us: u64, now: Instant) -> Admit {
+		let Some(line) = self.lines.get_mut(&mid) else {
+			return Admit::Forward;
+		};
+		match line {
+			IngestLine::Keyless { request_at } if !keyframe => match request_at {
+				Some(at) if now >= *at => {
+					*at = now.saturating_add(KEYFRAME_REQUEST_INTERVAL);
+					Admit::Request
+				}
+				_ => Admit::Drop,
+			},
+			IngestLine::Keyless { .. } => {
+				*line = IngestLine::Video {
+					keyframe: timestamp_us,
+				};
+				Admit::Forward
+			}
+			IngestLine::Video { keyframe: floor } if timestamp_us < *floor => Admit::Drop,
+			IngestLine::Video { keyframe: floor } => {
+				if keyframe {
+					*floor = timestamp_us;
+				}
+				Admit::Forward
+			}
+			IngestLine::Audio { last: Some(last) } if timestamp_us <= *last => Admit::Drop,
+			IngestLine::Audio { last } => {
+				*last = Some(timestamp_us);
+				Admit::Forward
+			}
+		}
 	}
 }
 
@@ -738,6 +845,55 @@ mod tests {
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	/// A video line drops its frames until its first keyframe, asking for one at once and then
+	/// at most once an interval, and forwards everything after it; a line without PLI waits
+	/// without asking.
+	#[test]
+	fn video_waits_for_its_first_keyframe() {
+		let mut order = IngestOrder::default();
+		let (video, silent) = (Mid::from("1"), Mid::from("2"));
+		let t0 = Instant::now();
+		order.open(video, true, true, t0);
+		order.open(silent, true, false, t0);
+
+		assert_eq!(order.admit(video, false, 0, t0), Admit::Request);
+		let early = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL - Duration::from_millis(1));
+		assert_eq!(order.admit(video, false, 33_000, early), Admit::Drop);
+		let due = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL);
+		assert_eq!(order.admit(video, false, 66_000, due), Admit::Request);
+		assert_eq!(order.admit(video, true, 100_000, due), Admit::Forward);
+		assert_eq!(order.admit(video, false, 133_000, due), Admit::Forward);
+
+		let late = t0.saturating_add(KEYFRAME_REQUEST_INTERVAL * 5);
+		assert_eq!(order.admit(silent, false, 0, late), Admit::Drop);
+		assert_eq!(order.admit(silent, true, 33_000, late), Admit::Forward);
+	}
+
+	/// A late frame is dropped where it would rewind a published group: audio anything not
+	/// after its last frame, video anything before its last keyframe. A video delta may still
+	/// dip below another delta, as a reordered picture does.
+	#[test]
+	fn late_frames_are_dropped() {
+		let mut order = IngestOrder::default();
+		let (audio, video) = (Mid::from("0"), Mid::from("1"));
+		let t0 = Instant::now();
+		order.open(audio, false, false, t0);
+		order.open(video, true, false, t0);
+
+		assert_eq!(order.admit(audio, false, 40_000, t0), Admit::Forward);
+		assert_eq!(order.admit(audio, false, 20_000, t0), Admit::Drop);
+		assert_eq!(order.admit(audio, false, 40_000, t0), Admit::Drop);
+		assert_eq!(order.admit(audio, false, 60_000, t0), Admit::Forward);
+
+		assert_eq!(order.admit(video, true, 100_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 166_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 133_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 66_000, t0), Admit::Drop);
+		assert_eq!(order.admit(video, true, 66_000, t0), Admit::Drop);
+		assert_eq!(order.admit(video, true, 200_000, t0), Admit::Forward);
+		assert_eq!(order.admit(video, false, 166_000, t0), Admit::Drop);
+	}
 
 	#[test]
 	fn sender_reports_outside_the_wall_range_are_ignored() {
