@@ -880,3 +880,38 @@ test("a quiet source repeats its last picture every 250 ms on its own timeline",
 
 	expect(open()).toEqual([]);
 });
+
+test("closing capture while parked closes the source frame that resolved meanwhile", async () => {
+	using input = frameSource();
+	const clock = new Manual();
+	const installed = clock.install();
+	clock.jump(Duration.secs(1));
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+		const reader = fanout.subscribe(first).getReader();
+		input.push(1_000_000);
+		(await clock.drive(reader.read())).value?.close();
+
+		// The last reader leaves while the repeat race is open, so the pull parks with its read outstanding.
+		await flush();
+		first.close();
+		clock.jump(Duration.millis(300));
+		await flush();
+
+		// The outstanding read resolves with nobody to pull it, then capture closes.
+		input.push(1_400_000);
+		await flush();
+		capture.close();
+		await flush();
+	} finally {
+		first.close();
+		capture.close();
+		installed.close();
+	}
+
+	expect(open()).toEqual([]);
+});

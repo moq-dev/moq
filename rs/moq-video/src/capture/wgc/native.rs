@@ -41,6 +41,9 @@ use crate::{Error, FrameRate, Size};
 
 const BUFFERS: i32 = 2;
 
+/// How often an open window capture checks for a minimize, which WGC reports with no event.
+const MINIMIZE_POLL: Duration = Duration::from_millis(250);
+
 pub(in crate::capture) async fn open(config: &Config) -> Result<Stream, Error> {
 	let rate = framerate(config);
 	let chan = FrameChannel::repeating(interval(rate));
@@ -291,6 +294,7 @@ impl Capture {
 				.into_iter()
 				.chain(startup.deadline)
 				.chain(pending.as_ref().map(|_| pace.deadline()))
+				.chain(self.window.and(opened).map(|_| Instant::now().saturating_add(MINIMIZE_POLL)))
 				.min();
 			match signal.wait(deadline) {
 				Event::Stop => return Ok(()),

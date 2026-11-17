@@ -229,6 +229,12 @@ class Frames extends Fanout<VideoFrame> {
 				},
 				async cancel(reason) {
 					active.set(-1);
+					// A read left open by a repeat or a park may resolve to a frame nobody will pull. Closing
+					// twice is harmless, so this also covers a pull already awaiting it.
+					pending?.then(
+						({ value }) => value?.close(),
+						() => {},
+					);
 					await reader.cancel(reason);
 				},
 			},
