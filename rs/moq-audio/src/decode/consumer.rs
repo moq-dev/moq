@@ -2745,11 +2745,6 @@ mod tests {
 		let mut lost = false;
 		let mut after = Vec::new();
 		while let Some(read) = consumer.read().await.unwrap() {
-			match &read {
-				Read::Frame(f) => eprintln!("DBG frame {:?} {}", f.timestamp.as_micros(), f.data.len()),
-				Read::Gap { timestamp, .. } => eprintln!("DBG gap {timestamp:?}"),
-				Read::End { end } => eprintln!("DBG end {end:?}"),
-			}
 			match read {
 				Read::Gap { .. } => lost = true,
 				Read::Frame(frame) if lost => after.push((
