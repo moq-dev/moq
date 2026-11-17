@@ -387,7 +387,7 @@ impl Link {
 
 	/// Link `from` into `to`, which accepts only its first `uni` uni streams until
 	/// [`open`](Self::open), as a network can deliver one group stream well ahead of the
-	/// rest. SETUP takes the first.
+	/// rest. SETUP and the Announce Stream take the first two.
 	pub(crate) async fn held(from: &moq_net::origin::Producer, to: &moq_net::origin::Producer, uni: usize) -> Self {
 		use moq_net::transport::memory;
 

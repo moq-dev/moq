@@ -374,7 +374,7 @@ impl MoqServer {
 			Err(driver) => return cancelled(driver).await,
 		};
 		match request? {
-			Some(request) => Ok(Some(MoqRequest::new(request, origins.publish, origins.consume)?)),
+			Some(request) => Ok(Some(MoqRequest::new(request, origins.publish, origins.consume))),
 			None => {
 				driver.finished().await?;
 				Ok(None)
@@ -433,27 +433,27 @@ pub enum MoqTransport {
 	WebSocket,
 	/// A plaintext TCP connection using qmux framing.
 	Tcp,
-	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
-	Tls,
 	/// A Unix domain socket using qmux framing.
 	Unix,
 	/// WebTransport over HTTP/3 on QUIC.
 	WebTransport,
+	/// A transport this version of the bindings cannot name yet.
+	Unknown,
+	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
+	Tls,
 }
 
-impl TryFrom<moq_tokio::Transport> for MoqTransport {
-	type Error = MoqError;
-
-	fn try_from(value: moq_tokio::Transport) -> Result<Self, Self::Error> {
-		Ok(match value {
+impl From<moq_tokio::Transport> for MoqTransport {
+	fn from(value: moq_tokio::Transport) -> Self {
+		match value {
 			moq_tokio::Transport::Quic => Self::Quic,
 			moq_tokio::Transport::WebSocket => Self::WebSocket,
 			moq_tokio::Transport::Tcp => Self::Tcp,
 			moq_tokio::Transport::Tls => Self::Tls,
 			moq_tokio::Transport::Unix => Self::Unix,
 			moq_tokio::Transport::WebTransport => Self::WebTransport,
-			_ => return Err(MoqError::Unsupported),
-		})
+			_ => Self::Unknown,
+		}
 	}
 }
 
@@ -463,19 +463,19 @@ mod transport_tests {
 	use moq_tokio::Transport;
 
 	#[test]
-	fn converts_supported_transports() {
-		assert_eq!(MoqTransport::try_from(Transport::Quic).unwrap(), MoqTransport::Quic);
-		assert_eq!(
-			MoqTransport::try_from(Transport::WebSocket).unwrap(),
-			MoqTransport::WebSocket
-		);
-		assert_eq!(MoqTransport::try_from(Transport::Tcp).unwrap(), MoqTransport::Tcp);
-		assert_eq!(MoqTransport::try_from(Transport::Tls).unwrap(), MoqTransport::Tls);
-		assert_eq!(MoqTransport::try_from(Transport::Unix).unwrap(), MoqTransport::Unix);
-		assert_eq!(
-			MoqTransport::try_from(Transport::WebTransport).unwrap(),
-			MoqTransport::WebTransport
-		);
+	fn names_each_transport_it_knows() {
+		for (transport, want) in [
+			(Transport::Quic, MoqTransport::Quic),
+			(Transport::WebSocket, MoqTransport::WebSocket),
+			(Transport::Tcp, MoqTransport::Tcp),
+			(Transport::Tls, MoqTransport::Tls),
+			(Transport::Unix, MoqTransport::Unix),
+			(Transport::WebTransport, MoqTransport::WebTransport),
+			// A request over a transport the bindings cannot name still reaches the caller.
+			(Transport::WebRtc, MoqTransport::Unknown),
+		] {
+			assert_eq!(MoqTransport::from(transport), want);
+		}
 	}
 }
 
@@ -499,13 +499,13 @@ impl MoqRequest {
 		request: moq_tokio::server::Request,
 		publish: Option<Arc<MoqOriginProducer>>,
 		consume: Option<Arc<MoqOriginProducer>>,
-	) -> Result<Arc<Self>, MoqError> {
-		let transport = request.transport().try_into()?;
+	) -> Arc<Self> {
+		let transport = request.transport().into();
 		let url = request.url().map(|u| u.to_string());
 		let path = request.path().to_string();
 		let query = request.query().map(str::to_string);
 		let peer_implementation = request.peer_implementation().map(str::to_string);
-		Ok(Arc::new(Self {
+		Arc::new(Self {
 			task: Task::new(RequestState {
 				request: OneShot::new(request),
 				publish,
@@ -516,7 +516,7 @@ impl MoqRequest {
 			path,
 			query,
 			peer_implementation,
-		}))
+		})
 	}
 }
 
