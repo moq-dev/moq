@@ -247,14 +247,14 @@ test("closing a consumer ends its own parked reads", async () => {
 	consumer.close();
 	expect(await reading).toBeUndefined();
 	await waiting;
-	expect(consumer.isClosed).toBe(true);
+	expect(consumer.closed.peek()).toBeNull();
 	expect(consumer.done).toBe(true);
 
 	// The other reader is still parked on the open group, and reads the next frame.
 	const next = other.readFrame();
 	producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
 	expect((await next)?.payload[0]).toBe(1);
-	expect(other.isClosed).toBe(false);
+	expect(other.closed.peek()).toBeUndefined();
 
 	// A later write never reaches the released handle, so it takes nothing from the other reader.
 	producer.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.now() });

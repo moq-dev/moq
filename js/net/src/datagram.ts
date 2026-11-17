@@ -10,8 +10,6 @@ import { rescaleIn } from "./rescale.ts";
 import { keyOf, Timescale, type Timestamp } from "./time.ts";
 import { checkSequence, max } from "./util/sequence.ts";
 
-export { rescale, rescaleIn } from "./rescale.ts";
-
 /** A single unreliable payload, addressed within its datagram track. */
 export interface Datagram {
 	/** The datagram track's own sequence number. */
