@@ -6,7 +6,7 @@ const active: ControlHintState = {
 	focused: true,
 	estopped: false,
 	status: "pending",
-	handle: "mine",
+	driverId: "mine",
 	wheel: false,
 };
 
