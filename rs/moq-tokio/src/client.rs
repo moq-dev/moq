@@ -794,8 +794,7 @@ mod tests {
 			redirect.set_ip_host(peer.ip()).unwrap();
 		}
 		server_session
-			.drain()
-			.send(moq_net::goaway::Goaway::redirect(redirect.to_string()))
+			.goaway(moq_net::goaway::Goaway::redirect(redirect.to_string()))
 			.unwrap();
 		let result = connection.closed().await;
 		if pinned {

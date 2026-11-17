@@ -45,19 +45,20 @@ export async function refused(relay: string): Promise<CloseState> {
 /**
  * A WebSocket refusal reaches the reconnecting handle as its session error.
  *
- * The relay closes a session that ALPN already established, so the handle redials it like any
- * other close until its retry window runs out, then publishes the last close.
+ * The relay closes a session that ALPN already established. It never stayed up past the healthy
+ * bar, so the handle stops at once with that close, as after a refused dial, instead of redialing.
  */
 export async function refusedWebSocket(relay: string): Promise<CloseState> {
 	const url = new URL(relay);
 	url.protocol = "ws:";
 	url.searchParams.set("jwt", "refused");
+	// A short initial delay, so a redial, were there one, lands well before the error is read.
 	const connection = new Connection({
 		url,
 		share: false,
-		delay: { initial: Duration.millis(200), max: Duration.millis(200), timeout: Duration.secs(2) },
+		delay: { initial: Duration.millis(10), max: Duration.millis(10), timeout: null },
 	});
-	// Every refused session counted as connected first; a second one proves the handle redialed.
+	// The refused session counted as connected first; a second one means the handle redialed.
 	let connected = 0;
 	const dispose = connection.status.subscribe((status) => {
 		if (status === "connected") connected++;
@@ -65,7 +66,8 @@ export async function refusedWebSocket(relay: string): Promise<CloseState> {
 	try {
 		let error = connection.error.peek();
 		while (!error) error = await connection.error.changed();
-		if (connected < 2) return { error: `gave up after ${connected} session(s) instead of redialing: ${error}` };
+		if (connected !== 1)
+			return { error: `stopped after ${connected} session(s) instead of the refused one: ${error}` };
 		if (!(error instanceof MoqError.Session)) return { error: String(error) };
 		return { closeCode: error.code, reason: error.message };
 	} finally {

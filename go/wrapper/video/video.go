@@ -13,8 +13,8 @@ import (
 	"moq.dev/moq/media"
 )
 
-// Codec selects H.264 or H.265.
-type Codec = ffi.MoqVideoCodec
+// Codec selects the video codec; build one with moq.H264VideoCodec or moq.H265VideoCodec.
+type Codec = *ffi.MoqVideoCodec
 
 // PixelFormat is a CPU pixel layout (I420 or RGBA).
 type PixelFormat = ffi.MoqVideoPixelFormat
@@ -163,9 +163,6 @@ type Consumer struct{ inner *ffi.MoqVideoConsumer }
 
 // Subscribe subscribes to the catalog rendition id, following its broadcast and track.
 func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string, rendition media.Video, output DecoderOutput) (*Consumer, error) {
-	if err := bridge.Video(rendition); err != nil {
-		return nil, err
-	}
 	out, err := output.ffi()
 	if err != nil {
 		return nil, err

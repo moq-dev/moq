@@ -223,9 +223,11 @@ Scheduled runs
   `skipping missing groups` on the audio track before the stall, so the audio
   stalls past the 1039 ms bound after the route falls back. Reproduced
   at 1 of 8 and 2 of 12 loaded local runs (the audio ring still stalled 600 ms after the first
-  audio group of the returned incumbent); not root-caused. Decided 2026-11-15 (AFK, recommendation, for review):
+  audio group of the returned incumbent). Decided 2026-11-15 (AFK, recommendation, for review):
   `replacement` is quarantined by default on every engine again, and the child
   [replacement audio](/quest/m0/interop-green/replacement-audio.md) root-causes and restores it.
+  Its first PR found the stall: the decode gate released the backlog behind the clock one window
+  per worklet report. What keeps the quarantine is in the child.
 
 Public API: none. Wire: none.
 

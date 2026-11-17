@@ -80,5 +80,4 @@ CLI: `--public-addr` now advertises its port. Wire: none.
 ## Related
 
 - [The gateways admit a session the same way](/quest/m2/gateway-align.md) - changes the same crate's request and client names, and renames the CLI endpoint
-- [moq-webrtc runs on upstream str0m](/quest/m2/str0m-upstream.md) - swaps the stack under the same session code
 - [A WebRTC feed on the shared port](/quest/m3/one-port/rtc-feed.md) - adds the second socket source this leaves room for

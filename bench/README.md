@@ -168,8 +168,9 @@ nix develop --command just bench origin/release "quic ws wss tcp"
 ```
 
 Beside relay CPU in cores, each case
-reports CPU microseconds per delivered frame and cores per delivered Gbps; base
-comparisons pair those too.
+reports CPU microseconds per delivered frame, cores per delivered Gbps, and the
+relay's peak RSS over the window; base comparisons pair those too. Only `chat`,
+with 2,001 connections, shows a per-connection memory change.
 
 The qmux micro-bench isolates the transport from the relay. It connects
 client/server pairs over loopback TCP, each echoing one message at a time on one

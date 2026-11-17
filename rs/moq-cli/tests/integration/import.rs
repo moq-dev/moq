@@ -182,7 +182,8 @@ async fn a_short_import_drains_its_media_to_a_waiting_subscriber() {
 		.await
 		.expect("no catalog")
 		.expect("catalog read")
-		.expect("the import released its catalog");
+		.expect("the import released its catalog")
+		.value;
 	let name = catalog
 		.video
 		.renditions

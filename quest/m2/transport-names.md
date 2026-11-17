@@ -61,8 +61,8 @@ For the PR:
   crates. Extend the relay's mapping and `is_public_transport` (a TLS link
   is public the same way plaintext TCP is; say so in its doc).
 - Mirror it in `@moq/auth`'s contract enum and in `MoqTransport` with every
-  wrapper. If [open-set selectors](/quest/m2/ffi-open-selectors.md) has
-  landed, `MoqTransport` is already an object and this adds a constructor.
+  wrapper. `MoqTransport` carries an `Unknown` variant (the open-set rule in
+  `rs/moq-ffi/AGENTS.md`), so `Tls` joins as a named variant before the cut.
 - Grep for consumers of the `"tcp"` string: relay metrics labels
   (`rs/moq-relay/src/internal.rs` uses `"tcp"` for the listener, which
   stays, since the listener is one TCP port), stats labels, `doc/bin/relay`,
@@ -83,4 +83,3 @@ and logs. Wire: none.
 
 ## Related
 
-- [Open-set selectors in the bindings](/quest/m2/ffi-open-selectors.md) - makes `MoqTransport` able to grow without a break

@@ -69,6 +69,8 @@ export class BroadcastCache {
 	#blindPrefixes = new Map<Path.Valid, Set<Path.Valid>>();
 	#paths = new Map<Path.Valid, Set<Path.Valid>>();
 	readonly #covering?: Covering;
+	// What to re-check once a batch is applied: the prefixes it changed, or `all` of them.
+	#deferred?: { prefixes: Set<Path.Valid>; all: boolean };
 
 	constructor(covering?: Covering) {
 		this.#covering = covering;
@@ -102,8 +104,32 @@ export class BroadcastCache {
 		this.#update(path);
 	}
 
+	/**
+	 * Apply the changes `apply` makes as one: each consume re-checks its selection once, after all
+	 * of them, so none switches to a route only the middle of the change preferred.
+	 */
+	batch(apply: () => void): void {
+		if (this.#deferred) {
+			apply();
+			return;
+		}
+		const deferred = { prefixes: new Set<Path.Valid>(), all: false };
+		this.#deferred = deferred;
+		try {
+			apply();
+		} finally {
+			this.#deferred = undefined;
+			if (deferred.all) this.revalidate();
+			else for (const prefix of deferred.prefixes) this.#update(prefix);
+		}
+	}
+
 	/** Re-check every consume's selection, once what covers a path changed without an announcement. */
 	revalidate(): void {
+		if (this.#deferred) {
+			this.#deferred.all = true;
+			return;
+		}
 		for (const path of this.#cache.keys()) this.#check(path);
 	}
 
@@ -248,6 +274,10 @@ export class BroadcastCache {
 	}
 
 	#update(prefix: Path.Valid): void {
+		if (this.#deferred) {
+			this.#deferred.prefixes.add(prefix);
+			return;
+		}
 		for (const path of this.#paths.get(prefix) ?? []) this.#check(path);
 	}
 

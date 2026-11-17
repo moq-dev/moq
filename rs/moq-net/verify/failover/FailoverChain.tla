@@ -34,8 +34,8 @@
 (* every hop subscribes before the first group, and a copy's range is      *)
 (* resolved from its first group (SUBSCRIBE_OK), so a relay knows which    *)
 (* groups its copy owes. A fetch reaches the serving route while that      *)
-(* route lives, after the track ended too: the skill's open findings are   *)
-(* where the code does not yet.                                            *)
+(* route lives, and a relay whose track ended still moves to another route *)
+(* for the reads that hold it.                                             *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -225,7 +225,7 @@ Recover(e, g, s) ==
     /\ front[u].end # "err"
     /\ s \in Holders(u, e, g)
     /\ \/ SrcDead(u, cp[e].src[g], g)
-       \/ cp[e].src[g] # front[u].cur /\ s = front[u].cur /\ front[u].end = "open"
+       \/ cp[e].src[g] # front[u].cur /\ s = front[u].cur
     /\ cp' = [cp EXCEPT ![e].src[g] = s]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
 
@@ -254,8 +254,9 @@ Ask(u, g) ==
 
 \* A short group nothing can continue fails (`Recover::poll` gives up): its
 \* source failed, no other copy holds it, and no fetch can reach the rest,
-\* because the front has no route left, ended with its serving copy gone, or
-\* the live serving copy is the source that gave up on the group.
+\* because the front has no route left, ended with its serving copy gone and
+\* no route to move to, or the live serving copy is the source that gave up
+\* on the group.
 Abort(e, g) ==
     LET u == e[2] IN
     /\ u # "O"
@@ -264,7 +265,7 @@ Abort(e, g) ==
     /\ SrcDead(u, cp[e].src[g], g)
     /\ Holders(u, e, g) = {}
     /\ \/ front[u].end = "err"
-       \/ front[u].end = "ok" /\ ~Live(Serving(u))
+       \/ front[u].end = "ok" /\ ~Live(Serving(u)) /\ \A w \in Up(u) : ~Routable(w)
        \/ cp[e].src[g] = front[u].cur /\ Live(Serving(u))
     /\ cp' = [cp EXCEPT ![e].bad = @ \cup {g}]
     /\ UNCHANGED <<org, alive, deaths, front, left>>
@@ -281,22 +282,26 @@ Subscribe(u) ==
 
 \* The front moves to another route: forced off a dead one, or at will while
 \* the switches last (`Producer::splice`). A copy it still holds of that route
-\* is asked again from where the readers got to; otherwise a new one is.
+\* is asked again from where the readers got to; otherwise a new one is. A
+\* track that ended moves too, for the group reads and fetches still holding
+\* it (`Action::Reroute`): its readers stay on the copy it ended on, so a
+\* copy asked for them subscribes nothing, and one still held is left as is.
 Switch(u, w) ==
     LET usable == Live(Serving(u)) /\ Routable(front[u].cur)
         e1 == <<u, w>>
+        open == front[u].end = "open"
     IN
     /\ u \in Relays
-    /\ front[u].end = "open"
+    /\ front[u].end # "err"
     /\ Wanted(u)
     /\ w \in Up(u) /\ w # front[u].cur
     /\ Routable(w)
     /\ usable => front[u].sw < MaxSwitches
     /\ front' = [front EXCEPT ![u].cur = w, ![u].sw = @ + (IF usable THEN 1 ELSE 0)]
     /\ cp' = [cp EXCEPT ![e1] =
-                IF Live(e1) /\ ~cp[e1].fin THEN [@ EXCEPT !.ask = Demand(u)]
+                IF Live(e1) /\ ~cp[e1].fin /\ open THEN [@ EXCEPT !.ask = Demand(u)]
                 ELSE IF Live(e1) THEN @
-                ELSE Fresh(Demand(u))]
+                ELSE Fresh(IF open THEN Demand(u) ELSE {})]
     /\ UNCHANGED <<org, alive, deaths, left>>
 
 \* The serving copy completed: the front ends the track (`Action::Finish`).

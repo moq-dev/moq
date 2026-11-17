@@ -940,7 +940,7 @@ mod supervision_tests {
 		let consumer = origin.consume().request("routed".into(), None).await.unwrap();
 		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
 		let group = subscriber.recv_group().await.unwrap().unwrap();
-		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer)
+		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer, std::time::Duration::ZERO)
 			.await
 			.unwrap();
 		drop(consumer);
