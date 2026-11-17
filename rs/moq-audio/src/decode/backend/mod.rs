@@ -13,7 +13,7 @@
 use hang::catalog::{AudioCodec, AudioConfig};
 
 use super::Decoded;
-use super::decoder::{Config, Kind};
+use super::decoder::{Backend as Choice, Config};
 use crate::{Error, Layout};
 
 #[cfg(test)]
@@ -97,17 +97,17 @@ const SOFTWARE: &[Candidate] = &[
 
 /// Open the first backend that advertises the catalog codec and accepts the track.
 pub(crate) fn open(catalog: &AudioConfig, config: &Config) -> Result<Box<dyn Backend>, Error> {
-	select(catalog, candidates(config.kind, PLATFORM, SOFTWARE))
+	select(catalog, candidates(config.backend, PLATFORM, SOFTWARE))
 }
 
-/// The candidates `kind` allows, in the order to try them.
+/// The candidates `choice` allows, in the order to try them.
 ///
 /// Takes the tiers as arguments so a test can supply stubs instead of whatever
 /// this host compiles in.
-fn candidates<'a>(kind: Kind, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
-	match kind {
-		Kind::Software => software.iter().collect(),
-		Kind::Auto => platform.iter().chain(software).collect(),
+fn candidates<'a>(choice: Choice, platform: &'a [Candidate], software: &'a [Candidate]) -> Vec<&'a Candidate> {
+	match choice {
+		Choice::Software => software.iter().collect(),
+		Choice::Auto => platform.iter().chain(software).collect(),
 	}
 }
 
@@ -215,26 +215,26 @@ mod tests {
 		AudioConfig::new(AudioCodec::Opus, 48_000, 2)
 	}
 
-	fn pick(kind: Kind, platform: &[Candidate], software: &[Candidate]) -> Result<String, Error> {
-		let backend = select(&opus(), candidates(kind, platform, software))?;
+	fn pick(choice: Choice, platform: &[Candidate], software: &[Candidate]) -> Result<String, Error> {
+		let backend = select(&opus(), candidates(choice, platform, software))?;
 		Ok(backend.name().to_owned())
 	}
 
 	#[test]
 	fn auto_prefers_platform() {
-		let name = pick(Kind::Auto, &[PCM_ONLY, PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
+		let name = pick(Choice::Auto, &[PCM_ONLY, PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
 		assert_eq!(name, "platform");
 	}
 
 	#[test]
 	fn auto_falls_back_to_software() {
-		let name = pick(Kind::Auto, &[REFUSING], &[SOFTWARE_STUB]).unwrap();
+		let name = pick(Choice::Auto, &[REFUSING], &[SOFTWARE_STUB]).unwrap();
 		assert_eq!(name, "software");
 	}
 
 	#[test]
 	fn software_skips_platform() {
-		let name = pick(Kind::Software, &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
+		let name = pick(Choice::Software, &[PLATFORM_STUB], &[SOFTWARE_STUB]).unwrap();
 		assert_eq!(name, "software");
 	}
 
@@ -245,7 +245,7 @@ mod tests {
 			..REFUSING
 		};
 
-		let err = pick(Kind::Auto, &[REFUSING], &[ALSO_REFUSING]).unwrap_err();
+		let err = pick(Choice::Auto, &[REFUSING], &[ALSO_REFUSING]).unwrap_err();
 		let message = err.to_string();
 		assert!(
 			message.contains("refusing: ") && message.contains("also-refusing: "),
@@ -262,7 +262,7 @@ mod tests {
 			open: |_| Err(Error::Codec("allocation failed".into())),
 		};
 
-		let err = pick(Kind::Auto, &[REFUSING], &[FAULTY]).unwrap_err();
+		let err = pick(Choice::Auto, &[REFUSING], &[FAULTY]).unwrap_err();
 		assert!(matches!(err, Error::Codec(_)), "{err:?}");
 	}
 }

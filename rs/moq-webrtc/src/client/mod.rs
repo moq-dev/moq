@@ -50,18 +50,25 @@ impl Client {
 		&self.http
 	}
 
-	/// `client pull`: ingest a remote WHEP feed and publish it as `broadcast`, its tracks
-	/// minted under `catalog`, until the session ends.
+	/// `client pull`: ingest a remote WHEP feed into `broadcast`, publishing its renditions
+	/// on `catalog`, until the session ends.
 	///
-	/// The caller owns the broadcast, so its announcement and any linger after the end are
-	/// the caller's too.
+	/// The catalog gets its first update once the session negotiates a track. The caller owns
+	/// the broadcast, so its announcement and any linger after the end are the caller's too.
+	/// Any end, clean or not, aborts the catalog and every track with its cause.
 	pub async fn pull(
 		&self,
 		url: Url,
-		broadcast: moq_net::broadcast::Producer,
-		catalog: moq_mux::catalog::Config,
+		broadcast: &moq_net::broadcast::Producer,
+		catalog: &moq_mux::catalog::Producer,
 	) -> crate::Result<()> {
-		whep::dial(self, url, broadcast, catalog).await
+		let result = whep::dial(self, url, broadcast.clone(), catalog.clone()).await;
+		// A dial that fails before its session runs leaves the catalog open; a session already
+		// aborted it with its cause, which this keeps.
+		if let Err(err) = &result {
+			catalog.clone().abort(moq_net::Error::Transport(err.to_string()));
+		}
+		result
 	}
 
 	/// `client publish`: push the broadcast `source` resolved to a remote WHIP endpoint,
@@ -86,20 +93,22 @@ mod tests {
 		let address = listener.local_addr().expect("local address");
 		drop(listener);
 
-		let origin = moq_tokio::origin::spawn();
-		let broadcast = origin
-			.route("test", moq_net::origin::RouteOptions::hidden())
-			.expect("create broadcast");
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let url = format!("http://user:pass@{address}/whep/test?jwt=secret")
 			.parse()
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
 			.unwrap()
-			.pull(url, broadcast.broadcast().clone(), Default::default())
+			.pull(url, &broadcast, &catalog)
 			.await
 			.expect_err("dial a closed port");
 
 		assert!(matches!(err, crate::Error::Http(_)), "unexpected error: {err}");
+		assert!(
+			catalog.consume().unwrap().next().await.is_err(),
+			"the failed dial aborts the catalog"
+		);
 		let printed = format!("{err} {err:?}");
 		for secret in ["jwt", "secret", "user:pass"] {
 			assert!(!printed.contains(secret), "error leaked {secret}: {printed}");

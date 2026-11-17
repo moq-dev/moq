@@ -36,7 +36,10 @@ pub struct Audio {
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
 	///
 	/// A malformed rendition refuses the whole catalog when decoding.
-	#[serde(deserialize_with = "crate::catalog::deserialize_entries")]
+	#[serde(
+		deserialize_with = "crate::catalog::deserialize_entries",
+		serialize_with = "crate::catalog::serialize_entries"
+	)]
 	pub renditions: BTreeMap<String, AudioConfig>,
 }
 
@@ -104,6 +107,7 @@ pub struct AudioConfig {
 	/// Resolve it with [`Path::resolve`](moq_net::Path::resolve): a reference that walks
 	/// above the root names no broadcast, so the catalog is rejected.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -114,6 +118,7 @@ pub struct AudioConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
 	/// The instance of the stream the reference names, when the catalog knows it. Absent names
@@ -124,11 +129,12 @@ pub struct AudioConfig {
 	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
 	/// catalog's own stream.
 	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub label: Option<String>,
 
 	/// The codec, see the registry for details:
@@ -147,12 +153,12 @@ pub struct AudioConfig {
 	///
 	/// Live state, like video `color`.
 	#[serde(default)]
-	#[serde_as(as = "Option<DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<DisplayFromStr>")]
 	pub layout: Option<AudioLayout>,
 
 	/// The maximum bitrate of the audio track in bits per second, at most 2^53 - 1.
 	#[serde(default)]
-	#[serde_as(as = "Option<crate::snapshot::Number>")]
+	#[serde_as(as = "crate::catalog::NotNull<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
@@ -166,7 +172,7 @@ pub struct AudioConfig {
 	/// Some codecs include a description so the decoder can be initialized without extra data.
 	/// If not provided, there may be in-band metadata (marginally higher overhead).
 	#[serde(default)]
-	#[serde_as(as = "Option<Hex>")]
+	#[serde_as(as = "crate::catalog::NotNull<Hex>")]
 	pub description: Option<Bytes>,
 
 	/// Container format for frame encoding.
@@ -192,7 +198,7 @@ pub struct AudioConfig {
 
 	/// After a non-continuous join, decode from the group start, present at start plus warmup, and join that much earlier.
 	/// Serialized as whole milliseconds, rounded up so presentation never starts early.
-	#[serde_as(as = "Option<MillisCeil>")]
+	#[serde_as(as = "crate::catalog::NotNull<MillisCeil>")]
 	#[serde(default)]
 	pub warmup: Option<std::time::Duration>,
 
@@ -273,6 +279,10 @@ impl crate::catalog::Entry for AudioConfig {
 			layout.check(self.channel_count)?;
 		}
 		Ok(())
+	}
+
+	fn version(&self, id: &str) -> Option<u64> {
+		crate::catalog::renamed_version(self, id)
 	}
 }
 

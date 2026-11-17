@@ -254,14 +254,17 @@ outage still closes.
 | `publish` | Patterns the bearer may publish under `root`. `**` means everything; omitted means no publishing. |
 | `subscribe` | Patterns the bearer may subscribe to under `root`. Same rules. |
 | `exp`, `iat`, `nbf` | Expiry, issue time, and not-before. `exp` ends that credential's grant, including after connect; another accepted token can keep the session alive. A token is refused from its `exp` on and before its `nbf`. |
-| `iss`, `sub`, `jti` | Read and ignored. |
+| `jti` | The token's ID, which its issuer may record to revoke it: 1 to 128 printable ASCII characters, without spaces. Optional; `moq auth sign --id` writes one. |
+| `iss`, `sub` | Read and ignored. |
 
 Any other claim refuses the token with its name, `aud` included: an unknown
 claim may narrow the grant, and a misspelled `root` would otherwise widen it to
 everything. Put application data somewhere other than the token.
 
-Tokens and key scopes from the older `moq-token` format still work: each `put`
-and `get` prefix `p` reads as the subtree `p/**`.
+Tokens and key scopes from the older `moq-token` format still verify: each
+`put` and `get` prefix `p` reads as the subtree `p/**`. Nothing writes that
+form any more, so a verifier that reads only `put` and `get`, such as moq-relay
+0.14 and earlier, refuses a new token.
 
 ### Bitrate caps
 
@@ -332,7 +335,7 @@ so a session presenting one is refused rather than admitted on the public
 grant. The patterns are rooted at `/`, like a token with an empty root (see
 [Path matching](#path-matching)): `anon/**` admits a session dialed at `/`,
 `/anon`, or `/anon/room`, and refuses one dialed anywhere else. A pattern with
-no wildcard, such as `anon`, refuses to start; write `anon/**` for the subtree.
+no wildcard names one broadcast: `anon` is the broadcast `anon`, and `anon/**` is the subtree.
 `public = "**"` opens everything and is for development only. With
 `--auth-url` the anonymous rules live on the server instead
 (`moq auth serve --public-*`).
@@ -419,10 +422,12 @@ subscribe = []
 
 ## Auth server
 
-Upgrade auth servers before relays when adopting the `webtransport` transport value.
+Upgrade auth servers before relays when adopting the `webtransport` or `tls` transport value.
 WebTransport sessions report `webtransport`; native QUIC sessions report `quic`.
-Older auth servers reject the new value. Updated Rust and JavaScript auth parsers
-map future transport names to `unknown`, which your policy should handle explicitly.
+`tls://` sessions report `tls`; plaintext `tcp://` sessions report `tcp`.
+An auth server built before `tls` existed does not fail to parse it: the Rust and JavaScript
+parsers read an unrecognized transport name as `unknown`, so admission then depends on how your
+policy treats `unknown`. Update any policy keyed on `tcp` for stream links to handle `tls` too.
 
 `moq auth serve` is the reference auth server, answering the contract above.
 
@@ -517,8 +522,10 @@ so count sessions only on the others. See
 
 The plaintext TCP and Unix-socket listeners are admitted exactly like QUIC:
 the path and query ride the `SETUP` (`tcp://127.0.0.1:4444/room?jwt=...`) and
-reach the auth server with `transport` set to `tcp` or `unix`. A Unix socket
-can also require a specific uid, gid, or pid:
+reach the auth server with `transport` set to `tcp` or `unix`. A `tls://` link
+(below) reports `tls`, so a policy keyed on `transport == "tcp"` for cluster
+links over TLS now sees `"tls"`. A Unix socket can also require a specific uid,
+gid, or pid:
 
 ```toml
 [listen.unix]

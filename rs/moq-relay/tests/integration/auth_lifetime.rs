@@ -476,12 +476,36 @@ async fn admits_and_reports_the_session() {
 	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
 	assert_eq!(connect.node, "test-relay");
 	assert_eq!(connect.transport, moq_auth::Transport::Tcp);
+	assert_eq!(pub_session.transport(), Some(moq_tokio::Transport::Tcp));
 	assert_eq!(connect.path, "/room");
 	assert_eq!(connect.query.as_deref(), Some("jwt=token"));
 	assert!(connect.remote.is_some_and(|addr| addr.ip().is_loopback()));
 	assert!(connect.local.is_some_and(|addr| addr.port() == port));
 	assert!(connect.tls.is_none());
 	assert!(connect.token.is_none(), "moq-lite carries no SETUP token");
+
+	drop(pub_session);
+	drop(sub_session);
+	relay.abort();
+}
+
+/// A `tls://` session reaches the auth server as `tls`, and both ends of it report `tls`, so
+/// a policy keyed on `tcp` sees only the plaintext link.
+#[tokio::test]
+async fn reports_a_tls_session_as_tls() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let mut config = moq_tokio::listen::Config::default();
+	config.tcp.tls = Some(true);
+	config.tls.generate = vec!["localhost".into()];
+	let cluster = crate::spawn_cluster(cluster::Options::default());
+	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, config).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tls", port)).await;
+
+	let seen = script.seen.lock().unwrap().clone();
+	let connect = seen.iter().find(|r| r.event == Event::Connect).expect("a connect");
+	assert_eq!(connect.transport, moq_auth::Transport::Tls);
+	assert_eq!(pub_session.transport(), Some(moq_tokio::Transport::Tls));
+	assert_eq!(sub_session.transport(), Some(moq_tokio::Transport::Tls));
 
 	drop(pub_session);
 	drop(sub_session);
@@ -2034,12 +2058,12 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
 	let script = Script::new(Grant::new(all(), all()));
 	let mut server = moq_tokio::listen::Config::default();
-	server.extensions.solicit = false;
+	server.decline_solicit = true;
 	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
 	let mut config = moq_tokio::connect::Config::default();
 	config.version = vec!["moq-transport-22".parse().unwrap()];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let client = config.init(Default::default()).unwrap().with_reconnect(false);
 	let origin = moq_tokio::origin::spawn();
 	let publisher = client

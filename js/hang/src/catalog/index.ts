@@ -9,8 +9,8 @@
  */
 
 import type * as z from "zod/mini";
-import * as audio from "./audio";
-import * as video from "./video";
+import * as audio from "./audio.ts";
+import * as video from "./video.ts";
 
 /** Audio quality ordering. */
 export const Audio = { ranked: audio.ranked };
@@ -21,24 +21,24 @@ export const Video = { ranked: video.ranked };
 /** The catalog video section. */
 export type Video = z.infer<typeof video.VideoSchema>;
 
-export type { AudioConfig } from "./audio";
-export { AudioConfigSchema, AudioSchema } from "./audio";
-export * from "./binary";
-export * from "./clock";
-export * from "./container";
-export * from "./echo";
-export * from "./format";
-export * from "./hex";
-export * from "./include";
-export * from "./integers";
-export * from "./json";
-export * from "./mode";
-export * from "./path";
-export * from "./priority";
-export * from "./root";
-export * from "./stats";
-export * from "./text";
-export * from "./timeline";
-export * from "./track";
-export type { Color, Projection, VideoConfig } from "./video";
-export { ColorSchema, ProjectionSchema, VideoConfigSchema, VideoSchema } from "./video";
+export type { AudioConfig } from "./audio.ts";
+export { AudioConfigSchema, AudioSchema } from "./audio.ts";
+export * from "./binary.ts";
+export * from "./clock.ts";
+export * from "./container.ts";
+export * from "./echo.ts";
+export * from "./format.ts";
+export * from "./hex.ts";
+export * from "./include.ts";
+export * from "./integers.ts";
+export * from "./json.ts";
+export * from "./mode.ts";
+export * from "./path.ts";
+export * from "./priority.ts";
+export * from "./root.ts";
+export * from "./stats.ts";
+export * from "./text.ts";
+export * from "./timeline.ts";
+export * from "./track.ts";
+export type { Color, Projection, VideoConfig } from "./video.ts";
+export { ColorSchema, ProjectionSchema, VideoConfigSchema, VideoSchema } from "./video.ts";

@@ -1,10 +1,10 @@
 import * as z from "zod/mini";
-import { compareName, compareNumber } from "./compare";
-import { ContainerSchema } from "./container";
-import { hexSchema } from "./hex";
-import { u8Schema, u53Schema } from "./integers";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { codecNumber, countSchema, renditions } from "./section";
+import { compareName, compareNumber } from "./compare.ts";
+import { ContainerSchema } from "./container.ts";
+import { hexSchema } from "./hex.ts";
+import { u8Schema, u53Schema } from "./integers.ts";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
+import { codecNumber, countSchema, renditions } from "./section.ts";
 
 // av01.<profile>.<level><tier>.<bitDepth>, optionally followed by every one of .<monochrome>
 // .<chromaSubsampling><chromaSamplePosition>.<colorPrimaries>.<transfer>.<matrix>.<fullRange>.

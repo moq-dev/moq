@@ -1675,8 +1675,11 @@ async fn starts(consumer: &moq_net::broadcast::Consumer, track: &str) -> Vec<u64
 		.ordered();
 	let timescale = track.info().timescale;
 	let mut starts = Vec::new();
-	while let Some(group) = track.next_group().await.unwrap() {
-		starts.push(micros(group.start, timescale));
+	while let Some(item) = track.next_group().await.unwrap() {
+		// Nothing exists below the first group, which the read reports as a gap.
+		if let moq_net::track::Item::Group(group) = item {
+			starts.push(micros(group.start, timescale));
+		}
 	}
 	starts
 }

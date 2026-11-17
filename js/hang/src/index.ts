@@ -10,12 +10,14 @@ export * as Net from "@moq/net";
 /** Re-export of {@link https://www.npmjs.com/package/@moq/signals | @moq/signals}, the reactive primitives used throughout this package. */
 export * as Signals from "@moq/signals";
 /** The catalog schema describing a broadcast's tracks. */
-export * as Catalog from "./catalog";
+export * as Catalog from "./catalog/index.ts";
 /** Per-frame container formats, with consumers and producers to read and write them. */
-export * as Container from "./container";
+export * as Container from "./container/index.ts";
 /** Solicited viewer feedback schemas and broadcast names. */
-export * as Echo from "./echo";
+export * as Echo from "./echo.ts";
+/** Client health graded from two consecutive media reports. */
+export * as Health from "./health.ts";
 /** The compressed snapshot track a stats or feedback report is written to. */
-export * as Report from "./report";
+export * as Report from "./report.ts";
 /** Publisher media and transport snapshot schemas. */
-export * as Stats from "./stats";
+export * as Stats from "./stats.ts";

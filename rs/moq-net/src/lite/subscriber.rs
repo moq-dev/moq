@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
 	Error, Path, Timescale, Timestamp, bandwidth,
-	coding::{Decode as _, Reader, Stream},
+	coding::{Decode as _, Reader, Recv, Stream},
 	lite,
 	track::{Anchor, Position, Subscription},
 	util::SendCell,
@@ -20,7 +20,6 @@ use super::Version;
 use crate::tail::{self, Reading, Settle, Tail};
 
 use kio::Lock;
-use rangemap::RangeSet;
 
 mod fills;
 use fills::{FillAsk, RangeFills};
@@ -275,41 +274,21 @@ struct Yielding {
 	verdict: YieldVerdict,
 }
 
-/// A stale verdict expires on the next update; a final drop never does. A group already
-/// accounted before its header stays accounted even if a later stale drop expires.
+/// What a YIELDED reset of the stream leaves of its group: still owed a continuation, or
+/// accounted already, by a drop that overtook the header or one that named the group since,
+/// which ends it. Every drop is final, a stale one included.
 enum YieldVerdict {
 	Owed,
 	Accounted,
-	Stale { under: u64, error: Error },
-	AccountedStale { under: u64, error: Error },
 	Dropped(Error),
 }
 
 impl YieldVerdict {
-	fn updated(self, updates: u64) -> Self {
-		match self {
-			Self::Stale { under, .. } if under < updates => Self::Owed,
-			Self::AccountedStale { under, .. } if under < updates => Self::Accounted,
-			verdict => verdict,
-		}
-	}
-
-	fn drop_with(&mut self, error: Error, under: Option<u64>) {
-		*self = match under {
-			Some(_) if matches!(self, Self::Dropped(_)) => return,
-			Some(under) if matches!(self, Self::Accounted | Self::AccountedStale { .. }) => {
-				Self::AccountedStale { under, error }
-			}
-			Some(under) => Self::Stale { under, error },
-			None => Self::Dropped(error),
-		};
-	}
-
 	fn error(self) -> Option<Error> {
 		match self {
 			Self::Owed => None,
 			Self::Accounted => Some(Error::Stream(crate::StreamError::Old)),
-			Self::Stale { error, .. } | Self::AccountedStale { error, .. } | Self::Dropped(error) => Some(error),
+			Self::Dropped(error) => Some(error),
 		}
 	}
 }
@@ -332,9 +311,10 @@ struct Opened {
 	reading: Reading,
 }
 
-/// A group stream duplicating a copy still arriving, such as a lite-07 re-offer that
-/// overtook the reset of the stream it replaces. It waits unread, which its stream credit
-/// bounds, and is discarded if that copy finishes or takes the group if it fails.
+/// A group stream duplicating a copy still arriving, such as a lite-07 continuation that
+/// overtook the YIELDED reset of the stream it continues, or another subscription's stream
+/// feeding the same copy. It waits unread, which its stream credit bounds, and is discarded
+/// if that copy finishes or takes the group if it fails.
 struct Duplicate {
 	/// The copy still arriving, whose readers wait while this holds it.
 	arriving: track::Hold,
@@ -389,9 +369,6 @@ impl Drop for ParkWait {
 
 impl TrackEntry {
 	fn new(copy: Option<Accepted>, tail: kio::Producer<Tail>) -> Self {
-		if let Some(copy) = &copy {
-			Self::bill_tail(&tail, copy);
-		}
 		Self {
 			copy,
 			parked: None,
@@ -426,17 +403,7 @@ impl TrackEntry {
 	}
 
 	/// Give the copy to the subscription, opening the groups of the streams parked on it.
-	/// Bill what the tail keeps to the copy's account.
-	fn bill_tail(tail: &kio::Producer<Tail>, copy: &Accepted) {
-		// Opened before the tail's lock, which is never held across the track's.
-		let bill = copy.producer.bill();
-		if let Ok(mut tail) = tail.write() {
-			tail.bill(bill);
-		}
-	}
-
 	fn accept(&mut self, copy: Accepted, version: Version, now: crate::time::Instant) {
-		Self::bill_tail(&self.tail, &copy);
 		self.copy = Some(copy);
 		let Some(parked) = self.parked.clone() else {
 			return;
@@ -504,13 +471,28 @@ impl TrackEntry {
 			return Err(Error::Cancel);
 		};
 		let group_info = group::Info { start: hdr.key };
-		// A stale drop that overtook this stream, which the group replaces: the next update
-		// supersedes that verdict, so a YIELDED reset after it pauses the group.
-		let stale = producer.holds_stale(hdr.key);
 		// Stats (groups/frames/bytes) are counted in the model as the group
 		// is written, through the tagged `track::Producer`. The track counts
 		// it as content once its first frame lands.
 		let received = producer.create_group_at(group_info, hdr.frame_start);
+		// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
+		// would say. Recorded once the group is, so a relay serving the copy sees the group
+		// the skip runs up to, whose own GROUP passes over it again.
+		let passed = hdr.passed_over();
+		if !passed.is_empty() {
+			if let Ok(mut tail) = self.tail.write() {
+				tail.account(passed.clone(), now);
+			}
+			let cached = producer.skip_received(passed.clone());
+			if let Some(first) = cached.iter().next() {
+				tracing::warn!(
+					group = hdr.key,
+					passed = ?passed,
+					cached = first.start,
+					"protocol error: GROUP passes over a group that arrived; keeping the group"
+				);
+			}
+		}
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !self.tail.read().accounts(hdr.key);
 		// The subscription's end waits until this stream is read. Counted
@@ -538,15 +520,9 @@ impl TrackEntry {
 				}
 			}
 		}
-		let verdict = if owed {
-			YieldVerdict::Owed
-		} else if stale {
-			YieldVerdict::Stale {
-				under: self.tail.read().updates(),
-				error: Error::Stream(crate::StreamError::Old),
-			}
-		} else {
-			YieldVerdict::Accounted
+		let verdict = match owed {
+			true => YieldVerdict::Owed,
+			false => YieldVerdict::Accounted,
 		};
 		self.place(hdr, version, received, reading, verdict)
 	}
@@ -636,25 +612,20 @@ impl TrackEntry {
 
 	/// Stop tracking the stream reading `key`, returning whether a YIELDED reset pauses it.
 	/// A stream that a later one for the same group replaced finds nothing, leaving the
-	/// later stream's record in place. A stale drop an update sent since superseded no
-	/// longer ends the group.
+	/// later stream's record in place.
 	fn end_yielding(&mut self, key: u64, stream: u64) -> Option<Yielding> {
-		let mut yielding = match self.yielding.get(&key) {
-			Some(yielding) if yielding.stream == stream => self.yielding.remove(&key)?,
-			_ => return None,
-		};
-		yielding.verdict = yielding.verdict.updated(self.tail.read().updates());
-		Some(yielding)
+		match self.yielding.get(&key) {
+			Some(yielding) if yielding.stream == stream => self.yielding.remove(&key),
+			_ => None,
+		}
 	}
 
-	/// A SUBSCRIBE_DROP named `groups` with `err`, `stale` when it is a lite-07 stale verdict: a
-	/// paused group ends there, and one a stream is reading ends with it if a YIELDED reset
-	/// would otherwise pause it, since no continuation follows, unless an update supersedes a
-	/// stale drop first.
-	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error, stale: bool) {
-		let updates = stale.then(|| self.tail.read().updates());
+	/// A SUBSCRIBE_DROP named `groups` with `err`: a paused group ends there, and one a stream
+	/// is reading ends with it if a YIELDED reset would otherwise pause it, since no
+	/// continuation follows.
+	fn dropped(&mut self, groups: std::ops::Range<u64>, err: &Error) {
 		for (_, yielding) in self.yielding.range_mut(groups.clone()) {
-			yielding.verdict.drop_with(err.clone(), updates);
+			yielding.verdict = YieldVerdict::Dropped(err.clone());
 		}
 		let Some(registry) = &self.paused else {
 			return;
@@ -1177,28 +1148,21 @@ impl Subscriber {
 	///
 	/// A datagram track's subscription takes its datagrams. On lite-05/06 a stream track's
 	/// subscription carries its name's datagrams too, which go to that name's datagram track.
-	/// Padding and a body past the wire cap name no subscription.
+	/// A body past the wire cap names no subscription.
 	fn route_datagram(&self, payload: bytes::Bytes) -> Result<Option<u64>, Error> {
 		if payload.len() > lite::Datagram::MAX_SIZE {
 			return Ok(None);
 		}
-		let mut target = None;
-		let Some(dg) = lite::Datagram::decode(payload, self.version, |id| {
-			target = self.datagram_target(id);
-			target.as_ref().is_some_and(|(_, timescale)| timescale.is_some())
-		})?
-		else {
-			return Ok(None);
-		};
-		let Some((mut producer, timescale)) = target else {
+		let dg = lite::Datagram::decode(payload, self.version)?;
+		let Some((mut producer, timescale)) = self.datagram_target(dg.subscribe) else {
 			return Ok(Some(dg.subscribe));
 		};
-		// A scale-less datagram's time is its sequence.
-		let timestamp = match (dg.timestamp, timescale) {
-			(Some(value), Some(scale)) => {
-				Timestamp::new(value, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
+		// A scale-less datagram's timestamp is bare, which the track checks is its sequence.
+		let timestamp = match timescale {
+			Some(scale) => {
+				Timestamp::new(dg.timestamp, scale).map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?
 			}
-			_ => Timestamp::unscaled(dg.sequence),
+			None => Timestamp::unscaled(dg.timestamp),
 		};
 		producer.insert(crate::datagram::Datagram {
 			sequence: dg.sequence,
@@ -1547,10 +1511,6 @@ enum UniState {
 	Setup {
 		reader: Reader<crate::transport::boxed::RecvStream, Version>,
 	},
-	/// Discarding a lite-07+ padding stream until FIN.
-	Padding {
-		reader: Reader<crate::transport::boxed::RecvStream, Version>,
-	},
 	Group(GroupRecv),
 	Done,
 }
@@ -1576,7 +1536,7 @@ impl UniServe {
 	/// Abort the stream with the given error, wherever the reader currently lives.
 	fn abort(&mut self, err: &Error) {
 		match &mut self.state {
-			UniState::Start { reader } | UniState::Setup { reader } | UniState::Padding { reader } => reader.abort(err),
+			UniState::Start { reader } | UniState::Setup { reader } => reader.abort(err),
 			UniState::Group(recv) => recv.reader.abort(err),
 			UniState::Done => {}
 		}
@@ -1586,9 +1546,16 @@ impl UniServe {
 		loop {
 			match &mut self.state {
 				UniState::Start { reader } => {
-					// A decode error here is only logged; the peer hung up or spoke garbage
-					// before the stream had a type.
-					let kind = ready!(reader.poll_decode::<lite::DataType>(waiter))?;
+					// An unknown type is stopped, never the session's failure, so a later
+					// version can add one.
+					let kind = match ready!(reader.poll_decode::<lite::DataType>(waiter)) {
+						Ok(kind) => kind,
+						Err(err) => {
+							tracing::debug!(%err, "unknown uni stream");
+							reader.abort(&Error::UnexpectedStream);
+							return Poll::Ready(Ok(()));
+						}
+					};
 					// Claim before decoding the body, so two incomplete SETUPs are duplicates too.
 					if matches!(kind, lite::DataType::Setup) && self.subscriber.version.has_setup_stream() {
 						self.subscriber.peer_setup.claim()?;
@@ -1603,7 +1570,6 @@ impl UniServe {
 							reader.set_priority(crate::priority::RECV_CONTROL);
 							UniState::Setup { reader }
 						}
-						lite::DataType::Padding => UniState::Padding { reader },
 						lite::DataType::Announce => {
 							let mut reader = reader;
 							if !self.subscriber.version.has_routes() {
@@ -1638,13 +1604,6 @@ impl UniServe {
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 					}
-				}
-				UniState::Padding { reader } => {
-					if !self.subscriber.version.has_padding() {
-						self.abort(&Error::UnexpectedStream);
-						return Poll::Ready(Ok(()));
-					}
-					return reader.poll_discard(waiter);
 				}
 
 				UniState::Group(recv) => {
@@ -1718,6 +1677,10 @@ impl GroupRecv {
 			}
 			self.reader.poll_decode::<lite::Group>(waiter).map_ok(|hdr| (ietf, hdr))
 		})?;
+		// A previous group at or past this one's own start is no group before it.
+		if header.1.previous.is_some_and(|previous| previous >= header.1.key) {
+			return Poll::Ready(Err(Error::MalformedTrack));
+		}
 
 		// A SUBSCRIBE sent alongside its TRACK may be served before the TRACK_INFO that says
 		// how to read it: the stream parks, unread, until the accept opens its group.
@@ -1749,14 +1712,14 @@ impl GroupRecv {
 		let ietf: bool = header.0;
 		let hdr: lite::Group = header.1;
 		// Lite-07 on a track without object records: a YIELDED reset pauses the group.
-		let yields: bool = self.subscriber.version.has_yield()
-			&& !(ietf
-				&& self
-					.subscriber
-					.subscribes
-					.lock()
-					.get(&hdr.subscribe)
-					.is_some_and(|entry| entry.has_records()));
+		let records: bool = ietf
+			&& self
+				.subscriber
+				.subscribes
+				.lock()
+				.get(&hdr.subscribe)
+				.is_some_and(|entry| entry.has_records());
+		let yields: bool = self.subscriber.version.has_yield() && !records;
 		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
 			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
 		{
@@ -1861,7 +1824,7 @@ impl GroupRecv {
 		let group: crate::recv::Group = group;
 		let track: track::Producer = track;
 		let mut ingest: FrameIngest =
-			FrameIngest::new(framing, ietf, hdr.frame_start).yielding(yields, cut.map(|cut| *cut));
+			FrameIngest::new(framing, records, hdr.frame_start).yielding(yields, cut.map(|cut| *cut));
 		let reading: Reading = reading;
 
 		// Filling the group, bailing if the track or group dies first. The track or group
@@ -1884,13 +1847,8 @@ impl GroupRecv {
 				.and_then(|entry| entry.end_yielding(hdr.key, stream))
 		});
 		let res = match res {
-			Ok(()) => {
-				// Only a lite-07 stale drop asks which groups arrived whole.
-				if group.finish().is_ok() && self.subscriber.version.has_skip() {
-					reading.finish();
-				}
-				Ok(())
-			}
+			// Whole at a GROUP_END's end, else closed: every frame sent arrived.
+			Ok(end) => group.end(end),
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = group.abort(err);
 				Ok(())
@@ -1938,8 +1896,8 @@ impl GroupRecv {
 /// Pumps bare FRAME messages from a reader into a group producer: the wire
 /// format shared by GROUP streams and FETCH responses.
 pub(crate) struct FrameIngest {
-	/// A timescale decodes the lite-05 zigzag-delta timestamp prefix; none leaves frames
-	/// untimed (pre-lite-05).
+	/// Whether frames carry the zigzag-delta timestamp prefix (lite-05+), in the track's
+	/// timescale, or bare on a scale-less lite-07 track, where each must be its group's start.
 	framing: lite::Framing,
 	/// Previous frame's raw timestamp value (in `timescale` units), for the
 	/// zigzag-delta decode. The first frame's delta is absolute (prev = 0).
@@ -1986,9 +1944,13 @@ enum IngestPhase {
 	/// The END_OF_GROUP record arrived, so only the stream end may follow.
 	Ended,
 	/// Lite-07: reading the `Payload Length`, the payload size plus one, which leads the
-	/// frame. Stream end here means the group has no more frames.
+	/// frame, or 0 for GROUP_END. Stream end here means the group closed incomplete.
 	Length,
-	/// Reading the timestamp delta (skipped without a timescale), after the size on lite-07.
+	/// Lite-07: reading GROUP_END's `End`, the group's exclusive end.
+	GroupEnd,
+	/// Lite-07: GROUP_END said where the group ends, so only the stream end may follow.
+	Finished { end: u64 },
+	/// Reading the timestamp delta (skipped when frames carry none), after the size on lite-07.
 	/// Stream end here before lite-07 means the group has no more frames.
 	Timing { size: Option<u64> },
 	/// Reading a compressed Track's inflated size (lite-07), or skipped. Stream end here
@@ -2015,12 +1977,13 @@ enum IngestPhase {
 }
 
 impl FrameIngest {
-	/// `ietf` when the session negotiated the extension, so the stream starts with a Group State.
-	pub(crate) fn new(framing: lite::Framing, ietf: bool, frame_start: u64) -> Self {
+	/// `records` when the session negotiated the `ietf` extension and a moq-transport
+	/// publisher made the track, so the stream starts with a Group State.
+	pub(crate) fn new(framing: lite::Framing, records: bool, frame_start: u64) -> Self {
 		Self {
 			framing,
 			prev_ts: 0,
-			phase: match ietf {
+			phase: match records {
 				true => IngestPhase::State,
 				false => Self::first_field(framing),
 			},
@@ -2046,12 +2009,13 @@ impl FrameIngest {
 		self.partial.take()
 	}
 
-	/// The stream ended on a frame boundary: the group ends, unless a continuation ended
-	/// before completing the frame its group held cut short.
-	fn end(&self) -> Result<(), Error> {
+	/// The stream ended on a frame boundary: the group ends, whole at `end` after a GROUP_END
+	/// or closed without one, unless a continuation ended before completing the frame its
+	/// group held cut short.
+	fn end(&self, end: Option<u64>) -> Result<Option<u64>, Error> {
 		match self.partial {
 			Some(_) => Err(Error::ProtocolViolation),
-			None => Ok(()),
+			None => Ok(end),
 		}
 	}
 
@@ -2145,15 +2109,15 @@ impl FrameIngest {
 		}
 	}
 
-	/// `Ready(Ok(()))` once the stream FINs on a frame boundary. The caller
-	/// finishes or aborts the group; a frame cut short mid-payload was already
-	/// aborted here with the reason.
+	/// `Ready(Ok(end))` once the stream FINs on a frame boundary, with the group's end when a
+	/// GROUP_END preceded the FIN. The caller finishes, closes, or aborts the group; a frame
+	/// cut short mid-payload was already aborted here with the reason.
 	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
 		waiter: &kio::Waiter,
-	) -> Poll<Result<(), Error>> {
+	) -> Poll<Result<Option<u64>, Error>> {
 		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.phase {
@@ -2161,10 +2125,6 @@ impl FrameIngest {
 					let state = ready!(reader.poll_varint(waiter))?;
 					let wire = lite::ietf::decode_state(state, self.frame_start)?;
 					let relayed = wire.is_some();
-					// A track published over moq-lite has no moq-transport state.
-					if relayed && self.framing.ietf.is_none() {
-						return Poll::Ready(Err(Error::ProtocolViolation));
-					}
 					let extensions = wire.as_ref().is_some_and(|wire| wire.extensions);
 					if let Some(wire) = wire {
 						group.set_wire(wire)?;
@@ -2179,7 +2139,7 @@ impl FrameIngest {
 				}
 				IngestPhase::Object => {
 					let Some(code) = ready!(reader.poll_varint_maybe(waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
 					let records = self.records.as_mut().expect("the Group State came first");
 					let (id, end) = lite::ietf::decode_object(records.prior, code)?;
@@ -2226,34 +2186,54 @@ impl FrameIngest {
 					if ready!(reader.poll_has_more(waiter))? {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
-					return Poll::Ready(self.end());
+					return Poll::Ready(self.end(None));
 				}
 				IngestPhase::Length => {
 					let Some(length) = ready!(self.poll_header_varint(reader, true, waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
-					// 0 is reserved for GROUP_END, which no version defines yet.
+					// 0 is GROUP_END, where a frame would start. Under object records a record
+					// precedes every FRAME, and the group's end is the stream's.
 					let Some(size) = length.checked_sub(1) else {
-						return Poll::Ready(Err(Error::ProtocolViolation));
+						if self.records.is_some() {
+							return Poll::Ready(Err(Error::ProtocolViolation));
+						}
+						self.phase = IngestPhase::GroupEnd;
+						continue;
 					};
 					self.phase = IngestPhase::Timing { size: Some(size) };
 				}
+				IngestPhase::GroupEnd => {
+					let end = ready!(reader.poll_varint(waiter))?;
+					self.phase = IngestPhase::Finished { end };
+				}
+				IngestPhase::Finished { end } => {
+					let end = *end;
+					if ready!(reader.poll_has_more(waiter))? {
+						return Poll::Ready(Err(Error::MalformedTrack));
+					}
+					return Poll::Ready(self.end(Some(end)));
+				}
 				IngestPhase::Timing { size } => {
 					let size = *size;
-					let Some(scale) = self.framing.timescale else {
+					if !self.framing.stamped() {
 						self.phase = IngestPhase::Inflated { size, timestamp: None };
 						continue;
-					};
+					}
 					// Before lite-07 the timestamp delta doubles as the per-frame sentinel.
 					let Some(zz) = ready!(self.poll_header_varint(reader, size.is_none(), waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
 					let next: u64 = (self.prev_ts as i128 + crate::coding::varint::unzigzag(zz) as i128)
 						.try_into()
 						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 					self.prev_ts = next;
-					let timestamp = Timestamp::new(next, scale)
-						.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
+					// A scale-less track's is a bare number, which the group checks against its start.
+					let timestamp = match self.framing.timescale {
+						Some(scale) => Timestamp::new(next, scale)
+							.map_err(|_| Error::BoundsExceeded(crate::coding::BoundsExceeded))?,
+						None => Timestamp::unscaled(next),
+					};
 					self.phase = IngestPhase::Inflated {
 						size,
 						timestamp: Some(timestamp),
@@ -2264,9 +2244,9 @@ impl FrameIngest {
 					// Only a compressed Track carries it, and only lite-07 can mark one.
 					let inflated = match group.compressed() {
 						true => {
-							let boundary = size.is_none() && self.framing.timescale.is_none();
+							let boundary = size.is_none() && !self.framing.stamped();
 							let Some(inflated) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
-								return Poll::Ready(self.end());
+								return Poll::Ready(self.end(None));
 							};
 							Some(inflated)
 						}
@@ -2282,9 +2262,9 @@ impl FrameIngest {
 				}
 				IngestPhase::Size { timestamp, inflated } => {
 					let (timestamp, inflated) = (*timestamp, *inflated);
-					let boundary = self.framing.timescale.is_none() && !group.compressed();
+					let boundary = !self.framing.stamped() && !group.compressed();
 					let Some(size) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
-						return Poll::Ready(self.end());
+						return Poll::Ready(self.end(None));
 					};
 					let header = self.header(group, timestamp, inflated, size)?;
 					self.phase = self.dispatch(group, header)?;
@@ -2899,9 +2879,9 @@ struct TracksRecv {
 	open: crate::transport::open::Open,
 	session: Transport,
 	stream: Option<Stream<Transport, Version>>,
-	/// What the peer lists, each holding an `announces` slot: discovery state the peer
-	/// makes us hold.
-	listed: HashMap<Arc<str>, crate::session::Slot>,
+	/// What the peer lists, by kind then name, each holding an `announces` slot: discovery
+	/// state the peer makes us hold.
+	listed: TracksListed,
 	synced: bool,
 	/// Each event fans out to every reader, so a peer streaming add/remove churn must not
 	/// hold the thread for as long as its bytes keep arriving.
@@ -2915,20 +2895,40 @@ struct TracksRecv {
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
 }
 
+/// The tracks a peer lists, one map per kind since each kind is a namespace apart.
+#[derive(Default)]
+struct TracksListed {
+	tracks: HashMap<Arc<str>, crate::session::Slot>,
+	datagrams: HashMap<Arc<str>, crate::session::Slot>,
+}
+
+impl TracksListed {
+	fn of(&mut self, kind: crate::broadcast::Kind) -> &mut HashMap<Arc<str>, crate::session::Slot> {
+		match kind {
+			crate::broadcast::Kind::Track => &mut self.tracks,
+			crate::broadcast::Kind::Datagrams => &mut self.datagrams,
+		}
+	}
+
+	/// The key listed for `name` of `kind`, shared rather than copied.
+	fn known(&self, kind: crate::broadcast::Kind, name: &str) -> Option<Arc<str>> {
+		let listed = match kind {
+			crate::broadcast::Kind::Track => &self.tracks,
+			crate::broadcast::Kind::Datagrams => &self.datagrams,
+		};
+		listed.get_key_value(name).map(|(name, _)| name.clone())
+	}
+}
+
 /// A TRACKS event, with its name resolved against what the listing holds.
 #[derive(Debug)]
 enum Listing {
-	Added(Arc<str>, lite::TrackInfo),
-	/// The listed name, or `None` if nothing by that name is listed.
-	Removed(Option<Arc<str>>),
+	Added(Arc<str>, lite::Listed),
+	/// The listed name of that kind, or `None` if nothing of that kind and name is listed.
+	Removed(crate::broadcast::Kind, Option<Arc<str>>),
 	/// Like [`Self::Removed`].
-	Finished(Option<Arc<str>>),
+	Finished(crate::broadcast::Kind, Option<Arc<str>>),
 	Synced,
-}
-
-/// The key `listed` holds for `name`, shared rather than copied.
-fn known(listed: &HashMap<Arc<str>, crate::session::Slot>, name: &str) -> Option<Arc<str>> {
-	listed.get_key_value(name).map(|(name, _)| name.clone())
 }
 
 impl TracksRecv {
@@ -2968,8 +2968,8 @@ impl TracksRecv {
 			let event = ready!(stream.reader.poll_decode_maybe_with(waiter, |r| {
 				Ok(match lite::TracksEvent::decode(r, version)? {
 					lite::TracksEvent::Added { name, info } => Listing::Added(name.as_ref().into(), info),
-					lite::TracksEvent::Removed { name } => Listing::Removed(known(listed, &name)),
-					lite::TracksEvent::Finished { name } => Listing::Finished(known(listed, &name)),
+					lite::TracksEvent::Removed { kind, name } => Listing::Removed(kind, listed.known(kind, &name)),
+					lite::TracksEvent::Finished { kind, name } => Listing::Finished(kind, listed.known(kind, &name)),
 					lite::TracksEvent::Synced => Listing::Synced,
 				})
 			}))?;
@@ -2979,22 +2979,26 @@ impl TracksRecv {
 			};
 			match event {
 				Listing::Added(name, info) => {
-					if self.listed.contains_key(&name) {
+					let listed = self.listed.of(info.kind());
+					if listed.contains_key(&name) {
 						return Poll::Ready(Err(Error::ProtocolViolation));
 					}
 					let slot = source.subscriber.announces.acquire()?;
-					source.lister.add(name.clone(), info.into())?;
-					self.listed.insert(name, slot);
+					match info {
+						lite::Listed::Track(info) => source.lister.add(name.clone(), crate::track::Info::from(info))?,
+						lite::Listed::Datagrams(info) => source.lister.add(name.clone(), datagram::Info::from(info))?,
+					}
+					listed.insert(name, slot);
 				}
-				Listing::Removed(name) => {
+				Listing::Removed(kind, name) => {
 					let name = name.ok_or(Error::ProtocolViolation)?;
-					self.listed.remove(&name);
-					source.lister.remove(&name)?;
+					self.listed.of(kind).remove(&name);
+					source.lister.remove(kind, name)?;
 				}
-				Listing::Finished(name) => {
+				Listing::Finished(kind, name) => {
 					let name = name.ok_or(Error::ProtocolViolation)?;
-					self.listed.remove(&name);
-					source.lister.finish(&name)?;
+					self.listed.of(kind).remove(&name);
+					source.lister.finish(kind, name)?;
 				}
 				Listing::Synced => {
 					if std::mem::replace(&mut self.synced, true) {
@@ -3052,7 +3056,7 @@ impl SourceServe {
 						open: Default::default(),
 						session: self.subscriber.session.clone(),
 						stream: None,
-						listed: HashMap::new(),
+						listed: TracksListed::default(),
 						synced: false,
 						budget: kio::coop::Budget::new(32),
 						gate: crate::auth::Gate::new(
@@ -3650,7 +3654,8 @@ mod tests {
 				.await
 				.unwrap(),
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: None,
 			priority: 0,
@@ -3669,8 +3674,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		})
 	}
 
@@ -3812,7 +3815,8 @@ mod tests {
 					.await
 					.unwrap(),
 				id: 0,
-				max_delay: Duration::ZERO,
+				max_delay: Some(Duration::ZERO),
+				stale_budget: Duration::ZERO,
 				min_delay: None,
 				start: Some(floor),
 				priority: 0,
@@ -3831,8 +3835,6 @@ mod tests {
 				wanted: None,
 				unanswered: None,
 				_working: crate::session::Work::default().start(),
-				update: 0,
-				stale: RangeSet::new(),
 			});
 			if update {
 				h.serve
@@ -4291,7 +4293,8 @@ mod tests {
 			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: Some(2),
 			priority: 0,
@@ -4310,8 +4313,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -4408,7 +4409,8 @@ mod tests {
 			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: Some(4),
 			priority: 0,
@@ -4427,8 +4429,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		};
 		assert_eq!(sub.fill_range(0), None, "the demand's range is no fill");
 
@@ -4477,7 +4477,8 @@ mod tests {
 			order: crate::track::Order::Descending,
 			stream,
 			id: 0,
-			max_delay: Duration::ZERO,
+			max_delay: Some(Duration::ZERO),
+			stale_budget: Duration::ZERO,
 			min_delay: None,
 			start: Some(4),
 			priority: 0,
@@ -4496,8 +4497,6 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		};
 		assert_eq!(sub.owed(None), Some(vec![4..10]));
 
@@ -4523,59 +4522,6 @@ mod tests {
 		sub.edit(&[back], 0).unwrap();
 		assert_eq!(sub.starts.keys().copied().collect::<Vec<_>>(), [1]);
 		assert_eq!(sub.owed(Some(8)), Some(vec![1..8]));
-	}
-
-	async fn receive_padding(version: Version, bytes: Vec<u8>) {
-		let session = crate::lite::test_transport::ScriptedSession::new(bytes);
-		let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
-			.await
-			.unwrap();
-		let log = session.log.clone();
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: crate::time::sim(),
-			session: crate::driver::Transport::new(session.clone()),
-			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
-			recv_bandwidth: None,
-			version,
-			peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			peer_hop: None,
-			cost: None,
-			going_away: Default::default(),
-			auth: crate::auth::Link::new(false),
-		});
-		let mut uni = UniServe {
-			subscriber,
-			state: UniState::Start { reader: stream.reader },
-		};
-		let waiter = kio::Waiter::noop();
-		if version == Version::Lite07 {
-			assert!(uni.poll_serve(&waiter).is_pending());
-			// The same stream can keep sending before FIN, without accumulating a body.
-			for _ in 0..8 {
-				session.push(&[0; 4096]);
-				assert!(uni.poll_serve(&waiter).is_pending());
-			}
-			// A body that is all ready at once still yields the driver before FIN.
-			session.push(&[0; 64 * 8192]);
-			session.close(crate::lite::test_transport::Close::Fin);
-			assert!(uni.poll_serve(&waiter).is_pending());
-			let mut polls = 1;
-			let res = loop {
-				if let Poll::Ready(res) = uni.poll_serve(&waiter) {
-					break res;
-				}
-				polls += 1;
-				assert!(polls < 64, "padding never finished");
-			};
-			assert!(res.is_ok());
-			assert!(log.stops().is_empty());
-		} else {
-			assert!(uni.poll_serve(&waiter).is_ready());
-			// An unsupported stream is stopped without ending the session.
-			drop(uni);
-			assert!(!log.stops().is_empty());
-		}
-		assert!(log.closes().is_empty());
 	}
 
 	/// A peer opening streams at once gets a budget of them accepted per poll, leaving the
@@ -4671,7 +4617,7 @@ mod tests {
 			let body = lite::Datagram {
 				subscribe,
 				sequence: 0,
-				timestamp: None,
+				timestamp: 0,
 				payload: bytes::Bytes::from_static(b"x"),
 			};
 			peer.send_datagram(body.encode_bytes(Version::Lite07).unwrap(), Default::default())
@@ -4742,7 +4688,7 @@ mod tests {
 			let body = lite::Datagram {
 				subscribe: 1,
 				sequence: key,
-				timestamp: None,
+				timestamp: key,
 				payload: bytes::Bytes::from_static(b"x"),
 			};
 			peer.send_datagram(body.encode_bytes(Version::Lite07).unwrap(), Default::default())
@@ -4779,8 +4725,10 @@ mod tests {
 		}
 	}
 
+	/// A stream type the version doesn't define, such as lite-07's removed padding (0x2), is
+	/// stopped without ending the session.
 	#[kio::test]
-	async fn padding_is_discarded_only_on_lite07() {
+	async fn an_unknown_stream_type_is_stopped() {
 		for version in [
 			Version::Lite01,
 			Version::Lite02,
@@ -4794,30 +4742,31 @@ mod tests {
 			crate::coding::Encoder::new(&mut bytes, version.into())
 				.varint(2)
 				.unwrap();
-			receive_padding(version, bytes).await;
-		}
-	}
-
-	/// Both runtimes receive the other's encoded padding and keep the session live.
-	#[kio::test]
-	#[ignore = "requires Bun; run by just test interop"]
-	async fn lite_padding_interop() {
-		for (version, alpn) in [
-			(Version::Lite05, "moq-lite-05"),
-			(Version::Lite06, "moq-lite-06"),
-			(Version::Lite07, "moq-lite-07-wip"),
-		] {
-			let mut bytes = Vec::new();
-			let mut writer = crate::coding::Encoder::new(&mut bytes, version.into());
-			lite::DataType::Padding.encode(&mut writer, version).unwrap();
-			writer.slice(&[0xab; 4096]);
-			let echo: Vec<u8> = serde_json::from_slice(&crate::test_interop::bun(
-				"lite-padding.ts",
-				serde_json::json!({ "alpn": alpn, "bytes": bytes }),
-			))
-			.unwrap();
-			assert_eq!(echo, bytes);
-			receive_padding(version, echo).await;
+			let session = crate::lite::test_transport::ScriptedSession::new(bytes);
+			let stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
+				.await
+				.unwrap();
+			let log = session.log.clone();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let mut uni = UniServe {
+				subscriber,
+				state: UniState::Start { reader: stream.reader },
+			};
+			assert!(uni.poll_serve(&kio::Waiter::noop()).is_ready());
+			drop(uni);
+			assert!(!log.stops().is_empty(), "{version}: the stream was not stopped");
+			assert!(log.closes().is_empty(), "{version}: the session closed");
 		}
 	}
 
@@ -4834,6 +4783,7 @@ mod tests {
 				lite::Group {
 					subscribe: 7,
 					key: 3,
+					previous: None,
 					frame_start: 0,
 				}
 				.encode(&mut crate::coding::Encoder::new(&mut bytes, version.into()), version)
@@ -4901,7 +4851,8 @@ mod tests {
 				);
 				let mut accept = UniAccept::new(subscriber, early);
 				assert!(accept.poll(&kio::Waiter::noop()).is_pending());
-				assert!(log.stops().is_empty());
+				// Only the early stream of an unknown type is stopped.
+				assert_eq!(log.stops().len(), usize::from(pre_read));
 				let mut group = consumer.recv_group().await.unwrap().unwrap();
 				assert_eq!(group.start, 3);
 				let frame = group.read_frame().await.unwrap().unwrap();
@@ -4919,6 +4870,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -5021,26 +4973,38 @@ mod tests {
 		framing: lite::Framing,
 		body: &[u64],
 	) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
+		let header = lite::Group {
+			subscribe: 7,
+			key: 0,
+			previous: None,
+			frame_start: 0,
+		};
+		receive_lite07(framing, true, header, body).await
+	}
+
+	/// Receive the group `header` opens on a track `framing` describes over a lite-07
+	/// session, which negotiated the `ietf` extension when `ietf`, its stream holding `body`
+	/// after the header. Also returns the cache pool the track charges.
+	async fn receive_lite07(
+		framing: lite::Framing,
+		ietf: bool,
+		header: lite::Group,
+		body: &[u64],
+	) -> (Result<(), Error>, track::Producer, crate::cache::Pool) {
 		use crate::transport::poll::Session as _;
 
 		let version = Version::Lite07;
 		let mut script = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
-		lite::Group {
-			subscribe: 7,
-			key: 0,
-			frame_start: 0,
-		}
-		.encode(&mut encoder, version)
-		.unwrap();
+		header.encode(&mut encoder, version).unwrap();
 		for value in body {
 			encoder.varint(*value).unwrap();
 		}
 		let session = crate::lite::test_transport::ScriptedSession::eof(script);
-		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(true);
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup).offer_ietf(ietf);
 		peer_setup
 			.set(lite::Setup {
-				ietf: true,
+				ietf,
 				..Default::default()
 			})
 			.unwrap();
@@ -5086,6 +5050,108 @@ mod tests {
 		(res, track, pool)
 	}
 
+	/// A lite-07 track with no extension, in `timescale`.
+	fn lite07(timescale: Option<Timescale>) -> lite::Framing {
+		lite::Framing {
+			timescale,
+			ietf: None,
+			compressed: false,
+			length_first: true,
+		}
+	}
+
+	/// Group `key`'s header on subscription 7, naming `previous` as the group before it.
+	fn lite07_header(key: u64, previous: Option<u64>) -> lite::Group {
+		lite::Group {
+			subscribe: 7,
+			key,
+			previous,
+			frame_start: 0,
+		}
+	}
+
+	/// GROUP_END finishes the group whole at its End, and a bare FIN closes it with every frame
+	/// sent but no end: each frame is its `Payload Length`, a timestamp delta, and the payload.
+	#[kio::test]
+	async fn group_end_finishes_and_a_bare_fin_closes() {
+		let x = u64::from(b'x');
+		for (body, end) in [(&[2, 0, x, 0, 5][..], Some(5)), (&[2, 0, x][..], None)] {
+			let (res, track, _) =
+				receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(0, None), body).await;
+			res.unwrap();
+			let mut group = track.consume().peek_group(0).unwrap();
+			assert_eq!(
+				group.read_frame().now_or_never().unwrap().unwrap().unwrap().payload,
+				b"x"[..]
+			);
+			assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+			assert_eq!(group.end(), end, "{body:?}");
+		}
+	}
+
+	/// Anything after GROUP_END, an End the group refuses (at or before its start), or a
+	/// zero length under object records, where a record would come first, is refused.
+	#[kio::test]
+	async fn group_end_refuses_what_cannot_end_a_group() {
+		let x = u64::from(b'x');
+		for (key, body, reason) in [
+			(0, &[2, 0, x, 0, 5, 0][..], "a byte after GROUP_END"),
+			(0, &[2, 0, x, 0, 5, 2, 0, x], "a frame after GROUP_END"),
+			(5, &[2, 5, x, 0, 5], "an End at the group's start"),
+			(5, &[2, 5, x, 0, 4], "an End before the group's start"),
+			(0, &[0], "a stream ending inside GROUP_END"),
+		] {
+			let (res, track, _) =
+				receive_lite07(lite07(Some(Timescale::MILLI)), false, lite07_header(key, None), body).await;
+			assert!(res.is_err(), "accepted {reason}");
+			if let Some(mut group) = track.consume().peek_group(key) {
+				while let Some(Ok(Some(_))) = group.read_frame().now_or_never() {}
+				assert!(group.end().is_none(), "{reason}: the group finished");
+			}
+		}
+		let (res, ..) = receive_ietf(draft18(None), &[0, 0]).await;
+		assert!(res.is_err(), "accepted GROUP_END under object records");
+	}
+
+	/// A lite-07 FRAME on a scale-less track carries its timestamp, its group's start as a
+	/// bare number; any other value is a TIMESTAMP_MISMATCH.
+	#[kio::test]
+	async fn a_scale_less_frame_carries_its_groups_start() {
+		let x = u64::from(b'x');
+		let (res, track, _) = receive_lite07(lite07(None), false, lite07_header(9, None), &[2, 18, x, 2, 0, x]).await;
+		res.unwrap();
+		let mut group = track.consume().peek_group(9).unwrap();
+		for _ in 0..2 {
+			let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+			assert_eq!(frame.timestamp, Timestamp::unscaled(9));
+		}
+
+		// 10, then 9 and 10 again.
+		for body in [&[2, 20, x][..], &[2, 18, x, 2, 2, x]] {
+			let (res, ..) = receive_lite07(lite07(None), false, lite07_header(9, None), body).await;
+			assert!(matches!(res, Err(Error::TimestampMismatch)), "{body:?}: {res:?}");
+		}
+	}
+
+	/// GROUP's Previous Start passes over the starts between, which the copy records skipped
+	/// as a SUBSCRIBE_SKIP would; one at or above the group's own start is malformed.
+	#[kio::test]
+	async fn a_groups_previous_start_skips_the_starts_between() {
+		let x = u64::from(b'x');
+		let body = [2, 18, x];
+		let (res, track, _) = receive_lite07(lite07(None), false, lite07_header(9, Some(4)), &body).await;
+		res.unwrap();
+		let consumer = track.subscribe(None);
+		assert!(consumer.is_skipped(5..9));
+		assert!(!consumer.is_skipped(4..5), "the previous group is not skipped");
+
+		for previous in [9, 10] {
+			let (res, track, _) = receive_lite07(lite07(None), false, lite07_header(9, Some(previous)), &body).await;
+			assert!(matches!(res, Err(Error::MalformedTrack)), "{previous}: {res:?}");
+			assert!(track.consume().peek_group(9).is_none(), "{previous}: opened the group");
+		}
+	}
+
 	/// Object records: `(Skip << 1) | END`, the properties block's length, then the frame.
 	#[kio::test]
 	async fn ietf_records_frame_a_group() {
@@ -5123,18 +5189,17 @@ mod tests {
 		}
 	}
 
-	/// A track published over moq-lite has no moq-transport state, so a relayed group on
-	/// one is refused, though its plain groups cross.
+	/// A track published over moq-lite has no moq-transport state, so its Group Streams
+	/// carry no Group State and no records, as on a session without the extension.
 	#[kio::test]
-	async fn ietf_records_need_a_moq_transport_track() {
-		let plain = [0, 0, 0, 1, u64::from(b'x')];
-		let relayed = [0x1, 0, 0, 1, u64::from(b'x')];
-		for (framing, ok) in [(draft18(None), true), (lite::Framing::default(), false)] {
-			let (res, ..) = receive_ietf(framing, &plain).await;
-			res.unwrap();
-			let (res, ..) = receive_ietf(framing, &relayed).await;
-			assert_eq!(res.is_ok(), ok, "{framing:?}: {res:?}");
-		}
+	async fn a_moq_lite_track_has_no_records() {
+		let (res, track, _) = receive_ietf(lite::Framing::default(), &[1, u64::from(b'x')]).await;
+		res.unwrap();
+		let mut group = track.consume().peek_group(0).unwrap();
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload, b"x"[..]);
+		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+		assert!(group.wire().is_none());
 	}
 
 	/// A relayed group's records carry properties only when its Group State sets EXTENSIONS,
@@ -5216,6 +5281,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 5,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut encoder, version)
@@ -5378,6 +5444,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 3,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -5448,6 +5515,7 @@ mod tests {
 			lite::Group {
 				subscribe: 7,
 				key: 3,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut encoder, version)
@@ -5557,29 +5625,23 @@ mod tests {
 			compressed: false,
 			length_first: true,
 		};
-		// The `ietf` extension's plain records: a Group State of 0 after the header, then a
-		// record before each frame, as a moq-lite track on a relay link carries them.
-		let header = |ietf: bool| {
+		// A moq-lite track carries no records, so a relay link that negotiated the `ietf`
+		// extension sends the same stream.
+		let header = || {
 			let mut script = Vec::new();
 			lite::Group {
 				subscribe: 7,
 				key: 3,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
 			.unwrap();
-			if ietf {
-				script.push(0);
-			}
 			script
 		};
 		// A lite-07 FRAME: the payload size plus one, the timestamp delta, then the first
 		// `sent` bytes of the payload.
-		let frame = |script: &mut Vec<u8>, ietf: bool, delta: i64, payload: &[u8], sent: usize| {
-			if ietf {
-				// The next Object ID, with no properties.
-				script.extend_from_slice(&[0, 0]);
-			}
+		let frame = |script: &mut Vec<u8>, delta: i64, payload: &[u8], sent: usize| {
 			let mut encoder = crate::coding::Encoder::new(&mut *script, version.into());
 			encoder.varint(payload.len() as u64 + 1).unwrap();
 			encoder.varint(crate::coding::varint::zigzag(delta)).unwrap();
@@ -5589,12 +5651,12 @@ mod tests {
 
 		for (overtakes, ietf) in [(false, false), (true, false), (false, true), (true, true)] {
 			// Frame 0 whole, then frame 1 cut after three bytes.
-			let mut cut = header(ietf);
-			frame(&mut cut, ietf, frames[0].0, frames[0].1, frames[0].1.len());
-			frame(&mut cut, ietf, frames[1].0, frames[1].1, 3);
-			let mut whole = header(ietf);
+			let mut cut = header();
+			frame(&mut cut, frames[0].0, frames[0].1, frames[0].1.len());
+			frame(&mut cut, frames[1].0, frames[1].1, 3);
+			let mut whole = header();
 			for (delta, payload) in frames {
-				frame(&mut whole, ietf, delta, payload, payload.len());
+				frame(&mut whole, delta, payload, payload.len());
 			}
 			let yielded = ScriptedSession::new(cut);
 			let continued = ScriptedSession::eof(whole);
@@ -5715,6 +5777,7 @@ mod tests {
 			lite::Group {
 				subscribe: 7,
 				key: 3,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -5804,6 +5867,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 3,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut encoder, version)
@@ -5858,7 +5922,7 @@ mod tests {
 			.lock()
 			.get_mut(&7)
 			.unwrap()
-			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
+			.dropped(3..4, &Error::Stream(crate::StreamError::Old));
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
 		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 		assert!(res.is_ok(), "{res:?}");
@@ -5871,11 +5935,10 @@ mod tests {
 		);
 	}
 
-	/// Lite-07: a stale drop that overtook the YIELDED reset of the stream it names holds only
-	/// under the update it names: once the subscriber sends another, the reset pauses the
-	/// group, which the publisher then continues or drops again.
+	/// Lite-07: a stale drop that overtook the header of the stream it names is final, so a
+	/// YIELDED reset of that stream ends the group as stale rather than pausing it.
 	#[kio::test]
-	async fn a_yielded_group_pauses_once_an_update_supersedes_its_stale_drop() {
+	async fn a_yielded_group_ends_on_a_stale_drop_before_its_header() {
 		use crate::lite::test_transport::{Close, ScriptedSession};
 		use crate::transport::poll::Session as _;
 
@@ -5885,89 +5948,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 3,
-			frame_start: 0,
-		}
-		.encode(&mut encoder, version)
-		.unwrap();
-		encoder.varint(2).unwrap();
-		encoder.varint(crate::coding::varint::zigzag(300)).unwrap();
-		script.push(b'x');
-		let yielded = ScriptedSession::new(script);
-		let clock = crate::time::Deadlines::new(crate::time::Instant::now());
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: clock.clone(),
-			session: crate::driver::Transport::new(yielded.clone()),
-			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
-			recv_bandwidth: None,
-			version,
-			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			peer_hop: None,
-			cost: None,
-			going_away: Default::default(),
-			auth: crate::auth::Link::new(false),
-		});
-		let track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"video",
-			crate::track::Info::timed(),
-		);
-		let subscription = crate::track::Subscription::default()
-			.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
-			.with_range(0..);
-		let mut reader = track.subscribe(subscription);
-		let framing = lite::Framing {
-			timescale: Some(Timescale::MILLI),
-			ietf: None,
-			compressed: false,
-			length_first: true,
-		};
-		let tail = kio::Producer::new(Tail::default());
-		subscriber
-			.subscribes
-			.lock()
-			.insert(7, TrackEntry::accepted(track.clone(), framing, tail.clone()));
-
-		let (_, recv) = yielded.open_bi(Default::default()).await.unwrap();
-		let mut first = GroupRecv::new(
-			subscriber.clone(),
-			Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
-		);
-		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
-		let mut group = reader.assert_group();
-		// The publisher gave the group up after pausing it, and its drop lands first.
-		subscriber
-			.subscribes
-			.lock()
-			.get_mut(&7)
-			.unwrap()
-			.dropped(3..4, &Error::Stream(crate::StreamError::Old), true);
-		// An update supersedes it, as `buffer_update` does.
-		tail.write().ok().expect("the tail is open").updated();
-		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
-		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
-		assert!(res.is_ok(), "{res:?}");
-
-		let read = group.read_frame().await;
-		assert!(matches!(read, Ok(Some(_))), "the frame that arrived stays: {read:?}");
-		let subs = subscriber.subscribes.lock();
-		let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
-		assert!(paused.groups.contains_key(&3), "the group pauses");
-	}
-
-	/// Lite-07: a stale drop that overtook the header of the stream it names holds only under
-	/// the update it names: once the subscriber sends another, a YIELDED reset of that stream
-	/// pauses the group rather than ending it as stale.
-	#[kio::test]
-	async fn a_yielded_group_pauses_once_an_update_supersedes_a_stale_drop_before_its_header() {
-		use crate::lite::test_transport::{Close, ScriptedSession};
-		use crate::transport::poll::Session as _;
-
-		let version = Version::Lite07;
-		let mut script = Vec::new();
-		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
-		lite::Group {
-			subscribe: 7,
-			key: 3,
+			previous: None,
 			frame_start: 0,
 		}
 		.encode(&mut encoder, version)
@@ -6021,17 +6002,16 @@ mod tests {
 		);
 		assert!(first.poll_serve(&kio::Waiter::noop()).is_pending());
 		let mut group = reader.assert_group();
-		// An update supersedes it, as `buffer_update` does.
-		tail.write().ok().expect("the tail is open").updated();
 		yielded.close(Close::ResetStream(crate::StreamError::Yielded.to_code()));
 		let res = kio::wait(|waiter| first.poll_serve(waiter)).await;
 		assert!(res.is_ok(), "{res:?}");
 
 		let read = group.read_frame().await;
-		assert!(matches!(read, Ok(Some(_))), "the frame that arrived stays: {read:?}");
-		let subs = subscriber.subscribes.lock();
-		let paused = subs.get(&7).unwrap().paused.as_ref().unwrap().read();
-		assert!(paused.groups.contains_key(&3), "the group pauses");
+		assert!(matches!(read, Err(Error::Stream(crate::StreamError::Old))), "{read:?}");
+		assert!(
+			subscriber.subscribes.lock().get(&7).unwrap().paused.is_none(),
+			"nothing paused"
+		);
 	}
 
 	/// A SUBSCRIBE_FINISH below a group already received contradicts that group. lite-05
@@ -6233,7 +6213,10 @@ mod tests {
 		let largest = track::Position { group: 4, frame: 2 };
 		let mut responses = Vec::new();
 		lite::SubscribeResponse::Start(lite::SubscribeStart {
-			largest: Some(largest),
+			largest: Some(lite::Largest {
+				position: largest,
+				ended: true,
+			}),
 			starts: vec![Some(4)],
 		})
 		.encode(
@@ -6285,13 +6268,15 @@ mod tests {
 		};
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
+		// Recorded as ended, so a relay serving this copy says so in its own SUBSCRIBE_OK.
+		assert!(reader.largest_finished(largest));
 		assert_eq!(reader.largest().await, Some(largest));
 		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
 		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
 	}
 
-	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under update 0 and the
-	/// max age `budget`, its broadcast, and the tail it accounts on.
+	/// A lite-07 subscription's serve loop with an active SUBSCRIBE under the max age `budget`,
+	/// its broadcast, and the tail it accounts on.
 	async fn lite07_serving(
 		budget: Duration,
 	) -> (TrackServe, ServeLoop, kio::Producer<Tail>, crate::broadcast::Producer) {
@@ -6330,7 +6315,8 @@ mod tests {
 				.await
 				.unwrap(),
 			id: 0,
-			max_delay: budget,
+			max_delay: Some(budget),
+			stale_budget: budget,
 			min_delay: None,
 			start: None,
 			priority: 0,
@@ -6349,16 +6335,13 @@ mod tests {
 			wanted: None,
 			unanswered: None,
 			_working: crate::session::Work::default().start(),
-			update: 0,
-			stale: RangeSet::new(),
 		});
 		(serve, serving, tail, broadcast)
 	}
 
 	/// A stale drop of part of a fill's run recovers that part on its own subscription, which
-	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: left
-	/// in, any later update would reopen the stale drop and the publisher would serve the
-	/// recovered groups on both.
+	/// takes it out of the copy's ranges at once, though the rest of the run stays asked: the
+	/// subscription that dropped it never delivers it.
 	#[kio::test]
 	#[expect(clippy::single_range_in_vec_init, reason = "the asked runs are a list, here one")]
 	async fn a_recovered_run_leaves_the_subscription() {
@@ -6410,33 +6393,11 @@ mod tests {
 		);
 	}
 
-	/// A SUBSCRIBE_DROP can only echo an update the subscriber sent: one naming a later update
-	/// is a protocol violation, and accounts for nothing.
+	/// On lite-07 an OLD drop is final, recorded as a stale verdict under the narrowest budget
+	/// the subscription asked: a SUBSCRIBE_UPDATE widening the budget reopens nothing, and an
+	/// OLD drop arriving after it may have been judged before the publisher read it.
 	#[kio::test]
-	async fn a_drop_naming_an_unsent_update_is_a_protocol_violation() {
-		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
-		let drop = lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-			groups: 1..3,
-			error: u64::from(crate::coding::StreamCodes::encode_stream_code(
-				&Version::Lite07,
-				&crate::StreamError::Old,
-			)),
-			update: 1,
-		});
-		assert!(matches!(
-			serving.apply_response(&serve, drop),
-			Err(Error::ProtocolViolation)
-		));
-		assert!(!tail.read().covers(1..3));
-	}
-
-	/// On lite-07 an OLD drop is a stale verdict judged under the budget this subscriber sent
-	/// with the update it names. Any SUBSCRIBE_UPDATE reopens every stale run in the tail,
-	/// whether or not it widens the budget, and an OLD drop naming a superseded update is no
-	/// verdict: still owed, and given up on no reader. Any other drop is final, whatever update
-	/// it names.
-	#[kio::test]
-	async fn an_update_reopens_every_stale_drop_and_supersedes_the_rest() {
+	async fn an_update_reopens_no_stale_drop() {
 		let version = Version::Lite07;
 		let budget = Duration::from_millis(500);
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(budget).await;
@@ -6446,70 +6407,40 @@ mod tests {
 				.with_ranges([crate::track::Range::groups(0..)]),
 		);
 		let waiter = kio::Waiter::noop();
-		let code = |err: &crate::StreamError| u64::from(crate::coding::StreamCodes::encode_stream_code(&version, err));
-		let drop = |first, last: u64, err: &crate::StreamError, update| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				groups: first..last + 1,
-				error: code(err),
-				update,
-			})
+		let old = |groups: std::ops::Range<u64>| {
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(groups, &crate::StreamError::Old, version))
 		};
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
 
-		serving
-			.apply_response(&serve, drop(1, 2, &crate::StreamError::Old, 0))
-			.unwrap();
+		serving.apply_response(&serve, old(1..3)).unwrap();
 		assert!(covers(1..3));
 		assert_eq!(
 			reader.poll_drop(&waiter),
-			Poll::Ready((1..3, track::Hole::stale(budget))),
-			"judged under the budget sent with update 0"
+			Poll::Ready((1..3, track::Hole::stale(budget)))
 		);
 
-		// An update that keeps the budget and the ranges still reopens the stale run.
 		{
 			let Sub::Active(active) = &mut serving.sub else {
 				unreachable!("an active subscription");
 			};
+			active.max_delay = Some(Duration::from_secs(5));
 			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, serve.subscriber.runtime.now()).unwrap();
-			assert_eq!(active.update, 1);
-			assert!(active.stale.is_empty());
+			buffer_update(active, ranges).unwrap();
 		}
-		assert!(!covers(1..3), "the publisher re-offers or drops it again");
+		assert!(covers(1..3), "still accounted for");
+		assert!(reader.poll_drop(&waiter).is_pending(), "reported once");
 
-		// Still in flight from before the update: no verdict.
-		serving
-			.apply_response(&serve, drop(4, 4, &crate::StreamError::Old, 0))
-			.unwrap();
-		assert!(!covers(4..5), "still owed");
-		assert!(reader.poll_drop(&waiter).is_pending(), "no reader settles on it");
-
-		// Any other drop is final, whatever update it names.
-		serving
-			.apply_response(&serve, drop(5, 5, &crate::StreamError::App(5), 0))
-			.unwrap();
-		assert!(covers(5..6));
+		serving.apply_response(&serve, old(4..5)).unwrap();
+		assert!(covers(4..5));
 		assert_eq!(
 			reader.poll_drop(&waiter),
-			Poll::Ready((5..6, track::Hole::drop(crate::StreamError::App(5))))
-		);
-
-		// Under the current update, a stale drop is a verdict again.
-		serving
-			.apply_response(&serve, drop(6, 6, &crate::StreamError::Old, 1))
-			.unwrap();
-		assert!(covers(6..7));
-		assert_eq!(
-			reader.poll_drop(&waiter),
-			Poll::Ready((6..7, track::Hole::stale(budget)))
+			Poll::Ready((4..5, track::Hole::stale(budget)))
 		);
 	}
 
-	/// A group that arrives over a lite-07 stale (OLD) drop wins over it, whichever lands first:
-	/// the publisher serves a group after its stale drop, as a front that switched routes does,
-	/// and the group's stream may overtake the drop. The next update owes it no more, and a
-	/// group still arriving is never aborted by the drop.
+	/// A group that arrives over a lite-07 stale (OLD) drop wins over it in the copy, whichever
+	/// lands first: the group's stream may overtake the drop, or a recovery may deliver it. A
+	/// group still arriving is never aborted by the drop, and an update owes none of them again.
 	#[kio::test]
 	async fn a_group_wins_over_its_stale_drop() {
 		let version = Version::Lite07;
@@ -6523,7 +6454,6 @@ mod tests {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 				groups: key..key + 1,
 				error: code,
-				update: 0,
 			})
 		};
 		let frame = |mut group: crate::group::Producer| {
@@ -6554,116 +6484,15 @@ mod tests {
 				unreachable!("an active subscription");
 			};
 			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, now()).unwrap();
+			buffer_update(active, ranges).unwrap();
 		}
-		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
-		assert!(covers(1..4), "every group that arrived stays accounted for");
-		assert!(!covers(4..5), "the group that never arrived is owed again");
+		assert!(tail.read().covers(1..5), "every group stays accounted for");
 		frame(two).expect("the drop leaves a group still arriving");
 		frame(three).expect("the update leaves a group still arriving");
 	}
 
-	/// A group whose stream finished wins over a lite-07 stale drop that lands after the cache
-	/// evicted it: the publisher served it over that drop, so the next update owes it no more.
-	/// A stream that finished under an earlier update says nothing of a drop under the new one.
-	#[kio::test]
-	async fn a_finished_group_wins_over_a_late_stale_drop_once_evicted() {
-		let version = Version::Lite07;
-		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
-		let now = || serve.subscriber.runtime.now();
-		let code = u64::from(crate::coding::StreamCodes::encode_stream_code(
-			&version,
-			&crate::StreamError::Old,
-		));
-		let old = |key: u64, update| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
-				groups: key..key + 1,
-				error: code,
-				update,
-			})
-		};
-		serve.subscriber.subscribes.lock().insert(
-			0,
-			TrackEntry::accepted(
-				serving.serving.clone(),
-				lite::Framing {
-					timescale: Some(Timescale::MILLI),
-					ietf: None,
-					compressed: false,
-					length_first: false,
-				},
-				tail.clone(),
-			),
-		);
-		// A group stream that arrives whole, through the path that records it, then is evicted.
-		let arrive = async |serving: &mut ServeLoop, key| {
-			use crate::transport::poll::Session as _;
-
-			let mut script = Vec::new();
-			let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
-			lite::Group {
-				subscribe: 0,
-				key,
-				frame_start: 0,
-			}
-			.encode(&mut encoder, version)
-			.unwrap();
-			// A frame at the group's key, since starts strictly increase.
-			encoder.varint(crate::coding::varint::zigzag(key as i64)).unwrap();
-			encoder.bytes(b"x").unwrap();
-			let session = crate::lite::test_transport::ScriptedSession::eof(script);
-			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
-			let mut group = GroupRecv::new(
-				serve.subscriber.clone(),
-				Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
-			);
-			kio::wait(|waiter| group.poll_serve(waiter)).await.unwrap();
-			serving.serving.evict(key);
-		};
-		let update = |serving: &mut ServeLoop| {
-			let Sub::Active(active) = &mut serving.sub else {
-				unreachable!("an active subscription");
-			};
-			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, now()).unwrap();
-		};
-		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
-
-		arrive(&mut serving, 1).await;
-		serving.apply_response(&serve, old(1, 0)).unwrap();
-		update(&mut serving);
-		assert!(covers(1..2), "the evicted group that arrived stays accounted for");
-
-		// Finished under the first update, then judged stale under the second.
-		arrive(&mut serving, 2).await;
-		update(&mut serving);
-		serving.apply_response(&serve, old(2, 2)).unwrap();
-		update(&mut serving);
-		assert!(
-			!covers(2..3),
-			"a drop under a later update is the publisher's to re-offer"
-		);
-
-		// Under the pool's debt the tail folds what finished, gaps and all. A group in the span
-		// whose stream arrived before its stale drop still wins over it; a gap there the drop
-		// accounted first is owed again.
-		for key in [3, 5, 7] {
-			arrive(&mut serving, key).await;
-		}
-		if let Ok(mut state) = tail.write() {
-			assert!(state.fold());
-		}
-		serving.apply_response(&serve, old(3, 3)).unwrap();
-		serving.apply_response(&serve, old(4, 3)).unwrap();
-		update(&mut serving);
-		assert!(covers(3..4), "the folded group that arrived stays accounted for");
-		assert!(!covers(4..5), "the folded gap is the publisher's to re-offer");
-	}
-
-	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it: an
-	/// update reopens only stale verdicts, so the groups stay accounted for, and the skip
-	/// stays final rather than being superseded with the OLD drop. An empty range names
-	/// nothing.
+	/// A SKIP, or any final drop, that follows an OLD drop of the same groups replaces it in
+	/// the copy, and an update reopens none of them. An empty range names nothing.
 	#[kio::test]
 	async fn a_skip_or_final_drop_replaces_an_earlier_stale_one() {
 		let version = Version::Lite07;
@@ -6677,7 +6506,6 @@ mod tests {
 			lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 				groups: first..last + 1,
 				error: code,
-				update: 0,
 			})
 		};
 		let covers = |groups: std::ops::Range<u64>| tail.read().covers(groups);
@@ -6693,7 +6521,7 @@ mod tests {
 		serving
 			.apply_response(
 				&serve,
-				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..5, &crate::StreamError::App(5), 0, version)),
+				lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(4..5, &crate::StreamError::App(5), version)),
 			)
 			.unwrap();
 		// Empty ranges.
@@ -6710,7 +6538,7 @@ mod tests {
 				unreachable!("an active subscription");
 			};
 			let ranges = active.live.unchanged();
-			buffer_update(active, ranges, &serving.serving, serve.subscriber.runtime.now()).unwrap();
+			buffer_update(active, ranges).unwrap();
 		}
 		assert!(covers(1..3), "the skip is final");
 		assert!(covers(4..5), "the drop is final");
@@ -6731,7 +6559,7 @@ mod tests {
 		let version = Version::Lite07;
 		let (serve, mut serving, tail, _broadcast) = lite07_serving(Duration::from_millis(500)).await;
 		let drop = |first, last: u64, error: &crate::StreamError| {
-			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(first..last + 1, error, 0, version))
+			lite::SubscribeResponse::Drop(lite::SubscribeDrop::new(first..last + 1, error, version))
 		};
 		let skip = |first, last: u64| {
 			lite::SubscribeResponse::Skip(lite::SubscribeSkip {
@@ -6797,7 +6625,6 @@ mod tests {
 				lite::SubscribeResponse::Drop(lite::SubscribeDrop {
 					groups: 2..3,
 					error: code.into(),
-					update: 0,
 				}),
 			] {
 				resp.encode(
@@ -7246,7 +7073,7 @@ mod tests {
 	}
 
 	/// The session routes a datagram to its datagram track's subscription by Subscribe ID,
-	/// dropping lite-07 padding and a body past the wire cap.
+	/// dropping a body past the wire cap.
 	#[kio::test]
 	async fn route_datagram_delivers_to_its_subscription() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
@@ -7277,19 +7104,11 @@ mod tests {
 			);
 			let mut recv = || received.poll_recv(&kio::Waiter::noop());
 
-			if version.has_padding() {
-				// These bytes would name the active subscription without the discriminator.
-				for body in [vec![1], vec![1; 1200], vec![1; 1201]] {
-					assert_eq!(subscriber.route_datagram(body.into()).unwrap(), None);
-					assert!(recv().is_pending());
-				}
-			}
-
 			let payload = |key, size| {
 				lite::Datagram {
 					subscribe: 1,
 					sequence: key,
-					timestamp: Some(key),
+					timestamp: key,
 					payload: bytes::Bytes::from(vec![0; size]),
 				}
 				.encode_bytes(version)
@@ -7314,7 +7133,7 @@ mod tests {
 
 			// An unknown subscription's datagram goes nowhere, and names it.
 			let mut other = payload(4, 1).to_vec();
-			other[usize::from(version.has_padding())] = 2;
+			other[usize::from(version.has_datagram_tracks())] = 2;
 			assert_eq!(subscriber.route_datagram(other.into()).unwrap(), Some(2));
 			assert!(recv().is_pending());
 		}
@@ -7708,7 +7527,7 @@ mod tests {
 			waiting.now_or_never().expect("accepted").unwrap();
 
 			let (msg, trailing) = sent_subscribe(&sent(&session.log, 1), version);
-			assert_eq!(msg.max_delay, wait, "{version}: the subscriber's own max delay");
+			assert_eq!(msg.max_delay, Some(wait), "{version}: the subscriber's own max delay");
 			assert!(!trailing, "{version}: a SUBSCRIBE_UPDATE followed the accept");
 		}
 	}
@@ -7748,6 +7567,7 @@ mod tests {
 			lite::Group {
 				subscribe: 0,
 				key,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut w, version)
@@ -7824,6 +7644,7 @@ mod tests {
 			lite::Group {
 				subscribe: 0,
 				key,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(&mut w, version)
@@ -7879,6 +7700,7 @@ mod tests {
 		let header = |key| lite::Group {
 			subscribe: 0,
 			key,
+			previous: None,
 			frame_start: 0,
 		};
 		let mut entry = TrackEntry::new(None, Default::default());
@@ -11257,6 +11079,7 @@ mod tests {
 		lite::Group {
 			subscribe: 7,
 			key: 0,
+			previous: None,
 			frame_start: u64::MAX - 1,
 		}
 		.encode(&mut encoder, version)
@@ -11319,6 +11142,7 @@ mod tests {
 			lite::Group {
 				subscribe: 7,
 				key: 0,
+				previous: None,
 				frame_start: start,
 			}
 			.encode(&mut encoder, version)
@@ -11360,7 +11184,8 @@ mod tests {
 ///
 /// A group ID is the group's start, so a time anchor goes out as the group ID it names,
 /// on every version: a time start as the start, and a time end as the exclusive group past
-/// it. `None` when nothing is left to ask for, which no wire can say. The caller narrows a
+/// it, which lite-07 carries as the inclusive time again (see [`lite::Anchor::Absolute`]).
+/// `None` when nothing is left to ask for, which no wire can say. The caller narrows a
 /// subscription for a wire without ranges to the one span it carries first (see
 /// [`wire_span`]).
 ///
@@ -11422,7 +11247,12 @@ struct SubStream {
 	id: u64,
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
-	max_delay: Duration,
+	max_delay: Option<Duration>,
+	/// The narrowest max delay this subscription has asked, which a lite-07 stale drop is
+	/// recorded under: the wire does not say which update a drop crossed, so it may have been
+	/// judged under any budget asked before it arrived. Too narrow costs a wider reader a
+	/// request of its own; too wide would settle it on a group it could still get.
+	stale_budget: Duration,
 	min_delay: Option<Duration>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
@@ -11472,12 +11302,6 @@ struct SubStream {
 	/// without an instance resolves whichever one wins the path when it arrives, so one
 	/// still unanswered once another instance takes the path may be answered by it.
 	unanswered: Option<crate::model::broadcast::RequestValidity>,
-	/// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given
-	/// up under an earlier one is no verdict on the current terms.
-	update: u64,
-	/// The runs `tail` accounts for by a stale drop under `update`: the next update reopens
-	/// them, since the publisher re-offers or drops them again under it.
-	stale: RangeSet<u64>,
 	/// Holds the session busy for as long as the subscription is open.
 	_working: crate::session::Working,
 }
@@ -12095,7 +11919,7 @@ impl TrackServe {
 					// Open an upstream SUBSCRIBE for the first subscriber. Its terms are new, so a
 					// stale run an earlier subscription reported is no verdict on them.
 					Sub::None => {
-						producer.supersede_stale(judged(&wire.ranges));
+						producer.supersede_stale();
 						Ok(Begin::Establish(self.prepare_establish(producer, wire, &fills.groups)))
 					}
 					Sub::Active(active) => {
@@ -12110,7 +11934,7 @@ impl TrackServe {
 						let start_moved = demand.is_some() && active.start != subscription.start();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
-						active.max_delay = wire_max_delay(subscription.delay.max);
+						active.max_delay = subscription.delay.max;
 						active.min_delay = subscription.delay.min;
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
@@ -12158,7 +11982,7 @@ impl TrackServe {
 							} else if start_moved {
 								let _ = producer.start_at(active.start);
 							}
-							buffer_update(active, edit, producer, self.subscriber.runtime.now())?;
+							buffer_update(active, edit)?;
 						}
 						Ok(Begin::None)
 					}
@@ -12427,61 +12251,11 @@ enum Begin {
 	Establish(Establish),
 }
 
-/// The `Subscriber Max Age` a SUBSCRIBE carries for [`Delay::max`](crate::track::Delay::max): `None` is the publisher's
-/// max age alone, which the largest value every peer can read leaves to its clamp.
-fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration {
-	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
-}
-
-/// Every group `ranges` name, which a stale drop under them was judged against. A bound only
-/// the publisher resolves is taken at its widest: a start from group 0, an end past the live
-/// edge (an exclusive end of `u64::MAX`).
-fn judged<'a>(ranges: impl IntoIterator<Item = &'a lite::Range>) -> Option<RangeSet<u64>> {
-	let mut judged = RangeSet::new();
-	for range in ranges {
-		let start = match range.start {
-			Some(lite::Anchor::Absolute(start)) => start.group,
-			_ => 0,
-		};
-		let end = match range.end {
-			Some(lite::Anchor::Absolute(end)) => end.group.saturating_add(u64::from(end.frame > 0)),
-			_ => u64::MAX,
-		};
-		if start < end {
-			judged.insert(start..end);
-		}
-	}
-	Some(judged)
-}
-
 /// Buffer the current SUBSCRIBE parameters as the next update, with `ranges` the change to
-/// the live ranges. The caller flushes.
-///
-/// A stale drop given up under an earlier update may still be in flight, and this one may
-/// move the range or budget it was judged against, so the runs `serving` holds as stale
-/// become unknown again: a reader fills them by range rather than trust an old verdict.
-///
-/// A lite-07 publisher re-offers every group it reported stale on any update, and drops
-/// again under the new number what is still stale, so the tail owes every stale run again,
-/// from `now`. A group that arrived since its stale drop won over it: the publisher served
-/// it, so it is neither re-offered nor owed again.
-fn buffer_update(
-	active: &mut SubStream,
-	ranges: lite::RangeEdit,
-	serving: &track::Producer,
-	now: crate::time::Instant,
-) -> Result<(), Error> {
-	active.update += 1;
-	let held = serving.supersede_stale(judged(active.live.iter().map(|(_, range)| range)));
-	let recorded = std::mem::take(&mut active.stale);
-	if let Ok(mut tail) = active.tail.write() {
-		tail.updated();
-		for run in recorded.iter() {
-			for reopened in held.overlapping(run) {
-				tail.unaccount(reopened.start.max(run.start)..reopened.end.min(run.end), now);
-			}
-		}
-	}
+/// the live ranges. The caller flushes. It reopens nothing: every drop the publisher sent,
+/// a stale one included, stays final on the subscription.
+fn buffer_update(active: &mut SubStream, ranges: lite::RangeEdit) -> Result<(), Error> {
+	active.stale_budget = active.stale_budget.min(active.max_delay.unwrap_or(Duration::MAX));
 	active.stream.writer.buffer(&lite::SubscribeUpdate {
 		wanted_group: active.wanted,
 		priority: active.priority,
@@ -12489,7 +12263,6 @@ fn buffer_update(
 		min_delay: active.min_delay,
 		ranges,
 		order: active.order,
-		update: active.update,
 	})
 }
 
@@ -12554,11 +12327,10 @@ impl Establish {
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
 			priority: self.subscription.priority,
-			max_delay: wire_max_delay(self.subscription.delay.max),
+			max_delay: self.subscription.delay.max,
 			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
-			update: 0,
 		};
 		stream = stream.with_stats(self.serve.subscriber.origin.stats());
 		stream.writer.buffer(&lite::ControlType::Subscribe)?;
@@ -12599,7 +12371,8 @@ impl Establish {
 			unanswered: (!answered).then(|| self.validity.clone()),
 			stream,
 			id: self.id,
-			max_delay: wire_max_delay(self.subscription.delay.max),
+			max_delay: self.subscription.delay.max,
+			stale_budget: self.subscription.delay.max.unwrap_or(Duration::MAX),
 			min_delay: self.subscription.delay.min,
 			start: self.subscription.start(),
 			live: lite::LiveRanges::new(self.serve.subscriber.version, &self.ranges),
@@ -12618,8 +12391,6 @@ impl Establish {
 			declared: None,
 			end: None,
 			wanted: None,
-			update: 0,
-			stale: RangeSet::new(),
 			_working: self.session.work().start(),
 		}
 	}
@@ -12771,7 +12542,7 @@ impl SharedDatagrams {
 		let producer = serve
 			.source
 			.as_ref()?
-			.create_datagrams(serve.name.as_str(), info)
+			.create_unlisted_datagrams(serve.name.as_str(), info)
 			.ok()?;
 		let key = (serve.path.clone(), serve.name.clone());
 		serve.subscriber.legacy_datagrams.lock().insert(
@@ -13212,19 +12983,23 @@ impl TrackServeRun {
 					// to the session's other tasks while a peer streams them.
 					let mut budget = kio::coop::Budget::new(32);
 					while let Some(stream) = reader
-						&& let Poll::Ready(res) = stream.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
+						&& let Poll::Ready(res) = stream.poll_recv::<lite::SubscribeResponse>(waiter)
 					{
 						match res {
-							Ok(Some(_)) => {}
+							Recv::Message(_) => {}
 							// The publisher's FIN in reply, or a reset: the stream is done.
-							Ok(None) => {
+							Recv::Ended | Recv::Reset(_) => {
 								*reader = None;
 								break;
 							}
 							// Malformed bytes are a protocol violation here as on any Subscribe
-							// Stream, which closes the session; a short read at a FIN is not.
-							Err(err) => {
-								let _ = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
+							// Stream, which closes the session; a reset or a FIN inside a message
+							// is not.
+							Recv::Malformed(_) => {
+								let _ = lite::error::control(
+									&mut self.serve.subscriber.session.clone(),
+									Error::ProtocolViolation,
+								);
 								*reader = None;
 								break;
 							}
@@ -13894,13 +13669,15 @@ impl ServeLoop {
 					// A bounded feed that never delivers Largest goes live at the
 					// answer alone; one that does waits for it to show.
 					// An answer behind the copy's cache fails it.
-					match active.never_serves(start.largest) {
+					let position = start.largest.map(|largest| largest.position);
+					match active.never_serves(position) {
 						Some(largest) => self.serving.set_live_ahead(largest, served),
-						None => self.serving.set_live(start.largest, served),
+						None => self.serving.set_live(position, served),
 					}
 					.inspect_err(|err| tracing::warn!(track = %serve.name, %err, "subscribe start behind the cache"))?;
+					// Recorded whole, so a relay answers its own readers that the group ended.
 					if let Some(largest) = start.largest {
-						self.serving.report_largest(largest);
+						self.serving.report_largest(largest.position, largest.ended);
 					}
 				} else if active.demand.is_some()
 					&& let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id)
@@ -13968,80 +13745,46 @@ impl ServeLoop {
 			}
 			// The publisher will never send these groups, so they
 			// are accounted for without a stream, and a reader of
-			// one still arriving ends with the drop's error now. A
-			// lite-07 stale drop leaves a group whose stream arrived,
-			// since the stream wins over it.
+			// one still arriving ends with the drop's error now. Every
+			// drop is final on the subscription, a stale one included.
 			lite::SubscribeResponse::Drop(dropped) => {
-				// It can only echo an update this subscriber sent, even when it names nothing.
-				if dropped.update > active.update {
-					return Err(Error::ProtocolViolation);
-				}
 				let groups = dropped.groups.clone();
 				if groups.is_empty() {
 					return Ok(());
 				}
 				let error = dropped.error(serve.subscriber.version);
-				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every
-				// other drop is final, whatever update it names.
-				let stale = serve.subscriber.version.has_skip() && error == crate::StreamError::Old;
-				// One given up under an update since replaced says nothing of the current terms:
-				// the publisher re-offers it or drops it again under the new number, so it is
-				// still owed, and a reader that wants it fills it by range meanwhile.
-				if !(stale && dropped.update < active.update) {
-					// Asked before this drop is accounted: what a fold forgot finishing that the
-					// ledger already accounted may be a stream this drop overtook.
-					let overtaken: Vec<_> = match stale {
-						true => active.tail.read().overtaken(groups.clone()).collect(),
-						false => Vec::new(),
-					};
-					if let Ok(mut tail) = active.tail.write() {
-						tail.account(groups.clone(), serve.subscriber.runtime.now());
-					}
-					// A paused group the drop names ends there: no continuation follows.
-					if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
-						entry.dropped(groups.clone(), &Error::Stream(error.clone()), stale);
-					}
-					match stale {
-						// Judged under the budget this subscriber sent with that update. A
-						// key already skipped stays skipped, and one whose group arrived
-						// keeps it, so no update reopens either. A group a fill asked for is
-						// recovered on its own, so the copy does not record it given up meanwhile.
-						true => {
-							let mut given = rangemap::RangeSet::new();
-							given.insert(groups.clone());
-							for asked in active.fill_groups.overlapping(&groups) {
-								given.remove(asked.clone());
-							}
-							// A group whose stream finished under this update was served over
-							// the drop, so it won, even once the cache evicted it.
-							for finished in active.tail.read().finished(groups.clone()) {
-								given.remove(finished);
-							}
-							let mut owed = rangemap::RangeSet::new();
-							for given in given.iter() {
-								owed.extend(
-									self.serving
-										.give_up(given.clone(), track::Hole::stale(active.max_delay)),
-								);
-							}
-							// Owed again by the next update, save what a stream may have won.
-							for overtaken in overtaken {
-								owed.remove(overtaken);
-							}
-							active.stale.extend(owed);
-						}
-						// Final, so no update reopens it, even where it replaces a stale drop.
-						false => {
-							active.stale.remove(groups.clone());
-							self.serving.give_up(groups.clone(), track::Hole::drop(error.clone()));
-						}
-					}
-					self.range_fills.refuse(groups, error);
+				if let Ok(mut tail) = active.tail.write() {
+					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
+				// A paused group the drop names ends there: no continuation follows.
+				if let Some(entry) = serve.subscriber.subscribes.lock().get_mut(&active.id) {
+					entry.dropped(groups.clone(), &Error::Stream(error.clone()));
+				}
+				match serve.subscriber.version.has_skip() && error == crate::StreamError::Old {
+					// Lite-07 judged it stale, recorded under the narrowest budget it may have been
+					// judged under. A reader no wider settles on it; a wider one asks for the group
+					// on a request of its own, since this subscription never delivers it. A key already skipped stays
+					// skipped, and one whose group arrived keeps it. A group a fill asked for is
+					// recovered on its own, so the copy does not record it given up meanwhile.
+					true => {
+						let mut given = rangemap::RangeSet::new();
+						given.insert(groups.clone());
+						for asked in active.fill_groups.overlapping(&groups) {
+							given.remove(asked.clone());
+						}
+						for given in given.iter() {
+							self.serving
+								.give_up(given.clone(), track::Hole::stale(active.stale_budget));
+						}
+					}
+					false => {
+						self.serving.give_up(groups.clone(), track::Hole::drop(error.clone()));
+					}
+				}
+				self.range_fills.refuse(groups, error);
 			}
-			// Never produced, so nothing is waited for and no reader ends. A skip is final and
-			// replaces any drop of the same groups, stale or final, so no update reopens them;
-			// a reader a drop already ended stays ended.
+			// Never produced, so nothing is waited for and no reader ends. A skip replaces any
+			// drop of the same groups, stale or final; a reader a drop already ended stays ended.
 			lite::SubscribeResponse::Skip(skipped) => {
 				let groups = skipped.groups.clone();
 				if groups.is_empty() {
@@ -14050,7 +13793,6 @@ impl ServeLoop {
 				if let Ok(mut tail) = active.tail.write() {
 					tail.account(groups.clone(), serve.subscriber.runtime.now());
 				}
-				active.stale.remove(groups.clone());
 				// A fill owing them is answered: the source never had them.
 				self.range_fills.refuse(groups.clone(), crate::StreamError::NotFound);
 				// A group that arrived was produced after all, so the skip contradicts it: it
@@ -14328,9 +14070,7 @@ impl ServeLoop {
 						{
 							active.wanted = Some(wanted);
 							let ranges = active.live.unchanged();
-							if let Err(err) =
-								buffer_update(active, ranges, &self.serving, serve.subscriber.runtime.now())
-							{
+							if let Err(err) = buffer_update(active, ranges) {
 								return Poll::Ready(ServeEnd::GiveBack(err));
 							}
 							continue;
@@ -14393,10 +14133,7 @@ impl ServeLoop {
 					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
 					// Partial message bytes persist in the reader's buffer across turns.
 					if let Sub::Active(active) = &mut self.sub
-						&& let Poll::Ready(res) = active
-							.stream
-							.reader
-							.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
+						&& let Poll::Ready(res) = active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter)
 					{
 						// The publisher answered the SUBSCRIBE, so its demand stands on the
 						// subscription now. A query still held once that subscription ends
@@ -14404,7 +14141,7 @@ impl ServeLoop {
 						self.held = None;
 						active.unanswered = None;
 						match res {
-							Ok(Some(msg)) => {
+							Recv::Message(msg) => {
 								if let Err(err) = self.apply_response(serve, msg) {
 									return Poll::Ready(ServeEnd::GiveBack(err));
 								}
@@ -14413,7 +14150,7 @@ impl ServeLoop {
 								ready!(budget.poll_yield(waiter));
 								continue;
 							}
-							Ok(None) => {
+							Recv::Ended => {
 								// The publisher ends the subscription only once it declared the
 								// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
 								// reads into the tail without a FIN.
@@ -14433,7 +14170,17 @@ impl ServeLoop {
 								};
 								continue;
 							}
-							Err(err) => {
+							// Malformed bytes are a protocol violation, which closes the session; a
+							// reset gives up the subscription with its reason.
+							Recv::Malformed(err) => {
+								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
+								self.mode = ServeMode::Failed {
+									err: Error::ProtocolViolation,
+									tail: active.tail.consume(),
+								};
+								continue;
+							}
+							Recv::Reset(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
 								self.mode = ServeMode::Failed {
 									err,
@@ -14891,11 +14638,10 @@ impl kio::Task for FetchServeRun {
 						stream,
 						producer: Box::new(crate::recv::Group::new(producer)),
 						readers,
-						ingest: Box::new(FrameIngest::new(
-							lite::Framing::new(&info, self.serve.subscriber.version),
-							ietf,
-							frame_start,
-						)),
+						ingest: Box::new({
+							let framing = lite::Framing::new(&info, self.serve.subscriber.version);
+							FrameIngest::new(framing, ietf && framing.ietf.is_some(), frame_start)
+						}),
 					};
 				}
 				FetchRunState::Ingest {
@@ -14932,9 +14678,9 @@ impl kio::Task for FetchServeRun {
 						unreachable!()
 					};
 					match res {
-						Ok(()) => {
-							let producer = producer;
-							let _ = producer.finish();
+						// Whole at a GROUP_END's end, else closed; an end the group refuses aborts it.
+						Ok(end) => {
+							let _ = producer.end(end);
 						}
 						Err(err) => {
 							let _ = producer.abort(err);

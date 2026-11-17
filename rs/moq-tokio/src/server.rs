@@ -65,8 +65,15 @@ impl crate::listen::Config {
 	pub fn server(&self) -> moq_net::Server {
 		let mut server = moq_net::Server::new()
 			.with_timeout(self.resolved_timeout())
-			.with_versions(self.versions())
-			.with_extensions(self.extensions);
+			.with_versions(self.versions());
+		#[cfg(feature = "relay")]
+		{
+			server = server.with_ietf(self.ietf);
+		}
+		#[cfg(feature = "test-support")]
+		{
+			server = server.with_solicit(!self.decline_solicit);
+		}
 		if let Some(implementation) = &self.implementation {
 			server = server.with_implementation(implementation);
 		}
@@ -1266,7 +1273,7 @@ impl Incoming {
 			.zip(session.peer_certificates())
 			.map(|(tls, chain)| tls.peer(chain.to_vec()));
 		Self {
-			transport: Transport::Tcp,
+			transport: if tls.is_some() { Transport::Tls } else { Transport::Tcp },
 			url: None,
 			link: Link {
 				remote,

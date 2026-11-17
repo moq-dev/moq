@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { checkRenditions, RootSchema } from "./root.ts";
+import { checkRenditions, RootSchema, skipped } from "./root.ts";
 
 interface Case {
 	name: string;
@@ -11,10 +11,12 @@ interface Case {
 	json?: string[];
 	binary?: string[];
 	include?: string[];
+	skipped?: Record<string, Record<string, number>>;
 }
 
 // The corpus rs/hang also loads: both languages accept the same catalogs and keep the same
-// rendition, data track, and include IDs, so a divergence fails CI on whichever side drifts.
+// rendition, data track, and include IDs, and skip the same newer entries, so a divergence fails CI
+// on whichever side drifts.
 const cases = (await Bun.file(
 	new URL("../../../../rs/hang/fixtures/catalog-parity.json", import.meta.url),
 ).json()) as Case[];
@@ -36,5 +38,8 @@ for (const c of cases) {
 		expect(ids(root.json?.tracks)).toEqual(c.json ?? []);
 		expect(ids(root.binary?.tracks)).toEqual(c.binary ?? []);
 		expect(ids(root.include)).toEqual(c.include ?? []);
+		const { version: _, ...sections } = skipped(root) ?? { version: 0 };
+		const nonempty = Object.entries(sections).filter(([, entries]) => Object.keys(entries).length > 0);
+		expect(Object.fromEntries(nonempty)).toEqual(c.skipped ?? {});
 	});
 }

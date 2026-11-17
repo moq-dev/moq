@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch } from "../error.ts";
 import { Producer } from "../group.ts";
 import { hooks } from "../internal.ts";
-import { concat, encodeVarint, Reader } from "../stream.ts";
+import { concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { Timestamp } from "../time.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
 import * as Varint from "../varint.ts";
-import { frameDecoder, readFrames } from "./group.ts";
+import { frameDecoder, Group, readFrames, type WireFrame } from "./group.ts";
 import { frameHeader } from "./publisher.ts";
 import { hasLengthFirst, Version } from "./version.ts";
 
@@ -137,29 +137,103 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("a FRAME round-trips on %s", asy
 
 	// A compressed track's inflated size follows the timestamp delta, and the size still leads.
 	const compressed = concat([frameHeader(version, 7n, 9, 2, lengthFirst), new Uint8Array([5, 6])]);
-	const decoded = await streamOf([compressed], version).decode(
+	const decoded = (await streamOf([compressed], version).decode(
 		frameDecoder({ scale: SCALE, compress: true, lengthFirst }),
-	);
+	)) as WireFrame;
 	expect(decoded.size).toBe(2);
 	expect(decoded.inflated).toBe(9);
 	expect(decoded.timestamp?.value).toBe(7);
 	expect(decoded.payload).toEqual(new Uint8Array([5, 6]));
 });
 
-// A lite-07 Payload Length of 0 is reserved for GROUP_END, which no version defines yet. A malformed
-// FRAME ends only its stream, so it is a stream error rather than a session's protocol violation.
-test("a lite-07 FRAME with a Payload Length of 0 is malformed", async () => {
-	const producer = new Producer(0n);
-	const bytes = concat([encodeVarint(0, Version.DRAFT_07), encodeVarint(0, Version.DRAFT_07)]);
-	const err = await readFrames(streamOf([bytes], Version.DRAFT_07), producer, {
-		scale: SCALE,
-		lengthFirst: true,
-	}).then(
-		() => undefined,
+// Lite-07 varints, as a Group Stream after its header carries them.
+function lite07(...values: (number | bigint)[]): Uint8Array {
+	return concat(values.map((value) => encodeVarint(value, Version.DRAFT_07)));
+}
+
+// What reading `bytes` as group `start`'s lite-07 frames resolves with, or the error it throws.
+async function readLite07(bytes: Uint8Array, start = 0n, scale = SCALE): Promise<bigint | undefined | unknown> {
+	const producer = new Producer(start);
+	return readFrames(streamOf([bytes], Version.DRAFT_07), producer, { scale, lengthFirst: true }).catch(
 		(err: unknown) => err,
 	);
+}
+
+// A lite-07 GROUP_END, a Payload Length of 0 then the End, says where a whole group ends; a stream
+// ending without one only closes it.
+test("a lite-07 GROUP_END says where the group ends", async () => {
+	const frame = [2, 0, 7];
+	expect(await readLite07(lite07(...frame, 0, 500))).toBe(500n);
+	expect(await readLite07(lite07(...frame))).toBeUndefined();
+});
+
+// A publisher that stalls between GROUP_END and its FIN can't hold the read open: the group's own
+// close, such as an abort or eviction, still ends it.
+test("a lite-07 GROUP_END still waiting for its FIN stops once the group closes", async () => {
+	const producer = new Producer(0n);
+	const stream = new Reader(
+		new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(lite07(2, 0, 7, 0, 500));
+			},
+		}),
+		undefined,
+		Version.DRAFT_07,
+	);
+	const consumer = producer.consume();
+	const done = readFrames(stream, producer, { scale: SCALE, lengthFirst: true });
+	// The frame and GROUP_END arrive together, so once the frame is read the FIN is all that's left.
+	expect((await consumer.readFrame())?.payload).toEqual(new Uint8Array([7]));
+	producer.abort(new Error("evicted"));
+	expect(await done).toBeUndefined();
+});
+
+// An End at or before the group's start, or anything after GROUP_END, is malformed. A malformed
+// FRAME ends only its stream, so it is a stream error rather than a session's protocol violation.
+test.each([
+	["an End at the group's start", lite07(0, 5), 5n],
+	["an End before the group's start", lite07(0, 4), 5n],
+	["a byte after GROUP_END", lite07(0, 9, 0), 5n],
+	["a frame after GROUP_END", lite07(0, 9, 2, 0, 7), 5n],
+])("a lite-07 GROUP_END with %s is malformed", async (_, bytes, start) => {
+	const err = await readLite07(bytes, start);
 	expect(err).toBeInstanceOf(StreamError);
 	expect((err as StreamError).code).toBe(StreamCode.MalformedTrack);
+});
+
+// A lite-07 FRAME on a scale-less track carries its timestamp, its group's start as a bare number;
+// any other value is a TIMESTAMP_MISMATCH. The frame keeps the group's key as its time.
+test("a scale-less lite-07 FRAME carries its group's start", async () => {
+	const producer = new Producer(9n);
+	const consumer = producer.consume();
+	await readFrames(streamOf([lite07(2, 18, 7, 2, 0, 8)], Version.DRAFT_07), producer, {
+		scale: 0,
+		lengthFirst: true,
+	});
+	for (const payload of [7, 8]) {
+		const frame = await consumer.readFrame();
+		expect(frame?.payload).toEqual(new Uint8Array([payload]));
+		expect(frame?.timestamp).toEqual(Timestamp.unscaled(9n));
+	}
+	for (const bytes of [lite07(2, 20, 7), lite07(2, 18, 7, 2, 2, 8)])
+		expect(await readLite07(bytes, 9n, 0)).toBeInstanceOf(TimestampMismatch);
+});
+
+// GROUP carries the previous group's start plus one on lite-07, 0 when unknown, and passes over the
+// starts strictly between; earlier versions carry nothing.
+test("a lite-07 GROUP carries its Previous Start plus one", async () => {
+	const encode = (previous: bigint | undefined, version: Version) =>
+		Writer.collect(version, (w) => new Group({ subscribe: 1n, sequence: 7n, previous }).encode(w, version));
+	expect(Array.from(await encode(4n, Version.DRAFT_07))).toEqual([4, 1, 7, 5, 0]);
+	expect(Array.from(await encode(undefined, Version.DRAFT_07))).toEqual([4, 1, 7, 0, 0]);
+	expect(Array.from(await encode(4n, Version.DRAFT_06))).toEqual([3, 1, 7, 0]);
+
+	const decode = (bytes: number[], version: Version) =>
+		Group.decode(streamOf([new Uint8Array(bytes)], version), version);
+	const group = await decode([4, 1, 7, 5, 0], Version.DRAFT_07);
+	expect([group.previous, group.passedOver()]).toEqual([4n, { start: 5n, end: 7n }]);
+	expect((await decode([4, 1, 7, 0, 0], Version.DRAFT_07)).passedOver()).toEqual({ start: 7n, end: 7n });
+	expect((await decode([3, 1, 7, 0], Version.DRAFT_06)).previous).toBeUndefined();
 });
 
 // One macrotask, so every reaction queued before it has run.

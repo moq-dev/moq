@@ -1,6 +1,6 @@
 import * as z from "zod/mini";
-import { ClockSchema } from "./clock";
-import { nonzeroU53Schema } from "./integers";
+import { ClockSchema } from "./clock.ts";
+import { nonzeroU53Schema } from "./integers.ts";
 
 /**
  * The broadcast's timeline, at the catalog root's `sync`: the wall-clock time of PTS zero and how

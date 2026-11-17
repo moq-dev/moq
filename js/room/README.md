@@ -54,8 +54,8 @@ const local = new Local({
 	user: { name: "Alice" },
 });
 local.enabled.set(true);
-local.cameraEnabled.set(true);
-local.microphoneEnabled.set(true);
+local.camera.enabled.set(true);
+local.microphone.enabled.set(true);
 
 const room = new Room({ connection, identity });
 
@@ -65,7 +65,7 @@ const room = new Room({ connection, identity });
 // report the playing timestamp and receive stats.
 ```
 
-`Local` publishes through `Publish.Broadcast`, which encodes while enabled: while `cameraEnabled` is on, the camera's hd and sd renditions encode even when nobody in the room watches, so a member who arrives late can fetch the last few seconds. While `microphoneEnabled` is on, the microphone keeps raw audio and encodes it once someone listens. Turn either off to stop that capture.
+`Local` publishes through `Publish.Broadcast`, which encodes while enabled: while `camera.enabled` is on, the camera's hd and sd renditions encode even when nobody in the room watches, so a member who arrives late can fetch the last few seconds. While `microphone.enabled` is on, the microphone keeps raw audio and encodes it once someone listens. Turn either off to stop that capture.
 
 hang.live should depend on this package for `Room`, `Local`, `Remote`, and the `hang/*.json` metadata tracks. Location stays an app-defined catalog extension (`TRACK.location`). hang.live's JSON chat (`TRACK.chat` = `hang/chat.json`) is also an extension; the JSON window track is `Chat.TRACK` (`"chat"`).
 

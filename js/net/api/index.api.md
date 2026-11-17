@@ -27,7 +27,7 @@ export namespace Auth {
 	export interface Credential {
 		readonly answered: PromiseLike<void>;
 		close(): void;
-		readonly closed: PromiseLike<Error | null>;
+		readonly closed: Signals.GetPromise<Error | null>;
 		readonly grant: Signals.Getter<Auth.Grant | undefined>;
 	}
 	export class Duplicate extends Error {
@@ -93,10 +93,16 @@ export namespace Broadcast {
 		datagrams(name: string): Datagram.Consumer;
 		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
-		protected shareState(): never;
 		track(name: string): Track.Consumer;
 		tracks(): Broadcast.Tracks;
 	}
+	export type Listed = {
+		datagrams?: false;
+		info: Track.Info;
+	} | {
+		datagrams: true;
+		info: Datagram.Info;
+	};
 	export class Producer {
 		constructor();
 		close(): void;
@@ -113,15 +119,16 @@ export namespace Broadcast {
 		next(): Promise<Broadcast.TracksEvent | undefined>;
 	}
 	export type TracksEvent = {
-		info: Track.Info;
 		kind: "added";
 		name: string;
-	} | {
+	} & Broadcast.Listed | {
 		kind: "synced";
 	} | {
+		datagrams?: boolean;
 		kind: "removed";
 		name: string;
 	} | {
+		datagrams?: boolean;
 		kind: "finished";
 		name: string;
 	};
@@ -179,8 +186,8 @@ export namespace Connection {
 		rtt?: Clock.Duration;
 	}
 	export interface Props {
+		backoff?: Connection.Backoff;
 		consume?: Origin.Producer;
-		delay?: Connection.Backoff;
 		enabled?: boolean | Signals.Signal<boolean>;
 		goaway?: Connection.Handover;
 		publish?: Origin.Consumer;
@@ -200,7 +207,7 @@ export namespace Connection {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
-		closed: Promise<Error | null>;
+		readonly closed: Signals.GetPromise<Error | null>;
 		readonly draining: Signals.GetPromise<Connection.Goaway>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
@@ -221,7 +228,7 @@ export namespace Connection {
 		rtt?: Clock.Duration;
 	}
 	export type Status = "connecting" | "connected" | "disconnected";
-	export type Transport = "webtransport" | "websocket" | "webrtc";
+	export type Transport = "webtransport" | "websocket";
 	export interface WebSocketProps {
 		delay?: Clock.Duration;
 		enabled?: boolean;
@@ -293,12 +300,6 @@ export namespace Datagram {
 		readonly name: string;
 		get priority(): Signals.Getter<number | undefined>;
 	}
-	export function rescale(info: {
-		timescale?: Time.Timescale | null;
-	}, timestamp: Time.Timestamp): Time.Timestamp;
-	export function rescaleIn(info: {
-		timescale?: Time.Timescale | null;
-	}, timestamp: Time.Timestamp, key: bigint): Time.Timestamp;
 }
 
 export namespace Error {
@@ -392,8 +393,8 @@ export namespace Group {
 		close(): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
+		get end(): bigint | undefined;
 		get frameCount(): number;
-		get isClosed(): boolean;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -428,7 +429,7 @@ export namespace Group {
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
 		finish(): Group.Finished;
-		get isClosed(): boolean;
+		finishAt(end: bigint): Group.Finished;
 		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}
@@ -512,6 +513,7 @@ export namespace Origin {
 	}
 	export class Requesting {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
+		broadcast(): Promise<Broadcast.Consumer>;
 		close(): void;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly path: Path.Valid;
@@ -549,7 +551,6 @@ export namespace Origin {
 
 export namespace Path {
 	export { InvalidPattern } from "@moq/pattern";
-	export const MAX_PARTS: 32;
 	export { Pattern } from "@moq/pattern";
 	export { Patterns } from "@moq/pattern";
 	export type Relative = string & {
@@ -561,9 +562,7 @@ export namespace Path {
 		__brand: "Name";
 	};
 	export { compareSpecificity } from "@moq/pattern";
-	export function decode(raw: string): Path.Valid;
 	export function empty(): Path.Valid;
-	export function encode(path: Path.Valid): Path.Valid;
 	export { escape } from "@moq/pattern";
 	export function from(...paths: string[]): Path.Valid;
 	export function hasPrefix(prefix: Path.Valid, path: Path.Valid): boolean;
@@ -834,14 +833,6 @@ export namespace Track {
 		end?: Track.Anchor;
 		start?: Track.Anchor;
 	}
-	export class Request {
-		accept(info?: Track.InfoInit): Track.Producer;
-		demand(): Track.Demand;
-		readonly name: string;
-		get priority(): number;
-		reject(err: Error): void;
-		get subscription(): Readonly<Track.Subscription>;
-	}
 	export class Requests {
 		[Symbol.dispose](): void;
 		close(): void;
@@ -861,7 +852,6 @@ export namespace Track {
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
-		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
@@ -874,20 +864,17 @@ export namespace Track {
 		priority?: number;
 		ranges?: Track.Range[];
 	}
+	export function rescale(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp): Time.Timestamp;
+	export function rescaleIn(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp, key: bigint): Time.Timestamp;
 }
 
 export namespace Varint {
-	export const MAX_U14: number;
-	export const MAX_U30: number;
-	export const MAX_U53: number;
-	export const MAX_U6: number;
 	export function decode(buf: Uint8Array): [number, Uint8Array];
 	export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array];
-	export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array];
 	export function encode(v: number | bigint): Uint8Array;
-	export function encodeLeadingOnes(v: number | bigint): Uint8Array;
-	export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
-	export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
-	export function size(v: number): number;
 }
 ```

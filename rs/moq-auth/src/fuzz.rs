@@ -95,7 +95,7 @@ fn set() -> &'static KeySet {
 	SET.get_or_init(|| KeySet {
 		keys: keys()
 			.iter()
-			.map(|key| Arc::new(key.to_public().unwrap_or_else(|_| key.clone())))
+			.map(|key| Arc::new(key.public().unwrap_or_else(|_| key.clone())))
 			.collect(),
 	})
 }
@@ -288,7 +288,7 @@ fn check_key(key: &Key) {
 	let mut jwk = key.export();
 	jwk.operations = [KeyOperation::Verify].into();
 	let verifier = jwk.import().expect("a parsed key imports");
-	let verifier = verifier.to_public().unwrap_or(verifier);
+	let verifier = verifier.public().unwrap_or(verifier);
 	for claims in claims() {
 		let Ok(token) = key.sign(&claims) else { continue };
 		let verified = verifier
