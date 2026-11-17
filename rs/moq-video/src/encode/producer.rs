@@ -539,6 +539,8 @@ impl Producer {
 			}
 		}
 
+		self.resume_at_ceiling().await;
+
 		let noop = kio::Waiter::noop();
 		// Each target is one the grant would not hand out again without a new grant, a deadline,
 		// or a failure, all of which leave it pending until the next write.
@@ -562,7 +564,40 @@ impl Producer {
 				}
 				return;
 			}
+			// A deferred resume told the grant the rung is still off, so it would only offer the
+			// same resume again: wait for the next write.
+			if matches!(target, rate::Target::Enabled(_)) && matches!(self.encoding, Encoding::Disabled) {
+				return;
+			}
 			tracing::debug!(?target, "followed the bandwidth grant");
+		}
+	}
+
+	/// Resume a rung that only resumes at its ceiling, once its slice of the grant covers it.
+	async fn resume_at_ceiling(&mut self) {
+		if !self.ceiling_only || self.grant.is_none() || !matches!(self.encoding, Encoding::Disabled) {
+			return;
+		}
+		let ceiling = *self.ceiling.read();
+		if !self.reservation.rate().is_some_and(|rate| rate >= ceiling) {
+			return;
+		}
+		let target = rate::Target::Enabled(ceiling);
+		match self.apply(target).await {
+			Ok(()) => {
+				if let Some(grant) = self.grant.as_mut() {
+					grant.assume(target);
+				}
+			}
+			Err(err) => tracing::warn!(error = %err, bitrate = ceiling.as_bps(), "failed to resume at the ceiling"),
+		}
+	}
+
+	/// Leave a rung disabled and tell the grant so, which then offers its resume again from the
+	/// current estimate.
+	fn defer_resume(&mut self) {
+		if let Some(grant) = self.grant.as_mut() {
+			grant.assume(rate::Target::Disabled);
 		}
 	}
 
@@ -617,12 +652,13 @@ impl Producer {
 				self.publisher.report_bitrate(bitrate);
 				Ok(())
 			}
-			// A resume. Left disabled, the grant ramps on as if it were on, and the
-			// target that reaches the ceiling resumes it.
+			// A resume. One deferred leaves the grant agreeing the rung is off, and
+			// `resume_at_ceiling` resumes it once its slice covers the ceiling.
 			(rate::Target::Enabled(bitrate), Encoding::Disabled) => {
 				let ceiling = *self.ceiling.read();
 				let bitrate = bitrate.min(ceiling);
 				if self.ceiling_only && bitrate < ceiling {
+					self.defer_resume();
 					return Ok(());
 				}
 				let mut sink = Sink::open(&self.config).await?;
@@ -633,6 +669,7 @@ impl Producer {
 					// an encoder every ramp step on a backend that can never retune.
 					tracing::warn!(error = %err, bitrate = bitrate.as_bps(), "resumed encoder refused the funded bitrate; resuming only at the ceiling");
 					self.ceiling_only = true;
+					self.defer_resume();
 					return Ok(());
 				}
 				self.publisher.set_enabled(true)?;
@@ -911,6 +948,71 @@ mod tests {
 		assert!(enabled(&catalog, "high"));
 		assert_eq!(high.bitrate(), Some(ceiling));
 		let resumed = probe::take();
+		assert!(resumed.iter().all(|(event, _)| *event != "set_bitrate"), "{resumed:?}");
+
+		let _high = high.finish().await.unwrap();
+		let _low = low.finish().await.unwrap();
+	}
+
+	/// A rung waiting for its ceiling resumes from the grant: not while its slice covers only
+	/// part of the ceiling, and at once when the slice covers it, including after `set_bitrate`
+	/// lowers the ceiling to what the slice already funds.
+	#[tokio::test(start_paused = true)]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn a_deferred_resume_follows_the_grant_to_the_ceiling() {
+		let _probe = probe::exclusive();
+		let estimate = moq_net::bandwidth::Producer::new();
+		estimate.set(Some(Rate::from_kbps(1_500))).unwrap();
+		let bandwidth = moq_net::bandwidth::Allocator::new(estimate.consume());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let low = probed(
+			&broadcast,
+			&catalog,
+			"low",
+			Rate::from_kbps(500),
+			moq_net::bandwidth::Allocator::unlimited(),
+			None,
+		);
+		let ceiling = Rate::from_mbps(2);
+		let mut high = probed(&broadcast, &catalog, "high", ceiling, bandwidth, Some(low.rung()));
+		let _viewer = broadcast
+			.consume()
+			.track("high")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		let mut micros = 0;
+
+		high.write(frame(&mut micros)).await.unwrap();
+		high.apply(rate::Target::Disabled).await.unwrap();
+		let funded = Rate::from_mbps(1);
+		probe::refuse_once(funded.as_bps());
+		high.apply(rate::Target::Enabled(funded)).await.unwrap();
+		assert_eq!(high.bitrate(), None);
+		let _ = probe::take();
+
+		// The slice funds part of the ceiling: the grant offers resumes, and none opens.
+		for _ in 0..30 {
+			tokio::time::advance(Duration::from_millis(100)).await;
+			high.write(frame(&mut micros)).await.unwrap();
+		}
+		assert!(!enabled(&catalog, "high"));
+		assert_eq!(events("open"), 0);
+
+		// A ceiling the slice covers resumes it on the next frame, at that ceiling.
+		let lowered = Rate::from_mbps(1);
+		high.set_bitrate(lowered).await.unwrap();
+		high.write(frame(&mut micros)).await.unwrap();
+		assert!(enabled(&catalog, "high"));
+		assert_eq!(high.bitrate(), Some(lowered));
+		let resumed = probe::take();
+		assert!(resumed.iter().any(|(event, _)| *event == "open"), "{resumed:?}");
 		assert!(resumed.iter().all(|(event, _)| *event != "set_bitrate"), "{resumed:?}");
 
 		let _high = high.finish().await.unwrap();

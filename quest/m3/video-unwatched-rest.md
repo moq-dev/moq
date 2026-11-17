@@ -19,7 +19,13 @@ grant regardless. Its groups wait in the track cache, so the cost is encoder
 work and a join that starts on a group encoded at the ceiling. m3, as a fix to
 behaviour #8964 shipped.
 
-Recommended: while unwatched, close the encoder like a disabled rung but keep
+Decided 2026-11-16 (maintainer, on
+[moq-dev/moq#8964](https://github.com/moq-dev/moq/pull/8964#issuecomment-6932840632)):
+✅ rest by closing the encoder until a subscriber arrives (rejected: encoding
+at the policy floor, which still encodes every frame; encoding at the last
+granted rate, the bindings' behaviour before #8964).
+
+While unwatched, close the encoder like a disabled rung but keep
 the rendition advertised enabled; the first write after a subscriber arrives
 reopens it, which opens on a keyframe on every backend, at the rate the grant
 then funds. A simulcast rung keeps following the grant as it does now, since it
@@ -28,12 +34,3 @@ needs the grant's slice to resume. `publish_capture` keeps reporting its state.
 Tests: an unwatched producer encodes nothing and holds no encoder; a viewer
 arriving gets a group starting on a keyframe at the granted rate; a viewer
 leaving and returning does the same.
-
-## Waiting
-
-- Maintainer: how an unwatched rendition rests. Options: (1) recommended, close
-  the encoder until a subscriber arrives, which saves the most and costs the
-  first viewer one encoder open; (2) keep encoding at the policy floor (a tenth
-  of the ceiling), which keeps a group cached for an instant join but still
-  encodes every frame; (3) keep encoding at the last granted rate, which is
-  what the bindings did before #8964.
