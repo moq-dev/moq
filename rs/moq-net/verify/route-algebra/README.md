@@ -5,9 +5,17 @@ The multicast route rule (`rs/moq-net/src/route/tests/multi.rs` with the epic's
 algebra in Agda, with Daggitt and Griffin's Theorem 5 applied to it
 ([arXiv 2106.01184](https://arxiv.org/abs/2106.01184), library
 [MatthewDaggitt/agda-routing](https://github.com/MatthewDaggitt/agda-routing)):
-on every network, from every state, under every schedule of delayed,
-reordered, lost, and repeated messages, the asynchronous iteration reaches the
-network's unique fixed point once the network holds still long enough.
+on every network, from every state, with messages delayed, reordered, lost, and
+repeated, the asynchronous iteration reaches the network's unique fixed point
+once the network holds still long enough.
+
+"Long enough" is a premise on progress, not only on time (the paper's
+Definitions 14 to 17): while the network holds still, every node must keep
+acting, and every node must keep hearing from each neighbour something sent
+after any given moment, a fixed number of times over. Loss is tolerated only
+within that. A link that loses everything for good never converges, though
+nothing about the network changed. A session here is an ordered, reliable
+stream, so it delivers or it closes, and a close is a change to the network.
 
 `just test route-proof` type-checks it with its own Agda pin
 (`nix/route-proof.nix`: Agda 2.6.4.3, standard-library 2.0, agda-routing at a
@@ -104,7 +112,7 @@ never improves a claim in the real router (`a_grant_never_improves_a_claim`).
   [Requests](https://github.com/moq-dev/moq/pull/8881) name their origin node
   and fail closed instead.
 - **A cost that depends on who subscribed.** Warmth is not in the algebra;
-  [warmth](/quest/m2/multicast/warmth.md) argues it separately.
+  [warmth](https://github.com/moq-dev/moq/pull/8903) argues it separately.
 - **Liveness under churn that never stops.** Convergence needs each epoch to
   last long enough.
 - **The chain as Rust records it.** The claim instance's path names every node
@@ -212,7 +220,7 @@ neighbour that order left without a route.
 ## Moving the binding to the production router
 
 The tests bind to the prototype, which the router quest
-([router](/quest/m2/multicast/router.md)) replaces with `route/relay.rs`. When it
+([router](https://github.com/moq-dev/moq/pull/8901)) replaces with `route/relay.rs`. When it
 lands, point `algebra.rs` and `sticky.rs` at the router's equivalents of
 `Offer::own`, `Offer::onward`, `Here::arrive`, `order`, and `candidates`,
 keeping them one function each that the router itself calls. Instantiate

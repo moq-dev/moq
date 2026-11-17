@@ -12,10 +12,12 @@
 -- cost, mark it, and prepend the link to its path.
 --
 -- Any such algebra is an increasing path algebra, so Daggitt and Griffin's
--- Theorem 5 applies: on every network, from every state, under every schedule
--- of delayed, reordered, lost, and repeated messages, the asynchronous iteration
--- reaches the network's unique fixed point once the network holds still long
--- enough (`convergent`).
+-- Theorem 5 applies: on every network, from every state, with messages delayed,
+-- reordered, lost, and repeated, the asynchronous iteration reaches the network's
+-- unique fixed point once the network holds still long enough (`convergent`).
+-- Long enough means enough pseudocycles: every node keeps acting, and keeps
+-- hearing from each neighbour something sent after any given moment. A link that
+-- loses everything for good is outside the theorem.
 --------------------------------------------------------------------------------
 
 open import Data.Bool.Base using (Bool; true; false; _∨_; if_then_else_)
@@ -327,9 +329,9 @@ module Rule (P : Policy) where
   ------------------------------------------------------------------------
   -- The theorem
 
-  -- Daggitt and Griffin, Theorem 5: on every network, from every state, under
-  -- every schedule, the asynchronous iteration reaches the unique fixed point of
-  -- each epoch that lasts long enough.
+  -- Daggitt and Griffin, Theorem 5: on every network, from every state, the
+  -- asynchronous iteration reaches the unique fixed point of each epoch whose
+  -- schedule holds enough pseudocycles.
   convergent : Convergent algebra
   convergent = incrPaths⇒convergent isRoutingAlgebra isPathAlgebra isIncreasing
 
