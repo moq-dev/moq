@@ -21,12 +21,12 @@
 pub mod container;
 mod format;
 mod init;
-mod track;
+pub mod track;
 
 pub use container::Container;
 pub use format::{AudioFormat, ContainerFormat, Format, Kind, VideoFormat};
 pub use init::{AudioInit, ContainerInit, VideoInit};
-pub use track::*;
+pub use track::{Track, TrackStream};
 
 /// A finished importer keeps its tracks and renditions published, but not its input storage.
 ///
@@ -119,8 +119,7 @@ mod tests {
 				let pts = moq_net::Timestamp::from_micros(pts).unwrap();
 				track.decode(keyframe.clone(), Some(pts)).unwrap();
 			}
-			track.finish().unwrap();
-			Box::new(track)
+			Box::new(track.finish().unwrap())
 		});
 	}
 
@@ -132,8 +131,7 @@ mod tests {
 			let init = VideoInit::new(VideoFormat::Avc3, Bytes::new());
 			let mut track = TrackStream::video(avc3(broadcast), catalog.reserve(), init).unwrap();
 			track.decode(&stream).unwrap();
-			track.finish().unwrap();
-			Box::new(track)
+			Box::new(track.finish().unwrap())
 		});
 	}
 

@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
 	Error, Path, Timescale, Timestamp, bandwidth,
-	coding::{Decode as _, Reader, Stream},
+	coding::{Decode as _, Reader, Recv, Stream},
 	lite,
 	track::{Anchor, Position, Subscription},
 	util::SendCell,
@@ -13201,19 +13201,23 @@ impl TrackServeRun {
 					// to the session's other tasks while a peer streams them.
 					let mut budget = kio::coop::Budget::new(32);
 					while let Some(stream) = reader
-						&& let Poll::Ready(res) = stream.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
+						&& let Poll::Ready(res) = stream.poll_recv::<lite::SubscribeResponse>(waiter)
 					{
 						match res {
-							Ok(Some(_)) => {}
+							Recv::Message(_) => {}
 							// The publisher's FIN in reply, or a reset: the stream is done.
-							Ok(None) => {
+							Recv::Ended | Recv::Reset(_) => {
 								*reader = None;
 								break;
 							}
 							// Malformed bytes are a protocol violation here as on any Subscribe
-							// Stream, which closes the session; a short read at a FIN is not.
-							Err(err) => {
-								let _ = lite::error::control(&mut self.serve.subscriber.session.clone(), err);
+							// Stream, which closes the session; a reset or a FIN inside a message
+							// is not.
+							Recv::Malformed(_) => {
+								let _ = lite::error::control(
+									&mut self.serve.subscriber.session.clone(),
+									Error::ProtocolViolation,
+								);
 								*reader = None;
 								break;
 							}
@@ -14382,10 +14386,7 @@ impl ServeLoop {
 					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
 					// Partial message bytes persist in the reader's buffer across turns.
 					if let Sub::Active(active) = &mut self.sub
-						&& let Poll::Ready(res) = active
-							.stream
-							.reader
-							.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
+						&& let Poll::Ready(res) = active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter)
 					{
 						// The publisher answered the SUBSCRIBE, so its demand stands on the
 						// subscription now. A query still held once that subscription ends
@@ -14393,7 +14394,7 @@ impl ServeLoop {
 						self.held = None;
 						active.unanswered = None;
 						match res {
-							Ok(Some(msg)) => {
+							Recv::Message(msg) => {
 								if let Err(err) = self.apply_response(serve, msg) {
 									return Poll::Ready(ServeEnd::GiveBack(err));
 								}
@@ -14402,7 +14403,7 @@ impl ServeLoop {
 								ready!(budget.poll_yield(waiter));
 								continue;
 							}
-							Ok(None) => {
+							Recv::Ended => {
 								// The publisher ends the subscription only once it declared the
 								// track's end: with SUBSCRIBE_FINISH from lite-05, which lite-07
 								// reads into the tail without a FIN.
@@ -14422,7 +14423,17 @@ impl ServeLoop {
 								};
 								continue;
 							}
-							Err(err) => {
+							// Malformed bytes are a protocol violation, which closes the session; a
+							// reset gives up the subscription with its reason.
+							Recv::Malformed(err) => {
+								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
+								self.mode = ServeMode::Failed {
+									err: Error::ProtocolViolation,
+									tail: active.tail.consume(),
+								};
+								continue;
+							}
+							Recv::Reset(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
 								self.mode = ServeMode::Failed {
 									err,

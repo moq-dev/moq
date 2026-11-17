@@ -306,15 +306,6 @@ impl Abort for Data<moq_mux::json::Stream<serde_json::Value>> {
 	}
 }
 
-/// The cause a failed import ends its tracks with, so a reader sees the publisher fail rather than
-/// `Dropped`. Only a moq-net error has a wire code; any other reaches readers as `Internal`.
-fn cause(err: &moq_mux::Error) -> moq_net::Error {
-	match err {
-		moq_mux::Error::Moq(err) => err.clone(),
-		_ => moq_net::StreamError::Internal.into(),
-	}
-}
-
 impl<T> std::ops::Deref for Kept<T> {
 	type Target = T;
 
@@ -686,15 +677,19 @@ impl Publish {
 	}
 
 	pub fn media_finish(&mut self, media: Id) -> Result<(), Error> {
-		let mut track = self.media.remove(media).ok_or(Error::MediaNotFound)?;
-		if let Err(err) = track.finish() {
-			track.children.forget(Child::Media(media));
-			let cause = cause(&err);
-			track.abort(cause);
-			return Err(err.into());
+		let Kept { inner, children } = self.media.remove(media).ok_or(Error::MediaNotFound)?;
+		match inner.track.finish() {
+			// The broadcast keeps the finished track, so its finish still holds it.
+			Ok(finished) => {
+				children.keep(Child::Media(media), finished);
+				Ok(())
+			}
+			// A failed finish already ended the track with its cause.
+			Err(err) => {
+				children.forget(Child::Media(media));
+				Err(err.into())
+			}
 		}
-		track.keep(Child::Media(media));
-		Ok(())
 	}
 
 	/// Write a whole chunk of container bytes.

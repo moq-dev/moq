@@ -93,7 +93,6 @@ export namespace Broadcast {
 		datagrams(name: string): Datagram.Consumer;
 		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
-		protected shareState(): never;
 		track(name: string): Track.Consumer;
 		tracks(): Broadcast.Tracks;
 	}
@@ -221,7 +220,7 @@ export namespace Connection {
 		rtt?: Clock.Duration;
 	}
 	export type Status = "connecting" | "connected" | "disconnected";
-	export type Transport = "webtransport" | "websocket" | "webrtc";
+	export type Transport = "webtransport" | "websocket";
 	export interface WebSocketProps {
 		delay?: Clock.Duration;
 		enabled?: boolean;
@@ -293,12 +292,6 @@ export namespace Datagram {
 		readonly name: string;
 		get priority(): Signals.Getter<number | undefined>;
 	}
-	export function rescale(info: {
-		timescale?: Time.Timescale | null;
-	}, timestamp: Time.Timestamp): Time.Timestamp;
-	export function rescaleIn(info: {
-		timescale?: Time.Timescale | null;
-	}, timestamp: Time.Timestamp, key: bigint): Time.Timestamp;
 }
 
 export namespace Error {
@@ -393,7 +386,6 @@ export namespace Group {
 		get closed(): Signals.GetPromise<Error | null>;
 		get done(): boolean;
 		get frameCount(): number;
-		get isClosed(): boolean;
 		nextFrame(): Promise<Frame.Consumer | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -428,7 +420,6 @@ export namespace Group {
 		consume(): Group.Consumer;
 		createFrame(info: Frame.Info): Frame.Producer;
 		finish(): Group.Finished;
-		get isClosed(): boolean;
 		readonly sequence: bigint;
 		writeFrame(frame: Group.Frame): void;
 	}
@@ -549,7 +540,6 @@ export namespace Origin {
 
 export namespace Path {
 	export { InvalidPattern } from "@moq/pattern";
-	export const MAX_PARTS: 32;
 	export { Pattern } from "@moq/pattern";
 	export { Patterns } from "@moq/pattern";
 	export type Relative = string & {
@@ -561,9 +551,7 @@ export namespace Path {
 		__brand: "Name";
 	};
 	export { compareSpecificity } from "@moq/pattern";
-	export function decode(raw: string): Path.Valid;
 	export function empty(): Path.Valid;
-	export function encode(path: Path.Valid): Path.Valid;
 	export { escape } from "@moq/pattern";
 	export function from(...paths: string[]): Path.Valid;
 	export function hasPrefix(prefix: Path.Valid, path: Path.Valid): boolean;
@@ -834,14 +822,6 @@ export namespace Track {
 		end?: Track.Anchor;
 		start?: Track.Anchor;
 	}
-	export class Request {
-		accept(info?: Track.InfoInit): Track.Producer;
-		demand(): Track.Demand;
-		readonly name: string;
-		get priority(): number;
-		reject(err: Error): void;
-		get subscription(): Readonly<Track.Subscription>;
-	}
 	export class Requests {
 		[Symbol.dispose](): void;
 		close(): void;
@@ -861,7 +841,6 @@ export namespace Track {
 		recvGroup(): Promise<Group.Consumer | undefined>;
 		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
-		tryRecvGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
@@ -874,20 +853,17 @@ export namespace Track {
 		priority?: number;
 		ranges?: Track.Range[];
 	}
+	export function rescale(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp): Time.Timestamp;
+	export function rescaleIn(info: {
+		timescale?: Time.Timescale | null;
+	}, timestamp: Time.Timestamp, key: bigint): Time.Timestamp;
 }
 
 export namespace Varint {
-	export const MAX_U14: number;
-	export const MAX_U30: number;
-	export const MAX_U53: number;
-	export const MAX_U6: number;
 	export function decode(buf: Uint8Array): [number, Uint8Array];
 	export function decodeBigInt(buf: Uint8Array): [bigint, Uint8Array];
-	export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array];
 	export function encode(v: number | bigint): Uint8Array;
-	export function encodeLeadingOnes(v: number | bigint): Uint8Array;
-	export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
-	export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array;
-	export function size(v: number): number;
 }
 ```

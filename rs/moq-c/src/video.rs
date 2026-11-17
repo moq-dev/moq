@@ -539,18 +539,24 @@ fn surface(_frame: &moq_video::Frame) -> *const c_void {
 /// anyway would leave a truncated stream indistinguishable from a complete one,
 /// and only the local caller would ever learn otherwise.
 fn finalize(
-	mut producer: moq_video::encode::Producer,
+	producer: moq_video::encode::Producer,
 	drained: Result<(), moq_video::Error>,
 	children: &crate::publish::Children,
 	child: crate::publish::Child,
 ) -> Result<(), Error> {
 	match drained {
-		Ok(()) => {
-			producer.finish()?;
+		Ok(()) => match producer.finish() {
 			// The broadcast keeps the finished track, so its finish still holds it.
-			children.keep(child, producer);
-			Ok(())
-		}
+			Ok(finished) => {
+				children.keep(child, finished);
+				Ok(())
+			}
+			// A failed finish already ended the track with its cause.
+			Err(err) => {
+				children.forget(child);
+				Err(err.into())
+			}
+		},
 		Err(err) => {
 			children.forget(child);
 			producer.abort(moq_net::Error::Transport(err.to_string()));

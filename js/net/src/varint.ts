@@ -19,13 +19,7 @@ import {
 	writeQuic,
 } from "./util/varint.ts";
 
-/** Largest value that fits in a 1-byte varint (6 bits). */
-export const MAX_U6 = 2 ** 6 - 1;
-/** Largest value that fits in a 2-byte varint (14 bits). */
-export const MAX_U14 = 2 ** 14 - 1;
-/** Largest value that fits in a 4-byte varint (30 bits). */
-export const MAX_U30 = 2 ** 30 - 1;
-/** Largest value representable without precision loss (`Number.MAX_SAFE_INTEGER`, 53 bits). */
+/** Largest value representable without precision loss (`Number.MAX_SAFE_INTEGER`, 53 bits). @internal */
 export const MAX_U53 = Number.MAX_SAFE_INTEGER;
 
 // The size of the varint at the start of `buf`, throwing unless all of it is there.
@@ -36,7 +30,7 @@ function sizeOf(buf: Uint8Array, size: (first: number) => number): number {
 	return n;
 }
 
-/** Encode a value in leading-ones varint format into the provided buffer, returning the written subarray. */
+/** Encode a value in leading-ones varint format into the provided buffer, returning the written subarray. @internal */
 export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
 	const lo = split(v);
 	const buf = new Uint8Array(dst, 0, lengthLeadingOnes(parts.hi, lo));
@@ -44,7 +38,7 @@ export function encodeLeadingOnesTo(dst: ArrayBuffer, v: number | bigint): Uint8
 	return buf;
 }
 
-/** Encode a value in leading-ones varint format into a freshly allocated buffer. */
+/** Encode a value in leading-ones varint format into a freshly allocated buffer. @internal */
 export function encodeLeadingOnes(v: number | bigint): Uint8Array {
 	return encodeLeadingOnesTo(new ArrayBuffer(9), v);
 }
@@ -53,6 +47,8 @@ export function encodeLeadingOnes(v: number | bigint): Uint8Array {
  * Decode a leading-ones varint, returning the value and the remaining buffer.
  *
  * Accepts the 7-byte form, which only draft-18+ allows, since there is no version here to check.
+ *
+ * @internal
  */
 export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array] {
 	const size = sizeOf(buf, peekLeadingOnes);
@@ -61,19 +57,10 @@ export function decodeLeadingOnes(buf: Uint8Array): [bigint, Uint8Array] {
 }
 
 /**
- * Returns the number of bytes needed to encode a value as a varint.
- */
-export function size(v: number): number {
-	if (v <= MAX_U6) return 1;
-	if (v <= MAX_U14) return 2;
-	if (v <= MAX_U30) return 4;
-	if (v <= MAX_U53) return 8;
-	throw new Error(`overflow, value larger than 53-bits: ${v}`);
-}
-
-/**
  * Encodes a value as a QUIC variable-length integer into the provided buffer,
  * returning the written subarray.
+ *
+ * @internal
  */
 export function encodeTo(dst: ArrayBuffer, v: number | bigint): Uint8Array {
 	const lo = split(v);

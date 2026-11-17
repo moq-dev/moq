@@ -226,8 +226,7 @@ impl PublishDecoder {
 			Self::Avc3 { mut split, mut import } => {
 				let tail = split.flush(None)?;
 				import.decode(tail)?;
-				import.finish()?;
-				FinishedDecoder::Avc3(import)
+				FinishedDecoder::Avc3(Box::new(import.finish()?))
 			}
 			Self::Fmp4(d) => FinishedDecoder::Fmp4(Box::new(d.finish()?)),
 			Self::Ts(d) => FinishedDecoder::Ts(Box::new(d.finish()?)),
@@ -253,7 +252,7 @@ impl PublishDecoder {
 
 /// A [`PublishDecoder`] whose tracks finished, holding them so they stay servable.
 enum FinishedDecoder {
-	Avc3(Box<moq_mux::codec::h264::Import>),
+	Avc3(Box<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>),
 	Fmp4(Box<fmp4::Finished>),
 	Ts(Box<ts::republish::Finished>),
 	TsPrograms(Box<ts::programs::Finished>),

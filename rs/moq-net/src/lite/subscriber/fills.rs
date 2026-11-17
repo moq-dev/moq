@@ -11,7 +11,9 @@ use rangemap::{RangeMap, RangeSet};
 
 use super::{Establish, SubStream, Tail, TrackServe};
 use crate::{
-	Error, StreamError, group, lite,
+	Error, StreamError,
+	coding::Recv,
+	group, lite,
 	track::{self, Delay, Order, Position, Subscription},
 };
 
@@ -619,12 +621,7 @@ impl Recovery {
 					if let Poll::Ready(Err(err)) = active.stream.writer.poll_flush(waiter) {
 						tracing::debug!(%err, "recovery subscribe write failed");
 					}
-					let res = ready!(
-						active
-							.stream
-							.reader
-							.poll_decode_maybe::<lite::SubscribeResponse>(waiter)
-					);
+					let res = ready!(active.stream.reader.poll_recv::<lite::SubscribeResponse>(waiter));
 					let now = self.serve.subscriber.runtime.now();
 					let version = self.serve.subscriber.version;
 					let groups = self.groups.clone();
@@ -641,7 +638,7 @@ impl Recovery {
 					};
 					match res {
 						// One start, for its one range.
-						Ok(Some(lite::SubscribeResponse::Start(start)))
+						Recv::Message(lite::SubscribeResponse::Start(start))
 							if active.started.is_none() && start.starts.len() == 1 =>
 						{
 							// Below its start the publisher delivers nothing.
@@ -652,49 +649,46 @@ impl Recovery {
 							);
 							active.started = Some(start.starts[0]);
 						}
-						Ok(Some(lite::SubscribeResponse::Drop(dropped))) => {
+						Recv::Message(lite::SubscribeResponse::Drop(dropped)) => {
 							given_up(dropped.groups.clone(), Refusal::dropped(dropped.error(version)));
 						}
 						// Never produced, such as the keys between two sparse group starts: the copy
 						// records the skip, as the subscription itself does, and a fill owing one
 						// is answered rather than asked again.
-						Ok(Some(lite::SubscribeResponse::Skip(skipped))) => {
+						Recv::Message(lite::SubscribeResponse::Skip(skipped)) => {
 							if !skipped.groups.is_empty() {
 								self.serving.skip_received(skipped.groups.clone());
 								given_up(skipped.groups, Refusal::dropped(StreamError::NotFound));
 							}
 						}
 						// Nothing at or past the track's end will be produced.
-						Ok(Some(lite::SubscribeResponse::Finish(finish))) if active.end.is_none() => {
+						Recv::Message(lite::SubscribeResponse::Finish(finish)) if active.end.is_none() => {
 							given_up(
 								finish.group.max(groups.start)..groups.end,
 								Refusal::dropped(StreamError::NotFound),
 							);
 							active.end = Some(finish);
 						}
-						Ok(Some(lite::SubscribeResponse::Ok(_))) => {}
+						Recv::Message(lite::SubscribeResponse::Ok(_)) => {}
 						// A second START or FINISH, or a STARTED for a range no update added.
-						Ok(Some(msg)) => {
+						Recv::Message(msg) => {
 							tracing::warn!(?msg, "unexpected recovery subscribe response");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 						// The publisher FINs in reply to ours, or once it finished the track.
-						Ok(None) if *finished || active.end.is_some() => self.end(StreamError::NotFound),
+						Recv::Ended if *finished || active.end.is_some() => self.end(StreamError::NotFound),
 
-						Ok(None) => {
+						Recv::Ended => {
 							tracing::warn!("recovery subscribe ended without SUBSCRIBE_FINISH");
 							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
-						Err(err) => {
-							// Malformed bytes are a violation, as on the subscription itself; a
-							// reset gives up what is left with its reason.
-							let err = match err {
-								Error::Decode(crate::DecodeError::Short) => err,
-								err => crate::auth::protocol_error(err),
-							};
-							if matches!(err, Error::ProtocolViolation) {
-								return Poll::Ready(Err(err));
-							}
+						// Malformed bytes are a violation, as on the subscription itself.
+						Recv::Malformed(err) => {
+							tracing::warn!(%err, "malformed recovery subscribe response");
+							return Poll::Ready(Err(Error::ProtocolViolation));
+						}
+						// A reset, or a FIN inside a message, gives up what is left with its reason.
+						Recv::Reset(err) => {
 							tracing::debug!(%err, "recovery subscribe ended");
 							self.end(StreamError::from(&err));
 						}

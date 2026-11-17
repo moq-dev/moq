@@ -2670,6 +2670,10 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
+/// The subscription's ranges filter the read, and an update replaces them on the live read.
+///
+/// No delivery budget runs on the wall clock (the track keeps its groups and the read waits
+/// on them), so a slow suite cannot age group `one` out before the read reaches it.
 #[test]
 fn raw_track_subscription_options_and_update() {
 	let origin = id(moq_origin_create());
@@ -2679,8 +2683,8 @@ fn raw_track_subscription_options_and_update() {
 	let track_name = b"data";
 	let info = moq_track_info {
 		priority: 3,
-		max_age_us: 1_000_000,
-		max_age_unlimited: false,
+		max_age_us: 0,
+		max_age_unlimited: true,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2690,52 +2694,43 @@ fn raw_track_subscription_options_and_update() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
 
-	let payloads: [&[u8]; 3] = [b"zero", b"one", b"two"];
-	for (i, payload) in payloads.into_iter().enumerate() {
+	let publish = |payload: &[u8], at: u64| {
 		assert_eq!(
-			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(i as u64 * 20_000)) },
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(at)) },
 			0
 		);
-	}
+	};
+	publish(b"zero", 0);
+	publish(b"one", 20_000);
+	publish(b"two", 40_000);
 
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	// An absolute anchor is a group's start, in the track's microseconds. A read whose ranges
-	// all end ends once it read them, so an open range far ahead keeps this one open for the
-	// update.
+	let absolute = |group| moq_anchor {
+		kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+		group,
+		timestamp: moq_timestamp::default(),
+	};
+	// An absolute anchor is a group's start, in the track's microseconds, and an absolute end
+	// is exclusive. The open range starts at the group containing 100 s, the newest one held:
+	// `two`, and every group after it.
 	let ranges = [
 		moq_range {
-			start: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 20_000,
-				timestamp: moq_timestamp::default(),
-			},
-			end: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 20_001,
-				timestamp: moq_timestamp::default(),
-			},
+			start: absolute(20_000),
+			end: absolute(20_001),
 			end_present: true,
 		},
 		moq_range {
-			start: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 100_000_000,
-				timestamp: moq_timestamp::default(),
-			},
-			end: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 0,
-				timestamp: moq_timestamp::default(),
-			},
+			start: absolute(100_000_000),
+			end: absolute(0),
 			end_present: false,
 		},
 	];
 	let subscription = moq_subscription {
 		priority: 5,
 		delay: moq_delay {
-			max_us: 25_000,
+			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: ranges.as_ptr(),
@@ -2753,52 +2748,42 @@ fn raw_track_subscription_options_and_update() {
 		)
 	});
 
-	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_frame {
-		payload: std::ptr::null(),
-		payload_size: 0,
-		timestamp: std::ptr::null(),
-		keyframe: false,
+	let expect = |payload: &[u8], at: u64| {
+		let frame_id = id(frame_cb.recv());
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp: std::ptr::null(),
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+		assert_eq!(received, payload);
+		assert_eq!(read_timestamp(frame.timestamp), micros(at));
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
-	assert_eq!(received, b"one");
-	assert_eq!(read_timestamp(frame.timestamp), micros(20_000));
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	expect(b"one", 20_000);
+	expect(b"two", 40_000);
 
-	// Widen the bounded range but keep the open one, so the read stays open for the cancel.
-	let widened = [
-		moq_range {
-			end: moq_anchor {
-				group: 40_001,
-				..ranges[0].end
-			},
-			..ranges[0]
-		},
-		ranges[1],
-	];
+	// Replace both ranges with one that ends at `three`, so the read ends once it reads it
+	// and never sees `four`.
+	let bounded = [moq_range {
+		end: absolute(60_001),
+		..ranges[0]
+	}];
 	let update = moq_subscription {
-		ranges: widened.as_ptr(),
-		ranges_len: widened.len(),
+		ranges: bounded.as_ptr(),
+		ranges_len: bounded.len(),
 		..subscription
 	};
 	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);
 
-	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_frame {
-		payload: std::ptr::null(),
-		payload_size: 0,
-		timestamp: std::ptr::null(),
-		keyframe: false,
-	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
-	assert_eq!(received, b"two");
-	assert_eq!(read_timestamp(frame.timestamp), micros(40_000));
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	publish(b"three", 60_000);
+	publish(b"four", 80_000);
+	expect(b"three", 60_000);
+	assert_eq!(frame_cb.recv_terminal(), 0, "the read ends with its ranges");
+	assert!(moq_consume_track_cancel(consumer) < 0, "the ended read is gone");
 
-	assert_eq!(moq_consume_track_cancel(consumer), 0);
-	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -2806,7 +2791,7 @@ fn raw_track_subscription_options_and_update() {
 }
 
 /// A time anchor starts at the group containing that presentation time, given unscaled in the
-/// track's timescale.
+/// track's timescale. No budget runs on the wall clock, so a slow suite can't age `one` out.
 #[test]
 fn raw_track_time_anchor() {
 	let origin = id(moq_origin_create());
@@ -2816,8 +2801,8 @@ fn raw_track_time_anchor() {
 	let track_name = b"data";
 	let info = moq_track_info {
 		priority: 3,
-		max_age_us: 1_000_000,
-		max_age_unlimited: false,
+		max_age_us: 0,
+		max_age_unlimited: true,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2858,7 +2843,7 @@ fn raw_track_time_anchor() {
 	let subscription = moq_subscription {
 		priority: 5,
 		delay: moq_delay {
-			max_us: 1_000_000,
+			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: ranges.as_ptr(),
