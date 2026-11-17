@@ -107,4 +107,3 @@ behind a temporary alias. Wire: none.
 ## Related
 
 - [Tokens are written as documented](/quest/m2/auth-claims.md) - the token side of the same types
-- [An attached token arrives as a token](/quest/m2/auth-attach-token.md) - the other change to the request the server reads

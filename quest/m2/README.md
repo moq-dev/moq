@@ -45,9 +45,8 @@ removal, a rename, or a wire, catalog, or format change that is free until
   memory pairing found; [congestion names](/quest/m2/congestion-names.md);
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [transport names](/quest/m2/transport-names.md).
-- **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
-  [claims](/quest/m2/auth-claims.md), and
-  [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
+- **Auth and crypto.** [Grants](/quest/m2/auth-grants.md) and
+  [claims](/quest/m2/auth-claims.md). End-to-end encryption
   [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
