@@ -167,11 +167,8 @@ pub struct Consumer {
 	/// The playout delay, fixed or estimated from arrivals.
 	target: Target,
 	/// The playout delay the subscription states as its [`Delay::min`] in place of
-	/// [`Options::delay`]'s, once the start no longer depends on it.
-	stated: Option<Duration>,
-	/// Whether the container's start no longer depends on the min: floored at the live edge,
-	/// or fixed once it handed over a packet, gap, or end.
-	placed: bool,
+	/// [`Options::delay`]'s.
+	stated: Duration,
 	/// Where arrival times are measured from.
 	origin: Instant,
 	/// Packets read and observed but not yet decoded, held by the [`Backpressure`] gate,
@@ -232,7 +229,16 @@ impl Consumer {
 
 		let name = name.into();
 		let warmup = catalog.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
-		let playout = moq_mux::container::Playout::new(options.delay, warmup);
+		let target = Target::new(
+			options.delay.min.unwrap_or_default(),
+			options.estimate,
+			catalog.jitter,
+		);
+		// The subscription states the playout delay as its min from the start, the estimate's cold
+		// start included: the container places an unfloored start and waits a missing group out
+		// by it (see `next`).
+		let stated = from_millis(target.millis());
+		let playout = moq_mux::container::Playout::new(options.delay.with_min(stated), warmup);
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		// The whole delay from the start, as the container keeps it: the transport enforces the
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
@@ -280,9 +286,8 @@ impl Consumer {
 		let track = playout.consumer(track, container);
 
 		Ok(Self {
-			target: Target::new(delay, options.estimate, catalog.jitter),
-			stated: None,
-			placed: options.start == Start::Latest,
+			target,
+			stated,
 			decoder,
 			track,
 			resampler: None,
@@ -354,10 +359,9 @@ impl Consumer {
 		from_millis(self.target.millis())
 	}
 
-	// The delay the subscription carries: the options', with the playout delay as the min once the
-	// start no longer depends on it.
+	// The delay the subscription carries: the options', with the playout delay as the min.
 	fn stated(&self) -> Delay {
-		self.options.delay.with_min(self.stated.or(self.options.delay.min))
+		self.options.delay.with_min(self.stated)
 	}
 
 	/// Sample rate samples are actually delivered at, which is
@@ -614,13 +618,10 @@ impl Consumer {
 			// The container waits a missing group out for the subscription's min, so it states the
 			// playout delay: past it the group would play late, and a reordered backlog's holes
 			// waited out to the max delay would read as jitter. Late groups that did arrive still
-			// play up to the max. An unfloored start waits for media the min reaches back to, which
-			// the estimate would measure as jitter, so that start keeps the configured min until
-			// the container hands over its first item. Checked before every poll, since each
-			// arrival and each decoded frame can move it; the estimate moves in whole buckets, so
-			// each move is one update.
-			if self.placed && self.stated != Some(self.delay()) {
-				self.stated = Some(self.delay());
+			// play up to the max. Checked before every poll, since each arrival and each decoded
+			// frame can move it; the estimate moves in whole buckets, so each move is one update.
+			if self.stated != self.delay() {
+				self.stated = self.delay();
 				self.track.set_delay(self.stated());
 			}
 			// Read before judging the head, so any update after that wakes the wait.
@@ -672,8 +673,6 @@ impl Consumer {
 					self.ended = Some(Some(moq_net::Error::TimestampMismatch.into()));
 				}
 				Some(Ok(Some(read))) => {
-					// The container hands over nothing before its start is fixed.
-					self.placed = true;
 					// The estimator times arrivals, so it learns of a declared silence as the
 					// packets around it arrive rather than as they decode. The end's own group
 					// carries the stopped encoder's final packets, which end the speech before
@@ -2771,16 +2770,18 @@ mod tests {
 
 	/// Write `events`, `(arrival, group, media)` in ms in arrival order, through the whole
 	/// decode path, one PCM packet per group, reading each one `read` admits as it lands.
-	/// Returns the delay once they have all landed, and whether the container reported a
+	/// The publisher answers that its feed starts at the first event's group, as a session's
+	/// does. Returns the delay once they have all landed, and whether the container reported a
 	/// backlog.
 	async fn play(events: &[(u64, u64, u64)], read: impl Fn(u64) -> bool) -> (f64, bool) {
 		use moq_mux::container::Container as _;
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let track = broadcast
+		let mut track = broadcast
 			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
 			.unwrap();
+		track.start_at(events[0].1).unwrap();
 		let subscriber = broadcast.consume();
 		// The estimate's 2 s ceiling past the delay, as `moq play` subscribes.
 		let options = Options {
@@ -2939,8 +2940,7 @@ mod tests {
 	}
 
 	/// Backpressure holding the first packet encoded doesn't keep the estimate from the hole wait:
-	/// the container fixed its start when it handed that packet over, so a hole after it waits
-	/// out the estimate rather than the zero min an unfloored start was configured with.
+	/// a hole right after it waits out the estimate, not the configured zero min.
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_behind_a_held_first_packet_waits_out_the_estimate() {
 		use moq_mux::container::Container as _;
@@ -2996,6 +2996,56 @@ mod tests {
 			});
 		}
 		assert_eq!(read, ["frame 0", "frame 20", "frame 40"]);
+	}
+
+	/// The group the publisher says its feed starts at, landing just behind the one after it, is
+	/// waited out for the estimate, not skipped as a hole at the configured zero min.
+	#[tokio::test(start_paused = true)]
+	async fn the_publishers_start_landing_late_waits_out_the_estimate() {
+		use moq_mux::container::Container as _;
+
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		track.start_at(5).unwrap();
+		let options = Options {
+			delay: Delay {
+				max: Some(Duration::from_secs(2)),
+				..Delay::default()
+			},
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
+			.await
+			.unwrap();
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let write = |sequence: u64| {
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let frame = moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.close().unwrap();
+		};
+
+		write(6);
+		assert!(kio::clock::timeout(Duration::from_millis(10), consumer.read()).await.is_err());
+		write(5);
+		let mut read = Vec::new();
+		for _ in 0..2 {
+			read.push(match consumer.read().await.unwrap().unwrap() {
+				Read::Frame(frame) => format!("frame {}", Duration::try_from(frame.timestamp).unwrap().as_millis()),
+				Read::Gap { .. } => "gap".to_string(),
+				Read::End { .. } => "end".to_string(),
+			});
+		}
+		assert_eq!(read, ["frame 100", "frame 120"]);
 	}
 
 	/// A path that delivers every fifth packet 300 ms late from the start: each lands after
