@@ -2261,13 +2261,23 @@ impl Producer {
 	/// A finished group's own end bounds how long it stays fresh, so the last group of a
 	/// paused or finished track ages out without a successor (see
 	/// [`track::Info::max_age`]). An `end` at or before the group's start is
-	/// [`Error::TimestampMismatch`]. Fails with the abort error if the group was already
-	/// aborted.
+	/// [`Error::TimestampMismatch`], which aborts the group. Fails with the abort error if the
+	/// group was already aborted.
 	pub fn finish_at(self, end: u64) -> Result<Finished> {
-		if end <= self.start {
-			return Err(Error::TimestampMismatch);
+		if let Err(err) = self.check_end(end) {
+			let _ = self.handle.close_aborted(err.clone());
+			return Err(err);
 		}
 		self.end(Some(end))
+	}
+
+	/// Whether [`Self::finish_at`] takes `end`: [`Error::TimestampMismatch`] at or before the
+	/// group's start.
+	pub(crate) fn check_end(&self, end: u64) -> Result<()> {
+		match end <= self.start {
+			true => Err(Error::TimestampMismatch),
+			false => Ok(()),
+		}
 	}
 
 	/// End the group without saying where it ends, returning the [`Finished`] group: every
@@ -3881,19 +3891,6 @@ impl Consumer {
 		self.cursor.poll(waiter, |state| state.poll_outcome())
 	}
 
-	/// Resolves once the group is aborted, including when the cache releases it after it
-	/// finished, with the cause. Finishing alone does not end it.
-	#[cfg(feature = "async")]
-	pub(crate) fn poll_aborted(&self, waiter: &kio::Waiter) -> Poll<Error> {
-		let abort = |state: &GroupState| state.outcome.error().cloned().map_or(Poll::Pending, Poll::Ready);
-		// Not `Cursor::poll`: it reads a closed channel as `Dropped`, but every writer dropping
-		// after a finish aborts nothing, and with no writer left nothing ever will.
-		match ready!(self.cursor.state.poll(waiter, |state| abort(state))) {
-			Ok(err) => Poll::Ready(err),
-			Err(state) => abort(&state),
-		}
-	}
-
 	/// The index of the first frame the group holds (see [`Producer::start_at`]).
 	pub(crate) fn first_frame(&self) -> u64 {
 		self.cursor.state.read().offset as u64
@@ -4114,6 +4111,13 @@ impl Consumer {
 	#[cfg(any(feature = "async", test))]
 	pub(crate) fn poll_expired(&mut self, waiter: &kio::Waiter) -> bool {
 		self.poll_expiry(waiter, true)
+	}
+
+	/// Whether the subscription this group was handed out under gave up on it as stale, as
+	/// [`Self::poll_expired`] or a read failing with [`Error::Old`] found.
+	#[cfg(feature = "async")]
+	pub(crate) fn is_expired(&self) -> bool {
+		self.expired
 	}
 
 	/// Apply the drift budget to a read that found nothing and is about to park, failing
@@ -6792,21 +6796,6 @@ mod test {
 		assert!(matches!(handle.poll_aborted(&waiter), Poll::Ready(Error::Cancel)));
 		assert!(handle.cut_error().is_none());
 		assert!(!handle.fate().failed());
-		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
-	}
-
-	/// Every writer dropping after a finish aborts nothing, so a reader keeps its frames.
-	#[cfg(feature = "async")]
-	#[test]
-	fn writers_dropped_after_a_finish_abort_nothing() {
-		let mut producer = Info { start: 0 }.produce();
-		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
-		let mut consumer = producer.consume();
-		drop(producer.finish().unwrap());
-		let waiter = kio::Waiter::noop();
-
-		assert!(consumer.poll_aborted(&waiter).is_pending());
-		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(consumer.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 	}
 

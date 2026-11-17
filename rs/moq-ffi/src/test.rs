@@ -1351,7 +1351,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let clock = broadcast
-		.with_state(|state| Ok(state.catalog.snapshot().media.clock))
+		.with_state(|state| Ok(state.catalog.snapshot().sync.clock))
 		.unwrap();
 	// Withhold publication so only the explicit clock read can fix it before the first frame.
 	let reserved = broadcast.with_state(|state| Ok(state.catalog.reserve())).unwrap();
@@ -1371,7 +1371,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 		.unwrap();
 	assert_eq!(
 		broadcast
-			.with_state(|state| Ok(state.catalog.snapshot().media.clock))
+			.with_state(|state| Ok(state.catalog.snapshot().sync.clock))
 			.unwrap(),
 		clock
 	);
@@ -1480,14 +1480,14 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	let refreshed = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let group = joiner.recv_group().await.unwrap().expect("expected a group");
-			if group.sequence() > 0 {
+			if group.start() > 0 {
 				return group;
 			}
 		}
 	})
 	.await
 	.expect("timed out waiting for the refresh");
-	assert_eq!(refreshed.sequence(), 3000, "the restatement starts at the value's time");
+	assert_eq!(refreshed.start(), 3000, "the restatement starts at the value's time");
 	let consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "meta".into(), None).unwrap();
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
 		.await
@@ -1651,7 +1651,7 @@ async fn json_window_cut_restates_the_window() {
 	let group = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let group = raw.recv_group().await.unwrap().expect("expected a group");
-			if group.sequence() > 0 {
+			if group.start() > 0 {
 				return group;
 			}
 		}
@@ -1659,7 +1659,7 @@ async fn json_window_cut_restates_the_window() {
 	.await
 	.expect("timed out waiting for the cut's group");
 	assert_eq!(
-		group.sequence(),
+		group.start(),
 		4000,
 		"a repeated cut opens no extra group: the next starts at the next push"
 	);
@@ -1710,7 +1710,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 	// The join crosses the ratio, so the producer restates the window without another edit.
 	let joiner = subscribe(&broadcast, "log").await;
 	kio::clock::timeout(TIMEOUT, async {
-		while joiner.recv_group().await.unwrap().expect("expected a group").sequence() == 0 {}
+		while joiner.recv_group().await.unwrap().expect("expected a group").start() == 0 {}
 	})
 	.await
 	.expect("timed out waiting for the refresh");
@@ -1895,7 +1895,7 @@ async fn json_consumer_takes_an_unread_track() {
 		.subscribe_track("events".into(), None)
 		.await
 		.unwrap();
-	track.append_group().unwrap().finish().unwrap();
+	track.append_group(MoqTimestamp::unscaled(0)).unwrap().finish().unwrap();
 	kio::clock::timeout(TIMEOUT, read.recv_group())
 		.await
 		.expect("timed out waiting for a group")
@@ -1961,7 +1961,7 @@ async fn abort_unwanted_keeps_a_late_reader() {
 	// A reader joins after the publisher saw nobody wanted the track.
 	let late = consumer.subscribe_track("events".into(), None).await.unwrap();
 	assert!(!track.abort_unwanted(7).unwrap());
-	track.append_group().unwrap().finish().unwrap();
+	track.append_group(MoqTimestamp::unscaled(0)).unwrap().finish().unwrap();
 	let group = kio::clock::timeout(TIMEOUT, late.recv_group())
 		.await
 		.expect("timed out waiting for the late reader's group")
@@ -1976,7 +1976,10 @@ async fn abort_unwanted_keeps_a_late_reader() {
 	demand.until_unwanted().await.unwrap();
 	assert!(track.abort_unwanted(7).unwrap());
 	assert!(matches!(track.abort_unwanted(7), Err(MoqError::Closed)));
-	assert!(matches!(track.append_group(), Err(MoqError::Closed)));
+	assert!(matches!(
+		track.append_group(MoqTimestamp::unscaled(1)),
+		Err(MoqError::Closed)
+	));
 
 	// The next reader asks the publisher again instead of finding the aborted track.
 	let next = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
@@ -2305,8 +2308,8 @@ async fn raw_untimed_frames_roundtrip() {
 	let frame = consumer.read_frame().await.unwrap().unwrap();
 	assert_eq!(frame.payload, b"frame");
 	assert_eq!(frame.timestamp, MoqTimestamp::unscaled(5));
-	let group = track.append_group().unwrap();
-	assert_eq!(group.sequence(), 6);
+	let group = track.append_group(MoqTimestamp::unscaled(6)).unwrap();
+	assert_eq!(group.start(), 6);
 	let reader = group.consume().unwrap();
 	let mismatched = group.write_frame(MoqFrame {
 		payload: b"group".to_vec(),
@@ -2334,6 +2337,22 @@ async fn raw_untimed_frames_roundtrip() {
 	track.finish().unwrap();
 }
 
+/// `append_group` starts the group at its timestamp, in the track's timescale, and only moving
+/// forward.
+#[test]
+fn append_group_starts_at_its_timestamp() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("timed".into(), Some(timed_info())).unwrap();
+	let millis = MoqTimestamp {
+		value: 2,
+		scale: Some(1_000),
+	};
+	assert_eq!(track.append_group(millis).unwrap().start(), 2_000);
+	assert!(track.append_group(us(2_000)).is_err());
+	assert!(track.append_group(MoqTimestamp::unscaled(3_000)).is_err());
+	assert_eq!(track.append_group(us(2_001)).unwrap().start(), 2_001);
+}
+
 /// An explicitly timed raw track refuses unscaled timestamps.
 #[test]
 fn raw_timed_writes_need_a_scale() {
@@ -2355,7 +2374,7 @@ fn raw_timed_writes_need_a_scale() {
 		)
 	};
 	assert!(refused(track.write_frame(untimed()).unwrap_err()));
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(0)).unwrap();
 	assert!(refused(group.write_frame(untimed()).unwrap_err()));
 }
 
@@ -2381,7 +2400,7 @@ async fn raw_frame_timestamps() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(micros(frame.timestamp), 12_345);
 
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(23_456)).unwrap();
 	let group_consumer = group.consume().unwrap();
 	let payload = b"group frame".to_vec();
 	group
@@ -2465,7 +2484,7 @@ fn raw_track_supports_sparse_groups_and_known_end() {
 	let track = broadcast.publish_track("sparse".into(), None).unwrap();
 
 	let group = track.create_group(2).unwrap();
-	assert_eq!(group.sequence(), 2);
+	assert_eq!(group.start(), 2);
 	group.finish().unwrap();
 
 	track.finish_at(5).unwrap();
@@ -2510,7 +2529,7 @@ async fn abort_after_finish_keeps_the_track_handle() {
 async fn abort_after_finish_reaches_group_consumer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("aborted".into(), Some(timed_info())).unwrap();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(0)).unwrap();
 	let consumer = group.consume().unwrap();
 
 	group
@@ -2529,7 +2548,7 @@ async fn abort_after_finish_reaches_group_consumer() {
 async fn raw_group_abort_reaches_consumer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("aborted".into(), None).unwrap();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(MoqTimestamp::unscaled(0)).unwrap();
 	let consumer = group.consume().unwrap();
 
 	group.abort(409).unwrap();
@@ -2568,7 +2587,7 @@ async fn dynamic_track_request_can_abort() {
 async fn fetches_cached_group_without_subscribing() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(0)).unwrap();
 	group
 		.write_frame(MoqFrame {
 			payload: b"first".to_vec(),
@@ -2596,7 +2615,7 @@ async fn fetches_cached_group_without_subscribing() {
 		.await
 		.unwrap();
 
-	assert_eq!(fetched.sequence(), 0);
+	assert_eq!(fetched.start(), 0);
 	let frame = fetched.read_frame().await.unwrap().expect("expected first frame");
 	assert_eq!(frame.payload, b"first".to_vec());
 	assert_eq!(micros(frame.timestamp), 0);
@@ -2639,7 +2658,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 		MoqMediaGroupConfig {
 			rendition: rendition("media", crate::media::MoqContainer::Legacy),
 			// The group starts at its first frame, a second in, in the track's milliseconds.
-			sequence: 1000,
+			start: 1000,
 			options: Some(MoqFetchGroupOptions {
 				priority: 7,
 				max_delay: None,
@@ -2649,7 +2668,7 @@ async fn fetches_cached_media_group_and_decodes_container() {
 	.await
 	.unwrap();
 
-	assert_eq!(fetched.sequence(), 1000);
+	assert_eq!(fetched.start(), 1000);
 	let frame = fetched.next().await.unwrap().expect("expected keyframe");
 	assert_eq!(frame.payload, b"keyframe");
 	assert_eq!(micros(frame.timestamp), 1_000_000);
@@ -2671,7 +2690,7 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 		&consumer,
 		MoqMediaGroupConfig {
 			rendition: rendition("media", crate::media::MoqContainer::Cmaf { init: Vec::new() }),
-			sequence: 0,
+			start: 0,
 			options: None,
 		},
 	)
@@ -2722,7 +2741,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 			MoqMediaGroupConfig {
 				rendition: rendition("video", crate::media::MoqContainer::Cmaf { init: init.to_vec() }),
 				// The group starts at its first sample, in the init's ticks.
-				sequence: moq_net::Timestamp::from_micros(2_000_000)
+				start: moq_net::Timestamp::from_micros(2_000_000)
 					.unwrap()
 					.convert(muxer.timescale())
 					.unwrap()
@@ -2823,7 +2842,7 @@ async fn media_group_decodes_arrival_order_groups() {
 	let mut first = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	write_legacy(&mut first, 1, 1_000_000, b"a");
 	let first_media = recv_media_group(&consumer).await;
-	assert_eq!(first_media.sequence(), 0);
+	assert_eq!(first_media.start(), 0);
 	let frame = next_media(&first_media).await.unwrap().expect("expected a frame");
 	assert_eq!(frame.payload, b"a");
 	assert_eq!(micros(frame.timestamp), 1_000_000);
@@ -2833,7 +2852,7 @@ async fn media_group_decodes_arrival_order_groups() {
 	let mut second = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut second, 2, 1_040_000, b"c");
 	let second_media = recv_media_group(&consumer).await;
-	assert_eq!(second_media.sequence(), 1);
+	assert_eq!(second_media.start(), 1);
 	let frame = next_media(&second_media).await.unwrap().expect("expected a frame");
 	assert_eq!(frame.payload, b"c");
 	assert_eq!(micros(frame.timestamp), 1_040_000);
@@ -2947,7 +2966,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		.expect("timed out waiting for fetch")
 		.expect("fetch task panicked")
 		.unwrap();
-	assert_eq!(fetched.sequence(), 5);
+	assert_eq!(fetched.start(), 5);
 	let frame = fetched.read_frame().await.unwrap().expect("expected fetched frame");
 	assert_eq!(frame.payload, b"fetched".to_vec());
 	assert_eq!(micros(frame.timestamp), 100_000);
@@ -3791,7 +3810,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 			&broadcast,
 			MoqMediaGroupConfig {
 				rendition,
-				sequence: 0,
+				start: 0,
 				options: None,
 			},
 		),
@@ -4663,7 +4682,7 @@ async fn video_decode_start() {
 		.expect("timed out")
 		.unwrap()
 		.expect("the track ended early")
-		.sequence()
+		.start()
 		== 0
 	{}
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer, Duration::ZERO)
@@ -5506,7 +5525,7 @@ async fn cancel_retracts_the_route_synchronously() {
 	}
 }
 
-/// The sequence cursor commits on first use, so every later read has to reach the same
+/// The ordered cursor commits on first use, so every later read has to reach the same
 /// converted handle. Repeating the conversion (or dropping it on the way through) leaves
 /// the track in its transient state and panics the next read.
 #[tokio::test]
@@ -5545,11 +5564,11 @@ async fn raw_track_next_group_is_repeatable() {
 		assert_eq!(frame.payload, payload);
 	}
 
-	// The arrival cursor is gone once the track committed to sequence order.
+	// The arrival cursor is gone once the track committed to start order.
 	assert!(matches!(consumer.recv_group().await, Err(MoqError::AlreadyCommitted)));
 }
 
-/// The first group read commits the cursor either way: mixing arrival and sequence
+/// The first group read commits the cursor either way: mixing arrival and start
 /// reads on one track is refused rather than silently interleaving two cursors.
 #[tokio::test]
 async fn raw_track_group_order_commits_on_first_read() {
@@ -5575,7 +5594,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.expect("timed out waiting for a group")
 		.unwrap()
 		.expect("expected a group");
-	assert_eq!(group.sequence(), 0);
+	assert_eq!(group.start(), 0);
 	assert!(matches!(consumer.next_group().await, Err(MoqError::AlreadyCommitted)));
 	assert!(matches!(consumer.read_frame().await, Err(MoqError::AlreadyCommitted)));
 
@@ -5591,7 +5610,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.expect("timed out waiting for a group")
 		.unwrap()
 		.expect("expected a group");
-	assert_eq!(group.sequence(), 1);
+	assert_eq!(group.start(), 1);
 }
 
 fn raw_track() -> (
@@ -5657,7 +5676,7 @@ async fn raw_read_frame_skips_empty_group_on_open_track() {
 	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let consumer = track.consume(None).unwrap();
 
-	let empty = track.append_group().unwrap();
+	let empty = track.append_group(us(0)).unwrap();
 	empty.finish().unwrap();
 
 	let read = {
@@ -5699,8 +5718,8 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let consumer = track.consume(None).unwrap();
 
-	track.append_group().unwrap().finish().unwrap();
-	track.append_group().unwrap().finish().unwrap();
+	track.append_group(us(0)).unwrap().finish().unwrap();
+	track.append_group(us(1_000)).unwrap().finish().unwrap();
 
 	let payload = b"populated".to_vec();
 	track
@@ -5785,7 +5804,7 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let consumer = track.consume(None).unwrap();
 
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(3_000)).unwrap();
 	cancel_parked_read_frame(&consumer, &group).await;
 
 	let payload = b"kept".to_vec();
@@ -5823,7 +5842,7 @@ async fn raw_read_frame_drops_aborted_pending_group() {
 	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let consumer = track.consume(None).unwrap();
 
-	let first = track.append_group().unwrap();
+	let first = track.append_group(us(0)).unwrap();
 	let read = {
 		let consumer = consumer.clone();
 		tokio::spawn(async move { consumer.read_frame().await })
@@ -5871,7 +5890,7 @@ async fn raw_read_frame_and_next_group_share_the_cursor() {
 	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let consumer = track.consume(None).unwrap();
 
-	let first = track.append_group().unwrap();
+	let first = track.append_group(us(0)).unwrap();
 	cancel_parked_read_frame(&consumer, &first).await;
 	first
 		.write_frame(MoqFrame {
@@ -5920,7 +5939,7 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 		.expect("timed out waiting for the subscriber")
 		.unwrap();
 
-	let open = track.append_group().unwrap();
+	let open = track.append_group(MoqTimestamp::unscaled(0)).unwrap();
 	let read = {
 		let consumer = consumer.clone();
 		spawn_parked(async move { consumer.read_frame().await }).await
@@ -8329,7 +8348,7 @@ async fn request_accept_inherits_overrides_and_captures_origins() {
 		let fresh = MoqOriginProducer::new(MoqOriginConfig::default());
 		let publish = override_publish.then(|| fresh.clone());
 		let consume = override_consume.then(|| fresh.clone());
-		let expected_publish = publish.as_ref().unwrap_or(&default_publish).inner().hop();
+		let expected_publish = publish.as_ref().unwrap_or(&default_publish).inner().node();
 		let expected_consume = consume.as_ref().unwrap_or(&default_consume).consume();
 		let captured = Arc::downgrade(&fresh);
 		let server = MoqServer::new(MoqServerConfig {
@@ -8380,7 +8399,7 @@ async fn request_accept_inherits_overrides_and_captures_origins() {
 		kio::clock::timeout(TIMEOUT, hold).await.unwrap().unwrap().unwrap();
 		let session = kio::clock::timeout(TIMEOUT, accept).await.unwrap().unwrap().unwrap();
 		let client_session = kio::clock::timeout(TIMEOUT, connect).await.unwrap().unwrap().unwrap();
-		assert_eq!(session.publish().inner().hop(), expected_publish);
+		assert_eq!(session.publish().inner().node(), expected_publish);
 
 		// Incoming broadcasts reach the selected consume origin, independently
 		// of which publish side was selected.
@@ -8758,7 +8777,7 @@ async fn shutdown_without_waiter_survives_session_disposal() {
 	let remote = await_announced(&subscriber.consume(), "tail").await;
 	let reader = remote.subscribe_track("data".into(), None).await.unwrap();
 	shutdown_ready(&track, &reader).await;
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(1)).unwrap();
 	group
 		.write_frame(MoqFrame {
 			timestamp: us(1),
@@ -8867,7 +8886,7 @@ async fn session_pair(version: &str) -> (Arc<MoqServer>, Arc<MoqSession>, Arc<Mo
 
 /// TRACK_INFO holds demand before SUBSCRIBE; receiving a frame proves live delivery started.
 async fn shutdown_ready(track: &MoqTrackProducer, reader: &MoqTrackConsumer) {
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(0)).unwrap();
 	group
 		.write_frame(MoqFrame {
 			timestamp: us(0),
@@ -8909,7 +8928,7 @@ async fn shutdown_delivers_the_finished_track() {
 		kio::clock::timeout(
 			TIMEOUT,
 			crate::ffi::run(async move {
-				let group = track.append_group()?;
+				let group = track.append_group(us(1))?;
 				group.write_frame(MoqFrame {
 					timestamp: us(1),
 					payload: b"last".to_vec(),
@@ -8994,7 +9013,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 		.publish_track("events".into(), Some(unlimited_info()))
 		.unwrap();
 	for timestamp_us in [0, 1_000, 2_000] {
-		let group = track.append_group().unwrap();
+		let group = track.append_group(us(timestamp_us)).unwrap();
 		group
 			.write_frame(MoqFrame {
 				payload: b"x".to_vec(),
@@ -9027,16 +9046,16 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	);
 
 	let consumer = track.consume(Some(subscription)).unwrap();
-	let mut sequences = Vec::new();
+	let mut starts = Vec::new();
 	for _ in 0..3 {
 		let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
 			.expect("expected a group");
-		sequences.push(group.sequence());
+		starts.push(group.start());
 	}
-	assert_eq!(sequences, vec![0, 1, 2]);
+	assert_eq!(starts, vec![0, 1_000, 2_000]);
 }
 
 /// Wait until `session` grants `want`, following its changes.
@@ -9211,7 +9230,7 @@ async fn token_server(
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let mut listener = config.init(Default::default()).unwrap().listen().await.unwrap();
 	let addr = listener.tcp_local_addr().unwrap();
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -9445,16 +9464,16 @@ async fn time_anchors_start_at_the_containing_group() {
 		Err(MoqError::Protocol { details }) if details.kind == MoqProtocolKind::TimestampMismatch
 	));
 	let consumer = track.consume(Some(since(1_500))).unwrap();
-	let mut sequences = Vec::new();
+	let mut starts = Vec::new();
 	for _ in 0..2 {
 		let group = kio::clock::timeout(TIMEOUT, consumer.recv_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
 			.expect("expected a group");
-		sequences.push(group.sequence());
+		starts.push(group.start());
 	}
-	assert_eq!(sequences, vec![1_000, 2_000]);
+	assert_eq!(starts, vec![1_000, 2_000]);
 
 	let untimed = broadcast
 		.publish_track(
@@ -9624,7 +9643,7 @@ fn raw_read_frame_cancelled_unfreed_does_not_block_the_next() {
 #[test]
 fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
 	let (_broadcast, track, _consumer) = raw_track();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(us(0)).unwrap();
 	let consumer = group.consume().unwrap();
 	cancelled_unfreed_read_does_not_block_the_next(
 		|| {
@@ -9673,7 +9692,7 @@ async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 		.expect("next_group timed out")
 		.unwrap()
 		.expect("expected the open group");
-	assert_eq!(taken.sequence(), 0);
+	assert_eq!(taken.start(), 0);
 
 	let frame = kio::clock::timeout(TIMEOUT, read)
 		.await
@@ -9739,7 +9758,7 @@ async fn raw_next_group_wakes_read_frame_after_unlocking() {
 		.expect("next_group timed out")
 		.unwrap()
 		.expect("expected the open group");
-	assert_eq!(taken.sequence(), 0);
+	assert_eq!(taken.start(), 0);
 	assert_eq!(
 		inline.polls.load(std::sync::atomic::Ordering::SeqCst),
 		2,
@@ -9768,7 +9787,7 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 		}))
 		.unwrap();
 
-	// Each reader returns the group sequences it took: a frame's payload names its group.
+	// Each reader returns the group starts it took: a frame's payload names its group.
 	let frames = |consumer: Arc<MoqTrackConsumer>| {
 		tokio::spawn(async move {
 			let mut taken = Vec::new();
@@ -9782,7 +9801,7 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 		tokio::spawn(async move {
 			let mut taken = Vec::new();
 			while let Some(group) = consumer.next_group().await.unwrap() {
-				taken.push(group.sequence());
+				taken.push(group.start());
 			}
 			taken
 		})
@@ -9795,16 +9814,16 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 	];
 	ffi_caught_up().await;
 
-	for sequence in 0..GROUPS {
-		let group = track.create_group(sequence).unwrap();
+	for start in 0..GROUPS {
+		let group = track.create_group(start).unwrap();
 		group
 			.write_frame(MoqFrame {
-				payload: sequence.to_be_bytes().to_vec(),
-				timestamp: us(sequence),
+				payload: start.to_be_bytes().to_vec(),
+				timestamp: us(start),
 			})
 			.unwrap();
 		group.finish().unwrap();
-		if sequence % 8 == 0 {
+		if start % 8 == 0 {
 			tokio::task::yield_now().await;
 		}
 	}
@@ -10128,9 +10147,9 @@ async fn write_ahead_of_a_slow_reader(
 ) {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(MoqTimestamp::unscaled(0)).unwrap();
 	let reader = group.consume().unwrap();
-	let key = MoqTimestamp::unscaled(group.sequence());
+	let key = MoqTimestamp::unscaled(group.start());
 	let frame = move || MoqFrame {
 		payload: vec![7; MIB],
 		timestamp: key,
@@ -10224,7 +10243,7 @@ async fn an_unpaced_writer_evicts_a_slow_reader() {
 async fn ready_after_abort_is_closed() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(MoqTimestamp::unscaled(0)).unwrap();
 	group.abort(1).unwrap();
 	assert!(matches!(group.ready(1).await, Err(MoqError::Closed)));
 }
@@ -10235,9 +10254,9 @@ async fn ready_after_abort_is_closed() {
 async fn concurrent_ready_calls_all_wake() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(MoqTimestamp::unscaled(0)).unwrap();
 	let reader = group.consume().unwrap();
-	let key = MoqTimestamp::unscaled(group.sequence());
+	let key = MoqTimestamp::unscaled(group.start());
 	let frame = move || MoqFrame {
 		payload: vec![7; MIB],
 		timestamp: key,
@@ -10292,7 +10311,7 @@ async fn concurrent_ready_calls_all_wake() {
 async fn a_waiting_ready_ends_on_abort() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
-	let group = track.append_group().unwrap();
+	let group = track.append_group(MoqTimestamp::unscaled(0)).unwrap();
 	// No reader holds the group, so the call waits.
 	let wait = {
 		let group = group.clone();
@@ -10348,13 +10367,13 @@ async fn group_calls_wake_ready_after_unlocking() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("tcp".into(), None).unwrap();
 
-	let group = track.append_group().unwrap();
+	let group = track.append_group(MoqTimestamp::unscaled(0)).unwrap();
 	let parked = Inline::park(&group);
 	let _reader = group.consume().unwrap();
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Ok(()))), "{result:?}");
 
-	let group = track.append_group().unwrap();
+	let group = track.append_group(MoqTimestamp::unscaled(1)).unwrap();
 	let parked = Inline::park(&group);
 	group.abort(1).unwrap();
 	let result = parked.result.lock().unwrap().take();

@@ -12,6 +12,19 @@ type Update =
 	| { readonly kind: "gap" }
 	| { readonly kind: "end"; readonly group: bigint; readonly end: Duration };
 
+// How far, in microseconds, pre-roll output may end past the pre-roll: it absorbs the restamped
+// timestamps' rounding, and is shorter than any codec frame (Opus's shortest is 2.5 ms).
+const PREROLL_SLACK = 1_000;
+
+/** An encoded frame handed to the decoder, on the timeline the decoder saw it. */
+export interface Encoded {
+	/** Microseconds. */
+	readonly timestamp: number;
+	/** Microseconds. */
+	readonly duration: number;
+	readonly payload: Uint8Array;
+}
+
 /** The portion of decoded audio that belongs to the source timeline. */
 export interface DecodedSpan {
 	/** Source timestamp of the first retained frame, in microseconds. */
@@ -35,6 +48,13 @@ export class Terminal {
 	#warmup = 0;
 	#prime = true;
 	#before?: number;
+	// The newest frames decoded, back to back and covering the warmup, which re-prime the decoder a
+	// gap restarts. Their output is pre-roll for the warmup to trim instead of the audio after the gap.
+	#history: Encoded[] = [];
+	#covered = 0;
+	#preroll: Encoded[] = [];
+	// Where the pre-roll ends: output before it only primes the decoder.
+	#prerollEnd?: number;
 
 	/** How far decoded output lands before its frame timestamp: the Opus pre-skip, or zero. */
 	get delay(): number {
@@ -55,7 +75,14 @@ export class Terminal {
 		this.#warmup = warmup;
 		this.#prime = true;
 		this.#before = undefined;
+		this.#forget();
 		this.#resetEpoch();
+	}
+
+	/** Whether applying a read would end a codec epoch, as `update` reports. */
+	ends(read: Update): boolean {
+		if (read.kind === "gap") return this.#started;
+		return read.kind === "frame" && this.#endGroup !== undefined && read.group > this.#endGroup;
 	}
 
 	/** Apply one ordered consumer read and report whether a codec epoch ended before it. */
@@ -63,6 +90,8 @@ export class Terminal {
 		if (read.kind === "gap") {
 			this.#prime = true;
 			this.#before = undefined;
+			this.#preroll = [];
+			this.#prerollEnd = undefined;
 			this.#resetEpoch();
 			return this.#started;
 		}
@@ -73,16 +102,82 @@ export class Terminal {
 		}
 		// A later group after a declared end comes from a fresh encoder; the end's own group carries
 		// the stopped encoder's final packets.
-		const reset = this.#endGroup !== undefined && read.group > this.#endGroup;
+		const reset = this.ends(read);
 		if (reset) this.#restart();
 		this.#started = true;
 		const timestamp = read.frame.timestamp.asMicros();
 		this.#epoch ??= timestamp;
 		if (this.#prime) {
-			this.#before = timestamp + this.#warmup;
+			const primed = this.#reprime(timestamp);
+			this.#before = timestamp + Math.max(0, this.#warmup - primed);
 			this.#prime = false;
 		}
 		return reset;
+	}
+
+	/**
+	 * Note a frame handed to the decoder, with its duration in microseconds if known. A frame of unknown
+	 * duration cannot be restamped, so the pre-roll starts after it.
+	 */
+	decoded(frame: { readonly timestamp: Duration; readonly payload: Uint8Array }, duration?: Duration): void {
+		if (this.#warmup === 0) return;
+		const micros = duration?.asMicros() ?? 0;
+		if (micros <= 0) {
+			this.#history = [];
+			this.#covered = 0;
+			return;
+		}
+		this.#history.push({ timestamp: frame.timestamp.asMicros(), duration: micros, payload: frame.payload });
+		this.#covered += micros;
+		while (this.#covered - this.#history[0].duration >= this.#warmup) {
+			this.#covered -= this.#history[0].duration;
+			this.#history.shift();
+		}
+	}
+
+	/** Take the frames to decode, output discarded, before the first frame after a gap. */
+	preroll(): Encoded[] {
+		const preroll = this.#preroll;
+		this.#preroll = [];
+		return preroll;
+	}
+
+	/**
+	 * Whether a decoded sample is pre-roll output alone, which only primes the decoder. A sample
+	 * reaching past the pre-roll holds the audio after the gap, so it is not.
+	 */
+	primes(sample: SampleSpan): boolean {
+		const end = this.#prerollEnd;
+		if (end === undefined) return false;
+		const sampleEnd = sample.timestamp + (sample.numberOfFrames * 1_000_000) / sample.sampleRate;
+		if (sampleEnd <= end + PREROLL_SLACK) return true;
+		this.#prerollEnd = undefined;
+		return false;
+	}
+
+	// Restamp the history to end where the first frame after a gap starts, as the pre-roll that
+	// re-primes the restarted decoder, returning how much of the warmup it covers. Chrome stamps an
+	// AudioDecoder's output from its first input, so the pre-roll carries the timestamps it plays at.
+	#reprime(timestamp: number): number {
+		let start = timestamp;
+		const preroll: Encoded[] = [];
+		for (let i = this.#history.length - 1; i >= 0; i--) {
+			start -= this.#history[i].duration;
+			preroll[i] = { ...this.#history[i], timestamp: start };
+		}
+		this.#history = preroll;
+		this.#preroll = preroll;
+		if (preroll.length === 0) return 0;
+		this.#epoch = start;
+		this.#prerollEnd = timestamp;
+		return timestamp - start;
+	}
+
+	#forget(): void {
+		this.#history = [];
+		this.#covered = 0;
+		this.#preroll = [];
+		this.#prerollEnd = undefined;
 	}
 
 	// Start a fresh codec epoch after its declared end, on the same timeline.
@@ -91,6 +186,8 @@ export class Terminal {
 		this.#end = undefined;
 		this.#endGroup = undefined;
 		this.#before = undefined;
+		// A fresh encoder's first packets need no frames of the stopped one ahead of them.
+		this.#forget();
 		this.#resetEpoch();
 	}
 

@@ -187,28 +187,20 @@ impl Publisher {
 
 	/// Finalize the track.
 	///
-	/// Borrows rather than consumes, so a later [`abort`](Self::abort) can still
-	/// run after a successful finish.
-	pub fn finish(&mut self) -> Result<(), Error> {
-		// Each publish flushed its access unit, so the splitter holds only input storage, which
-		// ends here. The import stays, keeping the finished track and its rendition published.
-		match &mut self.codecs {
-			Codecs::H264 { split, import } => {
-				*split = Default::default();
-				import.finish()?
-			}
-			Codecs::H265 { split, import } => {
-				*split = Default::default();
-				import.finish()?
-			}
-		}
-		Ok(())
+	/// Consumes the publisher, releasing the splitter. The returned [`Finished`] keeps the track
+	/// and its catalog rendition published, and can still [`abort`](Finished::abort) them. A
+	/// finish that fails ends the track with an error instead.
+	pub fn finish(self) -> Result<Finished, Error> {
+		// Each publish flushed its access unit, so the splitter holds only input storage.
+		let track = match self.codecs {
+			Codecs::H264 { import, .. } => import.finish()?,
+			Codecs::H265 { import, .. } => import.finish()?,
+		};
+		Ok(Finished { track })
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
 	/// see the real cause rather than [`moq_net::Error::Dropped`].
-	///
-	/// Consumes the producer. Still callable after [`finish`](Self::finish).
 	pub fn abort(self, err: moq_net::Error) {
 		match self.codecs {
 			Codecs::H264 { import, .. } => import.abort(err),
@@ -239,30 +231,30 @@ impl Publisher {
 	}
 }
 
-/// A video track whose [`Producer`](super::Producer) [finished](super::Producer::finish) it: every
-/// frame is published, and it can still be watched or aborted, but not written to.
+/// A video track whose [`Producer`](super::Producer) or [`Publisher`] finished it: every frame
+/// is published, and it can still be watched or aborted, but not written to.
 ///
 /// Dropping it releases the track like dropping the producer.
+///
+/// ```compile_fail,E0599
+/// # fn cannot_publish(track: moq_video::encode::Finished, encoded: &moq_video::encode::Encoded) {
+/// track.publish(encoded).unwrap();
+/// # }
+/// ```
 #[must_use = "dropping it releases the track and its catalog rendition"]
 pub struct Finished {
-	publisher: Publisher,
+	track: moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>,
 }
 
 impl Finished {
-	/// Finish `publisher`'s track, keeping it published.
-	pub(crate) fn new(mut publisher: Publisher) -> Result<Self, Error> {
-		publisher.finish()?;
-		Ok(Self { publisher })
-	}
-
 	/// A watch-only handle to the track's subscriber demand.
 	pub fn demand(&self) -> moq_net::track::Demand {
-		self.publisher.demand()
+		self.track.demand()
 	}
 
 	/// Abort the track with `err`, so subscribers that have not drained it see the real cause.
 	pub fn abort(self, err: moq_net::Error) {
-		self.publisher.abort(err);
+		self.track.abort(err);
 	}
 }
 
@@ -396,7 +388,7 @@ mod tests {
 				producer.publish(&encoded).unwrap();
 			}
 		}
-		producer.finish().unwrap();
+		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_groups(consumer).await, vec![1, 1, 1]);
 	}
@@ -523,7 +515,7 @@ mod tests {
 		assert_eq!(rendition.bitrate, Some(6_000_000));
 	}
 
-	/// Finish leaves the handle, so abort can still run.
+	/// Finish returns a handle, so abort can still run.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
 	async fn abort_after_finish() {
@@ -549,9 +541,9 @@ mod tests {
 			producer.publish(&encoded).unwrap();
 		}
 
-		producer.finish().unwrap();
+		let finished = producer.finish().unwrap();
 		assert!(subscriber.recv_group().await.unwrap().is_some());
-		producer.abort(moq_net::Error::Cancel);
+		finished.abort(moq_net::Error::Cancel);
 	}
 
 	#[tokio::test]
@@ -671,8 +663,7 @@ mod finished {
 						let pts = moq_net::Timestamp::from_micros(pts).unwrap();
 						producer.publish(&Encoded::new(keyframe(), pts, true)).unwrap();
 					}
-					producer.finish().unwrap();
-					producer
+					producer.finish().unwrap()
 				})
 				.collect();
 

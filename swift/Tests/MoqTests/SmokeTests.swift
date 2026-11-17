@@ -74,9 +74,9 @@ final class SmokeTests: XCTestCase {
     func testStreamAbortPreservesProtocolDetails() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "errors")
-        let producer = try track.appendGroup()
+        let producer = try track.appendGroup(start: .unscaled(0))
         let consumer = try broadcast.consume()
-        let group = try await consumer.fetchGroup(name: "errors", sequence: 0)
+        let group = try await consumer.fetchGroup(name: "errors", start: 0)
         try producer.abort(errorCode: 404)
         do {
             _ = try await group.readFrame()
@@ -94,7 +94,7 @@ final class SmokeTests: XCTestCase {
         let info = TrackInfo(maxAge: nil, timescale: 1_000_000)
         let track = try broadcast.publishTrack(name: "backlog", info: info)
         for ms: UInt64 in 0..<3 {
-            let group = try track.appendGroup()
+            let group = try track.appendGroup(start: micros(ms * 1_000))
             try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
             try group.finish()
         }
@@ -104,12 +104,12 @@ final class SmokeTests: XCTestCase {
                 ranges: [Subscription.Range(start: .relative(groups: 2))],
                 order: .ascending
             ))
-        var sequences: [UInt64] = []
+        var starts: [UInt64] = []
         for _ in 0..<3 {
             let group = try await consumer.recvGroup()
-            sequences.append(try XCTUnwrap(group).sequence)
+            starts.append(try XCTUnwrap(group).start)
         }
-        XCTAssertEqual(sequences, [0, 1, 2])
+        XCTAssertEqual(starts, [0, 1_000, 2_000])
     }
 
     /// An error's description is the Rust error message.
@@ -627,17 +627,17 @@ final class SmokeTests: XCTestCase {
     func testBroadcastConsumerFetchesCachedGroup() async throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
-        let group = try track.appendGroup()
+        let group = try track.appendGroup(start: micros(0))
         try group.writeFrame(Data("cached".utf8), timestamp: micros(0))
         try group.finish()
 
         let consumer = try broadcast.consume()
         let fetched = try await consumer.fetchGroup(
             name: "events",
-            sequence: 0,
+            start: 0,
             options: FetchGroupOptions(priority: 3)
         )
-        XCTAssertEqual(fetched.sequence, 0)
+        XCTAssertEqual(fetched.start, 0)
         let frame = try await fetched.readFrame()
         XCTAssertEqual(frame?.payload, Data("cached".utf8))
         let end = try await fetched.readFrame()
@@ -833,9 +833,9 @@ final class SmokeTests: XCTestCase {
         XCTAssertNil(frame.timestamp.scale)
         XCTAssertNil(consumer.info().timescale)
         // A group's frames carry that group's key, and only it.
-        let group = try track.createGroup(sequence: 1)
+        let group = try track.createGroup(start: 1)
         XCTAssertThrowsError(try group.writeFrame(Data("other".utf8), timestamp: .unscaled(2)))
-        try group.writeFrame(Data("grouped".utf8), timestamp: .unscaled(group.sequence))
+        try group.writeFrame(Data("grouped".utf8), timestamp: .unscaled(group.start))
         try group.finish()
         let grouped = try await consumer.readFrame()
         XCTAssertEqual(grouped?.timestamp, .unscaled(1))
@@ -865,7 +865,7 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(frame?.payload, payload)
         XCTAssertEqual(frame?.timestamp, micros(12_345))
 
-        let group = try track.appendGroup()
+        let group = try track.appendGroup(start: micros(23_456))
         let groupConsumer = try group.consume()
         let groupPayload = Data("group".utf8)
         try group.writeFrame(groupPayload, timestamp: micros(23_456))
@@ -945,8 +945,8 @@ final class SmokeTests: XCTestCase {
         let track = try broadcast.publishTrack(name: "status", info: TrackInfo(maxAge: 0, timescale: 1_000_000))
         let consumer = try track.consume()
 
-        try track.appendGroup().finish()
-        try track.appendGroup().finish()
+        try track.appendGroup(start: micros(0)).finish()
+        try track.appendGroup(start: micros(1_000)).finish()
         try track.writeFrame(Data("populated".utf8), timestamp: micros(2_000))
 
         let frame = try await consumer.readFrame()
@@ -960,13 +960,13 @@ final class SmokeTests: XCTestCase {
     func testSparseGroupsAndKnownEnd() throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "sparse")
-        let group = try track.createGroup(sequence: 2)
-        XCTAssertEqual(group.sequence, 2)
+        let group = try track.createGroup(start: 2)
+        XCTAssertEqual(group.start, 2)
         try group.finish()
 
         try track.finish(at: 5)
-        try track.createGroup(sequence: 4).finish()
-        XCTAssertThrowsError(try track.createGroup(sequence: 5))
+        try track.createGroup(start: 4).finish()
+        XCTAssertThrowsError(try track.createGroup(start: 5))
         try track.finish()
         try broadcast.close()
     }

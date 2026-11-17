@@ -7,7 +7,7 @@ use std::task::Poll;
 ///
 /// moq-net boxes every transport with a native `Send` bound, which a worker's
 /// `!Send` session cannot meet, so wrap the session in this
-/// before `Server::accept_request` or `Client::connect`. The session, its
+/// before `Server::handshake` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
 /// proving it at compile time.

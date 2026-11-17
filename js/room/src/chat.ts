@@ -49,7 +49,7 @@ export class Publisher {
 	send(text: string): void {
 		if (!text) return;
 		this.expire();
-		this.#producer.push({ value: text, at: Time.Timestamp.now() });
+		this.#producer.push(text, Time.Timestamp.now());
 		this.#expires.update((expires) => [...expires, now().saturatingAdd(HISTORY)]);
 	}
 

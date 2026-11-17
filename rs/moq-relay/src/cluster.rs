@@ -1402,7 +1402,7 @@ pub(crate) struct Admitted {
 impl Cluster {
 	/// The request caps for an admitted session: only a `peer` grant gets the peer policy.
 	pub(crate) fn limits(&self, lease: &auth::Lease) -> moq_net::session::Limits {
-		if lease.token().peer {
+		if lease.token().link.is_some() {
 			self.peer_limits
 		} else {
 			self.client_limits
@@ -1413,7 +1413,7 @@ impl Cluster {
 	/// grant's wider ones, and the lease's bitrate caps. A receive window left unset opens
 	/// to the configured one.
 	pub(crate) fn quic_limits(&self, lease: &auth::Lease) -> moq_quic::Limits {
-		let mut limits = match lease.token().peer {
+		let mut limits = match lease.token().link.is_some() {
 			true => self.peer_quic.limits(),
 			false => moq_quic::Limits::default(),
 		};
@@ -1425,7 +1425,7 @@ impl Cluster {
 
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
-		self.origin.hop().get()
+		self.origin.node().get()
 	}
 
 	/// Creates a cluster with one origin, using [`Options`] for identity, cache,
@@ -1512,7 +1512,7 @@ impl Cluster {
 		}));
 		let stats = stats_producer.registry().clone();
 		let nodes = crate::nodes::Nodes::default();
-		tracing::info!(hop_id = %origin.hop(), "cluster initialized");
+		tracing::info!(hop_id = %origin.node(), "cluster initialized");
 		let cluster = Cluster {
 			client_limits: client.resolve(),
 			peer_limits: peer.resolve(),
@@ -1579,8 +1579,8 @@ impl Cluster {
 	) -> Result<Admitted, auth::Error> {
 		let mut admitted = self.scope(lease, request)?;
 		let mut bound = admitted.lease.token().clone();
-		bound.publish = moq_net::Pattern::all().into();
-		bound.subscribe = moq_net::Pattern::all().into();
+		bound.publish.path = moq_net::Pattern::all().into();
+		bound.subscribe.path = moq_net::Pattern::all().into();
 		if request.role != Some(moq_auth::Role::Subscriber) {
 			admitted.publisher = self
 				.publisher(&bound)
@@ -1590,7 +1590,7 @@ impl Cluster {
 			admitted.subscriber = self.subscriber(&bound).map(|origin| {
 				origin
 					.consume()
-					.with_hidden(bound.peer)
+					.with_hidden(bound.link.is_some())
 					.with_stats(admitted.stats.clone())
 			});
 		}
@@ -1605,12 +1605,15 @@ impl Cluster {
 		let allowed = match request.role {
 			Some(moq_auth::Role::Publisher) => publisher.is_some(),
 			Some(moq_auth::Role::Subscriber) => subscriber.is_some(),
+			// A direction this relay does not know admits nothing.
+			Some(_) => false,
 			None => publisher.is_some() || subscriber.is_some(),
 		};
 		if !allowed {
 			let wanted = match request.role {
 				Some(moq_auth::Role::Publisher) => "publisher",
 				Some(moq_auth::Role::Subscriber) => "subscriber",
+				Some(_) => "an unknown kind of",
 				None => "any",
 			};
 			return Err(auth::Error::Forbidden(format!(
@@ -1639,7 +1642,12 @@ impl Cluster {
 		// TODO: drop the exemption once deployed peers all opt in.
 		let subscriber = match request.role {
 			Some(moq_auth::Role::Publisher) => None,
-			_ => subscriber.map(|origin| origin.consume().with_hidden(token.peer).with_stats(stats.clone())),
+			_ => subscriber.map(|origin| {
+				origin
+					.consume()
+					.with_hidden(token.link.is_some())
+					.with_stats(stats.clone())
+			}),
 		};
 		Ok(Admitted {
 			lease: lease.with_stats(stats.clone()),
@@ -1698,7 +1706,7 @@ impl Cluster {
 	/// equivalent per-request setter), which derives the read handle. On an
 	/// upstream grant that handle never sees a route learned from another upstream.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.subscribe).ok()
+		self.mounted(token)?.scope(&token.root, &token.subscribe.path).ok()
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
@@ -1707,20 +1715,20 @@ impl Cluster {
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
 		let mut origin = self.mounted(token)?;
-		if let Some(prefix) = self.stats_prefix.as_ref().filter(|_| !(token.peer || token.upstream)) {
+		if let Some(prefix) = self.stats_prefix.as_ref().filter(|_| token.link.is_none()) {
 			origin = origin.exclude(prefix).ok()?;
 		}
-		origin.scope(&token.root, &token.publish).ok()
+		origin.scope(&token.root, &token.publish.path).ok()
 	}
 
 	/// The origin marked with the grant's link and with its mounts applied,
 	/// before it is scoped to the session. A mount the origin refuses
 	/// (overlapping another) admits nothing.
 	fn mounted(&self, token: &auth::Token) -> Option<origin::Producer> {
-		let mut origin = match (token.upstream, token.peer) {
-			(true, _) => self.origin.clone().with_link(origin::Link::Upstream),
-			(false, true) => self.origin.clone().with_link(origin::Link::Peer),
-			(false, false) => self.origin.clone(),
+		let mut origin = match token.link {
+			Some(moq_auth::Link::Upstream) => self.origin.clone().with_link(origin::Link::Upstream),
+			Some(moq_auth::Link::Peer) => self.origin.clone().with_link(origin::Link::Peer),
+			None => self.origin.clone(),
 		};
 		for (at, target) in &token.mounts {
 			let mounted = token.root.join(at).map_err(moq_net::Error::from);
@@ -1773,7 +1781,7 @@ impl Cluster {
 	pub(crate) fn lan_peer_grant(&self) -> moq_auth::Grant {
 		let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
 		grant.tier = self.config.tier.clone().filter(|tier| !tier.is_empty());
-		grant.peer = true;
+		grant.link = Some(moq_auth::Link::Peer);
 		grant
 	}
 
@@ -2599,10 +2607,13 @@ mod tests {
 		options.client.announces = 2;
 		options.peer.announces = 20;
 		let cluster = Cluster::spawn(options).unwrap();
-		for (peer, upstream, expected) in [(false, false, 2), (true, false, 20), (true, true, 20)] {
+		for (link, expected) in [
+			(None, 2),
+			(Some(moq_auth::Link::Peer), 20),
+			(Some(moq_auth::Link::Upstream), 20),
+		] {
 			let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
-			grant.peer = peer;
-			grant.upstream = upstream;
+			grant.link = link;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
 			// A cluster-looking path alone never selects the peer policy.
 			let lease = auth::Lease::new("/.cluster/untrusted", consumer).unwrap();
@@ -2631,7 +2642,7 @@ mod tests {
 		for peer in [false, true] {
 			for session in [false, true] {
 				let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
-				grant.peer = peer;
+				grant.link = peer.then_some(moq_auth::Link::Peer);
 				let lease = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
 				let admitted = match session {
 					true => cluster.scope_session(lease, &request),
@@ -2799,10 +2810,10 @@ mod tests {
 	async fn only_peers_publish_under_the_stats_prefix() {
 		let (cluster, driver) = Cluster::new(with_stats()).unwrap();
 		let options = || moq_net::origin::RouteOptions::default();
-		for (peer, upstream) in [(false, false), (true, false), (true, true)] {
+		for link in [None, Some(moq_auth::Link::Peer), Some(moq_auth::Link::Upstream)] {
+			let peer = link.is_some();
 			let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
-			grant.peer = peer;
-			grant.upstream = upstream;
+			grant.link = link;
 			let token = auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant)).unwrap();
 			let publisher = cluster.publisher(token.token()).expect("publish grant");
 			assert!(publisher.route("room", options()).is_ok());
@@ -4093,7 +4104,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		// The dialer marks what the peer forwards: it entered at `node`, not here.
-		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.hop().get()));
+		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.node().get()));
 
 		let _from_fp = fingerprint
 			.origin
@@ -4109,7 +4120,7 @@ mod tests {
 				// The acceptor marks a LAN peer the same way.
 				assert_eq!(
 					update.route.source(),
-					origin::Source::Peer(fingerprint.origin.hop().get())
+					origin::Source::Peer(fingerprint.origin.node().get())
 				);
 				break;
 			}
@@ -4625,7 +4636,7 @@ mod tests {
 
 		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone())).unwrap();
 		let mut grant = moq_auth::Grant::new(all.clone(), all);
-		grant.peer = true;
+		grant.link = Some(moq_auth::Link::Peer);
 		let peer = auth::Token::new("/", &grant).unwrap();
 
 		let _ingest = cluster
@@ -4661,9 +4672,9 @@ mod tests {
 
 		let client = auth::Token::new("/", &moq_auth::Grant::new(all.clone(), all.clone())).unwrap();
 		let mut grant = moq_auth::Grant::new(all.clone(), all);
-		grant.peer = true;
+		grant.link = Some(moq_auth::Link::Peer);
 		let peer = auth::Token::new("/", &grant).unwrap();
-		grant.upstream = true;
+		grant.link = Some(moq_auth::Link::Upstream);
 		let core = auth::Token::new("/", &grant).unwrap();
 
 		let _ingest = cluster

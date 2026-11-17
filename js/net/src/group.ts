@@ -94,6 +94,9 @@ class GroupState {
 	readonly sequence: bigint;
 	frames = new Signal(new Queue<Frame>());
 	closed = new Once<Error | null>();
+	// Where the group ends, in its track's timescale, once its producer finished it whole: set
+	// before a clean `closed`, and undefined when it only closed.
+	end?: bigint;
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
 	// Absolute sequence of the frame at the front of `frames`, advanced by a read: the
@@ -463,6 +466,7 @@ export class Producer {
 		if (dst.closed.peek() !== undefined) return makeConsumer(dst);
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
+			dst.end = this.#state.end;
 			dst.closed.set(closed);
 			return makeConsumer(dst);
 		}
@@ -694,16 +698,24 @@ export class Producer {
 		}
 	}
 
-	/** True once the group has been closed. */
-	get isClosed(): boolean {
-		return this.#state.closed.peek() !== undefined;
+	/**
+	 * Ends the group without saying where it ends, returning it as {@link Finished}: every frame
+	 * written reaches its readers, but they can't tell the group is whole. Idempotent, as the
+	 * Rust `group::Producer::finish`.
+	 */
+	finish(): Finished {
+		this.#end(null);
+		return this;
 	}
 
 	/**
-	 * Marks the group complete, returning it as {@link Finished}: no more frames will be written.
-	 * Idempotent.
+	 * Ends the group whole at `end`, the exclusive end of its presentation in the track's
+	 * timescale, returning it as {@link Finished}, as the Rust `group::Producer::finish_at`. An
+	 * `end` at or before the group's start throws {@link TimestampMismatch}.
 	 */
-	finish(): Finished {
+	finishAt(end: bigint): Finished {
+		if (end <= this.sequence) throw new TimestampMismatch();
+		if (this.#state.closed.peek() === undefined) this.#state.end = end;
 		this.#end(null);
 		return this;
 	}
@@ -754,7 +766,10 @@ export class Producer {
 		const outcome = this.#state.closed.peek();
 		if (outcome === undefined) return;
 		for (const mirror of this.#mirrors?.keys() ?? []) {
-			if (mirror.closed.peek() === undefined) mirror.closed.set(outcome);
+			if (mirror.closed.peek() === undefined) {
+				if (outcome === null) mirror.end = this.#state.end;
+				mirror.closed.set(outcome);
+			}
 			this.#unmirror(mirror);
 		}
 	}
@@ -992,6 +1007,14 @@ export class Consumer {
 	}
 
 	/**
+	 * Where the group ends in its track's timescale, once its producer finished it whole with
+	 * {@link Producer.finishAt}'s `end`: undefined while it is open, or when it ended without one.
+	 */
+	get end(): bigint | undefined {
+		return this.#state.closed.peek() === null ? this.#state.end : undefined;
+	}
+
+	/**
 	 * Settles when this consumer reaches a terminal state: `null` after a clean close has no
 	 * unread or in-flight frames, or the terminal {@link Error}.
 	 * Peek it synchronously (`undefined` while open), observe it reactively, or `await` it.
@@ -1098,6 +1121,7 @@ export class Consumer {
 			group.#expiry = expiry;
 		};
 		hooks.groupFailed = (group) => group.#failed();
+		hooks.groupExpired = (group) => group.#expiry?.expired() === true;
 		hooks.recoverGroup = (group, recover) => {
 			group.#recover = recover;
 			// A front serving another front attaches its recovery after the inner one handed the
@@ -1324,11 +1348,6 @@ export class Consumer {
 			this.#verdict.peek() !== undefined ||
 			(this.#bufferedFrames().length === 0 && (this.#released || this.#settled()))
 		);
-	}
-
-	/** True once this handle or the group has been closed, regardless of whether buffered frames remain unread. Synchronous complement to the {@link closed} promise. */
-	get isClosed(): boolean {
-		return this.#verdict.peek() !== undefined || this.#released || this.#settled();
 	}
 
 	// Whether the copy being read ended, for good: a failure recovery may continue is not an end.

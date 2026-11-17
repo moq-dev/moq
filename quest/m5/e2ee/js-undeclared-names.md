@@ -2,7 +2,7 @@
 
 ## Goal
 
-`@moq/crypto`'s broadcast producer answers requests for track names it never
+`@moq/e2ee`'s broadcast producer answers requests for track names it never
 created, under semantic names, through `@moq/net`'s public broadcast request
 handler, as `moq_e2ee::broadcast::Requests` does in Rust. A JS
 application then serves on-demand tracks from a plaintext or encrypted
@@ -15,8 +15,8 @@ Decided with the maintainer on 2026-10-24:
 - One quest, both halves; amended 2026-11-03 (maintainer): the `@moq/net`
   half moved to [its own quest](/quest/m4/net-broadcast-requests.md), which
   plaintext users (Kixel's T3 host) need first, and this keeps the
-  `@moq/crypto` half.
-- `@moq/crypto` mirrors the Rust handler exactly: it opens each request's
+  `@moq/e2ee` half.
+- `@moq/e2ee` mirrors the Rust handler exactly: it opens each request's
   physical name, claims it, and yields a request whose `name` is semantic.
   A name that does not open is answered as missing and keeps no state. A
   re-requested or re-created name resumes above its high-water marks, as in
@@ -30,9 +30,9 @@ Decided with the maintainer on 2026-10-24:
   `requests_serve_a_dropped_name_above_its_marks` tests: a relay-forged name, an older epoch's name,
   and a burst of forged names that leaves no state behind.
 
-Public API: a request handler on `@moq/crypto`'s broadcast producer. Wire: none.
+Public API: a request handler on `@moq/e2ee`'s broadcast producer. Wire: none.
 
 ## Required
 
 - [`@moq/net` broadcasts expose their requests](/quest/m4/net-broadcast-requests.md) - the public handler this wraps; split out 2026-11-03 so plaintext users get it first
-- [JS mirror](/quest/m5/net-wrap/js.md) - the `@moq/net` interfaces the `@moq/crypto` wrappers implement
+- [JS mirror](/quest/m5/net-wrap/js.md) - the `@moq/net` interfaces the `@moq/e2ee` wrappers implement

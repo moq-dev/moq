@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { authorize, type Claims, ClaimsSchema, type Permissions, ScopeSchema } from "./claims.ts";
-import { encodeGrant, GrantSchema } from "./contract.ts";
-import { encodeGrants } from "./wire.ts";
+import { Claims, ClaimsSchema, type Permissions, ScopeSchema } from "./claims.ts";
+import { GrantSchema } from "./contract.ts";
+import { encodeClaims, encodeGrants } from "./wire.ts";
 
 // These cases mirror the Rust moq-auth crate's claims::tests one-for-one, so both
 // sides stay pinned to the same authorization semantics.
 
-function claims(root: string, subscribe: string[], publish: string[]): Claims {
+function claims(root: string, subscribe: string[], publish: string[]) {
 	return ClaimsSchema.parse({ root, subscribe, publish });
 }
 
@@ -41,25 +41,45 @@ test("claims refuse mixed encodings and wildcard legacy prefixes", () => {
 	expect(() => ScopeSchema.parse({ root: "demo", put: "room" })).toThrow();
 });
 
-test("grants are written the legacy way only when faithful", () => {
+test("grants are written as patterns, never legacy prefixes", () => {
 	expect(encodeGrants({ root: "live", publish: ["camera1/**"], subscribe: ["**"] })).toEqual({
 		root: "live",
-		put: ["camera1"],
-		get: [""],
-	});
-	// One grant a prefix can't say moves the whole document to patterns.
-	expect(encodeGrants({ root: "live", publish: ["camera1/**"], subscribe: ["*/chat"] })).toEqual({
-		root: "live",
 		publish: ["camera1/**"],
-		subscribe: ["*/chat"],
+		subscribe: ["**"],
 	});
-	expect(encodeGrants({ root: "live", publish: ["camera1"] })).toEqual({ root: "live", publish: ["camera1"] });
+	expect(encodeGrants({ root: "live", publish: ["camera1"], subscribe: [] })).toEqual({
+		root: "live",
+		publish: ["camera1"],
+	});
+});
+
+test("claims read the registered names and write them back", () => {
+	const wire = { root: "live", publish: ["**"], exp: 4102444800, iat: 1, nbf: 2, jti: "abc-123" };
+	const claims = ClaimsSchema.parse(wire);
+	expect(claims).toEqual({
+		root: "live",
+		publish: ["**"],
+		expires: 4102444800,
+		issued: 1,
+		notBefore: 2,
+		id: "abc-123",
+	});
+	expect(encodeClaims(claims)).toEqual(wire);
+});
+
+test("a token ID is a bounded printable string", () => {
+	for (const jti of ["a", "550e8400-e29b-41d4-a716-446655440000", "user:42/a.b+c=", "x".repeat(128)]) {
+		expect(ClaimsSchema.parse({ publish: ["**"], jti }).id).toBe(jti);
+	}
+	for (const jti of ["", "has space", "caf\u00e9", "x".repeat(129), 7, null, ["x"]]) {
+		expect(ClaimsSchema.safeParse({ publish: ["**"], jti }).success).toBe(false);
+	}
 });
 
 test("claims exp and iat are whole seconds", () => {
 	expect(() => ClaimsSchema.parse({ publish: ["**"], exp: 1.5 })).toThrow();
 	expect(() => ClaimsSchema.parse({ publish: ["**"], iat: 1.5 })).toThrow();
-	expect(ClaimsSchema.parse({ publish: ["**"], exp: 4102444800 }).exp).toBe(4102444800);
+	expect(ClaimsSchema.parse({ publish: ["**"], exp: 4102444800 }).expires).toBe(4102444800);
 });
 
 test("claims refuse a bad pattern", () => {
@@ -68,55 +88,66 @@ test("claims refuse a bad pattern", () => {
 });
 
 test("authorize - path equals root", () => {
-	const permissions = authorize(claims("room/123", ["**"], ["alice/**"]), "room/123");
+	const permissions = Claims.authorize(claims("room/123", ["**"], ["alice/**"]), "room/123");
 	expect(texts(permissions)).toEqual({ subscribe: ["**"], publish: ["alice/**"] });
 });
 
 test("authorize - path extends root", () => {
 	// Connecting below the root consumes the matching part of each grant.
-	const permissions = authorize(claims("room/123", ["bob/**"], ["alice/**"]), "room/123/alice");
+	const permissions = Claims.authorize(claims("room/123", ["bob/**"], ["alice/**"]), "room/123/alice");
 	expect(texts(permissions)).toEqual({ subscribe: [], publish: ["**"] });
 });
 
 test("authorize - a literal reached exactly is the path itself", () => {
-	const permissions = authorize(claims("room", [], ["alice"]), "room/alice");
+	const permissions = Claims.authorize(claims("room", [], ["alice"]), "room/alice");
 	expect(texts(permissions)).toEqual({ subscribe: [], publish: [""] });
 });
 
 test("authorize - path is parent of root", () => {
 	// Connecting above the root prepends it, keeping the grants anchored.
-	const permissions = authorize(claims("demo", ["**"], ["alice/**"]), "/");
+	const permissions = Claims.authorize(claims("demo", ["**"], ["alice/**"]), "/");
 	expect(texts(permissions)).toEqual({ subscribe: ["demo/**"], publish: ["demo/alice/**"] });
 });
 
 test("authorize - empty root", () => {
 	// A root-scoped token grants everything it lists, wherever it connects.
-	const permissions = authorize(claims("", ["demo/**"], []), "demo/room");
+	const permissions = Claims.authorize(claims("", ["demo/**"], []), "demo/room");
 	expect(texts(permissions)).toEqual({ subscribe: ["**"], publish: [] });
 });
 
 test("authorize - slashes are implicit", () => {
-	const permissions = authorize(claims("/room/123/", ["bob/**"], []), "//room/123//");
+	const permissions = Claims.authorize(claims("/room/123/", ["bob/**"], []), "//room/123//");
 	expect(permissions.subscribe.toJSON()).toEqual(["bob/**"]);
 });
 
 test("authorize - respects segment boundaries", () => {
 	// "foo" must not cover "foobar".
-	expect(() => authorize(claims("foo", ["**"], ["**"]), "foobar")).toThrow(/does not overlap/);
+	expect(() => Claims.authorize(claims("foo", ["**"], ["**"]), "foobar")).toThrow(/does not overlap/);
 });
 
 test("authorize - unrelated path", () => {
-	expect(() => authorize(claims("demo", ["**"], ["**"]), "other")).toThrow(/does not overlap/);
+	expect(() => Claims.authorize(claims("demo", ["**"], ["**"]), "other")).toThrow(/does not overlap/);
 });
 
 test("authorize - no access at path", () => {
 	// The path overlaps the root, but every grant sits outside it.
-	expect(() => authorize(claims("", ["demo/**"], []), "other")).toThrow(/grants no access/);
+	expect(() => Claims.authorize(claims("", ["demo/**"], []), "other")).toThrow(/grants no access/);
+});
+
+test("authorize - reads an escaped separator as content", () => {
+	// `a\/b` is one segment holding a `/`, the spelling of a moq-transport field.
+	const grant = claims("room", ["a\\/b/*"], ["*"]);
+	expect(texts(Claims.authorize(grant, "room/a\\/b"))).toEqual({ subscribe: ["*"], publish: [""] });
+	expect(Claims.authorize(grant, "room").publish.matches("a\\/b")).toBe(true);
+	expect(Claims.authorize(grant, "room").publish.matches("a/b")).toBe(false);
+	expect(Claims.authorize(claims("room", ["**"], []), "//room/a\\///").subscribe.toJSON()).toEqual(["**"]);
+	// `a\` ends inside that segment, so it is no path the root covers.
+	expect(() => Claims.authorize(claims("a\\/b", ["**"], []), "a\\")).toThrow(/does not overlap/);
 });
 
 test("authorize - wildcards rebase as a set", () => {
 	// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
-	const permissions = authorize(claims("", ["**/chat"], []), "chat");
+	const permissions = Claims.authorize(claims("", ["**/chat"], []), "chat");
 	expect(permissions.subscribe.toJSON()).toEqual(["", "**/chat"]);
 });
 
@@ -124,7 +155,8 @@ test("shared rate vectors parse and re-encode like Rust", async () => {
 	const vectors = await Bun.file(new URL("../../../rs/moq-auth/rate.json", import.meta.url)).json();
 	for (const row of vectors.valid) {
 		expect(encodeGrants(ClaimsSchema.parse(row.input))).toEqual(row.claims);
-		expect(encodeGrant(GrantSchema.parse(row.input))).toEqual(row.grant);
+		// A grant's type is its wire shape, so what parses is what a server answers with.
+		expect(GrantSchema.parse(row.input)).toEqual(row.grant);
 	}
 	for (const input of vectors.invalid) {
 		expect(ClaimsSchema.safeParse(input).success).toBe(false);
@@ -132,7 +164,7 @@ test("shared rate vectors parse and re-encode like Rust", async () => {
 	}
 });
 
-test("a capped role decodes beside its patterns and never encodes as a prefix", () => {
+test("a capped role keeps its cap in the role and never encodes as a prefix", () => {
 	for (const role of ["publish", "subscribe"] as const) {
 		// Subtrees alone would be written as legacy prefixes, which a cap must not be.
 		const claims = ClaimsSchema.parse({
@@ -140,8 +172,7 @@ test("a capped role decodes beside its patterns and never encodes as a prefix", 
 			subscribe: ["**"],
 			[role]: { path: ["alice/**"], rate: 8000 },
 		});
-		expect(claims[role]).toEqual(["alice/**"]);
-		expect(claims[`${role}_rate`]).toBe(8000);
+		expect(claims[role]).toEqual({ path: ["alice/**"], rate: 8000 });
 		const encoded = encodeGrants(claims);
 		expect(encoded).not.toHaveProperty("put");
 		expect(encoded).not.toHaveProperty("get");

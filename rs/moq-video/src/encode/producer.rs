@@ -382,7 +382,7 @@ impl Producer {
 			Encoding::Idle | Encoding::Disabled => Ok(()),
 		};
 		match drained {
-			Ok(()) => Finished::new(publisher),
+			Ok(()) => publisher.finish(),
 			Err(err) => {
 				publisher.abort(moq_net::Error::Transport(err.to_string()));
 				Err(err)

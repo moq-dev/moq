@@ -2,7 +2,7 @@
 
 use std::{num::NonZeroU64, sync::Arc};
 
-use moq_auth::{Grant, Rate};
+use moq_auth::{Access, Grant, Rate};
 
 /// Why a capped grant is refused: nothing under the session would hold it to the cap.
 pub(crate) const UNENFORCED: &str = "this transport cannot enforce bitrate caps";
@@ -19,8 +19,8 @@ impl Caps {
 	/// The caps one grant names.
 	pub fn of(grant: &Grant) -> Self {
 		Self {
-			publish: grant.publish_rate,
-			subscribe: grant.subscribe_rate,
+			publish: grant.publish.rate,
+			subscribe: grant.subscribe.rate,
 		}
 	}
 
@@ -28,25 +28,20 @@ impl Caps {
 	/// direction takes the highest cap among the grants that cap it, and a grant that
 	/// gives the direction paths without a cap lifts it. A grant naming neither has no say.
 	pub fn union<'a>(grants: impl IntoIterator<Item = &'a Grant> + Clone) -> Self {
-		fn highest<'a>(roles: impl Iterator<Item = (&'a moq_auth::Patterns, Option<Rate>)>) -> Option<Rate> {
+		fn highest<'a>(roles: impl Iterator<Item = &'a Access>) -> Option<Rate> {
 			let mut highest = None;
-			for (paths, rate) in roles {
-				match rate {
+			for role in roles {
+				match role.rate {
 					Some(rate) => highest = highest.max(Some(rate)),
-					None if !paths.is_empty() => return None,
+					None if !role.path.is_empty() => return None,
 					None => {}
 				}
 			}
 			highest
 		}
 		Self {
-			publish: highest(
-				grants
-					.clone()
-					.into_iter()
-					.map(|grant| (&grant.publish, grant.publish_rate)),
-			),
-			subscribe: highest(grants.into_iter().map(|grant| (&grant.subscribe, grant.subscribe_rate))),
+			publish: highest(grants.clone().into_iter().map(|grant| &grant.publish)),
+			subscribe: highest(grants.into_iter().map(|grant| &grant.subscribe)),
 		}
 	}
 
@@ -114,8 +109,8 @@ mod tests {
 				.collect::<moq_auth::Patterns>()
 		};
 		let mut grant = Grant::new(patterns(publish), patterns(subscribe));
-		grant.publish_rate = publish_rate;
-		grant.subscribe_rate = subscribe_rate;
+		grant.publish.rate = publish_rate;
+		grant.subscribe.rate = subscribe_rate;
 		grant
 	}
 

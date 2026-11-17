@@ -63,6 +63,7 @@ impl MoqReservation {
 		Self { inner: inner.into() }
 	}
 
+	#[cfg(test)]
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
 		self.inner.consume()
 	}

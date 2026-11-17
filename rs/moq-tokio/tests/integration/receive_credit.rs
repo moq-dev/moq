@@ -626,7 +626,8 @@ fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
 	let mut header = Vec::new();
 	varint(&mut header, subscribe);
 	varint(&mut header, sequence);
-	// The first frame.
+	// No previous start: 0 says unknown, since the field carries it plus one. A lite-07
+	// GROUP has no Frame Start: every Group Stream starts at frame 0.
 	varint(&mut header, 0);
 
 	// GROUP, then its size-prefixed header.
@@ -1028,10 +1029,10 @@ const INFLIGHT: usize = 1 << 20;
 /// The receiver's storage segment (`moq_net`'s crate-private `frame::SEGMENT`): a frame within
 /// one keeps its credit until it completes, and a larger one returns each segment's as it seals.
 const SEGMENT: usize = 1 << 20;
-/// Why cells whose incomplete units overcommit the window are skipped: the quest that makes
-/// `track::Subscriber` report each group it abandons, which their readers need to return its
+/// Why cells whose incomplete units overcommit the window are skipped: their readers must
+/// read through `track::Ordered`, which reports each group it abandons, to return its
 /// in-flight credit.
-const OVERCOMMITTED: &str = "waits on quest/m2/group-drops.md";
+const OVERCOMMITTED: &str = "waits on quest/m3/receive-windows-evicted.md";
 
 /// One benchmark configuration.
 #[derive(Clone, Copy)]
@@ -1200,8 +1201,8 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 ///
 /// Cells whose units overcommit the window are skipped, each printed with [`OVERCOMMITTED`]
 /// as the reason. They should keep their offered load and report what eviction cost them, but
-/// the subscriber can abandon a group without handing it out, so its in-flight credit never
-/// returns and the track's writer stalls.
+/// the reader abandons a group without handing it out, so its in-flight credit never returns
+/// and the track's writer stalls, until it reads the gaps `track::Ordered` reports.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "release benchmark, run by nightly"]
 async fn benchmark_receive_windows() {

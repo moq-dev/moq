@@ -10,6 +10,17 @@ use std::time::Duration;
 use kio::clock::{Instant, Sleep};
 use moq_net::Timestamp;
 
+/// Why the buffer refuses a frame.
+#[derive(Clone, Debug, thiserror::Error)]
+pub(crate) enum Error {
+	/// The source's clock runs further off ours than the output's may follow.
+	#[error("the source's clock runs {ppm:+.1} ppm off ours, past the {limit:.0} ppm the output's may follow")]
+	Drift { ppm: f64, limit: f64 },
+	/// A publisher handed off from queued a frame after its handoff deadline.
+	#[error("a retired publisher queued after its handoff deadline")]
+	Retired,
+}
+
 /// What each track may hold before its reader is held back, as the container consumer's max
 /// buffer: the most one group may cache.
 pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -125,12 +136,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
-	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> anyhow::Result<Push> {
-		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref() {
-			anyhow::ensure!(
-				committed.keys.contains(&key),
-				"a retired publisher queued after its handoff deadline"
-			);
+	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> Result<Push, Error> {
+		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref()
+			&& !committed.keys.contains(&key)
+		{
+			return Err(Error::Retired);
 		}
 		self.writing(&key).push(key, arrival)
 	}
@@ -856,7 +866,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// Queue a frame, or drop it if it cannot make its deadline. Fails once the source's clock
 	/// runs further off ours than the clock may follow.
-	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> anyhow::Result<Push> {
+	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> Result<Push, Error> {
 		let held = self.acquire.as_ref().and_then(|acquire| acquire.tracks.get(&key));
 		// A restart behind what the track already holds cannot decode in order on the clock the
 		// acquisition would anchor, so the acquisition ends at it and the frame opens the next.
@@ -1164,7 +1174,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 	/// Account for the slack a frame arrived with, and every [`STEER`] of our time step the
 	/// clock's drift toward the source's rate plus a pull back to the delay, as far as
 	/// [`MAX_SLEW`] allows.
-	fn steer(&mut self, key: &K, deadline: Option<Instant>, arrival: &Arrival<T>) -> anyhow::Result<()> {
+	fn steer(&mut self, key: &K, deadline: Option<Instant>, arrival: &Arrival<T>) -> Result<(), Error> {
 		let (Some(clock), Some(deadline)) = (self.clock, deadline) else {
 			return Ok(());
 		};
@@ -1294,11 +1304,10 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			self.out_of_tolerance += 1;
 			// The clock can never catch up, so fail once the rate has cost half the delay.
 			if lost * slow.signum() < -delay / 2.0 {
-				anyhow::bail!(
-					"the source's clock runs {:+.1} ppm off ours, past the {:.0} ppm the output's may follow",
-					rate * 1e6,
-					MAX_DRIFT * 1e6
-				);
+				return Err(Error::Drift {
+					ppm: rate * 1e6,
+					limit: MAX_DRIFT * 1e6,
+				});
 			}
 		}
 		Ok(())
@@ -2789,7 +2798,7 @@ mod tests {
 	/// What a run against a drifting source saw.
 	struct Run {
 		/// The error the run ended on, if it failed.
-		err: Option<anyhow::Error>,
+		err: Option<Error>,
 		/// The largest gap between a frame's slack and the delay, in seconds, from `settled`
 		/// hours on.
 		worst: f64,
@@ -2979,7 +2988,7 @@ mod tests {
 	/// What [`feed`] saw.
 	struct Fed {
 		/// The decode time a push failed at, in seconds, and its error.
-		err: Option<(f64, anyhow::Error)>,
+		err: Option<(f64, Error)>,
 		dropped: u64,
 		/// What the last push did.
 		last: Option<Push>,
@@ -3147,7 +3156,7 @@ mod tests {
 
 	/// What [`unmarked`] saw.
 	struct Stepped {
-		err: Option<anyhow::Error>,
+		err: Option<Error>,
 		dropped: u64,
 		/// Each frame's generation, in the order they went out.
 		out: Vec<u64>,

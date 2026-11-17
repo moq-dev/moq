@@ -123,7 +123,7 @@ int main(void) {
     pthread_mutex_lock(&c.mutex);
     wait_until(&c, &c.broadcast);
     pthread_mutex_unlock(&c.mutex);
-    int32_t catalogs = moq_consume_catalog((uint32_t)c.broadcast, on_catalog, &c);
+    int32_t catalogs = moq_consume_catalog((uint32_t)c.broadcast, 0, on_catalog, &c);
     CHECK(catalogs > 0);
     pthread_mutex_lock(&c.mutex);
     wait_until(&c, &c.catalog);

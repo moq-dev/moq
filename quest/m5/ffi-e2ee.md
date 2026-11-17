@@ -4,7 +4,7 @@
 
 The Swift and Kotlin bindings publish and consume moq-e2ee protected
 broadcasts under an application-supplied `(context, kid, secret)` credential,
-interoperating with `@moq/crypto` in both directions, with the same epoch rules
+interoperating with `@moq/e2ee` in both directions, with the same epoch rules
 and typed authentication failures as Rust and JS.
 
 ## Plan

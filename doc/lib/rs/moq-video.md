@@ -56,6 +56,17 @@ cameras; links libpipewire), and `vpx` (links libvpx). `vaapi` (Intel and AMD on
 Linux), `v4l2` (ARM SoC codecs such as a Raspberry Pi's), and `nvidia` are on by
 default, since none needs anything on the build host.
 
+Every config that opens hardware (`encode::Config`, `decode::Config`,
+`resize::Config`, `encode::Capture`) has a `device` field, on every platform
+and feature set. `Device::Auto`, the default, lets each backend choose.
+`Device::Render(path)` names a DRM render node: VA-API opens it, and NVENC and
+NVDEC open the NVIDIA GPU behind it, so a host with several GPUs places each
+codec on the one it names. `Device::Video(path)` names a V4L2 codec node. A
+named node steers automatic backend selection to the backends that drive it,
+and one that fails to open is an error rather than a search for another.
+macOS, Windows, and Android pick their own device and ignore the field.
+`capture::Config::cursor` is `Cursor::Drawn` (the default) or `Cursor::Hidden`.
+
 On Wayland, the `pipewire` feature lets Rust callers request a screen or
 window through the system picker with `capture::Source::Portal`. Keep the
 selection for automatic reopens; create a new one to choose another source.

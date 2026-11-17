@@ -59,9 +59,9 @@ class FfiBench {
 
         val broadcast = BroadcastProducer()
         val track = broadcast.publishTrack("calls", null)
-        val producer = track.appendGroup()
+        val producer = track.appendGroup(Timestamp.unscaled(0uL))
         val group = producer.consume()
-        call("sequence", results) { group.sequence() }
+        call("start", results) { group.start() }
         val consumer = track.consume(null)
         call("info", results) { consumer.info() }
         listOf(consumer, group, producer, track, broadcast).forEach { it.close() }
@@ -118,7 +118,8 @@ class FfiBench {
                     }
                 }
                 tracks.forEach { track ->
-                    track.appendGroup().use { group ->
+                    track.appendGroup(Timestamp((n * case.frames).toULong(), 1_000_000uL)).use {
+                        group ->
                         repeat(case.frames) { f ->
                             group.writeFrame(
                                 Frame(

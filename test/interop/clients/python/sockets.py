@@ -30,13 +30,13 @@ async def start(coro: Coroutine[Any, Any, T]) -> asyncio.Task[T]:
 async def exchange(stream: socket.TrackStream) -> None:
     assert stream.peer == "rust"
     assert stream.consumer.info().max_age is None
-    for _ in range(3):
-        group = stream.producer.append_group()
+    for key in range(3):
+        group = stream.producer.append_group(moq.Timestamp.unscaled(key))
         for payload in PAYLOADS:
-            group.write_frame(payload, moq.Timestamp.unscaled(group.sequence))
+            group.write_frame(payload, moq.Timestamp.unscaled(key))
         group.finish()
     stream.producer.finish()
-    received = [(group.sequence, [frame.payload async for frame in group]) async for group in stream.consumer]
+    received = [(group.start, [frame.payload async for frame in group]) async for group in stream.consumer]
     assert received == [(sequence, PAYLOADS) for sequence in range(3)], received
 
 

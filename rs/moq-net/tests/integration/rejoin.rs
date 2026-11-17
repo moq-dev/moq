@@ -684,6 +684,9 @@ async fn leaving_after_the_cache_window_keeps_the_latest_group() {
 
 /// A rejoin keeps the source's timestamps.
 ///
+/// moq-transport carries a frame's time as its Group ID, in the track's units, so each
+/// group is keyed by its time.
+///
 /// The returning subscription opts out of the track's properties from draft-22, since the
 /// copy already learned them, so its units must come from that first answer rather than
 /// the empty block the second one carries.
@@ -716,10 +719,11 @@ async fn rejoin_keeps_source_timestamps() {
 			// Far from any arrival time, so a frame stamped on arrival cannot pass.
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
 
-			for (key, ms) in [(0, 123_456), (1, 654_321)] {
+			for ms in [123_456, 654_321] {
+				let key = ms;
 				let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
 				crate::support::wanted(track.demand()).await.unwrap();
-				let mut group = track.append_next().unwrap();
+				let mut group = track.append_group(ts(ms)).unwrap();
 				group.write_frame(ts(ms), b"frame".as_ref()).unwrap();
 				group.finish().unwrap();
 

@@ -136,7 +136,7 @@ class SmokeTest {
     fun `stream abort preserves protocol details`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("errors", null)
-            val producer = track.appendGroup()
+            val producer = track.appendGroup(Timestamp.unscaled(0uL))
             val group = broadcast.consume().fetchGroup("errors", 0uL, FetchGroupOptions())
             producer.abort(404u)
             val error = assertFailsWith<MoqException.Protocol> { group.readFrame() }
@@ -322,7 +322,7 @@ class SmokeTest {
                     "events",
                     TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
                 )
-            val group = track.appendGroup()
+            val group = track.appendGroup(Timestamp(0uL, 1_000_000uL))
             group.writeFrame(
                 Frame(
                     payload = "cached".encodeToByteArray(),
@@ -339,7 +339,7 @@ class SmokeTest {
                         0uL,
                         FetchGroupOptions(priority = 3),
                     )
-            assertEquals(0uL, fetched.sequence())
+            assertEquals(0uL, fetched.start())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
         }
@@ -360,7 +360,7 @@ class SmokeTest {
                     TrackInfo(maxAge = null, timescale = 1_000_000uL),
                 )
             for (ms in 0uL until 3uL) {
-                val group = track.appendGroup()
+                val group = track.appendGroup(Timestamp(ms, 1_000uL))
                 group.writeFrame(
                     Frame(payload = "x".encodeToByteArray(), timestamp = Timestamp(ms, 1_000uL))
                 )
@@ -378,8 +378,8 @@ class SmokeTest {
                         order = Order.ASCENDING,
                     )
                 )
-            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
-            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
+            val starts = List(3) { checkNotNull(consumer.recvGroup()).start() }
+            assertEquals(listOf(0uL, 1_000uL, 2_000uL), starts)
         }
     }
 
@@ -417,8 +417,8 @@ class SmokeTest {
                     TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
                 )
             val consumer = track.consume(null)
-            track.appendGroup().finish()
-            track.appendGroup().finish()
+            track.appendGroup(Timestamp(0uL, 1_000_000uL)).finish()
+            track.appendGroup(Timestamp(1_000uL, 1_000_000uL)).finish()
             track.writeFrame(
                 Frame(
                     payload = "populated".encodeToByteArray(),
@@ -532,7 +532,7 @@ class SmokeTest {
                     consumer,
                     dev.moq.media.GroupConfig(
                         rendition = dev.moq.media.AudioRendition(name, audio),
-                        sequence = 5_000_000uL,
+                        start = 5_000_000uL,
                         options = FetchGroupOptions(priority = 3),
                     ),
                 )
@@ -541,7 +541,7 @@ class SmokeTest {
             media.finish()
 
             fetched.use {
-                assertEquals(5_000_000uL, it.sequence())
+                assertEquals(5_000_000uL, it.start())
                 val frames = it.frames().toList()
                 assertEquals(1, frames.size)
                 val frame = frames.single()
@@ -831,7 +831,7 @@ class SmokeTest {
     fun `a flow releases its handle however collection ends`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("thrown", null)
-            track.appendGroup().finish()
+            track.appendGroup(Timestamp.unscaled(0uL)).finish()
             // Finished, so a handle left open would read the end instead of failing.
             track.finish()
             val consumer = broadcast.consume().subscribeTrack("thrown", null)

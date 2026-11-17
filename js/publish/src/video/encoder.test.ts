@@ -1018,7 +1018,8 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		await settle();
 		const first = accepted().at(-1);
 		expect(first).toMatchObject({ framerate: 30 });
-		expect(first?.bitrate).toBeGreaterThan(0);
+		// The default cap, the formula moq-video shares: 720p30 H.264 is 4 Mbps.
+		expect(first?.bitrate).toBe(3_978_544);
 		expect(encoder.out.resolved.peek()?.bitrate).toBe(first?.bitrate);
 
 		// A grant below the ceiling caps the live config but leaves the probe alone.
@@ -1034,7 +1035,8 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		expect(probe.mock.calls.length).toBeGreaterThan(probes);
 		const second = accepted().at(-1);
 		expect(second).toMatchObject({ framerate: 60 });
-		expect(second?.bitrate).toBeGreaterThan(first?.bitrate ?? 0);
+		// 60 fps costs 1.5x the 30 fps cap.
+		expect(second?.bitrate).toBe(5_967_816);
 		expect(encoder.out.catalog.peek()?.framerate).toBe(60);
 	} finally {
 		encoder.close();
@@ -1457,7 +1459,7 @@ test("an on-demand rendition declares its join, and a media subscriber starts it
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		subscribers.push(catalog);
 		const first = (await catalog.latest())?.value;
-		expect(first?.media?.join).toEqual({ interval: Catalog.u53(3000) });
+		expect(first?.sync?.interval).toEqual(Catalog.u53(3000));
 		expect(first?.video?.renditions.video).not.toHaveProperty("hls");
 
 		subscribers.push(net.track("video").subscribe());
@@ -1467,7 +1469,7 @@ test("an on-demand rendition declares its join, and a media subscriber starts it
 		// A later join leaves the declared grid alone for this broadcast.
 		config.set({ join: Duration.millis(5000) });
 		await settle();
-		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(3000));
+		expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(3000));
 	} finally {
 		for (const subscriber of subscribers) subscriber.close();
 		encoder.close();
@@ -1481,7 +1483,7 @@ test("the default join is the declared join interval", async () => {
 	const encoder = new Encoder("video", { enabled: true, broadcast, capture: recording.capture as never });
 	try {
 		await settle();
-		expect((await readCatalog(broadcast))?.media?.join?.interval).toBe(Catalog.u53(2000));
+		expect((await readCatalog(broadcast))?.sync?.interval).toBe(Catalog.u53(2000));
 	} finally {
 		encoder.close();
 		broadcast.close();
@@ -1505,7 +1507,7 @@ async function liveInterval(changed: Duration): Promise<{ keys: number[]; interv
 			if (ms === 2500) config.set({ join: changed });
 			await recording.send(ms);
 		}
-		return { keys: [...recording.keys], interval: (await readCatalog(broadcast))?.media?.join?.interval };
+		return { keys: [...recording.keys], interval: (await readCatalog(broadcast))?.sync?.interval };
 	} finally {
 		encoder.close();
 		broadcast.close();

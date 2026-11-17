@@ -124,10 +124,10 @@ int32_t moq_publish_container_finish(uint32_t container);
 int32_t moq_publish_media_finish(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, moq_timestamp timestamp);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_track_info *info);
-int32_t moq_publish_track_group(uint32_t track);
+int32_t moq_publish_track_group(uint32_t track, const moq_timestamp *start);
 int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
-int32_t moq_publish_group_sequence(uint32_t group, uint64_t *dst);
+int32_t moq_publish_group_start(uint32_t group, uint64_t *dst);
 int32_t moq_publish_group_finish(uint32_t group);
 int32_t moq_publish_group_ready(uint32_t group, uint64_t size, moq_status_callback on_ready, void *user_data);
 int32_t moq_publish_track_finish(uint32_t track);
@@ -155,7 +155,7 @@ int32_t moq_track_request_video(uint32_t request, const moq_video_init *config);
 int32_t moq_track_request_audio(uint32_t request, const moq_audio_init *config);
 int32_t moq_track_request_abort(uint32_t request, uint16_t error_code);
 int32_t moq_track_request_free(uint32_t request);
-int32_t moq_group_request_sequence(uint32_t request, uint64_t *dst);
+int32_t moq_group_request_start(uint32_t request, uint64_t *dst);
 int32_t moq_group_request_priority(uint32_t request, int8_t *dst);
 int32_t moq_group_request_frame_start(uint32_t request, uint64_t *dst);
 int32_t moq_group_request_accept(uint32_t request);
@@ -168,7 +168,8 @@ int32_t moq_consume_closed(uint32_t broadcast, moq_status_callback on_closed, vo
 int32_t moq_consume_closed_cancel(uint32_t watcher);
 
 // Consuming: Catalog
-int32_t moq_consume_catalog(uint32_t broadcast, moq_status_callback on_catalog, void *user_data);
+int32_t moq_consume_catalog(uint32_t broadcast, uint64_t delay_us, moq_status_callback on_catalog, void *user_data);
+int32_t moq_consume_catalog_timestamp(uint32_t catalog, moq_timestamp *dst);
 int32_t moq_consume_catalog_cancel(uint32_t catalog);
 int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);
@@ -234,7 +235,7 @@ A scale-less track has no time, so there `has_scale` is false and `value` is
 the frame's group key (a datagram's sequence). Every write takes a non-NULL
 timestamp: `moq_publish_track_frame` and `moq_publish_group_frame` convert
 theirs to the track's timescale, a microsecond one unless
-`moq_track_info.timescale` sets another, and `moq_publish_group_sequence` reads
+`moq_track_info.timescale` sets another, and `moq_publish_group_start` reads
 the key a scale-less group's frames carry. `moq_consume_track_frame` points
 `moq_frame.timestamp` at the timestamp read, never NULL, valid until the frame
 is freed.

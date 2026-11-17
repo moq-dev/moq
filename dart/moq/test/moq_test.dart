@@ -247,7 +247,9 @@ void main() {
         info: TrackInfo(maxAge: null, timescale: 1000000),
       );
       for (var ms = 0; ms < 3; ms++) {
-        final group = track.appendGroup();
+        final group = track.appendGroup(
+          start: Duration(milliseconds: ms).toTimestamp(),
+        );
         group.writeFrame(
           frame: Frame(
             payload: utf8.encode('x'),
@@ -264,12 +266,12 @@ void main() {
           order: Order.ascending,
         ),
       );
-      final sequences = <int>[];
+      final starts = <int>[];
       for (var i = 0; i < 3; i++) {
         final group = await consumer.recvGroup().timeout(timeout);
-        sequences.add(group!.sequence());
+        starts.add(group!.start());
       }
-      expect(sequences, [0, 1, 2]);
+      expect(starts, [0, 1000, 2000]);
       broadcast.close();
     },
   );
@@ -538,7 +540,7 @@ void main() {
     final demand = track.demand();
     while (await demand.wantedChanged().timeout(timeout) == null) {}
 
-    final producer = track.appendGroup();
+    final producer = track.appendGroup(start: Duration.zero.toTimestamp());
     producer.writeFrame(
       frame: MoqFrame(
         payload: utf8.encode('dart round trip'),

@@ -32,7 +32,7 @@ What remains here:
 - Rust and JS only (decided 2026-10-20, maintainer): the e2ee publisher has
   no moq-ffi half either, so an FFI consumer waits for a quest that adds both.
 
-Public API: an e2ee consumer entry point in `moq-e2ee` and `@moq/crypto`.
+Public API: an e2ee consumer entry point in `moq-e2ee` and `@moq/e2ee`.
 Wire: none.
 
 ## Required

@@ -77,83 +77,10 @@ export namespace Echo {
 	export function isEcho(path: Net.Path.Valid): boolean;
 }
 
-export namespace Health {
-	export interface Connection {
-		evidence: Health.Evidence[];
-		lostBytes?: number;
-		lostPackets?: number;
-		stale?: true;
-		verdict: Health.Verdict;
-	}
-	export interface Evidence {
-		input: Health.Input;
-		value?: number;
-		verdict: Health.Verdict;
-	}
-	export interface Health {
-		interval?: number;
-		observer: Health.Observer;
-		renditions: Record<string, Health.Rendition>;
-		reset?: Health.Reset;
-		role: Health.Role;
-		stale?: true;
-		transport: Health.Connection;
-		verdict: Health.Verdict;
-	}
-	export type Input = "rtt" | "loss" | "headroom" | "skipped" | "late" | "errors" | "stalled";
-	export interface Limits {
-		degraded: number;
-		unhealthy: number;
-	}
-	export interface Observer {
-		instance?: Net.Instance.Valid;
-		path: Net.Path.Valid;
-	}
-	export interface Rendition {
-		bitrate?: number;
-		bytes?: number;
-		evidence: Health.Evidence[];
-		frames?: number;
-		verdict: Health.Verdict;
-	}
-	export interface Report<S> {
-		observer: Health.Observer;
-		snapshot: S;
-	}
-	export type Reset = "decrease" | "replaced";
-	export type Role = "publisher" | "viewer";
-	export interface Sample<S> {
-		age: number;
-		current: Health.Report<S>;
-		interval: number;
-		previous?: Health.Report<S>;
-	}
-	export interface Thresholds {
-		publisher: {
-			skipped: Health.Limits;
-		};
-		stale: number;
-		transport: {
-			headroom: Health.Limits;
-			loss: Health.Limits;
-			rtt: Health.Limits;
-		};
-		viewer: {
-			errors: Health.Limits;
-			late: Health.Limits;
-			stalled: Health.Limits;
-		};
-	}
-	export type Verdict = "unknown" | "healthy" | "degraded" | "unhealthy";
-	export function defaultThresholds(): Health.Thresholds;
-	export function publisher(sample: Health.Sample<Stats.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
-	export function viewer(sample: Health.Sample<Echo.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
-}
-
 export * as Net from "@moq/net";
 
 export namespace Report {
-	export const INTERVAL: 1000;
+	export const INTERVAL: Net.Clock.Duration;
 	export class Writer<T, I = T> {
 		constructor(broadcast: Net.Broadcast.Producer, name: string, schema: ZodMiniType<T, I>);
 		finish(): void;

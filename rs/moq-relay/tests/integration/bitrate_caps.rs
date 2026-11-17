@@ -27,15 +27,15 @@ const LEAST: Duration = Duration::from_millis(700);
 fn grant(publish: Option<u64>, subscribe: Option<u64>) -> moq_auth::Grant {
 	let all: moq_auth::Patterns = moq_auth::Pattern::all().into();
 	let mut grant = moq_auth::Grant::new(all.clone(), all);
-	grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
-	grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.publish.rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+	grant.subscribe.rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
 	grant
 }
 
 /// Where a relay's QUIC listener is, and the clients and sockets that reach it.
 enum Dial {
 	/// Real sockets on loopback.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	Real(u16),
 	/// A simulated host serving at `addr`, trusting `fingerprints`.
 	#[cfg(feature = "test-support")]
@@ -51,7 +51,7 @@ impl Dial {
 	fn client(&self, host: std::net::IpAddr) -> moq_tokio::Client {
 		let _ = host;
 		match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(_) => {
 				let mut config = moq_tokio::connect::Config::default();
 				config.tls.insecure = Some(true);
@@ -78,7 +78,7 @@ impl Dial {
 
 	fn addr(&self) -> SocketAddr {
 		match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(port) => ([127, 0, 0, 1], *port).into(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { addr, .. } => *addr,
@@ -87,7 +87,7 @@ impl Dial {
 
 	fn url(&self) -> url::Url {
 		match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(port) => format!("https://localhost:{port}/room").parse().unwrap(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { addr, .. } => format!("moqt://{addr}/room").parse().unwrap(),
@@ -98,7 +98,7 @@ impl Dial {
 	fn endpoint(&self, host: std::net::IpAddr) -> driver::endpoint::Endpoint {
 		let _ = host;
 		let socket: driver::endpoint::Socket = match self {
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			Dial::Real(_) => std::net::UdpSocket::bind("127.0.0.1:0").unwrap().into(),
 			#[cfg(feature = "test-support")]
 			Dial::Sim { network, .. } => (Box::new(network.bind(SocketAddr::new(host, 4433)))
@@ -326,7 +326,7 @@ mod sim {
 	}
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 mod uring {
 	use std::net::{IpAddr, Ipv4Addr};
 

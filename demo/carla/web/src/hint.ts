@@ -4,8 +4,7 @@ export interface ControlHintState {
 	estopped: boolean;
 	estopBy?: string;
 	status: "pending" | "available" | "unavailable";
-	/** How `status` names this player's lease. */
-	handle?: string;
+	driverId?: string;
 	statusDriver?: string;
 	wheel: boolean;
 }
@@ -25,8 +24,8 @@ export function controlHint(state: ControlHintState): string {
 	if (!state.active && state.status === "pending") return "Waiting for vehicle status";
 	if (!state.active) return "Take control to drive";
 	if (state.status === "unavailable") return "Vehicle status lost · Control unconfirmed";
-	if (!state.handle || !state.statusDriver) return "Requesting control…";
-	if (state.statusDriver !== state.handle) return `Driven by ${state.statusDriver}`;
+	if (!state.driverId || !state.statusDriver) return "Requesting control…";
+	if (state.statusDriver !== state.driverId) return `Driven by ${state.statusDriver}`;
 	if (state.wheel) {
 		return "Wheel · Brake before shifting · Esc to release";
 	}
