@@ -20,6 +20,9 @@ fn arms() -> Vec<Arm> {
 			hops,
 			merge: false,
 			chain: false,
+			stay: false,
+			rejoin: false,
+			reroute: false,
 		});
 	}
 	for mode in [
@@ -36,6 +39,9 @@ fn arms() -> Vec<Arm> {
 					hops,
 					merge,
 					chain: false,
+					stay: false,
+					rejoin: false,
+					reroute: false,
 				});
 			}
 		}
@@ -49,6 +55,9 @@ const fn arm(mode: Mode, merge: bool) -> Arm {
 		hops: true,
 		merge,
 		chain: false,
+		stay: false,
+		rejoin: false,
+		reroute: false,
 	}
 }
 
@@ -406,20 +415,27 @@ fn a_join_skips_pops_without_demand_and_warm_ones_draw_it() {
 		let edges: BTreeSet<(Node, Node)> = middle.trees[0].edges.iter().copied().collect();
 		let joined = BTreeSet::from([(4, 0), (0, 1), (1, 2), (2, 3)]);
 		let skip = BTreeSet::from([(4, 0), (0, 1), (0, 2), (0, 3)]);
+		// A settled pull stays: the middle pop joins the near pop's copy, but the far
+		// pop, settled on its long link, never moves for the warm pops beside it.
+		let stayed = BTreeSet::from([(4, 0), (0, 1), (1, 2), (0, 3)]);
 		match arm.mode {
 			Mode::Path => assert_eq!(edges, skip, "{case}"),
+			_ if arm.stay => assert_eq!(edges, stayed, "{case}"),
 			// One query goes to the cheapest link, which for the middle pop is the near
 			// pop's and for the far pop the middle's.
 			_ => assert_eq!(edges, joined, "{case}"),
 		}
-		// The near pop's reader leaves and the middle pop returns to its long link.
+		// The near pop's reader leaves and the middle pop returns to its long link,
+		// unless its pull stays, when the near pop carries on for it.
 		let near = last(&rows, "near_pop_leaves");
-		assert!(
+		let carriers: &[Node] = if arm.stay { &[1] } else { &[] };
+		assert_eq!(
 			near.trees[0].edges.contains(&(0, 2)),
+			!arm.stay,
 			"{case}: {:?}",
 			near.trees[0].edges
 		);
-		assert!(near.carriers[0].is_empty(), "{case}: {:?}", near.carriers[0]);
+		assert_eq!(near.carriers[0], carriers, "{case}");
 	}
 }
 
@@ -490,10 +506,34 @@ const CHAIN: Arm = Arm {
 	..NOT_DOWN_QUERY
 };
 
+/// The pick with settled pulls staying: no move for price after the join.
+const STAY: Arm = Arm {
+	stay: true,
+	..NOT_DOWN_QUERY
+};
+
+/// [`STAY`], choosing again when a reader of its own starts.
+const REJOIN: Arm = Arm { rejoin: true, ..STAY };
+
+/// [`STAY`], choosing again when its route changes.
+const REROUTE: Arm = Arm { reroute: true, ..STAY };
+
 /// The narrower audiences for useful adverts, which keep them off a CDN's edges.
-/// [`NOT_DOWN_QUERY`] is the pick, and [`CHAIN`] the pick with the chain.
+/// [`NOT_DOWN_QUERY`] is the pick, [`CHAIN`] the pick with the chain, [`STAY`] the
+/// pick whose settled pulls stay, and [`REJOIN`] and [`REROUTE`] that, choosing again
+/// on a reader of its own or a new route.
 fn narrower() -> Vec<Arm> {
-	vec![NOT_NEXT, NOT_DOWN, NOT_DOWN_ASK, NOT_DOWN_ASK_UP, NOT_DOWN_QUERY, CHAIN]
+	vec![
+		NOT_NEXT,
+		NOT_DOWN,
+		NOT_DOWN_ASK,
+		NOT_DOWN_ASK_UP,
+		NOT_DOWN_QUERY,
+		CHAIN,
+		STAY,
+		REJOIN,
+		REROUTE,
+	]
 }
 
 /// The cheaper ways to advertise measured beside the rest: the narrower audiences,
@@ -722,8 +762,8 @@ fn an_edge_finds_the_warm_core_beside_its_route() {
 /// The price of taking no warm signal from a relay on the taker's own path. Relay 1
 /// is warm for a reader of its own, and 3 pulls through 1 and 2 at 4. Once the
 /// direct link 1 to 3 opens, 1's warm copy is 3 away, but 1 is 3's ancestor, so the
-/// pick stays: its tree costs 14 where 13 is cheapest, the publisher's link included. The chain, which tells 1 that
-/// 2's pull is 3's demand, takes it.
+/// pick stays: its tree costs 14 where 13 is cheapest, the publisher's link
+/// included. The chain, which tells 1 that 2's pull is 3's demand, takes it.
 #[test]
 fn an_ancestor_warm_on_its_own_is_passed_over() {
 	let shape = Shape {
@@ -752,6 +792,10 @@ fn an_ancestor_warm_on_its_own_is_passed_over() {
 	};
 	assert_eq!(tree(NOT_DOWN_QUERY), (14, 13));
 	assert_eq!(tree(CHAIN), (13, 13));
+	// A settled pull stays on 14. The new link moves its route, but the route reaches
+	// 3 before 1's advert does, so the one choice the move buys finds only the route.
+	assert_eq!(tree(STAY), (14, 13));
+	assert_eq!(tree(REROUTE), (14, 13));
 }
 
 /// One CSV row of the growth sweeps.
@@ -1040,6 +1084,8 @@ fn every_arm_settles_after_churn() {
 		NOT_DOWN_ASK_UP,
 		NOT_DOWN_QUERY,
 		CHAIN,
+		STAY,
+		REROUTE,
 	] {
 		for shape in [random as fn(&mut XorShift) -> Shape, flying, regional] {
 			let out = churn(arm, 0..12, shape);

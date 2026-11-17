@@ -103,6 +103,19 @@ pub(super) struct Arm {
 	/// that stops the same loop: a relay never takes a warm signal from a relay named
 	/// on its own pull's path, whose warmth may be this relay's own demand.
 	pub chain: bool,
+	/// A settled pull stays: a relay chooses where to pull when its demand starts, and
+	/// once more on each query answer from that join, then moves only when its parent
+	/// says it lost its upstream, the pull runs through itself, or the session closes.
+	/// No price a neighbour offers later moves it, so no relay's move is another's
+	/// reason to move, and no rule about whose warmth it is applies.
+	pub stay: bool,
+	/// With [`Arm::stay`], a relay already pulling for others chooses again, once, when
+	/// a reader of its own starts: an outside event, like a join.
+	pub rejoin: bool,
+	/// With [`Arm::stay`], a relay chooses again, once, each time its route changes:
+	/// the route layer's routes follow links and claims, never demand, so no relay's
+	/// pull is another's reason to move.
+	pub reroute: bool,
 }
 
 impl Arm {
@@ -124,7 +137,10 @@ impl Arm {
 		let hops = if self.hops { "+hops" } else { "" };
 		let merge = if self.merge { "+merge" } else { "" };
 		let chain = if self.chain { "+chain" } else { "" };
-		format!("{mode}{hops}{merge}{chain}")
+		let stay = if self.stay { "+stay" } else { "" };
+		let rejoin = if self.rejoin { "+rejoin" } else { "" };
+		let reroute = if self.reroute { "+reroute" } else { "" };
+		format!("{mode}{hops}{merge}{chain}{stay}{rejoin}{reroute}")
 	}
 }
 
@@ -250,6 +266,13 @@ struct Carry {
 	told: BTreeMap<(Node, u64), Option<Signal>>,
 	heard: BTreeMap<Node, Signal>,
 	advertised: BTreeMap<Node, Signal>,
+	/// Upstreams whose query answer arrived since the relay last judged one, with
+	/// [`Arm::stay`].
+	fresh: BTreeSet<Node>,
+	/// A reader of its own started while it already pulled, with [`Arm::rejoin`].
+	rejoin: bool,
+	/// The route it last chose by, with [`Arm::reroute`].
+	route: Option<(Node, Metric)>,
 }
 
 impl Carry {
@@ -720,7 +743,8 @@ impl WarmSim {
 				.collect(),
 		};
 		// Without the chain, an ancestor's warmth may be this relay's own demand.
-		let ancestors: Vec<Node> = match self.arm.chain {
+		// A relay that never moves for price has no reason to fence its own warmth off.
+		let ancestors: Vec<Node> = match self.arm.chain || self.arm.stay {
 			true => Vec::new(),
 			false => self
 				.live(node, cast)
@@ -948,11 +972,19 @@ impl WarmSim {
 			// It asks before it pulls, so the first answers can steer the first pull.
 			if let Some(best) = best.filter(|_| carry.unanswered.is_empty()) {
 				let pull = self.subscribe(node, cast, best.via);
-				self.entry(node, cast).up = Some(pull);
+				let route = self.route(node, cast);
+				let carry = self.entry(node, cast);
+				carry.up = Some(pull);
+				carry.fresh.clear();
+				carry.route = route;
 			}
 			return;
 		};
-		let moving = carry.next.as_ref().map(|next| next.via);
+		if self.arm.stay {
+			self.stay(node, cast, &up, &options, best);
+			return;
+		}
+		let moving = self.entry(node, cast).next.as_ref().map(|next| next.via);
 		let target = match &up.state {
 			// Nothing flows yet, so a better source replaces it outright.
 			State::Pending => {
@@ -1035,6 +1067,62 @@ impl WarmSim {
 
 	/// Move toward `target` unless already there or on the way, marking a new pull the
 	/// merge asked for.
+	/// [`Arm::stay`]'s rule for a relay already pulling: a pending pull waits for its
+	/// answer, failing closed only if its source left; a live one moves only for a
+	/// query answer from its join that is strictly cheaper, judged once, keeping the old
+	/// pull until the new one is live; a lost one, or one through itself, is replaced by
+	/// a fresh choice.
+	fn stay(&mut self, node: Node, cast: usize, up: &Pull, options: &[Choice], best: Option<Choice>) {
+		let hops = self.arm.hops;
+		let reroute = self.arm.reroute;
+		let route = self.route(node, cast);
+		let carry = self.entry(node, cast);
+		let moving = carry.next.as_ref().map(|next| next.via);
+		let fresh = std::mem::take(&mut carry.fresh);
+		let mut rejoin = std::mem::take(&mut carry.rejoin);
+		if reroute && carry.route != route && up.state != State::Pending {
+			carry.route = route;
+			rejoin = true;
+		}
+		match &up.state {
+			State::Pending => {
+				carry.fresh = fresh;
+				carry.rejoin = rejoin;
+				if !options.iter().any(|choice| choice.via == up.via) {
+					let old = self.entry(node, cast).up.take();
+					self.unsubscribe(node, cast, old);
+				}
+			}
+			State::Live(signal) if !(hops && signal.path.contains(&node)) => {
+				let own = signal.cost + self.price(up.via, node).warm;
+				let answer = (options.iter())
+					.filter(|choice| fresh.contains(&choice.via) && choice.offered.is_some() && choice.cost < own)
+					.min_by_key(|choice| (choice.cost, Reverse(self.hash(cast, choice.via)), choice.via));
+				// A reader starting is a join: the best source now, if strictly cheaper.
+				let rejoined = best.filter(|best| rejoin && best.via != up.via && best.cost < own);
+				let target = (answer.map(|choice| choice.via))
+					.or(rejoined.map(|best| best.via))
+					.or(moving)
+					.unwrap_or(up.via);
+				self.toward(node, cast, target, false);
+			}
+			// Nothing flows from a lost pull, so a new one replaces it outright, and fails
+			// closed like any pending pull: two relays that each turn to the other on stale
+			// adverts would otherwise wait on each other for good.
+			_ => {
+				let (old, next) = (carry.up.take(), carry.next.take());
+				self.unsubscribe(node, cast, old);
+				self.unsubscribe(node, cast, next);
+				if let Some(best) = best {
+					let pull = self.subscribe(node, cast, best.via);
+					let carry = self.entry(node, cast);
+					carry.up = Some(pull);
+					carry.route = route;
+				}
+			}
+		}
+	}
+
 	fn toward(&mut self, node: Node, cast: usize, target: Node, merged: bool) {
 		let carry = self.entry(node, cast);
 		let up = carry.up.as_ref().map(|pull| pull.via);
@@ -1176,6 +1264,7 @@ impl WarmSim {
 
 	fn recv(&mut self, from: Node, to: Node, cast: usize, msg: Msg) {
 		self.dirty.insert((to, cast));
+		let stay = self.arm.stay;
 		// A publisher answers at once.
 		if let Msg::Subscribe { stream, open: true, .. } = msg
 			&& !self.relay(to)
@@ -1227,6 +1316,9 @@ impl WarmSim {
 				if carry.asking.get(&from) == Some(&stream)
 					&& let Some(heard) = carry.asks.get_mut(&from)
 				{
+					if stay && word.is_some() {
+						carry.fresh.insert(from);
+					}
 					*heard = word;
 					carry.unanswered.remove(&from);
 				}
@@ -1245,7 +1337,9 @@ impl WarmSim {
 	/// A reader at `node` starts or stops reading broadcast `cast`.
 	pub fn read(&mut self, node: Node, cast: usize, reading: bool) {
 		let round = self.round;
+		let rejoin = self.arm.rejoin;
 		let carry = self.entry(node, cast);
+		carry.rejoin |= rejoin && reading && !carry.reader && carry.up.is_some();
 		carry.reader = reading;
 		carry.since = reading.then_some(round);
 		self.dirty.insert((node, cast));
