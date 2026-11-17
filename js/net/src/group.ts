@@ -595,6 +595,14 @@ export class Producer {
 		if (this.#state.flate && (inflated === undefined ? !encodable(size) : size > MAX_FRAME_BYTES))
 			throw new FrameTooLarge();
 		if ((inflated ?? 0) > MAX_FRAME_BYTES) throw new FrameTooLarge();
+		// Held in the track's timescale, rounded down, as Rust's `write_frame` holds it: two starts
+		// within one unit tie, as they do once on the wire.
+		const track = this.#state.track;
+		if (track) {
+			const rescaled = rescaleIn(track, frame.timestamp, this.#state.start);
+			if (rescaled.value !== frame.timestamp.value || rescaled.scale !== frame.timestamp.scale)
+				frame = { payload: frame.payload, timestamp: rescaled };
+		}
 		const commits = this.#admit(frame);
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
