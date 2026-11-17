@@ -5498,6 +5498,35 @@ mod test {
 		assert_eq!(read(&mut sub), ["group 6"]);
 	}
 
+	/// A front served by another front reports a late arrival on the inner copy too.
+	#[test]
+	fn a_nested_front_reports_a_late_arrival_as_a_gap() {
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		let b = copy();
+		inner_routes.serve(b.consume());
+		let routes = Producer::new();
+		let outer = logical(&routes);
+		routes.serve(inner.consume());
+		let mut sub = subscribe(&outer, HOUR).ordered();
+		let waiter = kio::Waiter::noop();
+		let read = |sub: &mut track::Ordered| -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+				});
+			}
+			items
+		};
+		write(&b, 0);
+		write(&b, 5);
+		assert_eq!(read(&mut sub), ["group 0", "group 5"]);
+		write(&b, 3);
+		assert_eq!(read(&mut sub), ["gap 3..4 (old)"]);
+	}
+
 	/// A late arrival the reader's ranges leave out is no gap of its own: it is neither reported
 	/// nor held, and widening the ranges offers it as the group it is.
 	#[test]

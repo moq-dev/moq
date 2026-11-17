@@ -8048,8 +8048,9 @@ struct Cursor {
 	/// [`Subscriber`], which drains this after every read.
 	stale: stats::Content,
 	/// Groups the seek path has convicted but whose keys no caller has committed
-	/// past yet, keyed by key; see [`Self::commit_seek_stale`].
-	seek_pending: BTreeMap<u64, stats::Content>,
+	/// past yet, keyed by key, with the budget that convicted each; see
+	/// [`Self::commit_seek_stale`].
+	seek_pending: BTreeMap<u64, (stats::Content, Duration)>,
 	/// What this cursor handed out, skipped, gave up, and reported.
 	record: Record,
 	/// The drops a wire publisher forwards, once it first polls for one.
@@ -9641,7 +9642,7 @@ impl Cursor {
 				// the edge can be evicted), so the group may still be delivered.
 				// Re-snapshot on every re-examination so the eventual count reflects the
 				// group's latest observed content.
-				self.seek_pending.insert(group.start, group.content());
+				self.seek_pending.insert(group.start, (group.content(), drift.budget));
 				floor = group.start.saturating_add(1);
 				continue;
 			}
@@ -9708,8 +9709,15 @@ impl Cursor {
 	/// then be delivered after all.
 	fn commit_seek_stale(&mut self, committed: u64) {
 		let keep = self.seek_pending.split_off(&committed);
-		for (_, content) in std::mem::replace(&mut self.seek_pending, keep) {
+		for (key, (content, budget)) in std::mem::replace(&mut self.seek_pending, keep) {
 			self.stale.add(content);
+			// Given up for good now, so it is as reported as a write-off is: a key-order
+			// reader tells its caller the group will not come.
+			if self.drops.is_some()
+				&& let Some(end) = key.checked_add(1)
+			{
+				self.record.pending.insert(key..end, Pending::own(Hole::stale(budget)));
+			}
 		}
 	}
 }
@@ -10255,7 +10263,7 @@ impl Subscriber {
 	pub(super) fn late(&mut self, below: u64) -> Vec<u64> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.late(below),
-			Inner::Resume(..) => Vec::new(),
+			Inner::Resume(resume, _) => resume.late(below),
 		}
 	}
 
@@ -11061,11 +11069,7 @@ impl Ordered {
 						if let Some((at, span)) = lowest
 							&& span.start == key
 						{
-							let resume = key.saturating_add(1);
-							let (end, error) = self.gaps.remove(&at).expect("the lowest gap is held");
-							if end > resume {
-								self.gaps.insert(resume, (end, error));
-							}
+							self.cut_gap(at, span.start, key.saturating_add(1));
 						}
 						self.at = self.at.max(key.saturating_add(1));
 						Poll::Ready(Ok(Some(Item::Group(group))))
@@ -11124,13 +11128,24 @@ impl Ordered {
 	}
 
 	/// Take `given` from the gap `lowest_gap` found, as an item. What lies from `resume` on stays
-	/// a gap, to be clipped and returned later.
+	/// a gap, to be clipped and returned later, as does what lies below `given`.
 	fn take_gap(&mut self, at: u64, given: ops::Range<u64>, resume: u64) -> Item {
+		let error = self.cut_gap(at, given.start, resume);
+		self.give(given, error)
+	}
+
+	/// Remove `from..resume` from the gap held at `at`, returning its error. What lies below
+	/// `from`, which the ranges leave out, and from `resume` on stay gaps, to be clipped and
+	/// returned later.
+	fn cut_gap(&mut self, at: u64, from: u64, resume: u64) -> Error {
 		let (end, error) = self.gaps.remove(&at).expect("the lowest gap is held");
+		if at < from {
+			self.gaps.insert(at, (from, error.clone()));
+		}
 		if end > resume {
 			self.gaps.insert(resume, (end, error.clone()));
 		}
-		self.give(given, error)
+		error
 	}
 
 	/// Look for every drop recorded, in whatever order they come.
@@ -11146,6 +11161,8 @@ impl Ordered {
 			};
 			match hole {
 				Hole::Drop { error, .. } => {
+					// A final drop replaces a stale one still waiting, rather than overlap it.
+					self.forget_gaps(range.clone());
 					self.gaps.insert(range.start, (range.end, error.into()));
 				}
 				// A skip was never a group: nothing was given up, and it replaces a drop
@@ -16380,15 +16397,8 @@ mod test {
 		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..2));
 		assert_eq!(drain(&mut subscriber), vec![1]);
 		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..2)).ordered();
-		let next = subscriber
-			.next_group()
-			.now_or_never()
-			.unwrap()
-			.unwrap()
-			.unwrap()
-			.group()
-			.unwrap();
-		assert_eq!(next.start, 1);
+		// Group 0 is stale against it, which the read reports before the group.
+		assert_eq!(items(&mut subscriber), ["gap 0..1 (old)", "group 1"]);
 
 		// A budget that covers it delivers the range, and nothing above it.
 		let mut subscriber = producer.subscribe(replay().with_end(2));
@@ -19449,6 +19459,60 @@ mod test {
 
 	/// A group landing after the read passed its key is given up as old, since the read never
 	/// goes back; the group it was passed for is no gap.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_cached_group_the_seek_passes_as_stale_is_a_gap() {
+		let producer = received_producer(None);
+		put(&producer, 0, None);
+		put(&producer, 1, None);
+		elapse(&producer, Duration::from_millis(100));
+		put(&producer, 2, None);
+		let budget = Duration::from_millis(50);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
+			.ordered();
+		assert_eq!(items(&mut ordered), ["gap 0..1 (old)", "group 1", "group 2", "pending"]);
+	}
+
+	/// A final drop replaces the part of a stale gap it covers while that gap still waits, so
+	/// the buffered gaps never overlap: the stale run keeps what lies either side of it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_buffered_gap_gives_way_to_what_replaces_it() {
+		let producer = received_producer(None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		ordered.gaps.insert(4, (8, StreamError::Old.into()));
+		ordered.forget_gaps(5..7);
+		ordered.gaps.insert(5, (7, StreamError::DeliveryTimeout.into()));
+		let held: Vec<_> = ordered.gaps.iter().map(|(start, (end, _))| (*start, *end)).collect();
+		assert_eq!(held, [(4, 5), (5, 7), (7, 8)]);
+		ordered.forget_gaps(0..100);
+		assert!(ordered.gaps.is_empty());
+	}
+
+	/// What a range excludes from a gap that is partly covered stays a gap, so a range that
+	/// widens again over it reports it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_gap_a_range_clips_keeps_what_the_range_excluded() {
+		let producer = received_producer(None);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.ordered();
+		put(&producer, 2, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
+		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
+		ordered.set_range(4..5);
+		assert_eq!(items(&mut ordered), ["gap 4..5 (delivery timeout)", "pending"]);
+		ordered.set_range(..);
+		assert_eq!(
+			items(&mut ordered),
+			["gap 3..4 (delivery timeout)", "gap 5..6 (delivery timeout)", "pending"]
+		);
+	}
+
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_late_arrival_is_a_gap() {
