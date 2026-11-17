@@ -1154,14 +1154,14 @@ impl<N: Key> Router<N> {
 		Some((heard.offer.cost + claim.cost, heard.offer.names(self.me)))
 	}
 
-	/// Every neighbour whose route to `origin` ranks with the one in use: the equal
-	/// next hops a request may take.
+	/// Every neighbour whose route to `origin` ranks with the one in use, mark
+	/// included: the equal next hops a request may take.
 	pub fn ties(&self, origin: Id) -> Vec<N> {
 		let Some(best) = self.best.get(&origin) else {
 			return Vec::new();
 		};
 		(self.candidates(origin).into_iter())
-			.filter(|candidate| candidate.rank() == best.rank())
+			.filter(|candidate| candidate.rank() == best.rank() && candidate.offer.marked == best.offer.marked)
 			.map(|candidate| candidate.via)
 			.collect()
 	}
