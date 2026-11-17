@@ -179,8 +179,9 @@ settles.
   next, by induction on the rank: no relay's demand comes back to it as a
   price, the reflection every fence of the pick chased. TLC checks it from
   every state the bounded outside events reach, delivering every word late
-  and in any order, on three drones with three reader changes, two reader
-  changes and an uplink flap, and churned random mesh 503's six relays.
+  and in any order, on three drones with three reader changes, two fixed
+  readers while an uplink closes and reopens, and churned random mesh 503's
+  six relays.
   With the rank check removed it fails on the three drones: two readers'
   relays each take the other's copy, find their own path in it, fall back,
   and repeat. The pick fails on case 503, as the sweep found.

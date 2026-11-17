@@ -32,7 +32,7 @@ quest gate just rs tla moq-net/verify/warm/WarmSettle.tla -config rs/moq-net/ver
 | --- | --- | --- | --- |
 | `Drones.cfg` | ranked by route cost | three drones meshed with costly uplinks, readers starting and stopping three times | 164,434, 5 minutes |
 | `Hash.cfg` | ranked by relay | the same | 164,434, 5 minutes |
-| `Flap.cfg` | ranked by route cost | the drones with two reader changes and one uplink closing and reopening | FLAP_STATES |
+| `Flap.cfg` | ranked by route cost | readers fixed at two drones while one's uplink closes and reopens, changing its rank | 44,427, under a minute |
 | `Mesh503.cfg` | ranked by route cost | churned random mesh 503's six relays and readers, from no pulls | 490,125, 25 minutes |
 | `Settled.cfg` | settled pulls | the same | 407,526, 6 minutes |
 | `SettledDrones.cfg` | settled pulls | as `Drones.cfg` | 6,852, seconds |
@@ -60,4 +60,4 @@ Sync commit: the merge of moq-dev/moq#8986. Run `git log -- rs/moq-net/src/route
 
 ## Not covered
 
-One broadcast and one publisher, which never moves. The route layer is an oracle: each relay's route is the shortest over the open links at once, the lowest relay among equal ones; `verify-route` and the route proof cover how routes settle. The three words one session carries one way arrive together, though the subscription, its answer, and the advert ride separate streams, and a register keeps only its newest value, so a relay may skip values but never reads one out of order on one session. No link is marked upstream, so the mark is left out, and there is no query. A pull replaced by one through the same neighbour is the same pull. Relays never restart. A pass covers four relays with three reader changes, or two and one uplink flap, and case 503's six relays with their readers fixed.
+One broadcast and one publisher, which never moves. The route layer is an oracle: each relay's route is the shortest over the open links at once, the lowest relay among equal ones; `verify-route` and the route proof cover how routes settle. The three words one session carries one way arrive together, though the subscription, its answer, and the advert ride separate streams, and a register keeps only its newest value, so a relay may skip values but never reads one out of order on one session. No link is marked upstream, so the mark is left out, and there is no query. A pull replaced by one through the same neighbour is the same pull. Relays never restart. A pass covers four relays with three reader changes, or two fixed readers and one uplink closing and reopening, and case 503's six relays with their readers fixed. A reader change during the flap passed 2M states without finishing, so it is left out.

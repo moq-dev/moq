@@ -609,7 +609,13 @@ fn growing() -> Vec<Arm> {
 		ADVERTISE,
 		USEFUL,
 	];
-	arms.extend(audiences());
+	// Of ranked readers only the one measured against the others: its variants change
+	// trees, not how adverts grow, and each arm adds about a minute to the sweep.
+	arms.extend(
+		audiences()
+			.into_iter()
+			.filter(|arm| arm.order.is_none() || *arm == ORDER_ROUTE),
+	);
 	arms
 }
 
