@@ -33,7 +33,7 @@ use std::{
 
 use super::cache::rendezvous;
 use super::compare::Arm as Rule;
-use super::multi::{Broadcast, MultiSim, Next, Tie, Tune};
+use super::multi::{Broadcast, MultiSim, Next, Tie};
 use super::*;
 
 /// How a relay hears that a neighbour has demand.
@@ -420,14 +420,6 @@ pub(super) struct Tree {
 	pub uplinks: usize,
 }
 
-/// The tune of the route rule the bake-off picked.
-fn kept() -> Tune {
-	match Rule::KEPT {
-		Rule::Multi(tune) => tune,
-		Rule::Path(_) => unreachable!(),
-	}
-}
-
 /// Close `stream` from `peer`, forgetting `peer` once none is left.
 fn close(streams: &mut BTreeMap<Node, BTreeSet<u64>>, peer: Node, stream: u64) {
 	if let Some(open) = streams.get_mut(&peer) {
@@ -501,7 +493,7 @@ impl WarmSim {
 		let nodes = relays + publishers;
 		Self {
 			arm,
-			net: MultiSim::new(kept(), nodes),
+			net: MultiSim::new(Rule::TUNE, nodes),
 			relays,
 			nodes,
 			endpoints: BTreeMap::new(),

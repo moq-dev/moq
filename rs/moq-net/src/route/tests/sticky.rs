@@ -14,10 +14,7 @@ use super::multi::{Best, MultiSim, Tie, Tune};
 use super::*;
 
 /// The rule the epic picked: floor, epoch, batch, drain, and claimed.
-const KEPT: Tune = match Arm::KEPT {
-	Arm::Multi(tune) => tune,
-	Arm::Path(_) => panic!("the picked rule is the prototype's"),
-};
+const KEPT: Tune = Arm::TUNE;
 
 /// More deliveries than any network here needs to settle.
 const LIMIT: usize = 200_000;

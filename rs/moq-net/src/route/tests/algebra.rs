@@ -21,10 +21,7 @@ use super::multi::{Best, Change, Claim, Here, Hop, Msg, Offer, Port, Role, Route
 use super::*;
 
 /// The rule the epic picked: floor, epoch, batch, drain, and claimed.
-const KEPT: Tune = match Arm::KEPT {
-	Arm::Multi(tune) => tune,
-	Arm::Path(_) => panic!("the picked rule is the prototype's"),
-};
+const KEPT: Tune = Arm::TUNE;
 
 /// The node receiving every route here: relay 0 at its first start.
 const ME: Id = 1_000;
