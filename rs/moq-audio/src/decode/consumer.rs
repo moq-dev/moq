@@ -169,6 +169,9 @@ pub struct Consumer {
 	/// The playout delay the subscription states as its [`Delay::min`] in place of
 	/// [`Options::delay`]'s, once the start no longer depends on it.
 	stated: Option<Duration>,
+	/// Whether the container's start no longer depends on the min: floored at the live edge,
+	/// or fixed once it handed over a packet, gap, or end.
+	placed: bool,
 	/// Where arrival times are measured from.
 	origin: Instant,
 	/// Packets read and observed but not yet decoded, held by the [`Backpressure`] gate,
@@ -279,6 +282,7 @@ impl Consumer {
 		Ok(Self {
 			target: Target::new(delay, options.estimate, catalog.jitter),
 			stated: None,
+			placed: options.start == Start::Latest,
 			decoder,
 			track,
 			resampler: None,
@@ -612,11 +616,10 @@ impl Consumer {
 			// waited out to the max delay would read as jitter. Late groups that did arrive still
 			// play up to the max. An unfloored start waits for media the min reaches back to, which
 			// the estimate would measure as jitter, so that start keeps the configured min until
-			// reading started; a start at the live edge is floored there. Checked before every
-			// poll, since each arrival and each decoded frame can move it; the estimate moves in
-			// whole buckets, so each move is one update.
-			let placed = self.started || self.options.start == Start::Latest;
-			if placed && self.stated != Some(self.delay()) {
+			// the container hands over its first item. Checked before every poll, since each
+			// arrival and each decoded frame can move it; the estimate moves in whole buckets, so
+			// each move is one update.
+			if self.placed && self.stated != Some(self.delay()) {
 				self.stated = Some(self.delay());
 				self.track.set_delay(self.stated());
 			}
@@ -669,6 +672,8 @@ impl Consumer {
 					self.ended = Some(Some(moq_net::Error::TimestampMismatch.into()));
 				}
 				Some(Ok(Some(read))) => {
+					// The container hands over nothing before its start is fixed.
+					self.placed = true;
 					// The estimator times arrivals, so it learns of a declared silence as the
 					// packets around it arrive rather than as they decode. The end's own group
 					// carries the stopped encoder's final packets, which end the speech before
@@ -2931,6 +2936,66 @@ mod tests {
 			.await
 			.unwrap()
 			.expect("the packet past the hole");
+	}
+
+	/// Backpressure holding the first packet encoded doesn't keep the estimate from the hole wait:
+	/// the container fixed its start when it handed that packet over, so a hole after it waits
+	/// out the estimate rather than the zero min an unfloored start was configured with.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_behind_a_held_first_packet_waits_out_the_estimate() {
+		use moq_mux::container::Container as _;
+
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 8_000, 1);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let options = Options {
+			delay: Delay {
+				max: Some(Duration::from_secs(2)),
+				..Delay::default()
+			},
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
+			.await
+			.unwrap();
+		let backpressure = consumer.backpressure();
+		backpressure.set_latency(Duration::from_millis(100), Duration::from_secs(2));
+		let container = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
+		let payload: Bytes = vec![0u8; 160 * size_of::<f32>()].into();
+		let write = |sequence: u64| {
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let frame = moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(sequence * 20_000).unwrap(),
+				duration: None,
+				payload: payload.clone(),
+				keyframe: true,
+			};
+			container.write(&mut group, &[frame]).unwrap();
+			group.close().unwrap();
+		};
+
+		write(0);
+		assert!(kio::clock::timeout(Duration::ZERO, consumer.read()).await.is_err());
+		assert_eq!(consumer.pending.len(), 1, "the first packet is held encoded");
+		write(2);
+		assert!(
+			kio::clock::timeout(Duration::from_millis(10), consumer.read())
+				.await
+				.is_err()
+		);
+		write(1);
+		drop(backpressure);
+		let mut read = Vec::new();
+		for _ in 0..3 {
+			read.push(match consumer.read().await.unwrap().unwrap() {
+				Read::Frame(frame) => format!("frame {}", Duration::try_from(frame.timestamp).unwrap().as_millis()),
+				Read::Gap { .. } => "gap".to_string(),
+				Read::End { .. } => "end".to_string(),
+			});
+		}
+		assert_eq!(read, ["frame 0", "frame 20", "frame 40"]);
 	}
 
 	/// A path that delivers every fifth packet 300 ms late from the start: each lands after
