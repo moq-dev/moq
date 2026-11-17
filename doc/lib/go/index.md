@@ -21,7 +21,7 @@ catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamp
 `TimestampFromScale` and `TimestampFromDuration` build one exactly; `TimestampToDuration` rounds down to a whole nanosecond.
 Every write takes a timestamp, and the library never substitutes zero or now.
 A raw track with a `nil` timescale is untimed: each frame carries `moq.Unscaled(key)`, its group's key, whose `Scale` is `nil`.
-`TrackInfo.Compression` set to `CompressionDeflate` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
+`TrackInfo.Compression` set to `DeflateCompression()` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
 The JSON producers' `Update`, `Append`, `Push`, and `Pop` take a final `moq.Timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
 skips to the newest state where `Next` yields each one. A read timestamp is at the track's timescale.
@@ -106,7 +106,7 @@ track := "camera"
 catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
 video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
     Input: moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: moqvideo.FrameRate{Numerator: 30000, Denominator: 1001}},
-    Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
+    Output: moqvideo.EncoderOutput{Codec: moq.H264VideoCodec(), Kind: moq.AutoEncoder()},
     Track: &track,
 })
 _ = video.Write(moqvideo.Frame{Timestamp: moq.TimestampFromScale(pts, 90_000), Data: rgba})

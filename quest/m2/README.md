@@ -70,8 +70,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
   [signals](/quest/m2/signals-semantics.md), [`@moq/ui`](/quest/m2/ui-private.md),
   and [room, publish, and OBS names](/quest/m2/browser-packages.md).
-- **Bindings.** [Open selectors](/quest/m2/ffi-open-selectors.md),
-  [Dart as experimental](/quest/m2/dart-experimental.md), and
+- **Bindings.** [Dart as experimental](/quest/m2/dart-experimental.md) and
   [the C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).

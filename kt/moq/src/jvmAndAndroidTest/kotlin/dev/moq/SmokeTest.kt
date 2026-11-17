@@ -315,7 +315,11 @@ class SmokeTest {
     @Test
     fun `broadcast consumer fetches cached group`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "events",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
             val group = track.appendGroup()
             group.writeFrame(
                 Frame(
@@ -351,7 +355,7 @@ class SmokeTest {
             val track =
                 broadcast.publishTrack(
                     "backlog",
-                    TrackInfo(maxAgeUnlimited = true, timescale = 1_000_000uL),
+                    TrackInfo(maxAge = null, timescale = 1_000_000uL),
                 )
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
@@ -405,7 +409,11 @@ class SmokeTest {
     @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
             val consumer = track.consume(null)
             track.appendGroup().finish()
             track.appendGroup().finish()
@@ -439,17 +447,13 @@ class SmokeTest {
     }
 
     @Test
-    fun `an omitted max age is zero and the unlimited flag sets none`() {
+    fun `an omitted info has a zero max age and a null one sets none`() {
         BroadcastProducer().use { broadcast ->
             val omitted = broadcast.publishTrack("omitted", null).consume(null).info()
             assertEquals(java.time.Duration.ZERO, omitted.maxAge)
             val unlimited =
-                broadcast
-                    .publishTrack("unlimited", TrackInfo(maxAgeUnlimited = true))
-                    .consume(null)
-                    .info()
+                broadcast.publishTrack("unlimited", TrackInfo(maxAge = null)).consume(null).info()
             assertNull(unlimited.maxAge)
-            assertTrue(unlimited.maxAgeUnlimited)
         }
     }
 
@@ -572,7 +576,9 @@ class SmokeTest {
                 val track =
                     broadcast.publishTrack(
                         "ticks",
-                        timestamp.scale?.let { TrackInfo(timescale = it) },
+                        timestamp.scale?.let {
+                            TrackInfo(maxAge = java.time.Duration.ZERO, timescale = it)
+                        },
                     )
                 val consumer = track.consume(null)
                 track.writeFrame(Frame(payload = ByteArray(0), timestamp = timestamp))
@@ -585,7 +591,11 @@ class SmokeTest {
     @Test
     fun `out of range timestamps are refused`() {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("ticks", TrackInfo(timescale = 90_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "ticks",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 90_000uL),
+                )
             for (timestamp in
                 listOf(
                     Timestamp(1uL, 0uL),
@@ -627,7 +637,11 @@ class SmokeTest {
     fun `typed json snapshot round-trips a serializable value`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = true)
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val consumer = SnapshotConsumer(broadcast.consume(), "status")
                 for (n in 1..4) producer.update(
@@ -659,7 +673,11 @@ class SmokeTest {
             val track =
                 broadcast.publishTrack(
                     "log",
-                    TrackInfo(timescale = 1_000_000uL, compression = Compression.DEFLATE),
+                    TrackInfo(
+                        maxAge = java.time.Duration.ZERO,
+                        timescale = 1_000_000uL,
+                        compression = Compression.deflate(),
+                    ),
                 )
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
@@ -696,7 +714,11 @@ class SmokeTest {
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 assertEquals("status", demand.name())
@@ -715,7 +737,11 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
             // A demand watcher does not own the writer; keep it alive through collection.
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
@@ -738,7 +764,11 @@ class SmokeTest {
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            val track =
+                broadcast.publishTrack(
+                    "status",
+                    TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000uL),
+                )
             SnapshotProducer(broadcast, track, config).use { producer ->
                 producer.update("""{"state":"raw"}""", Timestamp(1uL, 1_000uL))
 
@@ -1354,7 +1384,7 @@ class SmokeTest {
                                     ),
                                 output =
                                     VideoEncoderOutput(
-                                        codec = VideoCodec.H264,
+                                        codec = VideoCodec.h264(),
                                         kind = softwareEncoder,
                                     ),
                                 track = "camera",
