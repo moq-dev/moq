@@ -30,7 +30,7 @@ Each request's direction and resource come from its SRT stream id:
 
 A request waits for its broadcast to be announced, so a player may connect
 before the publisher does. A multi-program feed is refused unless
-`Publish::with_program` picks one program (`Program::One(n)`) or every program
+`Import::program` picks one program (`Program::One(n)`) or every program
 (`Program::All`), which publishes each on its own broadcast under the path:
 `live/cam0/1`, `live/cam0/2`, and so on.
 
@@ -43,16 +43,18 @@ while let Some(request) = server.accept().await {
         moq_srt::Request::Publish(publish) => {
             let origin = origin.clone();
             tokio::spawn(async move {
-                publish.accept(&origin, "live/cam0", &moq_mux::Ingest::default()).await
+                let path = moq_net::Path::from_static("live/cam0");
+                publish.accept(moq_srt::Import::new(&origin, path)).await
             });
         }
-        moq_srt::Request::Subscribe(subscribe) => {
+        moq_srt::Request::Play(play) => {
             let consumer = consumer.clone();
-            tokio::spawn(async move { subscribe.accept(&consumer, "live/cam0").await });
+            let path = moq_net::Path::from_static("live/cam0");
+            tokio::spawn(async move { play.accept(moq_srt::Export::new(&consumer, path)).await });
         }
     }
     // ...or call `.reject(moq_srt::Reject::Forbidden)` on the `Publish` /
-    // `Subscribe` instead of `.accept()` to deny it.
+    // `Play` instead of `.accept()` to deny it.
 }
 ```
 

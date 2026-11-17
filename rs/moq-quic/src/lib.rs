@@ -1,10 +1,8 @@
 //! Low-level protocol logic for the QUIC protocol
 //!
 //! moq-quic has no networking code: the caller supplies transport timestamps, and address
-//! validation reads the ambient `kio::clock` wall time. Most applications use the Tokio driver
-//! in `moq_tokio::quic::driver` instead.
-//!
-//! Use `moq_tokio::quic::driver` for Tokio, or drive this state machine from another runtime.
+//! validation reads the ambient `kio::clock` wall time. moq-tokio and moq-uring drive it on
+//! their runtimes; most applications reach it through their MoQ `connect` and `listen`.
 //!
 //! The most important types are `Endpoint`, which conceptually represents the protocol state for
 //! a single socket and mostly manages configuration and dispatches incoming datagrams to the

@@ -61,7 +61,7 @@ class FfiBench {
         val track = broadcast.publishTrack("calls", null)
         val producer = track.appendGroup()
         val group = producer.consume()
-        call("sequence", results) { group.sequence() }
+        call("start", results) { group.start() }
         val consumer = track.consume(null)
         call("info", results) { consumer.info() }
         listOf(consumer, group, producer, track, broadcast).forEach { it.close() }
@@ -87,7 +87,10 @@ class FfiBench {
             val broadcast = route.broadcast()
             val tracks =
                 (0 until case.publishers).map {
-                    broadcast.publishTrack("$it", TrackInfo(timescale = 1_000_000uL))
+                    broadcast.publishTrack(
+                        "$it",
+                        TrackInfo(maxAge = java.time.Duration.ZERO, timescale = 1_000_000uL),
+                    )
                 }
             val consumers = tracks.flatMap { track ->
                 (0 until case.subscribers).map { track.consume(null) }

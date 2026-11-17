@@ -4,7 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
-import type { Drain } from "./connection/goaway.ts";
+import type { Goaway as Received } from "./connection/goaway.ts";
 import { GoAway } from "./ietf/goaway.ts";
 import type { Session } from "./ietf/session.ts";
 import { Subscriber } from "./ietf/subscriber.ts";
@@ -247,7 +247,7 @@ test("ietf: requests open on the draining session until the replacement wins", a
 
 test("announcing and subscribing after GOAWAY still open streams", async () => {
 	for (const version of [IetfVersion.DRAFT_18, IetfVersion.DRAFT_22]) {
-		const goaway = new Once<Drain>();
+		const goaway = new Once<Received>();
 		goaway.set({ uri: "" });
 		let opened = false;
 		const session: Session = {

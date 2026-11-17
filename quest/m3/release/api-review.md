@@ -74,8 +74,8 @@ re-read this list, so it is settled:
   live estimate, which that quest gives a home.
 - `Rendition::applied()` and `moq_video::encode::Applied` go in
   [the media sweep](/quest/m2/unused-api/media.md); moq-sock's ICMP error
-  queue and `qmux::Config::fixed_receive_window` in
-  [the transport sweep](/quest/m2/unused-api/transport.md).
+  queue and `qmux::Config::fixed_receive_window` went in the transport sweep,
+  [moq-dev/moq#8957](https://github.com/moq-dev/moq/pull/8957).
 - Already gone: `TcpTls::new`
   ([moq-dev/moq#8852](https://github.com/moq-dev/moq/pull/8852)), and the
   `p2p` and `stun` features

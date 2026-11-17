@@ -19,8 +19,9 @@
 (* Scope: one target, redirects between endpoints the policy accepts plus  *)
 (* one it refuses, no retry window, no tokens, not connecting once, and no *)
 (* redirect-loop scoring. A session's age stands in for its tenure: 1 is   *)
-(* past `Backoff::healthy`. Until a session has been established, a failed *)
-(* dial ends the policy (`Reconnect::established`).                        *)
+(* past `Backoff::healthy`. Until a session has been established, which   *)
+(* takes one past that bar or a GOAWAY, a failed dial or a closed session *)
+(* ends the policy (`Reconnect::established`).                             *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -28,7 +29,7 @@ CONSTANTS
     Endpoints,    \* where a dial can land
     Start,        \* the configured target
     Refused,      \* a GOAWAY URI `Redirect::target` refuses
-    Restart,      \* `Config::restart`: "redial", "wait", or "handoff"
+    Restart,      \* `Config::restart`: "redial" or "handoff"
     MaxSessions   \* sessions that connect in one behaviour
 
 Sessions == 1..MaxSessions
@@ -57,12 +58,14 @@ VARIABLES
     spred,     \* the predecessor `Shared` mirrors for `Connection::close`
     started,   \* `Presence::sessions_started`
     ended,     \* `Presence::sessions_ended`
-    misdials   \* 1 once a dial went elsewhere than an unheeded redirect named
+    misdials,  \* 1 once a dial went elsewhere than an unheeded redirect named
+    established \* `Reconnect::established`: a session stayed up past the healthy bar or got a GOAWAY
 
 policyVars == <<phase, live, watch, probe, pred, target, queue, sess, used, timer,
                 dial, dialTo, misdials>>
 callerVars == <<lc, lcSess, migrating, spred, started, ended, probing>>
-vars == <<policyVars, callerVars>>
+lifeVars == <<established>>
+vars == <<policyVars, callerVars, lifeVars>>
 
 \* A session: where it reached, whether it is open and who closed it ("peer",
 \* "abort" for `Session::abort`, "drain" for a `start_close` that finished),
@@ -98,6 +101,7 @@ Init ==
     /\ started = 0
     /\ ended = 0
     /\ misdials = 0
+    /\ established = FALSE
 
 Open(s) == s # None /\ sess[s].open
 Abort(sx, s) == IF s # None /\ sx[s].open
@@ -168,12 +172,6 @@ CallerSame == UNCHANGED callerVars
 (* The policy: one pass of `Reconnect::poll`'s loop.                        *)
 (***************************************************************************)
 
-\* `Reconnect::established`. A dial that connects once the policy stopped
-\* waiting on it still counts toward `used`, but that happens only after an
-\* `Abandon`, which ends the policy until a session has been established. So
-\* wherever the policy reads it, any session connected means one was established.
-Established == used > 0
-
 \* `Reconnect::done`: the live session and the predecessor go with the policy.
 Done ==
     /\ phase' = "done"
@@ -186,6 +184,7 @@ Pop ==
     /\ Emit(queue, pred)
     /\ UNCHANGED <<phase, live, watch, probe, pred, target, sess, used, timer,
                    dial, dialTo, misdials>>
+    /\ UNCHANGED lifeVars
 
 \* The predecessor closed or overstayed its handover: `Predecessor::poll`.
 PredDue == pred # None /\ (~sess[pred].open \/ timer["handover"])
@@ -198,6 +197,7 @@ Retire ==
     /\ Emit(IF phase = "live" THEN <<"Retired">> ELSE <<"Retired", "Offline">>, None)
     /\ UNCHANGED <<phase, live, watch, probe, target, used, timer, dial, dialTo,
                    misdials>>
+    /\ UNCHANGED lifeVars
 
 \* `Predecessor::poll_idle`, only while a replacement serves. It returns
 \* nothing, so it shares its pass with whatever the phase returns; it is a
@@ -213,6 +213,7 @@ IdleClose ==
     /\ UNCHANGED <<phase, live, watch, probe, pred, target, queue, used, timer,
                    dial, dialTo, misdials>>
     /\ CallerSame
+    /\ UNCHANGED lifeVars
 
 \* Whether a dial to `e` ignores a redirect that a session the policy still
 \* holds was told, and the policy never acted on.
@@ -251,6 +252,8 @@ FollowPred ==
             /\ UNCHANGED <<phase, target, timer, dial, probing>>
     /\ UNCHANGED <<live, watch, probe, pred, queue, used, dialTo, misdials,
                    lc, lcSess, migrating, spred, started, ended>>
+    \* Its GOAWAY establishes the policy, as one off the live session does.
+    /\ established' = TRUE
 
 \* `Phase::Next`: ask for a dial.
 Dial ==
@@ -265,6 +268,7 @@ Dial ==
     /\ misdials' = IF Misdial(target) THEN 1 ELSE misdials
     /\ UNCHANGED <<live, watch, probe, pred, target, queue, sess, used>>
     /\ CallerSame
+    /\ UNCHANGED lifeVars
 
 \* The dial outran its deadline: `fail` with Retry, then `Action::Abandon`,
 \* which drops the dial and the probe `run` holds. The `Retrying` it queues
@@ -277,18 +281,18 @@ Abandon ==
     /\ timer["dial"]
     /\ dial' = "none"
     /\ probing' = FALSE
-    /\ IF Established
+    /\ IF established
        THEN /\ phase' = "backoff"
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
             \* `walk_failed` drops a redirect target, as in Failed.
             /\ target' = Start
             /\ UNCHANGED <<live, pred, queue>>
-       \* The first walk fails fast: `Action::Abandon`, then the `Done` it queued.
+       \* A walk fails fast until then: `Action::Abandon`, then the `Done` it queued.
        ELSE /\ Done
             /\ queue' = <<"Done">>
             /\ UNCHANGED <<timer, target>>
     /\ UNCHANGED <<watch, probe, sess, used, dialTo,
-                   misdials, lc, lcSess, migrating, spred, started, ended>>
+                   misdials, lc, lcSess, migrating, spred, started, ended, established>>
 
 BackoffEnds ==
     /\ queue = <<>>
@@ -300,15 +304,20 @@ BackoffEnds ==
     /\ UNCHANGED <<live, watch, probe, pred, target, queue, sess, used, timer,
                    dial, dialTo, misdials>>
     /\ CallerSame
+    /\ UNCHANGED lifeVars
 
-\* `Reconnect::end` for a GOAWAY naming `uri` off the live session `s`.
+\* `Reconnect::end` for a GOAWAY naming `uri` off the live session `s`. The
+\* GOAWAY establishes the policy however soon it came, as `Reconnect::poll` does
+\* on its receipt: the peer accepted the session, which a refusal never does.
 EndGoaway(s, uri) ==
     IF uri = Refused
     THEN \* A refused redirect is terminal.
          /\ Done
          /\ Emit(<<"Done">>, None)
+         /\ established' = TRUE
          /\ UNCHANGED <<sess, watch, probe, target, timer>>
-    ELSE /\ target' = IF uri = "" THEN target ELSE uri
+    ELSE /\ established' = TRUE
+         /\ target' = IF uri = "" THEN target ELSE uri
          \* An older predecessor is retired outright, with no `Retired`.
          /\ sess' = [Abort(sess, pred) EXCEPT ![s].heeded = TRUE]
          /\ pred' = s
@@ -320,27 +329,34 @@ EndGoaway(s, uri) ==
          /\ Emit(<<"Migrating">>, s)
          /\ UNCHANGED watch
 
-\* `Reconnect::closed`: every close retries, whatever its error. A predecessor
+\* `Reconnect::closed`. Until a session has been established, a close ends the
+\* policy as a failed dial does: it is how a peer refuses a session it already
+\* accepted. After that, every close retries, whatever its error. A predecessor
 \* that is not closing gracefully serves again, so the policy migrates back
 \* onto it; the `Retrying` that follows changes no status, so it is left out.
 EndClosed ==
-    /\ live' = None
-    /\ phase' = "backoff"
-    /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+    /\ established' = (established \/ sess[live].age >= 1)
     /\ probe' = "none"
-    /\ Emit(IF pred # None /\ ~sess[pred].closing THEN <<"Migrating">> ELSE <<"Offline">>, pred)
-    /\ UNCHANGED <<pred, sess, target, watch>>
+    /\ IF established'
+       THEN /\ live' = None
+            /\ phase' = "backoff"
+            /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
+            /\ Emit(IF pred # None /\ ~sess[pred].closing THEN <<"Migrating">> ELSE <<"Offline">>, pred)
+            /\ UNCHANGED <<pred, sess, target, watch>>
+       ELSE /\ Done
+            /\ Emit(<<"Done">>, None)
+            /\ UNCHANGED <<sess, target, watch, timer>>
 
 \* `Phase::Live`: a GOAWAY is checked before the close.
 Goaway(s) == watch /\ sess[s].goaway # NoGoaway
 
-\* `Restart::Wait` serves out a restart in place; `Restart::Handoff` does so
-\* only on a session drained before it was healthy, and redials an older one
-\* once, as `Restart::Redial` does.
+\* `Restart::Handoff` serves out a restart in place on a session drained
+\* before it was healthy, and redials an older one once, as `Restart::Redial`
+\* does.
 WaitOut(s) ==
     /\ sess[s].goaway = ""
-    /\ \/ Restart = "wait"
-       \/ Restart = "handoff" /\ sess[s].age = 0
+    /\ Restart = "handoff"
+    /\ sess[s].age = 0
 
 LiveEnds ==
     /\ queue = <<>>
@@ -348,10 +364,12 @@ LiveEnds ==
     /\ phase = "live"
     /\ \/ /\ Goaway(live)
           /\ WaitOut(live)
-          \* Drop the latch and serve until the peer closes.
+          \* Drop the latch and serve until the peer closes. The GOAWAY establishes
+          \* the policy here too, so that close retries.
           /\ watch' = FALSE
           /\ UNCHANGED <<phase, live, probe, pred, target, queue, sess, timer>>
           /\ CallerSame
+          /\ established' = TRUE
        \/ /\ Goaway(live)
           /\ ~WaitOut(live)
           /\ EndGoaway(live, sess[live].goaway)
@@ -373,6 +391,7 @@ ProbeAsk ==
     /\ probing' = TRUE
     /\ UNCHANGED <<phase, live, watch, pred, target, queue, sess, used, dial,
                    dialTo, misdials, lc, lcSess, migrating, spred, started, ended>>
+    /\ UNCHANGED lifeVars
 
 \* The probe outran its deadline: scored as failed, then `Action::Abandon`.
 ProbeAbandon ==
@@ -388,6 +407,7 @@ ProbeAbandon ==
     /\ dial' = "none"
     /\ UNCHANGED <<phase, live, watch, pred, target, queue, sess, used, timer,
                    dialTo, misdials, lc, lcSess, migrating, spred, started, ended>>
+    /\ UNCHANGED lifeVars
 
 Policy == Pop \/ Retire \/ IdleClose \/ FollowPred \/ Dial \/ Abandon \/ BackoffEnds
           \/ LiveEnds \/ ProbeAsk \/ ProbeAbandon
@@ -423,6 +443,7 @@ Connected ==
                     probe' = IF fallback THEN "wait" ELSE "none"
           ELSE UNCHANGED <<phase, live, watch, queue, probe>>
     /\ UNCHANGED <<pred, target, timer, dialTo, probing, misdials>>
+    /\ UNCHANGED lifeVars
 
 \* A dial failed. Once a session has been established, every failure retries
 \* whatever its error (an unusable address is out of scope); until then, any
@@ -432,7 +453,7 @@ Failed ==
     /\ dial' = "none"
     /\ IF phase # "dialing"
        THEN UNCHANGED <<phase, live, pred, queue, timer, target, callerVars>>
-       ELSE IF Established
+       ELSE IF established
             THEN /\ phase' = "backoff"
                  /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
                  \* A redirect target that failed its walk is dropped: the next walk
@@ -442,7 +463,7 @@ Failed ==
             ELSE /\ Done
                  /\ Emit(Append(queue, "Done"), None)
                  /\ UNCHANGED <<timer, target>>
-    /\ UNCHANGED <<watch, probe, sess, used, dialTo, misdials>>
+    /\ UNCHANGED <<watch, probe, sess, used, dialTo, misdials, established>>
 
 \* `Reconnect::probed`, and the dial `run` makes of a probe that got through.
 ProbeFails ==
@@ -451,6 +472,7 @@ ProbeFails ==
     /\ probe' = IF phase = "live" /\ probe = "dialing" THEN "wait" ELSE probe
     /\ UNCHANGED <<phase, live, watch, pred, target, queue, sess, used, timer,
                    dial, dialTo, misdials, lc, lcSess, migrating, spred, started, ended>>
+    /\ UNCHANGED lifeVars
 
 ProbeGetsThrough ==
     /\ probing
@@ -463,7 +485,7 @@ ProbeGetsThrough ==
           /\ probe' = "wait"
           /\ probing' = FALSE
           /\ UNCHANGED <<phase, live, pred, queue, sess, timer, dial, dialTo,
-                         lc, lcSess, migrating, spred, started, ended>>
+                         lc, lcSess, migrating, spred, started, ended, established>>
        \* The fallback sends its own GOAWAY and drains as the predecessor while
        \* the handshake over the preferred transport is the dial in flight.
        \/ /\ ~Goaway(live)
@@ -477,6 +499,8 @@ ProbeGetsThrough ==
           /\ dial' = "handshake"
           /\ dialTo' = sess[live].ep
           /\ Emit(Append(queue, "Migrating"), live)
+          \* The fallback served all along, so a long one establishes the policy.
+          /\ established' = (established \/ sess[live].age >= 1)
     /\ UNCHANGED <<watch, target, used, misdials>>
 
 Caller == Connected \/ Failed \/ ProbeFails \/ ProbeGetsThrough
@@ -531,12 +555,14 @@ Peer ==
     /\ UNCHANGED <<phase, live, watch, probe, pred, target, queue, used, timer,
                    dial, dialTo, misdials>>
     /\ CallerSame
+    /\ UNCHANGED lifeVars
 
 Clock ==
     /\ Tick
     /\ UNCHANGED <<phase, live, watch, pred, target, queue, sess, used, dial,
                    dialTo, misdials>>
     /\ CallerSame
+    /\ UNCHANGED lifeVars
 
 \* A finished run, so it is no deadlock.
 Finished ==
@@ -562,7 +588,7 @@ Due(t) ==
 View ==
     <<phase, live, watch, probe, pred, target, queue, [s \in Sessions |-> Seen(s)],
       used, [t \in Timers |-> Due(t)], dial, IF dial = "none" THEN Start ELSE dialTo,
-      misdials, callerVars>>
+      misdials, callerVars, established>>
 
 (***************************************************************************)
 (* Rules. Each is checked where `run` waits, its queue drained, since that *)
@@ -604,9 +630,10 @@ NoOrphan ==
 PresenceBalanced ==
     Parked => started - ended = IF lc = "live" THEN 1 ELSE 0
 
-\* The first walk fails fast: nothing backs off before a session has been
-\* established, so a setup mistake ends the policy instead of looping.
-FirstWalkFailsFast == phase = "backoff" => Established
+\* The policy fails fast: no failed dial or closed session backs off before a
+\* session has been established, so a setup mistake or a refusal ends the
+\* policy instead of looping. A GOAWAY establishes it: no refusal sends one.
+FirstWalkFailsFast == phase = "backoff" => established
 
 \* A dial never goes elsewhere than where a session the policy still holds
 \* was redirected and the policy never acted on it: the peer is leaving, and

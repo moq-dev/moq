@@ -43,6 +43,8 @@ pub enum DataType {
 	Setup = 1,
 	/// Arbitrary bytes discarded by lite-07+ receivers.
 	Padding = 2,
+	/// The lite-07+ Announce Stream: everything an endpoint says about routing.
+	Announce = 3,
 }
 
 impl<'a> Decode<'a, Version> for DataType {

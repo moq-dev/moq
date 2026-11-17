@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 /// How a gateway publishes what it ingests: the media tracks' max age, the allocator they
-/// claim on, and how long a cleanly ended broadcast stays up.
+/// claim on, how long a cleanly ended broadcast stays up, and the cap on what the source sends.
 ///
-/// RTMP, SRT, and WHIP each take one per ingest, so the same knobs mean the same thing
+/// RTMP, SRT, RTSP, and WHIP each take one per ingest, so the same knobs mean the same thing
 /// across them.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
@@ -24,6 +24,13 @@ pub struct Ingest {
 	/// arrives after the end still gets the tail. Defaults to [`Linger::DEFAULT`](crate::Linger::DEFAULT);
 	/// zero closes it at once.
 	pub linger: Duration,
+
+	/// A live cap on the media the source sends, or `None` (the default) to never cap it.
+	///
+	/// Only WHIP enforces it so far, steering the encoder with TIAS and REMB and closing a
+	/// session that runs past the cap plus its burst; RTMP, SRT, and RTSP ingest ignore it.
+	/// Clones share the cap, so every session handed a clone is capped at it, each on its own.
+	pub rate: Option<moq_net::bandwidth::Limit>,
 }
 
 impl Ingest {
@@ -41,6 +48,7 @@ impl Default for Ingest {
 			max_age: Some(hang::container::MAX_AGE),
 			bandwidth: moq_net::bandwidth::Allocator::unlimited(),
 			linger: crate::Linger::DEFAULT,
+			rate: None,
 		}
 	}
 }

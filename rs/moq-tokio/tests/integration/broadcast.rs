@@ -41,12 +41,12 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 
 	// Write a group containing a single frame.
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -161,7 +161,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	// zigzag timestamp delta carries a negative value.
 	let frames = [10_000u64, 30_000, 20_000];
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
@@ -169,7 +169,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 			.write_frame(Timestamp::new(us, Timescale::MICRO).unwrap(), payload)
 			.expect("failed to write frame");
 	}
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -279,7 +279,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	// stream carries a negative zigzag delta too).
 	let frames = [10_000u64, 30_000, 20_000];
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group"); // seq 0
 	for &us in &frames {
 		let payload = format!("frame@{us}").into_bytes();
@@ -287,7 +287,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 			.write_frame(Timestamp::new(us, Timescale::MICRO).unwrap(), payload)
 			.expect("failed to write frame");
 	}
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -391,7 +391,9 @@ async fn transport_fetch_roundtrip(version: &str) {
 		.expect("failed to create track");
 	for sequence in 0..3u64 {
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.expect("failed to append group");
 		for frame in 0..2 {
 			group
@@ -401,7 +403,7 @@ async fn transport_fetch_roundtrip(version: &str) {
 				)
 				.expect("failed to write frame");
 		}
-		group.close().expect("failed to finish group");
+		group.finish().expect("failed to finish group");
 	}
 
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -516,20 +518,20 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	// Group 0 is the "past" group only reachable via FETCH; group 1 is the latest,
 	// delivered live over the subscription.
 	let mut group0 = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group 0"); // seq 0
 	group0
 		.write_frame(Timestamp::new(10_000, Timescale::MICRO).unwrap(), b"old".as_slice())
 		.expect("frame 0");
-	group0.close().expect("finish group 0");
+	group0.finish().expect("finish group 0");
 
 	let mut group1 = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(Timestamp::from_micros(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group 1"); // seq 1
 	group1
 		.write_frame(Timestamp::new(20_000, Timescale::MICRO).unwrap(), b"new".as_slice())
 		.expect("frame 1");
-	group1.close().expect("finish group 1");
+	group1.finish().expect("finish group 1");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -636,12 +638,14 @@ async fn broadcast_moq_lite_05_untimed_track() {
 	let track = broadcast.broadcast().create_track("video", None).expect("create track");
 
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -743,7 +747,7 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	// The group is left open, so the subscriber joins part way through it: the two head
 	// frames are published before the SUBSCRIBE and the tail frame after.
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	for payload in [b"head-0".as_ref(), b"head-1".as_ref()] {
 		group
@@ -822,7 +826,7 @@ async fn broadcast_moq_transport_22_current_group_join() {
 			b"tail-2".as_ref(),
 		)
 		.expect("write tail");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	assert_eq!(read(&mut joined).await.as_deref(), Some(b"head-1".as_ref()));
 	assert_eq!(read(&mut joined).await.as_deref(), Some(b"tail-2".as_ref()));
@@ -1028,7 +1032,7 @@ async fn broadcast_route_migration() {
 				format!("a{sequence}").into_bytes(),
 			)
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 	}
 
 	// ── publisher B: the standby, pricier so A wins ─────────────────
@@ -1054,7 +1058,7 @@ async fn broadcast_route_migration() {
 				format!("b{sequence}").into_bytes(),
 			)
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 	}
 	let server_a = {
 		let mut config = moq_tokio::listen::Config::default();
@@ -1152,7 +1156,7 @@ async fn broadcast_route_migration() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"b4".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 	}
 	assert_eq!(read_payloads(&mut sub, 1).await, ["b4"]);
 
@@ -1207,7 +1211,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 			.create_group(moq_net::group::Info { start: sequence })
 			.expect("create group");
 		group.write_frame(ms(at), b"frame".as_ref()).expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 	};
 
 	let pub_origin = moq_tokio::origin::spawn();
@@ -1340,14 +1344,14 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		.expect("create track");
 	let live = track.clone();
 	let mut group = live
-		.append_group(live.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(live.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"v0".as_ref())
 		.expect("write frame");
 	let (mut group, _finished) = match open {
 		true => (Some(group), None),
-		false => (None, Some(group.close().expect("finish group"))),
+		false => (None, Some(group.finish().expect("finish group"))),
 	};
 
 	let mut config = moq_tokio::listen::Config::default();
@@ -1425,11 +1429,13 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		} else {
 			assert_eq!(read(&mut reading, &ctx).await, format!("v{}", round - 1), "{ctx}");
 			let mut next = live
-				.append_group(live.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(live.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.expect("append group");
 			next.write_frame(moq_net::Timestamp::from_millis(next.start).unwrap(), update.as_bytes())
 				.expect("write frame");
-			next.close().expect("finish group");
+			next.finish().expect("finish group");
 			reading = recv(&mut sub, &ctx).await;
 		}
 		// The live feed resumed behind the replayed cache.
@@ -1473,7 +1479,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 	}
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -1547,7 +1553,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 	}
 	assert_eq!(read_payloads(&mut sub, 1).await, ["g1"]);
 
@@ -1841,12 +1847,12 @@ async fn broadcast_websocket() {
 		.expect("failed to create track");
 
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	// Server with both QUIC (required) and WebSocket listeners.
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -1961,12 +1967,12 @@ async fn broadcast_websocket_fallback() {
 		.expect("failed to create track");
 
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	// QUIC binds on its own port; WebSocket on a different port.
 	let mut server_config = moq_tokio::listen::Config::default();
@@ -2091,12 +2097,12 @@ async fn broadcast_websocket_uses_newest_version() {
 		.create_track("video", timed())
 		.expect("failed to create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -2173,12 +2179,12 @@ async fn quic_driver_task_inherits_connection_span() {
 		.create_track("video", timed())
 		.expect("failed to create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -2300,12 +2306,12 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 		.expect("create track");
 
 	let mut group0 = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group 0");
 	group0
 		.write_frame(moq_net::Timestamp::from_millis(group0.start).unwrap(), b"a".as_ref())
 		.expect("write frame 0");
-	group0.close().expect("finish group 0");
+	group0.finish().expect("finish group 0");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -2379,12 +2385,12 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 
 	// A new group published after the resubscribe must reach the consumer.
 	let mut group1 = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group 1");
 	group1
 		.write_frame(moq_net::Timestamp::from_millis(group1.start).unwrap(), b"b".as_ref())
 		.expect("write frame 1");
-	group1.close().expect("finish group 1");
+	group1.finish().expect("finish group 1");
 
 	let mut saw_group1 = false;
 	for _ in 0..2 {
@@ -2445,12 +2451,12 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.expect("create track");
 
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -2630,10 +2636,7 @@ async fn one_shot_goaway_ends_the_connection() {
 		let session = request.ok().await?;
 
 		// No deadline, so nothing on the peer's side ever force-closes us.
-		session
-			.drain()
-			.send(moq_net::goaway::Goaway::default())
-			.expect("send goaway");
+		session.goaway(moq_net::goaway::Goaway::default()).expect("send goaway");
 
 		// Wait for the client to leave, exactly as a draining peer does. If the
 		// client ignores the GOAWAY, both sides wait here forever.
@@ -2747,7 +2750,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	client_config.tls.insecure = Some(true);
 	// Retry forever with a fast cadence: the worst case for a stale announce.
 	client_config.backoff.initial = Some((Duration::from_millis(10)).into());
-	client_config.backoff.timeout = Some((Duration::ZERO).into());
+	client_config.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = kio::clock::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
@@ -2790,12 +2793,12 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 		.create_track("video", timed())
 		.expect("failed to create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let publish = pub_origin
 		.consume()
@@ -2887,12 +2890,14 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 			.create_track("data", timed())
 			.expect("create track");
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.expect("append group");
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), path.as_bytes())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 		broadcasts.push((broadcast, track));
 	}
 	// The server's own grant excludes bob: the client never learns of his chat.
@@ -3097,12 +3102,12 @@ async fn publish_only_client_to_subscribe_only_server() {
 		.create_track("video", timed())
 		.expect("failed to create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"hello".as_ref())
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let publish = pub_origin
 		.consume()
@@ -3179,7 +3184,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 		.expect("failed to create track");
 
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("failed to append group");
 	group
 		.write_frame(
@@ -3187,7 +3192,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 			b"pre-goaway".as_ref(),
 		)
 		.expect("failed to write frame");
-	group.close().expect("failed to finish group");
+	group.finish().expect("failed to finish group");
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("[::]:0".parse().unwrap());
@@ -3218,8 +3223,10 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 		start_drain_rx.await.expect("drain signal");
 		session
-			.drain()
-			.send(moq_net::goaway::Goaway::redirect("https://elsewhere.example/").with_timeout(Duration::from_secs(5)))
+			.goaway(
+				moq_net::goaway::Goaway::redirect("https://elsewhere.example/")
+					.with_timeout(Some(Duration::from_secs(5))),
+			)
 			.expect("send goaway");
 
 		// Keep producers alive while the client finishes reading.
@@ -3344,8 +3351,7 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 		let session = request.with_publisher(&pub_origin).ok().await?;
 
 		session
-			.drain()
-			.send(moq_net::goaway::Goaway::new().with_timeout(Duration::from_millis(200)))
+			.goaway(moq_net::goaway::Goaway::new().with_timeout(Some(Duration::from_millis(200))))
 			.expect("send goaway");
 		// The client deliberately overstays; this resolves via the force-close.
 		session.closed().await;
@@ -3467,10 +3473,11 @@ async fn session_close_surfaces_a_rejection_code() {
 	server_handle.abort();
 }
 
-/// The same rejection under the reconnect loop, once a session went live, redials with
-/// backoff like any other close: the loop does not judge the error's kind.
+/// The same rejection of a first session under the reconnect loop ends it with the code,
+/// as a refused first dial does: on these versions the refusal arrives after ALPN, so the
+/// session connected first, yet redialing would only present the same credential again.
 #[tokio::test]
-async fn reconnect_retries_a_session_level_rejection() {
+async fn reconnect_ends_on_a_first_session_rejection() {
 	for code in [
 		moq_net::SessionError::Unauthorized,
 		moq_net::SessionError::MalformedAuthToken,
@@ -3490,18 +3497,59 @@ async fn reconnect_retries_a_session_level_rejection() {
 		});
 
 		let connection = test_client().connect(url);
-		for _ in 0..2 {
-			tokio::select! {
-				accepted = accepts.recv() => {
-					assert_eq!(accepted, Some(()), "the server stopped accepting");
-				}
-				result = connection.closed() => panic!("{code:?} ended the loop: {result:?}"),
-				_ = kio::clock::sleep(TIMEOUT) => panic!("{code:?} was never redialed"),
-			}
-		}
-
+		kio::clock::timeout(TIMEOUT, connection.closed())
+			.await
+			.unwrap_or_else(|_| panic!("{code:?} kept the loop redialing"))
+			.expect_err("a rejected first session must surface as an error");
 		server_handle.abort();
+		let mut count = 0;
+		while accepts.try_recv().is_ok() {
+			count += 1;
+		}
+		assert_eq!(count, 1, "{code:?} was redialed");
 	}
+}
+
+/// Once a session stayed up past the healthy bar, the same rejection redials with backoff
+/// like any other close: the loop does not judge the error's kind.
+#[tokio::test]
+async fn reconnect_retries_a_rejection_after_a_healthy_session() {
+	kio::clock::host_time(); // real QUIC sockets
+	const HEALTHY: Duration = Duration::from_millis(50);
+	let (mut server, addr) = test_server().await;
+	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
+
+	let (accepted, mut accepts) = tokio::sync::mpsc::unbounded_channel();
+	let (end_first, first_ended) = tokio::sync::oneshot::channel::<()>();
+	let server_handle = tokio::spawn(async move {
+		let first = server.accept().await.expect("no first session").ok().await?;
+		let _ = accepted.send(());
+		let _ = first_ended.await;
+		first.abort(moq_net::Error::Cancel);
+		while let Ok(request) = server.accept().await {
+			let _ = accepted.send(());
+			request.reject(moq_net::SessionError::Unauthorized).await?;
+		}
+		Ok::<_, anyhow::Error>(())
+	});
+
+	let mut config = moq_tokio::connect::Config::default();
+	config.tls.insecure = Some(true);
+	config.backoff.healthy = Some(HEALTHY.into());
+	let mut connection = config.init(Default::default()).unwrap().connect(url);
+	let status = kio::clock::timeout(TIMEOUT, connection.status()).await.unwrap();
+	assert_eq!(status.unwrap(), moq_tokio::Status::Connected);
+	kio::clock::timeout(TIMEOUT, accepts.recv()).await.unwrap().unwrap();
+	kio::clock::sleep(HEALTHY).await;
+	end_first.send(()).unwrap();
+	for _ in 0..2 {
+		tokio::select! {
+			accepted = accepts.recv() => assert_eq!(accepted, Some(()), "the server stopped accepting"),
+			result = connection.closed() => panic!("the rejection ended the loop: {result:?}"),
+			_ = kio::clock::sleep(TIMEOUT) => panic!("never redialed"),
+		}
+	}
+	server_handle.abort();
 }
 
 /// One-shot mode is the other way a caller observes the rejection: with no
