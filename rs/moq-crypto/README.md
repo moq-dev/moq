@@ -4,17 +4,13 @@
 
 Cryptography for [Media over QUIC](https://moq.dev): the `e2ee` module encrypts groups,
 datagrams, and track names so relays cannot read them. It wraps `moq-net` and checks timestamps
-with its `track::Info::rescale`, so a frame it accepts is one `moq-net` accepts. The `endpoint`
-module holds the key that names an endpoint. The `provider` module is the
+with its `track::Info::rescale`, so a frame it accepts is one `moq-net` accepts. The `provider` module is the
 [rind](https://github.com/kixel-ai/rind) rustls provider; `cpu` holds the CPU check and error
 that the MoQ crates share.
 
 ## Features
 
-`endpoint` and `e2ee`, both default, enable those modules. With default features off, the crate is
-only `endpoint::PublicKey`, the endpoint ID, with its canonical z-base-32 text: it builds without
-`moq-net` or rind, for crates that only name endpoints.
-`serde` adds the key's string serialization. `cpu`, enabled by `e2ee` and `provider`, adds
+`e2ee`, on by default, enables that module. `cpu`, enabled by `e2ee` and `provider`, adds
 only rind. `provider`, off by default, adds the rustls integration without `moq-net`, so
 transport crates can use it without a dependency cycle.
 
@@ -33,13 +29,6 @@ runs rind's slower paths rather than being refused:
 
 moq-auth, moq-hls, e2ee, moq-rtmp, and the transports report the same `cpu::UnsupportedCpu`, and
 `moq_tokio::crypto` re-exports this module's API.
-
-## Endpoint key
-
-An endpoint's `endpoint::SecretKey` is an Ed25519 key that `SecretKey::load_or_generate(path)` keeps
-for the life of a host, as 52 z-base-32 characters in a `0600` file it never replaces implicitly.
-`moq-relay` loads it for `--cluster-route-key`, where it converts into `moq_net::origin::RouteKey`.
-Its `endpoint::PublicKey` is the endpoint ID, displayed as those 52 characters (a DNS label).
 
 ## Encryption
 

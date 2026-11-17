@@ -113,10 +113,6 @@ export class Datagrams {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. */
 	instance?: Instance.Valid;
-	/** The publisher node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
-	node: bigint;
-	/** How many leading segments of `broadcast` make up the prefix of the route it follows. Lite-07+. */
-	depth: number;
 	/** The datagram track's name. */
 	track: string;
 	/** The subscriber priority, higher first. */
@@ -126,14 +122,10 @@ export class Datagrams {
 		id: bigint;
 		broadcast: Path.Valid;
 		instance?: Instance.Valid;
-		node?: bigint;
-		depth?: number;
 		track: string;
 		priority: number;
 	}) {
 		this.instance = properties.instance;
-		this.node = properties.node ?? 0n;
-		this.depth = properties.depth ?? 0;
 		this.id = properties.id;
 		this.broadcast = properties.broadcast;
 		this.track = properties.track;
@@ -147,7 +139,7 @@ export class Datagrams {
 			await w.u62(this.id);
 			await w.string(Path.encode(this.broadcast));
 			await encodePin(w, version, this.instance);
-			await encodeNode(w, version, this.node, this.depth);
+			await encodeNode(w, version);
 			await w.string(this.track);
 			await w.u8(toWire(this.priority));
 		});
@@ -160,13 +152,11 @@ export class Datagrams {
 			const id = await r.u62();
 			const broadcast = Path.decode(await r.string());
 			const instance = await decodePin(r, version);
-			const { node, depth } = await decodeNode(r, version, broadcast);
+			await decodeNode(r, version);
 			return new Datagrams({
 				id,
 				broadcast,
 				instance,
-				node,
-				depth,
 				track: await r.string(),
 				priority: fromWire(await r.u8()),
 			});

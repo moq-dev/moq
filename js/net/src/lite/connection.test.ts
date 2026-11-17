@@ -1127,16 +1127,6 @@ for (const [name, violate] of [
 		},
 	],
 	[
-		"a DEAD moving a route the stream never started",
-		async (pair) => {
-			const { send } = await announceStream(pair);
-			await send({
-				status: "dead",
-				dead: { kind: "closed", hop: { node: 2n, session: 1n }, far: 3n, gone: false, moved: 1n },
-			});
-		},
-	],
-	[
 		"an ANNOUNCE_OK answering no ANNOUNCE_REQUEST",
 		async (pair) => {
 			const { send } = await announceStream(pair);

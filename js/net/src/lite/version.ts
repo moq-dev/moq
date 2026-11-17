@@ -417,23 +417,6 @@ export function keepsSubscribeOpen(version: Version): boolean {
 	return hasRanges(version);
 }
 
-/** Whether the announce stream has ANNOUNCE_RESTART: another publisher instance replacing an
- * advertisement in place. Added in lite-07. Older versions send an ANNOUNCE_END then an
- * ANNOUNCE_START. */
-export function hasAnnounceRestart(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
 
 /** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
  * the instance they pin. Added in lite-07. Older versions carry nothing, so the receiving session
@@ -711,21 +694,6 @@ export function hasRoutes(version: Version): boolean {
 	}
 }
 
-/** Whether SETUP may carry a route key proof, added in lite-07. */
-export function hasRouteKey(version: Version): boolean {
-	// Explicitly list older versions so future versions default to carrying it.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
 
 /** Whether SETUP recognizes the Implementation parameter, added in lite-07. */
 export function hasImplementation(version: Version): boolean {

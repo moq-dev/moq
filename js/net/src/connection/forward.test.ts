@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import { Duration, type Installed } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
@@ -70,11 +69,7 @@ class FakeSession {
 	/** Called as the forwarder closes a request, before its stream can wind down. */
 	onClose?: () => void;
 
-	/** Whether a lite-07 claim of `node` at `at` serves `path` beneath it: the session's floors. */
-	covering?: (node: bigint, at: Path.Valid, path: Path.Valid) => boolean;
 
-	/** Bumped when what `covering` answers changed with no route reporting it. */
-	readonly coverage = new Signal(0);
 
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
@@ -83,8 +78,6 @@ class FakeSession {
 	constructor({ exclusive = false } = {}) {
 		registerWire(this, {
 			consume: (path, instance) => this.consume(path, instance),
-			covers: (node, at, path) => this.covering?.(node, at, path) ?? true,
-			coverage: this.coverage,
 			exclusive,
 			leave: () => {},
 			auth: new AuthSession({ peerGrant: { publish: new Path.Patterns(), subscribe: new Path.Patterns() } }),
@@ -186,10 +179,10 @@ test("a request through a received route consumes that route's instance", async 
 	origin.close();
 });
 
-// A lite-07 stream reports each origin node's claim at a path as its own route, so the origin
-// holds every candidate: an unpinned request spreads by node as Rust's does, and one pinned to
-// the claim that does not win still resolves.
-test("the origin holds each origin node's claim at a prefix", async () => {
+// A lite-07 stream reports each instance's claim at a path as its own route, so the origin holds
+// every candidate: an unpinned request spreads by instance, and one pinned to the claim that
+// does not win still resolves.
+test("the origin holds each instance's claim at a prefix", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
@@ -198,12 +191,12 @@ test("the origin holds each origin node's claim at a prefix", async () => {
 	const watch = origin.routes(Path.Pattern.subtree(Path.from("pool")));
 	await settle();
 	expect(session.requests[0]).toMatchObject({ claims: true });
-	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: a, node: 0x7an });
-	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: b, node: 0x8bn });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: a, claimed: true });
+	start(session.stream("pool/**"), "pool", { ...WireRoute.default, instance: b, claimed: true });
 	session.stream("pool/**").synced();
 	await settle();
 
-	// 0x8b's rendezvous hash wins `pool/job`; see `lite07_ties_match_js` in rs/moq-net.
+	// `b`'s rendezvous hash wins `pool/job`; see `lite07_ties_match_js` in rs/moq-net.
 	const job = Path.from("pool/job");
 	const unpinned = origin.request(job);
 	await settle();
@@ -217,85 +210,6 @@ test("the origin holds each origin node's claim at a prefix", async () => {
 	unpinned.close();
 	pinned.close();
 	watch.close();
-	session.die();
-	origin.close();
-});
-
-// Two streams carry a lite-07 node's claims, and the newer floor, on the narrower one, presents
-// nothing at live/x: the node's claim at live is older knowledge there. A request for live/x skips
-// it, per request, for another node's claim at live of another instance. Mirrors `covering` in
-// rs/moq-net.
-test("the origin skips a claim above a newer floor's region", async () => {
-	const origin = new OriginProducer();
-	const session = new FakeSession();
-	forwardAnnounced(session.session, origin);
-	const a = Instance.parse("a");
-	const b = Instance.parse("b");
-	const NODE_A = 0x7an;
-	const NODE_B = 0x8bn;
-	const live = origin.routes(Path.Pattern.subtree(Path.from("live")));
-	await settle();
-	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: a, node: NODE_A });
-	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: b, node: NODE_B, cost: 5n });
-	session.stream("live/**").synced();
-	await settle();
-	const x = Path.from("live/x");
-	session.covering = (node, at, path) => !(node === NODE_A && at === Path.from("live") && Path.hasPrefix(x, path));
-
-	const request = origin.request(x);
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(session.pins).toEqual([b]);
-	// Elsewhere under live the cheaper claim still serves.
-	const y = origin.request(Path.from("live/y"));
-	await settle();
-	expect(session.pins).toEqual([b, a]);
-
-	request.close();
-	y.close();
-	live.close();
-	session.die();
-	origin.close();
-});
-
-// A floor moves what a claim covers while both routes stay as they were: the request already
-// open beneath it is admitted anew and ends, and the next one resolves through the claim that
-// still covers its path.
-test("a floor that moves what a claim covers admits the open requests beneath it anew", async () => {
-	const origin = new OriginProducer();
-	const session = new FakeSession();
-	forwardAnnounced(session.session, origin);
-	const a = Instance.parse("a");
-	const b = Instance.parse("b");
-	const NODE_A = 0x7an;
-	const NODE_B = 0x8bn;
-	const live = origin.routes(Path.Pattern.subtree(Path.from("live")));
-	await settle();
-	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: a, node: NODE_A });
-	start(session.stream("live/**"), "live", { ...WireRoute.default, instance: b, node: NODE_B, cost: 5n });
-	session.stream("live/**").synced();
-	await settle();
-
-	const x = Path.from("live/x");
-	const request = origin.request(x);
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(session.pins).toEqual([a]);
-
-	session.covering = (node, at, path) => !(node === NODE_A && at === Path.from("live") && Path.hasPrefix(x, path));
-	session.coverage.update((n) => n + 1);
-	await settle();
-	// The claim it resolved through no longer serves its path, so it ends unroutable.
-	expect(request.closed.peek()).toBeInstanceOf(Error);
-	expect(session.pins).toEqual([a]);
-	const again = origin.request(x);
-	await settle();
-	expect(again.active.peek()).toBeDefined();
-	expect(session.pins).toEqual([a, b]);
-
-	request.close();
-	again.close();
-	live.close();
 	session.die();
 	origin.close();
 });

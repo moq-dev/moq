@@ -1349,10 +1349,13 @@ export const hooks: {
 	},
 };
 
-/** FNV-1a 64 of `path`, then `bytes`. The seed is the draft's Spread Hash offset basis. */
-function fnv(path: string, bytes: Iterable<number>): bigint {
+/** The Spread Hash's offset basis, which lite-06 and earlier rank by. */
+const SPREAD_BASIS = 0x420c0decb00bn;
+
+/** FNV-1a 64 from `basis` of `path`, then `bytes`. */
+function fnv(path: string, bytes: Iterable<number>, basis = SPREAD_BASIS): bigint {
 	const prime = 0x100000001b3n;
-	let hash = 0x420c0decb00bn;
+	let hash = basis;
 	for (const byte of new TextEncoder().encode(path)) {
 		hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * prime);
 	}
@@ -1373,14 +1376,12 @@ export function spreadHash(path: string, instance: string): bigint {
 }
 
 /**
- * The draft's Rendezvous Hash: FNV-1a 64 of `path` then the origin's Node ID as 8 little-endian
- * bytes, so every node that knows the same lite-07 claims ranks them alike. Mirrors the node key
- * of `route_order` in `rs/moq-net`.
+ * The draft's Rendezvous Hash: standard FNV-1a 64 of `path` then the instance's UTF-8, which
+ * spreads a pool's lite-07 claims across paths the same on every node. Mirrors `rendezvous` in
+ * `rs/moq-net`.
  */
-export function rendezvousHash(path: string, node: bigint): bigint {
-	const bytes: number[] = [];
-	for (let shift = 0n; shift < 64n; shift += 8n) bytes.push(Number((node >> shift) & 0xffn));
-	return fnv(path, bytes);
+export function rendezvousHash(path: string, instance: string): bigint {
+	return fnv(path, new TextEncoder().encode(instance), 0xcbf29ce484222325n);
 }
 
 /**
@@ -1509,15 +1510,15 @@ export function compareRoutes(a: WireRoute, b: WireRoute): number {
 	return (
 		last(a) - last(b) ||
 		(b.priority ?? 0) - (a.priority ?? 0) ||
-		Number(a.node === undefined && isAnonymous(a)) - Number(b.node === undefined && isAnonymous(b)) ||
+		Number(isAnonymous(a)) - Number(isAnonymous(b)) ||
 		(a.cost < b.cost ? -1 : a.cost > b.cost ? 1 : 0)
 	);
 }
 
 /**
  * Order eligible routes at `prefix` resolving `path` by preference, hop count, then the spread
- * hash of each instance, then, within one instance, the hash of its chain. A lite-07 route counts
- * as the one hop to its origin node, and ranks by the rendezvous hash of that node instead. The
+ * hash of each instance, then, within one instance, the hash of its chain. A lite-07 claim counts
+ * as one hop, to the peer that sent it, and ranks by the rendezvous hash of its instance. The
  * hashes only spread a prefix's paths: at the prefix itself a tie is left for the newest to win
  * (see {@link bestCandidate}), so a publisher that restarts under a new instance takes over from
  * its lingering session at once, matching `route_order` in rs/moq-net for routes a node did not
@@ -1534,21 +1535,15 @@ export function compareRouteCandidates(path: Path.Valid, prefix: Path.Valid, a: 
 	return a2 < b2 ? -1 : a2 > b2 ? 1 : 0;
 }
 
-/**
- * The hops a route ranks by: a lite-07 route counts as the one hop to its origin node, since the
- * rest of its chain is the lite-06 one it carries only for loop detection. As `route_order` in
- * rs/moq-net.
- */
+/** The hops a route ranks by: a lite-07 claim counts as the one hop to the peer that sent it. */
 export function routeHops(route: WireRoute): number {
-	return route.node !== undefined ? 1 : route.hops.length;
+	return route.claimed ? 1 : route.hops.length;
 }
 
-/**
- * The hash pair `route_order` in rs/moq-net ranks a route by beneath its prefix, each route keyed
- * on its own: a lite-07 claim by the rendezvous hash of its origin node, any other by the spread
- * hash of its instance and then the hash of its chain.
- */
+/** The hash pair a route ranks by beneath its prefix, each route keyed on its own: a lite-07 claim
+ * by the rendezvous hash of its instance, any other by the spread hash of its instance and then
+ * the hash of its chain. As `route_order` in rs/moq-net. */
 function routeKey(path: Path.Valid, route: WireRoute): [bigint, bigint] {
-	if (route.node !== undefined) return [rendezvousHash(path, route.node), 0n];
+	if (route.claimed) return [rendezvousHash(path, route.instance ? Instance.text(route.instance) : ""), 0n];
 	return [spreadHash(path, route.instance ? Instance.text(route.instance) : ""), chainHash(path, route.hops)];
 }

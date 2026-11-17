@@ -1,16 +1,13 @@
-//! Cryptography for MoQ: end-to-end encryption, endpoint keys, and the shared provider.
+//! Cryptography for MoQ: end-to-end encryption and the shared provider.
 //!
 //! [`e2ee`] encrypts groups, datagrams, and track names so a relay forwards ciphertext it cannot
 //! read. It wraps `moq-net` and checks a frame's timestamp with `moq_net::track::Info::rescale`,
-//! so it accepts no frame the net track would refuse. [`endpoint`] holds the Ed25519 key that
-//! names an endpoint, which a relay proves to its peers as its cluster route key.
+//! so it accepts no frame the net track would refuse.
 //! [`provider`] is rind's rustls provider; [`cpu`] holds the CPU check and [`cpu::UnsupportedCpu`]
 //! error that moq-quic, moq-tokio, and the other transport crates report.
 //!
-//! The `endpoint` and `e2ee` features, both default, gate those halves; `provider`, off by
-//! default, gates the rustls provider and enables `cpu`, which needs only rind. Without any of
-//! these features the crate holds only [`endpoint::PublicKey`], the endpoint ID, and its canonical
-//! z-base-32 text, with no `moq-net` or crypto backend; `serde` adds its string serialization.
+//! The `e2ee` feature, on by default, gates encryption; `provider`, off by default, gates the
+//! rustls provider and enables `cpu`, which needs only rind.
 //!
 //! The `poll_*` methods are always available. Enable the `async` feature for their generated
 //! async wrappers (such as `read_frame` and `recv_group`); it is off by default.
@@ -21,6 +18,5 @@
 pub mod cpu;
 #[cfg(feature = "e2ee")]
 pub mod e2ee;
-pub mod endpoint;
 #[cfg(feature = "provider")]
 pub mod provider;

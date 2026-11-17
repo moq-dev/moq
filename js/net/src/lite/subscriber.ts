@@ -74,7 +74,6 @@ import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate 
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
-import { Floors } from "./floors.ts";
 import { type Group as GroupMessage, type Ingest, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { Routed } from "./routed.ts";
@@ -153,10 +152,6 @@ interface SubscribeSetup {
  */
 interface Consumed {
 	readonly instance?: Instance.Valid;
-	// The publisher node every request names (lite-07): the one the route selected at consume
-	// reaches, or 0 to leave the choice to the publisher, and the depth of that route's prefix.
-	readonly node?: bigint;
-	readonly depth?: number;
 	readonly id?: number;
 	readonly valid?: AbortSignal;
 	// Aborted once another stream takes the path, which may answer a request without an instance
@@ -476,19 +471,10 @@ export class Subscriber {
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
 	#subscribeNext = 0n;
 
-	// Lite-07: what this session's Announce Stream certifies of each origin node's claims.
-	#floors = new Floors();
-	/**
-	 * Lite-07: changes whenever what {@link covers} answers may have changed with no route
-	 * reporting it.
-	 *
-	 * @internal
-	 */
-	readonly coverage = new Signal(0);
-	// Lite-07: the routes and claims the peer sends, shared by every `routes()` reader.
+	// Lite-07: the claims the peer sends, shared by every `routes()` reader.
 	#routed?: Routed;
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
-	#consumes = new BroadcastCache(this.#floors);
+	#consumes = new BroadcastCache();
 	#consumeNext = 0;
 
 	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, instance, track, sequence].
@@ -558,15 +544,9 @@ export class Subscriber {
 			this.#routed = new Routed({
 				quic,
 				version,
-				hop,
-				floors: this.#floors,
 				consumes: this.#consumes,
 				slots: this.#announces,
 				drained: (route) => this.#drained(route),
-				revalidate: () => {
-					this.#consumes.revalidate();
-					this.coverage.update((n) => n + 1);
-				},
 				goaway,
 				send: (msg) => stream.send(msg),
 			});
@@ -605,7 +585,7 @@ export class Subscriber {
 	 *
 	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
 	 * also asks for those whose subtree overlaps it. A lite-07 stream reports the best claim at
-	 * each path, or each origin node's with `options.claims`.
+	 * each path, or each instance's with `options.claims`.
 	 */
 	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.RouteOptions): announce.Routes {
 		const announced = new announce.Producer();
@@ -618,7 +598,7 @@ export class Subscriber {
 		const covering = options?.covering ?? false;
 		if (this.#routed) {
 			// Lite-07: every reader shares the session's one Announce Stream.
-			this.#routed.attach(announced, { prefix, scope, hidden, covering, perNode: options?.claims ?? false });
+			this.#routed.attach(announced, { prefix, scope, hidden, covering, claims: options?.claims ?? false });
 		} else {
 			void this.#runAnnounced(announced, prefix, scope, hidden, covering);
 		}
@@ -847,8 +827,6 @@ export class Subscriber {
 						active = true;
 						hops = announce.hops ?? [];
 						cost = announce.cost;
-						instance = announce.instance;
-						epoch = announce.epoch;
 						break;
 					}
 					case "ended":
@@ -1064,16 +1042,6 @@ export class Subscriber {
 	}
 
 	/**
-	 * Whether the session's claim of origin `node` at `at` may serve a request for `path` beneath
-	 * it: what the node's newest floor certifies there. See `Floors.covers`.
-	 *
-	 * @internal
-	 */
-	covers(node: bigint, at: Path.Valid, path: Path.Valid): boolean {
-		return this.#floors.covers(node, at, path);
-	}
-
-	/**
 	 * Consumes a broadcast from the connection.
 	 *
 	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
@@ -1094,23 +1062,8 @@ export class Subscriber {
 	}
 
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
-		const consumes = this.#consumes;
-		const pinned =
-			instance.route.node === undefined
-				? undefined
-				: { node: instance.route.node, depth: instance.route.depth ?? 0 };
-		// The best route now serving the instance, which moves with failover even once another
-		// instance wins the path; the one it first resolved through once none does.
-		const target = (instance: Instance.Valid | undefined) =>
-			(instance !== undefined ? consumes.node(path, instance) : undefined) ?? pinned;
 		const consumed = {
 			instance: instance.route.instance,
-			get node() {
-				return target(this.instance)?.node;
-			},
-			get depth() {
-				return target(this.instance)?.depth;
-			},
 			id: this.#consumeNext++,
 			get valid() {
 				return instance.validity?.signal;
@@ -1207,8 +1160,6 @@ export class Subscriber {
 							id,
 							broadcast: path,
 							instance: consumed.instance,
-							node: consumed.node,
-							depth: consumed.depth,
 							track: request.name,
 							priority,
 						}).encode(opened.writer, this.version);
@@ -1367,7 +1318,7 @@ export class Subscriber {
 			// Gave up, perhaps handed a stream as it did: the catch below hands back any stream.
 			if (!stream || cut.aborted) throw cut.reason;
 			await stream.writer.u53(StreamId.Tracks);
-			await new TracksMessage(broadcast, consumed.instance, consumed.node, consumed.depth).encode(
+			await new TracksMessage(broadcast, consumed.instance).encode(
 				stream.writer,
 				this.version,
 			);
@@ -1579,8 +1530,6 @@ export class Subscriber {
 			id,
 			broadcast,
 			instance: consumed.instance,
-			node: consumed.node,
-			depth: consumed.depth,
 			track: name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
@@ -1911,7 +1860,7 @@ export class Subscriber {
 	// stays open, as interest in the track, until the caller closes it.
 	async #trackInfo(
 		broadcast: Path.Valid,
-		{ instance, node, depth }: Pin,
+		{ instance }: Pin,
 		track: string,
 		signal: AbortSignal | undefined,
 		deadline: Deadline,
@@ -1920,7 +1869,7 @@ export class Subscriber {
 			{ version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Track);
-				await new TrackMessage(broadcast, track, instance, node, depth).encode(stream.writer, this.version);
+				await new TrackMessage(broadcast, track, instance).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
 				return { info, stream };
 			},
@@ -2128,7 +2077,7 @@ export class Subscriber {
 		deadline: Deadline,
 		maxDelay?: Duration,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const { instance, node, depth, valid } = consumed;
+		const { instance, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
 		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
@@ -2147,8 +2096,6 @@ export class Subscriber {
 					await new FetchMessage({
 						broadcast,
 						instance,
-						node,
-						depth,
 						track,
 						priority,
 						maxDelay:
@@ -2611,8 +2558,6 @@ export class Subscriber {
 							await new FetchMessage({
 								broadcast,
 								instance: consumed.instance,
-								node: consumed.node,
-								depth: consumed.depth,
 								track: name,
 								priority,
 								maxDelay,

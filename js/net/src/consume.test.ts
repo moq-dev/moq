@@ -196,21 +196,3 @@ test("the newest stream wins a tie at its own prefix", () => {
 	cache.announce(path, older, z, true);
 	expect(cache.instance(path).route.instance).toBe(z.instance);
 });
-
-test("the node serving an instance follows its routes even when another instance wins", () => {
-	const cache = new BroadcastCache();
-	const path = Path.from("room");
-	const x = Instance.random();
-	const a = {};
-	const b = {};
-	const c = {};
-	cache.announce(path, a, { ...WireRoute.default, instance: x, node: 1n });
-	cache.announce(path, b, { ...WireRoute.default, instance: x, node: 2n, cost: 5n });
-	expect(cache.node(path, x)).toEqual({ node: 1n, depth: 0 });
-	cache.withdraw(path, a);
-	cache.announce(path, c, { ...WireRoute.default, instance: Instance.random(), node: 3n });
-	expect(cache.instance(path).route.node).toBe(3n);
-	expect(cache.node(path, x)).toEqual({ node: 2n, depth: 0 });
-	cache.withdraw(path, b);
-	expect(cache.node(path, x)).toBeUndefined();
-});

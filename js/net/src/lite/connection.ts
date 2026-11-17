@@ -8,17 +8,16 @@ import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, randomHop, toHop } from "../hop.ts";
+import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
 import { hooks } from "../internal.ts";
 import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import type { Own } from "../route.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { registerWire, wireOf } from "../wire.ts";
+import { registerWire } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
 import { LiteAuthWire } from "./auth.ts";
@@ -28,7 +27,6 @@ import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
-import { proveRouteKey } from "./route_key.ts";
 import { SessionInfo } from "./session.ts";
 import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
@@ -44,7 +42,6 @@ import {
 	hasHidden,
 	hasPadding,
 	hasProbeRtt,
-	hasRouteKey,
 	hasRoutes,
 	hasSetupStream,
 	hasTrackStream,
@@ -116,8 +113,6 @@ export class Connection implements Session {
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
-	// The lite-07 route identity our published claims are originated under, if we publish.
-	#own?: Own;
 
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
@@ -217,8 +212,7 @@ export class Connection implements Session {
 		// Opens waiting for credit make room after about this RTT when the transport has none.
 		lines(quic).probe = this.#probe;
 
-		this.#own = publish && wireOf(publish).own;
-		this.hop = hasRoutes(version) && this.#own ? toHop(this.#own.hop) : randomHop();
+		this.hop = randomHop();
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
 		this.#auth = new AuthSession({
@@ -281,8 +275,6 @@ export class Connection implements Session {
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path, instance) => this.#subscriber.consume(path, instance),
-			covers: (node, at, path) => this.#subscriber.covers(node, at, path),
-			coverage: this.#subscriber.coverage,
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,
@@ -450,20 +442,18 @@ export class Connection implements Session {
 	// Role stays Both: the publish origin starts empty and fills later, and consume is
 	// called after this point, so there is nothing to narrow yet. Before lite-07 the hop
 	// declares our session identity so the peer can filter reflected announcements
-	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). From lite-07 the parameter
-	// is the Node ID our published claims originate under, omitted when we publish nothing.
+	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). Lite-07 sends none: only a node
+	// that forwards declares a Node ID.
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
 			await new Setup({
 				probe,
-				hop: hasRoutes(this.#version) ? this.#own && toHop(this.#own.node) : this.hop,
+				hop: this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
-				routeKey,
 			}).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
