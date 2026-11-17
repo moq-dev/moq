@@ -6,11 +6,12 @@
  */
 
 import { Connection } from "@moq/net";
+import type { Level } from "@moq/ui";
 import { workerSupported } from "../video/processor";
 import { probe } from "./video";
 
 /** How well a feature works: natively, through a fallback, or not at all. */
-export type Level = "full" | "partial" | "none";
+export type { Level };
 
 /** Whether a codec encodes in hardware and in software. */
 export type Codec = {
