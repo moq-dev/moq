@@ -4,7 +4,7 @@ import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway as Received } from "../connection/goaway.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
@@ -22,20 +22,17 @@ import {
 	toStreamCode,
 	unauthorized,
 } from "../error.ts";
-import { fillChanged, type Judged, rejectGroups } from "../fill.ts";
+import { type Judged, rejectGroups } from "../fill.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, WireRoute } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import * as Instance from "../instance.ts";
 import {
 	type Arriving,
-	bestCandidate,
-	type DropRun,
 	hiddenBelow,
 	hooks,
-	insertDrop,
-	insertRun,
 	maxDelayOf,
 	minDelayOf,
+	NO_MAX_DELAY,
 	type Run,
 	removeRun,
 	runGaps,
@@ -43,6 +40,7 @@ import {
 	scopeHead,
 	scopeOverlaps,
 	staleHole,
+	wireMaxDelay,
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Mint from "../mint.ts";
@@ -54,6 +52,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { closeUnwanted } from "../util/announce.ts";
+import { toNumber } from "../util/bigint.ts";
 import { Deadline } from "../util/deadline.ts";
 import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/demand.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -62,27 +61,22 @@ import { Budget } from "../util/yield.ts";
 import { hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
+	type AnnounceBroadcast,
 	AnnounceHistory,
 	AnnounceInit,
 	AnnounceOk,
-	type Refusal as AnnounceRefusal,
 	AnnounceRequest,
-	type Base,
-	type Dead,
 	decodeAnnounceBroadcastMaybe,
-	type Offer,
-	type Refusable,
-	ROUTE_MAX_HOPS,
-	type RouteHop,
-	type Unusable,
 } from "./announce.ts";
+import { AnnounceStream } from "./announce_stream.ts";
 import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
-import { type Carrier, type Claim, Floors } from "./floors.ts";
+import { Floors } from "./floors.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
+import { Routed } from "./routed.ts";
 import { ProbeLevel, type Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import {
@@ -223,18 +217,12 @@ interface SubscribeEntry {
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
 	declared?: { start?: bigint | null; requested?: bigint };
-	// Whether a SUBSCRIBE_UPDATE went out, which the publisher may have read before answering.
-	updated?: boolean;
-	// The number of the latest SUBSCRIBE (0) or SUBSCRIBE_UPDATE sent: a stale drop given up under
-	// an earlier one is no verdict on the current terms.
-	update: bigint;
-	// The max delay the latest SUBSCRIBE or SUBSCRIBE_UPDATE asked for, in milliseconds: the budget
-	// a stale drop under it was judged by.
-	maxDelay?: number;
-	// The runs `tail` accounts for by a stale drop under `update`: the next update reopens them,
-	// since the publisher re-offers or drops them again under it.
-	// Coalesced, so a peer repeating a drop holds one run, not one per message.
-	stale?: DropRun[];
+	// The narrowest max delay the SUBSCRIBE and every SUBSCRIBE_UPDATE asked for, in milliseconds,
+	// which a lite-07 stale drop is recorded under: the wire does not say which update a drop
+	// crossed, so it may have been judged under any budget asked before it arrived. Too narrow
+	// costs a wider reader a request of its own; too wide would settle it on a group it could
+	// still get.
+	staleBudget: number;
 	// The subscribe stream, from the setup that registered this entry to its end.
 	stream: SubscribeStream;
 	// How many SUBSCRIBE_UPDATEs went out, so a tail settling past SUBSCRIBE_FINISH waits a fresh
@@ -255,38 +243,11 @@ interface SubscribeEntry {
 	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
 	unanswered?: Unanswered;
-	// Lite-07: the drops naming the group each stream is reading, by sequence, one per stream, so
-	// stream credit bounds them.
-	reading?: Map<bigint, Reading>;
-}
-
-// Lite-07: a Group Stream being read, and the drops that name its group. A browser can lose the
-// reset of a stream the publisher gave up on (Chromium drops one that reaches a stream before the
-// page took it), so a drop that stands lets the subscription's end wait for the stream at most the
-// grace.
-interface Reading {
-	// The stream's hold on the subscription's end, which a standing drop excuses: see `excused`.
-	counted: Counted;
-	// A final drop named the group, before or after its header.
-	dropped: boolean;
-	// The update a stale drop naming the group was sent under, which only that update upholds.
-	staleUnder?: bigint;
-	// End the stream as the reset it was: a re-offer of its group proves the publisher reset it,
-	// even where the browser lost that reset.
-	supersede: () => void;
-}
-
-// Whether a drop accounts for the group under `update`, so the subscription's end waits for its
-// stream at most the grace. Only a drop excuses it: a stream whose header came after the grace gave
-// up on its gap is still delivering, and no reset is owed. A stale drop expires on the next update.
-function excused(reading: Reading, update: bigint): boolean {
-	return reading.dropped || (reading.staleUnder !== undefined && reading.staleUnder >= update);
-}
-
-// Excuse the stream's hold on the end, or restore it, as its drops now say.
-function judge(reading: Reading, update: bigint): void {
-	if (excused(reading, update)) reading.counted.excuse();
-	else reading.counted.restore();
+	// Lite-07: the hold each stream reading a group has on the subscription's end, by sequence, one
+	// per stream, so stream credit bounds them. A browser can lose the reset of a stream the publisher
+	// gave up on (Chromium drops one that reaches a stream before the page took it), so a drop naming
+	// the group excuses it, and the end waits for the stream at most the grace.
+	reading?: Map<bigint, Counted>;
 }
 
 // A subscribe stream's phases. Every SUBSCRIBE_UPDATE and our FIN go out on it.
@@ -345,21 +306,6 @@ export class Minted {
 	}
 }
 
-/**
- * Every group `ranges` name, which a stale drop under them was judged against. A bound only the
- * publisher resolves is taken at its widest: a start from group 0, an end past the live edge
- * (`UNBOUNDED`). Mirrors the Rust `judged`.
- */
-function judged(ranges: readonly track.Range[]): Run[] {
-	const runs: Run[] = [];
-	for (const range of ranges) {
-		const start = range.start?.absolute ?? 0n;
-		const end = range.end?.absolute ?? UNBOUNDED;
-		if (start < end) insertRun(runs, start, end);
-	}
-	return runs;
-}
-
 /** The groups a fill's range asks for: absolute at both ends, as `RangeFills` asks them. */
 function fillRun(range: WireRange): Run | undefined {
 	const start = range.start?.absolute;
@@ -409,8 +355,17 @@ export class Subscriber {
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
 	#subscribeNext = 0n;
 
-	// Lite-07: what this session's announce streams certify of each origin node's claims.
+	// Lite-07: what this session's Announce Stream certifies of each origin node's claims.
 	#floors = new Floors();
+	/**
+	 * Lite-07: changes whenever what {@link covers} answers may have changed with no route
+	 * reporting it.
+	 *
+	 * @internal
+	 */
+	readonly coverage = new Signal(0);
+	// Lite-07: the routes and claims the peer sends, shared by every `routes()` reader.
+	#routed?: Routed;
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache(this.#floors);
 	#consumeNext = 0;
@@ -421,11 +376,6 @@ export class Subscriber {
 	// group closes.
 	#fetches = new Map<string, { group: netGroup.Producer; accepted: Promise<void> }>();
 
-	// The runs a lite-07 copy's subscription reported stale under an update it has since
-	// superseded: its publisher re-offers them, or drops them again under the new number, so a
-	// fill waits on the subscription for them rather than FETCHing a copy the re-offer duplicates.
-	#reoffers = new WeakMap<track.Producer, Signal<Run[]>>();
-
 	// The peer's PROBE estimates, written as they arrive (Lite03+ only).
 	#probe?: Signal<ProbeStats>;
 
@@ -434,7 +384,7 @@ export class Subscriber {
 	#peerSetup?: Signal<Setup | undefined>;
 
 	// Settles when the peer sends GOAWAY, ranking this session's routes last.
-	#goaway?: GetPromise<Drain>;
+	#goaway?: GetPromise<Received>;
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
@@ -463,7 +413,7 @@ export class Subscriber {
 		hop: Hop,
 		probe?: Signal<ProbeStats>,
 		peerSetup?: Signal<Setup | undefined>,
-		goaway?: GetPromise<Drain>,
+		goaway?: GetPromise<Received>,
 		grant?: Getter<Grant | undefined>,
 		limits: Limits = LIMITS,
 		auth?: AuthSession,
@@ -477,6 +427,24 @@ export class Subscriber {
 		this.#goaway = goaway;
 		this.#grant = grant;
 		this.#auth = auth;
+		if (hasRoutes(version)) {
+			const stream = AnnounceStream.of(quic, version);
+			this.#routed = new Routed({
+				quic,
+				version,
+				hop,
+				floors: this.#floors,
+				consumes: this.#consumes,
+				slots: this.#announces,
+				drained: (route) => this.#drained(route),
+				revalidate: () => {
+					this.#consumes.revalidate();
+					this.coverage.update((n) => n + 1);
+				},
+				goaway,
+				send: (msg) => stream.send(msg),
+			});
+		}
 	}
 
 	// Whether the peer has sent GOAWAY. Requests keep opening here until a replacement
@@ -519,14 +487,15 @@ export class Subscriber {
 		const consumer = announced.consume();
 		// The last reader leaving ends the stream, which cancels the request.
 		closeUnwanted(announced);
-		void this.#runAnnounced(
-			announced,
-			scopeHead(scope),
-			scope,
-			options?.hidden ?? false,
-			options?.covering ?? false,
-			options?.claims ?? false,
-		);
+		const prefix = scopeHead(scope);
+		const hidden = options?.hidden ?? false;
+		const covering = options?.covering ?? false;
+		if (this.#routed) {
+			// Lite-07: every reader shares the session's one Announce Stream.
+			this.#routed.attach(announced, { prefix, scope, hidden, covering, perNode: options?.claims ?? false });
+		} else {
+			void this.#runAnnounced(announced, prefix, scope, hidden, covering);
+		}
 		return consumer;
 	}
 
@@ -536,14 +505,13 @@ export class Subscriber {
 		scope: Path.Pattern,
 		hidden: boolean,
 		covering: boolean,
-		claims: boolean,
 	): Promise<void> {
 		console.debug(`announced: prefix=${prefix}`);
 		// Lite04/05: send our own session-level Hop ID so the peer can skip announces
 		// whose hop chain already passed through us. Encoding drops it on every other
 		// version, where we drop the reflected announce on receipt instead. Matches the
 		// Rust subscriber's `exclude_hop: self.self_origin.id` in `run_announce_prefix`.
-		const msg = new AnnounceRequest(prefix, this.hop, hidden);
+		const msg = new AnnounceRequest(prefix, this.hop);
 		const visible = (path: Path.Valid) =>
 			(covering ? scopeOverlaps(scope, path) : scope.matches(path)) && (hidden || !hiddenBelow(prefix, path));
 
@@ -626,13 +594,6 @@ export class Subscriber {
 				// stay off this hop and are never forwarded.
 				responderOrigin = ok.hop;
 				initial = ok.active;
-			}
-
-			if (hasRoutes(this.version)) {
-				await this.#receiveRouted(stream, announced, { prefix, scope, hidden, visible, perNode: claims });
-				announced.close();
-				stream.close();
-				return;
 			}
 
 			switch (this.version) {
@@ -783,7 +744,7 @@ export class Subscriber {
 					case "skipped":
 						continue;
 					default:
-						// The restart and the route layer are lite-07's, answered by #receiveRouted.
+						// The restart and the route layer are lite-07's, on its Announce Stream.
 						throw new ProtocolViolation(`unexpected ${announce.status} before lite-07`);
 				}
 
@@ -947,597 +908,33 @@ export class Subscriber {
 		}
 	}
 
-	// Lite-07: the peer's routes and the claims under each, every route's claim changes applied
-	// whole at its floor. Each path reports the best claim the stream holds for it, ranked as the
-	// origin ranks routes, and a consume pins its requests to that claim's origin node. A claim
-	// another stream's newer floor withdrew or replaced is held back until this stream catches up
-	// (see `Floors`). Mirrors `subscriber/routed.rs` in rs/moq-net for a node that forwards
-	// nothing: an endpoint applies the peer's withdrawals and holds, and casts no doubt.
-	async #receiveRouted(
-		stream: Stream,
-		announced: announce.Producer,
-		request: {
-			prefix: Path.Valid;
-			scope: Path.Pattern;
-			hidden: boolean;
-			visible: (path: Path.Valid) => boolean;
-			perNode: boolean;
-		},
-	): Promise<void> {
-		const { prefix, scope, hidden, visible, perNode } = request;
-		type Route = {
-			id: bigint;
-			node: bigint;
-			// The prefix it covers, the requested one joined with the peer's suffix, or undefined when
-			// this node refused that suffix, which leaves the route refused for good.
-			prefix: Path.Valid | undefined;
-			// The path the peer last named, kept while this node refuses the rest, so a DEAD finds it.
-			path: RouteHop[];
-			// Undefined while this node refuses what the peer forwarded: no route at all, its claims
-			// offline, until an offer it can use. Mirrors rs/moq-net.
-			offer: Offer | undefined;
-			// A DRAIN named a node on its path since its last offer: it ranks last.
-			drain: boolean;
-			// ROUTE_HOLD, or a DEAD that held it: no usable path to the publisher, until its next offer.
-			held: boolean;
-			// The Announce ID of each live claim, by path: one per path, checked by lookup.
-			claims: Map<Path.Valid, bigint>;
-			// The Announce IDs of its live claims whose path this node refused.
-			unnamed: Set<bigint>;
-			// The Announce IDs of its live claims at a path whose content this node refuses.
-			withheld: Set<bigint>;
-			// How the claims differ from the view's, applied whole at the next floor.
-			pending: Map<Path.Valid, Claim | undefined>;
-			// The claims as of the last floor, and the revision it certified them at, if any.
-			view: { prefix: Path.Valid; hidden: boolean; revision: bigint | undefined; claims: Map<Path.Valid, Claim> };
-			// The view's claims no other stream's newer floor withdrew or replaced, each as the
-			// newest floor certifying it has it, cost included.
-			shown: Map<Path.Valid, Claim>;
-			carrier: Carrier;
-			// Who the route's claims are filed under in the consume cache, which keeps every
-			// route's claim so a consume ranks them for its own path.
-			owner: object;
-		};
-		const same = (a: Claim | undefined, b: Claim | undefined) =>
-			a === b ||
-			(!!a &&
-				!!b &&
-				a.instance === b.instance &&
-				a.epoch === b.epoch &&
-				a.cost === b.cost &&
-				a.above === b.above);
+	/**
+	 * Lite-07: one message the peer sent on its Announce Stream. Its routes and claims apply
+	 * here; its own ANNOUNCE_REQUEST only has to arrive outside a DEAD's updates.
+	 *
+	 * @internal
+	 */
+	announce(msg: AnnounceBroadcast): Promise<void> {
+		if (!this.#routed) throw new ProtocolViolation("Announce Stream before lite-07");
+		return this.#routed.receive(msg);
+	}
 
-		// Each live route and claim holds one of the session's announce slots.
-		const routes = new SlotMap<bigint, Route>(this.#announces);
-		// A claim refused has no `claim` until a restart names all of it, and one refused before its
-		// path has no `path` either, and never will.
-		const claims = new SlotMap<bigint, { route: bigint; path?: Path.Valid; claim?: Claim }>(this.#announces);
-		// The live route to each publisher node and prefix: at most one each.
-		const named = new Map<string, bigint>();
-		const key = (node: bigint, at: Path.Valid | undefined) =>
-			at === undefined || node === 0n ? undefined : `${node} ${at}`;
-		// The routes whose committed claims include each path.
-		const byPath = new Map<Path.Valid, Set<bigint>>();
-		// What each visible path reports; see `refresh`.
-		const reported = new Map<Path.Valid, Map<bigint | undefined, WireRoute>>();
-		const history = new AnnounceHistory();
-		let nextRoute = 0n;
-		let synced = false;
-		// Set once the stream lets go of its routes, which then show nothing anew.
-		let closing = false;
-		const route = (id: bigint): Route => {
-			const found = routes.get(id);
-			if (!found) throw new ProtocolViolation(`unknown route ${id}`);
-			return found;
-		};
-		const claimOf = (id: bigint) => {
-			const found = claims.get(id);
-			if (!found) throw new ProtocolViolation(`unknown announce id ${id}`);
-			return found;
-		};
-		// The claim at `path` under `id` is now `claim`, pending the route's next floor.
-		const change = (id: bigint, path: Path.Valid, claim: Claim | undefined) => {
-			const wire = route(id);
-			if (same(wire.view.claims.get(path), claim)) wire.pending.delete(path);
-			else wire.pending.set(path, claim);
-		};
+	/**
+	 * Lite-07: the peer finished its Announce Stream, so it is leaving and its routes end.
+	 *
+	 * @internal
+	 */
+	announceFinished(): void {
+		this.#routed?.finish();
+	}
 
-		// Whether this node takes what the peer offers for the route at all: not a refused offer or
-		// suffix, nor a route to the reserved node. Only such a route joins the node's floors.
-		const joined = (wire: Route): wire is Route & { offer: Offer; prefix: Path.Valid } =>
-			wire.offer !== undefined && wire.prefix !== undefined && wire.node !== 0n;
-		// A route is no route at all once it crossed as many nodes as one may, or crossed us: a copy
-		// of our own route, come back.
-		// The same, without narrowing, to compare a route before and after it changes.
-		const filed = (wire: Route): boolean => joined(wire);
-		const usable = (wire: Route): wire is Route & { offer: Offer; prefix: Path.Valid } =>
-			joined(wire) &&
-			wire.offer.path.length < ROUTE_MAX_HOPS &&
-			!wire.offer.path.some((hop) => hop.node === this.hop);
-
-		// A claim through this session: its cost plus the route's metric, past this session's link
-		// cost of 1 as Rust's default, ranked last while a node on its path drains, then by the
-		// lowest priority on its path, past this link's 0 as Rust's default, and unavailable while
-		// the route is held. Requests through it name its publisher and its prefix's depth.
-		const candidate = (wire: Route & { offer: Offer; prefix: Path.Valid }, claim: Claim): WireRoute =>
-			this.#drained(
-				WireRoute.normalize({
-					instance: claim.instance,
-					epoch: claim.epoch,
-					cost: claim.cost + wire.offer.metric + 1n,
-					node: wire.node,
-					depth: Path.parts(wire.prefix).length,
-					priority: Math.min(0, wire.offer.priority),
-					above: claim.above,
-					draining: wire.offer.draining || wire.drain || undefined,
-					available: !wire.held,
-				}),
-			);
-
-		// File the route's claim at `path` in the consume cache, or take it out. Every route's claim
-		// stays there, so each consume ranks them for its own path and its epochs. `restart` marks
-		// another instance or epoch, whose consumes subscribe fresh. An unusable route's claim is
-		// parked, keeping its place in a tie as `byPath` does, unless it just moved to the newest.
-		const serve = (wire: Route, path: Path.Valid, restart: boolean) => {
-			const claim = wire.shown.get(path);
-			if (!claim || !visible(path) || (!usable(wire) && restart)) this.#consumes.withdraw(path, wire.owner);
-			else if (!usable(wire)) this.#consumes.park(path, wire.owner);
-			else this.#consumes.announce(path, wire.owner, candidate(wire, claim), restart);
-		};
-
-		// Report the best claim at `path`, or with `perNode` each origin node's, and each one's end.
-		// `lost` marks the routes leaving as let go rather than withdrawn, so they go offline
-		// rather than ending.
-		const refresh = (path: Path.Valid, lost: boolean) => {
-			// Keyed by origin node with `perNode`, and otherwise the one key `undefined`.
-			const now = new Map<bigint | undefined, WireRoute>();
-			if (visible(path)) {
-				const candidates: WireRoute[] = [];
-				for (const id of byPath.get(path) ?? []) {
-					const wire = route(id);
-					const claim = wire.shown.get(path);
-					if (claim && usable(wire)) candidates.push(candidate(wire, claim));
-				}
-				if (perNode) {
-					for (const next of candidates) now.set(next.node, next);
-				} else {
-					// The same pick a consume of `path` makes from the cache.
-					const best = bestCandidate(path, path, candidates, (next) => next);
-					if (best) now.set(undefined, best);
-				}
-			}
-
-			const captures = scopeCaptures(scope, path);
-			const prev = reported.get(path) ?? new Map<bigint | undefined, WireRoute>();
-			// Arrivals first, so a reader sees a claim replaced rather than the path gone between.
-			for (const [key, next] of now) {
-				const was = prev.get(key);
-				if (was && routesEqual(was, next)) continue;
-				const restart = !!was && (was.instance !== next.instance || was.epoch !== next.epoch);
-				const kind = !was ? "start" : restart ? "restart" : "update";
-				console.debug(`announced: broadcast=${path} ${kind} instance=${next.instance} node=${next.node}`);
-				announced.append({ prefix: path, captures, kind, route: next });
-			}
-			for (const [key, was] of prev) {
-				if (now.has(key)) continue;
-				console.debug(`announced: broadcast=${path} active=false lost=${lost} node=${was.node}`);
-				announced.append({ prefix: path, captures, kind: lost ? "offline" : "end", route: was });
-			}
-			if (now.size > 0) reported.set(path, now);
-			else reported.delete(path);
-		};
-		// Show or hide the route's claims at `touched`, each marked whether it restarted, or with
-		// `all` every claim it holds, once another stream's floor may have moved what is current.
-		const show = (wire: Route, touched: ReadonlyMap<Path.Valid, boolean>, all: boolean) => {
-			const paths = all
-				? new Set([...touched.keys(), ...wire.shown.keys(), ...wire.view.claims.keys()])
-				: touched.keys();
-			for (const path of paths) {
-				const now = this.#floors.shows(wire.node, wire.view, path);
-				const was = wire.shown.get(path);
-				const restart = touched.get(path);
-				if (same(now, was) && restart === undefined) continue;
-				if (now) wire.shown.set(path, now);
-				else wire.shown.delete(path);
-				// A claim shown anew or restarted iterates last, as the newest; a re-price keeps its
-				// place, as the consume cache does. See bestCandidate.
-				const ids = byPath.get(path);
-				if (now && ids && (!was || restart)) {
-					ids.delete(wire.id);
-					ids.add(wire.id);
-				}
-				serve(wire, path, restart ?? false);
-				// A claim gone was let go, not withdrawn by its origin, where the newest floor certifying it
-				// still presents it, or where this node refuses one of the route's claims and no floor
-				// certifies it gone. An uncertified withdrawal otherwise still ends: a relay certifies
-				// nothing to a request wider than its scope's region, as this one may be.
-				const said = now ? undefined : this.#floors.certified(wire.node, wire.view, path);
-				const refusing = wire.unnamed.size > 0 || wire.withheld.size > 0;
-				refresh(path, !now && (said === "present" || (refusing && said === undefined)));
-			}
-		};
-		const refreshRoute = (wire: Route, lost: boolean) => {
-			for (const path of wire.view.claims.keys()) {
-				serve(wire, path, false);
-				refresh(path, lost);
-			}
-		};
-
-		// The peer started a route to `node` with the next Route ID, covering the requested prefix
-		// joined with `suffix`, along `offer`, or along `path` when this node refuses the offer.
-		const startRoute = (
-			node: bigint,
-			suffix: Path.Valid | undefined,
-			offer: Offer | undefined,
-			path: RouteHop[],
-		) => {
-			// The interest prefix can push a joined path past the limits: refused too.
-			const joinedPrefix = suffix === undefined ? undefined : Path.join(prefix, suffix);
-			const at = joinedPrefix !== undefined && Path.check(joinedPrefix) === undefined ? joinedPrefix : undefined;
-			const named_ = key(node, at);
-			// The peer keeps one route per publisher and prefix.
-			if (named_ !== undefined && named.has(named_))
-				throw new ProtocolViolation(`second route to node ${node} at ${at}`);
-			const id = nextRoute++;
-			const view: Route["view"] = { prefix: at ?? prefix, hidden, revision: undefined, claims: new Map() };
-			const wire: Route = {
-				id,
-				node,
-				prefix: at,
-				path,
-				offer,
-				drain: false,
-				held: false,
-				claims: new Map(),
-				unnamed: new Set(),
-				withheld: new Set(),
-				pending: new Map(),
-				view,
-				shown: new Map(),
-				carrier: {
-					view,
-					// Another route's floor or end runs this: a closed reader is about to let go.
-					reshow: () => {
-						if (!closing && announced.closed.peek() === undefined) show(wire, new Map(), true);
-					},
-				},
-				owner: {},
-			};
-			routes.set(id, wire);
-			if (named_ !== undefined) named.set(named_, id);
-			// A refused route's floors stay its own, as Rust's node never holds the route.
-			if (joined(wire)) this.#floors.join(node, wire.carrier);
-		};
-
-		// The peer let go of the route and every claim under it: offline, not withdrawn.
-		const endRoute = (wire: Route) => {
-			for (const id of [...wire.claims.values(), ...wire.unnamed]) {
-				history.end(id);
-				claims.delete(id);
-			}
-			routes.delete(wire.id);
-			const named_ = key(wire.node, wire.prefix);
-			if (named_ !== undefined && named.get(named_) === wire.id) named.delete(named_);
-			// Unindexed first: leaving its floors reshows another carrier at once, which
-			// refreshes these paths and so looks up every route indexed there.
-			for (const path of wire.view.claims.keys()) byPath.get(path)?.delete(wire.id);
-			// What its last floor certified stays, so no other stream's lagging claim revives.
-			this.#floors.leave(wire.node, wire.carrier);
-			wire.shown.clear();
-			refreshRoute(wire, true);
-			this.#consumes.revalidate();
-			for (const path of wire.view.claims.keys()) if (byPath.get(path)?.size === 0) byPath.delete(path);
-		};
-
-		// The peer's `above` for the claim at `path`, if it can be: a claim is no more than its
-		// path's segments broader than the path it is shown at. Mirrors rs/moq-net's `Routed::above`.
-		const aboveOf = (path: Path.Valid | undefined, above: bigint | undefined): bigint => {
-			const value = above ?? 0n;
-			if (path === undefined || value === 0n) return value;
-			if (value > BigInt(Path.parts(path).length))
-				throw new ProtocolViolation(`a claim at ${path} cannot be ${value} segments above it`);
-			return value;
-		};
-
-		// A claim the peer started under `routeId` with the next Announce ID, at `path` unless this
-		// node refused it, and `claim` unless it refuses what the peer forwarded.
-		const startClaim = (
-			routeId: bigint,
-			path: { suffix: Path.Valid; pathBase?: Base } | undefined,
-			claim: Claim | undefined,
-		) => {
-			const wire = route(routeId);
-			const suffix = history.start(path);
-			const id = history.next - 1n;
-			// The interest prefix can push a joined path past the limits: refused too.
-			const full = suffix === undefined ? undefined : Path.join(prefix, suffix);
-			const named = full !== undefined && Path.check(full) === undefined ? full : undefined;
-			if (claim) claim.above = aboveOf(named, claim.above);
-			if (named === undefined) {
-				if (claim) console.warn(`refusing a forwarded claim: route=${routeId} claim=${id} reason=path`);
-				claims.set(id, { route: routeId });
-				wire.unnamed.add(id);
-				return;
-			}
-			if (wire.claims.has(named)) throw new ProtocolViolation(`route ${routeId} claims ${named} twice`);
-			// A route covers only the claims at or below its prefix.
-			if (wire.prefix !== undefined && !Path.hasPrefix(wire.prefix, named))
-				throw new ProtocolViolation(`route ${routeId} at ${wire.prefix} claims ${named}`);
-			claims.set(id, { route: routeId, path: named, claim });
-			wire.claims.set(named, id);
-			if (claim) change(routeId, named, claim);
-			else wire.withheld.add(id);
-		};
-
-		// The route now reaches its node by `offer`, or along `path` while this node refuses what the
-		// peer forwarded. Either way the peer no longer holds it, nor drains a node on it but as the
-		// offer says. A refused route leaves the node's floors, as an ended one does, and joins again
-		// once usable, with what its last floor certified, as rs/moq-net files it again.
-		const reach = (wire: Route, offer: Offer | undefined, path: RouteHop[]) => {
-			const was = filed(wire);
-			wire.offer = offer;
-			wire.path = path;
-			wire.held = false;
-			wire.drain = false;
-			const now = filed(wire);
-			if (was && !now) {
-				this.#floors.leave(wire.node, wire.carrier);
-				// What its floor certified stays as it was, while the route goes on reading claims.
-				wire.view.claims = new Map(wire.view.claims);
-			}
-			if (was || !now) return;
-			this.#floors.join(wire.node, wire.carrier);
-			const others = this.#floors.floor(wire.node, wire.carrier);
-			show(wire, new Map(), true);
-			if (others) this.#consumes.revalidate();
-		};
-		// The route moved to `offer`, which this node refuses with its path when it is `Unusable`.
-		const move = (wire: Route, offer: Offer | Unusable) => {
-			const was = filed(wire);
-			if ("refused" in offer) {
-				console.warn(`refusing a forwarded route: node=${wire.node} route=${wire.id} reason=${offer.refused}`);
-				reach(wire, undefined, offer.path);
-			} else {
-				reach(wire, offer, offer.path);
-			}
-			refreshRoute(wire, !usable(wire));
-			// Its floors no longer cover anything, as on ROUTE_END.
-			if (was && !filed(wire)) this.#consumes.revalidate();
-		};
-
-		// The parts of a DEAD read so far, which apply as one once its last arrives.
-		let continued: { hop: RouteHop; far: bigint; gone: boolean; offers: Map<bigint, Offer | Unusable> } | undefined;
-
-		// A DEAD: the stream's routes through the hop it names carry on as it says. A route this
-		// node refuses still follows it, so both ends agree on which routes live. An endpoint casts
-		// no doubt: it never forwards a route, so no detour waits on one.
-		const dead = (news: Dead) => {
-			if (news.kind === "drain") {
-				for (const wire of routes.values()) {
-					if (!wire.path.some((hop) => hop.node === news.node)) continue;
-					wire.drain = true;
-					refreshRoute(wire, false);
-				}
-				return;
-			}
-			// A DEAD in parts applies with its last, each part naming the same hop, far node, and gone.
-			const parts = continued ?? { hop: news.hop, far: news.far, gone: news.gone, offers: new Map() };
-			continued = undefined;
-			const same =
-				parts.hop.node === news.hop.node &&
-				parts.hop.session === news.hop.session &&
-				parts.far === news.far &&
-				parts.gone === news.gone;
-			if (!same) throw new ProtocolViolation("DEAD part names another hop");
-			// Each part names live routes, so what the parts hold stays within the stream's.
-			const offers = parts.offers;
-			for (const { id, offer } of news.moved) offers.set(route(id).id, offer);
-			if (news.more) {
-				continued = parts;
-				return;
-			}
-			const through = [...routes.values()].filter((wire) =>
-				wire.path.some((hop) => hop.node === news.hop.node && hop.session === news.hop.session),
-			);
-			for (const wire of through) {
-				const moved = offers.get(wire.id);
-				const before = wire.path.at(-2);
-				if (moved !== undefined) move(wire, moved);
-				else if (news.gone) endRoute(wire);
-				// The peer learned it from this node, which it holds under: unchanged.
-				else if (before?.node === this.hop) continue;
-				else {
-					wire.held = true;
-					refreshRoute(wire, false);
-				}
-			}
-		};
-
-		// Apply a message whose content, which the peer only forwarded, this node refuses: withdraw
-		// the route or claim it names, and keep the stream. Mirrors rs/moq-net.
-		const refused = (message: Refusable, reason: AnnounceRefusal) => {
-			switch (message.kind) {
-				case "routeStart":
-					console.warn(`refusing a forwarded route: node=${message.node} reason=${reason}`);
-					return startRoute(message.node, message.suffix, undefined, message.path);
-				case "routeUpdate":
-					return move(route(message.id), { refused: reason, path: message.path });
-				case "start":
-					console.warn(
-						`refusing a forwarded claim: route=${message.route} claim=${history.next} reason=${reason}`,
-					);
-					return startClaim(message.route, message.path, undefined);
-				case "change": {
-					const live = claimOf(message.id);
-					console.warn(
-						`refusing a forwarded claim: route=${live.route} claim=${message.id} reason=${reason}`,
-					);
-					live.claim = undefined;
-					if (live.path === undefined) return;
-					route(live.route).withheld.add(message.id);
-					change(live.route, live.path, undefined);
-					return;
-				}
-			}
-		};
-
-		// A draining peer ranks its routes last from the GOAWAY itself.
-		const stopDrain = this.#goaway?.changed(() => {
-			if (announced.closed.peek() !== undefined) return;
-			for (const wire of routes.values()) refreshRoute(wire, false);
-		});
-
-		try {
-			for (;;) {
-				const msg = await race([decodeAnnounceBroadcastMaybe(stream.reader, this.version), announced.closed]);
-				if (msg === undefined && !synced) throw new ProtocolViolation("announce stream ended before SYNCED");
-				// undefined: the stream ended. null: the consumer closed cleanly.
-				if (!msg) break;
-				if (msg instanceof Error) throw msg;
-				// The parts of a DEAD arrive back to back.
-				if (continued && !(msg.status === "dead" && msg.dead.kind === "closed"))
-					throw new ProtocolViolation("DEAD part followed by another message");
-
-				switch (msg.status) {
-					case "routeStart":
-						startRoute(msg.node, msg.suffix, msg.offer, msg.offer.path);
-						break;
-					case "routeUpdate":
-						move(route(msg.id), msg.offer);
-						break;
-					case "routeHold": {
-						const wire = route(msg.id);
-						wire.held = true;
-						refreshRoute(wire, false);
-						break;
-					}
-					case "routeEnd":
-						endRoute(route(msg.id));
-						break;
-					case "dead":
-						dead(msg.dead);
-						break;
-					case "floor": {
-						// The batch applies whole, at the revision its floor certifies: none while this
-						// node refuses one of the route's claims, which its origin never withdrew.
-						const wire = route(msg.id);
-						const revision = wire.unnamed.size === 0 && wire.withheld.size === 0 ? msg.revision : undefined;
-						// A floor that certifies less keeps what the route's last one certified.
-						const certified = wire.view.revision;
-						const filed = joined(wire);
-						if (filed && certified !== undefined && (revision === undefined || revision < certified))
-							this.#floors.regress(wire.node, wire.carrier);
-						const touched = new Map<Path.Valid, boolean>();
-						for (const [path, claim] of wire.pending) {
-							// Another instance or epoch: what was consumed through the claim may be stale.
-							const was = wire.view.claims.get(path);
-							const restart =
-								!!was && !!claim && (was.instance !== claim.instance || was.epoch !== claim.epoch);
-							touched.set(path, restart);
-							if (claim) {
-								wire.view.claims.set(path, claim);
-								let ids = byPath.get(path);
-								if (!ids) {
-									ids = new Set();
-									byPath.set(path, ids);
-								}
-								ids.add(msg.id);
-							} else {
-								wire.view.claims.delete(path);
-								const ids = byPath.get(path);
-								ids?.delete(msg.id);
-								if (ids?.size === 0) byPath.delete(path);
-							}
-						}
-						wire.pending.clear();
-						wire.view.revision = revision;
-						// Every other route to the node is shown anew first; with one, this route's
-						// unchanged claims may change state too.
-						const others = filed && this.#floors.floor(wire.node, wire.carrier);
-						show(wire, touched, others);
-						// Another view of the node may now cover a consumed path differently.
-						if (others) this.#consumes.revalidate();
-						break;
-					}
-					case "active": {
-						if (msg.route === undefined) throw new ProtocolViolation("lite-07 claim without a route");
-						if (msg.instance === undefined)
-							throw new ProtocolViolation("lite-07 claim without an instance");
-						const claim = {
-							instance: msg.instance,
-							epoch: msg.epoch ?? 0n,
-							cost: msg.cost ?? Cost.zero,
-							above: msg.above ?? 0n,
-						};
-						startClaim(msg.route, msg, claim);
-						break;
-					}
-					case "update": {
-						const live = claimOf(msg.id);
-						const above = aboveOf(live.path, msg.above);
-						// An update names none of what a refused claim lacks.
-						if (live.claim === undefined || live.path === undefined) break;
-						live.claim = { ...live.claim, cost: msg.cost ?? Cost.zero, above };
-						change(live.route, live.path, live.claim);
-						break;
-					}
-					case "restart": {
-						const live = claimOf(msg.id);
-						if (msg.instance === undefined)
-							throw new ProtocolViolation("lite-07 restart without an instance");
-						// A claim without a path stays refused, whatever the peer sends for it.
-						if (live.path === undefined) break;
-						live.claim = {
-							instance: msg.instance,
-							epoch: msg.epoch ?? 0n,
-							cost: msg.cost ?? Cost.zero,
-							above: aboveOf(live.path, msg.above),
-						};
-						route(live.route).withheld.delete(msg.id);
-						change(live.route, live.path, live.claim);
-						break;
-					}
-					case "refused":
-						await refused(msg.message, msg.reason);
-						break;
-					case "endedId": {
-						const live = claimOf(msg.id);
-						history.end(msg.id);
-						claims.delete(msg.id);
-						const wire = route(live.route);
-						if (live.path === undefined) {
-							wire.unnamed.delete(msg.id);
-							break;
-						}
-						wire.claims.delete(live.path);
-						wire.withheld.delete(msg.id);
-						change(live.route, live.path, undefined);
-						break;
-					}
-					case "synced":
-						if (synced) throw new ProtocolViolation("duplicate SYNCED");
-						synced = true;
-						announced.synced();
-						break;
-					case "skipped":
-						break;
-					case "ended":
-						// Lite-07 ends a claim by its Announce ID only.
-						throw new ProtocolViolation("ANNOUNCE_END by path on lite-07");
-				}
-			}
-		} finally {
-			stopDrain?.();
-			closing = true;
-			for (const wire of routes.values()) {
-				this.#floors.leave(wire.node, wire.carrier);
-				for (const path of wire.view.claims.keys()) this.#consumes.withdraw(path, wire.owner);
-			}
-			if (routes.size > 0) this.#consumes.revalidate();
-			reported.clear();
-			claims.clear();
-			routes.clear();
-		}
+	/**
+	 * Lite-07: this side finished its Announce Stream, so it asks the peer for nothing more.
+	 *
+	 * @internal
+	 */
+	announceSilenced(): void {
+		this.#routed?.silence();
 	}
 
 	/**
@@ -1830,8 +1227,11 @@ export class Subscriber {
 			lister.abort(refused);
 			return;
 		}
-		// Each listed track holds an announces slot: discovery state the peer makes us hold.
-		const listed = new Set<string>();
+		// Each listed track holds an announces slot: discovery state the peer makes us hold. Each
+		// kind is a namespace apart.
+		const listedTracks = new Set<string>();
+		const listedDatagrams = new Set<string>();
+		const listed = (datagrams?: boolean) => (datagrams ? listedDatagrams : listedTracks);
 		const unused = new AbortController();
 		const stop = AbortSignal.any([unused.signal, revoked.signal, this.#closed.signal]);
 		const disposeWanted = lister.wanted.subscribe((wanted) => {
@@ -1864,18 +1264,24 @@ export class Subscriber {
 					return;
 				}
 				if (event.kind === "added") {
-					if (listed.has(event.name)) throw new ProtocolViolation(`track listed twice: ${event.name}`);
+					if (listed(event.datagrams).has(event.name))
+						throw new ProtocolViolation(`track listed twice: ${event.name}`);
 					if (!this.#announces.tryAcquire()) {
 						throw new SessionError(SessionCode.TooManyRequests, { reason: "too many listed tracks" });
 					}
-					listed.add(event.name);
-					lister.add(event.name, this.#toModelInfo(event.info));
+					listed(event.datagrams).add(event.name);
+					if (event.datagrams) {
+						const info = { priority: event.info.priority, timescale: event.info.timescale ?? null };
+						lister.add(event.name, { datagrams: true, info });
+					} else {
+						lister.add(event.name, { info: this.#toModelInfo(event.info) });
+					}
 				} else if (event.kind === "removed" || event.kind === "finished") {
-					if (!listed.delete(event.name))
+					if (!listed(event.datagrams).delete(event.name))
 						throw new ProtocolViolation(`unlisted track removed: ${event.name}`);
 					this.#announces.release();
-					if (event.kind === "finished") lister.finish(event.name);
-					else lister.remove(event.name);
+					if (event.kind === "finished") lister.finish(event.name, event.datagrams);
+					else lister.remove(event.name, event.datagrams);
 				} else {
 					if (synced) throw new ProtocolViolation("duplicate SYNCED");
 					synced = true;
@@ -1905,7 +1311,7 @@ export class Subscriber {
 		} finally {
 			disposeGrant?.();
 			disposeWanted();
-			this.#announces.release(listed.size);
+			this.#announces.release(listedTracks.size + listedDatagrams.size);
 		}
 	}
 
@@ -2061,7 +1467,7 @@ export class Subscriber {
 			track: name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
-			maxDelay: maxDelayOf(subscription),
+			maxDelay: wireMaxDelay(subscription),
 			minDelay: minDelayOf(subscription),
 			startGroup: span.start,
 			endGroup: inclusiveGroupEnd(span.end),
@@ -2161,9 +1567,6 @@ export class Subscriber {
 			stream.abort(e);
 		} finally {
 			answering?.removeEventListener("abort", replaced);
-			// Nothing more is re-offered on this subscription.
-			this.#reoffers.get(producer)?.set([]);
-			this.#reoffers.delete(producer);
 			entry.tail.close();
 			entry.unanswered?.held.close();
 			entry.datagramDemand?.();
@@ -2302,15 +1705,15 @@ export class Subscriber {
 			resolvesStart: resolvesStart(this.version),
 			fillsFromStart: fillsFromStart(this.version),
 		});
-		// The SUBSCRIBE's terms: the groups a stale drop under them was judged against.
-		hooks.supersedeStale(producer, judged(ranges));
+		// A new upstream subscription: stale runs an earlier one reported were judged under other terms.
+		hooks.supersedeStale(producer);
 		if (!hasRanges(this.version)) hooks.dropAnchors(producer);
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
 		const entry: SubscribeEntry = {
 			track: producer,
-			maxDelay: msg.maxDelay,
+			staleBudget: msg.maxDelay ?? NO_MAX_DELAY,
 			...framing,
 			// The effective max delay is the stopgap grace: the wrong clock (it bounds
 			// presentation-time drift), but it is how long the subscriber was willing to wait
@@ -2321,7 +1724,6 @@ export class Subscriber {
 			asked: [...ranges],
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
-			update: 0n,
 			sent: 0,
 			stream: { kind: "setup" },
 			fillIds: new Set(),
@@ -2335,7 +1737,7 @@ export class Subscriber {
 			this.#legacyRequests.delete(state.legacyKey);
 			const datagrams = request
 				? request.accept(info)
-				: wireOf(state.consumer).createDatagrams(producer.name, info);
+				: wireOf(state.consumer).createDatagrams(producer.name, info, false);
 			entry.datagrams = { producer: datagrams, timescale: framing.scale };
 			entry.legacyKey = state.legacyKey;
 			this.#datagrams.set(id, entry.datagrams);
@@ -2499,7 +1901,7 @@ export class Subscriber {
 		const key = JSON.stringify([consumed.id, broadcast, pin, track, String(sequence), options.maxDelay?.asNanos()]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
-		if (entry && !entry.group.isClosed) {
+		if (entry && entry.group.closed.peek() === undefined) {
 			consumer = entry.group.mirror();
 		} else {
 			const group = new netGroup.Producer(sequence);
@@ -2661,7 +2063,7 @@ export class Subscriber {
 		try {
 			// One guard covers both header waits and a stalled payload. Abandonment aborts
 			// the group before resetting the stream, releasing the shared frame pump too.
-			await untilAbandoned(
+			const end = await untilAbandoned(
 				group,
 				readFrames(stream.reader, group, {
 					scale: info.timescale ?? 0,
@@ -2670,7 +2072,9 @@ export class Subscriber {
 				}),
 			);
 
-			group.finish();
+			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
+			if (end === undefined) group.finish();
+			else group.finishAt(end);
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
@@ -2699,6 +2103,11 @@ export class Subscriber {
 			const maxAge = (await producer.info().catch(() => undefined))?.maxAge;
 			const framing = { compress: entry.compress, timescale: entry.timescale, maxAge };
 			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				// The wire fetches by group alone, so a lookup goes unanswered and its reader falls back.
+				if (fill.kind === "lookup") {
+					fill.close();
+					continue;
+				}
 				// One group is what FETCH carries; more go through the subscription.
 				if (fills && fill.end - fill.start > 1n) {
 					fills.push(fill);
@@ -2733,18 +2142,11 @@ export class Subscriber {
 		consumed: Consumed,
 		producer: track.Producer,
 		framing: Framing,
-		fill: track.Fill,
+		fill: track.FillGroups,
 	): Promise<void> {
 		try {
 			let last: bigint | undefined;
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-				// The subscription re-offers it, or drops it again, either of which answers the fill.
-				const reoffers = this.#reoffers.get(producer);
-				const reoffered = reoffers?.peek() ?? [];
-				if (reoffers && reoffered.some((run) => run.start <= sequence && sequence < run.end)) {
-					await race([fillChanged(fill), reoffers.changed()]);
-					continue;
-				}
 				// Every fetch answers its group, so the same one coming back is a bug: closing the
 				// fill names it dropped rather than fetching it forever.
 				if (sequence === last) break;
@@ -2785,6 +2187,7 @@ export class Subscriber {
 		);
 		const entry: SubscribeEntry = {
 			track: producer,
+			staleBudget: msg.maxDelay ?? NO_MAX_DELAY,
 			compress: copy.compress,
 			timescale: copy.timescale,
 			tail: new Tail({ grace: () => hooks.tailGrace(producer) }),
@@ -2793,7 +2196,6 @@ export class Subscriber {
 			asked: ranges,
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
-			update: 0n,
 			sent: 0,
 			// Its responses are read here, which owns this stream's end.
 			stream: { kind: "setup" },
@@ -2976,15 +2378,6 @@ export class Subscriber {
 		return bound === undefined ? undefined : { budget: bound, everyone: true };
 	}
 
-	// Settle `[start, end)` of what `producer`'s subscription re-offers: a stream or a verdict
-	// under the latest update answered it.
-	#reoffered(producer: track.Producer, start: bigint, end: bigint): void {
-		const reoffers = this.#reoffers.get(producer);
-		const runs = reoffers?.peek();
-		if (!runs?.some((run) => run.start < end && start < run.end)) return;
-		reoffers?.set(removeRun(runs, start, end));
-	}
-
 	// FETCH group `sequence` of `fill` and write it into the copy once the publisher answers: lite
 	// has no FETCH_OK, so a publisher without the group resets the stream, which refuses the group
 	// to the readers waiting now, as the Rust `GroupFill::reject` does. A fetch nobody waits on any
@@ -2994,7 +2387,7 @@ export class Subscriber {
 		consumed: Consumed,
 		name: string,
 		framing: Framing,
-		fill: track.Fill,
+		fill: track.FillGroups,
 		sequence: bigint,
 	): Promise<void> {
 		const cancel = new AbortController();
@@ -3020,7 +2413,7 @@ export class Subscriber {
 		try {
 			// Once no reader holds the group or waits to pick it up, cancel upstream and abort the
 			// truncated group rather than cache it whole, as the Rust fetch's ingest does.
-			await untilAbandoned(
+			const end = await untilAbandoned(
 				group,
 				readFrames(stream.reader, group, {
 					scale: framing.timescale,
@@ -3028,7 +2421,9 @@ export class Subscriber {
 					lengthFirst: hasLengthFirst(this.version),
 				}),
 			);
-			group.finish();
+			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
+			if (end === undefined) group.finish();
+			else group.finishAt(end);
 			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
@@ -3048,7 +2443,7 @@ export class Subscriber {
 		consumed: Consumed,
 		name: string,
 		framing: Framing,
-		fill: track.Fill,
+		fill: track.FillGroups,
 		sequence: bigint,
 		cancel: AbortSignal,
 	): Promise<Stream | undefined> {
@@ -3168,7 +2563,8 @@ export class Subscriber {
 				// whatever an update changed since.
 				if (hasRanges(this.version)) this.#declare(entry);
 				else hooks.startTrack(entry.track, { start: entry.start, requested: entry.requested });
-				hooks.reportedLargest(entry.track, resp.start.largest);
+				// Recorded whole, so a relay answers its own readers that the group ended.
+				hooks.reportedLargest(entry.track, resp.start.largest?.position, resp.start.largest?.ended ?? false);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
 				if (entry.requested !== undefined && start !== undefined) entry.tail.account(entry.requested, start);
@@ -3219,59 +2615,42 @@ export class Subscriber {
 					this.#declare(entry);
 				}
 			} else if ("drop" in resp) {
-				// The publisher will never send these groups, so they are accounted for without a
-				// stream, and a reader of one still arriving ends with the drop's error now. A lite-07
-				// stale drop leaves a group whose stream arrived, since the stream wins over it.
-				const { start, end, update } = resp.drop;
-				// It can only echo an update this subscriber sent.
-				if (update > entry.update)
-					throw new ProtocolViolation(`SUBSCRIBE_DROP names update ${update}, which was never sent`);
+				// The publisher will never send these groups on this subscription, so they are accounted
+				// for without a stream, and a reader of one still arriving ends with the drop's error now.
+				const { start, end } = resp.drop;
 				const error = resp.drop.cause(this.version);
-				// On lite-07 an OLD drop is a stale verdict, which the next update reopens; every other
-				// drop is final, whatever update it names.
-				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
-				// One given up under an update since replaced says nothing of the current terms: the
-				// publisher re-offers it or drops it again under the new number, so it is still owed,
-				// and a reader that wants it fills it meanwhile.
-				if (stale && update < entry.update) continue;
-				this.#reoffered(entry.track, start, end);
-				// Lite-07 tells a stream a final drop overtook from one whose gap the grace gave up on.
-				if (!stale && hasSkip(this.version)) entry.tail.drop(start, end);
+				// Lite-07 tells a stream a drop overtook from one whose gap the grace gave up on.
+				if (hasSkip(this.version)) entry.tail.drop(start, end);
 				else entry.tail.account(start, end);
-				this.#dropped(entry, start, end, stale ? update : undefined);
-				// Judged under the budget this subscriber sent with that update.
-				const hole = stale ? staleHole(entry.maxDelay ?? 0) : { error };
-				// A group whose stream finished under this update was served over a stale drop, so it
-				// won, even once the cache evicted it.
-				const named = stale ? entry.tail.unfinished(start, end) : [{ start, end }];
-				const recorded = named.flatMap((run) => hooks.dropTrackGroups(entry.track, run.start, run.end, hole));
-				// A final drop is never reopened, even where it replaces a stale one. A sequence
-				// already skipped stays skipped, and one whose group arrived keeps it, so no update
-				// reopens either.
-				// Owed again by the next update.
-				entry.stale = stale
-					? recorded.reduce((runs, run) => insertDrop(runs, run.start, run.end, hole), entry.stale ?? [])
-					: removeRun(entry.stale ?? [], start, end);
+				this.#dropped(entry, start, end);
+				// On lite-07 an OLD drop is stale, recorded under the narrowest budget it may have been
+				// judged under: a reader wider than that does not settle on it, and asks for the group
+				// with a request of its own.
+				const stale = hasSkip(this.version) && toStreamCode(error) === StreamCode.Old;
+				const hole = stale ? staleHole(entry.staleBudget) : { error };
+				hooks.dropTrackGroups(entry.track, start, end, hole);
 				entry.fills?.refuse(start, end, error);
 			} else if ("skip" in resp) {
-				// Never produced, so nothing is waited for and no reader ends. A skip is final and
-				// replaces any drop of the same groups, stale or final, so no update reopens them; a
-				// reader a drop already ended stays ended.
 				const { start, end } = resp.skip;
-				this.#reoffered(entry.track, start, end);
-				entry.tail.account(start, end);
-				entry.stale = removeRun(entry.stale ?? [], start, end);
-				// A fill owing them is answered: the source never had them.
-				entry.fills?.refuse(start, end, new NotFound(`group ${start}`));
-				// A group that arrived was produced after all, so the skip contradicts it: it keeps
-				// the group, and the session goes on, since the draft requires no more.
-				const [cached] = hooks.skipTrackGroups(entry.track, start, end);
-				if (cached) {
-					console.warn(
-						`protocol error: SUBSCRIBE_SKIP [${start}, ${end}) names group ${cached.start}, which arrived; keeping it`,
-					);
-				}
+				this.#skipped(entry, start, end, "SUBSCRIBE_SKIP");
 			}
+		}
+	}
+
+	// The publisher never produced `[start, end)`, as `by` (a SUBSCRIBE_SKIP, or a GROUP's Previous
+	// Start) says, so nothing is waited for and no reader ends. A skip replaces any drop of the same
+	// groups; a reader a drop already ended stays ended.
+	#skipped(entry: SubscribeEntry, start: bigint, end: bigint, by: string): void {
+		entry.tail.account(start, end);
+		// A fill owing them is answered: the source never had them.
+		entry.fills?.refuse(start, end, new NotFound(`group ${start}`));
+		// A group that arrived was produced after all, so the skip contradicts it: it keeps the
+		// group, and the session goes on, since the draft requires no more.
+		const [cached] = hooks.skipTrackGroups(entry.track, start, end);
+		if (cached) {
+			console.warn(
+				`protocol error: ${by} skips [${start}, ${end}), which holds group ${cached.start}, which arrived; keeping it`,
+			);
 		}
 	}
 
@@ -3325,7 +2704,7 @@ export class Subscriber {
 				if (!entry.starts.has(id)) return false;
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
-				const [model] = requestedRanges({ startFrame: 0, ranges: [range] }, entry.scale);
+				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
 				owed.push({ ...model, start: { absolute: at } });
 			}
 			const window = new Window(owed, entry.track.largest()?.group);
@@ -3368,7 +2747,7 @@ export class Subscriber {
 			priority: msg.priority,
 			order: msg.order,
 			delay: {
-				max: Duration.millis(msg.maxDelay),
+				max: msg.maxDelay === null ? null : Duration.millis(msg.maxDelay),
 				min: msg.minDelay === undefined ? null : Duration.millis(msg.minDelay),
 			},
 			ranges: entry.asked,
@@ -3462,43 +2841,14 @@ export class Subscriber {
 				wantedGroup: refresh ?? sentWanted,
 				priority,
 				order: current.order,
-				maxDelay: maxDelayOf(current),
+				maxDelay: wireMaxDelay(current),
 				minDelay: minDelayOf(current),
 				startGroup: span.start,
 				endGroup: inclusiveGroupEnd(span.end),
 				ranges: edit?.add,
 				remove: edit?.remove,
-				update: entry.update + 1n,
 			});
-			// A stale drop given up under the previous update may still be in flight, and this one
-			// may move the range or budget it was judged against, so the runs held as stale become
-			// unknown again: a reader fills them rather than trust an old verdict.
-			entry.update = update.update;
-			entry.maxDelay = update.maxDelay;
-			entry.tail.updated();
-			// A stream a stale drop excused holds the end again: that verdict no longer stands.
-			for (const reading of entry.reading?.values() ?? []) judge(reading, entry.update);
-			const held = hooks.supersedeStale(entry.track, judged([...ranges, ...fillRanges]));
-			// A lite-07 publisher re-offers every group it reported stale on any update, and drops
-			// again under the new number what is still stale, so the tail owes every stale run again.
-			// A group that arrived since its stale drop won over it: the publisher served it, so it
-			// is neither re-offered nor owed again.
-			for (const run of entry.stale ?? []) {
-				for (const reopened of held) {
-					const start = max(run.start, reopened.start);
-					const end = min(run.end, reopened.end);
-					if (start < end) entry.tail.unaccount(start, end);
-				}
-			}
-			// Re-offered whether or not the copy still holds the stale verdict.
-			if (entry.stale?.length) {
-				const reoffers = this.#reoffers.get(track) ?? new Signal<Run[]>([]);
-				this.#reoffers.set(track, reoffers);
-				const runs = [...reoffers.peek()];
-				for (const run of entry.stale) insertRun(runs, run.start, run.end);
-				reoffers.set(runs);
-			}
-			entry.stale = undefined;
+			entry.staleBudget = Math.min(entry.staleBudget, update.maxDelay ?? NO_MAX_DELAY);
 			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
 			const encoded = await Writer.collect(this.version, (w) => update.encode(w, this.version));
 			// A failed write means the publisher stopped reading, as it does once it finishes the
@@ -3509,7 +2859,6 @@ export class Subscriber {
 				return;
 			}
 			if (refresh !== undefined) sentWanted = refresh;
-			entry.updated = true;
 			entry.sent += 1;
 			// A tail settling past SUBSCRIBE_FINISH re-judges what the update now asks for.
 			entry.tail.touch();
@@ -3592,22 +2941,25 @@ export class Subscriber {
 		}
 
 		const { track, timescale, tail } = entry;
-		// Lite-07: a drop can name the group while its stream is read; see `Reading`.
-		const drops = hasSkip(this.version);
+		// The group before it must start below it, or the header contradicts itself: only this
+		// stream ends, as a malformed FRAME does.
+		if (group.previous !== undefined && group.previous >= group.sequence) {
+			stream.stop(
+				new StreamError(StreamCode.MalformedTrack, {
+					message: `group ${group.sequence} names group ${group.previous} as the one before it`,
+				}),
+			);
+			return;
+		}
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
 		let owed = !tail.covers(group.sequence, group.sequence + 1n);
-		// A final drop that overtook this stream, rather than a gap the grace gave up on.
+		// A drop that overtook this stream, rather than a gap the grace gave up on.
 		const dropped = !owed && tail.dropped(group.sequence);
-		// A stale drop that overtook this stream, which only the current update upholds.
-		const staleUnder =
-			!owed && entry.stale?.some((run) => run.start <= group.sequence && group.sequence < run.end)
-				? entry.update
-				: undefined;
 		let producer: netGroup.Producer | undefined;
 		let arriving: Arriving | undefined;
-		let reading: Reading | undefined;
+		// Lite-07: this stream's entry in `SubscribeEntry.reading`.
+		let reading = false;
 		const counted = tail.open(group.sequence);
-		this.#reoffered(track, group.sequence, group.sequence + 1n);
 
 		try {
 			// The publisher contradicted its own end, which no later group can repair. lite-05
@@ -3620,9 +2972,9 @@ export class Subscriber {
 				track.abort(violation);
 				throw violation;
 			}
-			// A duplicate of a copy still arriving, such as a lite-07 re-offer that overtook the reset
-			// of the stream it replaces, waits unread, which flow control bounds. Created once that copy
-			// ends, it is refused as a duplicate if the copy finished and takes the group if it failed,
+			// A duplicate of a copy still arriving, such as one another subscription sharing the copy
+			// delivers, waits unread, which flow control bounds. Created once that copy ends, it is
+			// refused as a duplicate if the copy finished and takes the group if it failed,
 			// continuing the reads of that copy, which wait while it is held. Its own reset ends the
 			// wait; a clean end leaves it on the copy alone.
 			for (;;) {
@@ -3633,10 +2985,6 @@ export class Subscriber {
 				arriving = next;
 				// Served again once that copy fails, so owed again.
 				owed = true;
-				// A later stream for the group means the publisher reset the earlier one on this
-				// subscription, so it ends now rather than wait on a reset the browser may have lost:
-				// Chromium drops a RESET_STREAM that reaches a stream it has not handed to the page.
-				entry.reading?.get(group.sequence)?.supersede();
 				const settled = arriving.settled;
 				await race([settled, stream.closed.then(() => settled)]);
 			}
@@ -3645,42 +2993,29 @@ export class Subscriber {
 				start: group.frameStart,
 				fill: entry.filling,
 			});
+			// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
+			// would say. Recorded once the group is, so a relay serving the copy sees the group the
+			// skip runs up to, whose own GROUP passes over it again.
+			const passed = group.passedOver();
+			if (passed.start < passed.end) this.#skipped(entry, passed.start, passed.end, `GROUP ${group.sequence}`);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
-			let superseded: Promise<void> | undefined;
-			if (drops) {
-				let supersede = () => {};
-				superseded = new Promise<void>((resolve) => {
-					supersede = resolve;
-				});
-				// A copy served again is owed whatever dropped the earlier one.
-				reading = {
-					counted,
-					dropped: !owed && dropped,
-					staleUnder: owed ? undefined : staleUnder,
-					supersede,
-				};
+			if (hasSkip(this.version)) {
 				entry.reading ??= new Map();
-				entry.reading.set(group.sequence, reading);
-				judge(reading, entry.update);
+				entry.reading.set(group.sequence, counted);
+				reading = true;
+				// A drop that overtook the header already accounts for the group; a copy served again
+				// is owed whatever dropped the earlier one.
+				if (!owed && dropped) counted.excuse();
 			}
 
 			const format = { scale: timescale, compress: entry.compress, lengthFirst: hasLengthFirst(this.version) };
 			const frames = readFrames(stream, producer, format);
-			const reads = entry.filling ? untilAbandoned(producer, frames) : frames;
-			if (!superseded) await reads;
-			else if ((await race([reads, superseded.then(() => SUPERSEDED)])) === SUPERSEDED) {
-				// Stopping makes the read end at the next frame boundary as if finished, so wait it out
-				// and treat the stream as the stale reset a re-offer follows: the later stream takes over.
-				stream.stop(new StreamError(StreamCode.Cancel));
-				await reads.catch(() => {});
-				throw new StreamError(StreamCode.Old, { message: "re-offered on a later stream" });
-			}
+			const end = await (entry.filling ? untilAbandoned(producer, frames) : frames);
 
-			producer.finish();
-			// Only a group that arrived whole, not one a drop or the track ended meanwhile, and only
-			// where a lite-07 stale drop asks for it.
-			if (hasSkip(this.version) && producer.closed.peek() === null) tail.finish(group.sequence);
+			// Whole at a GROUP_END's end, else without one: every frame sent arrived.
+			if (end === undefined) producer.finish();
+			else producer.finishAt(end);
 			stream.stop(StreamCode.Cancel);
 		} catch (err: unknown) {
 			// A violation ends the session, which the connection does once it escapes; anything
@@ -3694,20 +3029,16 @@ export class Subscriber {
 			stream.stop(e);
 		} finally {
 			arriving?.release();
-			if (reading && entry.reading?.get(group.sequence) === reading) entry.reading.delete(group.sequence);
+			if (reading && entry.reading?.get(group.sequence) === counted) entry.reading.delete(group.sequence);
 			counted.done();
 		}
 	}
 
-	// A SUBSCRIBE_DROP named `[start, end)`, under update `staleUnder` when it is a lite-07 stale
-	// verdict: a stream still reading a group it names holds the subscription's end at most the grace
-	// while the drop stands. Mirrors the Rust `TrackEntry::dropped`.
-	#dropped(entry: SubscribeEntry, start: bigint, end: bigint, staleUnder?: bigint): void {
-		for (const [sequence, reading] of entry.reading ?? []) {
-			if (sequence < start || sequence >= end) continue;
-			if (staleUnder === undefined) reading.dropped = true;
-			else reading.staleUnder = staleUnder;
-			judge(reading, entry.update);
+	// A SUBSCRIBE_DROP named `[start, end)`: a stream still reading a group it names holds the
+	// subscription's end at most the grace, since a browser can lose that stream's reset.
+	#dropped(entry: SubscribeEntry, start: bigint, end: bigint): void {
+		for (const [sequence, counted] of entry.reading ?? []) {
+			if (sequence >= start && sequence < end) counted.excuse();
 		}
 	}
 
@@ -3831,22 +3162,15 @@ export class Subscriber {
 	// Deliver one datagram body, returning its Subscribe ID if that subscription has no datagram
 	// track, or, `behindHeld`, has a datagram held.
 	async #deliverDatagram(payload: Uint8Array, behindHeld: boolean): Promise<bigint | undefined> {
-		// Read with the entry it was decoded with: one registered while the decode awaited would
-		// read a datagram parsed with the defaults.
-		let entry: DatagramEntry | undefined;
-		const dg = await DatagramMessage.decode(payload, this.version, (id) => {
-			entry = this.#datagrams.get(id);
-			return { timed: entry?.timescale !== undefined };
-		});
-		// Padding, which names no subscription.
-		if (!dg) return undefined;
-		if (!entry || this.#datagrams.get(dg.subscribe) !== entry) return dg.subscribe;
+		const dg = await DatagramMessage.decode(payload, this.version);
+		const entry = this.#datagrams.get(dg.subscribe);
+		if (!entry) return dg.subscribe;
 		if (behindHeld && this.#isHeld(dg.subscribe)) return dg.subscribe;
-		// A scale-less datagram's timestamp is its sequence.
+		// A scale-less datagram's timestamp is bare, which the track checks is its sequence.
 		const timestamp =
-			dg.timestamp === undefined || entry.timescale === undefined
-				? Time.Timestamp.unscaled(dg.sequence)
-				: new Time.Timestamp(dg.timestamp, entry.timescale);
+			entry.timescale === undefined
+				? Time.Timestamp.unscaled(dg.timestamp)
+				: new Time.Timestamp(toNumber(dg.timestamp), entry.timescale);
 		entry.producer.insert({ sequence: dg.sequence, timestamp, payload: dg.payload });
 		return undefined;
 	}
@@ -3984,6 +3308,7 @@ export class Subscriber {
 	 */
 	close(err: Error = new SessionError(SessionCode.Cancel)) {
 		this.#closed.abort(err);
+		this.#routed?.close(err);
 
 		for (const { track, stream, end, datagrams } of this.#subscribes.values()) {
 			if (stream.kind === "finished") track.finish();
@@ -4024,9 +3349,6 @@ async function groupUnwanted(group: netGroup.Producer): Promise<void> {
 		await Signal.race(demand.wanted, demand.closed);
 	}
 }
-
-// What a read of a Group Stream resolves to once a later stream for its group superseded it.
-const SUPERSEDED: unique symbol = Symbol("superseded");
 
 // Like untilClosed, but also cancels once every reader has left. Demand is level-triggered, so a
 // caller that coalesces onto the group before the check re-arms it.

@@ -334,8 +334,9 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 }
 
-/// A stream's payload billed as the transport acknowledges it, through offsets the writer asks
-/// [`poll_acked`](crate::transport::poll::SendStream::poll_acked) about.
+/// A stream's payload billed as the transport acknowledges it, or a reliable link takes it,
+/// through offsets the writer asks [`poll_acked`](crate::transport::poll::SendStream::poll_acked)
+/// about.
 struct Billing<O> {
 	delivery: crate::stats::Delivery,
 	ack: Ack<O>,
@@ -409,7 +410,8 @@ impl<O> Billing<O> {
 			while let Some((offset, through)) = asked.front() {
 				match stream.poll_acked(waiter, offset) {
 					Poll::Pending => break,
-					Poll::Ready(Ok(Acked::Delivered)) => {
+					// Bytes a reliable link took bill too: a reset can no longer discard them.
+					Poll::Ready(Ok(Acked::Delivered | Acked::Sent)) => {
 						self.delivery.deliver(*through);
 						asked.pop_front();
 					}
@@ -625,6 +627,7 @@ mod tests {
 
 	/// A stream that takes every write, acknowledging a prefix the test moves, or that cannot
 	/// see acknowledgments. It counts the polls waiting on acknowledgment, which stay pending.
+	/// With `sent`, it answers for the prefix as a reliable link that took it.
 	#[derive(Clone, Default)]
 	struct Acking(std::sync::Arc<std::sync::Mutex<AckingState>>);
 
@@ -633,6 +636,7 @@ mod tests {
 		written: u64,
 		acked: u64,
 		unsupported: bool,
+		sent: bool,
 		reset: bool,
 		waits: usize,
 	}
@@ -641,6 +645,12 @@ mod tests {
 		fn unsupported() -> Self {
 			let stream = Self::default();
 			stream.0.lock().unwrap().unsupported = true;
+			stream
+		}
+
+		fn sent() -> Self {
+			let stream = Self::default();
+			stream.0.lock().unwrap().sent = true;
 			stream
 		}
 
@@ -670,6 +680,7 @@ mod tests {
 			let mut state = self.0.lock().unwrap();
 			match () {
 				_ if state.unsupported => Poll::Ready(Ok(crate::transport::poll::Acked::Unsupported)),
+				_ if *offset <= state.acked && state.sent => Poll::Ready(Ok(crate::transport::poll::Acked::Sent)),
 				_ if *offset <= state.acked => Poll::Ready(Ok(crate::transport::poll::Acked::Delivered)),
 				_ if state.reset => Poll::Ready(Err(Stopped(0))),
 				_ => {
@@ -733,10 +744,15 @@ mod tests {
 	/// A frame bills once the transport acknowledges an offset past it, not as the stream takes
 	/// it: each write that ends a frame asks about its own offset, so a frame acknowledged before
 	/// a reset still bills, and nothing the reset discarded does. A park with nothing else to ask
-	/// about asks about a frame still being written, billing its acknowledged bytes.
+	/// about asks about a frame still being written, billing its acknowledged bytes. Bytes a
+	/// reliable link took bill the same way.
 	#[test]
 	fn egress_bills_acknowledged_payload() {
-		let stream = Acking::default();
+		egress_bills_payload(Acking::default());
+		egress_bills_payload(Acking::sent());
+	}
+
+	fn egress_bills_payload(stream: Acking) {
 		let (mut writer, registry) = billing(&stream);
 		let waiter = &kio::Waiter::noop();
 
@@ -903,7 +919,7 @@ mod tests {
 				starts: vec![Some(3)],
 			})
 			.unwrap();
-		writer.buffer(&lite::AnnounceBroadcast::Synced).unwrap();
+		writer.buffer(&lite::AnnounceBroadcast::Synced { prefix: 0 }).unwrap();
 		assert_eq!(
 			stats.snapshot().control().len(),
 			4,

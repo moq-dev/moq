@@ -162,11 +162,9 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
-			publish_rate: None,
-			subscribe_rate: None,
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,

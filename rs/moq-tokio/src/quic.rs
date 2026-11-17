@@ -18,10 +18,26 @@ mod backend;
 pub use backend::Error;
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
 pub mod demux;
-pub mod driver;
 
-/// WebTransport over the moq-quic [`driver`], usable without a MoQ session.
+#[cfg(feature = "test-support")]
+pub mod driver;
+#[cfg(not(feature = "test-support"))]
+#[allow(
+	dead_code,
+	unused_imports,
+	reason = "parts serve only the tests the `test-support` feature publishes it for"
+)]
+pub(crate) mod driver;
+
+#[cfg(feature = "test-support")]
 pub mod web;
+#[cfg(not(feature = "test-support"))]
+#[allow(
+	dead_code,
+	unused_imports,
+	reason = "parts serve only the tests the `test-support` feature publishes it for"
+)]
+pub(crate) mod web;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
 ///

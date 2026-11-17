@@ -37,13 +37,6 @@ async function decode(c: Case, r: Reader, v: Version): Promise<((w: Writer) => P
 		case "announce": {
 			const msg = await decodeAnnounceBroadcast(r, v);
 			if (msg.status === "refused") return "withdrawn";
-			// A DEAD withdraws each route a refused moved offer names.
-			if (
-				msg.status === "dead" &&
-				msg.dead.kind === "closed" &&
-				msg.dead.moved.some(({ offer }) => "refused" in offer)
-			)
-				return "withdrawn";
 			return (w) => encodeAnnounceBroadcast(w, msg, v);
 		}
 		case "announce_init": {

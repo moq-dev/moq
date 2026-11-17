@@ -53,7 +53,7 @@ fn millis(millis: u64) -> Timestamp {
 fn land(track: &track::Producer, key: u64) {
 	let mut group = track.create_group(group::Info { start: key }).unwrap();
 	group.write_frame(millis(key), Bytes::from_static(b"x")).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The groups from the one containing `start` through the one containing `end`.
@@ -140,7 +140,7 @@ impl TimeCap {
 		let mut group = self.track.create_group(group::Info { start: self.next }).unwrap();
 		let mut handed = drain(&mut self.reader);
 		group.write_frame(millis(self.next), Bytes::from_static(b"x")).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		handed += drain(&mut self.reader);
 		self.next += 1;
 		assert_eq!(handed, 1, "the group is in range");
@@ -280,7 +280,7 @@ impl TimeGaps {
 		let mut group = self.track.create_group(group::Info { start: self.next }).unwrap();
 		let mut handed = drain(&mut self.reader);
 		group.write_frame(millis(self.next), Bytes::from_static(b"x")).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		handed += drain(&mut self.reader);
 		self.next += 1;
 		assert_eq!(handed, 1, "the live group is in range");

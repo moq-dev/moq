@@ -16,7 +16,7 @@ capture or playback is enabled.
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
-| `encode` | PCM to Opus (mono or stereo, with DTX and voice activity) or raw PCM |
+| `encode` | PCM to Opus (mono or stereo, tuned for voice or music) or raw PCM |
 | `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps, each track's received audio stretched onto the caller's clock (`Sink::due`) |
 | `aec` | Acoustic echo cancellation (a port of WebRTC's) for caller-supplied PCM or the built-in devices |
@@ -48,7 +48,10 @@ or 10 ms with a shorter `frame_duration`. Groups carry at least 20 ms by default
 so 10 ms packets pair up. `encode::Options::join`
 changes that minimum; a join shorter than a packet puts every packet in its own
 group, and zero is refused. Longer groups
-mean fewer streams per relay but coarser loss. There is no AAC encoder, so an
+mean fewer streams per relay but coarser loss. An encode of `Kind::Voice`, as
+`moq import capture` makes of a microphone, sends nothing while its talker is
+silent: libopus decides when speech stops, the track declares the end as a
+push-to-talk mute does, and players fill the pause with comfort noise. There is no AAC encoder, so an
 AAC encode request is refused; AAC decode is for broadcasts from the ingest gateways.
 
 Playback writes never block: samples that do not fit are dropped and

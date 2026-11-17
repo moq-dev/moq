@@ -162,18 +162,25 @@ async fn connect_track(dialer: &Endpoint, acceptor: &Endpoint) -> (TrackStream, 
 /// Write `payload` as one message of a session: one group.
 fn send(track: &moq_net::track::Producer, payload: &'static [u8]) {
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::unscaled(
+			track.largest().map_or(0, |largest| largest.group + 1),
+		))
 		.expect("group");
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), payload)
 		.expect("frame");
-	group.close().expect("finish");
+	group.finish().expect("finish");
 }
 
 /// Read the next message of a session.
 async fn recv(reader: &mut moq_net::track::Ordered) -> Vec<u8> {
 	kio::clock::timeout(TIMEOUT, async {
-		let mut group = reader.next_group().await.expect("group").expect("a group");
+		let mut group = reader
+			.next_group()
+			.await
+			.expect("group")
+			.and_then(moq_net::track::Item::group)
+			.expect("a group");
 		let frame = group.read_frame().await.expect("frame").expect("a frame");
 		frame.payload.to_vec()
 	})

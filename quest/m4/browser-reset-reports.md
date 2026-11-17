@@ -12,7 +12,8 @@ browser fix make those paths dead code.
 ## Plan
 
 Found by [moq-dev/moq#8673](https://github.com/moq-dev/moq/pull/8673) with
-`just test stream-credit`, whose YIELDED resets of just-opened streams hit
+`just test stream-credit`, whose preempting resets of just-opened streams
+(YIELDED then, TOO_FAR_BEHIND since #8965) hit
 both bugs within a few milliseconds of the stream's data.
 
 - Chromium 156: the network service accepts the stream and replies to Blink's

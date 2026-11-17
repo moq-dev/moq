@@ -21,14 +21,14 @@ pub(crate) enum Spawner {
 	/// The caller's tokio runtime, else the fallback.
 	Tokio(tokio::runtime::Handle),
 	/// The `kio::clock` simulator the caller was running in.
-	#[cfg(feature = "sim")]
+	#[cfg(feature = "test-support")]
 	Sim,
 }
 
 impl Spawner {
 	/// The `kio::clock` simulator when called inside one, else the caller's runtime or the fallback.
 	pub(crate) fn current() -> Self {
-		#[cfg(feature = "sim")]
+		#[cfg(feature = "test-support")]
 		if kio::clock::sim::is_running() {
 			return Self::Sim;
 		}
@@ -43,7 +43,7 @@ impl Spawner {
 	{
 		match self {
 			Self::Tokio(handle) => drop(handle.spawn(future)),
-			#[cfg(feature = "sim")]
+			#[cfg(feature = "test-support")]
 			Self::Sim => drop(kio::clock::sim::spawn(future)),
 		}
 	}

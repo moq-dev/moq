@@ -27,9 +27,8 @@ depends on it, so a miss fails only its own publish. All five still returned
 404 on 2026-11-12.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): `@moq/ui`
-becomes a workspace-private package bundled into watch and publish
-([its quest](/quest/m2/ui-private.md), which the cut waits on), so its name
-is not claimed and it left this list, which had five names.
+became a workspace-private package bundled into watch and publish, so its
+name is not claimed and it left this list, which had five names.
 
 Decided 2026-10-22 (maintainer): publish a minimal `0.0.0` placeholder
 (README only) per name to claim it, then attach the trusted publisher. The

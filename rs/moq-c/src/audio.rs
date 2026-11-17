@@ -473,6 +473,50 @@ pub unsafe extern "C" fn moq_encode_audio_demand(
 	})
 }
 
+/// End an audio track with an application error code, but only while nobody wants it.
+///
+/// This is how an on-demand publisher ends the track once its [`moq_encode_audio_demand`]
+/// watcher reports `MOQ_DEMAND_UNWANTED`: releasing it instead fails a reader that joined in
+/// between. Returns 1 once the track is closed, which releases the handle and its bandwidth
+/// reservation like [moq_encode_audio_finish], and `0` when a reader wants it again, which
+/// leaves the handle serving: wait for `MOQ_DEMAND_UNWANTED` from a new watcher, since one that
+/// already reported it misses a reader that came and went. A negative code is a failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_encode_audio_abort_unwanted(producer: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let id = ffi::parse_id(producer)?;
+		let shared = State::lock().audio.producer(id)?;
+		let closed = {
+			let mut guard = shared.lock();
+			let encoder = guard.take().ok_or(Error::MediaNotFound)?;
+			let AudioEncoder {
+				producer,
+				reservation,
+				children,
+			} = encoder;
+			match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+				Ok(()) => {
+					children.forget(crate::publish::Child::Audio(id));
+					true
+				}
+				Err(producer) => {
+					*guard = Some(AudioEncoder {
+						producer,
+						reservation,
+						children,
+					});
+					false
+				}
+			}
+		};
+		if closed {
+			// A racing close may have released the id already.
+			let _ = State::lock().audio.remove(id);
+		}
+		Ok(i32::from(closed))
+	})
+}
+
 /// The C ABI spells an unset `u32` knob as 0, which no field here accepts as a
 /// real value.
 fn zeroable(value: u32) -> Option<u32> {

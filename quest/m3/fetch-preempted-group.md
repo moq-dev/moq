@@ -31,7 +31,11 @@ or reset carried, rather than matching on `TooFarBehind`. A drop judges the
 route's subscription, not whether the group exists, as the comment in
 `Recover::poll_serving` already says. Only a verdict the reader's own budget would
 reach, such as a stale (OLD) drop judged against the budget it sent, ends
-the group. Model the change with the verify-resume skill first, since it
+the group. Since [moq-dev/moq#8908](https://github.com/moq-dev/moq/pull/8908)
+a lite-07 subscriber already asks again, on a request of its own, for an OLD
+drop a wider reader still wants (`stale_budget` in
+`rs/moq-net/src/lite/subscriber.rs`); a drop to make room can take the same
+path. Model the change with the verify-resume skill first, since it
 changes which errors end a group.
 
 Tests: `rs/moq-net/tests/integration/stream_credit.rs`

@@ -6,7 +6,7 @@
 //!   moq-mux importer expects and publishes it.
 //! - **Egress** ([`Track`]): the egress source subscribes to a moq-mux
 //!   broadcast and the track yields RTP-ready codec frames that the
-//!   session loop hands to [`str0m::media::Writer::write`](crate::vendor::str0m::media::Writer::write).
+//!   session loop hands to [`str0m::media::Writer::write`](str0m::media::Writer::write).
 
 pub mod av1;
 pub mod h264;
@@ -26,7 +26,7 @@ use crate::Result;
 /// One codec frame received from str0m, paired with a microsecond timestamp.
 ///
 /// Used by the ingest path. The session loop converts str0m's
-/// [`MediaTime`](crate::vendor::str0m::media::MediaTime) to microseconds so individual
+/// [`MediaTime`](str0m::media::MediaTime) to microseconds so individual
 /// bridges don't need to repeat the math.
 #[derive(Clone, Debug)]
 pub struct Frame {
@@ -37,16 +37,16 @@ pub struct Frame {
 /// Bridges depacketized media frames from str0m to a hang broadcast track.
 ///
 /// One bridge per `m=` line on the ingest side. The session loop calls
-/// [`Bridge::push`] once per [`MediaData`](crate::vendor::str0m::media::MediaData) event
+/// [`Bridge::push`] once per [`MediaData`](str0m::media::MediaData) event
 /// with the codec frame; the bridge handles any codec-specific transformations
 /// (e.g. Annex-B to AVCC for H.264) and forwards the frame into the matching
 /// moq-mux importer.
 pub trait Bridge: Send {
 	fn push(&mut self, frame: Frame) -> Result<()>;
 
-	/// Finish the published track after its final frame, so a finished broadcast keeps
-	/// serving it.
-	fn finish(&mut self) -> Result<()>;
+	/// Finish the published track after its final frame, returning what keeps serving it while
+	/// the finished broadcast is held.
+	fn finish(self: Box<Self>) -> Result<Finished>;
 
 	/// Abort the published track with `err` so subscribers see the real cause
 	/// (the peer disconnected, an ICE failure) rather than a bare `Error::Dropped`.
@@ -54,6 +54,9 @@ pub trait Bridge: Send {
 	/// Consumes the bridge: the track is dead afterwards.
 	fn abort(self: Box<Self>, err: moq_net::Error);
 }
+
+/// A bridge's finished track, held so a finished broadcast keeps serving it.
+pub type Finished = Box<dyn Send>;
 
 /// A mux importer whose catalog configuration is resolved from its first frame.
 pub(crate) trait DeferredImport: Send + Sized {
@@ -64,7 +67,7 @@ pub(crate) trait DeferredImport: Send + Sized {
 	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()>;
 
 	/// Finish the active media track.
-	fn finish(&mut self) -> moq_mux::Result<()>;
+	fn finish(self) -> moq_mux::Result<moq_mux::container::Finished<moq_mux::catalog::hang::Container, VideoConfig>>;
 
 	/// Abort the active media track.
 	fn abort(self, err: moq_net::Error);
@@ -79,7 +82,7 @@ impl DeferredImport for moq_mux::codec::vp8::Import {
 		moq_mux::codec::vp8::Import::decode(self, frame, Some(pts))
 	}
 
-	fn finish(&mut self) -> moq_mux::Result<()> {
+	fn finish(self) -> moq_mux::Result<moq_mux::container::Finished<moq_mux::catalog::hang::Container, VideoConfig>> {
 		moq_mux::codec::vp8::Import::finish(self)
 	}
 
@@ -97,7 +100,7 @@ impl DeferredImport for moq_mux::codec::vp9::Import {
 		moq_mux::codec::vp9::Import::decode(self, frame, Some(pts))
 	}
 
-	fn finish(&mut self) -> moq_mux::Result<()> {
+	fn finish(self) -> moq_mux::Result<moq_mux::container::Finished<moq_mux::catalog::hang::Container, VideoConfig>> {
 		moq_mux::codec::vp9::Import::finish(self)
 	}
 
@@ -162,15 +165,14 @@ impl<I: DeferredImport> DeferredVideo<I> {
 	}
 
 	/// Finish the media track, whether or not a frame ever created its importer.
-	pub fn finish(&mut self) -> Result<()> {
-		match &mut self.state {
-			// The pending state keeps its own clone, whose appends the end refuses.
-			DeferredState::Pending(pending) => drop(pending.track.clone().finish()?),
-			DeferredState::Active(import) => import.finish()?,
+	pub fn finish(self) -> Result<Finished> {
+		Ok(match self.state {
+			DeferredState::Pending(pending) => Box::new(pending.track.finish()?),
+			DeferredState::Active(import) => Box::new(import.finish()?),
 			// The track already failed, so there is nothing clean to end.
-			DeferredState::Failed(_) | DeferredState::Poisoned => {}
-		}
-		Ok(())
+			DeferredState::Failed(track) => track,
+			DeferredState::Poisoned => Box::new(()),
+		})
 	}
 
 	/// Abort the media track in either lifecycle state.
@@ -192,7 +194,7 @@ impl<I: DeferredImport> DeferredVideo<I> {
 ///
 /// `timestamp_us` stays in microseconds; the session loop converts it to
 /// the negotiated codec's clock domain when calling
-/// [`Writer::write`](crate::vendor::str0m::media::Writer::write).
+/// [`Writer::write`](str0m::media::Writer::write).
 #[derive(Clone, Debug)]
 pub struct PacketizedFrame {
 	pub timestamp_us: u64,

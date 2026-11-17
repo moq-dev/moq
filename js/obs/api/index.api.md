@@ -4,6 +4,22 @@
 import { GetPromise } from "@moq/signals";
 import { Getter } from "@moq/signals";
 
+export interface Config {
+	audio?: {
+		bitrate?: number;
+	};
+	destination: Destination;
+	profile?: string;
+	video?: {
+		bitrate?: number;
+		fps?: number;
+		size?: {
+			height: number;
+			width: number;
+		};
+	};
+}
+
 export interface Configured {
 	encoder: string;
 	ignored: Ignored[];
@@ -25,7 +41,7 @@ export type ConnectReason = "denied" | "unreachable" | "refused" | "blocked" | "
 export type Destination = {
 	broadcast: string;
 	kind: "moq";
-	layers?: number;
+	renditions?: number;
 	token?: string;
 	url: string | URL;
 } | {
@@ -40,7 +56,7 @@ export class Obs {
 	addSource(source: Source): Promise<void>;
 	close(): void;
 	readonly closed: GetPromise<Error | null>;
-	configure(publish: Publish): Promise<Configured>;
+	configure(config: Config): Promise<Configured>;
 	readonly plugin: boolean;
 	start(): Promise<void>;
 	readonly stats: Getter<Stats | undefined>;
@@ -50,22 +66,6 @@ export class Obs {
 }
 
 export const PORT: 4455;
-
-export interface Publish {
-	audio?: {
-		bitrate?: number;
-	};
-	destination: Destination;
-	profile?: string;
-	video?: {
-		bitrate?: number;
-		fps?: number;
-		size?: {
-			height: number;
-			width: number;
-		};
-	};
-}
 
 export class RequestError extends Error {
 	constructor(request: string, code: number, comment: string | undefined);
