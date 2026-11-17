@@ -94,7 +94,7 @@ A `voice` source, which the microphone is, does the same on its own while its
 talker is silent. Each frame is scored as libopus scores it for DTX at the
 complexity browsers and the Rust publisher encode with: its tonality analysis
 tells speech from steady noise, so a fan switched on mid-call stops sending
-within a second or so (SILK's detector decides alone below 16 kHz). Once it has
+within a second or so (SILK's detector decides alone at 8 and 12 kHz). Once it has
 scored 200 ms of silence nothing more is sent and the end is declared, so
 listeners play comfort noise instead of receiving encoded silence. Noise as
 loud as the talker, within 25 dB of their speech, keeps sending, as it does in
