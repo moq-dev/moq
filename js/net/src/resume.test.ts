@@ -201,6 +201,92 @@ test("a returning route backfills below the reader's newest", async () => {
 });
 
 /**
+ * A route capped while replaced and then returned to reads on to the end of the reader's bounded
+ * range: the cap never becomes the range's own end.
+ */
+test("a returning route keeps the reader's bounded end across its cap", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const open = ta.write(0n, 1, false);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({
+		delay: { max: Duration.millis(3_600_000) },
+		ranges: [{ start: { time: 0n }, end: { time: 100n } }],
+	});
+	try {
+		await clock.advance(Duration.ZERO);
+		const held = sub.tryRecvGroup();
+		if (!held) throw new Error("expected the held group");
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		tb.write(10n);
+		tb.write(20n);
+		expect(drain(sub)).toEqual([10n, 20n]);
+		front.serve(handles[0]);
+		await clock.advance(Duration.ZERO);
+		ta.write(30n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([30n]);
+		held.close();
+	} finally {
+		open.finish();
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
+ * Replacing a resumed reader's ranges asks the serving copy for the new ones, not the endpoints
+ * the old ones resolved to.
+ */
+test("a resumed reader's replaced ranges reach its serving copy", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	ta.write(5n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({
+		delay: { max: Duration.millis(3_600_000) },
+		ranges: [{ start: { time: 0n }, end: { time: 100n } }],
+	});
+	try {
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([5n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		tb.write(10n);
+		expect(drain(sub)).toEqual([10n]);
+		sub.update({
+			delay: { max: Duration.millis(3_600_000) },
+			ranges: [{ start: { time: 50n }, end: { time: 60n } }],
+		});
+		await clock.advance(Duration.ZERO);
+		tb.write(30n);
+		tb.write(55n);
+		tb.write(70n);
+		await clock.advance(Duration.ZERO);
+		// 30 holds time 50, so the new range starts there; 70 is past its end.
+		expect(drain(sub)).toEqual([30n, 55n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+/**
  * A group below the replacement's resume point that the reader never got is asked of the new
  * route, as one cursor on the logical track would still get it late.
  */

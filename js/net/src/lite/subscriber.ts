@@ -187,6 +187,8 @@ interface Framing {
 }
 
 interface SubscribeEntry {
+	/** The publisher's latest group when SUBSCRIBE_START answered, if it had one. */
+	largest?: bigint;
 	datagrams?: DatagramEntry;
 	/** Release the stream demand held by readers of the legacy datagram track. */
 	datagramDemand?: Dispose;
@@ -2552,6 +2554,7 @@ export class Subscriber {
 					undefined,
 				);
 				entry.start = start ?? null;
+				entry.largest = resp.start.largest?.position.group;
 				// A lite-07 tail waits for SUBSCRIBE_START to say where delivery starts.
 				entry.tail.touch();
 				// Lite-07 says where every live range starts, so the declaration follows them
@@ -2883,7 +2886,12 @@ export class Subscriber {
 			else if (back !== undefined) relative.push([back, at]);
 		}
 		hooks.timeStarts(entry.track, times);
-		hooks.relativeStarts(entry.track, relative);
+		// Counted back from the publisher's latest when it answered, which SUBSCRIBE_START reports
+		// and a range an update added counts from no earlier than the copy's.
+		const held = hooks.producerLargest(entry.track).peek()?.group;
+		const latest =
+			entry.largest === undefined || (held !== undefined && held > entry.largest) ? held : entry.largest;
+		hooks.relativeStarts(entry.track, relative, latest);
 
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;

@@ -717,12 +717,16 @@ export const hooks: {
 	 */
 	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
 	/**
-	 * Tell a lite-07 copy where its publisher started each live range counting back from the
-	 * latest group, as `[back, start]` pairs, replacing the last set: the copy holds only part of
-	 * the track, so a reader's relative start counts back as the publisher did. Assigned by
-	 * `track.ts`.
+	 * Tell a lite-07 copy where its publisher started each live range counting back from
+	 * `latest`, as `[back, start]` pairs, replacing the last set: the copy holds only part of the
+	 * track, so a reader's relative start counts back as the publisher did, until a group past
+	 * `latest` moves the live edge. Assigned by `track.ts`.
 	 */
-	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
+	relativeStarts: (
+		producer: Producer,
+		starts: Iterable<readonly [bigint, bigint]>,
+		latest: bigint | undefined,
+	) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -796,6 +800,11 @@ export const hooks: {
 	 * still waits: what lite-07 SUBSCRIBE_STARTED answers. Assigned by `track.ts`.
 	 */
 	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
+	/**
+	 * `subscription`'s ranges resolved against the subscriber's track now, by index. Mirrors the
+	 * Rust `Subscriber::resolve_ranges`. Assigned by `track.ts`.
+	 */
+	resolveRanges: (subscriber: Subscriber, subscription: Subscription) => (Resolved | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes keys taken on other copies. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
@@ -1116,6 +1125,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingResolved: () => {
+		throw new Error("track.ts not loaded");
+	},
+	resolveRanges: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {

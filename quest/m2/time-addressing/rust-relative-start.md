@@ -1,4 +1,4 @@
-# [S] Rust lite-07 copies count a relative start from the publisher's
+# [S] Rust resume copies match @moq/net's relative starts and capped ends
 
 ## Goal
 
@@ -6,7 +6,8 @@ A Rust reader over a lite-07 received copy resolves a `Relative` range the
 way `@moq/net` does: counted back from the start the publisher reported in
 SUBSCRIBE_START, not from the groups the copy happens to hold. A sparse
 request mixing a time range and a relative one reads every group it names
-instead of stalling after the first.
+instead of stalling after the first. A route capped while replaced and then
+returned to reads on to the reader's own bounded end.
 
 ## Plan
 
@@ -22,5 +23,15 @@ fixing Rust in that PR; reverting JS to Rust's behavior).
   counts the copy's own cache; resolve a relative start from the reported
   start instead, as `@moq/net`'s `relativeStarts` hook
   (`js/net/src/track.ts`, `js/net/src/internal.ts`) does.
-- If Rust turns out to handle the case elsewhere, delete this quest with a
+- Scope the report to the publisher's latest when it answered (SUBSCRIBE_START's
+  Largest), as JS does: once a newer group arrives, a late live join counts
+  from the copy's own latest, so it starts at the live edge instead of
+  replaying from the old report.
+- `Copy::wire` (`rs/moq-net/src/model/resume.rs`) takes
+  `sub.resolved_ranges()` for unchanged ranges, which is the resolution of
+  the copy's clamped wire: a cap while replaced likely becomes the range's
+  end for good. JS keeps each range's first resolution instead
+  (`js/net/src/resume.ts` `#wire`, test "a returning route keeps the
+  reader's bounded end across its cap"); reproduce and port.
+- If Rust turns out to handle a case elsewhere, delete this quest with a
   test that pins it.

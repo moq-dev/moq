@@ -527,6 +527,43 @@ test("integration: lite-07 reports a relative start over a frameless newest grou
 	}
 });
 
+// A lite-07 copy counts a relative start back as its publisher reported, but only from the latest
+// group the publisher counted from: a reader joining live once newer groups arrived starts at the
+// live edge, not where the first reader started.
+test("integration: lite-07 joins a late relative start at the live edge", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	hooks.appendNext(producer).finish();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const subscription = { delay: { max: null }, ranges: [{ start: { relative: 0n } }] };
+	const first = remote.track("video").subscribe(subscription);
+	let late: ReturnType<typeof first.ordered> | undefined;
+	try {
+		expect((await first.recvGroup())?.start).toBe(0n);
+		for (let key = 1; key <= 3; key++) {
+			hooks.appendNext(producer).finish();
+			expect((await first.recvGroup())?.start).toBe(BigInt(key));
+		}
+		late = remote.track("video").subscribe(subscription).ordered();
+		expect((await late.nextGroup())?.start).toBe(3n);
+	} finally {
+		late?.close();
+		first.close();
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
 // A lite-07 publisher keeps a covered bounded subscription open for an update: the read ends
 // with its window, the same range reads again from the cache, and a wider one reaches upstream
 // for the rest, past a group that never existed. The demand goes with the readers. Mirrors the

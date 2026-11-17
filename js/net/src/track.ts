@@ -983,7 +983,7 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
 	starts: ReadonlyMap<bigint, bigint>;
-	relative: ReadonlyMap<bigint, bigint>;
+	relative: { latest?: bigint; starts: ReadonlyMap<bigint, bigint> };
 };
 
 /** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
@@ -1178,7 +1178,7 @@ export class Producer {
 	// it asked from. Mirrors the Rust `TrackState::time_starts`.
 	#timeStarts = new Map<bigint, bigint>();
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
-	#relativeStarts = new Map<bigint, bigint>();
+	#relativeStarts: { latest?: bigint; starts: ReadonlyMap<bigint, bigint> } = { starts: new Map() };
 	// The highest-key checked start evicted. Eviction is not a key prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
@@ -1397,8 +1397,8 @@ export class Producer {
 		hooks.timeStarts = (producer, starts) => {
 			producer.#timeStarts = new Map(starts);
 		};
-		hooks.relativeStarts = (producer, starts) => {
-			producer.#relativeStarts = new Map(starts);
+		hooks.relativeStarts = (producer, starts, latest) => {
+			producer.#relativeStarts = { latest, starts: new Map(starts) };
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
@@ -3311,8 +3311,12 @@ export class Subscriber {
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
 			back: (latest, back) => {
-				// A lite-07 copy holds only part of the track, so it counts back as its publisher did.
-				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
+				// A lite-07 copy holds only part of the track, so it counts back as its publisher did,
+				// from the latest group the publisher counted from: a newer one moved the live edge.
+				const reported =
+					receivedCopy(producer) && anchors.relative.latest === latest
+						? anchors.relative.starts.get(back)
+						: undefined;
 				if (reported !== undefined) return reported;
 				if (back === 0n) return latest;
 				// Bounded by the cache: a huge count reaches back to the oldest.
@@ -3934,6 +3938,13 @@ export class Subscriber {
 			subscriber.#settle();
 			return subscriber.#window.resolved();
 		};
+		hooks.resolveRanges = (subscriber, subscription) =>
+			new Window(
+				subscription.ranges ?? [{}],
+				subscriber.#latestGroup(),
+				subscriber.#holdings(),
+				subscription.delay?.min ?? undefined,
+			).resolved();
 		hooks.tryNextGroup = (subscriber, floor) => {
 			subscriber.#raiseNext(floor);
 			return subscriber.#tryNextGroup();

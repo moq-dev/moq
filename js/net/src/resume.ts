@@ -617,14 +617,16 @@ class Reader implements ResumeSource {
 	#wire(copy: Pick<Copy, "floor" | "until" | "from" | "resolved"> & { sub?: track.Subscriber }): track.Subscription {
 		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
 		const ranges = preferences.ranges ?? [{}];
-		if (copy.sub) {
-			// Its own resolution, which capping its end must not move; replaced ranges resolve
-			// against its cache, as any subscriber's do. A range it has yet to resolve keeps the
-			// resolution it was subscribed with.
+		if (copy.sub && copy.from !== undefined && sameRanges(copy.from, ranges)) {
+			// A range keeps its first resolution: the copy re-resolves its clamped wire, so its own
+			// resolution of a capped or floored request would move the endpoints for good.
 			const own = hooks.servingResolved(copy.sub);
-			const kept = copy.from !== undefined && sameRanges(copy.from, ranges) ? (copy.resolved ?? []) : [];
+			const kept = copy.resolved ?? [];
+			copy.resolved = ranges.map((_, index) => kept[index] ?? own[index]);
+		} else if (copy.sub) {
+			// Replaced ranges resolve against its cache now, as any subscriber's do.
 			copy.from = ranges;
-			copy.resolved = ranges.map((_, index) => own[index] ?? kept[index]);
+			copy.resolved = hooks.resolveRanges(copy.sub, { ...preferences, ranges });
 		} else if (copy.from === undefined || !sameRanges(copy.from, ranges)) {
 			// A new copy starts from where the reader's ranges resolved.
 			copy.from = ranges;
