@@ -296,12 +296,7 @@ impl Producer {
 	/// while this producer is still held. Readers keep every packet published before it.
 	fn fail_track(&mut self) {
 		let _ = self.track.cut(None);
-		let track = self.track.track();
-		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
-		let _ = track.clone().finish_at(
-			moq_net::track::Position::group(next),
-			Some(moq_net::StreamError::Internal.into()),
-		);
+		let _ = self.track.track().clone().fail(moq_net::StreamError::Internal.into());
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.
@@ -360,9 +355,15 @@ impl Producer {
 	/// partial input frame. Call this when resuming after an idle gap (e.g. a
 	/// released-then-reopened microphone) so the gap appears in the PTS and
 	/// audio stays aligned with a wall-clock video track, rather than the gap
-	/// being compressed out by the running sample count. Mirrors moq-boy's
-	/// `reanchor`. If the codec had started, a marker group is published before
-	/// the next packet so subscribers jump the playhead.
+	/// being compressed out by the running sample count. If the codec had
+	/// started, a marker group is published before the next packet so
+	/// subscribers jump the playhead.
+	///
+	/// This is for a gap the caller learns of only once audio returns, such as
+	/// a device stall: until then subscribers see an undeclared stall. A stop
+	/// known as it happens, such as a mute, takes
+	/// [`discontinuity`](Self::discontinuity) instead, which needs no
+	/// `reanchor` after it.
 	pub fn reanchor(&mut self) {
 		if self.encoder.started() || !self.backlog.is_empty() {
 			self.pending_discontinuity = true;
@@ -665,6 +666,11 @@ impl Producer {
 	/// switching source, or anything else that resumes on a new anchor. Buffered samples
 	/// are dropped, and the next frame sets a fresh anchor. See
 	/// [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity).
+	///
+	/// Unlike [`reanchor`](Self::reanchor), the marker goes out now and closes the
+	/// open group, so subscribers hear the silence as declared from its start: the
+	/// decoder reports it as [`Read::End`](crate::decode::Read::End), and a player
+	/// fills it with comfort noise rather than counting a gap.
 	pub fn discontinuity(&mut self) -> Result<(), Error> {
 		self.track.discontinuity()?;
 		self.pending_discontinuity = false;
@@ -789,6 +795,20 @@ impl Producer {
 	/// real cause rather than [`moq_net::Error::Dropped`]. Pending samples are dropped.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the producer back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the producer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
+		self.track.abort_unwanted(err).map_err(|track| Self { track, ..self })
 	}
 }
 

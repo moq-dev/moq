@@ -284,30 +284,20 @@ impl<O: Output> Media<O> {
 						// that imports none.
 						let mut decode = moq_video::decode::Config::new();
 						decode.output = self.output.render().await;
-						#[cfg(all(target_os = "linux", feature = "vaapi"))]
-						{
-							decode.vaapi = self.args.vaapi_device.clone();
-						}
-						#[cfg(all(target_os = "linux", feature = "v4l2"))]
-						{
-							decode.v4l2 = self.args.v4l2_decoder.clone();
-						}
+						decode.device = crate::device(&self.args.vaapi_device, &self.args.v4l2_decoder);
 						let decoder = moq_video::decode::Sink::open(config, &decode).await?;
 						let delay = moq_net::track::Delay {
 							min: Some(self.args.video_delay()),
 							max: Some(max_delay),
 						};
-						// An intra-refresh rendition decodes from a group earlier, presenting from
-						// its recovery point plus the warmup, as `moq_video::decode::Consumer` does.
-						let warmup = config.warmup.unwrap_or_default().min(moq_mux::container::DELAY_MAX);
-						let playout = moq_mux::container::Playout::new(delay, warmup);
+						let playout = moq_mux::container::Playout::new(delay, Duration::ZERO);
 						let track = rendition.track(hang::catalog::Reference::track(config, name))?;
 						// The whole delay from the first request, so a cold join never states a
 						// zero minimum before the container's update. The live edge, from the
 						// groups each hop holds from its live feed, never a warm copy's backlog,
 						// so it names no cached group for the shared publisher subscription to
 						// rewind to.
-						let mut subscriber = track
+						let subscriber = track
 							.subscribe(
 								playout.subscription(
 									moq_net::track::Subscription::default()
@@ -316,36 +306,15 @@ impl<O: Output> Media<O> {
 								),
 							)
 							.await?;
-						// A warmup widens the subscription to the group before the live edge, the
-						// one containing the key just below it, as starts are sparse. The live
-						// edge is known only once the feed is live: a warm copy still waiting on
-						// its source reports nothing yet. The wait ends with the track. Every wire
-						// carries a time start, where a relative one past the edge is refused
-						// before lite-07; there it reaches the edge alone.
-						if !warmup.is_zero()
-							&& let Some(edge) = subscriber.largest().await
-						{
-							let start = moq_net::track::Anchor::Time(edge.group.saturating_sub(1));
-							let subscription = subscriber
-								.subscription()
-								.with_ranges([moq_net::track::Range { start, end: None }]);
-							subscriber.update(subscription)?;
-						}
 						let format = catalog::hang::Container::try_from(config)?;
-						// The playout delay is the target latency, and the max how late a group may
-						// be; the start reaches the warmup further back.
+						// The playout delay is the target latency, and the max how late a group may be.
 						let track = playout.consumer(subscriber, format);
-						Ok::<_, anyhow::Error>((track, decoder, warmup))
+						Ok::<_, anyhow::Error>((track, decoder))
 					}
 					.await;
 					match opened {
-						Ok((track, decoder, warmup)) => {
-							tracing::info!(
-								track = name,
-								decoder = decoder.name(),
-								?warmup,
-								"playing video rendition"
-							);
+						Ok((track, decoder)) => {
+							tracing::info!(track = name, decoder = decoder.name(), "playing video rendition");
 							let (delay, held) = tokio::sync::watch::channel(None);
 							let video = Video {
 								presentation: self.presentation.clone(),
@@ -355,7 +324,6 @@ impl<O: Output> Media<O> {
 								max_delay,
 								min_delay: self.args.video_delay(),
 								delay: held,
-								warmup,
 							};
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							let (retire, retired) = tokio::sync::oneshot::channel();
@@ -886,7 +854,7 @@ async fn play_audio<O: Output>(
 							// groups were lost on the way, rather than filling the silence as a hole.
 							if std::mem::take(&mut silent) {
 								timeline = AudioTimeline::default();
-								sink.next();
+								sink.resume();
 								utterance = true;
 							}
 						}
@@ -897,7 +865,7 @@ async fn play_audio<O: Output>(
 							declare = ahead;
 							timeline = AudioTimeline::default();
 							silent = false;
-							sink.next();
+							sink.resume();
 							utterance = true;
 						}
 						None => {}
@@ -909,7 +877,7 @@ async fn play_audio<O: Output>(
 				Ok(Some(moq_audio::decode::Read::End { .. })) => {
 					// The stopped encoder's final frames may follow, and play before the silence.
 					if !silent {
-						sink.end();
+						sink.silence();
 						silent = true;
 					}
 					continue;
@@ -1026,7 +994,7 @@ async fn play_audio<O: Output>(
 				output.send(Event::Utterance(Duration::try_from(frame.timestamp)?));
 			}
 			if std::mem::take(&mut declare) {
-				sink.end();
+				sink.silence();
 				silent = true;
 			}
 
@@ -1608,7 +1576,6 @@ mod tests {
 			max_delay: delay,
 			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
-			warmup: Duration::ZERO,
 		};
 		let audio_task = tokio::spawn(async move {
 			play_audio(consumer, audio_play, std::future::pending()).await.unwrap();
@@ -1744,7 +1711,6 @@ mod tests {
 			max_delay: delay,
 			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
-			warmup: Duration::ZERO,
 		};
 		let audio_task = tokio::spawn(async move {
 			play_audio(consumer, audio_play, std::future::pending())
@@ -2046,7 +2012,6 @@ mod tests {
 			max_delay: delay,
 			min_delay: delay,
 			delay: tokio::sync::watch::channel(None).1,
-			warmup: Duration::ZERO,
 		};
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
@@ -2132,9 +2097,7 @@ mod tests {
 			args: Args {
 				catalog_format: None,
 				metrics: None,
-				#[cfg(all(target_os = "linux", feature = "vaapi"))]
 				vaapi_device: None,
-				#[cfg(all(target_os = "linux", feature = "v4l2"))]
 				v4l2_decoder: None,
 				delay: Delay::Fixed(delay),
 				stretch: Duration::ZERO.into(),
@@ -2813,7 +2776,6 @@ mod tests {
 				max_delay: delay,
 				min_delay: delay,
 				delay: tokio::sync::watch::channel(None).1,
-				warmup: Duration::ZERO,
 			}
 			.run(track, decoder),
 		);

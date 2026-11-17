@@ -19,14 +19,15 @@ use std::time::Duration;
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2_core_foundation::CFRetained;
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSObject, NSObjectProtocol, NSString};
 use objc2_screen_capture_kit::{
-	SCContentFilter, SCDisplay, SCRunningApplication, SCShareableContent, SCStream, SCStreamConfiguration,
-	SCStreamDelegate, SCStreamOutput, SCStreamOutputType, SCWindow,
+	SCContentFilter, SCDisplay, SCFrameStatus, SCRunningApplication, SCShareableContent, SCStream,
+	SCStreamConfiguration, SCStreamDelegate, SCStreamFrameInfoStatus, SCStreamOutput, SCStreamOutputType, SCWindow,
 };
 
 use super::surface::surface_frame;
@@ -158,10 +159,12 @@ async fn open(config: &Config, filter: &SCContentFilter, size: (u32, u32)) -> Re
 		configuration.setHeight(height as usize);
 		configuration.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
 		configuration.setMinimumFrameInterval(CMTime::new(1, fps));
-		configuration.setShowsCursor(config.cursor);
+		configuration.setShowsCursor(config.cursor.drawn());
 	}
 
-	let chan = FrameChannel::new();
+	// A still screen delivers only image-less buffers, which carry nothing to
+	// encode, so the channel repeats the last picture instead.
+	let chan = FrameChannel::repeating(Duration::from_micros(1_000_000 / fps as u64));
 	let delegate = Delegate::new(chan.clone());
 	let dispatch = DispatchQueue::new("dev.moq.video.screen", None);
 
@@ -443,16 +446,35 @@ define_class!(
 		#[unsafe(method(stream:didOutputSampleBuffer:ofType:))]
 		unsafe fn did_output(&self, _stream: &SCStream, sample_buffer: &CMSampleBuffer, kind: SCStreamOutputType) {
 			if kind.0 == SCStreamOutputType::Screen.0 {
-				// ScreenCaptureKit calls this at the configured rate even when nothing
-				// changed, handing back an image-less buffer; there's no new content to
-				// encode, so drop it.
-				if let Some(frame) = surface_frame(sample_buffer) {
+				// ScreenCaptureKit calls this even when nothing changed, handing back an
+				// image-less buffer: drop it, and let the channel repeat the last picture.
+				// A blank or suspended source no longer shows that picture, so it stops
+				// repeating until the next one.
+				let status = frame_status(sample_buffer);
+				if status == Some(SCFrameStatus::Blank) || status == Some(SCFrameStatus::Suspended) {
+					self.ivars().chan.forget();
+				} else if let Some(frame) = surface_frame(sample_buffer) {
 					self.ivars().chan.push(frame);
 				}
 			}
 		}
 	}
 );
+
+/// The frame status ScreenCaptureKit attached to a sample, if any.
+fn frame_status(sample_buffer: &CMSampleBuffer) -> Option<SCFrameStatus> {
+	let attachments = unsafe { sample_buffer.sample_attachments_array(false) }?;
+	// SAFETY: CFArray and CFDictionary are toll-free bridged to their Foundation
+	// counterparts, and the retained array outlives these borrows.
+	let attachments: &NSArray<NSDictionary<NSString, AnyObject>> =
+		unsafe { &*(CFRetained::as_ptr(&attachments).as_ptr() as *const NSArray<NSDictionary<NSString, AnyObject>>) };
+	let status = attachments
+		.firstObject()?
+		.objectForKey(unsafe { SCStreamFrameInfoStatus })?
+		.downcast::<NSNumber>()
+		.ok()?;
+	Some(SCFrameStatus(status.integerValue()))
+}
 
 impl Delegate {
 	fn new(chan: Arc<FrameChannel>) -> Retained<Self> {

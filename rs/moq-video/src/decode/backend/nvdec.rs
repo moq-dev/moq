@@ -137,7 +137,8 @@ impl Nvdec {
 
 		// `CudaContext::new` retains the device's primary context, the same one
 		// the NVENC backend uses, so frames pass between them without a copy.
-		let ctx = CudaContext::new(0).map_err(|e| codec_err(format!("CUDA init: {e:?}")))?;
+		let ordinal = cuda::ordinal(&config.device)?.unwrap_or(0);
+		let ctx = CudaContext::new(ordinal).map_err(|e| codec_err(format!("CUDA init: {e:?}")))?;
 		ctx.bind_to_thread()
 			.map_err(|e| codec_err(format!("CUDA bind: {e:?}")))?;
 		// The decoder itself waits for the first sequence header, so ask now

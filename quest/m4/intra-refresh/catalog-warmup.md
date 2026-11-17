@@ -22,7 +22,8 @@ rendition. It returns here, with the producers this epic adds.
 - Restore from history, not from scratch: #8857 is the design (one
   decoder, the container consumer's warmup reach, `Recovery`'s hold, the
   recovery-point SEI Chromium needs), and the PR that removed it before the
-  cut is its inverse. Read both, then re-apply by hand against the tree as
+  cut, [moq-dev/moq#8960](https://github.com/moq-dev/moq/pull/8960), is its
+  inverse. Read both, then re-apply by hand against the tree as
   it is.
 - The field comes back in the hang draft's next version, with the group
   rule that lets a video group start at a picture from which decoding

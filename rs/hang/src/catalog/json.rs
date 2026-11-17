@@ -30,10 +30,6 @@ pub struct Json {
 	pub tracks: BTreeMap<String, JsonConfig>,
 }
 
-impl crate::catalog::Section for Json {
-	const MAP: &'static str = "tracks";
-}
-
 impl crate::catalog::Entry for JsonConfig {
 	fn version(&self, id: &str) -> Option<u64> {
 		crate::catalog::renamed_version(self, id)
@@ -83,6 +79,7 @@ pub struct JsonConfig {
 	/// broadcast that served this catalog (e.g. `./source`). If unset, the track lives in the same
 	/// broadcast as the catalog.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub broadcast: Option<moq_net::path::Relative>,
 
 	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
@@ -93,6 +90,7 @@ pub struct JsonConfig {
 	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
 	/// field subscribes to the ID instead.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub track: Option<String>,
 
 	/// The instance of the stream the reference names, when the catalog knows it. Absent names
@@ -103,7 +101,7 @@ pub struct JsonConfig {
 	/// so there it is best effort. Without [`broadcast`](Self::broadcast), it names the
 	/// catalog's own stream.
 	#[serde(default)]
-	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
+	#[serde_as(as = "crate::catalog::NotNull<serde_with::DisplayFromStr>")]
 	pub instance: Option<moq_net::Instance>,
 
 	/// Whether the track is a latest-value document or an append log. Always stated: see [`Mode`].
@@ -113,20 +111,23 @@ pub struct JsonConfig {
 	/// An optional identifier for the shape of each value, typically a JSON Schema URL. Purely
 	/// descriptive: a consumer that doesn't recognize it can still read the track.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub schema: Option<String>,
 
 	/// The maximum bitrate of the track in bits per second, if known.
 	#[serde(default)]
+	#[serde_as(as = "crate::catalog::NotNull")]
 	pub bitrate: Option<u64>,
 
-	/// The maximum delay between a payload being ready and the publisher flushing it, with the same
-	/// meaning and whole-millisecond encoding as [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter).
+	/// The largest media span the publisher hands to the transport behind a payload's timestamp,
+	/// with the same meaning and whole-millisecond encoding as
+	/// [`VideoConfig::jitter`](crate::catalog::VideoConfig::jitter).
 	#[serde_as(as = "MillisCeil")]
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 
-	/// How far this track's payloads reach the transport behind the broadcast's earliest
-	/// rendition, with the same meaning and encoding as
+	/// How far this track's payloads persistently trail what the broadcast's other tracks already
+	/// wrote, with the same meaning and encoding as
 	/// [`VideoConfig::delay`](crate::catalog::VideoConfig::delay). Only measured for payloads that
 	/// carry a capture time.
 	#[serde_as(as = "MillisCeil")]

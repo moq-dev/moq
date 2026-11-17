@@ -101,9 +101,9 @@ async fn grouped_roundtrip(version: &str, payload: &[u8]) {
 			.unwrap()
 			.await
 			.unwrap();
-		let mut group = producer.append_group(1).unwrap();
+		let mut group = producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 		group.write_frame(Timestamp::from_millis(1).unwrap(), payload).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut group = consumer.recv_group().await.unwrap().unwrap();
 		let frame = group.read_frame().await.unwrap().unwrap();
 		assert_eq!(&frame.plaintext[..], payload);

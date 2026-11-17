@@ -16,7 +16,7 @@
 //! that is a refusal of the stream rather than a fault. For H.265, which has no
 //! software decoder behind this one, that refusal is what lets a player pick
 //! another rendition. The render node is the one the encoder and the GPU resize
-//! share, unless that one cannot decode H.265, and `Config::vaapi` can name
+//! share, unless that one cannot decode H.265, and `Config::device` can name
 //! it; see `frame::vaapi::device`.
 //!
 //! Progressive 8-bit 4:2:0 only, which is everything a browser's `VideoEncoder`,
@@ -120,14 +120,14 @@ impl Vaapi {
 			other => return Err(Error::codec(anyhow::anyhow!("VAAPI cannot decode {}", other.label()))),
 		};
 		if let Some((profile, name)) = required
-			&& offered(codec, config.vaapi.as_deref(), profile) == Some(false)
+			&& offered(codec, config.device.render(), profile) == Some(false)
 		{
 			return Err(Error::UnsupportedCodec(format!("no VA-API driver here decodes {name}")));
 		}
 
 		let vaapi = VaapiConfig {
 			codec,
-			device: vaapi::device(codec, config.vaapi.as_deref()),
+			device: vaapi::device(codec, config.device.render()),
 		};
 		let decoder = Decoder::new(vaapi).map_err(|e| Error::codec(anyhow::anyhow!("VAAPI decoder init: {e:?}")))?;
 

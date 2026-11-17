@@ -15,7 +15,6 @@ mod hex;
 mod include;
 mod json;
 mod m2ts;
-mod media;
 mod millis;
 mod mode;
 mod priority;
@@ -24,6 +23,7 @@ mod root;
 mod skipped;
 mod stats;
 mod text;
+mod timeline;
 mod video;
 
 pub use audio::*;
@@ -35,7 +35,6 @@ pub use echo::*;
 pub use include::*;
 pub use json::*;
 pub use m2ts::*;
-pub use media::*;
 pub use mode::*;
 pub use priority::*;
 pub use reference::*;
@@ -43,6 +42,7 @@ pub use root::*;
 pub use skipped::Skipped;
 pub use stats::*;
 pub use text::*;
+pub use timeline::*;
 pub use video::*;
 
 /// The newest moq-hang draft this crate reads. A catalog whose root `version` is higher is refused,
@@ -95,18 +95,36 @@ where
 	serde_json::from_value(serde_json::Value::Object(object)).map_err(serde::de::Error::custom)
 }
 
-/// Decode the root `media` section, falling back to an empty one when the value is not an object.
+/// Decode an optional section or member, which must be an object when present.
 ///
-/// `media` is a generic enough key that an application could have carried its own before it was
-/// reserved, so a non-object is someone else's, for the same reason as [`deserialize_section`]. An
-/// object is ours and must decode.
-pub(crate) fn deserialize_media<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Media, D::Error> {
-	use serde::Deserialize;
-	let value = serde_json::Value::deserialize(deserializer)?;
-	if !value.is_object() {
-		return Ok(Media::default());
+/// `null` is not absent: a publisher leaves the section off the wire instead.
+pub(crate) fn deserialize_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+	T: serde::de::DeserializeOwned,
+{
+	deserialize_object(deserializer).map(Some)
+}
+
+/// A [`serde_with`] adapter for an optional field that is absent or holds a value, never `null`.
+///
+/// serde reads `null` as `None`, but the draft refuses a catalog with a `null` field it defines.
+/// Pair it with `#[serde(default)]` so an absent field is still `None`.
+pub(crate) struct NotNull<T = serde_with::Same>(std::marker::PhantomData<T>);
+
+impl<T, U: serde_with::SerializeAs<T>> serde_with::SerializeAs<Option<T>> for NotNull<U> {
+	fn serialize_as<S: serde::Serializer>(source: &Option<T>, serializer: S) -> Result<S::Ok, S::Error> {
+		match source {
+			Some(value) => U::serialize_as(value, serializer),
+			None => serializer.serialize_none(),
+		}
 	}
-	serde_json::from_value(value).map_err(serde::de::Error::custom)
+}
+
+impl<'de, T, U: serde_with::DeserializeAs<'de, T>> serde_with::DeserializeAs<'de, Option<T>> for NotNull<U> {
+	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+		U::deserialize_as(deserializer).map(Some)
+	}
 }
 
 /// An entry of a catalog map keyed by ID (a rendition, data track, or include), checked as it
@@ -202,68 +220,4 @@ where
 		let version = config.version(id);
 		(id, Versioned { version, config })
 	}))
-}
-
-/// A catalog section: a map of track name to config, published under one well-known root key.
-///
-/// The associated [`MAP`](Self::MAP) is what tells a real section apart from an application's own
-/// value under the same name. See [`deserialize_section`].
-pub(crate) trait Section: Default + serde::de::DeserializeOwned {
-	/// The key holding the section's map of tracks.
-	const MAP: &'static str;
-}
-
-/// Decode a catalog section, falling back to an empty one when the value isn't a section at all.
-///
-/// A section name is only reserved from the version that defines it, so an application may already
-/// be carrying its own key under that name (through [`Extra`](crate::catalog::Catalog), or in a
-/// catalog this build has never seen). Dropping the one key we can't read keeps the rest of the
-/// catalog readable, rather than failing the whole document and taking video and audio down with it.
-///
-/// The fallback is deliberately narrow: only a value with no [`Section::MAP`] is treated as someone
-/// else's. A value that *is* a section but carries a malformed entry still fails, since swallowing
-/// that would hide a publisher bug (a data track with no `mode`) behind the silence that exists to
-/// protect an unrelated key.
-pub(crate) fn deserialize_section<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-	D: serde::Deserializer<'de>,
-	T: Section,
-{
-	use serde::Deserialize;
-	let value = serde_json::Value::deserialize(deserializer)?;
-
-	if !value.get(T::MAP).is_some_and(serde_json::Value::is_object) {
-		return Ok(T::default());
-	}
-
-	serde_json::from_value(value).map_err(serde::de::Error::custom)
-}
-
-/// Decode an optional section identified by one string field (`stats.track`, `echo.path`).
-///
-/// A value without that string field is someone else's key and decodes as absent, for the same
-/// reason as [`deserialize_section`]; a value with it is ours and must decode.
-fn deserialize_named<'de, D, T>(deserializer: D, key: &str) -> Result<Option<T>, D::Error>
-where
-	D: serde::Deserializer<'de>,
-	T: serde::de::DeserializeOwned,
-{
-	use serde::Deserialize;
-	let value = serde_json::Value::deserialize(deserializer)?;
-
-	if !value.get(key).is_some_and(serde_json::Value::is_string) {
-		return Ok(None);
-	}
-
-	serde_json::from_value(value)
-		.map(Some)
-		.map_err(serde::de::Error::custom)
-}
-
-pub(crate) fn deserialize_stats<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Stats>, D::Error> {
-	deserialize_named(deserializer, "track")
-}
-
-pub(crate) fn deserialize_echo<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Echo>, D::Error> {
-	deserialize_named(deserializer, "path")
 }

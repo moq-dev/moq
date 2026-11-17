@@ -45,9 +45,9 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	for _ in 0..GROUPS {
 		let mut group = track.append_next().unwrap();
 		group.write_frame(group.at_start(), b"frame".as_slice()).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
-	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
 	// Every group below the end is finished: the end has settled and the track is
 	// complete. Nothing has been read yet.
 	if abort {
@@ -59,7 +59,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 		let mut consumer = consumer.ordered();
 		loop {
 			match consumer.next_group().await {
-				Ok(Some(group)) => got.push(group.start),
+				Ok(Some(item)) => got.push(item.group().expect("a group").start),
 				Ok(None) => return (got, None),
 				Err(err) => return (got, Some(err)),
 			}

@@ -10,11 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Auth requests carry `host`, the host the client dialed: the `Host` header on HTTP and WebSocket, where `server_name` stays the TLS SNI only. A server that scopes tenants by hostname can now scope plaintext sessions.
-- Token claims and grants carry optional bitrate caps again, as additive `publish_rate` and `subscribe_rate` (`Rate`, bits per second) beside the patterns. A capped role is written as `{"path": [...], "rate": bps}`, which released verifiers refuse rather than drop the cap; key scopes still refuse it.
+- Token claims and grants carry optional bitrate caps again: each role is an `Access` of its patterns and an optional `Rate` (bits per second), the shape of the wire. A capped role is written as `{"path": [...], "rate": bps}`, which released verifiers refuse rather than drop the cap; key scopes still refuse it.
+- Auth requests carry `relay`, the relay software's `name/version` token, so a server can tell which grant fields a relay reads.
 
 ### Changed
 
-- [**breaking**] Auth roles hold path patterns directly, matching release. Removed the `Access` API and the unvalidated public `Key::decode`; a role's bitrate cap is a separate `publish_rate` or `subscribe_rate`.
+- [**breaking**] Removed the unvalidated public `Key::decode`.
+- [**breaking**] A grant with a field this reader does not know is refused, as an unknown claim is, and a 2xx the client cannot read is `Error::InvalidGrant`, final rather than an outage. A grant's `link` (`Link::Peer` or `Link::Upstream`) replaces `peer` and `upstream`; `peer: true` is still read and written beside it for relays before 0.22. `serve::Link` moved to `Link`, `serve::Rule` holds an `Access` per role, and `Event` and `Role` are `#[non_exhaustive]`.
 
 - Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
 - `moq auth serve` refuses a query carrying more than one `jwt`, even an empty or escaped one, with `serve::Refusal::DuplicateJwt` instead of believing the last. The value is percent-decoded once.

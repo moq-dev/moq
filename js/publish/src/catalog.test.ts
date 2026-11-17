@@ -91,7 +91,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 
 	const first = await subscriber.nextGroup();
 	expect(first?.sequence).toBe(0n);
-	expect(await first?.readJson()).toEqual({ media: { clock: expect.anything() }, video: { renditions: {} } });
+	expect(await first?.readJson()).toEqual({ sync: { clock: expect.anything() }, video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
 	catalog.mutate((c) => {
@@ -101,7 +101,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	const second = await subscriber.nextGroup();
 	expect(second?.sequence).toBe(1n);
 	expect(await second?.readJson()).toEqual({
-		media: { clock: expect.anything() },
+		sync: { clock: expect.anything() },
 		video: { renditions: {} },
 		scte35: { splices: [] },
 	});
@@ -123,7 +123,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 
 	// Before any rendition: a live-only publisher exposes its clock.
 	const first = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	const mapping = first.media?.clock;
+	const mapping = first.sync?.clock;
 	if (!mapping) throw new Error("expected a media clock");
 	expect(mapping.timescale).toBe(1_000_000);
 
@@ -138,7 +138,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 		c.video = { renditions: {} };
 	});
 	const second = Catalog.RootSchema.parse((await consumer.latest())?.value);
-	expect(second.media?.clock).toEqual(mapping);
+	expect(second.sync?.clock).toEqual(mapping);
 
 	effect.close();
 	installed.close();
