@@ -80,28 +80,32 @@ test("the head of the window arriving after the live edge is delivered first", a
 		timescale: Time.Timescale.MILLI,
 		maxAge: Duration.millis(30_000),
 	});
-	const consumer = new Consumer(
-		track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { time: 1n } }] }),
-		{ format: new LegacyFormat("data"), delay: { max: Duration.millis(5000) } },
-	);
+	// A local track holding no group at or before the anchor resolves no floor from it, so the
+	// publisher's start names the head, as a session declares it.
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(5000) }, ranges: [{ start: { time: 10n } }] });
+	subscriber.start = async () => 10n;
+	const consumer = new Consumer(subscriber, {
+		format: new LegacyFormat("data"),
+		delay: { max: Duration.millis(5000) },
+	});
 
 	// The live edge lands first, and delivery waits for the floor rather than starting there.
-	publish(track, 3n, 30);
+	publish(track, 12n, 12);
 	const waiting = consumer.next();
 	await clock.advance(Duration.millis(4_999));
 	expect(await poll(waiting)).toBe("pending");
 
 	// The window's head follows, and a reordered group below the floor with it.
-	publish(track, 0n, 0);
-	publish(track, 1n, 10);
-	publish(track, 2n, 20);
+	publish(track, 9n, 9);
+	publish(track, 10n, 10);
+	publish(track, 11n, 11);
 	track.finish();
 
 	const reads: string[] = [];
 	for (let read = await waiting; read; read = await consumer.next()) {
 		reads.push(read.kind === "frame" ? `${read.group}` : read.kind);
 	}
-	expect(reads).toEqual(["1", "2", "3"]);
+	expect(reads).toEqual(["10", "11", "12"]);
 
 	consumer.close();
 });

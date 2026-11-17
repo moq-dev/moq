@@ -5,7 +5,7 @@ import { Producer as BroadcastProducer } from "./broadcast.ts";
 import { DEFAULT_EXPIRY } from "./cache.ts";
 import { accept as acceptSession, connect as connectSession } from "./connection/index.ts";
 import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
-import { rejectGroups } from "./fill.ts";
+import { type FillLookup, rejectGroups } from "./fill.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
@@ -873,6 +873,14 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 			group.close();
 		}
 	})();
+	// Its time starts precede every group held, so each is looked up, but it asks no fill of groups.
+	const looked: FillLookup[] = [];
+	for (let i = 0; i < 2; i++) {
+		const lookup = await requests.requestedFill();
+		if (lookup?.kind !== "lookup") throw new Error("no lookup");
+		looked.push(lookup);
+	}
+	expect(looked.map((lookup) => lookup.time).sort()).toEqual([2n, 7n]);
 	await yieldNow();
 	expect(await Promise.race([requests.requestedFill(), yieldNow().then(() => "none")])).toBe("none");
 
@@ -881,6 +889,8 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 		group.writeFrame({ payload: enc.encode(`old ${sequence}`), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
 	}
+	// A handler that can't tell leaves each start at the group held containing its time.
+	for (const lookup of looked) lookup.close();
 	// The wide reader still waits on the rest of the fill; the narrow one has all it reads.
 	await done;
 	expect(got).toEqual([2n, 7n]);
@@ -895,31 +905,32 @@ test("fill: a reader joining a wider fill is owed only its own ranges", async ()
 test("fill: a group no reader reads any more stays withdrawn, and widening back asks a new fill", async () => {
 	const { broadcast, track } = resumed(5n);
 	const requests = track.requests();
-	const ranges = (start: bigint) => [{ start: { time: start }, end: { time: 4n } }];
-	const reader = track.subscribe({ ranges: ranges(0n), delay: { max: null }, order: "ascending" });
+	// Narrowed by its end: a time start before every group held would wait on a lookup instead.
+	const ranges = (end: bigint) => [{ start: { time: 0n }, end: { time: end } }];
+	const reader = track.subscribe({ ranges: ranges(4n), delay: { max: null }, order: "ascending" });
 	void drain(reader);
 	const fill = await requestedGroups(requests);
 	if (fill?.kind !== "groups") throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 5n]);
 
-	reader.update({ ranges: ranges(3n), delay: { max: null }, order: "ascending" });
-	expect(fill.isWanted(1n)).toBe(false);
-	expect(fill.wanted()).toBe(3n);
+	reader.update({ ranges: ranges(2n), delay: { max: null }, order: "ascending" });
+	expect(fill.isWanted(3n)).toBe(false);
+	expect(fill.wanted()).toBe(0n);
 
 	// Widening back does not revive the group in this fill: the handler may have stopped on it.
-	reader.update({ ranges: ranges(0n), delay: { max: null }, order: "ascending" });
+	reader.update({ ranges: ranges(4n), delay: { max: null }, order: "ascending" });
 	await yieldNow();
-	expect(fill.isWanted(1n)).toBe(false);
+	expect(fill.isWanted(3n)).toBe(false);
 	const again = await requestedGroups(requests);
-	expect([again?.start, again?.end]).toEqual([0n, 3n]);
+	expect([again?.start, again?.end]).toEqual([3n, 5n]);
 
 	// Each narrowing and widening back asks anew, never spending the refill an eviction gets.
-	reader.update({ ranges: ranges(3n), delay: { max: null }, order: "ascending" });
-	reader.update({ ranges: ranges(0n), delay: { max: null }, order: "ascending" });
+	reader.update({ ranges: ranges(2n), delay: { max: null }, order: "ascending" });
+	reader.update({ ranges: ranges(4n), delay: { max: null }, order: "ascending" });
 	await yieldNow();
-	expect(again?.isWanted(1n)).toBe(false);
+	expect(again?.isWanted(3n)).toBe(false);
 	const third = await requestedGroups(requests);
-	expect([third?.start, third?.end]).toEqual([0n, 3n]);
+	expect([third?.start, third?.end]).toEqual([3n, 5n]);
 
 	third?.close();
 	again?.close();
@@ -1554,32 +1565,31 @@ test("fill: a fetch of a headless group asks its head, as a fetch from frame 0 d
 	broadcast.close();
 });
 
-// A timed track that cached only group 5, starting at 5s; its archive holds groups 0 to 4, group
-// `n` starting at `n` seconds.
+// A timed track that cached only group 5, starting at 5ms; its archive holds groups 0 to 4, group
+// `n` keyed by its start, `n` milliseconds.
 function timed(): { broadcast: BroadcastProducer; track: Producer } {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const group = track.createGroup(5n);
-	group.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5000) });
+	group.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5) });
 	group.finish();
 	return { broadcast, track };
 }
 
 // Answer each lookup with `lookup(time)`, closing it unanswered when that is undefined, and serve
-// every fill of groups from the archive. Returns the lookups' times, in seconds.
-function lookups(requests: Requests, lookup: (time: number) => bigint | undefined): number[] {
-	const times: number[] = [];
+// every fill of groups from the archive. Returns the lookups' times, in milliseconds.
+function lookups(requests: Requests, lookup: (time: bigint) => bigint | undefined): bigint[] {
+	const times: bigint[] = [];
 	void (async () => {
 		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 			if (fill.kind === "lookup") {
-				const ms = fill.time.asMillis();
-				times.push(ms / 1000);
-				const answer = lookup(ms);
+				times.push(fill.time);
+				const answer = lookup(fill.time);
 				if (answer !== undefined) {
 					const group = fill.accept(answer);
 					group.writeFrame({
 						payload: enc.encode(`g${answer}`),
-						timestamp: Timestamp.fromMillis(Number(answer) * 1000),
+						timestamp: Timestamp.fromMillis(Number(answer)),
 					});
 					group.finish();
 				}
@@ -1590,7 +1600,7 @@ function lookups(requests: Requests, lookup: (time: number) => bigint | undefine
 				const group = fill.accept(sequence);
 				group.writeFrame({
 					payload: enc.encode(`g${sequence}`),
-					timestamp: Timestamp.fromMillis(Number(sequence) * 1000),
+					timestamp: Timestamp.fromMillis(Number(sequence)),
 				});
 				group.finish();
 			}
@@ -1600,8 +1610,8 @@ function lookups(requests: Requests, lookup: (time: number) => bigint | undefine
 	return times;
 }
 
-const fromTime = (ms: number): Subscription => ({
-	ranges: [{ start: { time: Timestamp.fromMillis(ms) } }],
+const fromTime = (ms: bigint): Subscription => ({
+	ranges: [{ start: { time: ms } }],
 	delay: { max: null },
 	order: "ascending",
 });
@@ -1609,14 +1619,14 @@ const fromTime = (ms: number): Subscription => ({
 test("fill: a time start no held group resolves is looked up, and the range starts at the answer", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();
-	const times = lookups(requests, (ms) => BigInt(Math.floor(ms / 1000)));
+	const times = lookups(requests, (ms) => ms);
 
-	const reader = track.subscribe(fromTime(2500));
+	const reader = track.subscribe(fromTime(2n));
 	const ordered = reader.ordered();
 	const got: bigint[] = [];
 	for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
 	expect(got).toEqual([2n, 3n, 4n, 5n]);
-	expect(times).toEqual([2.5]);
+	expect(times).toEqual([2n]);
 
 	reader.close();
 	requests.close();
@@ -1630,25 +1640,25 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 		const broadcast = new BroadcastProducer();
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		const requests = track.requests();
-		const times = lookups(requests, (ms) => BigInt(Math.floor(ms / 1000)));
+		const times = lookups(requests, (ms) => ms);
 		for (let n = 0n; n < 3n; n++) {
 			const group = track.createGroup(n);
-			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n) * 1000) });
+			group.writeFrame({ payload: enc.encode(`g${n}`), timestamp: Timestamp.fromMillis(Number(n)) });
 			group.finish();
 		}
 		// Idle past the cache window, so the next write evicts every group but the new edge: the
 		// answer and the fills below it land at or below the watermark, unverified.
 		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
 		const edge = track.createGroup(5n);
-		edge.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5000) });
+		edge.writeFrame({ payload: enc.encode("g5"), timestamp: Timestamp.fromMillis(5) });
 		edge.finish();
 
-		const reader = track.subscribe(fromTime(2500));
+		const reader = track.subscribe(fromTime(2n));
 		const ordered = reader.ordered();
 		const got: bigint[] = [];
 		for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
 		expect(got).toEqual([2n, 3n, 4n, 5n]);
-		expect(times).toEqual([2.5]);
+		expect(times).toEqual([2n]);
 
 		reader.close();
 		requests.close();
@@ -1658,45 +1668,37 @@ test("fill: a lookup answered below the eviction watermark starts the range ther
 	}
 });
 
-test("fill: a lookup whose answer leaves the cache unstarted falls back to the groups held", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	try {
-		const { broadcast, track } = timed();
-		const requests = track.requests();
-		const reader = track.subscribe(fromTime(2500));
-		const next = reader.ordered().nextGroup();
-		// The handler answers with group 2 but never writes its first frame.
-		const lookup = await requests.requestedFill();
-		if (lookup?.kind !== "lookup") throw new Error("no lookup");
-		expect(lookup.time.asMillis()).toBe(2500);
-		lookup.accept(2n);
-		await yieldNow();
+test("fill: a lookup's answer is read at once, before its first frame: its key is its start", async () => {
+	const { broadcast, track } = timed();
+	const requests = track.requests();
+	const reader = track.subscribe(fromTime(2n));
+	const next = reader.ordered().nextGroup();
+	// The handler answers with group 2 but writes no frame yet.
+	const lookup = await requests.requestedFill();
+	if (lookup?.kind !== "lookup") throw new Error("no lookup");
+	expect(lookup.time).toBe(2n);
+	const found = lookup.accept(2n);
+	expect((await next)?.start).toBe(2n);
 
-		// Idle past the cache window, so the next write evicts the unstarted answer, and group 5.
-		clock.jump(Duration.millis(DEFAULT_EXPIRY.asMillis() + 1000));
-		const edge = track.createGroup(6n);
-		edge.writeFrame({ payload: enc.encode("g6"), timestamp: Timestamp.fromMillis(6000) });
-		edge.finish();
-		expect((await next)?.start).toBe(6n);
-
-		reader.close();
-		requests.close();
-		broadcast.close();
-	} finally {
-		installed.close();
-	}
+	found.finish();
+	reader.close();
+	requests.close();
+	broadcast.close();
 });
 
-test("fill: a lookup closed unanswered leaves the range reaching back to the oldest group held", async () => {
+test("fill: a lookup closed unanswered starts the range at its time, asking nothing below it", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();
 	const times = lookups(requests, () => undefined);
 
-	const reader = track.subscribe(fromTime(2500));
+	// Mirrors the Rust `a_time_start_before_the_cache_asks_nothing_below_it`: the group containing
+	// the time is unknown, so every key from the time on is in range, and the archive fills from 2.
+	const reader = track.subscribe(fromTime(2n));
 	const ordered = reader.ordered();
-	expect((await ordered.nextGroup())?.start).toBe(5n);
-	expect(times).toEqual([2.5]);
+	const got: bigint[] = [];
+	for (let i = 0; i < 4; i++) got.push((await ordered.nextGroup())?.start ?? -1n);
+	expect(got).toEqual([2n, 3n, 4n, 5n]);
+	expect(times).toEqual([2n]);
 
 	reader.close();
 	requests.close();
@@ -1708,7 +1710,7 @@ test("fill: a time start the held groups place asks no lookup", async () => {
 	const requests = track.requests();
 	const times = lookups(requests, () => 0n);
 
-	const reader = track.subscribe(fromTime(5500));
+	const reader = track.subscribe(fromTime(6n));
 	expect((await reader.ordered().nextGroup())?.start).toBe(5n);
 	expect(times).toEqual([]);
 
@@ -1720,11 +1722,11 @@ test("fill: a time start the held groups place asks no lookup", async () => {
 test("fill: replacing the ranges withdraws a lookup still out", async () => {
 	const { broadcast, track } = timed();
 	const requests = track.requests();
-	const reader = track.subscribe(fromTime(2500));
+	const reader = track.subscribe(fromTime(2n));
 	expect(reader.tryRecvGroup()).toBeUndefined();
 	const lookup = await requests.requestedFill();
 	if (lookup?.kind !== "lookup") throw new Error("no lookup");
-	expect(lookup.time.asMillis()).toBe(2500);
+	expect(lookup.time).toBe(2n);
 
 	// It follows the readers waiting on it: the one with no age budget, until it leaves.
 	expect(lookup.maxDelay).toBeNull();

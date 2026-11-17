@@ -3,13 +3,13 @@ import { type Dispose, Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import type * as Group from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
-import { hooks } from "./internal.ts";
 
 // A subscription races its track's `closed` once per frame. These count the listeners left on
 // every Once that is still pending, so a per-frame leak shows up as a slope in frames.

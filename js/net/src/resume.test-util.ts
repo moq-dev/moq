@@ -1,6 +1,6 @@
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast";
-import { Timestamp } from "./time.ts";
 import { hooks } from "./internal.ts";
+import { Timestamp } from "./time.ts";
 
 let probes = 0;
 

@@ -3,13 +3,13 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timestamp } from "../time.ts";
 import { SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP } from "./version.ts";
-import { hooks } from "../internal.ts";
 
 test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s", async (alpn) => {
 	const clock = new Manual();

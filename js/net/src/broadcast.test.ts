@@ -66,7 +66,10 @@ test("a staged track resolves its subscribers at commit, with what was written",
 	if (!request) throw new Error("expected request");
 
 	const staged = hooks.stageRequest(request, { timescale: Timescale.MILLI });
-	staged.producer.writeFrame(textFrame("hello"));
+	// The staged track has no timescale until commit, so the group is created at its key.
+	const group = staged.producer.createGroup(0n);
+	group.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
+	group.finish();
 	const pending = Symbol("pending");
 	expect(await Promise.race([track.info(), Promise.resolve(pending)])).toBe(pending);
 
@@ -119,7 +122,7 @@ test("createTrack answers a queued request", async () => {
 
 	// The track is created before any handler takes the queued request.
 	const producer = broadcast.createTrack("media", { timescale: Timescale.MILLI, priority: 3 });
-	producer.writeFrame(textFrame("hello"));
+	producer.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 	expect(await subscriber.readString()).toBe("hello");
 	expect((await info).priority).toBe(3);
 
@@ -131,7 +134,7 @@ test("createTrack answers a queued request", async () => {
 
 	// Later subscriptions read the created track, and the name stays taken.
 	const again = broadcast.track("media").subscribe().ordered();
-	producer.writeFrame(textFrame("again"));
+	producer.writeFrame(textFrame("again", Timestamp.fromMillis(2)));
 	expect(await again.readString()).toBe("again");
 	expect(() => broadcast.createTrack("media")).toThrow("duplicate track");
 
@@ -409,13 +412,13 @@ test("consumer track subscriptions fan out and close independently", async () =>
 	expect(await pendingRequest(consumer)).toBeUndefined();
 
 	const producer = request.accept({ timescale: Timescale.MILLI });
-	producer.writeFrame(textFrame("one"));
+	producer.writeFrame(textFrame("one", Timestamp.fromMillis(1)));
 	expect(await a.readString()).toBe("one");
 	expect(await b.readString()).toBe("one");
 
 	// ...and closing one subscriber leaves the other (and the shared upstream) delivering.
 	a.close();
-	producer.writeFrame(textFrame("two"));
+	producer.writeFrame(textFrame("two", Timestamp.fromMillis(2)));
 	expect(await b.readString()).toBe("two");
 });
 
@@ -453,8 +456,8 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 		.subscribe({ delay: { max: Duration.millis(5000) } })
 		.ordered();
 
-	producer.writeFrame(textFrame("hello"));
-	producer.writeFrame(textFrame("world"));
+	producer.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
+	producer.writeFrame(textFrame("world", Timestamp.fromMillis(2)));
 
 	// Neither subscriber steals from the other: both see every frame in order.
 	expect(await a.readString()).toBe("hello");
@@ -468,12 +471,12 @@ test("a late subscriber replays the cached window", async () => {
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	// Written before anyone subscribes; retained in the cache for replay.
-	producer.writeFrame(textFrame("early"));
+	producer.writeFrame(textFrame("early", Timestamp.fromMillis(1)));
 
 	const late = broadcast.track("video").subscribe().ordered();
 	expect(await late.readString()).toBe("early");
 
-	producer.writeFrame(textFrame("later"));
+	producer.writeFrame(textFrame("later", Timestamp.fromMillis(2)));
 	expect(await late.readString()).toBe("later");
 });
 
@@ -487,11 +490,12 @@ test("a read throws Evicted at a shed front, then resyncs to the next group", as
 
 	// Group 0 sheds its front without aborting the writer.
 	const g0 = hooks.appendNext(producer);
-	for (let i = 0; i < 40; i++) g0.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
+	for (let i = 0; i < 40; i++)
+		g0.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.fromMillis(0) });
 
 	// Group 1 is clean.
 	const g1 = hooks.appendNext(producer);
-	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.now() });
+	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.fromMillis(1) });
 	g1.finish();
 
 	// The reader hits the shed front in group 0, then the next
@@ -520,9 +524,9 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		clock.jump(Duration.millis(30_000 + 1_000));
 		producer.writeFrame(textFrame("fresh"));
 
-		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
+		// The next group in arrival order is the fresh one (starting at 41s): the old (10s) group
 		// was evicted, not still buffered ahead of it.
-		expect((await stalled.recvGroup())?.start).toBe(1n);
+		expect((await stalled.recvGroup())?.start).toBe(41_000n);
 
 		// Nothing else is buffered: a second recvGroup stays pending (the track is open),
 		// proving exactly one group remained in the sink rather than two.
@@ -636,11 +640,11 @@ test("a fetch of a group still to come asks the request handler, and the write a
 	const pending = wireOf(broadcast).fetchGroup("video", 1n);
 
 	const first = hooks.appendNext(track);
-	first.writeFrame({ payload: new TextEncoder().encode("0"), timestamp: Timestamp.now() });
+	first.writeFrame({ payload: new TextEncoder().encode("0"), timestamp: Timestamp.fromMillis(0) });
 	first.finish();
 
 	const second = hooks.appendNext(track);
-	second.writeFrame({ payload: new TextEncoder().encode("1"), timestamp: Timestamp.now() });
+	second.writeFrame({ payload: new TextEncoder().encode("1"), timestamp: Timestamp.fromMillis(1) });
 	second.finish();
 
 	const group = await pending;

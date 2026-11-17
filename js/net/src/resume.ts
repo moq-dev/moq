@@ -71,7 +71,7 @@ import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/sequence.ts";
-import { clamped, type Resolved, type Window } from "./window.ts";
+import { clamped, type Resolved, sameRanges, type Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing to deliver rather than judging what it carried:
@@ -342,6 +342,13 @@ interface Copy {
 	sub: track.Subscriber;
 	/** Where the subscription was asked to start, so demand updates never ask for less. */
 	floor?: bigint;
+	/** The reader's ranges {@link Copy.resolved} are for. */
+	from?: readonly track.Range[];
+	/**
+	 * Each of those ranges resolved, by index, so clamping never widens one: as the serving copy
+	 * had them when this one was subscribed, until this one resolves them itself.
+	 */
+	resolved?: (Resolved | undefined)[];
 	/** Replaced by a newer route. */
 	replaced: boolean;
 	/**
@@ -403,6 +410,8 @@ class Reader implements ResumeSource {
 	 * one is the serving route's own, when it is subscribed.
 	 */
 	#copies: Copy[] = [];
+	/** The reader's ranges as {@link #placed} last resolved them. */
+	#resolution?: { from: readonly track.Range[]; resolved: (Resolved | undefined)[] };
 	/** The reader's cursor the copies were last bounded at: a lower start asks for a backfill. */
 	#bounded: { start: bigint; end?: bigint };
 	/** The newest group handed out: where a new copy is asked to start. */
@@ -463,10 +472,12 @@ class Reader implements ResumeSource {
 		// concluded.
 		if (parent) {
 			this.#generation = parent.generation;
+			const asked: Pick<Copy, "from" | "resolved"> = {};
 			const copy: Copy = {
 				generation: parent.generation,
 				source: parent.source,
-				sub: parent.sub.fork(this.#wire({})),
+				sub: parent.sub.fork(this.#wire(asked)),
+				...asked,
 				replaced: false,
 				lease: 0,
 			};
@@ -525,14 +536,14 @@ class Reader implements ResumeSource {
 			this.wake();
 			return;
 		}
-		const floor = this.#newest;
+		const asked: Pick<Copy, "floor" | "from" | "resolved"> = { floor: this.#newest };
 		const serving: Copy = {
 			generation: route.generation,
 			source,
 			// The wire request carries the floor from the first message: some sessions read the
 			// demand only once.
-			sub: subscribe(source.wire, route.name, this.#wire({ floor })),
-			floor,
+			sub: subscribe(source.wire, route.name, this.#wire(asked)),
+			...asked,
 			replaced: false,
 			lease: 0,
 		};
@@ -553,13 +564,13 @@ class Reader implements ResumeSource {
 			return;
 		}
 		if (this.#copies.some((copy) => copy.source.from.closed === incumbent.from.closed)) return;
-		const floor = serving.floor;
+		const asked: Pick<Copy, "floor" | "from" | "resolved"> = { floor: serving.floor };
 		this.#add(
 			{
 				generation: serving.generation - 1,
 				source: incumbent,
-				sub: subscribe(incumbent.wire, route.name, this.#wire({ floor })),
-				floor,
+				sub: subscribe(incumbent.wire, route.name, this.#wire(asked)),
+				...asked,
 				replaced: true,
 				lease: 0,
 			},
@@ -613,12 +624,45 @@ class Reader implements ResumeSource {
 		this.#changed.update((n) => n + 1);
 	}
 
-	/** What `copy` is asked for: the reader's own preferences, from its floor and through its replacement. */
-	#wire(copy: Pick<Copy, "floor" | "until">): track.Subscription {
+	/**
+	 * What `copy` is asked for: the reader's own preferences, from its floor and through its
+	 * replacement. Mirrors the Rust `Copy::wire`.
+	 */
+	#wire(copy: Pick<Copy, "floor" | "until" | "from" | "resolved"> & { sub?: track.Subscriber }): track.Subscription {
 		const preferences = this.#shell.subscription.peek() ?? track.Subscription.default();
+		const ranges = preferences.ranges ?? [{}];
+		if (copy.sub) {
+			// Its own resolution, which capping its end must not move; replaced ranges resolve
+			// against its cache, as any subscriber's do. A range it has yet to resolve keeps the
+			// resolution it was subscribed with.
+			const own = hooks.servingResolved(copy.sub);
+			const kept = copy.from !== undefined && sameRanges(copy.from, ranges) ? (copy.resolved ?? []) : [];
+			copy.from = ranges;
+			copy.resolved = ranges.map((_, index) => own[index] ?? kept[index]);
+		} else if (copy.from === undefined || !sameRanges(copy.from, ranges)) {
+			// A new copy starts from where the reader's ranges resolved.
+			copy.from = ranges;
+			copy.resolved = this.#placed(ranges);
+		}
 		const floor = copy.floor ? copy.floor : undefined;
-		// The copies resolve relative anchors against the groups they hold.
-		return { ...preferences, ranges: clamped(preferences.ranges ?? [{}], floor, copyEnd(copy), []) };
+		return { ...preferences, ranges: clamped(ranges, floor, copyEnd(copy), copy.resolved ?? []) };
+	}
+
+	/**
+	 * The reader's `ranges` resolved, as the first copy asked for them unclamped resolved each:
+	 * kept once resolved, past that copy being let go. Mirrors the Rust `Reader::window`.
+	 */
+	#placed(ranges: readonly track.Range[]): (Resolved | undefined)[] {
+		if (!this.#resolution || !sameRanges(this.#resolution.from, ranges))
+			this.#resolution = { from: ranges, resolved: [] };
+		const placed = this.#resolution;
+		for (const copy of this.#copies) {
+			if (copy.floor !== undefined || copy.until !== undefined) continue;
+			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
+			const own = hooks.servingResolved(copy.sub);
+			placed.resolved = ranges.map((_, index) => placed.resolved[index] ?? own[index]);
+		}
+		return placed.resolved;
 	}
 
 	#update(copy: Copy): void {
@@ -690,7 +734,7 @@ class Reader implements ResumeSource {
 			this.wake();
 			return;
 		}
-		const backfill = { floor: start, until: end - 1n };
+		const backfill: Pick<Copy, "floor" | "until" | "from" | "resolved"> = { floor: start, until: end - 1n };
 		this.#add(
 			{
 				generation: newest.generation,
@@ -1361,7 +1405,12 @@ class Reader implements ResumeSource {
 	resolved(): (Resolved | undefined)[] | undefined {
 		this.sync();
 		const serving = this.#serving();
-		return serving && hooks.servingResolved(serving.sub);
+		if (!serving) return undefined;
+		// As the first copy to resolve them placed them, then as the serving copy does.
+		const ranges = (this.#shell.subscription.peek() ?? track.Subscription.default()).ranges ?? [{}];
+		const placed = this.#placed(ranges);
+		const own = hooks.servingResolved(serving.sub);
+		return ranges.map((_, index) => placed[index] ?? own[index]);
 	}
 
 	// The reader's ranges resolve on the copies, which hold the groups their anchors name.

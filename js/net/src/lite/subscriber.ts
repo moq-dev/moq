@@ -2873,13 +2873,19 @@ export class Subscriber {
 		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
 		// `report_time_starts`.
 		const times: [bigint, bigint][] = [];
+		// And each one counting back, which the copy, holding only part of the track, can't count.
+		const relative: [bigint, bigint][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
 			const time = range?.start?.time ?? range?.start?.absolute;
+			const back = range?.start?.relative;
 			const at = entry.starts.get(id);
-			if (time !== undefined && at !== undefined) times.push([time, at]);
+			if (at === undefined) continue;
+			if (time !== undefined) times.push([time, at]);
+			else if (back !== undefined) relative.push([back, at]);
 		}
 		hooks.timeStarts(entry.track, times);
+		hooks.relativeStarts(entry.track, relative);
 
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;

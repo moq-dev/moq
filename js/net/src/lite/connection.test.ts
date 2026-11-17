@@ -6,6 +6,7 @@ import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { inspect } from "../connection/stats.ts";
 import { SessionCode, SessionError } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -40,7 +41,6 @@ import {
 	Version,
 	versionName,
 } from "./version.ts";
-import { hooks } from "../internal.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {

@@ -340,7 +340,7 @@ test("a read that starts later skips frames below it instead of returning them",
 	}
 
 	expect(await consumer.readFrameIndex({ from: 5 })).toMatchObject({
-		sequence: 5,
+		index: 5,
 		payload: new Uint8Array([5]),
 	});
 	expect(await consumer.readFrameIndex({ from: 5 })).toMatchObject({ index: 6 });
@@ -368,23 +368,23 @@ test("tryReadFrame drains buffered frames then returns undefined", () => {
 	expect(consumer.tryReadFrame()).toBeUndefined();
 });
 
-test("tryReadFrameSequence reports per-frame sequence numbers", () => {
+test("tryReadFrameIndex reports per-frame indexes", () => {
 	const { producer, consumer } = pair(7n);
 	producer.writeFrame(textFrame("a"));
 	producer.writeFrame(textFrame("b"));
 
-	expect(consumer.tryReadFrameIndex()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
-	expect(consumer.tryReadFrameIndex()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
+	expect(consumer.tryReadFrameIndex()).toMatchObject({ index: 0, payload: new TextEncoder().encode("a") });
+	expect(consumer.tryReadFrameIndex()).toMatchObject({ index: 1, payload: new TextEncoder().encode("b") });
 	expect(consumer.tryReadFrameIndex()).toBeUndefined();
 });
 
-test("readFrameSequence reports per-frame sequence numbers", async () => {
+test("readFrameIndex reports per-frame indexes", async () => {
 	const { producer, consumer } = pair(7n);
 	producer.writeFrame(textFrame("a"));
 	producer.writeFrame(textFrame("b"));
 
-	expect(await consumer.readFrameIndex()).toMatchObject({ sequence: 0, payload: new TextEncoder().encode("a") });
-	expect(await consumer.readFrameIndex()).toMatchObject({ sequence: 1, payload: new TextEncoder().encode("b") });
+	expect(await consumer.readFrameIndex()).toMatchObject({ index: 0, payload: new TextEncoder().encode("a") });
+	expect(await consumer.readFrameIndex()).toMatchObject({ index: 1, payload: new TextEncoder().encode("b") });
 });
 
 test("done distinguishes a finished group from one that is merely empty", () => {
@@ -476,7 +476,7 @@ test("readable waits past replayed frames after adopting an open replacement", a
 
 	replacement.writeFrame(textFrame("one"));
 	await readable;
-	expect(consumer.tryReadFrameIndex()).toMatchObject({ sequence: 1, payload: textFrame("one").payload });
+	expect(consumer.tryReadFrameIndex()).toMatchObject({ index: 1, payload: textFrame("one").payload });
 	consumer.close();
 	producer.finish();
 	replacement.finish();

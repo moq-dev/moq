@@ -3,7 +3,7 @@ import { Duration, type Installed, Wall } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Track } from "@moq/net";
+import { Time, Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "./catalog.ts";
 
@@ -16,7 +16,7 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	});
 
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 
@@ -56,7 +56,7 @@ test("catalog producer refuses an ID naming both a video and an audio rendition"
 test("catalog producer computes each entry version from the fields it uses", async () => {
 	const catalog = new CatalogProducer();
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 	const video = { codec: "avc1.64001f", container: { kind: "legacy" as const } };
@@ -85,12 +85,12 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const subscriber = track.subscribe().ordered();
 
 	const first = await subscriber.nextGroup();
-	expect(first?.start).toBe(0n);
+	if (!first) throw new Error("expected the first snapshot");
 	expect(await first?.readJson()).toEqual({ sync: { clock: expect.anything() }, video: { renditions: {} } });
 	expect(first?.done).toBe(true);
 
@@ -99,7 +99,8 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	});
 
 	const second = await subscriber.nextGroup();
-	expect(second?.start).toBe(1n);
+	// Each snapshot opens a group at its timestamp, past the previous one.
+	expect(second?.start).toBeGreaterThan(first.start);
 	expect(await second?.readJson()).toEqual({
 		sync: { clock: expect.anything() },
 		video: { renditions: {} },
@@ -117,7 +118,7 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	const catalog = new CatalogProducer();
 
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 
@@ -156,7 +157,7 @@ test("catalog producer omits the clock when the page's wall clock is unset", asy
 		});
 
 		const effect = new Effect();
-		const track = new Track.Producer("catalog.json");
+		const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 		catalog.serve(track, effect);
 		const subscriber = track.subscribe().ordered();
 		const group = await subscriber.nextGroup();
@@ -176,12 +177,12 @@ test("a reconnecting subscriber is seeded with the full current catalog", async 
 
 	// The first subscription drains and ends...
 	const first = new Effect();
-	catalog.serve(new Track.Producer("catalog.json"), first);
+	catalog.serve(new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI }), first);
 	first.close();
 
 	// ...and a fresh subscription still gets the current catalog, not nothing.
 	const effect = new Effect();
-	const track = new Track.Producer("catalog.json");
+	const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 	catalog.serve(track, effect);
 	const seeded = (await new Json.Snapshot.Consumer<Catalog.Root>({ track }).latest())?.value;
 	expect(seeded?.video).toEqual({ renditions: {} });
@@ -353,7 +354,7 @@ describe("estimate publication window", () => {
 		});
 		const effect = new Effect();
 		scopes.push(effect);
-		const track = new Track.Producer("catalog.json");
+		const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 		producer.serve(track, effect);
 		const consumer = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 		const estimate = (jitter: number) =>
@@ -442,7 +443,7 @@ describe("estimate publication window", () => {
 		// The window closed with the output, so a new subscriber's first estimate is immediate.
 		const again = new Effect();
 		scopes.push(again);
-		const track = new Track.Producer("catalog.json");
+		const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 		producer.serve(track, again);
 		const reader = new Json.Snapshot.Consumer<Catalog.Root>({ track });
 		await reader.latest();

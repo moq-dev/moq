@@ -485,7 +485,11 @@ test("a refresh reuses the newest timestamp", async () => {
 	expect(timestamps).toEqual([0, 30]);
 });
 
-test("a refresh after an older update starts at the newest timestamp", async () => {
+// A delta may carry a timestamp older than its group's first frame, but a new group must start past
+// that frame, so a refresh whose newest timestamp is still the group's own start waits for a later
+// update, then restates the value there. (Mirrors the Rust
+// `a_refresh_after_older_updates_waits_for_a_later_one`.)
+test("a refresh after older updates waits for a later one", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 1, maxAge: null });
 	const producer = new Producer<Value>({ track });
 	// Deltas may carry timestamps older than their group's first frame.
@@ -493,6 +497,10 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 
 	const joiner = track.subscribe();
 	await settle();
+	// No group may share the open group's start.
+	expect(track.largest()?.group).toBe(30n);
+
+	producer.update({ n: 4 }, Time.Timestamp.fromMillis(40));
 	producer.finish();
 	joiner.close();
 
@@ -503,10 +511,9 @@ test("a refresh after an older update starts at the newest timestamp", async () 
 		restated.push([frame?.timestamp?.asMillis(), frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
 		while ((await group.readFrame()) !== undefined) {}
 	}
-	// Restating at the last update's 15 would rewind past group 0's start and be refused.
 	expect(restated).toEqual([
 		[30, { n: 0 }],
-		[30, { n: 3 }],
+		[40, { n: 4 }],
 	]);
 });
 
@@ -703,25 +710,25 @@ test("a snapshot past the budget is refused", () => {
 // A publisher gives up a group a reader is still on once a newer one supersedes it, which every
 // moq-lite version reports as OLD. The reader skips to the newer snapshot instead of failing.
 test("snapshot consumer skips a group the publisher dropped mid-read", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const first = track.appendGroup();
-	first.writeFrame({ payload: new TextEncoder().encode('{"v":0}'), timestamp: Time.Timestamp.now() });
+	const first = track.appendGroup(Time.Timestamp.fromMillis(1));
+	first.writeFrame({ payload: new TextEncoder().encode('{"v":0}'), timestamp: Time.Timestamp.fromMillis(1) });
 	expect((await consumer.latest())?.value).toEqual({ v: 0 });
 
 	const next = consumer.latest();
 	first.abort(new NetError.Stream(StreamCode.Old));
-	const second = track.appendGroup();
-	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.now() });
+	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
+	second.writeFrame({ payload: new TextEncoder().encode('{"v":1}'), timestamp: Time.Timestamp.fromMillis(2) });
 	expect((await next)?.value).toEqual({ v: 1 });
 });
 
 // A malformed or failed group must reach the caller; only an explicit retention gap is resumable.
 test("snapshot consumer propagates a non-gap frame failure", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const consumer = new Consumer<Value>({ track });
-	const group = track.appendGroup();
-	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.now() });
+	const group = track.appendGroup(Time.Timestamp.fromMillis(1));
+	group.writeFrame({ payload: new TextEncoder().encode('{"ok":true}'), timestamp: Time.Timestamp.fromMillis(1) });
 	expect((await consumer.next())?.value).toEqual({ ok: true });
 	group.abort(new NetError.Stream(StreamCode.Internal));
 	await expect(consumer.next()).rejects.toMatchObject({ code: StreamCode.Internal });
@@ -755,8 +762,7 @@ test("a scale-less snapshot at a key not past the newest group is refused", asyn
 
 	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const sequences: bigint[] = [];
-	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup())
-		sequences.push(group.start);
+	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) sequences.push(group.start);
 	expect(sequences).toEqual([5n, 8n]);
 	expect(await drain(track)).toEqual([{ n: 1 }]);
 });
@@ -770,7 +776,7 @@ test("an unscaled update is refused on a timed track", () => {
 });
 
 test("a capture timestamp is written on snapshots and deltas alike", async () => {
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 	const producer = new Producer<Value>({ track, deltas: true });
 	producer.update({ a: 1, b: "x".repeat(64) }, Time.Timestamp.fromMillis(1_000));
 	producer.update({ a: 2, b: "x".repeat(64) }, Time.Timestamp.fromMillis(2_000));

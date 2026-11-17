@@ -11,19 +11,19 @@ import { WireRoute } from "../hop.ts";
 // Loaded up front: a session imports it on first use, which takes host turns a Manual clock cannot wait out.
 import "../ietf/connection.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
+import { hooks } from "../internal.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport, manual, textFrame, waitFor } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { Timescale } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { type Backoff, pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 import type { Session } from "./session.ts";
-import { hooks } from "../internal.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -824,7 +824,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		const track = remote.track("video").subscribe().ordered();
 
 		try {
-			hooks.appendNext(producer).writeFrame(textFrame("first"));
+			hooks.appendNext(producer).writeFrame(textFrame("first", Timestamp.fromMillis(0)));
 			expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 			if (teardown.goaway) {
@@ -836,7 +836,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 
 			fin.hold?.enable();
 			const last = hooks.appendNext(producer);
-			last.writeFrame(textFrame("last"));
+			last.writeFrame(textFrame("last", Timestamp.fromMillis(1)));
 			last.finish();
 			producer.finish();
 			producer.close();
@@ -1051,12 +1051,12 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const remote = wireOf(await first.server).consume(Path.from("room"));
 	const track = remote.track("video").subscribe().ordered();
 	try {
-		hooks.appendNext(producer).writeFrame(textFrame("first"));
+		hooks.appendNext(producer).writeFrame(textFrame("first", Timestamp.fromMillis(0)));
 		expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 		fin.hold?.enable();
 		const last = hooks.appendNext(producer);
-		last.writeFrame(textFrame("last"));
+		last.writeFrame(textFrame("last", Timestamp.fromMillis(1)));
 		last.finish();
 		producer.finish();
 		producer.close();

@@ -200,9 +200,18 @@ test("range fills: a recovery's refusals stand until the fill reaches them", asy
 	fills.poll(tail, true);
 	expect(peer.fill.wanted()).toBe(3n);
 	// Recorded as lost: a later reader is told so rather than waiting on them.
-	const later = peer.track.subscribe({ ranges: [{ start: { time: 1n } }], delay: { max: null } });
-	const next = hooks.tryRecvGroup(later, true);
-	expect(next.kind === "drop" ? [next.start, next.end] : next.kind).toEqual([1n, 3n]);
+	// From time 0, which names group 0 whatever is held: a time start of 1 would look up whether a
+	// group between 0 and 4 contains it, as the Rust tests' `missed` notes.
+	const later = peer.track.subscribe({
+		ranges: [{ start: { time: 0n } }],
+		delay: { max: null },
+		order: "ascending",
+	});
+	const drops: bigint[][] = [];
+	for (let next = hooks.tryRecvGroup(later, true); next.kind !== "idle"; next = hooks.tryRecvGroup(later, true)) {
+		if (next.kind === "drop") drops.push([next.start, next.end]);
+	}
+	expect(drops).toEqual([[1n, 3n]]);
 
 	later.close();
 	fills.close();
@@ -336,14 +345,18 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 	fills.poll(tail, true);
 
 	const requests = peer.track.requests();
+	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
+	// looking up where time 1 falls.
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 1n } }],
+		ranges: [{ start: { time: 0n } }],
 		delay: { max: null },
 		order: "ascending",
 	});
-	void later
-		.ordered()
+	// Reading past group 0 is what asks.
+	const reading = later.ordered();
+	void reading
 		.nextGroup()
+		.then(() => reading.nextGroup())
 		.catch(() => undefined);
 	const again = await requestedGroups(requests);
 	if (again?.kind !== "groups") throw new Error("no fill of groups");
@@ -408,14 +421,18 @@ test("range fills: a recovery's refusal is taken once", async () => {
 	expect(fills.recovering).toBe(true);
 
 	const requests = peer.track.requests();
+	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
+	// looking up where time 1 falls.
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 1n } }],
+		ranges: [{ start: { time: 0n } }],
 		delay: { max: null },
 		order: "ascending",
 	});
-	void later
-		.ordered()
+	// Reading past group 0 is what asks.
+	const reading = later.ordered();
+	void reading
 		.nextGroup()
+		.then(() => reading.nextGroup())
 		.catch(() => undefined);
 	const again = await requestedGroups(requests);
 	if (again?.kind !== "groups") throw new Error("no fill of groups");
@@ -456,14 +473,18 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 	// A later fill finds group 1 accounted for on the subscription, so a newer recovery asks for it.
 	tail.account(1n, 2n);
 	const requests = peer.track.requests();
+	// From time 0, which names group 0 whatever is held, so it asks for group 1 on rather than
+	// looking up where time 1 falls.
 	const later = peer.track.subscribe({
-		ranges: [{ start: { time: 1n } }],
+		ranges: [{ start: { time: 0n } }],
 		delay: { max: null },
 		order: "ascending",
 	});
-	void later
-		.ordered()
+	// Reading past group 0 is what asks.
+	const reading = later.ordered();
+	void reading
 		.nextGroup()
+		.then(() => reading.nextGroup())
 		.catch(() => undefined);
 	const again = await requestedGroups(requests);
 	if (again?.kind !== "groups") throw new Error("no fill of groups");

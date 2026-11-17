@@ -40,7 +40,7 @@ for (const protocol of protocols) {
 			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge });
 			const write = (sequence: bigint) => {
 				const group = track.createGroup(sequence);
-				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
+				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(sequence)) });
 				group.finish();
 			};
 
@@ -161,7 +161,10 @@ for (const protocol of protocols) {
 		const write = (sequence: bigint, frames: number) => {
 			const group = track.createGroup(sequence);
 			for (let frame = 0; frame < frames; frame++) {
-				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
+				group.writeFrame({
+					payload: new Uint8Array([frame]),
+					timestamp: Timestamp.fromMillis(Number(sequence)),
+				});
 			}
 			group.finish();
 		};

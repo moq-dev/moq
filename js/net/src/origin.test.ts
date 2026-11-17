@@ -10,11 +10,13 @@ import {
 	bestCandidate,
 	chainHash,
 	compareRouteCandidates,
+	hooks,
 	mostSpecific,
 	presented,
 	rendezvousHash,
 	spreadHash,
-	superseded, hooks } from "./internal.ts";
+	superseded,
+} from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -340,8 +342,9 @@ test("a superseded broadcast closes, and its subscribers keep reading", async ()
 	current?.close();
 
 	// A track already subscribed is not the broadcast: it keeps serving until it ends.
-	track.writeFrame(textFrame("late"));
-	expect((await subscriber.recvGroup())?.start).toBe(0n);
+	// The frame's time starts its group.
+	track.writeFrame(textFrame("late", Timestamp.fromMillis(5)));
+	expect((await subscriber.recvGroup())?.start).toBe(5n);
 
 	subscriber.close();
 	mine?.close();

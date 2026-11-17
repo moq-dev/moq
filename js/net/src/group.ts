@@ -600,8 +600,13 @@ export class Producer {
 		const track = this.#state.track;
 		if (track) {
 			const rescaled = rescaleIn(track, frame.timestamp, this.#state.start);
-			if (rescaled.value !== frame.timestamp.value || rescaled.scale !== frame.timestamp.scale)
-				frame = { payload: frame.payload, timestamp: rescaled };
+			// An unscaled timestamp is a key, which may lie past what a number holds.
+			const moved =
+				rescaled.scale !== frame.timestamp.scale ||
+				(rescaled.scale === undefined
+					? rescaled.key !== frame.timestamp.key
+					: rescaled.value !== frame.timestamp.value);
+			if (moved) frame = { payload: frame.payload, timestamp: rescaled };
 		}
 		const commits = this.#admit(frame);
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))

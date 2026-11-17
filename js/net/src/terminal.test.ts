@@ -9,7 +9,7 @@ import { createMockTransportPair, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -17,10 +17,10 @@ for (const release of [false, true]) {
 	test(`${release ? "releasing" : "closing"} a track preserves finished groups and aborts its unfinished tail`, async () => {
 		const producer = new TrackProducer("video").accept({ timescale: Timescale.MILLI });
 		const complete = hooks.appendNext(producer);
-		complete.writeFrame(textFrame("complete"));
+		complete.writeFrame(textFrame("complete", Timestamp.fromMillis(0)));
 		complete.finish();
 		const tail = hooks.appendNext(producer);
-		tail.writeFrame(textFrame("prefix"));
+		tail.writeFrame(textFrame("prefix", Timestamp.fromMillis(1)));
 		const finished = complete.consume();
 		const unfinished = tail.consume();
 		producer.finish();

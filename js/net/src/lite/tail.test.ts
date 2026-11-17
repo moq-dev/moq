@@ -30,17 +30,21 @@ import { ALPN_05, hasLengthFirst, hasRanges, resolvesStart, Version } from "./ve
 const GRACE = Duration.millis(100);
 
 /**
- * One lite-05+ frame: a zero timestamp delta, then the length-prefixed payload. Lite-07 leads with
- * the size plus one instead.
+ * One lite-05+ frame: a timestamp delta of `delta` milliseconds, then the length-prefixed
+ * payload. Lite-07 leads with the size plus one instead.
  */
-function frame(payload: string, version: Version): Uint8Array {
+function frame(payload: string, version: Version, delta = 0): Uint8Array {
 	const bytes = new TextEncoder().encode(payload);
-	// Every field is under 64, so each is a one-byte varint.
-	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, 0, ...bytes]);
-	return new Uint8Array([0, bytes.byteLength, ...bytes]);
+	// Every field is under 64, so each is a one-byte varint; the delta is zigzagged.
+	if (delta < 0 || delta >= 32) throw new RangeError("a one-byte delta only");
+	if (hasLengthFirst(version)) return new Uint8Array([bytes.byteLength + 1, delta * 2, ...bytes]);
+	return new Uint8Array([delta * 2, bytes.byteLength, ...bytes]);
 }
 
-/** A group stream the test writes by hand, handed to the subscriber as if it arrived. */
+/**
+ * A group stream the test writes by hand, handed to the subscriber as if it arrived. Its first
+ * frame starts at `sequence` milliseconds, so group starts strictly increase with their keys.
+ */
 function groupStream(subscriber: Subscriber, sequence: bigint) {
 	let controller!: ReadableStreamDefaultController<Uint8Array>;
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
@@ -48,8 +52,12 @@ function groupStream(subscriber: Subscriber, sequence: bigint) {
 		new GroupMessage({ subscribe: 0n, sequence }),
 		new Reader(readable, undefined, subscriber.version),
 	);
+	let first = true;
 	return {
-		write: (payload: string) => controller.enqueue(frame(payload, subscriber.version)),
+		write: (payload: string) => {
+			controller.enqueue(frame(payload, subscriber.version, first ? Number(sequence) : 0));
+			first = false;
+		},
 		finish: () => controller.close(),
 		// With a code, as a publisher resets.
 		reset: () => controller.error(toTransport(StreamCode.Cancel, "reset")),

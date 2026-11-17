@@ -955,7 +955,10 @@ test("a group stream whose FIN never completes is reset when the group expires",
 
 		const write = (sequence: bigint) => {
 			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
+			group.writeFrame({
+				payload: new TextEncoder().encode("frame"),
+				timestamp: Timestamp.fromMillis(Number(sequence)),
+			});
 			group.finish();
 		};
 
@@ -1036,10 +1039,13 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 		expect(await client.reader.u53()).toBe(SubscribeOk.id);
 		await SubscribeOk.decode(client.reader, VERSION);
 
-		// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
+		// Timestamps a millisecond apart, so only the wall clock since group 1 arrived convicts group 0.
 		const write = (sequence: bigint) => {
 			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
+			group.writeFrame({
+				payload: new TextEncoder().encode("frame"),
+				timestamp: Timestamp.fromMillis(Number(sequence)),
+			});
 			group.finish();
 		};
 
@@ -2329,7 +2335,11 @@ function fixture(
 function writeGroup(track: TrackProducer, frames: number): void {
 	const group = hooks.appendNext(track);
 	for (let i = 0; i < frames; i++) {
-		group.writeFrame({ payload: new TextEncoder().encode(`${group.start}.${i}`), timestamp: Timestamp.now() });
+		// Stamped at its key, so groups start in key order.
+		group.writeFrame({
+			payload: new TextEncoder().encode(`${group.start}.${i}`),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 	}
 	group.finish();
 }
@@ -2807,7 +2817,10 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 	for (const sequence of [0n, 3n, 9n]) {
 		const group = track.createGroup(sequence);
 		for (let i = 0; i < 2; i++)
-			group.writeFrame({ payload: new TextEncoder().encode(`${sequence}.${i}`), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode(`${sequence}.${i}`),
+				timestamp: Timestamp.fromMillis(Number(sequence)),
+			});
 		group.finish();
 	}
 
@@ -3708,7 +3721,10 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		const write = (text: string) => {
 			const group = hooks.appendNext(track);
-			group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode(text),
+				timestamp: Timestamp.fromMillis(Number(group.start)),
+			});
 			group.finish();
 		};
 		const { client } = await runSubscribe(
@@ -4610,7 +4626,7 @@ test("draft-22: narrowing gives up an excluded group's open stream", async () =>
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const open = hooks.appendNext(track);
-	open.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
+	open.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4700,7 +4716,7 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4743,7 +4759,7 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4789,7 +4805,7 @@ test("draft-22: a fill-only update keeps the subscription's floor", async () => 
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4833,7 +4849,7 @@ test.each([
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),

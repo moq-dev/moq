@@ -980,7 +980,11 @@ let fillFloor: (producer: Producer, named: bigint | undefined) => bigint | undef
 let keysOf: (producer: Producer) => readonly bigint[];
 // How a received copy resolves its readers' time anchors, as its wire tells it; assigned in the
 // producer's static block. See `hooks.startsAtKeys` and `hooks.timeStarts`.
-let timeAnchors: (producer: Producer) => { atKeys: boolean; starts: ReadonlyMap<bigint, bigint> };
+let timeAnchors: (producer: Producer) => {
+	atKeys: boolean;
+	starts: ReadonlyMap<bigint, bigint>;
+	relative: ReadonlyMap<bigint, bigint>;
+};
 
 /** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
 type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
@@ -1173,6 +1177,8 @@ export class Producer {
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the time
 	// it asked from. Mirrors the Rust `TrackState::time_starts`.
 	#timeStarts = new Map<bigint, bigint>();
+	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
+	#relativeStarts = new Map<bigint, bigint>();
 	// The highest-sequence checked start evicted. Eviction is not a sequence prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
@@ -1380,12 +1386,19 @@ export class Producer {
 		sourceStart = (producer) => producer.#wire?.served && producer.#feedStart();
 		fillFloor = (producer, named) => producer.#fillFloor(named);
 		keysOf = (producer) => producer.#keys;
-		timeAnchors = (producer) => ({ atKeys: producer.#startsAtKeys, starts: producer.#timeStarts });
+		timeAnchors = (producer) => ({
+			atKeys: producer.#startsAtKeys,
+			starts: producer.#timeStarts,
+			relative: producer.#relativeStarts,
+		});
 		hooks.startsAtKeys = (producer) => {
 			producer.#startsAtKeys = true;
 		};
 		hooks.timeStarts = (producer, starts) => {
 			producer.#timeStarts = new Map(starts);
+		};
+		hooks.relativeStarts = (producer, starts) => {
+			producer.#relativeStarts = new Map(starts);
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.joinProducer = (producer) => producer.#join();
@@ -1851,9 +1864,10 @@ export class Producer {
 		let ceiling = bounds[bounds[index]?.start === sequence ? index + 1 : index]?.first;
 		const evicted = this.#evicted;
 		const late = evicted !== undefined && sequence <= evicted.start;
-		if (evicted && late) {
+		// The evicted group itself, fetched again, starts where it did: only its neighbors bound it.
+		if (evicted && sequence < evicted.start) {
 			if (ceiling === undefined || evicted.first.isBefore(ceiling)) ceiling = evicted.first;
-		} else if (evicted) {
+		} else if (evicted && !late) {
 			if (floor === undefined || floor.isBefore(evicted.first)) floor = evicted.first;
 		}
 		if ((floor && !floor.isBefore(start)) || (ceiling && !start.isBefore(ceiling))) throw new TimestampMismatch();
@@ -3307,6 +3321,9 @@ export class Subscriber {
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
 			back: (latest, back) => {
+				// A lite-07 copy holds only part of the track, so it counts back as its publisher did.
+				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
+				if (reported !== undefined) return reported;
 				if (back === 0n) return latest;
 				// Bounded by the cache: a huge count reaches back to the oldest.
 				const index = BigInt(keyIndex(keys, latest)) - back;
@@ -4515,6 +4532,8 @@ export class Subscriber {
 		if (closed !== undefined) return { kind: "done" };
 		// Nothing buffered: ask a fill for what this reader misses, and wait while one owes it.
 		if (this.#askFills(start, end ?? UNBOUNDED, drift) !== undefined) return { kind: "idle" };
+		// A time start still looked up may yet take in a group held already.
+		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		// A bounded window ends once nothing in it is left to deliver, as in Rust.
 		if (this.#exhausted()) return { kind: "done" };
 		if (!this.#complete() || this.#starting(groups)) return { kind: "idle" };
@@ -4888,6 +4907,8 @@ export class Subscriber {
 			return { kind: "idle" };
 		}
 		const end = this.#state.end.peek()?.at;
+		// A time start still looked up may yet take in a group held already.
+		if (this.#window.lookups().length > 0) return { kind: "idle" };
 		if (this.#exhausted()) return { kind: "done" };
 		if (
 			!this.#parked(groups) &&

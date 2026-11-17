@@ -91,14 +91,14 @@ test("a second group is reported while the first is still open", async () => {
 	// first, so the read reports that rather than handing back the remainder as a continuous log.
 	// A boundary-only check would never look at the track again while the first group is open, so
 	// this parks forever without the eager check. Written by hand because this producer never rolls.
-	const track = new Track.Producer("test");
+	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, maxAge: null });
 	const encode = (record: Rec) => new TextEncoder().encode(JSON.stringify(record));
 
 	// Both groups stay open, the way a publisher writing to two at once leaves them.
-	const first = track.appendGroup();
-	first.writeFrame({ payload: encode({ n: 0 }), timestamp: Time.Timestamp.now() });
-	const second = track.appendGroup();
-	second.writeFrame({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.now() });
+	const first = track.appendGroup(Time.Timestamp.fromMillis(1));
+	first.writeFrame({ payload: encode({ n: 0 }), timestamp: Time.Timestamp.fromMillis(1) });
+	const second = track.appendGroup(Time.Timestamp.fromMillis(2));
+	second.writeFrame({ payload: encode({ n: 1 }), timestamp: Time.Timestamp.fromMillis(2) });
 
 	// Ask for a replay window, so the first group is delivered rather than skipped by the
 	// subscriber's default max delay budget once a newer group exists.
@@ -112,7 +112,7 @@ test("a second group is reported while the first is still open", async () => {
 	expect(second.demand().wanted.peek()).toBe(false);
 
 	// Sticky: a later read must not report the rest of the first group as a whole log.
-	first.writeFrame({ payload: encode({ n: 2 }), timestamp: Time.Timestamp.now() });
+	first.writeFrame({ payload: encode({ n: 2 }), timestamp: Time.Timestamp.fromMillis(3) });
 	await expect(consumer.next()).rejects.toBeInstanceOf(Rolled);
 });
 

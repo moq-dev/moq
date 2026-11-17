@@ -1572,7 +1572,7 @@ it("bounds startup decoding while another track is missing and releases it on cl
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: new Signal(null) });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 20; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1598,7 +1598,7 @@ it("resumes decoding the moment shared startup releases", async () => {
 	const audio = new Signal<{ start: Duration; end: Duration } | null>(null);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 8; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1646,7 +1646,7 @@ it("continues filling when the shared floor rises while video waits on audio", a
 	const audio = new Signal<{ start: Duration; end: Duration } | null>(null);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 7; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1670,7 +1670,7 @@ it("keeps feeding a decoder that has not output its first picture yet", async ()
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [0, 40_000, 80_000, 120_000], true, 1000);
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 5; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();

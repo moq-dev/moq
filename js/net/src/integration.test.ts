@@ -12,7 +12,7 @@ import {
 	connect as connectSession,
 	type Session,
 } from "./connection/index.ts";
-import { SessionCode, SessionError, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
@@ -193,7 +193,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.ranges?.[0]?.start?.absolute === 1n) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start?.time === 1n) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -287,7 +287,7 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 			const producer = request.accept({ timescale: Timescale.MILLI });
 			// The TRACK lookup opens the request and the SUBSCRIBE joins it, so its options land after.
 			const check = (subscription = producer.subscription.peek()) => {
-				if (subscription?.ranges?.[0]?.start?.absolute === 1n) resolveProducer?.(producer);
+				if (subscription?.ranges?.[0]?.start?.time === 1n) resolveProducer?.(producer);
 			};
 			check();
 			producer.subscription.subscribe(check);
@@ -367,9 +367,7 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		});
 		const updated = (pending: Promise<unknown>) =>
 			withTimeout(pending, Duration.millis(UPDATE_TIMEOUT_MS), "updated group bound timed out");
-		expect(((await updated(subscriber.nextGroup())) as { start: bigint } | undefined)?.start).toBe(
-			UPDATED_GROUP,
-		);
+		expect(((await updated(subscriber.nextGroup())) as { start: bigint } | undefined)?.start).toBe(UPDATED_GROUP);
 		expect(await updated(subscriber.nextGroup())).toBeUndefined();
 
 		// An open range parks at the live edge instead.
@@ -583,7 +581,7 @@ test("integration: lite-07 keeps a covered bounded subscription open", async () 
 	}
 });
 
-// A time range goes upstream in the track's timescale, as the keys of the groups starting at
+// A time range goes upstream as is, in the track's timescale: the keys of the groups starting at
 // those times, both ends inclusive.
 test("integration: lite-07 serves a time range", async () => {
 	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
@@ -607,17 +605,12 @@ test("integration: lite-07 serves a time range", async () => {
 		const reader = remote.track("video").subscribe({
 			delay: { max: null },
 			order: "ascending",
-			ranges: [{ start: { time: Timestamp.fromMillis(2000) }, end: { time: Timestamp.fromMillis(5000) } }],
+			ranges: [{ start: { time: 2000n }, end: { time: 5000n } }],
 		});
 		const got: bigint[] = [];
 		for (let i = 0; i < 4; i++) got.push((await reader.recvGroup())?.start ?? -1n);
 		expect(got.sort((a, b) => (a < b ? -1 : 1))).toEqual([2000n, 3000n, 4000n, 5000n]);
 		reader.close();
-
-		// An untimed track refuses it.
-		broadcast.createTrack("untimed", {});
-		const untimed = remote.track("untimed").subscribe({ ranges: [{ start: { time: Timestamp.fromMillis(0) } }] });
-		await expect(untimed.recvGroup()).rejects.toThrow(TimestampMismatch);
 	} finally {
 		remote.close();
 		broadcast.close();
@@ -1311,7 +1304,7 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 				const req = await wireOf(broadcast).requested();
 				if (!req) break;
 				const track = req.accept({ timescale: Timescale.MILLI });
-				track.writeFrame(textFrame("before"));
+				track.writeFrame(textFrame("before", Timestamp.fromMillis(0)));
 				served.push(track);
 			}
 		})();
@@ -1328,7 +1321,7 @@ test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 		expect(await listing.reader.u53()).toBe(RequestError.id);
 		expect((await RequestError.decode(listing.reader, version)).errorCode).toBe(0x3);
 
-		for (const producer of served) producer.writeFrame(textFrame("after"));
+		for (const producer of served) producer.writeFrame(textFrame("after", Timestamp.fromMillis(1)));
 		expect(await track.readString()).toBe("after");
 
 		broadcast.close();
@@ -1471,7 +1464,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 
 	const broadcast = publish(origin, Path.from("test"));
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	video.writeFrame(textFrame("hello"));
+	video.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const a = remote.track("video").subscribe().ordered();
@@ -1482,7 +1475,7 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
-	video.writeFrame(textFrame("more"));
+	video.writeFrame(textFrame("more", Timestamp.fromMillis(1)));
 	expect(await b.readString()).toBe("more");
 	expect(video.demand().wanted.peek()).toBeDefined();
 
@@ -2754,7 +2747,7 @@ test.each(["request", "follow"] as const)(
 			if (!request) throw new Error("missing job request");
 			const job = request.route({ hidden: true });
 			const chat = job.broadcast.createTrack("chat", { timescale: Timescale.MILLI });
-			chat.writeFrame(textFrame("job"));
+			chat.writeFrame(textFrame("job", Timestamp.fromMillis(0)));
 			job.announce();
 			return { job, chat };
 		})();
@@ -2773,7 +2766,7 @@ test.each(["request", "follow"] as const)(
 		const { job, chat } = await serving;
 		expect(job.instance).toBe(handle.instance);
 		expect(await listing.next()).toMatchObject({ kind: "present", prefix: path });
-		chat.writeFrame(textFrame("later"));
+		chat.writeFrame(textFrame("later", Timestamp.fromMillis(1)));
 		expect(await track.readString()).toBe("later");
 		expect(requested.active.peek()).toBe(remote);
 		expect(requested.closed.peek()).toBeUndefined();

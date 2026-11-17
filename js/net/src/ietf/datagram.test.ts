@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -12,7 +13,6 @@ import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";
 import { encodeDatagram, ObjectDatagram } from "./datagram.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { hooks } from "../internal.ts";
 
 const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 

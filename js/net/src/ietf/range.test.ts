@@ -325,9 +325,7 @@ for (const version of VERSIONS) {
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
-		const live = fx.broadcast
-			.track("video")
-			.subscribe({ ranges: [{ start: { time: 6n } }], delay: { max: null } });
+		const live = fx.broadcast.track("video").subscribe({ ranges: [{ start: { time: 6n } }], delay: { max: null } });
 		fx.readers.push(live);
 		const failed = live.recvGroup().catch((error) => error);
 		const widening = await fx.next();
@@ -362,9 +360,7 @@ for (const version of VERSIONS) {
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
-		const live = fx.broadcast
-			.track("video")
-			.subscribe({ ranges: [{ start: { time: 6n } }], delay: { max: null } });
+		const live = fx.broadcast.track("video").subscribe({ ranges: [{ start: { time: 6n } }], delay: { max: null } });
 		const widening = await fx.next();
 		expect(await widening.reader.u53()).toBe(Subscribe.id);
 		await Subscribe.decode(widening.reader, version);

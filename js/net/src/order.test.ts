@@ -11,16 +11,16 @@ import { accept, connect, type Session } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
 import type { SendStream } from "./stream.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
-import { hooks } from "./internal.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -94,10 +94,15 @@ function sendOrders(transport: MockTransport): number[] {
 	);
 }
 
+// The last first-frame time written, in milliseconds: each group starts strictly after the one
+// below it, so groups written within one millisecond still get distinct starts.
+let written = -1;
+
 // A group with one frame, left open.
 function writeGroup(track: TrackProducer): GroupProducer {
 	const group = hooks.appendNext(track);
-	group.writeFrame(textFrame("x"));
+	written = Math.max(written + 1, Timestamp.now().asMillis());
+	group.writeFrame(textFrame("x", Timestamp.fromMillis(written)));
 	return group;
 }
 

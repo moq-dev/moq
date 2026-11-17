@@ -73,7 +73,8 @@ for (const [name, protocol, routed, keyed] of transports) {
 		});
 		broadcastRoute.announce();
 
-		const group = video.appendGroup();
+		// Starts before its first frame, so a keyed frame's time (its group's key) tells apart.
+		const group = video.appendGroup(ms(0));
 		await group.writeFrame(ms(1), encoder.encode("keyframe"));
 		await group.writeFrame(ms(2), encoder.encode("delta"));
 
@@ -99,11 +100,11 @@ for (const [name, protocol, routed, keyed] of transports) {
 		expect(decoder.decode((await received.readFrame())?.plaintext)).toBe("late");
 		expect(await received.readFrame()).toBeUndefined();
 
-		const next = video.appendGroup();
+		const next = video.appendGroup(ms(4));
 		await next.writeFrame(ms(4), encoder.encode("next"));
 		next.finish();
 		const second = await consumer.recvGroup();
-		expect(second?.start).toBe(1n);
+		expect(second?.start).toBe(4n);
 		expect(decoder.decode((await second?.readFrame())?.plaintext)).toBe("next");
 
 		consumer.close();

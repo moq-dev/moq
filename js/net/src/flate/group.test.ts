@@ -147,8 +147,7 @@ test("refresh measures stored slices without inflating a compressed group", () =
 	const track = new Track("compressed").accept({ compression: "deflate" });
 	const group = hooks.appendNext(track);
 	const payload = Uint8Array.from({ length: 1024 }, (_, index) => index % 251);
-	for (let index = 0; index < 3; index++)
-		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
+	for (let index = 0; index < 3; index++) group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 	const inflating = spyOn(Decoder.prototype, "frame");
 	try {
 		expect(hooks.overRefresh(group, 1)).toBe(false);

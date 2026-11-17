@@ -38,8 +38,7 @@ function finished(producer: TrackProducer, size: number): bigint {
 async function cached(producer: TrackProducer): Promise<bigint[]> {
 	const subscriber = producer.subscribe({ delay: { max: null } });
 	const sequences: bigint[] = [];
-	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup())
-		sequences.push(group.start);
+	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) sequences.push(group.start);
 	subscriber.close();
 	await yieldNow();
 	return sequences;

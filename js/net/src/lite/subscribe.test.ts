@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import { ProtocolViolation, TimestampMismatch } from "../error.ts";
+import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { Timescale, Timestamp } from "../time.ts";
 import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
@@ -215,20 +214,17 @@ test("a lite-07 list decodes its time and relative anchors", async () => {
 	};
 
 	// Type 1 is a time, both ends inclusive, and type 2 counts back. A time names the group it
-	// keys, so the span covers it, and the model reads it as that key, the end exclusive.
+	// keys, so the span covers it, and the model reads it as the same time, the end inclusive.
 	const timed = await update([2, 1, 40, 1, 90, 2, 3, 0]);
 	expect(timed.ranges).toEqual([{ start: { time: 40n }, end: { time: 90n } }, { start: { relative: 3n } }]);
 	expect([timed.startGroup, timed.endGroup]).toEqual([undefined, undefined]);
-	expect(requestedRanges(timed)).toEqual([
-		{ start: { time: 40n }, end: { time: 90n } },
-		{ start: { relative: 3n } },
-	]);
+	expect(requestedRanges(timed)).toEqual([{ start: { time: 40n }, end: { time: 90n } }, { start: { relative: 3n } }]);
 	const bounded = await update([1, 1, 40, 1, 90]);
 	expect([bounded.startGroup, bounded.endGroup]).toEqual([40n, 90n]);
 
 	// One ending before its start covers no group there, and keeps its place.
 	const reversed = await update([1, 1, 5, 1, 3]);
-	expect(requestedRanges(reversed)).toEqual([{ start: { time: 5n }, end: { time: 4n } }]);
+	expect(requestedRanges(reversed)).toEqual([{ start: { time: 5n }, end: { time: 3n } }]);
 
 	// A time past what a JS number holds exactly reads at full width.
 	const far = 1n << 60n;
@@ -264,18 +260,14 @@ test("lite-07 sends an absolute anchor as a time, an end as the time before it",
 });
 
 test("lite-07 carries every range, relative and time anchors included, and older wires the span alone", async () => {
-	const ranges = toWireRanges(
-		[
-			{ start: { time: 2n }, end: { time: 4n } },
-			{ start: { relative: 1n } },
-			{ end: { relative: 0n } },
-			// In the track's timescale, rounded down.
-			{ start: { time: Timestamp.fromMicros(1_500_900) }, end: { time: Timestamp.fromMillis(3_000) } },
-		],
-		Timescale.MILLI,
-	);
+	// A model time anchor is already a group start in the track's timescale: it goes out as is.
+	const ranges = toWireRanges([
+		{ start: { time: 2n }, end: { time: 4n } },
+		{ start: { relative: 1n } },
+		{ end: { relative: 0n } },
+		{ start: { time: 1_500n }, end: { time: 3_000n } },
+	]);
 	expect(ranges[3]).toEqual({ start: { time: 1_500n }, end: { time: 3_000n } });
-	expect(() => toWireRanges([{ start: { time: Timestamp.fromMillis(1) } }], undefined)).toThrow(TimestampMismatch);
 	const message = new Subscribe({
 		id: 1n,
 		broadcast: Path.from("test"),
@@ -286,11 +278,7 @@ test("lite-07 carries every range, relative and time anchors included, and older
 	});
 	const decode = async (version: Version) =>
 		Subscribe.decode(new Reader(undefined, await encodeMessage(version, message), version), version);
-	// Lite-07 carries an absolute anchor as a time, an end as the time before it.
-	expect((await decode(Version.DRAFT_07)).ranges).toEqual([
-		{ start: { time: 2n }, end: { time: 4n } },
-		...ranges.slice(1),
-	]);
+	expect((await decode(Version.DRAFT_07)).ranges).toEqual(ranges);
 	const older = await decode(Version.DRAFT_05);
 	expect([older.ranges, older.startGroup, older.endGroup]).toEqual([undefined, 0n, undefined]);
 	await expect(encodeMessage(Version.DRAFT_07, new Subscribe({ ...message, ranges: [] }))).rejects.toThrow(

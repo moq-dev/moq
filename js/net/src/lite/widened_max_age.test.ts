@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -11,7 +12,6 @@ import { Timescale, Timestamp } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
-import { hooks } from "../internal.ts";
 
 const url = new URL("https://localhost:4443/test");
 

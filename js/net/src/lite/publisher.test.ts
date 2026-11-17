@@ -309,7 +309,7 @@ async function groupSendOrders(options: {
 
 			const group = track.createGroup(BigInt(sequence));
 			groups.push(group);
-			group.writeFrame(textFrame("hello"));
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(Number(sequence))));
 
 			// One stream per group, in the order given: wait for this one before queuing the next.
 			await servingNextGroup(opened);
@@ -506,7 +506,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 		for (let sequence = 0n; sequence < BigInt(count); sequence++) {
 			const group = track.createGroup(sequence);
 			groups.push(group);
-			group.writeFrame(textFrame("hello"));
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(Number(sequence))));
 			await servingNextGroup(opened);
 		}
 		opened.releaseLock();
@@ -517,9 +517,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
 
 		// Newest-first, so the last group opened is at position 0 and the first is at the back.
-		const expected = groups.map((group) =>
-			sendOrder({ priority: 9, position: count - 1 - Number(group.start) }),
-		);
+		const expected = groups.map((group) => sendOrder({ priority: 9, position: count - 1 - Number(group.start) }));
 		await clock.advance(Duration.ZERO);
 
 		expect(pair.server.sendStreams.uni.map((stream) => stream.sendOrder)).toEqual(expected);
@@ -1005,13 +1003,14 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
 
 		// Newer groups arrive, and another update leaves the range live: it still starts at 2.
+		// The added range starts at time 9, which the live group 7 contains.
 		for (const sequence of [5n, 6n, 7n]) sub.serve(sequence);
 		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
 		const pinned = await next();
 		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
-		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 9n]);
+		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 7n]);
 		const ranges = sub.track.subscription.peek()?.ranges ?? [];
-		expect(ranges.some((range) => range.start?.absolute === 2n)).toBe(true);
+		expect(ranges.some((range) => range.start?.time === 2n)).toBe(true);
 		expect(ranges.some((range) => range.start?.relative !== undefined)).toBe(false);
 	} finally {
 		await sub.close();
@@ -1270,7 +1269,9 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				if (version !== Version.DRAFT_07) {
 					expect([codes, skips]).toEqual([[0], []]);
 				} else if (declared) {
-					expect([codes, skips]).toEqual([[], [[2n, 5n]]]);
+					// Lite-07's time 2 lies before every held group, so the range reaches back to
+					// group 0: groups 0 and 1, never declared, go out as a drop.
+					expect([codes, skips]).toEqual([[StreamCode.NotFound], [[2n, 5n]]]);
 				} else {
 					expect([codes, skips]).toEqual([[StreamCode.NotFound], []]);
 				}
@@ -1647,9 +1648,11 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 
 // A relay receives the newest group first while its source still promises older groups.
 // START must preserve that promise, bounded by the downstream floor and first served group.
+// Lite-07 asks for the group containing time 2, which the source's start places, so no floor
+// raises it: a source starting at group 0 contains time 2.
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	for (const [source, expected] of [
-		[0n, 2n],
+		[0n, hasRanges(version) ? 0n : 2n],
 		[3n, 3n],
 		[9n, 6n],
 	]) {
@@ -1657,6 +1660,8 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			const sub = await servedSubscription({ version, startGroup: 2n });
 			try {
 				hooks.receiveTrack(sub.track);
+				// A lite-07 source reports where it started the time asked for.
+				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1684,6 +1689,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
+			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]]);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
@@ -2273,7 +2279,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 
 	try {
 		const first = track.createGroup(0n);
-		first.writeFrame(textFrame("hello"));
+		first.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 		first.finish();
 		track.finishAt({ group: 2n, frame: 0 });
 
@@ -2284,7 +2290,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 		expect("finish" in early).toBe(true);
 
 		const second = track.createGroup(1n);
-		second.writeFrame(textFrame("hello"));
+		second.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		second.finish();
 		track.finish();
 		track.close();
@@ -2318,7 +2324,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 
 	try {
 		const first = track.createGroup(0n);
-		first.writeFrame(textFrame("hello"));
+		first.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 		first.finish();
 		// An errored end past the live edge, which only a received copy forwards: group 1 is still
 		// to come below it.
@@ -2330,7 +2336,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 		expect(await settlesWithin(pending, clock, Duration.millis(20))).toBe(false);
 
 		const second = track.createGroup(1n);
-		second.writeFrame(textFrame("hello"));
+		second.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		second.finish();
 		await expect(pending).rejects.toBeDefined();
 	} finally {
@@ -2516,7 +2522,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 	});
 	const append = (sequence: number) => {
 		const group = track.createGroup(BigInt(sequence));
-		group.writeFrame(textFrame("frame"));
+		group.writeFrame(textFrame("frame", Timestamp.fromMillis(sequence)));
 		group.finish();
 	};
 	for (let sequence = 0; sequence < 8; sequence++) append(sequence);
@@ -2600,7 +2606,7 @@ async function serve(
 			start === undefined
 				? track.createGroup(BigInt(sequence))
 				: hooks.receiveGroup(track, { start: BigInt(sequence), offset: start });
-		for (const frame of frames) group.writeFrame(textFrame(frame));
+		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
 		group.finish();
 
 		// Let the publisher drain each group before the next, so the streams arrive in
@@ -3420,7 +3426,7 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 	}
 });
 
-test.each([0, 1])("lite draft-07 reports the cached largest position when starting at group %s", async (start) => {
+test.each([0, 1])("lite draft-07 reports the cached largest position when starting at time %s", async (start) => {
 	const startGroup = BigInt(start);
 	const version = Version.DRAFT_07;
 	const pair = createMockTransportPair(ALPN_07_WIP);
@@ -3447,7 +3453,8 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
-		expect(response.start.starts[0]).toBe(startGroup);
+		// Either time falls in group 0, the only group, which lite-07 starts at.
+		expect(response.start.starts[0]).toBe(0n);
 		// The group finished, so the answer says it ended.
 		expect(response.start.largest).toEqual({ position: { group: 0n, frame: 0 }, ended: true });
 	} finally {

@@ -974,12 +974,7 @@ export class Consumer {
 			}
 
 			const head = this.#groups.at(0);
-			if (
-				starting === undefined &&
-				head &&
-				this.#active !== undefined &&
-				head.consumer.start <= this.#active
-			) {
+			if (starting === undefined && head && this.#active !== undefined && head.consumer.start <= this.#active) {
 				const seq = head.consumer.start;
 				const frame = head.frames.shift();
 				if (frame) {

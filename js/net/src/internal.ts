@@ -716,6 +716,13 @@ export const hooks: {
 	 * `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
 	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
+	/**
+	 * Tell a lite-07 copy where its publisher started each live range counting back from the
+	 * latest group, as `[back, start]` pairs, replacing the last set: the copy holds only part of
+	 * the track, so a reader's relative start counts back as the publisher did. Assigned by
+	 * `track.ts`.
+	 */
+	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -1094,6 +1101,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	timeStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
+	relativeStarts: () => {
 		throw new Error("track.ts not loaded");
 	},
 	servingRuns: () => {

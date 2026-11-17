@@ -11,7 +11,6 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
 import { hooks, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
-import { requestedGroups } from "./mock.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
@@ -288,7 +287,11 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 	const requests = tb.producer.requests();
 	const fills: track.FillGroups[] = [];
 	void (async () => {
-		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) fills.push(fill);
+		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			// The replacement asks from the reader's newest group, which this route never held.
+			if (fill.kind === "lookup") fill.close();
+			else fills.push(fill);
+		}
 	})();
 	tb.write(6n);
 	tb.producer.finish();
@@ -299,6 +302,9 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 		ta.write(5n);
 		expect(drain(sub)).toEqual([5n]);
 		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		// The route's handler first answers where the reader's newest group falls on it.
+		expect(drain(sub)).toEqual([]);
 		await clock.advance(Duration.ZERO);
 		expect(drain(sub)).toEqual([6n]);
 		await clock.advance(Duration.ZERO);
@@ -925,13 +931,15 @@ test("readers owed nothing below the incumbent's end end cleanly when the replac
 	tb.producer.abort(new StreamError(StreamCode(64)));
 	await settle();
 
-	expect(await later.recvGroup()).toBeUndefined();
-	const groups: bigint[] = [];
-	for (let group = await joiner.recvGroup(); group; group = await joiner.recvGroup()) {
-		groups.push(group.start);
-		group.close();
+	// Time 3 falls in group 1, the incumbent's latest, so the later reader takes it as the Rust does.
+	for (const reader of [later, joiner]) {
+		const groups: bigint[] = [];
+		for (let group = await reader.recvGroup(); group; group = await reader.recvGroup()) {
+			groups.push(group.start);
+			group.close();
+		}
+		expect(groups).toEqual([1n]);
 	}
-	expect(groups).toEqual([1n]);
 
 	later.close();
 	joiner.close();
@@ -1060,7 +1068,11 @@ test("a replacement that delivered is not undone by a reader whose window skippe
 	const ta = copy(a);
 	const tb = copy(b);
 	const first = active.track("seq").subscribe();
-	const later = active.track("seq").subscribe({ ranges: [{ start: { time: 3n } }] });
+	// Bounded by key: a time start would resolve to the group containing it, group 0 or 1 here.
+	const later = active
+		.track("seq")
+		.subscribe()
+		.withRange({ start: { included: 3n } });
 	ta.write(0n);
 	expect(drain(first)).toEqual([0n]);
 	expect(drain(later)).toEqual([]);
@@ -2850,7 +2862,7 @@ test("a fetch still out on the old route moves to the new one", async () => {
 });
 
 // A front's reader reports the serving copy's largest only within its bounds: the cap it sets
-// and the floor its subscription names.
+// and the start its subscription names.
 test("the largest honours the reader's bounds on the serving copy", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2868,10 +2880,11 @@ test("the largest honours the reader's bounds on the serving copy", async () => 
 	capped.withRange({});
 	expect(await next).toEqual({ group: 4n, frame: 0 });
 
-	const floor = floored.largest();
-	expect(await isPending(floor)).toBe(true);
+	// Time 8 is past the copy's edge, so it starts at group 4, the group containing it, and reports
+	// that copy's largest, as the Rust `largest_honours_the_subscription_start_on_the_serving_copy`.
+	expect(await floored.largest()).toEqual({ group: 4n, frame: 0 });
 	ta.write(8n);
-	expect(await floor).toEqual({ group: 8n, frame: 0 });
+	expect(await floored.largest()).toEqual({ group: 8n, frame: 0 });
 
 	capped.close();
 	floored.close();
@@ -3438,7 +3451,7 @@ test.each([
 			}
 			return sequences;
 		};
-		const asked = () => tb.producer.subscription.peek()?.ranges?.[0]?.start?.absolute;
+		const asked = () => tb.producer.subscription.peek()?.ranges?.[0]?.start?.time;
 		try {
 			sub.withRange({ start: { included: 4n } });
 			await clock.advance(Duration.ZERO);

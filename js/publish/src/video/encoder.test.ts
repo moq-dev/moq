@@ -182,7 +182,7 @@ test("encoding tracks encoder config in its child effect", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 
-	const track = new Moq.Track.Producer("video/hd").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const track = new Moq.Track.Producer("video/hd").accept({ timescale: Moq.Time.Timescale.MICRO });
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
@@ -225,7 +225,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 	using _videoEncoder = installFakeVideoEncoder();
 	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
 
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, priority: 60 });
 	const live = new Signal<Moq.Track.Producer | undefined>(track);
 	const rendition = {
 		slot: new Signal(undefined),
@@ -282,7 +282,7 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 test("a bandwidth estimate updates the bitrate without blanking the config or re-probing", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
 		slot: new Signal(undefined),
@@ -359,7 +359,7 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 
 // The broadcast's current catalog, read through a fresh subscriber, which the producer seeds.
 async function readCatalog(broadcast: Broadcast): Promise<Catalog.Root | undefined> {
-	const track = new Moq.Track.Producer("catalog.json");
+	const track = new Moq.Track.Producer("catalog.json").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const effect = new Effect();
 	broadcast.catalog.serve(track, effect);
 	try {
@@ -382,7 +382,7 @@ test("every published config fits a probe for its own codec", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	FakeVideoEncoder.accepted = [];
 
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
 		slot: new Signal(undefined),
@@ -817,7 +817,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
 	);
 
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO });
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
@@ -986,7 +986,7 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	const probe = spyOn(FakeVideoEncoder, "isConfigSupported");
 
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
 		slot: new Signal(undefined),
@@ -1417,12 +1417,12 @@ test.each(["off", "all"] as const)(
 			if (onDemand) {
 				// The subscriber's arrival started the encoder, so its first frame opened the only group.
 				expect(recording.keys).toEqual([200]);
-				expect(groups).toEqual([0n]);
+				expect(groups).toEqual([200_000n]);
 				expect(firsts).toEqual([200]);
 			} else {
 				// Both groups were cached before it arrived, and its join forced no fresh keyframe.
 				expect(recording.keys).toEqual([0, 100]);
-				expect(groups).toEqual([0n, 1n]);
+				expect(groups).toEqual([0n, 100_000n]);
 				expect(firsts).toEqual([0, 100]);
 			}
 		} finally {
@@ -1608,7 +1608,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		await flush();
 		const siblingTrack = sibling.track.peek();
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
-		expect(siblingTrack.appendGroup().start).toBe(0n);
+		expect(siblingTrack.appendGroup(Moq.Time.Timestamp.fromMicros(0)).start).toBe(0n);
 		catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: net.track(Broadcast.CATALOG_TRACK) });
 		expect((await catalog.latest())?.value.video?.renditions["video/hd"]?.enabled).not.toBe(false);
 		const live = FakeVideoEncoder.instances.find((instance) => instance.state === "configured");
@@ -1624,7 +1624,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
 		expect(siblingTrack.closed.peek()).toBeUndefined();
-		expect(siblingTrack.appendGroup().start).toBe(1n);
+		expect(siblingTrack.appendGroup(Moq.Time.Timestamp.fromMicros(1)).start).toBe(1n);
 		const instances = FakeVideoEncoder.instances.length;
 		broadcast.audio("audio/new");
 		estimate.set(20_000_000);
@@ -1667,7 +1667,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);
 		expect(announced?.active.peek()?.instance).toBe(epoch);
-		expect(siblingTrack.appendGroup().start).toBe(2n);
+		expect(siblingTrack.appendGroup(Moq.Time.Timestamp.fromMicros(2)).start).toBe(2n);
 	} finally {
 		subscriber?.close();
 		siblingSubscriber?.close();
@@ -1793,7 +1793,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 		{ clone: (frame) => frame.clone(), release: (frame) => frame.close() },
 	);
 
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO });
 	const rendition = {
 		slot: new Signal(undefined),
 		config: new Signal(undefined),
@@ -1867,7 +1867,7 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 // catalog. Only a rise does.
 test("the catalog bitrate and frame rate only rise", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MICRO, priority: 60 });
 	const sub = track.subscribe();
 	const rendition = {
 		slot: new Signal(undefined),

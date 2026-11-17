@@ -200,8 +200,7 @@ export async function readFrames(
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
 		if (!frame || frame instanceof Error) return undefined;
 		if ("end" in frame) {
-			if (frame.end <= producer.start)
-				throw malformed(`GROUP_END at ${frame.end}, not past the group's start`);
+			if (frame.end <= producer.start) throw malformed(`GROUP_END at ${frame.end}, not past the group's start`);
 			// The FIN may never come, so the group's own close, such as an abort or eviction, still
 			// ends the wait.
 			const done = await race([stream.done(), producer.closed]);

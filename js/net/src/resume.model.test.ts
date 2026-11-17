@@ -302,6 +302,19 @@ function covers(reader: Reader, group: number): boolean {
 	return within(reader.cursor, group);
 }
 
+/**
+ * Whether the reader may be handed `group`: inside its local bounds and before its range's end.
+ * The range starts at the group containing its start time among those the copy that resolved it
+ * held, which may be a lower one, so a group below the start may be read too, though only one at
+ * or past where the range resolved (`resolved`). Mirrors the Rust model's `Reader::admits`.
+ */
+function admits(reader: Reader, group: number, resolved: number | undefined): boolean {
+	const range = reader.ranges;
+	const ranges =
+		range === undefined || (group < range[1] && (group >= range[0] || resolved === undefined || resolved <= group));
+	return ranges && within(reader.local, group);
+}
+
 /** Everything observed, to tell whether a poll found anything new. */
 function observed(reader: Reader): string {
 	let read = 0;
@@ -645,8 +658,14 @@ class Model {
 				if (reader.spec.ordered && last !== undefined && last >= sequence) {
 					throw fail(index, `group ${sequence} out of order after ${reader.handed}`);
 				}
-				if (!covers(reader, sequence)) {
-					throw fail(index, `group ${sequence} outside cursor ${reader.cursor}, ranges ${reader.ranges}`);
+				// Only an arrival cursor says where its range resolved.
+				const start = reader.spec.ordered ? undefined : hooks.servingResolved(reader.sub)[0]?.start;
+				const resolved = start === undefined ? undefined : Number(start);
+				if (!admits(reader, sequence, resolved)) {
+					throw fail(
+						index,
+						`group ${sequence} outside ranges ${reader.ranges} (resolved from ${resolved}) and bounds ${reader.local}`,
+					);
 				}
 				if (!instance.written.has(sequence)) {
 					throw fail(index, `group ${sequence} handed out before any route had it`);
