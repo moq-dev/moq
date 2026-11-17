@@ -7,14 +7,14 @@ import type { Goaway } from "../connection/goaway.ts";
 import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError, sessionClosed } from "../error.ts";
+import { error, fromClose, ProtocolViolation, StreamCode, StreamError, sessionClosed } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
 import { withTimeout } from "../util/timeout.ts";
 import { registerWire } from "../wire.ts";
 import * as Cluster from "./cluster.ts";
-import type { RequestKind } from "./error.ts";
+import { IetfSessionCode, type RequestKind } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
@@ -578,7 +578,7 @@ export class Connection implements Session {
 					}
 					if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
 						throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
-							code: SessionCode.InvalidRequestId,
+							code: IetfSessionCode.InvalidRequestId,
 						});
 					}
 					// Reject bytes already behind GOAWAY before a caller can close on the drain.
