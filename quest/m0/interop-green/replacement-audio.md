@@ -12,6 +12,14 @@ Chromium runs the case again by default. Its audio no longer goes silent across 
 starved viewer skips: the restarted decoder is re-primed on the frames before each gap, and a gap
 lands what the decoder still holds instead of resetting it away.
 
+Decided 2026-11-16 (maintainer, on [moq-dev/moq#8980](https://github.com/moq-dev/moq/pull/8980#issuecomment-6943194650)):
+
+- ✅ Lift the quarantine on Chromium even though loaded runs still fail about one in six (rejected:
+  keep it until the underruns are fixed). What still fails there is the steady-state starvation the
+  sibling cases share, not the gaps.
+- ✅ Leave Firefox to this quest (rejected: fix it in that PR). Its fallback misses the bound as
+  often before the gap fixes as after, so it is a separate cause.
+
 On Firefox, the fallback (`live incumbent fallback plays`) misses its 1039 ms bound about one run in
 five on an unloaded host, as often before those fixes as after: one failing run had neither a
 picture nor started audio, another a picture with the audio stalled. Root-cause it on Firefox first,

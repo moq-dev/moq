@@ -2631,7 +2631,8 @@ mod tests {
 		let frames = first.data.len() / size_of::<f32>();
 		assert!(frames < 960, "the pre-skip should be trimmed, got {frames} frames");
 
-		// The hole is real, but stream-level pre-skip does not start over. The audio is stamped where the packet says rather than 2.5 ms early.
+		// The hole is real, but stream-level pre-skip does not start over. The audio is
+		// stamped where the packet says rather than 2.5 ms early.
 		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		assert_eq!(second.timestamp.as_micros().unwrap(), 22_500);
 		assert_eq!(second.data.len() / size_of::<f32>(), 960, "pre-skip was reapplied");
