@@ -316,20 +316,38 @@ where
 
 /// Assert the invariant every path holds once built: its spelling parses back to it under
 /// the strict constructor, and so does every run of its leading segments, which is what
-/// stats grouping and announce compression derive from it. Only a run ending at an
-/// escaped `/` has no head, since it would end in half an escape.
+/// stats grouping and announce compression derive from it.
 fn assert_strict(path: &Path) {
 	let reparsed = Path::new(path.as_str()).unwrap_or_else(|err| panic!("{path:?} is refused: {err}"));
 	assert_eq!(reparsed, *path, "{path:?} did not parse back to itself");
 	let count = path.parts().count();
 	for n in 0..=count {
 		let cut = path.parts().take(n).collect::<Vec<_>>().join("/");
-		match path.head(n) {
-			Some(head) => assert_eq!(Path::new(&cut), Ok(head), "{path:?} has a wrong head at {n}"),
-			None => assert!(cut.ends_with('\\'), "{path:?} has no head at {n}"),
-		}
+		assert_eq!(Path::new(&cut).ok(), path.head(n), "{path:?} has a wrong head at {n}");
 	}
 	assert!(path.head(count + 1).is_none(), "{path:?} has a head past its segments");
+}
+
+/// The segments of `s` by a byte-at-a-time reading of the escape, independent of
+/// [`Path::parts`]: a `\` takes the byte after it, and only a bare `/` separates.
+fn escaped_segments(s: &str) -> Vec<String> {
+	if s.is_empty() {
+		return Vec::new();
+	}
+	let mut out = vec![String::new()];
+	let mut chars = s.chars();
+	while let Some(c) = chars.next() {
+		let segment = out.last_mut().expect("never empty");
+		match c {
+			'\\' => {
+				segment.push(c);
+				segment.extend(chars.next());
+			}
+			'/' => out.push(String::new()),
+			c => segment.push(c),
+		}
+	}
+	out
 }
 
 /// Read the input as a moq-lite path, whatever its kind, and hold it to [`assert_strict`].
@@ -1948,15 +1966,24 @@ pub fn path(data: &[u8]) -> bool {
 
 	let (target, base) = text.split_once('\n').unwrap_or((text, ""));
 
-	// A spelling is refused exactly when it is over the limit, has an empty segment, or has
-	// a `\` escaping anything but `\` or `/`, so each path has one spelling.
+	// A spelling is refused exactly when it is over the limit, has a `\` escaping anything but
+	// `\` or `/`, or has an empty segment, so each path has one spelling.
+	let paired = |segment: &str| {
+		let mut bytes = segment.bytes();
+		while let Some(b) = bytes.next() {
+			if b == b'\\' && !matches!(bytes.next(), Some(b'\\' | b'/')) {
+				return false;
+			}
+		}
+		true
+	};
 	for s in [target, base] {
 		let expected = if s.len() > Path::MAX_BYTES {
 			Err(crate::path::Error::TooLong)
-		} else if !s.is_empty() && s.split('/').any(str::is_empty) {
-			Err(crate::path::Error::EmptySegment)
-		} else if s.replace(r"\\", "").replace(r"\/", "").contains('\\') {
+		} else if escaped_segments(s).iter().any(|segment| !paired(segment)) {
 			Err(crate::path::Error::InvalidEscape)
+		} else if escaped_segments(s).iter().any(String::is_empty) {
+			Err(crate::path::Error::EmptySegment)
 		} else {
 			Ok(())
 		};
@@ -1970,6 +1997,26 @@ pub fn path(data: &[u8]) -> bool {
 	// through the wire would drift.
 	assert_strict(&target);
 	assert_eq!(target.parts().collect::<Vec<_>>().join("/"), target.as_str());
+
+	// The walk splits where the escape says, from either end, and each segment's content
+	// escapes back to the segment.
+	let segments = escaped_segments(target.as_str());
+	assert_eq!(target.parts().collect::<Vec<_>>(), segments, "{target:?} split wrongly");
+	assert!(
+		target.parts().rev().eq(segments.iter().rev()),
+		"{target:?} split wrongly from the back"
+	);
+	for segment in &segments {
+		let content = crate::path::unescape(segment);
+		assert_eq!(&content.replace('\\', r"\\").replace('/', r"\/"), segment);
+	}
+	assert_eq!(
+		target.is_hidden(),
+		segments
+			.iter()
+			.any(|segment| crate::path::unescape(segment).starts_with('.')),
+		"{target:?} hid wrongly"
+	);
 
 	// A prefix is a prefix whichever way you ask.
 	assert_eq!(
@@ -2009,15 +2056,10 @@ pub fn path(data: &[u8]) -> bool {
 	// Resolving arbitrary references must stay inside the clamped/unclamped contract:
 	// `try_resolve` only refuses by walking above the root, so whenever it answers, it
 	// answers the same as `resolve`.
-	match Relative::new(base.as_str()) {
-		Ok(rel) => {
-			if let Some(resolved) = target.try_resolve(&rel) {
-				assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
-			}
-		}
-		// Only dropping a `.` segment can make a valid path an invalid reference, by stranding
-		// the `\` of the escaped `/` before it.
-		Err(err) => assert_eq!(err, crate::path::Error::InvalidEscape, "{base:?} is no reference"),
+	// Dropping `.` segments leaves whole ones, so every valid path is a valid reference.
+	let rel = Relative::new(base.as_str()).unwrap_or_else(|err| panic!("{base:?} is no reference: {err}"));
+	if let Some(resolved) = target.try_resolve(&rel) {
+		assert_eq!(Ok(resolved), target.resolve(&rel), "try_resolve disagreed with resolve");
 	}
 
 	// The moq-transport namespace tuple is the same path back, so the mapping is symmetric.

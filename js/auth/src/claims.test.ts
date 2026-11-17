@@ -114,6 +114,17 @@ test("authorize - no access at path", () => {
 	expect(() => authorize(claims("", ["demo/**"], []), "other")).toThrow(/grants no access/);
 });
 
+test("authorize - reads an escaped separator as content", () => {
+	// `a\/b` is one segment holding a `/`, the spelling of a moq-transport field.
+	const grant = claims("room", ["a\\/b/*"], ["*"]);
+	expect(texts(authorize(grant, "room/a\\/b"))).toEqual({ subscribe: ["*"], publish: [""] });
+	expect(authorize(grant, "room").publish.matches("a\\/b")).toBe(true);
+	expect(authorize(grant, "room").publish.matches("a/b")).toBe(false);
+	expect(authorize(claims("room", ["**"], []), "//room/a\\///").subscribe.toJSON()).toEqual(["**"]);
+	// `a\` ends inside that segment, so it is no path the root covers.
+	expect(() => authorize(claims("a\\/b", ["**"], []), "a\\")).toThrow(/does not overlap/);
+});
+
 test("authorize - wildcards rebase as a set", () => {
 	// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
 	const permissions = authorize(claims("", ["**/chat"], []), "chat");

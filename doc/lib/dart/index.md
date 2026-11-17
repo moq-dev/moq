@@ -5,6 +5,8 @@ description: Futures and streams for Flutter via the moq package
 
 # Dart and Flutter
 
+**Experimental:** the API may change in any release, and nobody has run it on iOS or in a Flutter application yet.
+
 [![pub.dev](https://img.shields.io/pub/v/moq)](https://pub.dev/packages/moq)
 
 The [`moq`](https://pub.dev/packages/moq) package on pub.dev wraps the

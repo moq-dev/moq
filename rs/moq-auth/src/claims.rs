@@ -702,6 +702,22 @@ mod tests {
 	}
 
 	#[test]
+	fn test_authorize_reads_an_escaped_separator_as_content() {
+		// `a\/b` is one segment holding a `/`, the spelling of a moq-transport field.
+		let claims = authorize_claims("room", &[r"a\/b/*"], &["*"]);
+		let permissions = claims.authorize(r"room/a\/b").unwrap();
+		assert_eq!(permissions.subscribe, patterns(&["*"]));
+		assert_eq!(permissions.publish, patterns(&[""]));
+		assert!(claims.authorize("room").unwrap().publish.matches(r"a\/b"));
+		assert!(!claims.authorize("room").unwrap().publish.matches("a/b"));
+		// `a\` ends inside that segment, so it is no path the root covers.
+		assert!(matches!(
+			authorize_claims(r"a\/b", &["**"], &[]).authorize(r"a\"),
+			Err(crate::Error::RootMismatch(_))
+		));
+	}
+
+	#[test]
 	fn test_authorize_wildcards_rebase_as_a_set() {
 		// `**/chat` reached at `chat` is both the path itself and deeper `**/chat`.
 		let claims = authorize_claims("", &["**/chat"], &[]);
