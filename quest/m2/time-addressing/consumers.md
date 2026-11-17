@@ -132,10 +132,6 @@ consumer and producer mirror it. Wire: hang drops empty duration frames and
 discontinuity marker groups on lite-07; the hang-04 draft never specifies
 them.
 
-## Required
-
-- [@moq/net by start](/quest/m2/time-addressing/js.md) - the JS API these consume
-
 ## Related
 
 - [A group's frames present before the next group starts](/quest/m3/groups-never-overlap.md) - tightens the group rule a declared end relies on

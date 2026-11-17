@@ -198,7 +198,6 @@ the version that ships them.
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
-- [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire
 
 ## Related
 
