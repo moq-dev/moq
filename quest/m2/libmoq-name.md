@@ -67,8 +67,10 @@ For the PR:
   keeps the move to the generated API for when that publishes.
 - The Nightly size report names four `moq-c-<target>` archives, and
   `sh/size/report.py` refuses a renamed series. Rename them in the report
-  and restart the history with the delete command in `sh/size/README.md`, or
-  land with it.
+  and restart the history with the delete command in `sh/size/README.md`:
+  run it after the rename merges and before the next Nightly, since deleting
+  earlier lets a Nightly rewrite a history that still names the old series, and
+  merging without it fails every later Nightly.
 - Docs: strike "stable ABI" from `doc/lib/index.md` and `doc/lib/c`, and say
   what is true: `libmoq` 0.22 is the hand-written API's last minor, and a
   generated `moq-c` replaces it.
