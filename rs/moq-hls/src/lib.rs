@@ -9,7 +9,9 @@
 //!   HTTP for MoQ broadcasts (an HTTP *server*). It subscribes only to each
 //!   broadcast's catalog and numbers segments on its `sync.interval` grid; media
 //!   bytes are FETCHed from the relay one group at a time, only when a segment
-//!   is actually requested.
+//!   is actually requested. Until the catalog declares `sync.interval`, a
+//!   non-lazy server also holds its video and audio tracks subscribed, so an
+//!   on-demand publisher produces the media its interval is measured from.
 //!   It serves every request; gate access by layering your own middleware onto
 //!   [`Server::router`](server::Server::router), or parse and authorize each request
 //!   yourself and answer it with [`Server::respond`](server::Server::respond).
