@@ -62,15 +62,13 @@ Not in this sweep, with their owners:
 
 - `Subscriber::next_in_range`, `is_skipped`, and `poll_start` have one
   consumer, moq-mux's container reader, which orders groups itself.
-  [Group drops](/quest/m2/group-drops.md) adds `Gap` to `track::Ordered`;
-  once the container reader moves onto it these three can go private.
+  `track::Ordered` now reports a `Gap`; once the container reader moves onto it
+  these three can go private.
 - `socket::is_endpoint` leaves with
   [socket endpoints](/quest/m2/sockets/remove.md).
 - `origin::Producer::update_hold`, `with_proxy`, `Source`, `source()`,
   `Consumer::local()`, `origin::RouteKey`, and `Config::route_key` belong to
   [the route switch](/quest/m2/multicast/switch.md).
-- `setup::Extensions` belongs to
-  [the `ietf` extension](/quest/m2/ietf-records-per-track.md).
 
 Run `just api-diff rust` after the change and list
 every item it shows removed in the PR's Impact section.
@@ -82,4 +80,3 @@ Public API: breaking, removals only (`Position::after`, `after_group`,
 ## Related
 
 - [moq-net's node, version, handshake, and route priority](/quest/m2/net-renames.md) - makes `Version` opaque
-- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - gives the container reader the `Gap` that frees three more methods

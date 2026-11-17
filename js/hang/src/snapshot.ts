@@ -1,5 +1,5 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./catalog/integers";
+import { u53Schema } from "./catalog/integers.ts";
 
 /** An optional measurement, with JSON null decoded as unavailable like Rust Option. */
 export const measurementSchema = z.optional(

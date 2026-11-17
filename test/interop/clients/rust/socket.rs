@@ -62,7 +62,11 @@ async fn main() -> anyhow::Result<()> {
 	}
 	let _producer = producer.finish()?;
 	for start in 0..3 {
-		let mut next = consumer.next_group().await?.context("short track")?;
+		let mut next = consumer
+			.next_group()
+			.await?
+			.and_then(moq_net::track::Item::group)
+			.context("short track")?;
 		ensure!(next.start == start, "wrong group order");
 		group(&mut next).await?;
 	}

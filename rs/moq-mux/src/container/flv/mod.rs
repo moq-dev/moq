@@ -26,7 +26,7 @@ mod import;
 pub use export::*;
 pub use import::*;
 
-/// FLV export errors.
+/// FLV import and export errors.
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -73,6 +73,11 @@ pub enum Error {
 	/// The audio codec has no FLV or enhanced-RTMP mapping.
 	#[error("FLV export does not support audio codec {0}")]
 	UnsupportedAudioCodec(String),
+
+	/// The FLV stream an import reads breaks the format, or uses a codec or layout it does not
+	/// carry.
+	#[error("{0}")]
+	Malformed(String),
 }
 
 #[cfg(test)]

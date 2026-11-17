@@ -205,9 +205,16 @@ impl Track {
 		if let Self::Subscribing(pending) = self {
 			*self = Self::Ordered(Box::new(std::task::ready!(pending.poll_ok(waiter))?.ordered()));
 		}
-		match self {
-			Self::Ordered(track) => track.poll_next_group(waiter),
-			Self::Subscribing(_) => unreachable!("resolved above"),
+		let Self::Ordered(track) = self else {
+			unreachable!("resolved above")
+		};
+		// A snapshot is the newest group's content, so a group given up on changes nothing.
+		loop {
+			match std::task::ready!(track.poll_next_group(waiter))? {
+				Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
+				Some(moq_net::track::Item::Gap { .. }) => continue,
+				None => return Poll::Ready(Ok(None)),
+			}
 		}
 	}
 }

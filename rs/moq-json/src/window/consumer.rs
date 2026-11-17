@@ -73,11 +73,13 @@ impl<T: DeserializeOwned> Consumer<T> {
 
 			let Some(group) = &mut self.group else {
 				match self.track.poll_next_group(waiter)? {
-					Poll::Ready(Some(group)) => {
+					Poll::Ready(Some(moq_net::track::Item::Group(group))) => {
 						self.codec = Some(Codec::new());
 						self.group = Some(group);
 						continue;
 					}
+					// The window advances by index, so a group given up on is read past.
+					Poll::Ready(Some(moq_net::track::Item::Gap { .. })) => continue,
 					Poll::Ready(None) => return Poll::Ready(Ok(None)),
 					Poll::Pending => return Poll::Pending,
 				}
