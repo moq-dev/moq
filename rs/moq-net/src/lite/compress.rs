@@ -274,7 +274,7 @@ impl AnnounceEncoder {
 	pub fn insert(&mut self, path: Path) -> u64 {
 		let id = self.live.next;
 		self.live.next += 1;
-		self.heads.insert(path.parts(), id);
+		self.heads.insert(raw_parts(&path), id);
 		self.live.suffixes.insert(id, path);
 		id
 	}
@@ -497,6 +497,12 @@ mod tests {
 		// A head ending inside an escape that nothing completes is refused, its id assigned.
 		assert_eq!(decoder.start(Some(path(3, 2, ""))).unwrap(), None);
 		assert_eq!(decoder.last(), 3);
+
+		// A claim an edit inserts is indexed the same way, so its end leaves nothing behind.
+		let mut encoder = AnnounceEncoder::new(VERSION);
+		let id = encoder.insert(Path::from_static(r"a\/b"));
+		encoder.end(id);
+		assert!(encoder.heads.children.is_empty());
 	}
 
 	#[test]
