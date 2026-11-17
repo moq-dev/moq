@@ -34,4 +34,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Session codes](/quest/m2/session-codes.md) - errors classify themselves in moq-net
+- [Session codes](https://github.com/moq-dev/moq/commit/b4c1db719358a25e351771e8ad33f01d45169bb0) - errors classify themselves in moq-net

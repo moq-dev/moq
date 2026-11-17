@@ -19,11 +19,11 @@ On `release` too, from the original batching design.
 
 Recommended: record the value each listener added during a pending
 notification saw, and deliver to it when the final value differs. No API
-change, so it does not touch [signal semantics](/quest/m2/signals-semantics.md)'s
+change, so it does not touch [signal semantics](https://github.com/moq-dev/moq/commit/bc66d3eaecc1e2e02e07aeccb1d2f167dce496e5)'s
 frozen shape. Add the repro as a test.
 
 Public API: none. Wire: none.
 
 ## Related
 
-- [Signal semantics](/quest/m2/signals-semantics.md) - changes `update`, `mutate`, and `set(v, false)`
+- [Signal semantics](https://github.com/moq-dev/moq/commit/bc66d3eaecc1e2e02e07aeccb1d2f167dce496e5) - changes `update`, `mutate`, and `set(v, false)`
