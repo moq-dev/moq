@@ -686,6 +686,17 @@ test("a voice source sends nothing while its talker is silent", async () => {
 	await push(1_000_000, 5, false);
 	await push(1_100_000, 1, true);
 	expect(written).toEqual([[500_000, 0], ...frames(1_080_000, 2)]);
+
+	// A mute between two captures that leaves no gap still starts the gate shut: the hangover from
+	// before it sends nothing after the declared end.
+	written.length = 0;
+	encoder.muted.set(true);
+	await settle();
+	encoder.muted.set(false);
+	await settle();
+	await push(1_120_000, 5, false);
+	await push(1_220_000, 1, true);
+	expect(written).toEqual([[1_120_000, 0], ...frames(1_200_000, 2)]);
 });
 
 // With `idle="release"` a mute closes the microphone, taking its format away. The rendition stays

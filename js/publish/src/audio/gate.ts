@@ -29,7 +29,7 @@ export interface GateProps {
  * SILK's voice activity detector scores the audio. Once it has been silent past a 200 ms hangover,
  * frames are held back instead of passed on. Speech reopens the gate, with the held frames covering
  * one analysis block sent first as pre-roll, so a soft onset the detector scored late is not
- * clipped. A gap in the frames' timeline, such as a mute, resets it shut.
+ * clipped. A mute, or any other gap in the frames' timeline, resets it shut.
  */
 export class Gate {
 	readonly #vad: Vad;
@@ -57,7 +57,7 @@ export class Gate {
 
 	/** Score one codec frame ending at `end`, returning the frames to encode now, in order. */
 	push(frame: AudioFrame, end: Duration): Gated[] {
-		if (this.#end !== undefined && !frame.timestamp.eq(this.#end)) this.#reset();
+		if (this.#end !== undefined && !frame.timestamp.eq(this.#end)) this.reset();
 		this.#end = end;
 
 		this.#speech = this.#vad.push(frame) ?? this.#speech;
@@ -86,8 +86,8 @@ export class Gate {
 		return [];
 	}
 
-	// A new timeline starts shut, with nothing held from the old one.
-	#reset(): void {
+	/** Start shut with nothing held, as after a mute, keeping the detector's learned noise floor. */
+	reset(): void {
 		this.#state = { open: false, held: [] };
 		this.#speech = false;
 		this.#vad.reset();

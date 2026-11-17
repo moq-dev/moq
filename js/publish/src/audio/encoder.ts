@@ -932,6 +932,8 @@ export class Encoder {
 					// The capture resumes on a later timeline, so drop the partial frame and filter state.
 					resampler = createResampler();
 					framer = createFramer(resolved, config.sampleRate);
+					// The gate would miss a resume that leaves no gap in the timeline.
+					gate?.reset();
 					pause();
 				});
 
