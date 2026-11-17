@@ -4538,8 +4538,11 @@ pub unsafe extern "C" fn moq_consume_catalog(
 pub unsafe extern "C" fn moq_consume_catalog_timestamp(catalog: u32, dst: *mut moq_timestamp) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
-		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
-		*dst = State::lock().consume.catalog_timestamp(catalog)?;
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+		let timestamp = State::lock().consume.catalog_timestamp(catalog)?;
+		unsafe { dst.write(timestamp) };
 		Ok(())
 	})
 }
