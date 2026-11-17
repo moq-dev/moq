@@ -5080,9 +5080,9 @@ test("reading a shed frame head requests refresh", async () => {
 	producer.close();
 });
 
-// An end declared with an error keeps the history below it: a reader gets every group, then the
+// A track ended by `fail` keeps the history below its end: a reader gets every group, then the
 // error, even one arriving after the producer closed.
-test("an errored end keeps its history", async () => {
+test("a failed track keeps its history", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 1n]) {
 		const group = producer.createGroup(sequence);
@@ -5091,7 +5091,7 @@ test("an errored end keeps its history", async () => {
 		group.finish();
 	}
 	const failed = new StreamError(StreamCode(71));
-	producer.finishAt({ group: 2n, frame: 0 }, failed);
+	producer.fail(failed);
 	producer.close();
 	expect(producer.closed.peek()).toBe(failed);
 
@@ -5115,6 +5115,40 @@ test("an errored end keeps its history", async () => {
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0n);
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1n);
 	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
+});
+
+// `fail` ends where `finish` would, after the highest group written, so a late group below it is
+// still taken. Like `finish`, it leaves whatever outcome was already given.
+test("fail ends at the live edge and leaves an end already given", async () => {
+	const failed = new StreamError(StreamCode(71));
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const latest = producer.createGroup(2n);
+	latest.writeFrame(textFrame("c", Timestamp.fromMillis(2)));
+	latest.finish();
+	producer.fail(failed);
+	expect(() => producer.createGroup(3n)).toThrow();
+	const late = producer.createGroup(1n);
+	late.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
+	late.finish();
+	const sub = producer.subscribe({ ranges: [{ start: { absolute: 1n } }], delay: { max: Duration.millis(30_000) } });
+	expect((await sub.recvGroup())?.sequence).toBe(1n);
+	expect((await sub.recvGroup())?.sequence).toBe(2n);
+	await expect(sub.recvGroup()).rejects.toBe(failed);
+	producer.close();
+
+	// An end already declared stands: the track still finishes cleanly.
+	const finished = new TrackProducer("finished").accept({ timescale: Timescale.MILLI, maxAge: null });
+	finished.finish();
+	finished.fail(failed);
+	finished.close();
+	expect(finished.closed.peek()).toBeNull();
+
+	// So does an abort.
+	const aborted = new TrackProducer("aborted").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const cause = new StreamError(StreamCode(70));
+	aborted.abort(cause);
+	aborted.fail(failed);
+	expect(aborted.closed.peek()).toBe(cause);
 });
 
 // Creating a group says nothing about the gap it leaves: groups may be created out of order. An

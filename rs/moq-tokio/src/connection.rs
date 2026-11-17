@@ -2737,12 +2737,14 @@ mod tests {
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -2763,12 +2765,14 @@ mod tests {
 			.unwrap();
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -2829,12 +2833,14 @@ mod tests {
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -2888,12 +2894,14 @@ mod tests {
 		assert!(monitor.stats().is_some());
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -3089,12 +3097,14 @@ mod tests {
 			.unwrap();
 		let mut sub = cam.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let g0 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
@@ -3121,12 +3131,14 @@ mod tests {
 		assert!(!crate::websocket::won(&url), "the race still skips QUIC's head start");
 
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let mut g1 = kio::clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()

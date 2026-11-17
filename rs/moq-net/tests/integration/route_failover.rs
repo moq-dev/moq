@@ -152,9 +152,13 @@ impl Feed {
 			let index = self.written.len() as u64;
 			if index.is_multiple_of(FRAMES) {
 				if let Some(group) = self.group.take() {
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
-				self.group = Some(self.track.append_group(index / FRAMES).unwrap());
+				self.group = Some(
+					self.track
+						.append_group(Timestamp::from_millis(index / FRAMES).unwrap())
+						.unwrap(),
+				);
 			}
 			let group = self.group.as_mut().unwrap();
 			let timestamp = Timestamp::from_millis(index * self.step.as_millis() as u64).unwrap();

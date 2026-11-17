@@ -92,7 +92,7 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 }
 
 /// A WHIP publish for [`accept`]: the raw SDP offer, the producer and broadcast its media
-/// goes to, how it is published, and an optional bitrate cap.
+/// goes to, and how it is published.
 #[non_exhaustive]
 pub struct Request<'a> {
 	/// The producer the media is published into.
@@ -101,10 +101,9 @@ pub struct Request<'a> {
 	pub broadcast: moq_net::Path,
 	/// The raw SDP offer.
 	pub offer: &'a str,
-	/// How the ingested broadcast is published.
+	/// How the ingested broadcast is published, including the [cap](moq_mux::Ingest::rate)
+	/// on the session's media (see [`accept`]).
 	pub ingest: moq_mux::Ingest,
-	/// A live cap on the session's media (see [`accept`]), or `None` to never cap it.
-	pub rate: Option<moq_net::bandwidth::Limit>,
 }
 
 impl<'a> Request<'a> {
@@ -116,7 +115,6 @@ impl<'a> Request<'a> {
 			broadcast: broadcast.into(),
 			offer,
 			ingest: moq_mux::Ingest::default(),
-			rate: None,
 		}
 	}
 }
@@ -144,7 +142,7 @@ impl<'a> Request<'a> {
 /// [`moq_net::Error::Unauthorized`] if the broadcast is
 /// outside the producer's scope.
 ///
-/// [`Request::rate`] caps the session's media; a request is uncapped by default. The answer
+/// The ingest's [rate](moq_mux::Ingest::rate) caps the session's media; it is uncapped by default. The answer
 /// carries a `b=TIAS` line at the cap it holds when the offer is accepted, and the session
 /// repeats a REMB on every video line that negotiated one, following
 /// [`Limit::set`](moq_net::bandwidth::Limit::set) at once. Both steer to nine tenths of the
@@ -161,8 +159,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		publisher,
 		broadcast,
 		offer,
-		ingest,
-		rate,
+		mut ingest,
 	} = request;
 	let (offer, refused) = sdp::parse_offer(offer)?;
 
@@ -199,7 +196,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 	let socket = crate::ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
 	let mut session = session::Session::ingest(rtc, socket, sink)?;
 	let mut cap = None;
-	if let Some(mut rate) = rate {
+	if let Some(mut rate) = ingest.rate.take() {
 		cap = rate.get();
 		session = session.with_rate(rate);
 	}
@@ -275,7 +272,7 @@ mod tests {
 		let offer = offer();
 		let path = moq_net::Path::from_static("live/capped");
 		let mut capped = Request::new(&origin, path, &offer);
-		capped.rate = Some(moq_net::bandwidth::Limit::new(cap));
+		capped.ingest.rate = Some(moq_net::bandwidth::Limit::new(cap));
 		let capped = accept(&server, capped).await.unwrap();
 		assert!(capped.answer.contains("\r\nb=TIAS:900000\r\n"), "{}", capped.answer);
 		str0m::change::SdpAnswer::from_sdp_string(&capped.answer).expect("str0m parses the capped answer");
