@@ -635,6 +635,10 @@ impl SiImport {
 	fn identities(count: u16) -> Self {
 		let mut this = Self::new();
 		this.repeat((0..count).map(|id| (2, 0x80, id)));
+		// The first renewal advertises the SI tracks in the catalog, a one-time publish that would
+		// otherwise land in every timed iteration, since each starts from a fresh importer.
+		this.tick();
+		this.repeat((0..count).map(|id| (2, 0x80, id)));
 		this
 	}
 

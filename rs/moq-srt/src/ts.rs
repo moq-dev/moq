@@ -733,7 +733,8 @@ mod tests {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		let (name, _) = catalog.video.renditions.iter().next().expect("a video rendition");
 		let info = broadcast.track(name.as_str()).unwrap().info().await.unwrap();
 		assert_eq!(info.max_age, Some(Duration::from_secs(3)));

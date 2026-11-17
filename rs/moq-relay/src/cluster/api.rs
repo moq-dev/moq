@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Dynamic peer-list source, independent from mesh TLS trust.
+#[serde_with::serde_as]
 #[derive(usage_rs::Args, Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
@@ -21,27 +22,18 @@ pub struct Config {
 	/// `--cluster-node` value, when set, is sent as a `?node=` query param so the
 	/// server can return this node's peers. The relay keeps the last good list if
 	/// a fetch fails. Composes with `--cluster-connect`.
-
 	#[usage(long = "cluster-api-url", env = "MOQ_CLUSTER_API_URL", setting = "cluster.api.url")]
 	pub url: Option<String>,
-	/// TLS trust used only for the peer-list API.
-	#[usage(flatten)]
-	pub tls: Tls,
-}
 
-/// Server roots for a peer-list API; its client identity comes from the dial template.
-#[serde_with::serde_as]
-#[derive(usage_rs::Args, Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-#[non_exhaustive]
-pub struct Tls {
 	/// PEM roots to use instead of system roots, verifying the API URL's hostname.
+	/// The client identity comes from the dial template; mesh trust never applies.
 	#[usage(
-		long = "cluster-api-tls-root",
-		env = "MOQ_CLUSTER_API_TLS_ROOT",
-		setting = "cluster.api.tls.root"
+		long = "cluster-api-root",
+		env = "MOQ_CLUSTER_API_ROOT",
+		setting = "cluster.api.root"
 	)]
 	#[usage(value_hint = usage_rs::ValueHint::FilePath, extensions("pem", "crt", "cer"))]
+	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub root: Vec<PathBuf>,
 }

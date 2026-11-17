@@ -2622,14 +2622,14 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 }
 
 /// A socket whose output can be held independently of QUIC's flow control.
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[derive(Debug)]
 struct ControlledSocket {
 	inner: super::sim::Socket,
 	output: Arc<Mutex<ControlledOutput>>,
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[derive(Debug, Default)]
 struct ControlledOutput {
 	blocked: bool,
@@ -2640,7 +2640,7 @@ struct ControlledOutput {
 	parked: kio::WaiterList,
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 impl ControlledOutput {
 	/// Wait until a send parks on the blocked socket, past `attempts` earlier ones
 	async fn parked(output: &Mutex<Self>, attempts: usize) {
@@ -2671,7 +2671,7 @@ impl ControlledOutput {
 }
 
 /// A client connected to a server whose output the test holds, with the handshake settled
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 struct Controlled {
 	output: Arc<Mutex<ControlledOutput>>,
 	_client: Endpoint,
@@ -2682,7 +2682,7 @@ struct Controlled {
 	peer: Connection,
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 impl Controlled {
 	async fn connect() -> Self {
 		let network = super::sim::Network::new(1);
@@ -2727,7 +2727,7 @@ impl Controlled {
 	}
 }
 
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 impl AsyncUdpSocket for ControlledSocket {
 	fn poll_recv(
 		&self,
@@ -2773,7 +2773,7 @@ impl AsyncUdpSocket for ControlledSocket {
 }
 
 /// Output resumes on release, and closing never depends on that release.
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[test]
 fn a_close_behind_a_blocked_socket_is_bounded() {
 	for release in [false, true] {
@@ -2824,7 +2824,7 @@ fn a_close_behind_a_blocked_socket_is_bounded() {
 
 /// A datagram the socket held from before a local close is not the CONNECTION_CLOSE, so
 /// sending it leaves `closed` waiting for the close itself.
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 #[test]
 fn closed_waits_past_a_datagram_held_from_before_the_close() {
 	use futures::FutureExt;

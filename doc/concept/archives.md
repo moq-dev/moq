@@ -112,7 +112,7 @@ cannot reliably seek old stored content. There is no automatic switch from a
 live broadcast to its archive at the original path.
 
 The archived catalog is an ordinary track. [HLS](/bin/hls) serves a recording
-from its media tracks, numbered on the catalog's `media.join.interval`, just as
+from its media tracks, numbered on the catalog's `sync.interval`, just as
 it serves a live broadcast; a recording whose catalog declares no interval gets
 no playlists. The [join interval](/concept/hang#catalog) describes HLS
 segmentation, not archive discovery. Protected broadcasts are outside this archive workflow.
