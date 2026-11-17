@@ -6680,8 +6680,12 @@ impl GroupServe {
 											Err(err) => break 'serve Err(err),
 										},
 										None => {
-											match buffer_group_end(writer, self.ctx.version, self.ctx.object_records, &self.group)
-											{
+											match buffer_group_end(
+												writer,
+												self.ctx.version,
+												self.ctx.object_records,
+												&self.group,
+											) {
 												Ok(true) => {
 													*ending = Ending::Whole;
 													continue;
@@ -6737,8 +6741,12 @@ impl GroupServe {
 											Err(err) => break 'serve Err(err),
 										},
 										None => {
-											match buffer_group_end(writer, self.ctx.version, self.ctx.object_records, &self.group)
-											{
+											match buffer_group_end(
+												writer,
+												self.ctx.version,
+												self.ctx.object_records,
+												&self.group,
+											) {
 												Ok(true) => {
 													*ending = Ending::Whole;
 													continue;
