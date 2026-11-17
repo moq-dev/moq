@@ -41,8 +41,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
-- **Relay and transports.** [CPU](/quest/m2/relay-cpu.md), which the
-  memory pairing found; [congestion names](/quest/m2/congestion-names.md);
+- **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md);
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [transport names](/quest/m2/transport-names.md).
 - **Auth and crypto.** [Claims](/quest/m2/auth-claims.md). End-to-end encryption
