@@ -102,7 +102,7 @@ export type BroadcastInput = {
  */
 export type OnDemand = "off" | "retain" | "all";
 
-// The longest group among the video and audio renditions, the catalog's `media.join.interval`: the
+// The longest group among the video and audio renditions, the catalog's `sync.interval`: the
 // promise that every one starts a group at least that often. Undefined while none declares one, so a
 // later listing tries again; it reads every hint until then, since none is fixed yet.
 function longestGroup(effect: Effect, renditions: ReadonlyMap<string, Rendition<unknown>>): Catalog.U53 | undefined {
@@ -133,7 +133,7 @@ export class Broadcast {
 
 	/**
 	 * The catalog, editable at any time regardless of whether anyone is subscribed. The base
-	 * `video`/`audio` sections and `media.join` are folded from the registered renditions (see
+	 * `video`/`audio` sections and `sync.interval` are folded from the registered renditions (see
 	 * {@link Rendition.join}); an application adds its own
 	 * root sections (e.g. `scte35`) by locking it too.
 	 */
@@ -175,7 +175,7 @@ export class Broadcast {
 	readonly #join = new Signal<Duration | undefined>(undefined);
 
 	/**
-	 * The catalog's `media.join.interval` the current network broadcast declared, in milliseconds:
+	 * The catalog's `sync.interval` the current network broadcast declared, in milliseconds:
 	 * the longest group any video or audio rendition promised when media was first listed. Fixed
 	 * for the network broadcast, so an encoder holds its groups within it. Undefined until declared.
 	 */
@@ -326,9 +326,9 @@ export class Broadcast {
 
 		this.catalog.mutate((catalog) => {
 			if (join !== undefined) {
-				catalog.media = { ...catalog.media, join: { interval: join } };
-			} else if (catalog.media) {
-				delete catalog.media.join;
+				catalog.sync = { ...catalog.sync, interval: join };
+			} else if (catalog.sync) {
+				delete catalog.sync.interval;
 			}
 
 			if (Object.keys(video).length > 0) {

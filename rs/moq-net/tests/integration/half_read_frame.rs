@@ -62,7 +62,7 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 	let mut sub = remote.track("file").unwrap().subscribe(prefs).await.unwrap();
 
 	let payload = pattern(SIZE);
-	let group0 = track.append_group(0).unwrap();
+	let group0 = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	let mut writing = group0
 		.create_frame(frame::Info {
 			size: SIZE as u64,
@@ -80,11 +80,11 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 	}
 	assert_eq!(got, payload[..HALF]);
 
-	let mut group1 = track.append_group(1).unwrap();
+	let mut group1 = track.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group1
 		.write_frame(Timestamp::from_millis(1).unwrap(), b"next".to_vec())
 		.unwrap();
-	group1.close().unwrap();
+	group1.finish().unwrap();
 	let mut read1 = sub.recv_group().await.unwrap().unwrap();
 	assert_eq!(read1.start, 1);
 	assert_eq!(&read1.read_frame().await.unwrap().unwrap().payload[..], b"next");
@@ -104,7 +104,7 @@ async fn a_half_read_frame_refetches_whole_and_skips_what_was_read() {
 	settle().await;
 
 	writing.write(payload[HALF..].to_vec()).unwrap();
-	writing.finish().unwrap().close().unwrap();
+	writing.finish().unwrap().finish().unwrap();
 
 	while let Some(chunk) = reading.read_chunk().await.unwrap() {
 		got.extend_from_slice(&chunk);

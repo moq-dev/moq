@@ -1497,7 +1497,7 @@ mod tests {
 			panic!("first catalog")
 		};
 		assert_eq!(
-			first.media.clock.unwrap().wall.as_micros().unwrap(),
+			first.sync.clock.unwrap().wall.as_micros().unwrap(),
 			(kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_secs(1_735_689_600))
 				.saturating_duration_since(kio::clock::Wall::MOQ_EPOCH)
 				.as_micros(),
@@ -1536,7 +1536,7 @@ mod tests {
 				let state = control.live.as_ref().unwrap();
 				(
 					state.route.broadcast().consume(),
-					state.catalog.as_ref().unwrap().snapshot().media.clock.unwrap(),
+					state.catalog.as_ref().unwrap().snapshot().sync.clock.unwrap(),
 				)
 			};
 			assert_eq!(
@@ -2470,7 +2470,11 @@ mod tests {
 		};
 		let consumer = broadcast.consume();
 		let track = broadcast.create_track("video", None).unwrap();
-		track.append_group(0).unwrap().close().unwrap();
+		track
+			.append_group(moq_net::Timestamp::unscaled(0))
+			.unwrap()
+			.finish()
+			.unwrap();
 		let track = track.finish().unwrap();
 		assert!(session.finish());
 		while bus.pop().is_some() {}

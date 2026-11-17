@@ -870,9 +870,9 @@ impl MoqMediaCatalogProducer {
 	/// Set an application catalog section from JSON, refusing reserved section names.
 	///
 	/// `json` is any JSON document. Errors with [`MoqError::Json`] if it doesn't parse, or with
-	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `media`, `text`, `json`,
-	/// `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, and
-	/// `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
+	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `sync`, `text`, `json`,
+	/// `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`, `media`,
+	/// and `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
 	/// `initDataList`).
 	pub fn set_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -1692,7 +1692,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		// Newest first, all before the first read. Group 4 covers the min delay alone, so
 		// without the warmup the start would skip group 3; only the warmup's reach keeps it.
@@ -1759,7 +1759,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		first.close().unwrap();
+		first.finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("expected frame")
 		};
@@ -1778,7 +1778,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		marker.close().unwrap();
+		marker.finish().unwrap();
 		assert!(
 			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp, duration }) if timestamp == micros(10_000) && duration == Duration::from_millis(10))
 		);
@@ -1798,7 +1798,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		resumed.close().unwrap();
+		resumed.finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("end is not EOF")
 		};
@@ -2101,14 +2101,10 @@ mod catalog_tests {
 			.await
 			.unwrap();
 			for ms in [1_000, 2_000, 3_000] {
-				let mut group = track.append_group(ms).unwrap();
-				group
-					.write_frame(
-						moq_net::Timestamp::from_millis(ms).unwrap(),
-						format!(r#"{{"app":{ms}}}"#),
-					)
-					.unwrap();
-				group.close().unwrap();
+				let at = moq_net::Timestamp::from_millis(ms).unwrap();
+				let mut group = track.append_group(at).unwrap();
+				group.write_frame(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
+				group.finish().unwrap();
 			}
 			drop(track.finish().unwrap());
 

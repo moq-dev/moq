@@ -1351,7 +1351,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
 	let clock = broadcast
-		.with_state(|state| Ok(state.catalog.snapshot().media.clock))
+		.with_state(|state| Ok(state.catalog.snapshot().sync.clock))
 		.unwrap();
 	// Withhold publication so only the explicit clock read can fix it before the first frame.
 	let reserved = broadcast.with_state(|state| Ok(state.catalog.reserve())).unwrap();
@@ -1371,7 +1371,7 @@ async fn catalog_now_fixes_the_clock_for_later_media() {
 		.unwrap();
 	assert_eq!(
 		broadcast
-			.with_state(|state| Ok(state.catalog.snapshot().media.clock))
+			.with_state(|state| Ok(state.catalog.snapshot().sync.clock))
 			.unwrap(),
 		clock
 	);
@@ -2820,7 +2820,7 @@ async fn next_media(group: &MoqMediaGroupConsumer) -> Result<Option<MoqMediaFram
 async fn media_group_decodes_arrival_order_groups() {
 	let (_broadcast, track, consumer) = legacy_track().await;
 
-	let mut first = track.append_group(0).unwrap();
+	let mut first = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	write_legacy(&mut first, 1, 1_000_000, b"a");
 	let first_media = recv_media_group(&consumer).await;
 	assert_eq!(first_media.sequence(), 0);
@@ -2830,7 +2830,7 @@ async fn media_group_decodes_arrival_order_groups() {
 	assert!(frame.keyframe);
 
 	// A newer group lands while the first is stalled mid-way.
-	let mut second = track.append_group(1).unwrap();
+	let mut second = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut second, 2, 1_040_000, b"c");
 	let second_media = recv_media_group(&consumer).await;
 	assert_eq!(second_media.sequence(), 1);
@@ -2848,8 +2848,8 @@ async fn media_group_decodes_arrival_order_groups() {
 	assert_eq!(micros(frame.timestamp), 1_020_000);
 	assert!(!frame.keyframe);
 
-	first.close().unwrap();
-	second.close().unwrap();
+	first.finish().unwrap();
+	second.finish().unwrap();
 	assert!(next_media(&first_media).await.unwrap().is_none());
 	assert!(next_media(&second_media).await.unwrap().is_none());
 }
@@ -2859,10 +2859,10 @@ async fn media_group_decodes_arrival_order_groups() {
 #[tokio::test]
 async fn media_group_takes_over_an_unread_group() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	write_legacy(&mut group, 1, 1_000_000, b"a");
 	write_legacy(&mut group, 2, 1_020_000, b"b");
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let raw = recv_raw_group(&consumer).await;
 	assert!(raw.read_frame().await.unwrap().is_some());
@@ -2875,7 +2875,7 @@ async fn media_group_takes_over_an_unread_group() {
 		"the refusal kept the raw handle"
 	);
 
-	let mut group = track.append_group(1).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(1).unwrap()).unwrap();
 	write_legacy(&mut group, 3, 1_040_000, b"c");
 	let raw = recv_raw_group(&consumer).await;
 	let media = MoqMediaGroupConsumer::new(&raw, MoqContainer::Legacy).unwrap();
@@ -2891,7 +2891,7 @@ async fn media_group_takes_over_an_unread_group() {
 #[tokio::test]
 async fn media_group_fails_loudly_on_bad_containers() {
 	let (_broadcast, track, consumer) = legacy_track().await;
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(moq_net::Timestamp::from_micros(0).unwrap()).unwrap();
 	// A truncated varint timestamp: the 2-byte form with only its first byte.
 	write_raw(&mut group, 1, bytes::Bytes::from_static(&[0x40]));
 
@@ -5732,13 +5732,13 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 		.unwrap();
 	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
 
-	let expired = track.append_group(0).unwrap();
+	let expired = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 	// The read holds the group when the reset lands, as one arriving over the wire does.
 	let read = spawn_parked(async move { consumer.read_frame().await }).await;
 	expired
 		.abort(moq_net::Error::Stream(moq_net::StreamError::Old))
 		.unwrap();
-	let mut later = track.append_group(1).unwrap();
+	let mut later = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 	later
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())
 		.unwrap();

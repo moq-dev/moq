@@ -4980,7 +4980,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		reader
 	};
 	let first = id(group_cb.recv_reading(&mut reader));
@@ -5025,7 +5025,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
@@ -8975,7 +8975,7 @@ fn join_hint_declares_the_join_interval() {
 	for i in 0..60u64 {
 		if i == 50 {
 			assert_eq!(
-				published_catalog(broadcast).media.join,
+				published_catalog(broadcast).sync.interval,
 				None,
 				"no window has closed yet"
 			);
@@ -8989,7 +8989,7 @@ fn join_hint_declares_the_join_interval() {
 		}
 	}
 	assert_eq!(
-		published_catalog(broadcast).media.interval(),
+		published_catalog(broadcast).sync.interval,
 		Some(std::time::Duration::from_millis(500)),
 		"the hint, not the 100 ms groups measured"
 	);

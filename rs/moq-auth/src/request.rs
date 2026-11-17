@@ -60,7 +60,9 @@ pub struct Request {
 	/// The raw query string, without the leading `?`.
 	pub query: Option<String>,
 
-	/// The credential a moq-transport client presented in its SETUP.
+	/// The credential the client presented: the Token of its SETUP, or on an
+	/// [`Attach`](Event::Attach) (and that credential's revalidations and end) the one it
+	/// attached in band, with `query` left as the connection dialed it.
 	pub token: Option<Token>,
 
 	/// The direction the client declared at SETUP; absent means both.
@@ -127,7 +129,8 @@ impl Request {
 	}
 }
 
-/// A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed.
+/// A credential a client presented, unparsed: a SETUP Token (an `AUTHORIZATION TOKEN` on
+/// moq-transport) or one attached in band.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Token {

@@ -145,7 +145,7 @@ async fn a_listed_track_serves_its_cached_group() {
 	group
 		.write_frame(moq_net::Timestamp::unscaled(group.start), &b"first"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(next(&mut tracks).await, "+late");
 
 	let mut sub = kio::clock::timeout(TIMEOUT, remote.track("late").unwrap().subscribe(None))

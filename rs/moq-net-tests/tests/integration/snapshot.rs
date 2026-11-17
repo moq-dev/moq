@@ -28,7 +28,7 @@ fn reads_skip_an_owed_hole() {
 					serde_json::to_vec(&json!({ "n": start })).unwrap(),
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 
 		put(0);

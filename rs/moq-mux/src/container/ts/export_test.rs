@@ -253,9 +253,9 @@ async fn a_follower_keeps_msf_after_catalog_eof() {
 			.create_track(moq_msf::DEFAULT_NAME, hang::Catalog::default_track_info())
 			.unwrap();
 		let msf = moq_msf::Catalog::<()>::new(Vec::new()).to_json().unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, msf).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		broadcast.announce().unwrap();
 		(broadcast, track)
 	};
@@ -1026,7 +1026,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 			})
 			.collect();
 		format.write(&mut group, &frames).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let _track = track.finish().unwrap();
 	let mut export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
@@ -1331,7 +1331,7 @@ async fn export_declared(reorder: u8, groups: &[&[u64]]) -> (Export<crate::catal
 			})
 			.collect();
 		format.write(&mut group, &frames).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let track = track.finish().unwrap();
 	let export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
@@ -6363,14 +6363,14 @@ async fn a_start_group_cut_short_goes_out() {
 	for tick in GOP + 1..4 * GOP {
 		rig.at(tick * VIDEO_US).await;
 		if tick.is_multiple_of(GOP) {
-			group.close().unwrap();
+			group.finish().unwrap();
 			group = track.create_group(moq_net::group::Info { start: tick / GOP }).unwrap();
 		}
 		wire.write(&mut group, &[picture(tick)]).unwrap();
 		out.extend(poll_frames(&mut export));
 		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
 	}
-	group.close().unwrap();
+	group.finish().unwrap();
 	rig.finish();
 	out.extend(drain_frames(&mut export).await);
 
@@ -8662,7 +8662,7 @@ async fn a_skipped_group_flags_the_clock() {
 							.write(&mut group, &[frame])
 							.unwrap();
 					}
-					group.close().unwrap();
+					group.finish().unwrap();
 				}
 				out.extend(poll_frames(&mut export));
 			}
@@ -8798,7 +8798,7 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 				.write(&mut group, &[frame])
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		if sequence < 10 {
 			poll_frames(&mut export);
 		}
@@ -9289,7 +9289,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut groups = track.consume();
-	let clock = catalog.snapshot().media.clock;
+	let clock = catalog.snapshot().sync.clock;
 	let source = crate::source::resolved(&origin, "live").await;
 	let old = source.broadcast();
 	let mut export = open_export(source, RECORDING_MAX_AGE).await.unwrap().with_replay();
@@ -9307,7 +9307,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	crate::clock::fake_host_wall(wall + start.elapsed());
 	broadcast.announce().unwrap();
 	assert_eq!(
-		catalog.snapshot().media.clock,
+		catalog.snapshot().sync.clock,
 		clock,
 		"a return must keep the catalog clock"
 	);
@@ -10734,9 +10734,9 @@ async fn a_cancelled_replacement_after_the_follow_can_follow_again() {
 			.broadcast()
 			.create_track(name, hang::Catalog::default_track_info())
 			.unwrap();
-		let mut group = old_catalog.append_group(0).unwrap();
+		let mut group = old_catalog.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 		group.write_frame(Timestamp::ZERO, snapshot).unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let source = crate::source::resolved(&origin, "live").await;
 		let stream = source.catalog::<()>(format).await.unwrap();
 		let follow = Duration::from_secs(10);
