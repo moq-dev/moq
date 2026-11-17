@@ -42,6 +42,12 @@ async function settled(source: Source): Promise<void> {
 	}
 }
 
+// Wait for the stubbed decoder to be asked. `pending` turns true before that: the probe first
+// awaits the libav polyfill, which takes longer once an earlier test file has loaded it.
+async function probed(asked: () => boolean): Promise<void> {
+	while (!asked()) await yieldNow();
+}
+
 test("a rejected rendition probe preserves its supported siblings", async () => {
 	const state = broadcast({ bad: config(""), good: config("opus"), other: config("mp4a.40.2") });
 	answer = (c) => {
@@ -177,11 +183,15 @@ test("a rejecting probe alone is unsupported", () =>
 	}));
 
 test("does not wedge the effect when a support probe never settles", async () => {
-	answer = () => new Promise(() => {});
+	let asked = false;
+	answer = () => {
+		asked = true;
+		return new Promise(() => {});
+	};
 	const state = broadcast({ mic: config("opus") });
 	const source = new Source({ broadcast: state.broadcast });
 	try {
-		if (!source.pending.peek()) await source.pending.changed();
+		await probed(() => asked);
 		expect(source.out.available.peek()).toEqual({});
 		expect(source.out.error.peek()).toBeUndefined();
 
@@ -201,12 +211,11 @@ test("a catalog replaced while its probe is pending publishes only the replaceme
 	answer = (c) => new Promise((resolve) => probes.set(c.codec, resolve));
 	const source = new Source({ broadcast: state.broadcast });
 	try {
-		if (!source.pending.peek()) await source.pending.changed();
+		await probed(() => probes.has("opus"));
 		const old = probes.get("opus");
-		expect(old).toBeDefined();
 
 		state.catalog.set({ audio: { renditions: { next: config("mp4a.40.2") } } });
-		while (!probes.has("mp4a.40.2")) await yieldNow();
+		await probed(() => probes.has("mp4a.40.2"));
 
 		// The torn-down probe settles late; its result must not land.
 		old?.(true);
