@@ -144,6 +144,7 @@ pub trait Controller: Send + Sync {
     /// BBR3 does, leaves the target to bound what its probes cost. One that reads a probe at the
     /// rate it was sent, as GoogCC does, learns only that rate from a probe held below it, and
     /// bounds the cost by the cluster's size.
+    #[cfg(feature = "lab")]
     fn paces_probe(&self) -> bool {
         false
     }
@@ -153,6 +154,7 @@ pub trait Controller: Send + Sync {
     ///
     /// The transport reports it to each controller it builds and whenever it changes. A
     /// controller that sizes its own probes, as GoogCC does, may aim them at it.
+    #[cfg(feature = "lab")]
     #[allow(
         unused_variables,
         reason = "a no-op default that keeps the parameter names for implementors"

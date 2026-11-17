@@ -264,12 +264,12 @@ void main() {
           order: Order.ascending,
         ),
       );
-      final sequences = <int>[];
+      final starts = <int>[];
       for (var i = 0; i < 3; i++) {
         final group = await consumer.recvGroup().timeout(timeout);
-        sequences.add(group!.sequence());
+        starts.add(group!.start());
       }
-      expect(sequences, [0, 1, 2]);
+      expect(starts, [0, 1, 2]);
       broadcast.close();
     },
   );

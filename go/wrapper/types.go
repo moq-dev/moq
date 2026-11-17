@@ -77,7 +77,7 @@ type (
 	// DeflateCompression, and compare a received one by Name; a new compression joins as a
 	// new builder.
 	Compression = ffi.MoqCompression
-	// Position is a location within a track: a group sequence and a frame index in it.
+	// Position is a location within a track: a group start and a frame index in it.
 	Position = ffi.MoqPosition
 	// VideoCodec selects the video encoder codec. Build one with H264VideoCodec or
 	// H265VideoCodec; adding a codec later adds a constructor, not a breaking enum change.
@@ -159,7 +159,7 @@ func NamedEncoder(name string) VideoEncoderKind {
 
 // Order values: which pending group the publisher sends first.
 const (
-	// OrderAscending sends the oldest first, draining a backlog in sequence order.
+	// OrderAscending sends the oldest first, draining a backlog in start order.
 	OrderAscending = ffi.MoqOrderAscending
 	// OrderDescending sends the newest first, so congestion sheds the backlog rather than the live edge.
 	OrderDescending = ffi.MoqOrderDescending

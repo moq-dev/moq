@@ -22,7 +22,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 
 - **lite-07 wire.** [YIELDED continuations](/quest/m2/yield-defer.md) leave
   for lite-08; [the ietf extension](/quest/m2/ietf-records-per-track.md)
-  costs nothing on a moq-lite track; [the path escape](/quest/m2/path-escape.md)
+  costs nothing on a moq-lite track; the path escape
   is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
   [lite-07 by start](/quest/m2/time-addressing/lite07.md) carries the
@@ -35,8 +35,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
-- **moq-net API.** [Groups](/quest/m2/group-api.md),
-  [names](/quest/m2/net-renames.md), and
+- **moq-net API.** [Names](/quest/m2/net-renames.md) and
   [session codes](/quest/m2/session-codes.md).
   [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
   demos return to their earlier format.
@@ -46,9 +45,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   memory pairing found; [congestion names](/quest/m2/congestion-names.md);
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [transport names](/quest/m2/transport-names.md).
-- **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
-  [claims](/quest/m2/auth-claims.md), and
-  [the attached token](/quest/m2/auth-attach-token.md). End-to-end encryption
+- **Auth and crypto.** [Claims](/quest/m2/auth-claims.md). End-to-end encryption
   [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
@@ -63,14 +60,13 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [device and cursor](/quest/m2/native-media-config.md),
   [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
-  [gateway admission](/quest/m2/gateway-align.md), and
+  [the WHEP pull's announcement](/quest/m2/whep-pull-announce.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
   [signals](/quest/m2/signals-semantics.md), [`@moq/ui`](/quest/m2/ui-private.md),
   and [room, publish, and OBS names](/quest/m2/browser-packages.md).
-- **Bindings.** [Dart as experimental](/quest/m2/dart-experimental.md) and
-  [the C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
+- **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
 
@@ -331,5 +327,5 @@ what would need a breaking release had it landed right after the cut:
   [moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774); the public
   `Ordered` API waits for the model.
   Catalog at timestamp no longer waits
-  for `@moq/net` by start, and [the bindings](/quest/m2/time-addressing/bindings.md)
-  shrink to a rename, since the model already fills each field with the start.
+  for `@moq/net` by start, and the bindings shrank to a rename, since the model
+  already filled each field with the start.

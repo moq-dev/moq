@@ -35,7 +35,7 @@ impl MoqTrackDemand {
 	}
 
 	/// The group subscribers want next: null while nobody consumes the track, otherwise the
-	/// sequence the next group should have at least. A value past the newest group asks for a
+	/// start the next group should have at least. A value past the newest group asks for a
 	/// new group now, typically a keyframe.
 	pub fn wanted(&self) -> Option<u64> {
 		self.inner.wanted()

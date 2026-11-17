@@ -105,7 +105,7 @@ typedef AudioRendition = AudioMoqRendition;
 /// A catalog rendition and live delivery options.
 typedef TrackConfig = MoqMediaTrackConfig;
 
-/// A catalog rendition's group sequence and fetch delivery options.
+/// A catalog rendition's group start and fetch delivery options.
 typedef GroupConfig = MoqMediaGroupConfig;
 
 /// The packaging advertised for a media track.

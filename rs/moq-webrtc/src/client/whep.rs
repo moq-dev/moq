@@ -1,4 +1,4 @@
-//! `client subscribe`: dial a remote WHEP endpoint, ingest RTP into a
+//! `client pull`: dial a remote WHEP endpoint, ingest RTP into a
 //! local moq-net broadcast.
 //!
 //! Mints an SDP offer with `recvonly` audio and video, POSTs it to the

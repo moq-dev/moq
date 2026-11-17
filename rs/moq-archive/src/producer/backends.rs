@@ -37,7 +37,7 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 			let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
 			group.write_frame(pts, format!("v{sequence}.{frame}")).unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let text = source
 		.create_track(CHAT, track::Info::default().with_max_age(None))
@@ -49,7 +49,7 @@ fn source(groups: u64, chat: &[(u64, &[&str])]) -> (broadcast::Producer, [track:
 				.write_frame(moq_net::Timestamp::unscaled(*sequence), frame.to_string())
 				.unwrap();
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	(source, [video, text])
 }

@@ -467,8 +467,6 @@ mod transport_tests {
 			(Transport::Tcp, MoqTransport::Tcp),
 			(Transport::Unix, MoqTransport::Unix),
 			(Transport::WebTransport, MoqTransport::WebTransport),
-			// A request over a transport the bindings cannot name still reaches the caller.
-			(Transport::WebRtc, MoqTransport::Unknown),
 		] {
 			assert_eq!(MoqTransport::from(transport), want);
 		}

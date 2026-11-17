@@ -7,6 +7,16 @@ const PRESENCE = "presence.json";
 const PREFIX_TRACK = "prefix.json";
 const BUCKET = /^bucket\.([^/]+)\.json$/;
 
+/** Whether `key` is the one spelling of a path. */
+function valid(key: string): boolean {
+	try {
+		Path.from(key);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** `<key>/<kind>`, or `<kind>` for the empty key. */
 function keyed(key: string, kind: string): string {
 	return key === "" ? kind : `${Path.from(key)}/${kind}`;
@@ -36,8 +46,8 @@ export function bucketTrack(bucket: string, epoch: string): string {
 export function parseBucketTrack(name: string): { bucket: string; epoch: string } | undefined {
 	const slash = name.lastIndexOf("/");
 	const bucket = slash < 0 ? "" : name.slice(0, slash);
-	// Only a bucket with no empty segment round-trips, so each bucket has exactly one name.
-	if (slash >= 0 && bucket.split("/").includes("")) return undefined;
+	// Only a valid bucket round-trips, so each bucket has exactly one name.
+	if (slash >= 0 && (bucket === "" || !valid(bucket))) return undefined;
 	const epoch = BUCKET.exec(name.slice(slash + 1))?.[1];
 	return epoch ? { bucket, epoch } : undefined;
 }

@@ -151,7 +151,7 @@ class BroadcastRequest:
         return Route(self._inner.route(_options(hidden=hidden, cost=cost, instance=instance, epoch=epoch)))
 
     def serve(self, broadcast: BroadcastConsumer) -> None:
-        """Serve held content under the claim's continuous sequence space, without an exact route."""
+        """Serve held content under the claim's continuous start space, without an exact route."""
         self._inner.serve(broadcast._inner)
 
     def reject(self, error_code: int) -> None:

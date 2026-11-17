@@ -241,6 +241,7 @@ export class Connection {
 	static readonly accept: ({ ... }: Connection.AcceptProps) => Promise<Connection.Session>;
 	readonly allocator: Signals.Getter<Bandwidth.Handle | undefined>;
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+	answered(): Promise<void>;
 	readonly auth: Signals.Getter<Auth.Handle | undefined>;
 	static readonly certificateHash: (cert: string | BufferSource) => Promise<Uint8Array<ArrayBuffer>>;
 	static readonly checkVersions: (versions: readonly string[]) => string[];
@@ -563,8 +564,10 @@ export namespace Path {
 	export function decode(raw: string): Path.Valid;
 	export function empty(): Path.Valid;
 	export function encode(path: Path.Valid): Path.Valid;
+	export { escape } from "@moq/pattern";
 	export function from(...paths: string[]): Path.Valid;
 	export function hasPrefix(prefix: Path.Valid, path: Path.Valid): boolean;
+	export function head(path: Path.Valid, n: number): Path.Valid | undefined;
 	export function join(path: Path.Valid, other: Path.Valid): Path.Valid;
 	export function normalizeRelative(rel: string): Path.Relative;
 	export function parts(path: Path.Valid): string[];
@@ -572,6 +575,7 @@ export namespace Path {
 	export function resolve(base: Path.Valid, rel: Path.Relative): Path.Valid;
 	export function stripPrefix(prefix: Path.Valid, path: Path.Valid): Path.Valid | null;
 	export function tryResolve(base: Path.Valid, rel: Path.Relative): Path.Valid | undefined;
+	export { unescape } from "@moq/pattern";
 }
 
 export const SessionCode: ((code: number) => SessionCode) & {
@@ -726,22 +730,32 @@ export namespace Track {
 		priority?: number;
 		signal?: AbortSignal;
 	}
-	export class Fill {
+	export type Fill = Track.FillGroups | Track.FillLookup;
+	export class FillGroups {
 		[Symbol.dispose](): void;
 		accept(sequence: bigint, info?: Track.Info): Group.Producer;
 		close(): void;
 		dropGroups(start: bigint, end: bigint): void;
 		readonly end: bigint;
 		isWanted(sequence: bigint): boolean;
+		readonly kind: "groups";
 		get maxDelay(): Clock.Duration | null;
 		get order(): Track.Order;
 		get priority(): number;
 		refuseGroups(start: bigint, end: bigint, error: Error): void;
 		readonly start: bigint;
-		readonly time?: Time.Timestamp;
 		unwanted(sequence: bigint): Promise<void>;
 		wanted(): bigint | undefined;
 		wantedChanged(): Promise<bigint | undefined>;
+	}
+	export class FillLookup {
+		[Symbol.dispose](): void;
+		accept(sequence: bigint, info?: Track.Info): Group.Producer;
+		close(): void;
+		readonly kind: "lookup";
+		get maxDelay(): Clock.Duration | null;
+		get priority(): number;
+		readonly time: Time.Timestamp;
 	}
 	export interface Finished {
 		abort(error: Error): void;
@@ -803,8 +817,9 @@ export namespace Track {
 		get closed(): Signals.GetPromise<Error | null>;
 		createGroup(sequence: bigint): Group.Producer;
 		demand(): Track.Demand;
+		fail(error: Error): Track.Finished;
 		finish(): Track.Finished;
-		finishAt(end: Track.Position, error?: Error): void;
+		finishAt(end: Track.Position): void;
 		info(): Promise<Track.Info>;
 		largest(): Track.Position | undefined;
 		readonly name: string;

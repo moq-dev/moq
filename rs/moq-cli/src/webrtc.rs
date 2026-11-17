@@ -15,15 +15,15 @@ use crate::moq::{ImportTarget, notify_ready};
 /// `--listen` (WHIP/WHEP server). The parent direction picks WHIP vs WHEP.
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
-#[usage(group("rtc-mode", required))]
+#[usage(group("webrtc-mode", required))]
 pub struct Args {
 	/// Dial a remote WHIP/WHEP endpoint URL.
-	#[usage(name = "rtc-connect", long = "connect", value_name = "URL", group = "rtc-mode")]
+	#[usage(name = "webrtc-connect", long = "connect", value_name = "URL", group = "webrtc-mode")]
 	pub connect: Option<Url>,
 
 	/// Bind an HTTP listener for WHIP/WHEP, scoped to the single `--broadcast`
 	/// (peers reach it at `http://host:port/<broadcast>`).
-	#[usage(name = "rtc-listen", long = "listen", value_name = "ADDR", group = "rtc-mode")]
+	#[usage(name = "webrtc-listen", long = "listen", value_name = "ADDR", group = "webrtc-mode")]
 	pub listen: Option<SocketAddr>,
 
 	/// Shared UDP socket for ICE/media (one port for all sessions), bound at startup.
@@ -103,7 +103,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, instance: moq_net::I
 
 	let client = moq_webrtc::Client::new(moq_webrtc::client::Config::default())?;
 	client
-		.subscribe(url, route.broadcast().clone(), target.ingest.catalog())
+		.pull(url, route.broadcast().clone(), target.ingest.catalog())
 		.await?;
 	Ok(())
 }

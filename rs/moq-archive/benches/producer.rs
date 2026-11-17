@@ -34,7 +34,7 @@ fn setup(tracks: usize, groups: u64) -> (broadcast::Producer, Vec<track::Produce
 					let pts = Timestamp::from_millis(sequence * 1_000 + frame * 500).unwrap();
 					group.write_frame(pts, vec![0u8; 64]).unwrap();
 				}
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 			track
 		})
