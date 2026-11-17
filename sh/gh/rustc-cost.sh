@@ -39,7 +39,7 @@ cpu=
 instructions=
 while IFS=, read -r count _ event _; do
     case "$event" in
-        *task-clock*) cpu=${count%.*} ;;
+        *task-clock*) [[ ! "$count" =~ ^[0-9]+(\.[0-9]+)?$ ]] || cpu=${count%.*} ;;
         *instructions*) [[ ! "$count" =~ ^[0-9]+$ ]] || instructions=$((${instructions:-0} + count)) ;;
     esac
 done <"$stats"
