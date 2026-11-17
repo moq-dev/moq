@@ -51,6 +51,10 @@ pub trait MediaSink: Send {
 		audio_params: Option<(u32, u32)>,
 	) -> Result<()>;
 
+	/// Called before the [`on_frame`](Self::on_frame) of a frame that opens a group, when the
+	/// session timeline stepped to it: the track's timeline breaks there.
+	fn on_discontinuity(&mut self, mid: str0m::media::Mid) -> Result<()>;
+
 	/// Called on each [`MediaData`](str0m::media::MediaData) event. The session
 	/// loop has already converted the timestamp to microseconds.
 	fn on_frame(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()>;
@@ -304,7 +308,12 @@ impl Session {
 							return Ok(());
 						}
 					}
-					let timestamp_us = self.ingest_clock.normalize(data.mid, arrival, media_us);
+					let opens_group = data.is_keyframe() || self.ingest_order.is_audio(data.mid);
+					let mapped = self.ingest_clock.normalize(data.mid, arrival, media_us, opens_group);
+					if mapped.stepped {
+						sink.on_discontinuity(data.mid)?;
+					}
+					let timestamp_us = mapped.timestamp_us;
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -506,6 +515,11 @@ impl IngestOrder {
 		self.lines.insert(mid, line);
 	}
 
+	/// Whether `mid` is an audio line, whose every frame opens a group.
+	fn is_audio(&self, mid: str0m::media::Mid) -> bool {
+		matches!(self.lines.get(&mid), Some(IngestLine::Audio { .. }))
+	}
+
 	/// Whether a frame on `mid` at its line's RTP time `timestamp_us` reaches the sink, and whether
 	/// to ask for a keyframe.
 	fn admit(&mut self, mid: str0m::media::Mid, keyframe: bool, timestamp_us: u64, now: Instant) -> Admit {
@@ -579,7 +593,13 @@ impl IngestClock {
 	/// Map a raw RTP-derived microsecond timestamp onto the session timeline.
 	/// `arrival` is the packet's network time
 	/// ([`MediaData::network_time`](str0m::media::MediaData::network_time)).
-	fn normalize(&mut self, mid: str0m::media::Mid, arrival: Instant, media_us: u64) -> u64 {
+	///
+	/// A track's timeline steps when the sender reports replace arrival time, by as much as the
+	/// arrival skew between tracks was. A step is only taken by a frame that `opens_group`, which a
+	/// reader can be told is a break ([`Mapped::stepped`]): the readers' clocks follow a track
+	/// that continues, and would read the step as drift. A frame that continues a group keeps the
+	/// track's timeline until the next one that opens a group.
+	fn normalize(&mut self, mid: str0m::media::Mid, arrival: Instant, media_us: u64, opens_group: bool) -> Mapped {
 		let epoch = *self.arrival_epoch.get_or_insert(arrival);
 		let track = self.tracks.entry(mid).or_default();
 		let offset = *track.arrival_offset_us.get_or_insert_with(|| {
@@ -596,6 +616,10 @@ impl IngestClock {
 		});
 		let fallback = to_u64(media_us as i128 + offset);
 		let previous = track.last_output_us;
+		// Where the track's last frame puts this one if its timeline just continues.
+		let continued = previous
+			.zip(track.last_media_us)
+			.map(|(output, media)| to_u64(output as i128 + media_us.saturating_sub(media) as i128));
 		track.last_media_us = Some(media_us);
 		track.last_output_us = Some(fallback);
 
@@ -611,8 +635,16 @@ impl IngestClock {
 			Some(mapped) => mapped.max(previous.map_or(fallback, |last| last.saturating_add(1))),
 			None => fallback,
 		};
+		let step = continued.is_some_and(|continued| output.abs_diff(continued) > STEP_US);
+		let (output, stepped) = match continued {
+			Some(continued) if step && !opens_group => (continued, false),
+			_ => (output, step),
+		};
 		self.tracks.get_mut(&mid).expect("track was inserted").last_output_us = Some(output);
-		output
+		Mapped {
+			timestamp_us: output,
+			stepped,
+		}
 	}
 
 	/// Switch to the sender's common clock once every negotiated track has both
@@ -639,6 +671,17 @@ impl IngestClock {
 		}
 		self.ntp_epoch_us = Some(epoch);
 	}
+}
+
+/// How far a frame may land from where its track's timeline continues before it is a step: a
+/// sender report's own correction, which readers absorb, stays under it.
+const STEP_US: u64 = 20_000;
+
+/// A frame's place on the session timeline.
+struct Mapped {
+	timestamp_us: u64,
+	/// The frame opens a group the track's timeline stepped to, which no earlier frame led to.
+	stepped: bool,
 }
 
 #[derive(Default)]
@@ -722,6 +765,14 @@ impl Bridges {
 	pub fn push(&mut self, mid: str0m::media::Mid, frame: codec::Frame) -> Result<()> {
 		if let Some(bridge) = self.inner.get_mut(&mid) {
 			bridge.push(frame)?;
+		}
+		Ok(())
+	}
+
+	/// Mark a break in `mid`'s track before its next frame.
+	pub fn discontinuity(&mut self, mid: str0m::media::Mid) -> Result<()> {
+		if let Some(bridge) = self.inner.get_mut(&mid) {
+			bridge.discontinuity()?;
 		}
 		Ok(())
 	}
@@ -907,9 +958,9 @@ mod tests {
 		let audio = Mid::from("0");
 		let video = Mid::from("1");
 		let t0 = Instant::now();
-		assert_eq!(clock.normalize(audio, t0, 0), 0);
+		assert_eq!(normalize(&mut clock, audio, t0, 0), 0);
 		assert_eq!(
-			clock.normalize(video, t0.saturating_add(Duration::from_millis(50)), 0),
+			normalize(&mut clock, video, t0.saturating_add(Duration::from_millis(50)), 0),
 			50_000
 		);
 
@@ -924,11 +975,16 @@ mod tests {
 
 		// Both tracks stay on arrival time.
 		assert_eq!(
-			clock.normalize(audio, t0.saturating_add(Duration::from_secs(1)), 1_000_000),
+			normalize(&mut clock, audio, t0.saturating_add(Duration::from_secs(1)), 1_000_000),
 			1_000_000
 		);
 		assert_eq!(
-			clock.normalize(video, t0.saturating_add(Duration::from_millis(1_050)), 1_000_000),
+			normalize(
+				&mut clock,
+				video,
+				t0.saturating_add(Duration::from_millis(1_050)),
+				1_000_000
+			),
 			1_050_000
 		);
 		assert!(SenderAnchor::new(sender_info(1, UNIX_EPOCH, 0)).is_ok());
@@ -982,10 +1038,10 @@ mod tests {
 		let mid = Mid::from("0");
 		let t0 = Instant::now();
 		// Raw RTP base is a large random value; the first frame must map to 0.
-		assert_eq!(clock.normalize(mid, t0, 5_000_000_000), 0);
+		assert_eq!(normalize(&mut clock, mid, t0, 5_000_000_000), 0);
 		// A later frame advances by the RTP delta, not by arrival jitter.
 		let arrival = t0.saturating_add(Duration::from_millis(17)); // jittered arrival, ignored after anchor
-		assert_eq!(clock.normalize(mid, arrival, 5_000_020_000), 20_000);
+		assert_eq!(normalize(&mut clock, mid, arrival, 5_000_020_000), 20_000);
 	}
 
 	#[test]
@@ -995,14 +1051,15 @@ mod tests {
 		let video = Mid::from("1");
 		let t0 = Instant::now();
 		// Audio anchors the session at 0 with its own random RTP base.
-		assert_eq!(clock.normalize(audio, t0, 1_000_000_000), 0);
+		assert_eq!(normalize(&mut clock, audio, t0, 1_000_000_000), 0);
 		// Video's first frame arrives 5 ms later with an unrelated RTP base; it
 		// must land at +5 ms on the shared timeline, not at video's raw base.
 		let video_arrival = t0.saturating_add(Duration::from_millis(5));
-		assert_eq!(clock.normalize(video, video_arrival, 8_000_000_000), 5_000);
+		assert_eq!(normalize(&mut clock, video, video_arrival, 8_000_000_000), 5_000);
 		// And then track its own RTP delta.
 		assert_eq!(
-			clock.normalize(
+			normalize(
+				&mut clock,
 				video,
 				video_arrival.saturating_add(Duration::from_millis(33)),
 				8_000_033_000
@@ -1018,14 +1075,15 @@ mod tests {
 		let video = Mid::from("1");
 		let t0 = Instant::now();
 		// Audio's MediaData is dequeued first and sets the epoch at t0.
-		assert_eq!(clock.normalize(audio, t0, 1_000_000), 0);
+		assert_eq!(normalize(&mut clock, audio, t0, 1_000_000), 0);
 		// Video's first frame actually arrived 5 ms *before* the epoch. Its lead
 		// pulls the start below zero (clamped to 0), and a frame 33 ms into video
 		// lands 28 ms onto the shared timeline (33 ms - the 5 ms head start).
 		let video_arrival = t0.saturating_sub(Duration::from_millis(5));
-		assert_eq!(clock.normalize(video, video_arrival, 8_000_000), 0);
+		assert_eq!(normalize(&mut clock, video, video_arrival, 8_000_000), 0);
 		assert_eq!(
-			clock.normalize(
+			normalize(
+				&mut clock,
 				video,
 				video_arrival.saturating_add(Duration::from_millis(33)),
 				8_033_000
@@ -1043,17 +1101,28 @@ mod tests {
 		let audio_base = 1_000_000_000;
 		let video_base = 8_000_000_000;
 
-		assert_eq!(clock.normalize(audio, t0, audio_base), 0);
+		assert_eq!(normalize(&mut clock, audio, t0, audio_base), 0);
 		assert_eq!(
-			clock.normalize(video, t0.saturating_add(Duration::from_millis(50)), video_base),
+			normalize(
+				&mut clock,
+				video,
+				t0.saturating_add(Duration::from_millis(50)),
+				video_base
+			),
 			50_000
 		);
 		assert_eq!(
-			clock.normalize(audio, t0.saturating_add(Duration::from_secs(1)), audio_base + 1_000_000),
+			normalize(
+				&mut clock,
+				audio,
+				t0.saturating_add(Duration::from_secs(1)),
+				audio_base + 1_000_000
+			),
 			1_000_000
 		);
 		assert_eq!(
-			clock.normalize(
+			normalize(
+				&mut clock,
 				video,
 				t0.saturating_add(Duration::from_millis(1_050)),
 				video_base + 1_000_000,
@@ -1067,18 +1136,101 @@ mod tests {
 		clock.observe(audio, sender_info(1, report_time, audio_base + 1_000_000));
 		clock.observe(video, sender_info(2, report_time, video_base + 1_000_000));
 
-		let audio_time = clock.normalize(
+		let audio_time = normalize(
+			&mut clock,
 			audio,
 			t0.saturating_add(Duration::from_millis(1_020)),
 			audio_base + 1_020_000,
 		);
-		let video_time = clock.normalize(
+		let video_time = normalize(
+			&mut clock,
 			video,
 			t0.saturating_add(Duration::from_millis(1_070)),
 			video_base + 1_020_000,
 		);
 		assert_eq!(audio_time, video_time);
 		assert_eq!(audio_time, 1_070_000);
+	}
+
+	/// `mid`'s frame as the timeline maps it, every frame opening a group.
+	fn normalize(clock: &mut IngestClock, mid: Mid, arrival: Instant, media_us: u64) -> u64 {
+		clock.normalize(mid, arrival, media_us, true).timestamp_us
+	}
+
+	/// The sender reports step the track that arrived earlier than the other forward, once, by the
+	/// arrival skew they replace: audio, whose every frame opens a group, takes the step and says
+	/// so, and video keeps its timeline through its deltas and takes it at its next keyframe.
+	#[test]
+	fn the_sender_reports_step_a_track_where_a_group_opens() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		let (audio_base, video_base) = (1_000_000_000, 8_000_000_000);
+		// A frame of media time `ms` that arrived `late` ms after it was captured.
+		let frame = |clock: &mut IngestClock, mid, ms: u64, late: u64, base: u64, opens_group| {
+			let arrival = t0.saturating_add(Duration::from_millis(ms + late));
+			clock.normalize(mid, arrival, base + ms * 1_000, opens_group)
+		};
+
+		// Video arrives 300 ms behind audio, though both were captured at the same instant.
+		for ms in (0..1_000).step_by(20) {
+			assert!(!frame(&mut clock, audio, ms, 0, audio_base, true).stepped);
+			assert!(!frame(&mut clock, video, ms, 300, video_base, ms == 0).stepped);
+		}
+
+		// Both reports name one capture instant for media time 1 s.
+		let report_time = UNIX_EPOCH + Duration::from_secs(1_700_000_001);
+		clock.observe(audio, sender_info(1, report_time, audio_base + 1_000_000));
+		clock.observe(video, sender_info(2, report_time, video_base + 1_000_000));
+
+		// Audio was placed 300 ms ahead of where it belongs next to video, and no track may
+		// rewind, so audio moves forward and video stays.
+		let audio_next = frame(&mut clock, audio, 1_000, 0, audio_base, true);
+		assert!(audio_next.stepped, "audio takes the step");
+		assert_eq!(audio_next.timestamp_us, 1_300_000);
+		let delta = frame(&mut clock, video, 1_000, 300, video_base, false);
+		assert!(!delta.stepped, "a video delta continues its group");
+		assert_eq!(delta.timestamp_us, 1_300_000);
+		// Neither steps again.
+		for ms in (1_020..2_000).step_by(20) {
+			assert!(!frame(&mut clock, audio, ms, 0, audio_base, true).stepped);
+			assert!(!frame(&mut clock, video, ms, 300, video_base, false).stepped);
+		}
+	}
+
+	/// A video line with its timeline stepping forward keeps it through the deltas of its group and
+	/// takes it, saying so, at the keyframe that opens the next.
+	#[test]
+	fn video_takes_a_step_at_its_next_keyframe() {
+		let mut clock = IngestClock::default();
+		let audio = Mid::from("0");
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		let (audio_base, video_base) = (1_000_000_000, 8_000_000_000);
+		let frame = |clock: &mut IngestClock, mid, ms: u64, late: u64, base: u64, opens_group| {
+			let arrival = t0.saturating_add(Duration::from_millis(ms + late));
+			clock.normalize(mid, arrival, base + ms * 1_000, opens_group)
+		};
+
+		// Audio arrives 300 ms behind video, so video steps forward once the reports arrive.
+		for ms in (0..1_000).step_by(40) {
+			assert!(!frame(&mut clock, video, ms, 0, video_base, ms == 0).stepped);
+			assert!(!frame(&mut clock, audio, ms, 300, audio_base, true).stepped);
+		}
+		let report_time = UNIX_EPOCH + Duration::from_secs(1_700_000_001);
+		clock.observe(audio, sender_info(1, report_time, audio_base + 1_000_000));
+		clock.observe(video, sender_info(2, report_time, video_base + 1_000_000));
+
+		for ms in (1_000..1_200).step_by(40) {
+			let delta = frame(&mut clock, video, ms, 0, video_base, false);
+			assert!(!delta.stepped, "{ms}");
+			assert_eq!(delta.timestamp_us, ms * 1_000, "a delta continues its group");
+		}
+		let key = frame(&mut clock, video, 1_200, 0, video_base, true);
+		assert!(key.stepped, "the keyframe takes the step");
+		assert_eq!(key.timestamp_us, 1_500_000);
+		assert!(!frame(&mut clock, video, 1_240, 0, video_base, false).stepped);
 	}
 
 	fn sender_info(ssrc: u32, ntp_time: SystemTime, rtp_us: u64) -> SenderInfo {

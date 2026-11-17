@@ -4472,6 +4472,23 @@ impl FrontServeRun {
 	}
 }
 
+/// A front dropped before it ended, as when its origin is torn down, ends the logical tracks it
+/// was serving as closed, rather than leave them to warn as producers dropped unfinished.
+impl Drop for FrontServeRun {
+	fn drop(&mut self) {
+		let mut close = |logical: &mut Logical| {
+			if let Logical::Accepted(accepted) = std::mem::replace(logical, Logical::Ended) {
+				let _ = accepted.abort(Error::Closed);
+			}
+		};
+		match &mut self.state {
+			FrontRunState::Start(_) => {}
+			FrontRunState::Serve(serve) => serve.tracks.values_mut().for_each(|io| close(&mut io.logical)),
+			FrontRunState::InFlight(in_flight) => in_flight.iter_mut().for_each(|io| close(&mut io.logical)),
+		}
+	}
+}
+
 impl kio::Task for FrontServeRun {
 	type Output = ();
 
@@ -9138,6 +9155,41 @@ mod tests {
 			assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
 		});
 		assert_eq!(warns, 0, "a clean logical end must not drop an unfinished producer");
+	}
+
+	/// A torn-down origin ends the logical tracks its fronts were serving, rather than warn about
+	/// producers dropped unfinished.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn teardown_ends_the_logical_tracks() {
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
+		let consumer = producer.consume();
+		let source = producer.route("room", RouteOptions::default()).unwrap();
+		let _source_track = source.broadcast().create_track("video", None).unwrap();
+		let waiter = kio::Waiter::noop();
+
+		// The driver runs the front that answers each of these.
+		let mut request = Box::pin(consumer.request("room", None));
+		let front = loop {
+			driver.poll(kio::clock::now(), &waiter).unwrap();
+			if let Some(front) = request.as_mut().now_or_never() {
+				break front.unwrap();
+			}
+			kio::clock::sim::yield_now().await;
+		};
+		let track = front.track("video").unwrap();
+		let mut subscribing = Box::pin(track.subscribe(None));
+		let subscriber = loop {
+			driver.poll(kio::clock::now(), &waiter).unwrap();
+			if let Some(subscriber) = subscribing.as_mut().now_or_never() {
+				break subscriber.unwrap();
+			}
+			kio::clock::sim::yield_now().await;
+		};
+
+		let warns = count_drop_warnings("track::Producer dropped without finish", || drop(driver));
+		assert_eq!(warns, 0, "a torn-down front must not drop an unfinished track");
+		drop(subscriber);
 	}
 
 	#[kio::test]
