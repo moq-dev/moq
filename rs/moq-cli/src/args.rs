@@ -19,7 +19,7 @@
 //!   conditional on the subcommand.
 //! - The endpoint is one subcommand: a container format (`ts`, `fmp4`, ... read
 //!   from stdin on import, written to stdout on export) or a gateway (`hls`,
-//!   `rtmp`, `srt`, `rtc`, `archive`). Exactly one per stage, so "which endpoint" is
+//!   `rtmp`, `srt`, `webrtc`, `archive`). Exactly one per stage, so "which endpoint" is
 //!   unambiguous and there's no silently-ignored flag.
 //! - `--` starts another stage on the same Origin and the same MoQ attachment, so
 //!   one process can bridge several broadcasts (or both directions at once). Usage
@@ -829,6 +829,9 @@ impl Import {
 		if self.latency_max.is_some() {
 			found.flag("--latency-max", None, "--max-age");
 		}
+		if let ImportSource::Rtc(_) = &self.source {
+			found.flag("import rtc", None, "import webrtc");
+		}
 		#[cfg(feature = "capture")]
 		if let ImportSource::Capture(capture) = &self.source {
 			found.extend(capture.deprecated());
@@ -858,7 +861,10 @@ pub enum ImportSource {
 	/// RTSP: pull an IP camera's stream (`--connect`), reconnecting on failure.
 	Rtsp(crate::rtsp::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
-	Rtc(crate::rtc::Args),
+	Webrtc(crate::webrtc::Args),
+	/// The released spelling of [`Self::Webrtc`].
+	#[usage(hide = true)]
+	Rtc(crate::webrtc::Args),
 	/// Replay a recording from an object store, serving its groups on demand.
 	Archive(crate::archive::ImportArgs),
 	/// Capture a local source (camera, display, window, app, microphone) and
@@ -892,9 +898,13 @@ impl ImportSource {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
 				Some("`import ts --program all` builds a catalog per program")
 			}
-			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtsp(_) | Self::Rtc(_) | Self::Archive(_) => {
-				Some("the gateway and archive imports build their own catalogs")
-			}
+			Self::Hls(_)
+			| Self::Rtmp(_)
+			| Self::Srt(_)
+			| Self::Rtsp(_)
+			| Self::Webrtc(_)
+			| Self::Rtc(_)
+			| Self::Archive(_) => Some("the gateway and archive imports build their own catalogs"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => None,
 			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
@@ -908,7 +918,9 @@ impl ImportSource {
 			// Every run is followed by a redial publishing the next one, so a run's end is not
 			// the end of the content, and its finished catalog would tell readers to stop.
 			Self::Rtsp(_) => Some("`import rtsp` redials after every session, so a run's end is not the content's"),
-			Self::Rtc(rtc) if rtc.connect.is_some() => Some("a WHEP pull has no clean end"),
+			Self::Webrtc(webrtc) | Self::Rtc(webrtc) if webrtc.connect.is_some() => {
+				Some("a WHEP pull has no clean end")
+			}
 			Self::Archive(_) => Some("`import archive` serves its recording until stopped"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` has no clean end"),
@@ -919,6 +931,7 @@ impl ImportSource {
 			| Self::Hls(_)
 			| Self::Rtmp(_)
 			| Self::Srt(_)
+			| Self::Webrtc(_)
 			| Self::Rtc(_) => None,
 		}
 	}
@@ -1061,6 +1074,7 @@ impl Export {
 			ExportSink::H264(args) | ExportSink::H265(args) => found.extend(args.deprecated()),
 			ExportSink::Rtmp(rtmp) => found.extend(rtmp.deprecated()),
 			ExportSink::Hls(hls) => found.extend(hls.deprecated()),
+			ExportSink::Rtc(_) => found.flag("export rtc", None, "export webrtc"),
 			_ => {}
 		}
 		found
@@ -1092,7 +1106,10 @@ pub enum ExportSink {
 	/// SRT: push to a remote (`--connect`) or serve requests (`--listen`).
 	Srt(crate::srt::ExportArgs),
 	/// WebRTC: WHIP client pushing to a remote (`--connect`) or WHEP server serving plays (`--listen`).
-	Rtc(crate::rtc::Args),
+	Webrtc(crate::webrtc::Args),
+	/// The released spelling of [`Self::Webrtc`].
+	#[usage(hide = true)]
+	Rtc(crate::webrtc::Args),
 	/// Record every broadcast announced under `--broadcast` into an object store.
 	Archive(crate::archive::ExportArgs),
 	/// Write the broadcast's media reports (`import --report`) to stdout as JSON lines.
@@ -1110,7 +1127,7 @@ impl ExportSink {
 			Self::Hls(_) => "hls",
 			Self::Rtmp(_) => "rtmp",
 			Self::Srt(_) => "srt",
-			Self::Rtc(_) => "rtc",
+			Self::Webrtc(_) | Self::Rtc(_) => "webrtc",
 			Self::Archive(_) => "archive",
 			Self::Report => "report",
 			Self::Echo => "echo",
@@ -1776,7 +1793,7 @@ mod tests {
 			&["hls", "--hls-listen", "127.0.0.1:8080"],
 			&["rtmp", "--listen", "127.0.0.1:1935"],
 			&["srt", "--listen", "127.0.0.1:9000"],
-			&["rtc", "--listen", "127.0.0.1:8443"],
+			&["webrtc", "--listen", "127.0.0.1:8443"],
 			&["archive", "file:///tmp/archive"],
 		];
 		for sink in sinks {
@@ -1972,6 +1989,34 @@ mod tests {
 		assert!(format(&["--passthrough", "--pcr-pid", "0"]).is_none(), "the PAT");
 		assert!(format(&["--passthrough", "--pcr-pid", "clock"]).is_none());
 		assert!(matches!(format(&[]), Some(PublishFormat::Ts { program: None })));
+	}
+
+	/// `--udp-bind` and `--public-addr` configure the server's shared socket, so a `--connect` client refuses them.
+	#[test]
+	fn webrtc_socket_flags_require_listen() {
+		for verb in ["import", "export"] {
+			let url = "http://127.0.0.1:8443/live";
+			for flag in [["--public-addr", "1.2.3.4:5"], ["--udp-bind", "0.0.0.0:0"]] {
+				assert!(
+					Invocation::try_parse_from(["moq", verb, "webrtc", "--connect", url, flag[0], flag[1]]).is_err(),
+					"{verb} webrtc --connect {}",
+					flag[0]
+				);
+			}
+			assert!(
+				Invocation::try_parse_from([
+					"moq",
+					verb,
+					"webrtc",
+					"--listen",
+					"127.0.0.1:8443",
+					"--public-addr",
+					"1.2.3.4:5"
+				])
+				.is_ok(),
+				"{verb} webrtc --listen --public-addr"
+			);
+		}
 	}
 
 	/// `import srt` takes the same `--program` as `import ts`; `export srt` has no program to pick.
@@ -2649,6 +2694,27 @@ mod tests {
 			panic!("subscribe must not start a run");
 		};
 		assert!(err.to_string().contains("subscribe -> export"), "{err}");
+
+		for verb in ["import", "export"] {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://relay",
+				"--broadcast",
+				"room",
+				verb,
+				"rtc",
+				"--listen",
+				"127.0.0.1:8443",
+			];
+			let Err(err) = Invocation::try_parse_from(argv) else {
+				panic!("{verb} rtc must not start a run");
+			};
+			assert!(
+				err.to_string().contains(&format!("{verb} rtc -> {verb} webrtc")),
+				"{err}"
+			);
+		}
 	}
 
 	/// An exported `MOQ_CONNECT` configures a MoQ side but does not ask for one, so a
