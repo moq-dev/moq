@@ -188,14 +188,14 @@ pub(in crate::lite) struct Routed {
 }
 
 /// The absolute prefixes a session asks a peer that grants `permit` for, to serve
-/// `wants`: the wider of any two nested.
+/// `wants`: the wider of any two nested, and few enough to fit one ANNOUNCE_REQUEST.
 fn asks(
 	root: &Path,
 	permit: &crate::auth::Permit,
 	wants: &BTreeMap<Path, Option<crate::model::Snapshot>>,
 ) -> BTreeSet<Path> {
 	let granted = permit.granted_regions();
-	let mut relative: Vec<Path> = Vec::new();
+	let mut relative: BTreeSet<Path> = BTreeSet::new();
 	for want in wants.keys() {
 		match &granted {
 			// Whichever of the two lies within the other.
@@ -204,14 +204,69 @@ fn asks(
 				_ if want.has_prefix(region) => Some(want.clone()),
 				_ => None,
 			})),
-			None => relative.push(want.clone()),
+			None => {
+				relative.insert(want.clone());
+			}
 		}
 	}
-	let all: BTreeSet<Path> = relative.iter().filter_map(|region| root.join(region).ok()).collect();
-	(all.iter())
-		.filter(|path| !route::ancestors(path).any(|above| above != **path && all.contains(&above)))
+	let regions = granted.unwrap_or_default().into_iter().collect();
+	(coarsen(widest(&relative), &regions).iter())
+		.filter_map(|prefix| root.join(prefix).ok())
+		.collect()
+}
+
+/// The prefixes of `set` that lie inside no other.
+fn widest(set: &BTreeSet<Path>) -> BTreeSet<Path> {
+	set.iter()
+		.filter(|prefix| !route::ancestors(prefix).any(|above| above != **prefix && set.contains(&above)))
 		.cloned()
 		.collect()
+}
+
+/// `set`, asked for more coarsely until it fits the Adds of one ANNOUNCE_REQUEST, which
+/// the peer refuses a larger set by closing the session: the prefixes inside one of the
+/// grant's `regions`, or all of them without a confined grant, give way to the longest
+/// prefix they share, the largest such group first, and then a prefix alone in its
+/// region gives way to the region. Either lies inside the region, so the session asks
+/// for more than it wants and never for more than it is granted. Regions that are too
+/// many on their own lose the last of them.
+fn coarsen(mut set: BTreeSet<Path>, regions: &BTreeSet<Path>) -> BTreeSet<Path> {
+	while !lite::request_fits(set.iter(), lite::Version::Lite07) {
+		// Each prefix files under the widest region holding it.
+		let mut groups: BTreeMap<Option<&Path>, Vec<&Path>> = BTreeMap::new();
+		for prefix in &set {
+			let region = route::heads(prefix).find_map(|head| regions.get(head));
+			groups.entry(region).or_default().push(prefix);
+		}
+		let bytes = |group: &[&Path]| group.iter().map(|prefix| prefix.as_str().len()).sum::<usize>();
+		let shared = (groups.values())
+			.filter(|group| group.len() > 1)
+			.max_by_key(|group| bytes(group))
+			.map(|group| {
+				(route::ancestors(group[0]).rev())
+					.find(|above| group.iter().all(|prefix| route::within(prefix, above)))
+					.unwrap_or_default()
+			});
+		let region = || {
+			(groups.iter())
+				.filter_map(|(region, group)| Some(((*region)?, group)))
+				.filter(|(region, group)| group[0] != *region)
+				.max_by_key(|(_, group)| bytes(group))
+				.map(|(region, _)| region.clone())
+		};
+		match shared.or_else(region) {
+			Some(wider) => {
+				set.insert(wider);
+				set = widest(&set);
+			}
+			None => {
+				// Nothing is left to widen: the grant's regions alone pass one request.
+				let dropped = set.pop_last();
+				tracing::warn!(?dropped, "a grant too wide for one ANNOUNCE_REQUEST goes unasked");
+			}
+		}
+	}
+	set
 }
 
 impl Routed {

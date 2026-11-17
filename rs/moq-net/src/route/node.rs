@@ -235,13 +235,15 @@ impl std::ops::DerefMut for Locked<'_> {
 impl Drop for Locked<'_> {
 	fn drop(&mut self) {
 		let mut state = self.state.take().expect("locked");
-		// Whatever changed, the timer task waits for the router's next deadline.
+		// Whatever changed, the timer task waits for the router's next deadline. Published
+		// under the lock, so a deadline read before another thread's change never replaces
+		// the one read after it.
 		let deadline = state.router.deadline();
-		let released = std::mem::take(&mut state.released);
-		drop(state);
 		if *self.node.timer.read() != deadline {
 			*self.node.timer.lock() = deadline;
 		}
+		let released = std::mem::take(&mut state.released);
+		drop(state);
 		// An orphan's release reaches into the origin, which may be feeding this node.
 		for (orphan, ended) in released {
 			orphan.release(ended);
@@ -290,12 +292,12 @@ impl Node {
 		}
 	}
 
-	/// A node for the origin whose hop id is `hop`, named by it and by when it started,
+	/// A node for the origin whose node is `relay`, named by it and by when it started,
 	/// which only grows across the restarts of one relay.
-	pub fn origin(hop: std::num::NonZeroU64, clock: Deadlines) -> Self {
+	pub fn origin(relay: std::num::NonZeroU64, clock: Deadlines) -> Self {
 		let started = kio::clock::Wall::now().saturating_duration_since(kio::clock::Wall::UNIX_EPOCH);
 		let me = NodeId {
-			relay: hop.get(),
+			relay: relay.get(),
 			start: u64::try_from(started.as_micros()).unwrap_or(u64::MAX),
 		};
 		Self::new(me, clock)

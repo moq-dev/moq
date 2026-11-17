@@ -380,12 +380,12 @@ Its peer keeps answering the prefixes the endpoint asked for, which it can no lo
 
 A subscriber edits the set of prefixes it wants claims for with ANNOUNCE_REQUEST messages.
 An edit too large for one message continues over several: every ANNOUNCE_REQUEST of an edit but the last sets `More`, and nothing else comes between them on the stream.
-The set starts empty and MAY be empty, no prefix in it is at or below another, and encoded as the Adds of one ANNOUNCE_REQUEST it fits the [Message Length](#message-length) limit, each as it stands once every earlier edit is in effect.
-A subscriber MAY send an edit before the publisher has answered its last.
+The set starts empty and MAY be empty, no prefix in it is at or below another, and encoded as the Adds of one ANNOUNCE_REQUEST it fits the [Message Length](#message-length) limit.
+A subscriber MUST NOT send an edit before the publisher has answered its last, so a publisher holds at most one unanswered: a subscriber whose interest moves meanwhile sends what it wants by then as its next edit.
 
-A publisher answers each edit with one ANNOUNCE_OK, in the order it received them, where the edit takes effect on its stream (see [Edits](#edits)), and sends the matching claims and any future changes:
+A publisher answers each edit with one ANNOUNCE_OK, where the edit takes effect on its stream (see [Edits](#edits)), and sends the matching claims and any future changes:
 
-- ANNOUNCE_OK: the peer's oldest unanswered edit takes effect here.
+- ANNOUNCE_OK: the peer's unanswered edit takes effect here.
 - ANNOUNCE_START: a matching claim.
 - ANNOUNCE_UPDATE: a claim changed.
 - ANNOUNCE_END: a claim is gone.
@@ -416,7 +416,7 @@ An endpoint MUST close the session with a PROTOCOL_VIOLATION if it receives:
 
 - a message referencing a Prefix ID, Route ID, or Announce ID that was never assigned or already retired;
 - any other message between the ANNOUNCE_REQUESTs of one edit, or an edit that leaves a prefix of the set at or below another or the set past the limit;
-- an ANNOUNCE_OK with no edit unanswered;
+- an ANNOUNCE_OK with no edit unanswered, or an ANNOUNCE_REQUEST starting an edit while one is;
 - a second SYNCED for a prefix, or one before the ANNOUNCE_OK answering the edit that added it;
 - a ROUTE, ROUTE_END, DEAD, DRAIN, or ANNOUNCE_FLOOR on a session that does not exchange routes; or
 - a message that does not decode within its Message Length, a flag this version does not define, or a Node ID of 0.
@@ -1137,7 +1137,7 @@ Implementations SHOULD consider reasonable limits on the number of matching clai
 
 
 ## ANNOUNCE_OK {#announce-ok}
-A publisher sends one ANNOUNCE_OK message on its Announce Stream for each edit it receives, in order, after the edit's last ANNOUNCE_REQUEST, where the edit takes effect (see [Edits](#edits)).
+A publisher sends one ANNOUNCE_OK message on its Announce Stream for each edit it receives, after the edit's last ANNOUNCE_REQUEST, where the edit takes effect (see [Edits](#edits)).
 
 ~~~
 ANNOUNCE_OK Message {
@@ -2258,7 +2258,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - A receiver mints an Instance for each announcement a session of an earlier version delivers, and a `Minted` field beside every Instance says whether a receiver minted it, so no Instance text is reserved for minting.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session. A finished Announce Stream means its endpoint is leaving.
-- ANNOUNCE_REQUEST (0x5) edits a set of prefixes, none at or below another, and ANNOUNCE_OK (0x6) marks where each edit takes effect, in order. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints drop the claims within a removed prefix at the ANNOUNCE_OK. SYNCED names the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix.
+- ANNOUNCE_REQUEST (0x5) edits a set of prefixes, none at or below another, and ANNOUNCE_OK (0x6) marks where each edit takes effect; a subscriber sends one edit at a time. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints drop the claims within a removed prefix at the ANNOUNCE_OK. SYNCED names the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix.
 - Replaced the Hop ID list with a claim's Cost, `Above`, flags, priority, and chain on ANNOUNCE_START and ANNOUNCE_UPDATE. The chain names the relays that announced the claim again across a scoped grant or from an earlier version, and a relay takes no claim whose chain names it. The 0x1 flag marks a claim no route reaches, which its sender keeps for 800 milliseconds before ending it, and the 0x2 flag one behind a draining node.
 - ANNOUNCE_END carries `Lost`: whether the claim's publisher withdrew it or the sender only lost its way to it.
 - Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay and its Start, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Instance. Removed ANNOUNCE_OK's Hop ID.

@@ -15,7 +15,7 @@
 //! answering it, where both ends drop every claim within a prefix it removed.
 
 use std::{
-	collections::{BTreeMap, HashMap, HashSet, VecDeque},
+	collections::{BTreeMap, HashMap, HashSet},
 	sync::Arc,
 	task::Poll,
 };
@@ -100,8 +100,8 @@ pub(in crate::lite) struct Answer {
 	/// The prefixes in effect, by Prefix ID.
 	prefixes: BTreeMap<u64, Prefix>,
 	next_prefix: u64,
-	/// The edits the node has yet to put in effect, oldest first.
-	requests: VecDeque<Request>,
+	/// The edit the node has yet to put in effect.
+	request: Option<Request>,
 	/// The ANNOUNCE_REQUESTs of an edit that continues.
 	parts: Option<Parts>,
 	encoder: lite::AnnounceEncoder,
@@ -145,7 +145,7 @@ impl Answer {
 			turn: MAIN,
 			prefixes: BTreeMap::new(),
 			next_prefix: 0,
-			requests: VecDeque::new(),
+			request: None,
 			parts: None,
 			encoder: lite::AnnounceEncoder::new(Version::Lite07),
 			routes: HashMap::new(),
@@ -174,23 +174,18 @@ impl Answer {
 		if self.withdrawn {
 			return Ok(());
 		}
+		// One edit at a time, so a peer that never reads its answers leaves one here.
+		if self.request.is_some() {
+			return Err(Error::ProtocolViolation);
+		}
 		let (mut remove, mut add) = (remove, add);
 		if let Some(parts) = self.parts.take() {
 			remove.splice(0..0, parts.remove);
 			add.splice(0..0, parts.add);
 		}
-		// The set as it stands once every edit before this one is in effect.
 		let mut left: BTreeMap<u64, (&Path, Option<&Path>)> = (self.prefixes.iter())
 			.map(|(id, prefix)| (*id, (&prefix.relative, prefix.path.as_ref())))
 			.collect();
-		for request in &self.requests {
-			for id in &request.remove {
-				left.remove(id);
-			}
-			for (id, prefix) in &request.add {
-				left.insert(*id, (&prefix.relative, prefix.path.as_ref()));
-			}
-		}
 		// Parts that could never make a valid edit fail before more of them pile up: their
 		// Adds alone already pass the set's limit, or they remove more than the set holds.
 		if remove.len() > left.len() || !lite::request_fits(add.iter().map(|(path, _)| path), Version::Lite07) {
@@ -236,7 +231,7 @@ impl Answer {
 		// The node refuses a routing peer that asks for part of the tree.
 		self.main.recv(Msg::Ask(edit)).map_err(|_| Error::ProtocolViolation)?;
 		self.next_prefix = next;
-		self.requests.push_back(Request { remove, add: added });
+		self.request = Some(Request { remove, add: added });
 		Ok(())
 	}
 
@@ -361,10 +356,10 @@ impl Answer {
 		})
 	}
 
-	/// The node put the peer's oldest request in effect: answer it, drop what the removed
+	/// The node put the peer's request in effect: answer it, drop what the removed
 	/// prefixes covered, and read the mounts beneath the added ones.
 	fn edited(&mut self, writer: &mut Writer) -> Result<(), Error> {
-		let Some(request) = self.requests.pop_front() else {
+		let Some(request) = self.request.take() else {
 			return Ok(());
 		};
 		writer.buffer(&Wire::Ok)?;

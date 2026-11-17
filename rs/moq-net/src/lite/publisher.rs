@@ -3588,8 +3588,8 @@ mod announce_test {
 		);
 	}
 
-	/// A lite-07 peer names only prefixes its edits leave in effect, and asks for no
-	/// prefix at or below another: each is a protocol violation.
+	/// A lite-07 peer sends one edit at a time, names only prefixes its edits leave in
+	/// effect, and asks for no prefix at or below another: each is a protocol violation.
 	#[test]
 	fn a_lite07_request_naming_no_prefix_or_nested_is_a_violation() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
@@ -3612,14 +3612,21 @@ mod announce_test {
 			wire.take_announces()
 		};
 
-		// A second edit may go before the first is answered, naming what the first leaves
-		// in effect, and each is answered in turn.
+		// One edit at a time: a second before the first is answered, whole or its first
+		// part, is refused, so a peer that never reads its answers leaves one edit here.
 		let mut first = answer();
 		first.request(false, Vec::new(), vec![(path("a"), false)]).unwrap();
+		for more in [false, true] {
+			let refused = first.request(more, Vec::new(), vec![(path("z"), false)]);
+			assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+		}
+		let oks = |answers: &[lite::AnnounceBroadcast]| {
+			let oks = answers.iter().filter(|msg| **msg == lite::AnnounceBroadcast::Ok);
+			oks.count()
+		};
+		assert_eq!(oks(&sent(&mut first)), 1);
 		first.request(false, vec![0], vec![(path("b"), false)]).unwrap();
-		let answers = sent(&mut first);
-		let oks = answers.iter().filter(|msg| **msg == lite::AnnounceBroadcast::Ok);
-		assert_eq!(oks.count(), 2, "{answers:?}");
+		assert_eq!(oks(&sent(&mut first)), 1);
 
 		// A prefix that is not in effect, one asked for twice, and one below another.
 		for (remove, add) in [

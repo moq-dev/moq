@@ -3998,13 +3998,15 @@ test("a lite-07 edit the peer may not send is a violation", async () => {
 		nested.request([0n], [Path.from("a")]);
 		await nested.ok();
 		expect(await nested.next()).toEqual({ status: "synced", prefix: 1n });
-		// A second edit before the first is answered is checked against the set the first leaves.
+		// A second edit before the first is answered, whole or the first part of one: a peer
+		// that never reads its answers leaves one edit here.
 		const early = await answer("a");
 		early.request([], [Path.from("b")]);
-		expect(() => early.request([], [Path.from("b/c")])).toThrow(ProtocolViolation);
-		early.request([1n], [Path.from("c")]);
+		expect(() => early.request([], [Path.from("c")])).toThrow(ProtocolViolation);
+		expect(() => early.publisher.request(true, [], [])).toThrow(ProtocolViolation);
 		await early.ok();
 		expect(await early.next()).toEqual({ status: "synced", prefix: 1n });
+		early.request([1n], [Path.from("c")]);
 		await early.ok();
 		expect(await early.next()).toEqual({ status: "synced", prefix: 2n });
 		// A set past what one message holds.

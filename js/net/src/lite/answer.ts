@@ -52,8 +52,8 @@ export class Answer {
 	/** The prefixes in effect, by Prefix ID. */
 	#prefixes = new Map<bigint, Prefix>();
 	#nextPrefix = 0n;
-	/** The peer's edits not put in effect yet, oldest first. */
-	#requests: { remove: bigint[]; add: [bigint, Prefix][] }[] = [];
+	/** The peer's edit not answered yet. */
+	#request?: { remove: bigint[]; add: [bigint, Prefix][] };
 	/** The ANNOUNCE_REQUESTs of an edit that continues: its removes and its adds so far. */
 	#parts?: { remove: bigint[]; add: Add[] };
 	/** The claims the peer holds, by their path from the session's root. */
@@ -91,17 +91,15 @@ export class Answer {
 	request(more: boolean, remove: bigint[], add: Add[]): Promise<void> {
 		this.#running ??= this.#run();
 		if (this.#withdrawn || this.#closed) return this.#running;
+		// One edit at a time, so a peer that never reads its answers leaves one here beside the
+		// one being answered.
+		if (this.#request) throw new ProtocolViolation("ANNOUNCE_REQUEST before the last was answered");
 		if (this.#parts) {
 			remove = [...this.#parts.remove, ...remove];
 			add = [...this.#parts.add, ...add];
 			this.#parts = undefined;
 		}
-		// The set as it stands once every edit before this one is in effect.
 		const left = new Map(this.#prefixes);
-		for (const request of this.#requests) {
-			for (const id of request.remove) left.delete(id);
-			for (const [id, prefix] of request.add) left.set(id, prefix);
-		}
 		// Parts that could never make a valid edit fail before more of them pile up: their Adds
 		// alone already pass the set's limit, or they remove more than the set holds.
 		if (
@@ -135,7 +133,7 @@ export class Answer {
 		if (!requestFits(set, this.#publish.version)) throw new ProtocolViolation("ANNOUNCE_REQUEST set too large");
 		// Each added prefix takes the next Prefix ID, in the order the edit names them.
 		const added = add.map(({ prefix, hidden }): [bigint, Prefix] => [this.#nextPrefix++, { path: prefix, hidden }]);
-		this.#requests.push({ remove, add: added });
+		this.#request = { remove, add: added };
 		this.#notify?.();
 		return this.#running;
 	}
@@ -161,8 +159,11 @@ export class Answer {
 					this.#live.clear();
 					return;
 				}
-				const request = this.#requests.shift();
+				const request = this.#request;
 				if (request) {
+					// Let go before its answer is written: the peer may send its next edit the
+					// moment it reads the answer, which can be before the write returns here.
+					this.#request = undefined;
 					await this.#edit(request);
 					continue;
 				}

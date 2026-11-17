@@ -418,3 +418,54 @@ async fn a_closed_session_leaves_its_claims_unavailable() {
 	drop(routed);
 	assert!(!cursor.expect_next_active("room").await.available);
 }
+
+/// Prefixes named `head/0`, `head/1`, ... each padded to about `bytes`.
+fn prefixes(head: &str, count: usize, bytes: usize) -> std::collections::BTreeSet<Path> {
+	(0..count)
+		.map(|i| Path::new(&format!("{head}/{i}{}", "x".repeat(bytes))).expect("a path"))
+		.collect()
+}
+
+#[test]
+fn a_set_past_one_request_is_asked_for_more_coarsely() {
+	let fits =
+		|set: &std::collections::BTreeSet<Path>| crate::lite::request_fits(set.iter(), crate::lite::Version::Lite07);
+	let path = |path: &str| Path::new(path).expect("a path");
+
+	// A set that fits is asked for as it is.
+	let small = prefixes("a", 16, 64);
+	assert_eq!(super::coarsen(small.clone(), &Default::default()), small);
+
+	// Without a confined grant, what the prefixes share stands for them.
+	let wide = prefixes("a", 17, 4000);
+	assert!(!fits(&wide));
+	assert_eq!(
+		super::coarsen(wide.clone(), &Default::default()),
+		[path("a")].into_iter().collect()
+	);
+
+	// Within a grant, each region's prefixes give way inside it, the largest group first,
+	// and nothing is asked for above a region.
+	let regions: std::collections::BTreeSet<Path> = [path("a"), path("b")].into_iter().collect();
+	let mut both = wide.clone();
+	both.extend(prefixes("b", 2, 64));
+	let asked = super::coarsen(both, &regions);
+	assert!(fits(&asked));
+	assert!(asked.contains(&path("a")));
+	assert_eq!(asked.len(), 3);
+
+	// One prefix alone in each region gives way to its region.
+	let regions: std::collections::BTreeSet<Path> = (0..17).map(|i| path(&format!("r{i}"))).collect();
+	let alone: std::collections::BTreeSet<Path> = (regions.iter())
+		.map(|region| path(&format!("{region}/{}", "x".repeat(4000))))
+		.collect();
+	assert!(!fits(&alone));
+	let asked = super::coarsen(alone, &regions);
+	assert!(fits(&asked));
+	assert!(
+		asked
+			.iter()
+			.all(|prefix| regions.iter().any(|region| prefix.has_prefix(region)))
+	);
+	assert_eq!(asked.len(), 17);
+}

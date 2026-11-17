@@ -28,7 +28,7 @@ use crate::Path;
 
 pub(crate) use node::Node;
 #[cfg(feature = "async")]
-pub(crate) use prefix::{ancestors, within};
+pub(crate) use prefix::{ancestors, heads, within};
 pub(crate) use relay::NodeId;
 
 /// A claim's attributes as the router carries them down a stream.
