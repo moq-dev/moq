@@ -186,10 +186,9 @@ impl Release {
 	fn update_catalog(&mut self, catalog: &Catalog<super::Ext>) -> crate::Result<()> {
 		let Some(passthrough) = &catalog.ext.mpegts.passthrough else {
 			if self.track.is_none() && !(catalog.video.renditions.is_empty() && catalog.audio.renditions.is_empty()) {
-				return Err(unsupported!(
-					"the broadcast is demultiplexed, with no passthrough track to release"
-				)
-				.into());
+				return Err(
+					unsupported!("the broadcast is demultiplexed, with no passthrough track to release").into(),
+				);
 			}
 			return Ok(());
 		};
@@ -208,7 +207,9 @@ impl Release {
 				self.subscribed = kio::clock::now();
 			}
 			Some((name, _)) if *name != passthrough.track => {
-				return Err(unsupported!("the passthrough track moved from `{name}` to `{}`", passthrough.track).into());
+				return Err(
+					unsupported!("the passthrough track moved from `{name}` to `{}`", passthrough.track).into(),
+				);
 			}
 			Some(_) => {}
 		}
