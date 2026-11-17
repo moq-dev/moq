@@ -37,7 +37,7 @@ fn write_group(track: &moq_net::track::Producer, key: u64) {
 	group
 		.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next group's key, or `None` once the track ends or nothing arrives in time.
@@ -238,7 +238,7 @@ async fn range_fixture_history(version: &str, relay: bool, history: u64) -> Rang
 		group
 			.write_frame(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 	let relay_origin = produce_origin(2);
 	let subscriber = produce_origin(3);
@@ -373,7 +373,7 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 		group
 			.write_frame(Timestamp::from_millis(6).unwrap(), b"later".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(next(&mut reader).await, Some(6), "relay={relay}");
 	}
 }
@@ -470,7 +470,7 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 		let mut got = [next(&mut history).await.unwrap(), next(&mut history).await.unwrap()];
 		got.sort_unstable();
 		assert_eq!(got, [0, 1], "relay={relay}");
-		quiet.close().unwrap();
+		quiet.finish().unwrap();
 		assert!(
 			kio::clock::timeout(TIMEOUT, current.read_frame())
 				.await
@@ -532,7 +532,7 @@ async fn draft18_updates_narrow_then_widen() {
 			group
 				.write_frame(Timestamp::from_millis(key).unwrap(), key.to_be_bytes().as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		reader.update(initial).unwrap();
 		let mut seen = Vec::new();
@@ -584,7 +584,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			group
 				.write_frame(Timestamp::from_millis(6).unwrap(), b"sibling".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			assert_eq!(next(&mut sibling).await, Some(6), "{version} relay={relay}");
 			reader.update(live.clone()).unwrap();
 			assert_eq!(next(&mut reader).await, Some(6));
@@ -613,7 +613,7 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			group
 				.write_frame(Timestamp::from_millis(7).unwrap(), b"resumed".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			reader.update(live).unwrap();
 			assert_eq!(next(&mut reader).await, Some(7), "{version} relay={relay}");
 		}
@@ -662,7 +662,7 @@ async fn draft22_cold_widening_finishes_the_largest_group() {
 				group
 					.write_frame(Timestamp::from_millis(key).unwrap(), key.to_be_bytes().as_slice())
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			}
 			reader
 				.update(initial.clone().with_ranges([support::keys(start..)]))
@@ -802,7 +802,7 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 			group
 				.write_frame(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		// Warm the relay's cache with groups 1 and 5 alone, one-group runs every wire fills.
@@ -843,7 +843,7 @@ async fn holes_through_a_relay(version: &str, budget: Option<Duration>) {
 		group
 			.write_frame(Timestamp::from_millis(LIVE_MILLIS).unwrap(), b"x".as_slice())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		let _finished = fixture.track.clone().finish().unwrap();
 		// The read ends only once every key in range was delivered or skipped.
 		loop {

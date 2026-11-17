@@ -973,7 +973,7 @@ mod tests {
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
 
-	/// The first request already states the min delay, and the max plus the warmup: a latest
+	/// The first request already states the min and max delay, each plus the warmup: a latest
 	/// start waits for the live edge with its subscription open, before the container could
 	/// update it.
 	#[tokio::test]
@@ -1007,7 +1007,11 @@ mod tests {
 		};
 		assert_eq!(
 			first.map(|sub| sub.delay),
-			Some(delay.with_max(Duration::from_millis(600)))
+			Some(
+				delay
+					.with_min(Duration::from_millis(400))
+					.with_max(Duration::from_millis(600))
+			)
 		);
 	}
 
@@ -2771,7 +2775,7 @@ mod tests {
 				keyframe: true,
 			};
 			container.write(&mut group, &[frame]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			if read(sequence) {
 				next_frame(&mut consumer).await.unwrap().expect("one frame per packet");
 			}

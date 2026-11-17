@@ -610,6 +610,11 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
+          # Nightly `just test route-proof` type-checks the route rule's convergence
+          # proof. Its own Agda pin, so neither the dev shell nor `nix flake check`
+          # fetches it.
+          route-proof = import ./nix/route-proof.nix { inherit system; };
+
           # The QUIC Interop Runner's host tools (`just test quic-interop`): tshark
           # reads its pcaps, OpenSSL makes its certificates (the dev shell's LibreSSL
           # has no config for them), and Compose drives Podman where Docker's plugin is

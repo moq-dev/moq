@@ -20,8 +20,11 @@ METRICS = (
     "generator_cpu_cores",
     "loss_pct",
     "latency_p99_ms",
+    # The relay's peak resident memory over the window; per-connection state shows here, not in CPU.
+    "rss_bytes",
 )
-CPU_METRICS = ("cpu_cores", "cpu_us_per_frame", "cpu_cores_per_gbps", "generator_cpu_cores")
+# Read from the host sampler, which runs only on Linux.
+HOST_METRICS = ("cpu_cores", "cpu_us_per_frame", "cpu_cores_per_gbps", "generator_cpu_cores", "rss_bytes")
 
 
 def value(row, metric):
@@ -54,10 +57,10 @@ def reduce(pairs):
         "metrics": {},
     }
     for metric in METRICS:
-        if metric in CPU_METRICS and all(
+        if metric in HOST_METRICS and all(
             value(pair[label], metric) is None for pair in pairs for label in ("base", "current")
         ):
-            result["metrics"][metric] = {"delta_pct": None, "status": "unavailable: no host CPU samples"}
+            result["metrics"][metric] = {"delta_pct": None, "status": "unavailable: no host samples"}
             continue
         deltas = []
         absolute = []

@@ -2,45 +2,12 @@ import * as z from "zod/mini";
 import { u53Schema } from "./integers";
 
 /**
- * Wrap a catalog section so a value that isn't one decodes as absent rather than failing the
- * whole catalog.
- *
- * A section name is only reserved from the version that defines it, so an application may already
- * be carrying its own key under that name. Dropping the one key we can't read keeps the rest of
- * the catalog readable, instead of taking video and audio down with it.
- *
- * The fallback is deliberately narrow: only a value whose `map` key is missing or not an object is
- * treated as someone else's. A value that *is* a section but carries a malformed entry still fails,
- * since swallowing that would hide a publisher bug (a data track with no `mode`) behind the silence
- * that exists to protect an unrelated key. Mirrors the Rust `deserialize_section`, which recognizes
- * the section only when the map is an object.
- *
- * @param schema - the section's own schema, applied when the value looks like a section.
- * @param map - the key holding the section's map of tracks (`tracks`, `renditions`).
- */
-export function section<T extends z.ZodMiniType>(schema: T, map: string) {
-	return z.optional(
-		z.union([
-			schema,
-			z.pipe(
-				z.custom<unknown>((value) => {
-					if (typeof value !== "object" || value === null || !(map in value)) return true;
-					const inner = (value as Record<string, unknown>)[map];
-					return typeof inner !== "object" || inner === null || Array.isArray(inner);
-				}),
-				z.transform(() => undefined),
-			),
-		]),
-	);
-}
-
-/**
  * A catalog map keyed by ID (renditions, data tracks, includes), refusing the catalog if any
  * entry is malformed.
  *
  * Each entry must parse with `schema`; the issue names the entry. An unknown container
  * or extension field is not malformed, so it never refuses the catalog. Mirrors the Rust
- * `deserialize_renditions`.
+ * `deserialize_entries`.
  *
  * @param schema - one entry's schema.
  * @param kind - what an entry is, naming it in the issue (`rendition`, `include`).
@@ -83,47 +50,4 @@ export function codecNumber(field: string | undefined, radix: 10 | 16, max: numb
 	if (field === undefined) return false;
 	const digits = radix === 10 ? /^[0-9]+$/ : /^[0-9a-fA-F]+$/;
 	return digits.test(field) && Number.parseInt(field, radix) <= max;
-}
-
-/**
- * Like {@link section}, for a section identified by one string field (`stats.track`, `echo.path`)
- * rather than a map. Mirrors the Rust `deserialize_named`.
- *
- * @param schema - the section's own schema, applied when the field is a string.
- * @param key - the section's required string field.
- */
-export function named<T extends z.ZodMiniType>(schema: T, key: string) {
-	return z.optional(
-		z.union([
-			schema,
-			z.pipe(
-				z.custom<unknown>(
-					(value) =>
-						typeof value !== "object" ||
-						value === null ||
-						typeof (value as Record<string, unknown>)[key] !== "string",
-				),
-				z.transform(() => undefined),
-			),
-		]),
-	);
-}
-
-/**
- * Like {@link section}, for a section recognized by being an object at all (`media`): any other
- * value, `null` and arrays included, is someone else's and decodes as absent, while an object is
- * checked by `schema` and fails the catalog when malformed. Mirrors the Rust `deserialize_media`.
- *
- * @param schema - the section's own schema, applied when the value is an object.
- */
-export function object<T extends z.ZodMiniType>(schema: T) {
-	return z.optional(
-		z.union([
-			schema,
-			z.pipe(
-				z.custom<unknown>((value) => typeof value !== "object" || value === null || Array.isArray(value)),
-				z.transform(() => undefined),
-			),
-		]),
-	);
 }

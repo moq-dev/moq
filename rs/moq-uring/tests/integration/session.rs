@@ -64,12 +64,12 @@ fn lite_session_over_the_worker() {
 		.create_track("data", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
 	let server_config = quic::server::Config::new(certs.server(&[ALPN]));
@@ -196,12 +196,12 @@ fn two_lite_sessions_share_the_server_socket() {
 		.create_track("data", timed())
 		.expect("create track");
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), PAYLOAD)
 		.expect("write frame");
-	group.close().expect("finish group");
+	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
 	let server_config = quic::server::Config::new(certs.server(&[ALPN]));

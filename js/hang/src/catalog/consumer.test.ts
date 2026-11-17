@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { TRACK } from "./format";
@@ -60,7 +61,7 @@ test("watch yields a catalog with many renditions", async () => {
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
 	producer.update({ value: catalog(1000), at: Moq.Time.Timestamp.now() });
 	const next = await consumer.next();
-	expect(Object.keys(next.value?.audio?.renditions ?? {})).toHaveLength(1000);
+	expect(Object.keys(next.value?.value.audio?.renditions ?? {})).toHaveLength(1000);
 	producer.finish();
 	broadcast.close();
 });
@@ -113,7 +114,7 @@ test("watch refuses a broadcast reference escaping the requested path", async ()
 
 test("watch accepts a sibling reference under the same root and yields it unresolved", async () => {
 	const root = referencing("./bob");
-	expect(await watchRequested(root)).toMatchObject({ value: root });
+	expect(await watchRequested(root)).toMatchObject({ value: { value: root } });
 });
 
 test("watch on a standalone broadcast refuses any parent reference", async () => {
@@ -127,16 +128,47 @@ test("watch on a standalone broadcast refuses any parent reference", async () =>
 	broadcast.close();
 });
 
-test("watch subscribes and yields typed catalog updates", async () => {
+test("watch yields each catalog update with the timestamp it takes effect at", async () => {
 	const broadcast = new Moq.Broadcast.Producer();
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update({ value: catalog(1), at: Moq.Time.Timestamp.now() });
-	expect(await consumer.next()).toMatchObject({ value: catalog(1) });
+	for (const [count, ms] of [
+		[1, 1_000],
+		[2, 2_500],
+	]) {
+		producer.update({ value: catalog(count), at: Moq.Time.Timestamp.fromMillis(ms) });
+		const next = await consumer.next();
+		expect(next.value?.value).toEqual(catalog(count));
+		expect(next.value?.at.asMillis()).toBe(ms);
+	}
 	await consumer.return?.();
 	producer.finish();
 	broadcast.close();
+});
+
+test("a holding watcher reads every update it may still play, in order", async () => {
+	// A reader `delay` behind the live edge (3s) plays from `3000 - delay`, so it needs the update in
+	// effect there and every later one; without a delay it takes only the newest.
+	for (const [delay, expected] of [
+		[undefined, [3000]],
+		[Duration.millis(999), [2000, 3000]],
+		[Duration.millis(1001), [1000, 2000, 3000]],
+	] as const) {
+		const broadcast = new Moq.Broadcast.Producer();
+		const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI, maxAge: Duration.secs(30) });
+		const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
+		// Subscribed before the updates land, as a live reader is; all three arrive before it reads.
+		const updates = watch(broadcast.consume(), { delay })[Symbol.asyncIterator]();
+		const first = updates.next();
+		for (const ms of [1000, 2000, 3000])
+			producer.update({ value: catalog(ms / 1000), at: Moq.Time.Timestamp.fromMillis(ms) });
+		producer.finish();
+		const read: number[] = [];
+		for (let next = await first; !next.done; next = await updates.next()) read.push(next.value.at.asMillis());
+		expect(read).toEqual([...expected]);
+		broadcast.close();
+	}
 });
 
 test("echo feedback prefix refuses root escape with the same URL resolution as renditions", () => {
@@ -162,5 +194,5 @@ test("watch refuses an echo prefix escaping the requested broadcast root", async
 		watchRequested({ echo: { path: Moq.Path.normalizeRelative("../../viewers") } }),
 	).rejects.toBeInstanceOf(EscapingBroadcast);
 	const root = { echo: { path: Moq.Path.normalizeRelative("viewers") } };
-	expect(await watchRequested(root)).toMatchObject({ value: root });
+	expect(await watchRequested(root)).toMatchObject({ value: { value: root } });
 });

@@ -8,18 +8,15 @@
 mod whep;
 mod whip;
 
-use std::net::SocketAddr;
-
 use url::Url;
 
-/// Configuration shared by both `client publish` and `client subscribe`.
+/// Configuration shared by both `client publish` and `client pull`.
+///
+/// No options yet; it is where a later one, such as a dial policy, goes without
+/// changing [`Client::new`].
 #[derive(Clone, Debug, Default)]
 #[non_exhaustive]
-pub struct Config {
-	/// Public UDP socket addresses to advertise as ICE host candidates in
-	/// our outbound offer. Same semantics as [`crate::server::Config::ice_candidates`].
-	pub ice_candidates: Vec<SocketAddr>,
-}
+pub struct Config {}
 
 /// Outbound WHIP/WHEP dialer.
 ///
@@ -27,42 +24,38 @@ pub struct Config {
 /// rustls config survive between resources.
 #[derive(Clone)]
 pub struct Client {
-	config: Config,
 	http: reqwest::Client,
 }
 
 impl Client {
 	/// Build a dialer from the shared client [`Config`]. The underlying
 	/// [`reqwest::Client`] (with its connection pool and rustls config) is created
-	/// once here and reused across every [`subscribe`](Self::subscribe) /
+	/// once here and reused across every [`pull`](Self::pull) /
 	/// [`publish`](Self::publish) call.
 	///
 	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU
 	/// rind can't run on.
 	pub fn new(config: Config) -> crate::Result<Self> {
+		// Destructured so a new option cannot compile without being used.
+		let Config {} = config;
 		// reqwest reads rustls's process default and panics without one, so install rind's
 		// unless the host already chose a provider.
 		moq_crypto::provider::install_default()?;
 		Ok(Self {
-			config,
 			http: reqwest::Client::builder().build()?,
 		})
-	}
-
-	pub(crate) fn config(&self) -> &Config {
-		&self.config
 	}
 
 	pub(crate) fn http(&self) -> &reqwest::Client {
 		&self.http
 	}
 
-	/// `client subscribe`: pull a remote WHEP feed and publish it as `broadcast`, its tracks
+	/// `client pull`: ingest a remote WHEP feed and publish it as `broadcast`, its tracks
 	/// minted under `catalog`, until the session ends.
 	///
 	/// The caller owns the broadcast, so its announcement and any linger after the end are
 	/// the caller's too.
-	pub async fn subscribe(
+	pub async fn pull(
 		&self,
 		url: Url,
 		broadcast: moq_net::broadcast::Producer,
@@ -102,7 +95,7 @@ mod tests {
 			.expect("WHEP URL");
 		let err = Client::new(Config::default())
 			.unwrap()
-			.subscribe(url, broadcast.broadcast().clone(), Default::default())
+			.pull(url, broadcast.broadcast().clone(), Default::default())
 			.await
 			.expect_err("dial a closed port");
 

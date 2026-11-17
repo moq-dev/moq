@@ -33,14 +33,18 @@ mod test {
 		let broadcast = moq_net::broadcast::Info::default().produce();
 		let track = broadcast.create_track("t", moq_net::track::Info::default()).unwrap();
 		let mut first = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(moq_net::Timestamp::unscaled(
+				track.largest().map_or(0, |largest| largest.group + 1),
+			))
 			.unwrap();
 		first
 			.write_frame(moq_net::Timestamp::unscaled(first.start), &b"a"[..])
 			.unwrap();
-		first.close().unwrap();
+		first.finish().unwrap();
 		let _open = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(moq_net::Timestamp::unscaled(
+				track.largest().map_or(0, |largest| largest.group + 1),
+			))
 			.unwrap();
 
 		let handle = broadcast.consume().track("t").unwrap();

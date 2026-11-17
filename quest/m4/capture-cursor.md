@@ -21,9 +21,11 @@ Decided: ✅ a separate cursor (rejected: drawn into the frame, with the
 viewer's own pointer shown on top). Milestone: ✅ m4 (rejected: m3), since
 the consumer is Kixel's later (m2) plans.
 
-Today `capture::Config::cursor` is a bool that draws the cursor in or leaves
-it out: the portal's embedded mode, `SetIsCursorCaptureEnabled` on WGC,
-`setShowsCursor` on macOS, and a CPU blend of the XFixes cursor on X11.
+Today `capture::Config::cursor` is a `#[non_exhaustive]` enum whose
+`Drawn` and `Hidden` draw the cursor in or leave it out: the portal's
+embedded mode, `SetIsCursorCaptureEnabled` on WGC, `setShowsCursor` on
+macOS, and a CPU blend of the XFixes cursor on X11. The separate cursor is a
+third variant, which each backend's `Cursor::drawn` match must then decide.
 
 What each system offers, to confirm in the PR:
 

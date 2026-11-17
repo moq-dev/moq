@@ -9,7 +9,7 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt};
 
 use crate::layout::{self, End, Name, Object, Start};
-use crate::{Error, Info, Result, Store, VERSION};
+use crate::{Error, Info, Result, Store};
 
 /// One track as stored.
 pub(super) struct Stored {
@@ -49,10 +49,6 @@ async fn load_track<S: ObjectStore>(store: &Store<S>, dir: &Path) -> Result<Stor
 	let entries: Vec<_> = store.inner().list(Some(dir)).try_collect().await?;
 	let info_path = crate::path::push(dir, layout::TRACK_INFO)?;
 	let info = Info::decode(&store.inner().get(&info_path).await?.bytes().await?)?;
-	// A reader still reads an older format, but nothing appends to it.
-	if info.version != VERSION {
-		return Err(Error::Version(info.version));
-	}
 	let timed = info.timescale.is_some();
 
 	let mut objects: Vec<(Start, Path)> = Vec::new();
@@ -66,7 +62,7 @@ async fn load_track<S: ObjectStore>(store: &Store<S>, dir: &Path) -> Result<Stor
 			.location
 			.filename()
 			.ok_or_else(|| Error::Path(entry.location.to_string()))?;
-		match Name::parse(filename, timed)? {
+		match Name::parse(filename)? {
 			Name::Info => {}
 			Name::End => end = Some(End::decode(&store.inner().get(&entry.location).await?.bytes().await?)?),
 			Name::Object(start) => objects.push((start, entry.location)),

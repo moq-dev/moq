@@ -111,12 +111,23 @@ test("concurrent bucket reads each get a frame", async () => {
 	origin.close();
 });
 
-test("legacy counter names fill in for missing canonical ones", () => {
-	const traffic = TrafficSchema.parse({ announced: 3, broadcasts: 2, broadcasts_ended: 1, broadcasts_closed: 9 });
-	expect(traffic).toMatchObject({ announces_started: 3, broadcasts_started: 2, broadcasts_ended: 1 });
-	expect(PresenceSchema.parse({ sessions: 4, sessions_closed: 2 })).toMatchObject({
+test("a frame names each counter once and a missing counter reads zero", () => {
+	const traffic = TrafficSchema.parse({ announces_started: 3, broadcasts_started: 2, broadcasts_ended: 1 });
+	expect(traffic).toMatchObject({
+		announces_started: 3,
+		announces_ended: 0,
+		broadcasts_started: 2,
+		broadcasts_ended: 1,
+	});
+	expect(traffic).not.toHaveProperty("announced");
+	expect(PresenceSchema.parse({ sessions_started: 4, sessions_ended: 2 })).toMatchObject({
 		sessions_started: 4,
 		sessions_ended: 2,
+	});
+	// The pre-rename spellings are neither read nor kept.
+	expect(PresenceSchema.parse({ sessions: 4, sessions_closed: 2 })).toMatchObject({
+		sessions_started: 0,
+		sessions_ended: 0,
 	});
 });
 

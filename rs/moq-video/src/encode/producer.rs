@@ -258,6 +258,28 @@ impl Producer {
 			Codecs::H265 { import, .. } => import.abort(err),
 		}
 	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the producer back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the producer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
+		let codecs = match self.codecs {
+			Codecs::H264 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| Codecs::H264 { split, import }),
+			Codecs::H265 { split, import } => import
+				.abort_unwanted(err)
+				.map_err(|import| Codecs::H265 { split, import }),
+		};
+		codecs.map_err(|codecs| Self { codecs })
+	}
 }
 
 /// Capture and encode settings for [`publish_capture`].
@@ -310,12 +332,8 @@ pub struct Capture {
 	/// the recent past in the track's cache. On demand saves the capture and encode while nobody
 	/// watches, and leaves nothing to fetch from before the first viewer arrived.
 	pub on_demand: bool,
-	/// The VA-API render node the encoder opens; see [`Config::vaapi`](encoder::Config::vaapi).
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	pub vaapi: Option<std::path::PathBuf>,
-	/// The V4L2 M2M node the encoder opens; see [`Config::v4l2`](encoder::Config::v4l2).
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	pub v4l2: Option<std::path::PathBuf>,
+	/// The hardware the encoder opens; see [`Config::device`](encoder::Config::device).
+	pub device: crate::Device,
 }
 
 #[cfg(feature = "capture")]
@@ -326,14 +344,7 @@ impl Capture {
 		config.bitrate = self.bitrate;
 		config.codec = self.codec;
 		config.kind = self.kind.clone();
-		#[cfg(all(target_os = "linux", feature = "vaapi"))]
-		{
-			config.vaapi = self.vaapi.clone();
-		}
-		#[cfg(all(target_os = "linux", feature = "v4l2"))]
-		{
-			config.v4l2 = self.v4l2.clone();
-		}
+		config.device = self.device.clone();
 		config
 	}
 }
@@ -1814,7 +1825,7 @@ mod tests {
 					let now = kio::clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
 					let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
-					let advertised = fixture.catalog.snapshot().media.clock;
+					let advertised = fixture.catalog.snapshot().sync.clock;
 					assert_eq!(advertised, fixture.clock.wall());
 
 					let mut track = fixture.subscribe().await;
@@ -1827,7 +1838,7 @@ mod tests {
 					fixture.assert_acquired(published, captured);
 					let mapped = advertised.unwrap().wall_clock(us(published)).unwrap();
 					assert_eq!(mapped, wall + Duration::from_micros(published));
-					assert_eq!(fixture.catalog.snapshot().media.clock, advertised);
+					assert_eq!(fixture.catalog.snapshot().sync.clock, advertised);
 					fixture.finish().await;
 				})
 				.await

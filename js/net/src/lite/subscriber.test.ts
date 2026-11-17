@@ -35,18 +35,21 @@ import { SEGMENT_BYTES } from "../util/limits.ts";
 import { Budget } from "../util/yield.ts";
 import * as Varint from "../varint.ts";
 import {
+	type Add,
 	type AnnounceBroadcast,
 	AnnounceInit,
 	AnnounceOk,
-	AnnounceRequest,
+	decodeAnnounceBroadcast,
+	decodeAnnounceBroadcastMaybe,
 	encodeAnnounceBroadcast,
 	type Offer,
 	ROUTE_MAX_HOPS,
 } from "./announce.ts";
+import { closeViolation } from "./error.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { ProbeLevel, Setup } from "./setup.ts";
-import { StreamId } from "./stream.ts";
+import { DataType, StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
 	Subscribe,
@@ -90,8 +93,10 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 });
 
 // Drives a Subscriber's announce stream directly: the harness plays the peer, writing
-// forged announce messages into the stream the subscriber opens.
+// forged announce messages into the stream the subscriber opens. On lite-07 they are the
+// peer's Announce Stream instead, delivered in order as the session does.
 function announceHarness(version: Version, origin = 1n) {
+	const routed = version === Version.DRAFT_07;
 	const reading = Promise.withResolvers<void>();
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
 	// Resolves with the reason once the subscriber resets the stream, which is how a peer
@@ -114,6 +119,8 @@ function announceHarness(version: Version, origin = 1n) {
 			),
 			writable: new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) }),
 		}),
+		// Lite-07: the subscriber's own Announce Stream, whose first write is its request.
+		createUnidirectionalStream: async () => new WritableStream<Uint8Array>({ write: () => reading.resolve() }),
 		close: (info?: WebTransportCloseInfo) => {
 			// WebTransport throws rather than closing when the reason exceeds 1024 bytes of
 			// UTF-8. Enforced here so an unbounded reason fails as a session that stayed up,
@@ -144,8 +151,25 @@ function announceHarness(version: Version, origin = 1n) {
 			out.set(chunk, offset);
 			offset += chunk.byteLength;
 		}
-		inbound.enqueue(out);
+		if (!routed) {
+			inbound.enqueue(out);
+			return;
+		}
+		// A violation ends the session, as the connection does for one on the peer's Announce Stream.
+		try {
+			const reader = new Reader(undefined, out, version);
+			while (!(await reader.done())) await subscriber.announce(await decodeAnnounceBroadcast(reader, version));
+		} catch (err) {
+			const violation = closeViolation(quic, err);
+			if (!violation) throw err;
+			subscriber.close(violation);
+		}
 	};
+	// The peer answers the request: ANNOUNCE_OK, on whichever stream the version carries it.
+	const ok = () =>
+		send((w) =>
+			routed ? encodeAnnounceBroadcast(w, { status: "ok" }, version) : new AnnounceOk(PEER, 0).encode(w, version),
+		);
 
 	// The reason the subscriber reset the stream, or a prompt rejection if it never did.
 	// A peer that is not told about its own violation should fail the test visibly rather
@@ -172,8 +196,9 @@ function announceHarness(version: Version, origin = 1n) {
 	return {
 		subscriber,
 		send,
+		ok,
 		// The peer FINs the announce stream.
-		finish: () => inbound.close(),
+		finish: () => (routed ? subscriber.announceFinished() : inbound.close()),
 		abortReason,
 		sessionEnded,
 		settle: async () => {
@@ -228,7 +253,7 @@ function claimer(version: Version) {
 		const route = routes++;
 		await encodeAnnounceBroadcast(
 			w,
-			{ status: "routeStart", node, suffix: Path.empty(), offer: offer(node) },
+			{ status: "routeStart", node, prefix: 0n, suffix: Path.empty(), exact: false, offer: offer(node) },
 			version,
 		);
 		await encodeAnnounceBroadcast(w, { status: "active", suffix, route, instance }, version);
@@ -412,13 +437,13 @@ test("an update moves the route in place, even from another publisher", async ()
 });
 
 test("a lite-07 restart replaces the instance, and the next consume subscribes fresh", async () => {
-	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07);
+	const { subscriber, send, ok, settle } = announceHarness(Version.DRAFT_07);
 	const announced = subscriber.routes();
 	await settle();
 	const room = Path.from("room");
 
 	const v = Version.DRAFT_07;
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, v));
+	await ok();
 	const first = Instance.random();
 	await send((w) => claimer(v)(w, room, { instance: first, hops: [], node: NODE_A }));
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: first } });
@@ -457,13 +482,13 @@ test.each([
 	["a lite-07 restart", Version.DRAFT_07],
 	["an end then a start", Version.DRAFT_06],
 ] as const)("%s of a prefix stops sharing what was consumed beneath it", async (_, version) => {
-	const { subscriber, send, settle } = announceHarness(version);
+	const { subscriber, send, ok, settle } = announceHarness(version);
 	const announced = subscriber.routes();
 	await settle();
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
 
-	await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
+	await ok();
 	await send((w) => claimer(version)(w, pool, { instance: named(version, "a"), hops: [PUBLISHER_A], node: NODE_A }));
 	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
 	const held = subscriber.consume(job);
@@ -2822,38 +2847,44 @@ test("retirement preserves an accepted fetch and its coalesced reads", async () 
 // Drive discovery and inspect the TRACK request before answering it. Waiting for the
 // reader means the whole request has reached the wire, without a clock-based settle.
 test("consumes resolve the serving prefix and pin its instance", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const announced = subscriber.routes();
-	await opened(0);
-	const peer = new Writer(
-		new WritableStream<Uint8Array>({
-			write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
-		}),
-		version,
-	);
-	await new AnnounceOk(PEER, 0).encode(peer, version);
+	const { subscriber, announced, send, opened, version } = await routedStream();
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
 	const instance = Instance.random();
-	const claim = claimer(version);
-	await claim(peer, pool, { instance, hops: [], node: NODE_A });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: pool, route: 0n, instance });
+	await send({ status: "floor", id: 0n });
 	await announced.next();
 	const held = subscriber.consume(job);
 	const info = held
 		.track("video")
 		.info()
 		.catch(() => {});
-	await opened(1);
-	await streams[1].reading;
-	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
+	const first = await opened(0);
+	await first.reading;
+	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(first.written)), version);
 	expect(await reader.u53()).toBe(StreamId.Track);
 	expect(await Track.decode(reader, version)).toMatchObject({ instance, node: NODE_A });
 
 	// The more specific source's instance shadows the covering source's.
 	const other = Instance.random();
-	await claim(peer, job, { instance: other, hops: [], node: NODE_B });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
+	await send({ status: "active", suffix: job, route: 1n, instance: other });
+	await send({ status: "floor", id: 1n });
 	await announced.next();
 	const fresh = subscriber.consume(job);
 	expect(fresh.closed).not.toBe(held.closed);
@@ -2862,14 +2893,14 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 		.track("video")
 		.info()
 		.catch(() => {});
-	await opened(2);
-	await streams[2].reading;
-	const freshReader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[2].written)), version);
+	const second = await opened(1);
+	await second.reading;
+	const freshReader = new Reader(undefined, new Uint8Array(Buffer.concat(second.written)), version);
 	await freshReader.u53();
 	expect(await Track.decode(freshReader, version)).toMatchObject({ instance: other, node: NODE_B });
 
-	await encodeAnnounceBroadcast(peer, { status: "endedId", id: 1n }, version);
-	await encodeAnnounceBroadcast(peer, { status: "floor", id: 1n }, version);
+	await send({ status: "endedId", id: 1n });
+	await send({ status: "floor", id: 1n });
 	await announced.next();
 	const fallback = subscriber.consume(job);
 	expect(fallback.closed).toBe(held.closed);
@@ -2885,10 +2916,10 @@ test("consumes resolve the serving prefix and pin its instance", async () => {
 test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	"a more specific start replaces an existing consume on %s",
 	async (version) => {
-		const { subscriber, send, settle } = announceHarness(version);
+		const { subscriber, send, ok, settle } = announceHarness(version);
 		const announced = subscriber.routes();
 		await settle();
-		await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
+		await ok();
 		const pool = Path.from("pool");
 		const job = Path.from("pool/job");
 		const claim = claimer(version);
@@ -4300,30 +4331,73 @@ test("a cancelled legacy datagram lookup cannot refuse a stream answer arriving 
 	}
 });
 
-// A lite-07 peer's announce stream, after the request: what the peer writes, and the replies
-// the subscriber sends back. `another` opens a further one on the session as its `index`th stream.
-async function routedStream(options?: RouteOptions) {
+// A lite-07 session whose peer the test plays: what the peer sends on its Announce Stream reaches
+// the subscriber in order, as the session delivers it, and each edit the subscriber sends on its
+// own is answered at once. `another` adds a reader, which shares the stream.
+async function routedStream(options?: RouteOptions, scope?: Path.Pattern) {
 	const version = Version.DRAFT_07;
-	const { quic, opened } = fakeSession();
+	const { quic, opened, closes } = fakeSession();
+	let sent!: ReadableStreamDefaultController<Uint8Array>;
+	const outbound = new ReadableStream<Uint8Array>({ start: (controller) => (sent = controller) });
+	Object.assign(quic, {
+		createUnidirectionalStream: async () =>
+			new WritableStream<Uint8Array>({
+				write: (chunk) => sent.enqueue(new Uint8Array(chunk)),
+				close: () => sent.close(),
+			}),
+	});
 	const subscriber = new Subscriber(quic, version, toHop(1n));
-	const another = async (index: number, scope?: Path.Pattern) => {
-		const announced = subscriber.routes(scope, options);
-		const stream = await opened(index);
-		const peer = new Writer(
-			new WritableStream<Uint8Array>({ write: (chunk) => stream.inbound.enqueue(new Uint8Array(chunk)) }),
-			version,
-		);
-		const replies = new Reader(stream.outbound, undefined, version);
-		expect(await replies.u53()).toBe(StreamId.Announce);
-		await AnnounceRequest.decode(replies, version);
-		await new AnnounceOk(PEER, 0).encode(peer, version);
-		const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(peer, msg, version);
-		// Bytes as a newer or broken peer might write them.
-		const raw = (bytes: number[]) => stream.inbound.enqueue(new Uint8Array(bytes));
-		return { announced, send, raw, replies };
+
+	// One message at a time, in the order the peer wrote them. A violation ends the session, as
+	// the connection does for one on the peer's Announce Stream.
+	let delivering = Promise.resolve();
+	const deliver = (bytes: Uint8Array | Promise<Uint8Array>) => {
+		const done = delivering.then(async () => {
+			try {
+				const msg = await decodeAnnounceBroadcast(new Reader(undefined, await bytes, version), version);
+				await subscriber.announce(msg);
+			} catch (err) {
+				const violation = closeViolation(quic, err);
+				if (!violation) throw err;
+				subscriber.close(violation);
+			}
+		});
+		delivering = done.catch(() => {});
+		return done;
 	};
-	const { announced, send, raw, replies } = await another(0);
-	// The TRACK request a consume of `path` opens as its `index`th stream.
+	const send = (msg: AnnounceBroadcast) =>
+		deliver(Writer.collect(version, (w) => encodeAnnounceBroadcast(w, msg, version)));
+	// Bytes as a newer or broken peer might write them.
+	const raw = (bytes: number[]) => deliver(new Uint8Array(bytes));
+
+	// The edits the subscriber sent, each answered with an ANNOUNCE_OK as it arrives.
+	const edits: { remove: bigint[]; add: Add[] }[] = [];
+	const replies = new Reader(outbound, undefined, version);
+	void (async () => {
+		expect(await replies.u53()).toBe(DataType.Announce);
+		for (;;) {
+			const msg = await decodeAnnounceBroadcastMaybe(replies, version);
+			if (!msg) break;
+			if (msg.status !== "request") throw new Error(`the subscriber sent ${msg.status}`);
+			edits.push({ remove: msg.remove, add: msg.add });
+			void send({ status: "ok" });
+		}
+	})();
+	// Everything the subscriber had to send is out, and the peer's answers to it are in.
+	const settled = async () => {
+		for (let i = 0; i < 8; i++) await yieldNow();
+		await delivering;
+	};
+
+	const another = async (scope?: Path.Pattern, more?: RouteOptions) => {
+		const announced = subscriber.routes(scope, more ?? options);
+		await settled();
+		return { announced };
+	};
+	const announced = subscriber.routes(scope, options);
+	while (edits.length === 0) await yieldNow();
+	await settled();
+	// The TRACK request a consume of `path` opens as the session's `index`th bidirectional stream.
 	const trackRequest = async (path: Path.Valid, index: number, pin?: Instance.Valid) => {
 		const consumed = subscriber.consume(path, pin);
 		const info = consumed
@@ -4336,7 +4410,7 @@ async function routedStream(options?: RouteOptions) {
 		const request = await Track.decode(reader, version);
 		return { request, consumed, info };
 	};
-	return { subscriber, announced, send, raw, replies, version, trackRequest, another, opened };
+	return { subscriber, announced, send, raw, edits, settled, closes, version, trackRequest, another, opened };
 }
 
 // A route or claim whose forwarded content this subscriber refuses is withdrawn alone: the session,
@@ -4346,8 +4420,22 @@ test("a lite-07 refused route or claim withdraws only itself", async () => {
 	const [a, b, c, d] = ["live/a", "live/b", "live/c", "live/d"].map((path) => Path.from(path));
 	const instance = Instance.parse("i");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: a, route: 0n, instance });
 	await send({ status: "active", suffix: b, route: 1n, instance });
 	await send({ status: "floor", id: 0n, revision: 0n });
@@ -4370,8 +4458,8 @@ test("a lite-07 refused route or claim withdraws only itself", async () => {
 	await send({ status: "routeUpdate", id: 0n, offer: offer(NODE_A) });
 	expect(await announced.next()).toMatchObject({ prefix: a, kind: "start" });
 
-	// ROUTE_START to the reserved node takes Route ID 2, and its claims never show.
-	raw([6, 8, 0, 0, 1, 5, 0, 0, 128, 0]);
+	// ROUTE_START to the reserved node, not exact, takes Route ID 2, and its claims never show.
+	raw([6, 10, 0, 0, 0, 0, 1, 5, 0, 0, 128, 0]);
 	await send({ status: "active", suffix: d, route: 2n, instance });
 	await send({ status: "floor", id: 2n, revision: 0n });
 	await send({ status: "endedId", id: 3n });
@@ -4390,7 +4478,14 @@ test("a lite-07 refused claim goes offline, its route certifying nothing meanwhi
 	const [a, b, e] = ["live/a", "live/b", "live/e"].map((path) => Path.from(path));
 	const instance = Instance.parse("i");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: a, route: 0n, instance });
 	await send({ status: "active", suffix: b, route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 0n });
@@ -4428,61 +4523,86 @@ test("a lite-07 refused claim goes offline, its route certifying nothing meanwhi
 	subscriber.close();
 });
 
-// Another stream certifying the refused claim still present proves no withdrawal either: the
-// refusing stream's reader sees it go offline.
-test("a lite-07 refused claim another stream still certifies goes offline", async () => {
-	const { subscriber, announced, send, raw, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+// A peer may carry one origin's claims on two routes, each at a prefix of its own. A claim this
+// node refuses on one of them is not withdrawn, and the other still certifies it: it stays shown.
+test("a lite-07 refused claim another route still certifies stays shown", async () => {
+	const { subscriber, announced, send, raw } = await routedStream();
+	const live = Path.from("live");
 	const x = Path.from("live/x");
 	const instance = Instance.parse("i");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
-	await live.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance });
-	await live.send({ status: "floor", id: 0n, revision: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start" });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: live, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 1n, instance });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	// The more specific route to the node now carries the claim, which a request names by its depth.
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { depth: 1 } });
 
 	// ANNOUNCE_RESTART of Announce ID 0 to an empty instance.
-	raw([3, 5, 0, 0, 0, 0, 0]);
+	await raw([3, 5, 0, 0, 0, 0, 0]);
 	await send({ status: "floor", id: 0n, revision: 1n });
+	// Another node's claim marks the refusal as applied: live/x neither went offline nor ended.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
+	await send({ status: "active", suffix: Path.from("live/z"), route: 2n, instance });
+	await send({ status: "floor", id: 2n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+
+	// Once the other route lets it go too, nothing certifies its withdrawal: it goes offline.
+	await send({ status: "routeEnd", id: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "offline" });
 
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 });
 
 // What the refusing route's last floor certified still counts against an older floor of another
-// stream: a lagging stream that never had the claim proves no withdrawal of it.
-test("a lite-07 refused claim a lagging stream never had goes offline", async () => {
-	const { subscriber, announced, send, raw, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+// route: a lagging route that never had the claim proves no withdrawal of it.
+test("a lite-07 refused claim a lagging route never had goes offline", async () => {
+	const { subscriber, announced, send, raw } = await routedStream();
+	const live = Path.from("live");
 	const x = Path.from("live/x");
+	const y = Path.from("live/y");
 	const instance = Instance.parse("i");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 7n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
-	// The second stream lags at revision 5, before live/x existed.
-	await live.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await live.send({ status: "active", suffix: Path.from("y"), route: 0n, instance });
-	await live.send({ status: "floor", id: 0n, revision: 5n });
-	// A claim of another node on that stream shows once it read all of the above.
-	await live.send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
-	await live.send({ status: "active", suffix: Path.from("z"), route: 1n, instance });
-	await live.send({ status: "floor", id: 1n, revision: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+	// The second route lags at revision 5, before live/x existed.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: live, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: y, route: 1n, instance });
+	await send({ status: "floor", id: 1n, revision: 5n });
+	// The first route's newer floor has no live/y, so the lagging copy of it stays held back.
 
 	// ANNOUNCE_RESTART of Announce ID 0 to an empty instance.
-	raw([3, 5, 0, 0, 0, 0, 0]);
+	await raw([3, 5, 0, 0, 0, 0, 0]);
 	await send({ status: "floor", id: 0n, revision: 8n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "offline" });
 
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 });
@@ -4493,7 +4613,14 @@ test("a lite-07 claim at the root updates and ends", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const root = Path.empty();
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: root, route: 0n, instance: Instance.parse("i") });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start" });
@@ -4516,34 +4643,35 @@ test("a lite-07 claim at the root updates and ends", async () => {
 });
 
 // A route this subscriber refused is no view of its node: a newer floor on it hides nothing
-// another stream carries, as rs/moq-net's node never holds the route.
-test("a lite-07 refused route's floors hide no other stream's claims", async () => {
-	const { subscriber, announced, send, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+// another route carries, as rs/moq-net's node never holds the route.
+test("a lite-07 refused route's floors hide no other route's claims", async () => {
+	const { subscriber, announced, send, raw } = await routedStream();
 	const instance = Instance.parse("i");
 	// One varint byte, so the raw message below spells it.
 	const node = 7n;
 
-	await send({ status: "routeStart", node, suffix: Path.empty(), offer: offer(node) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: node,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(node),
+	});
 	await send({ status: "active", suffix: Path.from("live/x"), route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/x"), kind: "start" });
 
-	// ROUTE_START to the node with a flag no version defines, then a newer floor without live/x.
-	live.raw([6, 9, 7, 0, 1, 7, 0, 0x80, 128, 0, 42]);
-	await live.send({ status: "floor", id: 0n, revision: 5n });
-	// A claim of another node on that stream shows once it read all of the above.
-	await live.send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
-	await live.send({ status: "active", suffix: Path.from("z"), route: 1n, instance });
-	await live.send({ status: "floor", id: 1n, revision: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+	// ROUTE_START to the node at live under Prefix ID 0, not exact, with a flag no version defines,
+	// then a newer floor without live/x.
+	await raw([6, 15, 7, 0, 4, ...new TextEncoder().encode("live"), 0, 1, 7, 0, 0x80, 128, 0, 42]);
+	await send({ status: "floor", id: 1n, revision: 5n });
 
-	// What the first stream shows next is its own new claim, not live/x withdrawn.
+	// What shows next is the first route's own new claim, not live/x withdrawn.
 	await send({ status: "active", suffix: Path.from("live/y"), route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/y"), kind: "start" });
 
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 });
@@ -4551,181 +4679,219 @@ test("a lite-07 refused route's floors hide no other stream's claims", async () 
 // A route refused once live leaves what its last floor certified, as an ended one does: the claims
 // it reads afterwards never rewrite that.
 test("a lite-07 route refused once live leaves its last floor as it was", async () => {
-	const { subscriber, announced, send, raw, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const { subscriber, announced, send, raw } = await routedStream();
+	const live = Path.from("live");
 	const instance = Instance.parse("i");
 	const node = 7n;
 	const x = Path.from("live/x");
 
-	// Both streams carry live/x, the first at revision 5 and the second lagging at 3.
-	await send({ status: "routeStart", node, suffix: Path.empty(), offer: offer(node) });
+	// Both routes carry live/x, the first at revision 5 and the second lagging at 3.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: node,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(node),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 5n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
-	await live.send({ status: "routeStart", node, suffix: Path.empty(), offer: offer(node) });
-	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance });
-	await live.send({ status: "floor", id: 0n, revision: 3n });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start" });
+	await send({ status: "routeStart", prefix: 0n, node: node, suffix: live, exact: false, offer: offer(node) });
+	await send({ status: "active", suffix: x, route: 1n, instance });
+	await send({ status: "floor", id: 1n, revision: 3n });
+	// The more specific route to the node now carries the claim, which a request names by its depth.
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { depth: 1 } });
 
-	// The first stream's route is refused, then ends live/x at a floor no view takes.
-	raw([7, 8, 0, 1, 5, 0, 0x80, 128, 0, 42]);
-	expect(await announced.next()).toMatchObject({ prefix: x, kind: "offline" });
+	// The first route is refused, then ends live/x at a floor no view takes.
+	await raw([7, 8, 0, 1, 5, 0, 0x80, 128, 0, 42]);
 	await send({ status: "endedId", id: 0n });
 	await send({ status: "floor", id: 0n, revision: 6n });
 
-	// The second stream's next floor still has live/x, as revision 5 did: what it shows next is
+	// The second route's next floor still has live/x, as revision 5 did: what shows next is
 	// another node's claim, not live/x withdrawn.
-	await live.send({ status: "floor", id: 0n, revision: 4n });
-	await live.send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
-	await live.send({ status: "active", suffix: Path.from("z"), route: 1n, instance });
-	await live.send({ status: "floor", id: 1n, revision: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+	await send({ status: "floor", id: 1n, revision: 4n });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
+	await send({ status: "active", suffix: Path.from("live/z"), route: 2n, instance });
+	await send({ status: "floor", id: 2n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
 
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 });
 
-// Two streams carry one origin's claims, and a withdrawal reaches one first. Of the floors that
-// certify a claim, the newest decides whether it exists, so the lagging stream's copy is held back
-// rather than selected and refused: also once the newer stream's route ends.
-test("a lite-07 claim another stream's newer floor withdrew is not selected", async () => {
-	const { subscriber, announced, send, trackRequest, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+// Two routes carry one origin's claims, and a withdrawal reaches one first. Of the floors that
+// certify a claim, the newest decides whether it exists, so the lagging route's copy is held back
+// rather than selected and refused: also once the newer route ends.
+test("a lite-07 claim another route's newer floor withdrew is not selected", async () => {
+	const { subscriber, announced, send, trackRequest } = await routedStream();
+	const live = Path.from("live");
 	const x = Path.from("live/x");
 	const a = Instance.parse("a");
 	const b = Instance.parse("b");
 	const y = Instance.parse("y");
 
-	// NODE_A claims live/x and live/y, cheaply, on both streams at revision 0.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	// NODE_A claims live/x and live/y, cheaply, on both routes at revision 0.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance: a });
 	await send({ status: "active", suffix: Path.from("live/y"), route: 0n, instance: y });
 	await send({ status: "floor", id: 0n, revision: 0n });
-	await live.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
-	await live.send({ status: "active", suffix: Path.from("y"), route: 0n, instance: y });
-	await live.send({ status: "floor", id: 0n, revision: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
-	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/y"), kind: "start" });
-	// A dearer NODE_B claims live/x on the first stream only.
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
-	await send({ status: "active", suffix: x, route: 1n, instance: b });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/y"), kind: "start" });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: live, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 1n, instance: a });
+	await send({ status: "active", suffix: Path.from("live/y"), route: 1n, instance: y });
 	await send({ status: "floor", id: 1n, revision: 0n });
-
-	// NODE_A withdraws live/x at revision 1, which only the first stream has delivered.
-	await send({ status: "endedId", id: 0n });
-	await send({ status: "floor", id: 0n, revision: 1n });
-	// The lagging stream ends its copy, and keeps the claim it still agrees on.
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "end", route: { node: NODE_A } });
-	const first = await trackRequest(x, 2);
-	expect(first.request).toMatchObject({ instance: b, node: NODE_B });
-
-	// The first stream lets its route to NODE_A go, and a third stream, as far behind, then lands
-	// its copy: what the ended route's floor certified still holds, so a fresh pick of live/x
-	// still passes over the cheaper copy.
-	const exact = await another(3, Path.Pattern.subtree(x));
-	await send({ status: "routeEnd", id: 0n });
-	await exact.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await exact.send({ status: "active", suffix: Path.empty(), route: 0n, instance: a });
-	await exact.send({ status: "floor", id: 0n, revision: 0n });
-	await exact.send({
+	// The more specific route to the node now carries the claim, which a request names by its depth.
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { depth: 1 } });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/y"), kind: "update", route: { depth: 1 } });
+	// A dearer NODE_B claims live/x.
+	await send({
 		status: "routeStart",
+		prefix: 0n,
 		node: NODE_B,
 		suffix: Path.empty(),
+		exact: false,
 		offer: offer(NODE_B, { metric: 5n }),
 	});
-	await exact.send({ status: "active", suffix: Path.empty(), route: 1n, instance: b });
-	await exact.send({ status: "floor", id: 1n, revision: 0n });
-	expect(await exact.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_B } });
-	const second = await trackRequest(x, 4);
+	await send({ status: "active", suffix: x, route: 2n, instance: b });
+	await send({ status: "floor", id: 2n, revision: 0n });
+
+	// NODE_A withdraws live/x at revision 1, which only the first route has delivered: the
+	// lagging route's copy is held back, so the path moves to NODE_B.
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "restart", route: { node: NODE_B } });
+	const first = await trackRequest(x, 0);
+	expect(first.request).toMatchObject({ instance: b, node: NODE_B });
+
+	// The first route goes, and a third, as far behind, then lands its copy: what the ended
+	// route's floor certified still holds, so a fresh pick of live/x still passes over the cheaper
+	// copy.
+	await send({ status: "routeEnd", id: 0n });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: x, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 3n, instance: a });
+	await send({ status: "floor", id: 3n, revision: 0n });
+	const second = await trackRequest(x, 1);
 	expect(second.request).toMatchObject({ instance: b, node: NODE_B });
 
-	// The lagging stream catches up and reports nothing more for live/x.
-	await live.send({ status: "endedId", id: 0n });
-	await live.send({ status: "floor", id: 0n, revision: 1n });
-	await live.send({ status: "active", suffix: Path.from("z"), route: 0n, instance: y });
-	await live.send({ status: "floor", id: 0n, revision: 2n });
-	expect(await live.announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
+	// The lagging route catches up, and nothing more shows for live/x.
+	await send({ status: "endedId", id: 2n });
+	await send({ status: "floor", id: 1n, revision: 1n });
+	await send({ status: "active", suffix: Path.from("live/z"), route: 1n, instance: y });
+	await send({ status: "floor", id: 1n, revision: 2n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/z"), kind: "start" });
 
 	first.consumed.close();
 	second.consumed.close();
-	exact.announced.close();
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 	await Promise.all([first.info, second.info]);
 });
 
 // A floor that certifies nothing withdraws no knowledge: the revision its route's last floor
-// certified still decides, so the lagging stream's withdrawn copy stays held back.
+// certified still decides, so the lagging route's withdrawn copy stays held back.
 test("a lite-07 floor that certifies nothing keeps the withdrawal its route certified", async () => {
-	const { subscriber, announced, send, trackRequest, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const { subscriber, announced, send, trackRequest } = await routedStream();
+	const live = Path.from("live");
 	const x = Path.from("live/x");
 	const a = Instance.parse("a");
 	const b = Instance.parse("b");
 
-	// NODE_A claims live/x cheaply on both streams at revision 0; a dearer NODE_B on the first.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	// NODE_A claims live/x cheaply on both routes at revision 0, and a dearer NODE_B claims it too.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
-	await live.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
-	await live.send({ status: "floor", id: 0n, revision: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
-	await send({ status: "active", suffix: x, route: 1n, instance: b });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: live, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 1n, instance: a });
 	await send({ status: "floor", id: 1n, revision: 0n });
+	// The more specific route to the node now carries the claim, which a request names by its depth.
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { depth: 1 } });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 5n }),
+	});
+	await send({ status: "active", suffix: x, route: 2n, instance: b });
+	await send({ status: "floor", id: 2n, revision: 0n });
 
-	// NODE_A withdraws live/x at revision 1 on the first stream, whose next floor certifies nothing.
+	// NODE_A withdraws live/x at revision 1 on the first route, whose next floor certifies nothing.
 	await send({ status: "endedId", id: 0n });
 	await send({ status: "floor", id: 0n, revision: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "restart", route: { node: NODE_B } });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "end", route: { node: NODE_A } });
 	await send({ status: "floor", id: 0n });
 	// Another node's claim marks the uncertified floor as applied.
 	const w = Path.from("live/w");
-	await send({ status: "active", suffix: w, route: 1n, instance: b });
-	await send({ status: "floor", id: 1n, revision: 1n });
+	await send({ status: "active", suffix: w, route: 2n, instance: b });
+	await send({ status: "floor", id: 2n, revision: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: w, kind: "start" });
 
-	const pick = await trackRequest(x, 2);
+	const pick = await trackRequest(x, 0);
 	expect(pick.request).toMatchObject({ instance: b, node: NODE_B });
 
 	pick.consumed.close();
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 	await pick.info;
 });
 
 // A kept floor decides only while a live one certifies the path: once the last certifying route
-// ends, a claim another stream carries uncertified shows again.
+// ends, a claim another route carries uncertified shows again.
 test("a lite-07 uncertified claim shows once its last certifier ends", async () => {
-	const { subscriber, announced, send, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const { subscriber, announced, send } = await routedStream();
+	const live = Path.from("live");
 	const x = Path.from("live/x");
 	const y = Path.from("live/y");
 	const a = Instance.parse("a");
 
-	// The first stream certifies NODE_A's claims at revision 1, without live/x.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	// The first route certifies NODE_A's claims at revision 1, without live/x.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: y, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n, revision: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: y, kind: "start" });
 	// The second carries live/x under a floor that certifies nothing: held back.
-	await live.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
-	await live.send({ status: "active", suffix: Path.from("y"), route: 0n, instance: a });
-	await live.send({ status: "floor", id: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: y, kind: "start" });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: live, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 1n, instance: a });
+	await send({ status: "active", suffix: y, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n });
+	// The more specific route to the node now carries the claim, which a request names by its depth.
+	expect(await announced.next()).toMatchObject({ prefix: y, kind: "update", route: { depth: 1 } });
 
 	await send({ status: "routeEnd", id: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
 
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 });
@@ -4739,7 +4905,14 @@ test("a lite-07 claim a pruned floor held back shows without a batch", async () 
 	const w = Path.from("live/w");
 	const a = Instance.parse("a");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: y, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n, revision: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: y, kind: "start" });
@@ -4749,7 +4922,14 @@ test("a lite-07 claim a pruned floor held back shows without a batch", async () 
 	// A floor that certifies nothing leaves no floor to decide live/x, so it shows.
 	await send({ status: "floor", id: 0n });
 	// Another node's claim marks the floors as applied.
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: w, route: 1n, instance: a });
 	await send({ status: "floor", id: 1n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
@@ -4761,62 +4941,198 @@ test("a lite-07 claim a pruned floor held back shows without a batch", async () 
 // A claim above a newer floor's region is older knowledge there: a consume below that region does
 // not select it, as Rust's `covering` presents no claim above the newest certifier.
 test("a lite-07 consume skips a claim above a newer floor's region", async () => {
-	const { subscriber, announced, send, trackRequest, another } = await routedStream();
-	const x = await another(1, Path.Pattern.subtree(Path.from("live/x")));
+	const { subscriber, announced, send, trackRequest } = await routedStream();
 	const root = Path.from("live");
+	const below = Path.from("live/x");
 	const a = Instance.parse("a");
 
 	// NODE_A claims live at revision 0; a dearer NODE_B claims it too.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: root, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start", route: { node: NODE_A } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 5n }),
+	});
 	await send({ status: "active", suffix: root, route: 1n, instance: a });
 	await send({ status: "floor", id: 1n, revision: 0n });
-	// NODE_A's revision 1 presents only live/x/m under live/x: it withdrew live.
-	await x.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await x.send({ status: "active", suffix: Path.from("m"), route: 0n, instance: a });
-	await x.send({ status: "floor", id: 0n, revision: 1n });
-	expect(await x.announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
+	// NODE_A's route at live/x presents only live/x/m there at revision 1: it withdrew live.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: below, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: Path.from("live/x/m"), route: 2n, instance: a });
+	await send({ status: "floor", id: 2n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
 
-	const pick = await trackRequest(Path.from("live/x"), 2);
+	const pick = await trackRequest(below, 0);
 	expect(pick.request).toMatchObject({ instance: a, node: NODE_B });
 
 	pick.consumed.close();
-	x.announced.close();
 	announced.close();
 	subscriber.close();
 	await pick.info;
 });
 
+// A DEAD whose far end is gone takes a reader's only claim offline, not withdrawn: the publisher
+// may still hold it, whatever the coverage the route took with it.
+test("a lite-07 DEAD takes a reader's claim offline at its own prefix", async () => {
+	const below = Path.from("live/x");
+	const { subscriber, announced, send } = await routedStream(undefined, Path.Pattern.subtree(below));
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: below, route: 0n, instance: Instance.parse("a") });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: below, kind: "start" });
+
+	const hop = { node: PEER_NODE, session: NODE_A };
+	await send({ status: "dead", dead: { kind: "closed", hop, far: NODE_A, gone: true, moved: 0n } });
+	expect(await announced.next()).toMatchObject({ prefix: below, kind: "offline" });
+
+	announced.close();
+	subscriber.close();
+});
+
+// A DEAD ending several routes through its hop shows each reader its loss once, at the path it
+// presents, whichever route went first: a broader reader's recheck does not withdraw it first.
+test("a lite-07 DEAD takes a narrower reader's claim offline beside a broader reader", async () => {
+	const below = Path.from("live/x");
+	const { subscriber, announced, send, another } = await routedStream();
+	const hop = { node: PEER_NODE, session: NODE_A };
+	// An unrelated route through the same hop goes first.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { path: [{ node: NODE_B, session: 0n }, { node: NODE_A, session: 1n }, hop] }),
+	});
+	await send({ status: "active", suffix: Path.from("other"), route: 0n, instance: Instance.parse("b") });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: below, route: 1n, instance: Instance.parse("a") });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("other"), kind: "start" });
+	expect(await announced.next()).toMatchObject({ prefix: below, kind: "start" });
+	const { announced: under } = await another(Path.Pattern.subtree(below));
+	expect(await under.next()).toMatchObject({ prefix: below, kind: "start" });
+
+	await send({ status: "dead", dead: { kind: "closed", hop, far: NODE_A, gone: true, moved: 0n } });
+	expect(await under.next()).toMatchObject({ prefix: below, kind: "offline" });
+
+	under.close();
+	announced.close();
+	subscriber.close();
+});
+
+// A reader below a newer floor's region is not shown a claim above it, as a consume there skips
+// it: the covering claim it sees at its own prefix is the one that floor leaves current.
+test("a lite-07 reader skips a claim above a newer floor's region", async () => {
+	const { subscriber, announced, send, another } = await routedStream();
+	const root = Path.from("live");
+	const below = Path.from("live/x");
+	const a = Instance.parse("a");
+
+	// NODE_A claims live at revision 0; a dearer NODE_B claims it too.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: root, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: root, kind: "start", route: { node: NODE_A } });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 5n }),
+	});
+	await send({ status: "active", suffix: root, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	// NODE_A's route at live/x presents only live/x/m there at revision 1: it withdrew live.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: below, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: Path.from("live/x/m"), route: 2n, instance: a });
+	await send({ status: "floor", id: 2n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
+
+	const { announced: under } = await another(Path.Pattern.subtree(below));
+	const shown = [await under.next(), await under.next()];
+	expect(shown).toContainEqual(
+		expect.objectContaining({ prefix: below, route: expect.objectContaining({ node: NODE_B }) }),
+	);
+	expect(shown).not.toContainEqual(
+		expect.objectContaining({ prefix: below, route: expect.objectContaining({ node: NODE_A }) }),
+	);
+
+	under.close();
+	announced.close();
+	subscriber.close();
+});
+
 // A route refused once live stops covering, as an ended one does: a held consume a narrower floor
 // of it took off a broader claim is routable again once that floor is gone.
 test("a lite-07 route refused once live gives a held consume back its broader claim", async () => {
-	const { subscriber, announced, send, trackRequest, another, opened } = await routedStream();
+	const { subscriber, announced, send, raw, trackRequest, opened } = await routedStream();
 	const live = Path.from("live");
+	const below = Path.from("live/x");
 	const y = Path.from("live/x/y");
 	const minted = Mint.fresh();
 
 	// NODE_A claims live under a floor that certifies nothing, and a consume of live/x/y takes it.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: live, route: 0n, instance: minted });
 	await send({ status: "floor", id: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: live, kind: "start" });
-	const x = await another(1, Path.Pattern.subtree(Path.from("live/x")));
-	const held = await trackRequest(y, 2);
+	const held = await trackRequest(y, 0);
 	expect(held.request).toMatchObject({ node: NODE_A });
 
-	// NODE_A's revision 1 presents only live/x/m under live/x, so live no longer covers live/x/y.
-	await x.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await x.send({ status: "active", suffix: Path.from("m"), route: 0n, instance: minted });
-	await x.send({ status: "floor", id: 0n, revision: 1n });
-	expect(await x.announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
+	// NODE_A's route at live/x presents only live/x/m there at revision 1, so live no longer
+	// covers live/x/y.
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: below, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: Path.from("live/x/m"), route: 1n, instance: minted });
+	await send({ status: "floor", id: 1n, revision: 1n });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "start" });
 	await held.info;
 
 	// That route is refused: nothing certifies live/x/y any more, so live covers it again.
-	x.raw([7, 8, 0, 1, 5, 0, 0x80, 128, 0, 42]);
-	expect(await x.announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "offline" });
+	await raw([7, 8, 1, 1, 5, 0, 0x80, 128, 0, 42]);
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("live/x/m"), kind: "offline" });
 	const info = held.consumed
 		.track("audio")
 		.info()
@@ -4824,10 +5140,9 @@ test("a lite-07 route refused once live gives a held consume back its broader cl
 			() => "answered",
 			() => "refused",
 		);
-	expect(await Promise.race([opened(3).then(() => "opened"), info])).toBe("opened");
+	expect(await Promise.race([opened(1).then(() => "opened"), info])).toBe("opened");
 
 	held.consumed.close();
-	x.announced.close();
 	announced.close();
 	subscriber.close();
 	await info;
@@ -4840,11 +5155,25 @@ test("a lite-07 tie keeps its winner across a route's unusable spell", async () 
 	const x = Path.from("live/x");
 	const a = Instance.parse("a");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: x, route: 1n, instance: a });
 	await send({ status: "floor", id: 1n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { node: NODE_B } });
@@ -4862,7 +5191,7 @@ test("a lite-07 tie keeps its winner across a route's unusable spell", async () 
 	await send({ status: "floor", id: 1n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: w, kind: "start" });
 
-	const pick = await trackRequest(x, 1);
+	const pick = await trackRequest(x, 0);
 	expect(pick.request).toMatchObject({ instance: a, node: NODE_B });
 
 	pick.consumed.close();
@@ -4879,12 +5208,26 @@ test("a lite-07 consume pinned to a minted instance asks for it", async () => {
 	const a = Instance.parse("a");
 	const minted = Mint.fresh();
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
 	// A dearer route carries the minted instance.
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 5n }),
+	});
 	await send({ status: "active", suffix: x, route: 1n, instance: minted });
 	await send({ status: "floor", id: 1n, revision: 0n });
 	// Another claim marks the floor as applied.
@@ -4893,7 +5236,7 @@ test("a lite-07 consume pinned to a minted instance asks for it", async () => {
 	await send({ status: "floor", id: 1n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: w, kind: "start" });
 
-	const pick = await trackRequest(x, 1, minted);
+	const pick = await trackRequest(x, 0, minted);
 	expect(pick.request).toMatchObject({ instance: minted, node: NODE_B });
 
 	pick.consumed.close();
@@ -4902,38 +5245,55 @@ test("a lite-07 consume pinned to a minted instance asks for it", async () => {
 	await pick.info;
 });
 
-// A lagging stream's copy of a claim takes the cost the newest certifying floor gives it, so a
+// A lagging route's copy of a claim takes the cost the newest certifying floor gives it, so a
 // re-priced origin does not keep winning on the cost it had.
 test("a lite-07 lagging copy carries the cost a newer floor certified", async () => {
-	const { subscriber, announced, send, trackRequest, another } = await routedStream();
-	const live = await another(1, Path.Pattern.subtree(Path.from("live")));
+	const { subscriber, announced, send, trackRequest } = await routedStream({ claims: true });
+	const live = Path.from("live");
 	const x = Path.from("live/x");
 	const a = Instance.parse("a");
 	const b = Instance.parse("b");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n, revision: 0n });
-	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
-	await live.send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
-	await live.send({ status: "active", suffix: Path.from("x"), route: 0n, instance: a });
-	await live.send({ status: "floor", id: 0n, revision: 0n });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { cost: 1n } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
-	await send({ status: "active", suffix: x, route: 1n, instance: b });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A, cost: 1n } });
+	await send({ status: "routeStart", prefix: 0n, node: NODE_A, suffix: live, exact: false, offer: offer(NODE_A) });
+	await send({ status: "active", suffix: x, route: 1n, instance: a });
 	await send({ status: "floor", id: 1n, revision: 0n });
+	// The more specific route to the node now carries the claim, which a request names by its depth.
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { depth: 1, node: NODE_A } });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 5n }),
+	});
+	await send({ status: "active", suffix: x, route: 2n, instance: b });
+	await send({ status: "floor", id: 2n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_B } });
 
-	// NODE_A raises its cost to 100 at revision 1, which only the first stream has delivered.
+	// NODE_A raises its cost to 100 at revision 1, which only the first route has delivered: its
+	// claim is reported at that cost, whichever route carries it.
 	await send({ status: "update", id: 0n, cost: 100n });
 	await send({ status: "floor", id: 0n, revision: 1n });
-	expect(await announced.next()).toMatchObject({ prefix: x, kind: "restart", route: { node: NODE_B } });
-	expect(await live.announced.next()).toMatchObject({ prefix: x, kind: "update", route: { cost: 101n } });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "update", route: { node: NODE_A, cost: 101n } });
+	// The first route goes, and the lagging copy still carries the newer cost.
+	await send({ status: "routeEnd", id: 0n });
 
-	const pick = await trackRequest(x, 2);
+	const pick = await trackRequest(x, 0);
 	expect(pick.request).toMatchObject({ instance: b, node: NODE_B });
 
 	pick.consumed.close();
-	live.announced.close();
 	announced.close();
 	subscriber.close();
 	await pick.info;
@@ -4945,21 +5305,35 @@ test("a lite-07 consume names the node now serving its instance", async () => {
 	const a = Instance.parse("a");
 
 	// Two origin nodes reach one instance; the cheaper serves.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A, { metric: 5n }) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A, { metric: 5n }),
+	});
 	await send({ status: "active", suffix: room, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n });
 	await announced.next();
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: room, route: 1n, instance: a });
 	await send({ status: "floor", id: 1n });
 	await announced.next();
-	const first = await trackRequest(room, 1);
+	const first = await trackRequest(room, 0);
 	expect(first.request).toMatchObject({ instance: a, node: NODE_B });
 
 	// The cheaper one goes: the same instance's consume now names the other.
 	await send({ status: "routeEnd", id: 1n });
 	await announced.next();
-	const second = await trackRequest(room, 2);
+	const second = await trackRequest(room, 1);
 	expect(second.consumed.closed).toBe(first.consumed.closed);
 	expect(second.request).toMatchObject({ instance: a, node: NODE_A });
 
@@ -4980,13 +5354,27 @@ test("a lite-07 certified route ending shows another route's copy of its claim",
 	};
 
 	// A narrow route's floor certifies nothing, so it shows x at b while it carries it.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.from("live"), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.from("live"),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance: Instance.parse("b") });
 	await send({ status: "floor", id: 0n });
 	expect(await next()).toBe("start live/x b");
 
 	// A wide route's floor certifies x at a, which then decides it.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 1n, instance: Instance.parse("a") });
 	await send({ status: "floor", id: 1n, revision: 1n });
 	let seen = await next();
@@ -5004,13 +5392,27 @@ test("a lite-07 path ranks only an instance's newest epoch", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const room = Path.from("room");
 	const a = Instance.parse("a");
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: room, route: 0n, instance: a, epoch: 0n });
 	await send({ status: "floor", id: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: room, route: { epoch: 0n } });
 
 	// Dearer, but newer: it takes over.
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 9n }) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 9n }),
+	});
 	await send({ status: "active", suffix: room, route: 1n, instance: a, epoch: 1n });
 	await send({ status: "floor", id: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { epoch: 1n, node: NODE_B } });
@@ -5029,7 +5431,14 @@ test("lite-07 children of a prefix two origins claim spread by node", async () =
 		const { subscriber, announced, send, trackRequest } = await routedStream();
 		const pool = Path.from("pool");
 		for (const [route, node] of order.entries()) {
-			await send({ status: "routeStart", node, suffix: Path.empty(), offer: offer(node) });
+			await send({
+				status: "routeStart",
+				prefix: 0n,
+				node,
+				suffix: Path.empty(),
+				exact: false,
+				offer: offer(node),
+			});
 			await send({ status: "active", suffix: pool, route: BigInt(route), instance: Instance.parse(`i${node}`) });
 			await send({ status: "floor", id: BigInt(route) });
 			await announced.next();
@@ -5038,7 +5447,7 @@ test("lite-07 children of a prefix two origins claim spread by node", async () =
 		// Pinned to `lite07_ties_match_js` in rs/moq-net, which picks NODE_B too.
 		expect(rendezvousHash(job, NODE_A)).toBe(0xc376be7bf47aebbfn);
 		expect(rendezvousHash(job, NODE_B)).toBe(0x5813213b6508aaeen);
-		const { request, consumed, info } = await trackRequest(job, 1);
+		const { request, consumed, info } = await trackRequest(job, 0);
 		expect(request.node).toBe(NODE_B);
 		consumed.close();
 		subscriber.close();
@@ -5057,11 +5466,25 @@ test("a lite-07 tie at a claim's path goes to the newest claim, a re-price keepi
 	const b = Instance.parse("b");
 	const c = Instance.parse("c");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: room, route: 0n, instance: a, cost: 4n });
 	await send({ status: "floor", id: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { node: NODE_A } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: room, route: 1n, instance: b });
 	await send({ status: "floor", id: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "restart", route: { node: NODE_B } });
@@ -5072,7 +5495,7 @@ test("a lite-07 tie at a claim's path goes to the newest claim, a re-price keepi
 	await send({ status: "active", suffix: other, route: 1n, instance: b });
 	await send({ status: "floor", id: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: other, kind: "start" });
-	const kept = await trackRequest(room, 1);
+	const kept = await trackRequest(room, 0);
 	expect(kept.request).toMatchObject({ instance: b, node: NODE_B });
 
 	// A restart at the tie is the newest claim: both pick it.
@@ -5083,7 +5506,7 @@ test("a lite-07 tie at a claim's path goes to the newest claim, a re-price keepi
 		kind: "restart",
 		route: { instance: c, node: NODE_A },
 	});
-	const restarted = await trackRequest(room, 2);
+	const restarted = await trackRequest(room, 1);
 	expect(restarted.request).toMatchObject({ instance: c, node: NODE_A });
 
 	kept.consumed.close();
@@ -5098,16 +5521,30 @@ test("a lite-07 consume pinned to an instance names its route's node", async () 
 	const { subscriber, announced, send, trackRequest } = await routedStream();
 	const pool = Path.from("pool");
 	const a = Instance.parse("a");
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: pool, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n });
 	await announced.next();
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: pool, route: 1n, instance: Instance.parse("b") });
 	await send({ status: "floor", id: 1n });
 	await announced.next();
 	// NODE_B wins `pool/job` unpinned; see the spread test above.
-	const { request, consumed, info } = await trackRequest(Path.from("pool/job"), 1, a);
+	const { request, consumed, info } = await trackRequest(Path.from("pool/job"), 0, a);
 	expect(request).toMatchObject({ instance: a, node: NODE_A });
 	consumed.close();
 	announced.close();
@@ -5119,11 +5556,25 @@ test("a lite-07 consume pinned to an instance names its route's node", async () 
 test("a lite-07 stream reports each node's claim with claims", async () => {
 	const { subscriber, announced, send } = await routedStream({ claims: true });
 	const pool = Path.from("pool");
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: pool, route: 0n, instance: Instance.parse("a") });
 	await send({ status: "floor", id: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { node: NODE_A } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: pool, route: 1n, instance: Instance.parse("b") });
 	await send({ status: "floor", id: 1n });
 	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start", route: { node: NODE_B } });
@@ -5146,13 +5597,27 @@ test("a lite-07 batch applies at its floor, and a held route turns unavailable",
 	const a = Instance.parse("a");
 
 	// Nothing under a route shows before its floor, even while another route's batch lands.
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: room, route: 0n, instance: a, cost: 2n });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: other, route: 1n, instance: a });
 	await send({ status: "floor", id: 1n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: other, kind: "start" });
-	await send({ status: "synced" });
+	await send({ status: "synced", prefix: 0n });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	// The claim's cost, the route's metric, and this session's link.
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { cost: 3n, node: NODE_A } });
@@ -5199,13 +5664,27 @@ test("a lite-07 path served by two routes fails over when the cheaper one ends",
 	const a = Instance.parse("a");
 	const b = Instance.parse("b");
 
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A, { metric: 5n }) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A, { metric: 5n }),
+	});
 	await send({ status: "active", suffix: room, route: 0n, instance: a });
 	await send({ status: "floor", id: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: a, node: NODE_A } });
 
 	// Another origin claims the path more cheaply: it takes over, as another instance.
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B),
+	});
 	await send({ status: "active", suffix: room, route: 1n, instance: b });
 	await send({ status: "floor", id: 1n });
 	expect(await announced.next()).toMatchObject({
@@ -5242,21 +5721,28 @@ test("a lite-07 DEAD moves, ends, or holds the routes through its hop", async ()
 		[1n, NODE_B, b],
 		[2n, NODE_C, c],
 	] as const) {
-		await send({ status: "routeStart", node, suffix: Path.empty(), offer: offer(node) });
+		await send({ status: "routeStart", prefix: 0n, node, suffix: Path.empty(), exact: false, offer: offer(node) });
 		await send({ status: "active", suffix: path, route: id, instance });
 		await send({ status: "floor", id, revision: 0n });
 		expect(await announced.next()).toMatchObject({ prefix: path, kind: "start", route: { cost: 1n } });
 	}
-	// The peer's session to a publisher, as each route's path names it.
-	const closed = (node: bigint, gone: boolean, moved: { id: bigint; offer: Offer }[] = []): AnnounceBroadcast => ({
-		status: "dead",
-		dead: { kind: "closed", hop: { node: PEER_NODE, session: node }, far: node, gone, more: false, moved },
-	});
+	// The peer's session to a publisher, as each route's path names it, closed: the DEAD, then
+	// the ROUTE_UPDATE of each route it moved.
+	const closed = async (
+		to: (msg: AnnounceBroadcast) => Promise<void>,
+		node: bigint,
+		gone: boolean,
+		moved: { id: bigint; offer: Offer }[] = [],
+	) => {
+		const hop = { node: PEER_NODE, session: node };
+		await to({ status: "dead", dead: { kind: "closed", hop, far: node, gone, moved: BigInt(moved.length) } });
+		for (const { id, offer } of moved) await to({ status: "routeUpdate", id, offer });
+	};
 
 	// A hop no route crosses changes nothing: the next thing shown is the move below.
 	await send({
 		status: "dead",
-		dead: { kind: "closed", hop: { node: 0x55n, session: 4n }, far: 0x56n, gone: true, more: false, moved: [] },
+		dead: { kind: "closed", hop: { node: 0x55n, session: 4n }, far: 0x56n, gone: true, moved: 0n },
 	});
 	// Route 0 moved to a costlier path through another of the peer's sessions.
 	const detour = [
@@ -5264,12 +5750,12 @@ test("a lite-07 DEAD moves, ends, or holds the routes through its hop", async ()
 		{ node: 3n, session: 1n },
 		{ node: PEER_NODE, session: 3n },
 	];
-	await send(closed(NODE_A, false, [{ id: 0n, offer: offer(NODE_A, { metric: 4n, path: detour }) }]));
+	await closed(send, NODE_A, false, [{ id: 0n, offer: offer(NODE_A, { metric: 4n, path: detour }) }]);
 	expect(await announced.next()).toMatchObject({ prefix: a, kind: "update", route: { cost: 5n, available: true } });
 	// Its old hop names it no more: a DEAD of that hop leaves it alone.
-	await send(closed(NODE_A, true));
+	await closed(send, NODE_A, true);
 	// Route 1's far end is gone: it ends with its claims.
-	await send(closed(NODE_B, true));
+	await closed(send, NODE_B, true);
 	expect(await announced.next()).toMatchObject({ prefix: b, kind: "offline" });
 	await send({ status: "endedId", id: 1n });
 	await expect(announced.next()).rejects.toThrow(ProtocolViolation);
@@ -5277,17 +5763,26 @@ test("a lite-07 DEAD moves, ends, or holds the routes through its hop", async ()
 
 	// Held, a route stays unavailable until its next offer.
 	const held = await routedStream();
-	await held.send({ status: "routeStart", node: NODE_C, suffix: Path.empty(), offer: offer(NODE_C) });
+	await held.send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_C,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_C),
+	});
 	await held.send({ status: "active", suffix: c, route: 0n, instance });
 	await held.send({ status: "floor", id: 0n, revision: 0n });
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "start" });
-	await held.send(closed(NODE_C, false));
+	await closed(held.send, NODE_C, false);
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "update", route: { available: false } });
 	await held.send({ status: "routeUpdate", id: 0n, offer: offer(NODE_C) });
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "update", route: { available: true } });
 	// Moved to an offer this node refuses, it goes offline, and a later usable offer brings it back.
-	// DEAD: the session NODE_C (two varint bytes) closed, route 0 moved to an offer with an unknown flag.
-	await held.raw([15, 17, 0, 2, 0x80, 0x9c, 0x80, 0x9c, 0, 0, 1, 0, 6, 1, 7, 0, 0x80, 128, 0]);
+	// DEAD: the session NODE_C (two varint bytes) closed, moving one route, then the ROUTE_UPDATE
+	// of route 0 to an offer with an unknown flag.
+	await held.raw([15, 8, 0, 2, 0x80, 0x9c, 0x80, 0x9c, 0, 1]);
+	await held.raw([7, 7, 0, 1, 7, 0, 0x80, 128, 0]);
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "offline" });
 	await held.send({ status: "routeUpdate", id: 0n, offer: offer(NODE_C) });
 	expect(await held.announced.next()).toMatchObject({ prefix: c, kind: "start" });
@@ -5295,42 +5790,327 @@ test("a lite-07 DEAD moves, ends, or holds the routes through its hop", async ()
 	held.subscriber.close();
 });
 
-// A DEAD in parts applies with its last: a route an earlier part moved is not ended by the gone
-// hop, and nothing shows before the last part. Mirrors rs/moq-net.
-test("a lite-07 DEAD in parts applies with its last", async () => {
-	const { subscriber, announced, send } = await routedStream();
-	const [a, b] = ["a", "b"].map((path) => Path.from(path));
+// A DEAD and the ROUTE_UPDATEs it counts apply as one step: nothing shows before the last of
+// them, a route one of them moved is not ended by the gone hop, and the route none of them
+// names ends with it. Mirrors rs/moq-net.
+test("a lite-07 DEAD and its ROUTE_UPDATEs apply as one", async () => {
+	const { subscriber, announced, send, raw, settled } = await routedStream();
+	const [a, b, c] = ["a", "b", "c"].map((path) => Path.from(path));
 	const instance = Instance.parse("i");
-	// Both routes reach the peer over its session to NODE_A.
+	// One varint byte, so the raw message below spells it.
+	const NODE_C = 0x9n;
+	// Every route reaches the peer over its session to NODE_A.
 	const hop = { node: PEER_NODE, session: NODE_A };
 	const through = (node: bigint) => [
 		{ node, session: 0n },
 		...(node === NODE_A ? [] : [{ node: NODE_A, session: 1n }]),
 		hop,
 	];
+	const NODE_D = 0x9dn;
+	const d = Path.from("d");
 	for (const [id, node, path] of [
 		[0n, NODE_A, a],
 		[1n, NODE_B, b],
+		[2n, NODE_C, c],
+		[3n, NODE_D, d],
 	] as const) {
-		await send({ status: "routeStart", node, suffix: Path.empty(), offer: offer(node, { path: through(node) }) });
+		await send({
+			status: "routeStart",
+			prefix: 0n,
+			node,
+			suffix: Path.empty(),
+			exact: false,
+			offer: offer(node, { path: through(node) }),
+		});
 		await send({ status: "active", suffix: path, route: id, instance });
 		await send({ status: "floor", id, revision: 0n });
 		expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
 	}
-	const detour = (node: bigint) => ({
-		id: node === NODE_A ? 0n : 1n,
-		offer: offer(node, { metric: 4n, path: [...through(node).slice(0, -1), { node: PEER_NODE, session: 9n }] }),
+	const detour = (node: bigint) =>
+		offer(node, { metric: 4n, path: [...through(node).slice(0, -1), { node: PEER_NODE, session: 9n }] });
+
+	// Whatever shows before the last ROUTE_UPDATE is one applied alone.
+	const shown: unknown[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const event = await announced.next();
+			if (!event) break;
+			shown.push(event);
+		}
+	})();
+	await send({ status: "dead", dead: { kind: "closed", hop, far: NODE_A, gone: true, moved: 3n } });
+	await settled();
+	expect(shown).toEqual([]);
+	await send({ status: "routeUpdate", id: 0n, offer: detour(NODE_A) });
+	await settled();
+	expect(shown).toEqual([]);
+	// ROUTE_UPDATE of Route ID 2 with a flag no version defines: refused, and counted all the same.
+	await raw([7, 9, 2, 2, 9, 0, 2, 9, 0x80, 128, 0]);
+	await settled();
+	expect(shown).toEqual([]);
+	await send({ status: "routeUpdate", id: 1n, offer: detour(NODE_B) });
+	await settled();
+	// The moved routes carry on along their new paths, the one moved to a refused offer goes
+	// offline, and the one no update named ends with the gone hop.
+	expect(shown).toMatchObject([
+		{ prefix: a, kind: "update", route: { cost: 5n } },
+		{ prefix: b, kind: "update", route: { cost: 5n } },
+		{ prefix: c, kind: "offline" },
+		{ prefix: d, kind: "offline" },
+	]);
+	// The ended route's ids went with it, and the moved ones are live.
+	await send({ status: "routeHold", id: 0n });
+	await settled();
+	expect(shown.at(-1)).toMatchObject({ prefix: a, kind: "update", route: { available: false } });
+
+	announced.close();
+	await reading;
+	subscriber.close();
+});
+
+// A reader sees only where a DEAD leaves every route it moves, never a route only the middle of
+// it preferred: the publisher wins before and after, so its fallback never shows.
+test("a lite-07 DEAD shows readers only its end", async () => {
+	const { subscriber, announced, send, settled } = await routedStream();
+	const x = Path.from("live/x");
+	const [a, b] = [Instance.parse("a"), Instance.parse("b")];
+	// Two routes to NODE_A over the peer's session to it, the second held, and NODE_B dearer.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
 	});
-	const part = (more: boolean, moved: { id: bigint; offer: Offer }[]): AnnounceBroadcast => ({
-		status: "dead",
-		dead: { kind: "closed", hop, far: NODE_A, gone: true, more, moved },
+	await send({ status: "active", suffix: x, route: 0n, instance: a });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { node: NODE_A } });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.from("live"),
+		exact: false,
+		offer: offer(NODE_A),
 	});
-	await send(part(true, [detour(NODE_A)]));
-	await send(part(false, [detour(NODE_B)]));
-	for (const path of [a, b]) {
-		expect(await announced.next()).toMatchObject({ prefix: path, kind: "update", route: { cost: 5n } });
+	await send({ status: "active", suffix: x, route: 1n, instance: a });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	await send({ status: "routeHold", id: 1n });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 9n }),
+	});
+	await send({ status: "active", suffix: x, route: 2n, instance: b });
+	await send({ status: "floor", id: 2n, revision: 0n });
+	await settled();
+
+	const shown: { route: { node?: bigint } }[] = [];
+	const reading = (async () => {
+		for (;;) {
+			const event = await announced.next();
+			if (!event) break;
+			shown.push(event);
+		}
+	})();
+	// The session to NODE_A closed for good: the first route ends, and the held one moves to a
+	// usable path.
+	const detour = [
+		{ node: NODE_A, session: 0n },
+		{ node: 3n, session: 1n },
+		{ node: PEER_NODE, session: 3n },
+	];
+	const hop = { node: PEER_NODE, session: NODE_A };
+	await send({ status: "dead", dead: { kind: "closed", hop, far: NODE_A, gone: true, moved: 1n } });
+	await send({ status: "routeUpdate", id: 1n, offer: offer(NODE_A, { metric: 4n, path: detour }) });
+	await settled();
+	expect(shown.length).toBeGreaterThan(0);
+	for (const event of shown) expect(event).toMatchObject({ prefix: x, route: { node: NODE_A } });
+
+	announced.close();
+	await reading;
+	subscriber.close();
+});
+
+// A reader of a wider prefix widens the route in place: the claim it carried stays shown to
+// both readers, and only what the wider prefix adds arrives.
+test("a lite-07 edit to a wider prefix keeps the claims the route carried", async () => {
+	const half = Path.from("a");
+	const { subscriber, announced, send, edits, settled, another } = await routedStream(
+		undefined,
+		Path.Pattern.subtree(half),
+	);
+	const [x, y] = [Path.from("a/x"), Path.from("b/y")];
+	const instance = Instance.parse("i");
+	expect(edits).toMatchObject([{ remove: [], add: [{ prefix: half }] }]);
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: x, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({ status: "synced", prefix: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
+
+	// The root takes the place of the narrower prefix in one edit, which the harness answers.
+	const wide = await another();
+	expect(edits).toMatchObject([{}, { remove: [0n], add: [{ prefix: Path.empty() }] }]);
+	expect(await wide.announced.next()).toMatchObject({ prefix: x, kind: "start" });
+	// The route now lies at the root, which a request through the claim names by its depth.
+	for (const reader of [announced, wide.announced]) {
+		expect(await reader.next()).toMatchObject({ prefix: x, kind: "update", route: { depth: 0, available: true } });
 	}
 
+	// The publisher sends what the widened route lacks, then its floor.
+	await send({ status: "active", suffix: y, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	await send({ status: "synced", prefix: 1n });
+	expect(await wide.announced.next()).toMatchObject({ prefix: y, kind: "start" });
+
+	// The claim both prefixes cover never left: its end is the next thing either reader sees.
+	await send({ status: "endedId", id: 0n });
+	await send({ status: "floor", id: 0n, revision: 2n });
+	await settled();
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "end" });
+	expect(await wide.announced.next()).toMatchObject({ prefix: x, kind: "end" });
+
+	wide.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
+// A route its ROUTE_START marked exact lies at its own prefix: a wider request leaves it there, so
+// its claims keep their route's depth and the publisher keeps sending under it. Mirrors rs/moq-net.
+test("a lite-07 edit to a wider prefix leaves an exact route at its own prefix", async () => {
+	const half = Path.from("a");
+	const { subscriber, announced, send, edits, settled, another } = await routedStream(
+		undefined,
+		Path.Pattern.subtree(half),
+	);
+	const [x, z] = [Path.from("a/x"), Path.from("a/z")];
+	const instance = Instance.parse("i");
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: true,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: x, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({ status: "synced", prefix: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start", route: { depth: 1 } });
+
+	const wide = await another();
+	expect(edits).toMatchObject([{}, { remove: [0n], add: [{ prefix: Path.empty() }] }]);
+	expect(await wide.announced.next()).toMatchObject({ prefix: x, kind: "start", route: { depth: 1 } });
+	await send({ status: "synced", prefix: 1n });
+
+	// Nothing moved, so the first reader's next event is the new claim under the same route.
+	await send({ status: "active", suffix: z, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 1n });
+	await settled();
+	expect(await announced.next()).toMatchObject({ prefix: z, kind: "start", route: { depth: 1 } });
+	expect(await wide.announced.next()).toMatchObject({ prefix: z, kind: "start", route: { depth: 1 } });
+
+	wide.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
+// A reader below the shared request is shown a broader claim at its own prefix as that much above
+// it, so a claim exactly there outranks the broader one however cheaper that is, as a consume of
+// the path picks.
+test("a lite-07 reader below the request ranks a broader claim as above its prefix", async () => {
+	const { subscriber, announced, send, edits, settled, another } = await routedStream();
+	const [x, xa] = [Path.from("x"), Path.from("x/a")];
+	const narrow = await another(Path.Pattern.subtree(xa));
+	// The root covers the narrow reader, so its request is the root's alone.
+	expect(edits).toHaveLength(1);
+	const instance = Instance.parse("i");
+	for (const [id, node, path, cost] of [
+		[0n, NODE_A, x, 0n],
+		[1n, NODE_B, xa, 10n],
+	] as const) {
+		await send({ status: "routeStart", prefix: 0n, node, suffix: Path.empty(), exact: false, offer: offer(node) });
+		await send({ status: "active", suffix: path, route: id, instance, cost });
+		await send({ status: "floor", id, revision: 0n });
+	}
+	await settled();
+	// The root's claim shows first, one segment above the reader's prefix, until the exact one
+	// arrives.
+	expect(await narrow.announced.next()).toMatchObject({
+		prefix: xa,
+		kind: "start",
+		route: { node: NODE_A, above: 1n },
+	});
+	expect(await narrow.announced.next()).toMatchObject({ prefix: xa, route: { node: NODE_B, above: 0n } });
+
+	narrow.announced.close();
+	announced.close();
+	subscriber.close();
+});
+
+// Two routes of one node, each showing its covering claim at its own prefix, merge when a reader
+// widens the request past both: each claim stays shown until the merged route's next floor.
+test("a lite-07 edit merging two routes keeps each one's covering claim", async () => {
+	const [a, b] = [Path.from("a"), Path.from("b")];
+	const { subscriber, announced, send, edits, settled, another } = await routedStream(
+		undefined,
+		Path.Pattern.subtree(a),
+	);
+	const instance = Instance.parse("i");
+	const other = await another(Path.Pattern.subtree(b));
+	expect(edits).toMatchObject([{ add: [{ prefix: a }] }, { add: [{ prefix: b }] }]);
+	// NODE_A claims the root, which each route presents at its requested prefix.
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: a, route: 0n, instance });
+	await send({ status: "floor", id: 0n, revision: 0n });
+	await send({
+		status: "routeStart",
+		prefix: 1n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({ status: "active", suffix: b, route: 1n, instance });
+	await send({ status: "floor", id: 1n, revision: 0n });
+	expect(await announced.next()).toMatchObject({ prefix: a, kind: "start" });
+	expect(await other.announced.next()).toMatchObject({ prefix: b, kind: "start" });
+
+	// A reader of everything widens the request to the root, which the harness answers.
+	const wide = await another();
+	await settled();
+	expect(edits.at(-1)).toMatchObject({ remove: [0n, 1n], add: [{ prefix: Path.empty() }] });
+	const seen: { kind: string }[] = [];
+	const reading = (async () => {
+		for (const reader of [announced, other.announced]) {
+			const event = await Promise.race([reader.next(), settled().then(() => undefined)]);
+			if (event) seen.push(event);
+		}
+	})();
+	await reading;
+	expect(seen.filter((event) => event.kind === "end")).toEqual([]);
+
+	wide.announced.close();
+	other.announced.close();
 	announced.close();
 	subscriber.close();
 });
@@ -5341,11 +6121,25 @@ test("a lite-07 DRAIN ranks the routes through its node last", async () => {
 	const { subscriber, announced, send } = await routedStream();
 	const room = Path.from("room");
 	const instance = Instance.parse("i");
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: room, route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { node: NODE_A } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 5n }),
+	});
 	await send({ status: "active", suffix: room, route: 1n, instance });
 	await send({ status: "floor", id: 1n, revision: 0n });
 
@@ -5367,14 +6161,23 @@ test("a lite-07 claim ranks by its path's priority before its cost", async () =>
 	const instance = Instance.parse("i");
 	await send({
 		status: "routeStart",
+		prefix: 0n,
 		node: NODE_A,
 		suffix: Path.empty(),
+		exact: false,
 		offer: offer(NODE_A, { priority: -10 }),
 	});
 	await send({ status: "active", suffix: room, route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { node: NODE_A } });
-	await send({ status: "routeStart", node: NODE_B, suffix: Path.empty(), offer: offer(NODE_B, { metric: 5n }) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_B,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_B, { metric: 5n }),
+	});
 	await send({ status: "active", suffix: room, route: 1n, instance });
 	await send({ status: "floor", id: 1n, revision: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "update", route: { node: NODE_B } });
@@ -5390,8 +6193,22 @@ test("a lite-07 request names its route's prefix depth", async () => {
 	const x = Path.from("live/room/x");
 	const y = Path.from("y");
 	const instance = Instance.parse("i");
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.from("live/room"), offer: offer(NODE_A) });
-	await send({ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) });
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.from("live/room"),
+		exact: false,
+		offer: offer(NODE_A),
+	});
+	await send({
+		status: "routeStart",
+		prefix: 0n,
+		node: NODE_A,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(NODE_A),
+	});
 	await send({ status: "active", suffix: x, route: 0n, instance });
 	await send({ status: "floor", id: 0n, revision: 0n });
 	await send({ status: "active", suffix: y, route: 1n, instance });
@@ -5399,9 +6216,9 @@ test("a lite-07 request names its route's prefix depth", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: x, kind: "start" });
 	expect(await announced.next()).toMatchObject({ prefix: y, kind: "start" });
 
-	const deep = await trackRequest(x, 1);
+	const deep = await trackRequest(x, 0);
 	expect(deep.request).toMatchObject({ node: NODE_A, depth: 2 });
-	const shallow = await trackRequest(y, 2);
+	const shallow = await trackRequest(y, 1);
 	expect(shallow.request).toMatchObject({ node: NODE_A, depth: 0 });
 
 	for (const pick of [deep, shallow]) pick.consumed.close();
@@ -5410,86 +6227,107 @@ test("a lite-07 request names its route's prefix depth", async () => {
 	for (const pick of [deep, shallow]) await pick.info;
 });
 
+// The routes a DEAD violation is checked against: NODE_A's and NODE_B's, each over the peer's
+// session to its node, and NODE_C's behind NODE_A's.
+const DEAD_HOP = { node: PEER_NODE, session: NODE_A };
+const DEAD_ROUTES: AnnounceBroadcast[] = [
+	{ status: "routeStart", prefix: 0n, node: NODE_A, suffix: Path.empty(), exact: false, offer: offer(NODE_A) },
+	{ status: "routeStart", prefix: 0n, node: NODE_B, suffix: Path.empty(), exact: false, offer: offer(NODE_B) },
+	{
+		status: "routeStart",
+		prefix: 0n,
+		node: 0x9cn,
+		suffix: Path.empty(),
+		exact: false,
+		offer: offer(0x9cn, { path: [{ node: 0x9cn, session: 0n }, { node: NODE_A, session: 1n }, DEAD_HOP] }),
+	},
+];
+const deadMoving = (moved: bigint): AnnounceBroadcast => ({
+	status: "dead",
+	dead: { kind: "closed", hop: DEAD_HOP, far: NODE_A, gone: false, moved },
+});
+
+// Each closes the session: a violation on the peer's Announce Stream is the peer breaking it.
 test.each([
 	[
 		"a second route to one origin node at one prefix",
 		[
-			{ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) },
-			{ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) },
+			{
+				status: "routeStart",
+				prefix: 0n,
+				node: NODE_A,
+				suffix: Path.empty(),
+				exact: false,
+				offer: offer(NODE_A),
+			},
+			{
+				status: "routeStart",
+				prefix: 0n,
+				node: NODE_A,
+				suffix: Path.empty(),
+				exact: false,
+				offer: offer(NODE_A),
+			},
 		],
+	],
+	[
+		"a route under a Prefix ID never asked for",
+		[{ status: "routeStart", prefix: 1n, node: NODE_A, suffix: Path.empty(), exact: false, offer: offer(NODE_A) }],
 	],
 	[
 		"a claim outside its route's prefix",
 		[
-			{ status: "routeStart", node: NODE_A, suffix: Path.from("live"), offer: offer(NODE_A) },
+			{
+				status: "routeStart",
+				prefix: 0n,
+				node: NODE_A,
+				suffix: Path.from("live"),
+				exact: false,
+				offer: offer(NODE_A),
+			},
 			{ status: "active", suffix: Path.from("other"), route: 0n, instance: Instance.parse("a") },
 		],
 	],
+	// A DEAD and the ROUTE_UPDATEs it counts are one step, so nothing else lies between them.
 	[
-		"a DEAD moving an unknown route",
-		[
-			{
-				status: "dead",
-				dead: {
-					kind: "closed",
-					hop: { node: PEER_NODE, session: 1n },
-					far: 3n,
-					gone: false,
-					more: false,
-					moved: [{ id: 0n, offer: offer(NODE_A) }],
-				},
-			},
-		],
+		"a DEAD followed by another message than its ROUTE_UPDATEs",
+		[...DEAD_ROUTES, deadMoving(1n), { status: "floor", id: 0n }],
 	],
 	[
-		"a DEAD part followed by another message",
-		[
-			{ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) },
-			{
-				status: "dead",
-				dead: {
-					kind: "closed",
-					hop: { node: PEER_NODE, session: NODE_A },
-					far: NODE_A,
-					gone: true,
-					more: true,
-					moved: [],
-				},
-			},
-			{ status: "floor", id: 0n },
-		],
+		"a DEAD followed by an ANNOUNCE_REQUEST before its ROUTE_UPDATEs",
+		[...DEAD_ROUTES, deadMoving(1n), { status: "request", remove: [], add: [] }],
+	],
+	["a DEAD followed by another DEAD before its ROUTE_UPDATEs", [...DEAD_ROUTES, deadMoving(1n), deadMoving(0n)]],
+	[
+		"a DEAD moving a route that is not live",
+		[...DEAD_ROUTES, deadMoving(1n), { status: "routeUpdate", id: 7n, offer: offer(NODE_A) }],
 	],
 	[
-		"a DEAD part continued by one naming another hop",
+		"a DEAD moving a route that does not cross its hop",
+		[...DEAD_ROUTES, deadMoving(1n), { status: "routeUpdate", id: 1n, offer: offer(NODE_B) }],
+	],
+	[
+		"a DEAD moving one route twice",
 		[
-			{
-				status: "dead",
-				dead: {
-					kind: "closed",
-					hop: { node: PEER_NODE, session: 1n },
-					far: 3n,
-					gone: true,
-					more: true,
-					moved: [],
-				},
-			},
-			{
-				status: "dead",
-				dead: {
-					kind: "closed",
-					hop: { node: PEER_NODE, session: 2n },
-					far: 3n,
-					gone: true,
-					more: false,
-					moved: [],
-				},
-			},
+			...DEAD_ROUTES,
+			deadMoving(2n),
+			{ status: "routeUpdate", id: 0n, offer: offer(NODE_A) },
+			{ status: "routeUpdate", id: 0n, offer: offer(NODE_A) },
 		],
 	],
+	["a DEAD moving more routes than cross its hop", [...DEAD_ROUTES, deadMoving(3n)]],
+	["a DEAD moving a route of a stream with none", [deadMoving(1n)]],
 	[
 		"a route claiming one path twice",
 		[
-			{ status: "routeStart", node: NODE_A, suffix: Path.empty(), offer: offer(NODE_A) },
+			{
+				status: "routeStart",
+				prefix: 0n,
+				node: NODE_A,
+				suffix: Path.empty(),
+				exact: false,
+				offer: offer(NODE_A),
+			},
 			{ status: "active", suffix: Path.from("room"), route: 0n, instance: Instance.parse("a") },
 			{ status: "active", suffix: Path.from("room"), route: 0n, instance: Instance.parse("b") },
 		],
@@ -5499,17 +6337,36 @@ test.each([
 		[{ status: "active", suffix: Path.from("room"), route: 0n, instance: Instance.parse("a") }],
 	],
 	["a floor for an unknown route", [{ status: "floor", id: 0n }]],
+	["a SYNCED for a Prefix ID never asked for", [{ status: "synced", prefix: 1n }]],
+	[
+		"a second SYNCED for one Prefix ID",
+		[
+			{ status: "synced", prefix: 0n },
+			{ status: "synced", prefix: 0n },
+		],
+	],
+	["an ANNOUNCE_OK answering no ANNOUNCE_REQUEST", [{ status: "ok" }]],
 ] as [string, AnnounceBroadcast[]][])("lite-07 %s is a violation", async (_, messages) => {
-	const version = Version.DRAFT_07;
-	const { subscriber, send, settle, sessionEnded } = announceHarness(version);
-	const announced = subscriber.routes();
-	await settle();
-	await send(async (w) => {
-		await new AnnounceOk(PEER, 0).encode(w, version);
-		for (const msg of messages) await encodeAnnounceBroadcast(w, msg, version);
-	});
+	const { subscriber, announced, send, closes } = await routedStream();
+	expect(closes).toEqual([]);
+	// Every message before the last is one the peer may send.
+	for (const msg of messages.slice(0, -1)) await send(msg);
+	expect(closes).toEqual([]);
+	await send(messages[messages.length - 1]);
 	await expect(announced.next()).rejects.toThrow(ProtocolViolation);
-	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
+	expect(closes).toHaveLength(1);
+	expect(closes[0]?.closeCode).toBe(SessionCode.ProtocolViolation);
+	announced.close();
+	subscriber.close();
+});
+
+// The peer finishing its Announce Stream between a DEAD and the ROUTE_UPDATEs it counted leaves
+// the step half said.
+test("lite-07 an Announce Stream finished inside a DEAD is a violation", async () => {
+	const { subscriber, announced, send } = await routedStream();
+	for (const msg of DEAD_ROUTES) await send(msg);
+	await send(deadMoving(1n));
+	expect(() => subscriber.announceFinished()).toThrow(ProtocolViolation);
 	announced.close();
 	subscriber.close();
 });

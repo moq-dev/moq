@@ -101,7 +101,7 @@ fn write(track: &track::Producer, tag: &str) {
 	let mut group = track.append_next().unwrap();
 	let start = Timestamp::from_millis(group.start).unwrap();
 	group.write_frame(start, tag.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// The next frame a subscription delivers, as text.
