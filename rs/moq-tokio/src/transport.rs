@@ -10,12 +10,12 @@ pub enum Transport {
 	WebSocket,
 	/// A plaintext TCP connection using qmux framing.
 	Tcp,
-	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
-	Tls,
 	/// A Unix domain socket using qmux framing.
 	Unix,
 	/// WebTransport over HTTP/3 on QUIC.
 	WebTransport,
+	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
+	Tls,
 }
 
 impl Transport {
@@ -25,9 +25,9 @@ impl Transport {
 			Self::Quic => "quic",
 			Self::WebSocket => "websocket",
 			Self::Tcp => "tcp",
-			Self::Tls => "tls",
 			Self::Unix => "unix",
 			Self::WebTransport => "webtransport",
+			Self::Tls => "tls",
 		}
 	}
 }

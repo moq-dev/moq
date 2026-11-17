@@ -188,8 +188,6 @@ pub enum Transport {
 	WebSocket,
 	/// A plaintext TCP connection using qmux framing.
 	Tcp,
-	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
-	Tls,
 	/// A Unix domain socket using qmux framing.
 	Unix,
 	/// A one-shot HTTP request on the relay's web listener (`/fetch`, `/announced`),
@@ -203,6 +201,8 @@ pub enum Transport {
 	WebRtc,
 	/// A WebTransport connection over HTTP/3.
 	WebTransport,
+	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
+	Tls,
 	/// A transport name this auth server does not recognize.
 	#[serde(other)]
 	Unknown,
