@@ -1117,9 +1117,18 @@ impl<N: Key, A: Item> Router<N, A> {
 	/// goes, and each names its hop to the others.
 	pub fn disconnect(&mut self, neighbors: impl IntoIterator<Item = N>, now: Instant) {
 		self.clock(now);
+		// A mount speaks for the session it answers, so it closes under that session's
+		// scope, read before any of them go.
+		let neighbors: Vec<(N, bool)> = (neighbors.into_iter())
+			.map(|neighbor| {
+				let scoped =
+					(self.sessions.get(&self.listen(neighbor))).is_some_and(|session| session.link.scope.is_some());
+				(neighbor, scoped)
+			})
+			.collect();
 		let mut ids = BTreeSet::new();
 		let mut hops = Vec::new();
-		for neighbor in neighbors {
+		for (neighbor, scoped) in neighbors {
 			let Some(session) = self.sessions.remove(&neighbor) else {
 				continue;
 			};
@@ -1144,7 +1153,7 @@ impl<N: Key, A: Item> Router<N, A> {
 			ids.extend(self.fail(hop, session.hop, None, Vec::new(), false, now));
 			// A scoped peer names itself as it likes, so its close neither doubts that node
 			// nor names it to the neighbours: the routes it sent end one by one instead.
-			if session.link.scope.is_none() {
+			if !scoped {
 				ids.extend(self.suspect(session.hop, now));
 				hops.push(Report::Closed(hop));
 			}
