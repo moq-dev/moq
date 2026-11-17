@@ -75,6 +75,12 @@ export class Terminal {
 		this.#resetEpoch();
 	}
 
+	/** Whether applying a read would end a codec epoch, as `update` reports. */
+	ends(read: Update): boolean {
+		if (read.kind === "gap") return this.#started;
+		return read.kind === "frame" && this.#endGroup !== undefined && read.group > this.#endGroup;
+	}
+
 	/** Apply one ordered consumer read and report whether a codec epoch ended before it. */
 	update(read: Update): boolean {
 		if (read.kind === "gap") {
@@ -92,7 +98,7 @@ export class Terminal {
 		}
 		// A later group after a declared end comes from a fresh encoder; the end's own group carries
 		// the stopped encoder's final packets.
-		const reset = this.#endGroup !== undefined && read.group > this.#endGroup;
+		const reset = this.ends(read);
 		if (reset) this.#restart();
 		this.#started = true;
 		const timestamp = read.frame.timestamp.asMicros();

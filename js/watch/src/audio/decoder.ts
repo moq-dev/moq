@@ -725,9 +725,7 @@ export class Decoder {
 						await this.#onFinish(effect, decoder, () => written);
 						break;
 					}
-					if (this.#onRead(next)) {
-						this.#reprime(decoder, decoderConfig, order);
-					}
+					if (!(await this.#apply(effect, decoder, decoderConfig, order, next))) return;
 					continue;
 				}
 				const { frame } = next;
@@ -819,9 +817,7 @@ export class Decoder {
 						await this.#onFinish(effect, decoder, () => written);
 						break;
 					}
-					if (this.#onRead(next)) {
-						this.#reprime(decoder, decoderConfig, order);
-					}
+					if (!(await this.#apply(effect, decoder, decoderConfig, order, next))) return;
 					continue;
 				}
 				const { frame } = next;
@@ -854,13 +850,29 @@ export class Decoder {
 		reads: FrameRead[],
 	): Promise<boolean> {
 		for (const read of reads) {
-			if (this.#onRead(read)) {
-				this.#reprime(decoder, config, order);
-			}
+			if (!(await this.#apply(effect, decoder, config, order, read))) return false;
 			if (!order.admit(read)) continue;
 			const duration = packetDuration(config.codec, read.frame);
 			if (!(await this.#decode(effect, decoder, read.frame, duration))) return false;
 		}
+		return true;
+	}
+
+	// Apply an ordered read, restarting the codec when it ends an epoch, and report whether to keep
+	// going. The decoder first hands over what it holds, mapped on the epoch it was decoded in: a reset
+	// would drop it, and a starved decoder skipping groups can hold everything since the last skip.
+	async #apply(
+		effect: Effect,
+		decoder: AudioDecoder,
+		config: AudioDecoderConfig,
+		order: Order<FrameRead>,
+		read: Container.Read,
+	): Promise<boolean> {
+		if (this.#terminal.ends(read) && decoder.state === "configured") {
+			await decoder.flush();
+			if (effect.abort.aborted) return false;
+		}
+		if (this.#onRead(read)) this.#reprime(decoder, config, order);
 		return true;
 	}
 
