@@ -12,7 +12,7 @@ const payload = new TextEncoder().encode("one shared compression window ".repeat
 
 test("synchronous writers store slices; plain readers share one charged inflated copy", async () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	const first = group.mirror();
 	const second = group.mirror();
 	const raw = group.mirror();
@@ -113,7 +113,7 @@ test("empty frames preserve the window", async () => {
 
 test("a cut compressed group preserves its committed frames before returning its error", async () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	const reader = group.mirror();
 	group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 	const cut = new Error("cut");
@@ -126,7 +126,7 @@ test("a cut compressed group preserves its committed frames before returning its
 
 test("a shared plain read cannot change a later synchronous write's admission", async () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	const reader = group.mirror();
 	// The largest local frame whose worst-case slice fits the frame cap.
 	let size = 32 * 1024 * 1024;
@@ -145,7 +145,7 @@ test("a shared plain read cannot change a later synchronous write's admission", 
 
 test("refresh measures stored slices without inflating a compressed group", () => {
 	const track = new Track("compressed").accept({ compression: "deflate" });
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	const payload = Uint8Array.from({ length: 1024 }, (_, index) => index % 251);
 	for (let index = 0; index < 3; index++)
 		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });

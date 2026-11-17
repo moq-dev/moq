@@ -27,7 +27,7 @@ function pooled(pool: cache.Pool, name = "test"): TrackProducer {
 }
 
 function finished(producer: TrackProducer, size: number): bigint {
-	const group = producer.appendGroup();
+	const group = hooks.appendNext(producer);
 	group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	return group.start;
@@ -73,7 +73,7 @@ test("the sweep expires idle groups across tracks without a write", async () => 
 		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const tracks = [pooled(pool, "a"), pooled(pool, "b")];
 		const stalled = tracks.map((track) => {
-			const group = track.appendGroup(); // left open
+			const group = hooks.appendNext(track); // left open
 			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.start) });
 			finished(track, 1); // the live edge
 			return group;
@@ -206,8 +206,8 @@ test("a forgotten failed fill answer leaves its gap owed", async () => {
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
-		for (const sequence of [0n, 2n]) hooks.receiveGroup(producer, { sequence, start: 0 }).finish();
-		hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true }).abort(new Error("archive failed"));
+		for (const sequence of [0n, 2n]) hooks.receiveGroup(producer, { start: sequence, offset: 0 }).finish();
+		hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true }).abort(new Error("archive failed"));
 		hooks.endTrack(producer, { group: 3n, frame: 0 });
 		await yieldNow();
 		// A failed fill answer says nothing of the feed, so it records no drop, as in Rust.
@@ -228,7 +228,7 @@ test("a held failed fill answer stays readable", async () => {
 	const producer = pooled(pool);
 	hooks.receiveTrack(producer);
 	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
-	const answer = hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true });
+	const answer = hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true });
 	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.start) });
 	const group = await reader.recvGroup();
 	expect(group?.start).toBe(1n);

@@ -145,7 +145,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	const handles = sources.map((source) => source.consume());
 	const tracks = sources.map((source) => source.createTrack("seq"));
 	const groups = tracks.map((track) => {
-		const group = track.appendGroup();
+		const group = hooks.appendNext(track);
 		group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 		return group;
 	});

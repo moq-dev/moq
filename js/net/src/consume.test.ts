@@ -5,6 +5,7 @@ import { StreamCode, StreamError } from "./error.ts";
 import { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import * as Path from "./path.ts";
+import { hooks } from "./internal.ts";
 
 test("cache identity follows the serving announcement, preserving held tracks", async () => {
 	const cache = new BroadcastCache();
@@ -31,7 +32,7 @@ test("cache identity follows the serving announcement, preserving held tracks", 
 	const shared = cache.get(job, cache.instance(job));
 	expect(shared?.closed).toBe(fresh.closed);
 	// Cache replacement never transfers or closes the track an old handle is reading.
-	track.appendGroup().finish();
+	hooks.appendNext(track).finish();
 	expect((await ordered.nextGroup())?.start).toBe(0n);
 	cache.withdraw(job, specific);
 	expect(cache.get(job, cache.instance(job))).toBeUndefined();

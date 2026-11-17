@@ -1,5 +1,6 @@
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast";
 import { Timestamp } from "./time.ts";
+import { hooks } from "./internal.ts";
 
 let probes = 0;
 
@@ -8,7 +9,7 @@ export function readsFrom(active: BroadcastConsumer | undefined, source: Broadca
 	if (!active) return false;
 	const name = `probe-${probes++}`;
 	const track = source.createTrack(name);
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
 	const sub = active.track(name).subscribe();

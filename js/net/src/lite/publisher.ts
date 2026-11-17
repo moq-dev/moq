@@ -41,7 +41,7 @@ import { readSize, sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { rescale } from "../rescale.ts";
 import { concat, encodeVarint, type Reader, type Stream, type StreamVersion, Writer } from "../stream.ts";
-import { floorAt, keyOf, type Timescale, Timestamp } from "../time.ts";
+import { floorAt, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import type { Reported } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
@@ -178,7 +178,7 @@ function wireTime(timestamp: Timestamp, stamp: Stamp): bigint {
 
 /** A scale-less lite-07 datagram's timestamp as it goes out: the bare value its producer gave. */
 function bareTime(timestamp: Timestamp): bigint {
-	const key = keyOf(timestamp);
+	const key = timestamp.key;
 	if (key === undefined) throw new TimestampMismatch();
 	return key;
 }

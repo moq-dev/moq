@@ -617,7 +617,7 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 		const active = request.active.peek();
 		if (!active) throw new Error("expected the incumbent route");
 		sub = active.track("seq").subscribe({ delay: { max: Duration.millis(60_000) } });
-		const first = source.appendGroup();
+		const first = hooks.appendNext(source);
 		for (let frame = 0; frame < 4; frame++)
 			first.writeFrame({ payload: enc.encode(`0.${frame}`), timestamp: Timestamp.unscaled(first.start) });
 		first.finish();
@@ -629,7 +629,7 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 		expect(await initial.readFrame()).toBeUndefined();
 		initial.close();
 
-		const open = source.appendGroup();
+		const open = hooks.appendNext(source);
 		for (let frame = 0; frame < 2; frame++)
 			open.writeFrame({ payload: enc.encode(`1.${frame}`), timestamp: Timestamp.unscaled(open.start) });
 		const interrupted = await sub.recvGroup();
@@ -639,7 +639,7 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 		for (let frame = 2; frame < 4; frame++)
 			open.writeFrame({ payload: enc.encode(`1.${frame}`), timestamp: Timestamp.unscaled(open.start) });
 		open.finish();
-		const last = source.appendGroup();
+		const last = hooks.appendNext(source);
 		for (let frame = 0; frame < 4; frame++)
 			last.writeFrame({ payload: enc.encode(`2.${frame}`), timestamp: Timestamp.unscaled(last.start) });
 		last.finish();

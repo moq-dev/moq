@@ -52,7 +52,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
-import { floorAt, keyOf, Timescale, type Timestamp } from "./time.ts";
+import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
@@ -1309,7 +1309,7 @@ export class Producer {
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
 		};
-		hooks.receiveGroup = (producer, { sequence, start, fill }) => producer.#createGroup(sequence, start, fill);
+		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) => producer.#createGroup(sequence, start, fill);
 		hooks.arrivingGroup = (producer, sequence) => {
 			const group = producer.#cached.get(sequence)?.group;
 			if (!group || group.closed.peek() !== undefined) return undefined;
@@ -1337,6 +1337,7 @@ export class Producer {
 		hooks.trackFinished = (producer) => producer.#state.end.peek() !== undefined;
 		hooks.dropTrackGroups = (producer, start, end, hole) => producer.#drop(start, end, hole, true);
 		hooks.skipTrackGroups = (producer, start, end) => producer.#skipReceived(start, end);
+		hooks.appendNext = (producer) => producer.#appendAt(producer.#received);
 		hooks.supersedeStale = (producer) => {
 			const held = producer.#state.drops.all.filter((run) => run.stale !== undefined);
 			for (const run of held) producer.#setDrops(run.start, run.end);
@@ -1776,10 +1777,11 @@ export class Producer {
 	}
 
 	// The starts a first frame of group `sequence` must fall between: the nearest checked
-	// starts cached on either side, since groups land out of sequence order, and the eviction
-	// watermark. Throws {@link TimestampMismatch} on a rewind; an equal start is allowed. Returns
-	// whether the group is late, at or below the watermark, where its floor may be gone, so
-	// the watermark caps it instead and it is accepted unverified.
+	// starts cached on either side, since groups land out of key order, and the eviction
+	// watermark. Throws {@link TimestampMismatch} on a rewind or a tie: starts strictly increase.
+	// Returns whether the group is late, at or below the watermark, where its floor may be gone,
+	// so the watermark caps it instead and it is accepted unverified. Mirrors the Rust
+	// `Neighbors::admit`.
 	#admit(sequence: bigint, start: Timestamp): boolean {
 		const bounds = this.#bounds;
 		const index = timelineIndex(bounds, sequence);
@@ -1792,7 +1794,7 @@ export class Producer {
 		} else if (evicted) {
 			if (floor === undefined || floor.isBefore(evicted.first)) floor = evicted.first;
 		}
-		if ((floor && start.isBefore(floor)) || ceiling?.isBefore(start)) throw new TimestampMismatch();
+		if ((floor && !floor.isBefore(start)) || (ceiling && !start.isBefore(ceiling))) throw new TimestampMismatch();
 		return late;
 	}
 
@@ -2000,11 +2002,15 @@ export class Producer {
 		this.#reportWanted();
 	}
 
-	// The sequence the next append takes: one past this producer's own writes.
-	#nextSequence(): bigint {
-		const next = this.#received;
-		this.#writable(next);
-		return next;
+	// `start` as a group key: its value at the track's timescale, rounded down, or the key of an
+	// unscaled timestamp on a scale-less track. A timed start before the track's info is accepted
+	// has no timescale to key it in.
+	#keyOf(start: Timestamp): bigint {
+		const info = this.#state.info.peek();
+		if (info === undefined && start.scale !== undefined)
+			throw new Error("a timed group start needs the track's timescale: accept() it first");
+		const rescaled = info === undefined ? start : rescale(info, start);
+		return rescaled.key ?? BigInt(rescaled.value);
 	}
 
 	// Hold a group to this track's timedness, once the track has committed it.
@@ -2032,32 +2038,39 @@ export class Producer {
 	}
 
 	/**
-	 * Append a new group with the next sequence number: one past this producer's own writes.
+	 * Create the next group, starting at `start`: after every group this track holds. Mirrors the
+	 * Rust `append_group`.
 	 *
-	 * Appending says the producer will not go back, so it skips every sequence below the new
-	 * group that it never produced, from just past its previous append (before the first, from
-	 * the lowest group it created), as {@link skipGroups} would, replacing any drop there. Those
-	 * sequences are then final: creating one throws {@link Skipped}. Appending alone never leaves
-	 * such a gap; one left by out-of-order {@link createGroup} calls is what it names.
+	 * A timed track converts `start` into its timescale, rounding down, as {@link writeFrame}
+	 * does; a scale-less track takes {@link Timestamp.unscaled} at the group's key. A `start` that
+	 * doesn't match the track, or at or before a group this track holds, throws
+	 * {@link TimestampMismatch}, like a rewound frame.
 	 *
-	 * The same broadcast, track, and group sequence always name the same content, and nothing
-	 * checks it: the broadcast remembers nothing of an earlier producer of the name, so a
-	 * replacement starts at 0. A recreated track, or a restarted publisher keeping its instance,
-	 * continues past its predecessor's groups with {@link createGroup}, or uses a new track name
-	 * or instance. Reusing a sequence only corrupts this broadcast for its readers. Datagram
-	 * sequences name no cached content and are exempt.
+	 * Appending says the producer will not go back, so it skips every start below the new group
+	 * that it never produced, from just past its previous append (before the first, from the
+	 * lowest group it created), as {@link skipGroups} would, replacing any drop there:
+	 * consecutive appends name the span between their starts. Those starts are then final:
+	 * creating one throws {@link Skipped}.
+	 *
+	 * The same broadcast, track, and group start always name the same content, and nothing
+	 * checks it: the broadcast remembers nothing of an earlier producer of the name. A recreated
+	 * track, or a restarted publisher keeping its instance, keeps its starts moving forward, as
+	 * its media time does, or uses a new track name or instance. Reusing a start only corrupts
+	 * this broadcast for its readers. Datagram sequences name no cached content and are exempt.
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a scaled timestamp on every frame
-	 * of a timed track, and on a scale-less one {@link Timestamp.unscaled} at the group's
-	 * sequence, or the write throws {@link TimestampMismatch}.
-	 * So does a first frame that starts before the group below it or after the one above it.
+	 * of a timed track, and on a scale-less one {@link Timestamp.unscaled} at the group's start,
+	 * or the write throws {@link TimestampMismatch}. So does a first frame that starts at or
+	 * before the group below it, or at or after the one above it: starts strictly increase.
 	 */
-	appendGroup(): GroupProducer {
-		return this.#appendAt(this.#nextSequence());
+	appendGroup(start: Timestamp): GroupProducer {
+		return this.#appendAt(this.#keyOf(start));
 	}
 
-	// Append a group at `sequence`, at or past the next sequence, skipping what it leaves below.
+	// Append a group at `sequence`, past every group held, skipping what it leaves below.
 	#appendAt(sequence: bigint): GroupProducer {
+		if (sequence < this.#received) throw new TimestampMismatch();
+		this.#writable(sequence);
 		this.#refuseSkipped(sequence);
 		const group = new GroupProducer(sequence);
 		this.#bind(group);
@@ -2488,20 +2501,14 @@ export class Producer {
 	}
 
 	/**
-	 * Append a frame as its own single-frame group.
-	 *
-	 * On a timed track the group takes the next sequence, as {@link appendGroup}. A scale-less
-	 * track has no time, so its frame's {@link Timestamp.unscaled} names the group instead: the
-	 * key must pass every group this track holds, and the sequences it leaves below are skipped,
-	 * as {@link appendGroup} skips them. A key at or below one held, or a timestamp that doesn't
-	 * match the track, throws {@link TimestampMismatch} before any group exists.
+	 * Append a group holding one frame at its timestamp, which is where the group starts, as
+	 * {@link appendGroup} does: on a scale-less track, {@link Timestamp.unscaled} at the group's
+	 * key. A timestamp at or before a group this track holds, or that doesn't match the track,
+	 * throws {@link TimestampMismatch} before any group exists. The group closes after its
+	 * frame, since nothing says where it ends. Mirrors the Rust `write_frame`.
 	 */
 	writeFrame(frame: Frame) {
-		const info = this.#state.info.peek();
-		const key = keyOf(info ? rescale(info, frame.timestamp) : frame.timestamp);
-		if (key !== undefined && key < this.#received) throw new TimestampMismatch();
-		if (key !== undefined) this.#writable(key);
-		const group = key === undefined ? this.appendGroup() : this.#appendAt(key);
+		const group = this.appendGroup(frame.timestamp);
 		try {
 			group.writeFrame(frame);
 		} catch (err) {

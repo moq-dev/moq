@@ -11,6 +11,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
+import { hooks } from "./internal.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -60,7 +61,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
 			const track = request.accept({ timescale });
-			const group = sequence === undefined ? track.appendGroup() : track.createGroup(sequence);
+			const group = sequence === undefined ? hooks.appendNext(track) : track.createGroup(sequence);
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}
@@ -130,7 +131,7 @@ test("a forwarded untimed track stays untimed", async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
-			const group = request.accept({ timescale: Timescale.MICRO }).appendGroup();
+			const group = hooks.appendNext(request.accept({ timescale: Timescale.MICRO }));
 			group.writeFrame({ payload: new Uint8Array([7]), timestamp: Timestamp.fromMicros(1_234) });
 			group.finish();
 		}

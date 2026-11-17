@@ -607,9 +607,9 @@ async function publishing(version: IetfVersion) {
 	const broadcast = publication.broadcast;
 	// Written once, before anyone subscribed, and left open: only the head can deliver it.
 	const catalog = broadcast.createTrack("catalog.json", { timescale: Timescale.MILLI });
-	catalog.appendGroup().writeFrame(textFrame("catalog"));
+	hooks.appendNext(catalog).writeFrame(textFrame("catalog"));
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = video.appendGroup();
+	const group = hooks.appendNext(video);
 	group.writeFrame(textFrame("v0"));
 	group.writeFrame(textFrame("v1"));
 

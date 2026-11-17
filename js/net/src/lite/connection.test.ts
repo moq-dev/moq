@@ -40,6 +40,7 @@ import {
 	Version,
 	versionName,
 } from "./version.ts";
+import { hooks } from "../internal.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {
@@ -363,7 +364,7 @@ for (const [alpn, version] of [
 			closed = true;
 		});
 		try {
-			const first = producer.appendGroup();
+			const first = hooks.appendNext(producer);
 			first.writeFrame(textFrame("first"));
 			first.finish();
 			// A frame can arrive while its sender still yields on the write. Drain the setup group
@@ -374,7 +375,7 @@ for (const [alpn, version] of [
 			received?.close();
 
 			fin.enable();
-			const last = producer.appendGroup();
+			const last = hooks.appendNext(producer);
 			last.writeFrame(textFrame("last"));
 			last.finish();
 			producer.finish();
@@ -428,7 +429,7 @@ for (const [alpn, version] of [
 				closed = true;
 			});
 			try {
-				const first = producer.appendGroup();
+				const first = hooks.appendNext(producer);
 				first.writeFrame(textFrame("first"));
 				first.finish();
 				const received = await track.nextGroup();
@@ -437,7 +438,7 @@ for (const [alpn, version] of [
 				received?.close();
 
 				fin.enable();
-				const last = producer.appendGroup();
+				const last = hooks.appendNext(producer);
 				last.writeFrame(textFrame("last"));
 				last.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("last");
@@ -491,13 +492,13 @@ for (const [alpn, version] of [
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			try {
-				const first = producer.appendGroup();
+				const first = hooks.appendNext(producer);
 				first.writeFrame(textFrame("first"));
 				first.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
-				const last = producer.appendGroup();
+				const last = hooks.appendNext(producer);
 				for (const frame of frames) last.writeFrame(textFrame(frame));
 				last.finish();
 				producer.finish();
@@ -542,7 +543,7 @@ for (const [alpn, version] of [
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			try {
-				const group = producer.appendGroup();
+				const group = hooks.appendNext(producer);
 				group.writeFrame(textFrame("only"));
 				group.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("only");
@@ -586,7 +587,7 @@ for (const [alpn, version] of [
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			try {
-				const group = producer.appendGroup();
+				const group = hooks.appendNext(producer);
 				group.writeFrame(textFrame("only"));
 				group.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("only");
@@ -621,7 +622,7 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 		publish: origin.consume(),
 	});
 
-	const group = producer.appendGroup();
+	const group = hooks.appendNext(producer);
 	group.writeFrame(textFrame("last"));
 	group.finish();
 
@@ -732,7 +733,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = producer.appendGroup();
+	const group = hooks.appendNext(producer);
 	group.writeFrame(textFrame("last"));
 	group.finish();
 	const server = new Connection({
@@ -785,7 +786,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const broadcastRoute = source.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = producer.appendGroup();
+	const group = hooks.appendNext(producer);
 	group.writeFrame(textFrame("last"));
 	group.finish();
 	const url = new URL("https://localhost/test");

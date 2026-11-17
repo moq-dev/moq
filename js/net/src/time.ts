@@ -46,12 +46,6 @@ function assertTimestampValue(value: number): void {
 
 const MAX_SAFE_KEY = BigInt(Number.MAX_SAFE_INTEGER);
 
-/**
- * The group key of an unscaled timestamp, exact at any u64, or `undefined` when it is scaled.
- * Unlike {@link Timestamp.value}, it never throws on a key past `Number.MAX_SAFE_INTEGER`.
- */
-export let keyOf: (timestamp: Timestamp) => bigint | undefined;
-
 // The key the constructor is building an unscaled timestamp for, set only inside `unscaled`.
 let building: bigint | undefined;
 
@@ -124,8 +118,12 @@ export class Timestamp {
 		return new Timestamp(0, Timescale.SECOND);
 	}
 
-	static {
-		keyOf = (timestamp) => timestamp.#key;
+	/**
+	 * The group key of an unscaled timestamp, exact at any u64, or `undefined` when it is scaled.
+	 * Unlike {@link value}, it never throws on a key past `Number.MAX_SAFE_INTEGER`.
+	 */
+	get key(): bigint | undefined {
+		return this.#key;
 	}
 
 	/** The installed clock's monotonic instant in milliseconds, not wall-clock time. */

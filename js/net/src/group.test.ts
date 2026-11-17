@@ -343,7 +343,7 @@ test("a read that starts later skips frames below it instead of returning them",
 		sequence: 5,
 		payload: new Uint8Array([5]),
 	});
-	expect(await consumer.readFrameIndex({ from: 5 })).toMatchObject({ sequence: 6 });
+	expect(await consumer.readFrameIndex({ from: 5 })).toMatchObject({ index: 6 });
 });
 
 test("a group with no eviction reads every frame without error", async () => {

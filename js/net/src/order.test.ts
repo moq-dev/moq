@@ -20,6 +20,7 @@ import type { SendStream } from "./stream.ts";
 import { Timescale } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
+import { hooks } from "./internal.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -95,7 +96,7 @@ function sendOrders(transport: MockTransport): number[] {
 
 // A group with one frame, left open.
 function writeGroup(track: TrackProducer): GroupProducer {
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	group.writeFrame(textFrame("x"));
 	return group;
 }

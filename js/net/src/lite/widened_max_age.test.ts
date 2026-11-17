@@ -11,6 +11,7 @@ import { Timescale, Timestamp } from "../time.ts";
 import type { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
+import { hooks } from "../internal.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -33,7 +34,7 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// One group per second, so a budget picks how far back a reader reaches.
 	for (let sequence = 0; sequence < 10; sequence++) {
-		const group = producer.appendGroup();
+		const group = hooks.appendNext(producer);
 		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(sequence * 1000) });
 		group.finish();
 	}

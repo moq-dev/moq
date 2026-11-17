@@ -12,6 +12,7 @@ import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";
 import { encodeDatagram, ObjectDatagram } from "./datagram.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
+import { hooks } from "../internal.ts";
 
 const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 
@@ -228,7 +229,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 		expect(upstream.client.sendStreams.bidi.length).toBe(before);
 		try {
 			datagrams.insert({ sequence: 4n, timestamp: Timestamp.fromMillis(9), payload: Uint8Array.of(7) });
-			const group = track.appendGroup();
+			const group = hooks.appendNext(track);
 			group.writeFrame({ timestamp: Timestamp.fromMillis(10), payload: Uint8Array.of(8) });
 			group.finish();
 			const received = await reader.recv();

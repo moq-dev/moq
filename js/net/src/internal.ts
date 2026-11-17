@@ -635,6 +635,11 @@ export const hooks: {
 	 */
 	skipTrackGroups: (producer: Producer, start: bigint, end: bigint) => Run[];
 	/**
+	 * Append a group one past every group the track holds, or at 0 on an empty track: for tests
+	 * and benches that count groups rather than time them. Mirrors the Rust `append_next`.
+	 */
+	appendNext: (producer: Producer) => GroupProducer;
+	/**
 	 * Forget every run a received copy holds as stale: a new upstream subscription opened, whose
 	 * terms are new, so those groups are unknown again. Mirrors the Rust `supersede_stale`.
 	 */
@@ -649,7 +654,7 @@ export const hooks: {
 	 * Create a received group at its wire offset before publishing it to readers; `fill` marks one a
 	 * fill's subscription answered, which the feed never promised. Assigned by `track.ts`.
 	 */
-	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number; fill?: boolean }) => GroupProducer;
+	receiveGroup: (producer: Producer, group: { start: bigint; offset: number; fill?: boolean }) => GroupProducer;
 	/**
 	 * Hold the copy of `sequence` still arriving, if one is, for a duplicate to wait on: until
 	 * released, that copy's failure leaves its readers open for the duplicate to continue. Assigned
@@ -1033,6 +1038,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	skipTrackGroups: () => {
+		throw new Error("track.ts not loaded");
+	},
+	appendNext: () => {
 		throw new Error("track.ts not loaded");
 	},
 	producerLargest: () => {

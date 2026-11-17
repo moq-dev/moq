@@ -2995,8 +2995,8 @@ export class Subscriber {
 				await race([settled, stream.closed.then(() => settled)]);
 			}
 			producer ??= hooks.receiveGroup(track, {
-				sequence: group.sequence,
-				start: group.frameStart,
+				start: group.sequence,
+				offset: group.frameStart,
 				fill: entry.filling,
 			});
 			// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP

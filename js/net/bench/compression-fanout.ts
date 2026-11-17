@@ -19,7 +19,7 @@ export function fanout() {
 				const tracks = Array.from({ length: publishers }, () =>
 					new Track("bench").accept({ compression: "deflate" }),
 				);
-				const groups: Group[] = tracks.map((track) => track.appendGroup());
+				const groups: Group[] = tracks.map((track) => hooks.appendNext(track));
 				const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
 				let started = performance.now();
 				for (const group of groups) {
@@ -78,7 +78,7 @@ export function tails() {
 					const tracks = Array.from({ length: publishers }, () =>
 						new Track("tail").accept({ compression: compress ? "deflate" : "none" }),
 					);
-					const groups = tracks.map((track) => track.appendGroup());
+					const groups = tracks.map((track) => hooks.appendNext(track));
 					const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
 					const started = performance.now();
 					for (let index = 0; index < frames; index++) {

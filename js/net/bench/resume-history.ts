@@ -28,6 +28,7 @@ import * as Path from "../src/path.ts";
 import { Front } from "../src/resume.ts";
 import { Timestamp } from "../src/time.ts";
 import { wireOf } from "../src/wire.ts";
+import { hooks } from "../src/internal.ts";
 
 const PAYLOAD = 4096;
 const MAX_DELAY = Duration.millis(1000);
@@ -226,7 +227,7 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 		const all = new Set(Array.from({ length: routes }, (_, route) => names(history, route, perRoute)).flat());
 		for (const name of all) {
 			const track = broadcast.createTrack(name);
-			const group = track.appendGroup();
+			const group = hooks.appendNext(track);
 			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		}

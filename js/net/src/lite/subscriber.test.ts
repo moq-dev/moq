@@ -2956,7 +2956,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 		const arrive = (sequence: bigint) => {
 			if (!entry) throw new Error("no subscription");
 			const read = entry.tail.open(sequence);
-			return { group: hooks.receiveGroup(entry.track, { sequence, start: 0 }), read };
+			return { group: hooks.receiveGroup(entry.track, { start: sequence, offset: 0 }), read };
 		};
 
 		await send({ start: new SubscribeStart([0n]) });

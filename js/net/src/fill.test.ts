@@ -251,7 +251,7 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	hooks.receiveTrack(track);
 	const reader = track.subscribe({ delay: { max: null } });
 	const ordered = reader.ordered();
-	for (const sequence of [0n, 2n]) hooks.receiveGroup(track, { sequence, start: 0 }).finish();
+	for (const sequence of [0n, 2n]) hooks.receiveGroup(track, { start: sequence, offset: 0 }).finish();
 	expect((await ordered.nextGroup())?.start).toBe(0n);
 	const requests = track.requests();
 	const fetching = wireOf(broadcast).fetchGroup("video", 1n);
@@ -275,7 +275,7 @@ async function failedAnswerHoldsTheEnd(error: Error) {
 	// than moving on to group 2, and gets it once the feed delivers it.
 	const next = ordered.nextGroup();
 	expect(await Promise.race([next.then(() => "moved"), yieldNow().then(() => "waiting")])).toBe("waiting");
-	hooks.receiveGroup(track, { sequence: 1n, start: 0 }).finish();
+	hooks.receiveGroup(track, { start: 1n, offset: 0 }).finish();
 	expect((await next)?.start).toBe(1n);
 	expect((await ordered.nextGroup())?.start).toBe(2n);
 	expect((await lateNext)?.start).toBe(1n);
@@ -295,7 +295,7 @@ test("fill: a group a lowered floor asks the feed for is not asked of a fill", a
 	hooks.receiveTrack(track);
 	const live = track.subscribe({ ranges: [{ start: { relative: 0n } }], delay: { max: null } });
 	hooks.startTrack(track, { start: 1n });
-	hooks.receiveGroup(track, { sequence: 1n, start: 0 }).finish();
+	hooks.receiveGroup(track, { start: 1n, offset: 0 }).finish();
 	expect((await live.recvGroup())?.start).toBe(1n);
 	const requests = track.requests();
 	const asked = requestedGroups(requests);
@@ -306,7 +306,7 @@ test("fill: a group a lowered floor asks the feed for is not asked of a fill", a
 	});
 	const next = history.recvGroup();
 	expect(await Promise.race([asked.then(() => "asked"), yieldNow().then(() => "waiting")])).toBe("waiting");
-	hooks.receiveGroup(track, { sequence: 0n, start: 0 }).finish();
+	hooks.receiveGroup(track, { start: 0n, offset: 0 }).finish();
 	expect((await next)?.start).toBe(0n);
 
 	live.close();
@@ -321,7 +321,7 @@ test("fill: a failed answer is withheld from a subscribed reader that reads at o
 		const broadcast = new BroadcastProducer();
 		const track = broadcast.createTrack("video", { maxAge: null });
 		hooks.receiveTrack(track);
-		hooks.receiveGroup(track, { sequence: 2n, start: 0 }).finish();
+		hooks.receiveGroup(track, { start: 2n, offset: 0 }).finish();
 		const reader = track.subscribe({ ranges: [{ start: { absolute: 0n } }], delay: { max: null } });
 		const requests = track.requests();
 		const fetching = wireOf(broadcast).fetchGroup("video", 1n);
@@ -1395,7 +1395,7 @@ test("fill: an OLD answer under the max age is held as stale until forgotten", a
 function headless(): { broadcast: BroadcastProducer; track: Producer } {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
-	const tail = hooks.receiveGroup(track, { sequence: 2n, start: 3 });
+	const tail = hooks.receiveGroup(track, { start: 2n, offset: 3 });
 	for (const frame of ["c3", "c4"])
 		tail.writeFrame({ payload: enc.encode(frame), timestamp: Timestamp.unscaled(2n) });
 	tail.finish();

@@ -8,6 +8,7 @@ import { createMockTransportPair } from "../src/mock.ts";
 import { Producer } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Timestamp } from "../src/time.ts";
+import { hooks } from "../src/internal.ts";
 
 console.debug = () => {};
 console.log("retained,tracks,joined,refresh_us");
@@ -37,7 +38,7 @@ for (const retained of [1, 64, 1024])
 				const consumers = producers.map((_, i) => remote.track(`data${i}`));
 				const baseline = consumers.map((track) => track.subscribe());
 				for (let i = 0; i < tracks; i++) {
-					const group = producers[i].appendGroup();
+					const group = hooks.appendNext(producers[i]);
 					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[i].recvGroup();
@@ -48,7 +49,7 @@ for (const retained of [1, 64, 1024])
 				// Keep this track's historical groups in its cache. Only the touched
 				// track grows, so scanning that cache appears independently of fanout.
 				for (let old = 1; old < retained; old++) {
-					const group = producers[0].appendGroup();
+					const group = hooks.appendNext(producers[0]);
 					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 					const received = await baseline[0].recvGroup();
@@ -59,7 +60,7 @@ for (const retained of [1, 64, 1024])
 
 				const samples: number[] = [];
 				for (let round = 0; round < 9; round++) {
-					const group = producers[0].appendGroup();
+					const group = hooks.appendNext(producers[0]);
 					group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 					group.writeFrame({ payload: new Uint8Array(4), timestamp: Timestamp.unscaled(group.start) });
 					group.finish();

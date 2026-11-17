@@ -23,6 +23,7 @@ import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { type Backoff, pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 import type { Session } from "./session.ts";
+import { hooks } from "../internal.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -823,7 +824,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		const track = remote.track("video").subscribe().ordered();
 
 		try {
-			producer.appendGroup().writeFrame(textFrame("first"));
+			hooks.appendNext(producer).writeFrame(textFrame("first"));
 			expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 			if (teardown.goaway) {
@@ -834,7 +835,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			}
 
 			fin.hold?.enable();
-			const last = producer.appendGroup();
+			const last = hooks.appendNext(producer);
 			last.writeFrame(textFrame("last"));
 			last.finish();
 			producer.finish();
@@ -915,7 +916,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		const track = remote.track("video").subscribe().ordered();
 		try {
 			// The group stays open, so the old session's drain waits out its deadline.
-			producer.appendGroup().writeFrame(textFrame("live"));
+			hooks.appendNext(producer).writeFrame(textFrame("live"));
 			expect(await (await track.nextGroup())?.readString()).toBe("live");
 
 			reload.url.set(new URL("https://example.com/b"));
@@ -977,7 +978,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	const track = remote.track("video").subscribe().ordered();
 	try {
 		// The group stays open, so a graceful close of the predecessor would wait out its deadline.
-		producer.appendGroup().writeFrame(textFrame("live"));
+		hooks.appendNext(producer).writeFrame(textFrame("live"));
 		expect(await (await track.nextGroup())?.readString()).toBe("live");
 
 		const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
@@ -1050,11 +1051,11 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const remote = wireOf(await first.server).consume(Path.from("room"));
 	const track = remote.track("video").subscribe().ordered();
 	try {
-		producer.appendGroup().writeFrame(textFrame("first"));
+		hooks.appendNext(producer).writeFrame(textFrame("first"));
 		expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 		fin.hold?.enable();
-		const last = producer.appendGroup();
+		const last = hooks.appendNext(producer);
 		last.writeFrame(textFrame("last"));
 		last.finish();
 		producer.finish();

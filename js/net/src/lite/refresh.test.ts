@@ -9,6 +9,7 @@ import * as Path from "../path.ts";
 import { Timestamp } from "../time.ts";
 import { SubscribeUpdate } from "./subscribe.ts";
 import { ALPN_06, ALPN_07_WIP } from "./version.ts";
+import { hooks } from "../internal.ts";
 
 test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s", async (alpn) => {
 	const clock = new Manual();
@@ -44,7 +45,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		const remote = (await request.broadcast()).track("data");
 		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : null);
 		const baseline = remote.subscribe();
-		const group = producer.appendGroup();
+		const group = hooks.appendNext(producer);
 		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
 		const received = await baseline.recvGroup();

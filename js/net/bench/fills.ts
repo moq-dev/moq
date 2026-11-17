@@ -13,6 +13,7 @@ import { Producer } from "../src/origin";
 import * as Path from "../src/path";
 import { Reader, Stream } from "../src/stream";
 import { Timestamp } from "../src/time";
+import { hooks } from "../src/internal.ts";
 
 console.debug = () => {};
 const version = Version.DRAFT_22;
@@ -23,7 +24,7 @@ for (const groups of [2, 16, 128]) {
 		const publication = origin.route(Path.from("fills"));
 		const track = publication.broadcast.createTrack("video", { maxAge: Duration.millis(60_000) });
 		for (let i = 0; i < groups; i++) {
-			const group = track.appendGroup();
+			const group = hooks.appendNext(track);
 			group.writeFrame({ payload: new Uint8Array([i % 256]), timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		}

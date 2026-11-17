@@ -14,8 +14,7 @@ import {
 	presented,
 	rendezvousHash,
 	spreadHash,
-	superseded,
-} from "./internal.ts";
+	superseded, hooks } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -3050,7 +3049,7 @@ test.each([
 	expect(resolved?.instance).toBe(from);
 
 	const sticky = resolved?.track("video").subscribe();
-	oldTrack.appendGroup().finish();
+	hooks.appendNext(oldTrack).finish();
 	expect((await sticky?.recvGroup())?.start).toBe(0n);
 
 	// A re-price at the same instance keeps every handle, and the handler is not asked again.
@@ -3072,7 +3071,7 @@ test.each([
 	expect(pinned.active.peek()?.instance).toBe(from);
 
 	// The subscription already open stays on the old answer.
-	oldTrack.appendGroup().finish();
+	hooks.appendNext(oldTrack).finish();
 	expect((await sticky?.recvGroup())?.start).toBe(1n);
 
 	// A re-request, local or from a session, asks the handler again and never reads the
@@ -3093,7 +3092,7 @@ test.each([
 	// Existing request handles can still subscribe, but never join the new answer.
 	const retained = held.active.peek()?.track("video").subscribe();
 	expect((await retained?.recvGroup())?.start).toBe(1n);
-	oldTrack.appendGroup().finish();
+	hooks.appendNext(oldTrack).finish();
 	expect((await retained?.recvGroup())?.start).toBe(2n);
 	expect(held.active.peek()).toBe(resolved);
 

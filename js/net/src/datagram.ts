@@ -7,7 +7,7 @@ import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { rescaleIn } from "./rescale.ts";
-import { keyOf, Timescale, type Timestamp } from "./time.ts";
+import { Timescale, type Timestamp } from "./time.ts";
 import { checkSequence, max } from "./util/sequence.ts";
 
 /** A single unreliable payload, addressed within its datagram track. */
@@ -158,7 +158,7 @@ export class Producer {
 	 * throws a `TimestampMismatch`.
 	 */
 	append(timestamp: Timestamp, payload: Uint8Array): bigint {
-		const sequence = keyOf(timestamp) ?? this.#state.next;
+		const sequence = timestamp.key ?? this.#state.next;
 		this.insert({ sequence, timestamp, payload });
 		return sequence;
 	}

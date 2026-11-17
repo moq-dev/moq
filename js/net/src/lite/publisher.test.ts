@@ -572,7 +572,7 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = hooks.receiveGroup(track, { sequence: 0n, start: 5 });
+	const group = hooks.receiveGroup(track, { start: 0n, offset: 5 });
 	for (const value of ["a", "b"]) group.writeFrame(textFrame(value));
 	group.finish();
 	const client = await Stream.open(pair.client, { version });
@@ -2599,7 +2599,7 @@ async function serve(
 		const group =
 			start === undefined
 				? track.createGroup(BigInt(sequence))
-				: hooks.receiveGroup(track, { sequence: BigInt(sequence), start });
+				: hooks.receiveGroup(track, { start: BigInt(sequence), offset: start });
 		for (const frame of frames) group.writeFrame(textFrame(frame));
 		group.finish();
 

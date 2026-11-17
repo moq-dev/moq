@@ -518,7 +518,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const open = remote.track("video").subscribe({ delay: { max: null } });
 			expect((await open.recvGroup())?.start).toBe(3n);
 			if (!copy) throw new Error("no copy");
-			const tail = hooks.receiveGroup(copy, { sequence: 2n, start: 3 });
+			const tail = hooks.receiveGroup(copy, { start: 2n, offset: 3 });
 			for (const frame of [3, 4])
 				tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
 			tail.finish();
