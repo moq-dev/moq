@@ -715,13 +715,23 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 	);
 });
 
-test("AnnounceHistory keeps whole segments across an escaped slash", () => {
+// TEMPORARY MIGRATION, delete at the next version cut and expect whole segments: the previous
+// release counts a keep by every `/`, so until it is gone this resolves what it sends.
+test("AnnounceHistory keeps raw parts across an escaped slash", () => {
 	const history = new AnnounceHistory();
-	history.start({ suffix: Path.from("a\\/b/c") });
-	// `a\/b` is one segment, so keeping one keeps all of it.
-	expect(history.start({ suffix: Path.from("d"), pathBase: { distance: 1n, keep: 1 } })).toBe(Path.from("a\\/b/d"));
-	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 2n, keep: 1 } })).toBe(Path.from("a\\/b"));
-	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 3n, keep: 3 } })).toThrow(
+	history.start({ suffix: Path.from("room/a\\/b/cam-1") });
+	// The previous release sends keep 3 for `room/a\/b/cam-2`.
+	expect(history.start({ suffix: Path.from("cam-2"), pathBase: { distance: 1n, keep: 3 } })).toBe(
+		Path.from("room/a\\/b/cam-2"),
+	);
+	// The kept `room/a\` is half an escape, which the rest completes, or nothing does and the path
+	// is refused, its id assigned all the same.
+	expect(history.start({ suffix: Path.from("c"), pathBase: { distance: 1n, keep: 2 } })).toBe(
+		Path.from("room/a\\/c"),
+	);
+	expect(history.start({ suffix: Path.empty(), pathBase: { distance: 3n, keep: 2 } })).toBeUndefined();
+	expect(history.next).toBe(4n);
+	expect(() => history.start({ suffix: Path.empty(), pathBase: { distance: 4n, keep: 5 } })).toThrow(
 		ProtocolViolation,
 	);
 });
