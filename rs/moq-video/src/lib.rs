@@ -35,7 +35,9 @@
 //!     decoder, or your own pixels via [`Surface::rgba`]) and publishes them,
 //!     following the connection's bandwidth grant between frames when
 //!     `encode::Options::bandwidth` carries the connection's allocator (the
-//!     default holds the configured bitrate).
+//!     default holds the configured bitrate). While nobody subscribes, a
+//!     rendition with no `encode::Options::lower` ignores the grant and encodes
+//!     at its ceiling, so a later viewer can start on a group cached at that rate.
 //!   - [`encode::Encoder`] encodes without publishing, and
 //!     [`encode::Publisher`] publishes frames you encoded yourself.
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
