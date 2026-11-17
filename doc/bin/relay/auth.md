@@ -43,8 +43,10 @@ does not know refuses the session, since a field added later may narrow the
 grant. A relay before 0.22 sends no `relay` and ignores a field it does not
 know, enforcing the grant without it, so a server branches on `relay` before
 sending a field newer than 0.22. Such a relay reads `peer: true` in place of
-`link`: until none runs, set `peer: true` beside any `link` (it then treats an
-upstream as a plain peer). Alone, `peer: true` reads as `link: "peer"`, and a
+`link` and knows no upstream: `moq_auth` writes `peer: true` beside every `link`, so that
+relay admits an upstream as a plain peer, which can carry traffic between two upstreams.
+Where that matters, refuse the session when the request has no `relay` (or one older than 0.22),
+and check that any auth proxy forwards `relay` to the backend that decides. Alone, `peer: true` reads as `link: "peer"`, and a
 grant naming a `link` beside `peer: false` is refused.
 
 `server_name` is the SNI that selected the relay's certificate. It is absent

@@ -17,7 +17,7 @@ use crate::Access;
 /// later may narrow the grant, and reading past it would widen the session. A server
 /// tells which fields a relay reads from [`Request::relay`](crate::Request::relay).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(try_from = "crate::wire::Grant", into = "crate::wire::Grant")]
+#[serde(try_from = "crate::wire::Object<crate::wire::Grant>", into = "crate::wire::Grant")]
 #[non_exhaustive]
 pub struct Grant {
 	/// What the session may publish, relative to the root.
@@ -52,8 +52,9 @@ pub struct Grant {
 	/// How the session, another relay, links into the cluster; absent for a client. A
 	/// client certificate alone is not a link.
 	///
-	/// Written beside `peer: true`, which a relay before 0.22 reads in its place; a grant
-	/// that names a link while its `peer` is false is refused.
+	/// Written beside `peer: true`, which a relay before 0.22 reads in its place, as a plain peer
+	/// even for an upstream: refuse a request with no [`Request::relay`](crate::Request::relay)
+	/// when that matters. A grant that names a link while its `peer` is false is refused.
 	pub link: Option<Link>,
 }
 

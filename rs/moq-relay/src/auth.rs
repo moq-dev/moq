@@ -379,11 +379,7 @@ impl From<moq_auth::Error> for Error {
 			}
 			// The server answered a grant this relay cannot read or accept: final, since
 			// asking again gets the same answer, and no fault of the client's credential.
-			err @ (moq_auth::Error::InvalidGrant(_)
-			| moq_auth::Error::UnboundedRevalidate
-			| moq_auth::Error::ZeroRevalidate
-			| moq_auth::Error::InvalidTier(_)
-			| moq_auth::Error::InvalidLabel(_)) => Self::Forbidden(err.to_string()),
+			err if err.is_final_grant() => Self::Forbidden(err.to_string()),
 			other => Self::Unavailable(other.to_string()),
 		}
 	}

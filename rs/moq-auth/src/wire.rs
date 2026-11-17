@@ -16,6 +16,7 @@ use moq_pattern::{Pattern, Patterns};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{DurationSeconds, serde_as};
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::time::Duration;
 
 /// The wire form of [`Claims`](crate::Claims).
@@ -160,6 +161,55 @@ impl Prefixes {
 			Self::One(prefix) => vec![prefix],
 			Self::Many(prefixes) => prefixes,
 		}
+	}
+}
+
+/// A wire struct read from a JSON object only. Serde's derive also reads a struct from a
+/// positional array, which would fill the first fields and default the rest, while `@moq/auth`
+/// refuses anything but an object.
+pub(crate) struct Object<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		struct Visitor<T>(PhantomData<T>);
+
+		impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Visitor<T> {
+			type Value = Object<T>;
+
+			fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+				formatter.write_str("an object")
+			}
+
+			fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+				T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(Object)
+			}
+		}
+
+		deserializer.deserialize_map(Visitor(PhantomData))
+	}
+}
+
+impl TryFrom<Object<Claims>> for crate::Claims {
+	type Error = String;
+
+	fn try_from(Object(wire): Object<Claims>) -> Result<Self, Self::Error> {
+		wire.try_into()
+	}
+}
+
+impl TryFrom<Object<Scope>> for crate::Scope {
+	type Error = String;
+
+	fn try_from(Object(wire): Object<Scope>) -> Result<Self, Self::Error> {
+		wire.try_into()
+	}
+}
+
+impl TryFrom<Object<Grant>> for crate::Grant {
+	type Error = String;
+
+	fn try_from(Object(wire): Object<Grant>) -> Result<Self, Self::Error> {
+		wire.try_into()
 	}
 }
 

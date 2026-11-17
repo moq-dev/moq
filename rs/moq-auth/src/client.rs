@@ -289,15 +289,21 @@ impl Post for Client {
 			let refusal = reply(response)
 				.await
 				.ok()
+				.flatten()
 				.and_then(|body| serde_json::from_slice(&body).ok());
 			return Err(Error::Refused(refusal.unwrap_or_default()));
 		}
 		check(status)?;
-		serde_json::from_slice(&reply(response).await?).map_err(|err| {
-			// The server's fault, not the client's: say so here, since the client only sees a refusal.
+		// The server's fault, not the client's: say so here, since the client only sees a refusal.
+		let invalid = |err: String| {
 			tracing::warn!(id = %request.id, %err, "auth server answered a grant this relay cannot read; refusing");
-			Error::InvalidGrant(err.to_string())
-		})
+			Error::InvalidGrant(err)
+		};
+		// A reply over the bound is as unreadable as one that does not parse: asking again gets the same.
+		let Some(body) = reply(response).await? else {
+			return Err(invalid(format!("reply exceeds {MAX_REPLY} bytes")));
+		};
+		serde_json::from_slice(&body).map_err(|err| invalid(err.to_string()))
 	}
 
 	async fn post_end(&self, request: &Request) -> crate::Result<()> {
@@ -319,18 +325,17 @@ fn check(status: reqwest::StatusCode) -> crate::Result<()> {
 	Ok(())
 }
 
-/// Read a reply body of at most [`MAX_REPLY`] bytes, refusing a longer one as it arrives.
-async fn reply(mut response: reqwest::Response) -> crate::Result<Vec<u8>> {
+/// Read a reply body of at most [`MAX_REPLY`] bytes, or `None` for a longer one, refused as it
+/// arrives. A body that cannot be read at all is an error: an outage, unlike an oversized reply.
+async fn reply(mut response: reqwest::Response) -> crate::Result<Option<Vec<u8>>> {
 	let mut body = Vec::new();
 	while let Some(chunk) = response.chunk().await? {
 		if body.len() + chunk.len() > MAX_REPLY {
-			return Err(Error::Unavailable(format!(
-				"auth server reply exceeds {MAX_REPLY} bytes"
-			)));
+			return Ok(None);
 		}
 		body.extend_from_slice(&chunk);
 	}
-	Ok(body)
+	Ok(Some(body))
 }
 
 /// Admit a session through `server` and spawn the driver behind its lease.
@@ -474,14 +479,7 @@ impl<S: Post> Driver<S> {
 							break producer.finish(reason, Bytes::default());
 						},
 						// The server answered a grant that can never admit: asking again gets the same.
-						Err(
-							Error::GrantExpired
-							| Error::UnboundedRevalidate
-							| Error::ZeroRevalidate
-							| Error::InvalidGrant(_)
-							| Error::InvalidTier(_)
-							| Error::InvalidLabel(_),
-						) => {
+						Err(err) if err.is_final_grant() => {
 							break producer.finish(Reason::Invalid, Bytes::default());
 						},
 						Err(err) => {
@@ -1081,7 +1079,7 @@ mod tests {
 		assert!(matches!(err, Error::Refused(_)), "{err}");
 	}
 
-	/// A reply of exactly `MAX_REPLY` bytes admits; one byte more is an outage, or a
+	/// A reply of exactly `MAX_REPLY` bytes admits; one byte more is an unreadable grant, or a
 	/// plain refusal on a 403, never read whole.
 	#[tokio::test]
 	async fn replies_are_bounded() {
@@ -1106,7 +1104,7 @@ mod tests {
 		let over = server(Log::default(), move |_| padded(200, &grant, MAX_REPLY + 1)).await;
 		let err = client(&over).connect(request()).await.unwrap_err();
 		assert!(
-			matches!(&err, Error::Unavailable(message) if message.contains("exceeds")),
+			matches!(&err, Error::InvalidGrant(message) if message.contains("exceeds")),
 			"{err}"
 		);
 

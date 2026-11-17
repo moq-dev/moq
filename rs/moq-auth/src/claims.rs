@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// Legacy `put`/`get` prefix scopes load as subtree patterns, and a scope that only
 /// grants subtrees is written that way so older readers load it too.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
-#[serde(try_from = "crate::wire::Scope", into = "crate::wire::Scope")]
+#[serde(try_from = "crate::wire::Object<crate::wire::Scope>", into = "crate::wire::Scope")]
 pub struct Scope {
 	/// The root for the publish/subscribe patterns below.
 	pub root: String,
@@ -116,7 +116,7 @@ impl Permissions {
 /// claims are read and ignored; any other field fails verification, since it might
 /// narrow the grant, and a misspelled `root` would otherwise widen it.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
-#[serde(try_from = "crate::wire::Claims", into = "crate::wire::Claims")]
+#[serde(try_from = "crate::wire::Object<crate::wire::Claims>", into = "crate::wire::Claims")]
 #[non_exhaustive]
 pub struct Claims {
 	/// The root for the publish/subscribe patterns below.

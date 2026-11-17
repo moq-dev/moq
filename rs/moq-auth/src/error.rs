@@ -224,6 +224,22 @@ from_message! {
 }
 
 impl Error {
+	/// The auth server's answer is a grant that can never admit, whether it is unreadable or fails
+	/// [`Grant::validate`](crate::Grant::validate): asking again gets the same, so the refusal is
+	/// final, not an outage to retry. The one list every caller shares.
+	pub fn is_final_grant(&self) -> bool {
+		matches!(
+			self,
+			Self::InvalidGrant(_)
+				| Self::UselessGrant
+				| Self::UnboundedRevalidate
+				| Self::ZeroRevalidate
+				| Self::GrantExpired
+				| Self::InvalidLabel(_)
+				| Self::InvalidTier(_)
+		)
+	}
+
 	/// A crypto backend's error, converted by hand so its crate stays out of this crate's API.
 	pub(crate) fn crypto(err: impl std::error::Error) -> Self {
 		Self::Crypto(message(err))
@@ -245,6 +261,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A grant fault is final; an outage is not.
+	#[test]
+	fn final_grant_faults() {
+		assert!(Error::InvalidGrant("unknown field".into()).is_final_grant());
+		assert!(Error::ZeroRevalidate.is_final_grant());
+		assert!(Error::InvalidTier("a b".into()).is_final_grant());
+		assert!(!Error::Unavailable("down".into()).is_final_grant());
+		assert!(!Error::Refused(Default::default()).is_final_grant());
+	}
 
 	/// A dependency that reports only a category in `Display` and keeps the real cause in
 	/// `source()` (reqwest is the one that matters here) must not lose it on conversion.

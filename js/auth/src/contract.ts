@@ -219,8 +219,9 @@ export const GrantSchema = z
 		link: z.optional(LinkSchema),
 		/**
 		 * TEMPORARY(0.22): set it to `true` beside any `link`, since a relay before 0.22 reads it in
-		 * place of `link`. Alone, `true` reads as `link: "peer"`. A grant that names a `link` while
-		 * this is `false` is refused. Removed at the next version migration.
+		 * place of `link`, as a plain peer even for an `upstream`: refuse such a relay (a request with
+		 * no `relay`) when that matters. Alone, `true` reads as `link: "peer"`. A grant that names a
+		 * `link` while this is `false` is refused. Removed at the next version migration.
 		 */
 		peer: z.optional(z.boolean()),
 	})
