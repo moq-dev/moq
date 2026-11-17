@@ -188,7 +188,9 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 		description: config.codec === "opus" || !config.description ? undefined : Hex.toBytes(config.description),
 	});
 
-	const sub = bc.track(name).subscribe({ priority: Catalog.PRIORITY.audio, delay: { min: null, max: AUDIO_MAX_DELAY } });
+	const sub = bc
+		.track(name)
+		.subscribe({ priority: Catalog.PRIORITY.audio, delay: { min: null, max: AUDIO_MAX_DELAY } });
 	const consumer = new Container.Consumer(sub, {
 		format: containerFormat(config, "audio"),
 		delay: { min: null, max: AUDIO_MAX_DELAY },
