@@ -5907,9 +5907,13 @@ impl TrackRun {
 		self.mark_served(key);
 		tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, key, "serving group");
 		// Its GROUP passes over the run elided below it, and a drop of it sends the run first.
-		self.elided.remove(&key);
+		// The run is taken as it was elided, since the cache may have forgotten the skip since.
+		let elided = self.elided.remove(&key).and_then(|start| start.checked_sub(1));
 		let previous = match self.ctx.version.has_group_end() {
-			true => self.track.previous_start(key),
+			true => match (elided, self.track.previous_start(key)) {
+				(Some(elided), Some(cached)) => Some(elided.min(cached)),
+				(elided, cached) => elided.or(cached),
+			},
 			false => None,
 		};
 		self.give_way();
@@ -8674,6 +8678,33 @@ mod serve_group_test {
 		assert!(holes(&mut writer, &log).await.is_empty(), "held for group 3's GROUP");
 		forward(&mut run, 3..4, &Hole::drop(StreamError::Cancel), &mut writer);
 		assert_eq!(holes(&mut writer, &log).await, [("skip", 1..3), ("drop", 3..4)]);
+	}
+
+	/// A skipped run held back for a group's GROUP still passes over the run once the cache
+	/// forgot the skip, as its pool's expiry or debt may before the group gets stream credit.
+	#[kio::test]
+	async fn lite07_a_held_skip_outlives_the_cache_forgetting_it() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		let subscriber = track.subscribe(None);
+		let session = Log::default();
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		track.skip_groups(1..3);
+		write_group(&mut track, 3, 3);
+		forward(&mut run, 1..3, &Hole::Skip, &mut writer);
+		track.forget_drops(1..3);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(
+			holes(&mut writer, &log).await.is_empty(),
+			"the GROUP passes over the run"
+		);
+		assert_eq!(group_headers(&session, Version::Lite07), [(0, None), (3, Some(0))]);
 	}
 
 	/// A skipped run held back for a group that is then skipped too joins that group's skip,

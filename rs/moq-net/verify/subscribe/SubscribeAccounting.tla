@@ -139,10 +139,10 @@ SkippedBelow(g) ==
     IN IF 0 \in below THEN {} ELSE below
 
 \* `serve`: open a Group Stream for g, which `mark_served` records. Its GROUP passes over
-\* the skipped run below it, the one held back for it included.
+\* the skipped run below it and the one held back for it, which the cache may have forgotten.
 Serve(g) ==
     /\ Len(streams) < MaxStreams
-    /\ streams' = Append(streams, NewStream(g, 0, 0, SkippedBelow(g)))
+    /\ streams' = Append(streams, NewStream(g, 0, 0, SkippedBelow(g) \cup held[g]))
     /\ served' = served \cup {g}
     /\ held' = [held EXCEPT ![g] = {}]
 

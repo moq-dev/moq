@@ -1825,8 +1825,15 @@ export class Publisher {
 				}
 				record?.tell(group.sequence, group.sequence + 1n, { kind: "settled" });
 				// Its GROUP passes over the run elided below it, and a drop of it sends the run first.
+				// The run is taken as it was elided, since the cache may have forgotten the skip since.
+				const from = elided.get(group.sequence);
 				elided.delete(group.sequence);
-				const previous = hasGroupEnd(this.version) ? hooks.previousStart(track, group.sequence) : undefined;
+				let previous: bigint | undefined;
+				if (hasGroupEnd(this.version)) {
+					const cached = hooks.previousStart(track, group.sequence);
+					const run = from !== undefined && from > 0n ? from - 1n : undefined;
+					previous = cached === undefined || run === undefined ? (cached ?? run) : min(cached, run);
+				}
 
 				const options: RunGroup = {
 					sub,
@@ -2466,18 +2473,25 @@ export class Publisher {
 			else await write(() => stream.closed);
 			return undefined;
 		} catch (err: unknown) {
-			const e = error(err);
+			let e = error(err);
 			if (closes && !ended && hooks.groupExpired(group)) {
-				// Expired on its stream: what went out stands as a closed group, and the frame
-				// being written completes first. Mirrors the Rust `GroupServe`'s expiry close.
-				console.debug(`closing expired group: subscribe=${sub} sequence=${group.sequence}`);
-				await writing?.catch(() => {});
-				stream.close();
-				group.close();
-				return await stream.closed.then(
+				// Expired on its stream: what went out stands as a closed group, once the frame being
+				// written completes. One that fails resets the stream with its failure instead, since a
+				// FIN would cut it short. Mirrors the Rust `GroupServe`'s expiry close.
+				const failed = await writing?.then(
 					() => undefined,
 					(err: unknown) => error(err),
 				);
+				if (failed === undefined) {
+					console.debug(`closing expired group: subscribe=${sub} sequence=${group.sequence}`);
+					stream.close();
+					group.close();
+					return await stream.closed.then(
+						() => undefined,
+						(err: unknown) => error(err),
+					);
+				}
+				e = failed;
 			}
 			stream.reset(e);
 			// A reset that pauses the group leaves the reader to the caller, which reads its fate

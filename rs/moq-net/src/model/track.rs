@@ -4706,6 +4706,12 @@ impl Producer {
 		state.supersede_stale()
 	}
 
+	/// Forget what was given up in `groups`, as the cache pool's expiry or debt does.
+	#[cfg(test)]
+	pub(crate) fn forget_drops(&self, groups: ops::Range<u64>) {
+		self.modify().unwrap().forget_drops(groups);
+	}
+
 	/// Record `groups` given up as `hole` describes, returning the runs recorded: a drop
 	/// leaves a skipped key skipped, and a group a copy still serves whole, since a group
 	/// stream wins over its drop: a stale drop leaves it still arriving or not, and a final one

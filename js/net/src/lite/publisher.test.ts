@@ -1536,6 +1536,52 @@ test.each([
 	}
 });
 
+// A lite-07 stream whose group expires mid-frame waits for that frame before it closes, and resets
+// with the frame's failure when the frame fails instead: a FIN would cut the frame short. Mirrors the
+// Rust `GroupServe`, which closes an expired stream only at a frame boundary.
+test("lite draft-07: an expired stream resets when its frame in flight fails", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const budget = 1_000;
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
+	try {
+		sub.serve(0n);
+		expect(await sub.servedSequence()).toBe(0n);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
+		await new SubscribeUpdate({
+			priority: 1,
+			startGroup: 0n,
+			maxDelay: budget,
+			...restate(Version.DRAFT_07, 0n),
+		}).encode(sub.client.writer, Version.DRAFT_07);
+		expect("started" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07))).toBe(true);
+
+		let reset: unknown;
+		void sub.stall(true).then((reason) => {
+			reset = reason;
+		});
+		const group = sub.track.createGroup(1n);
+		const frame = group.createFrame({ size: 10, timestamp: Timestamp.fromMillis(1) });
+		frame.write(new Uint8Array(5));
+		expect(await sub.servedHeader()).toBe(1n);
+		await flush();
+		await clock.advance(Duration.millis(budget * 10));
+		sub.serve(2n);
+		expect(await sub.servedSequence()).toBe(2n);
+		await clock.advance(Duration.millis(budget));
+		await flush();
+		expect(reset).toBeUndefined();
+
+		const cut = new Error("frame cut");
+		frame.abort(cut);
+		await flush();
+		expect(reset).toBe(cut);
+	} finally {
+		await sub.close();
+		installed.close();
+	}
+});
+
 // An update that lowers the start below SUBSCRIBE_START asks for those groups too, so the
 // end sweep drops them, as the Rust publisher does.
 test("lite draft-06: an update lowering the start is swept at the end", async () => {
