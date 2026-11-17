@@ -31,6 +31,7 @@ import {
 import { Handover } from "./handover";
 import { bound, maxDelay, ringHold, target } from "./latency";
 import { Order } from "./order";
+import { playable } from "./playhead";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -925,7 +926,7 @@ export class Decoder {
 			wait: this.sync.out.maxDelay,
 			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
-			playhead: this.sync,
+			playhead: playable(this.sync),
 		});
 		effect.cleanup(() => consumer.close());
 		this.#phase.set({ ...phase, consumer: { path, codec: config.codec, consumer } });

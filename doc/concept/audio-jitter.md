@@ -49,9 +49,12 @@ group is observed when the stall clears. A missing group, one that has delivered
 no frame, is waited for only the playout delay plus any lookahead, since past that
 it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
-jitter. The browser player waits less still, only until its clock reaches the
-group past the hole: a viewer resuming behind a replayed backlog, which arrives
-newest first, would otherwise hold the live audio for the backlog's oldest group. A caller that estimates keeps the budget past the target, which is why
+jitter. The browser player waits less still, only until the group past the hole
+trails its clock by the stretch threshold, past which the ring would skip the
+hole's audio anyway: a viewer resuming behind a replayed backlog, which arrives
+newest first, would otherwise hold the live audio for the backlog's oldest group,
+while a late burst that fills a hole a moment after the group past it lands
+still plays it. A caller that estimates keeps the budget past the target, which is why
 `moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
 ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
