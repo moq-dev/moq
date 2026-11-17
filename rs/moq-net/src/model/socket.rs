@@ -1134,7 +1134,7 @@ mod tests {
 		server.broadcast().close();
 		assert!(matches!(bob.accept_track().await, Err(Error::Closed)));
 		assert!(
-			accepted.producer.append_group(0).is_err(),
+			accepted.producer.append_group(crate::Timestamp::unscaled(0)).is_err(),
 			"a handed-out half outlived the end"
 		);
 		assert!(matches!(bob.dial_track("alice", None), Err(Error::Closed)));

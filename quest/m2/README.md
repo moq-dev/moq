@@ -35,8 +35,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
-- **moq-net API.** [Groups](/quest/m2/group-api.md),
-  [names](/quest/m2/net-renames.md), and
+- **moq-net API.** [Names](/quest/m2/net-renames.md) and
   [session codes](/quest/m2/session-codes.md).
   [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
   demos return to their earlier format.
@@ -64,7 +63,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
   [the WebRTC bind](/quest/m2/webrtc-bind.md),
-  [gateway admission](/quest/m2/gateway-align.md), and
+  [the WHEP pull's announcement](/quest/m2/whep-pull-announce.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),

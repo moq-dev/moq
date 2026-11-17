@@ -6,6 +6,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
+use moq_net::Timestamp;
 use rind::{aead, hmac};
 use serde_json::Value;
 
@@ -461,12 +462,12 @@ fn path_is_opaque() {
 #[test]
 fn grouped_roundtrip() {
 	let mut pair = pair("video");
-	let mut group = pair.producer.append_group(1).unwrap();
+	let mut group = pair.producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	assert_eq!(group.start(), 1);
 	group.write_frame(ms(1), b"frame-zero").unwrap();
 	group.write_frame(ms(2), b"frame-one").unwrap();
 	assert_eq!(group.next_frame(), 2);
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut group = recv_group(&mut pair.consumer);
 	assert_eq!(group.start(), 1);
@@ -496,9 +497,21 @@ fn datagram_roundtrip() {
 #[test]
 fn group_starts_only_rise() {
 	let mut pair = pair("video");
-	assert_eq!(pair.producer.append_group(0).unwrap().start(), 0);
+	assert_eq!(
+		pair.producer
+			.append_group(Timestamp::from_millis(0).unwrap())
+			.unwrap()
+			.start(),
+		0
+	);
 	assert_eq!(pair.producer.create_group(5).unwrap().start(), 5);
-	assert_eq!(pair.producer.append_group(6).unwrap().start(), 6);
+	assert_eq!(
+		pair.producer
+			.append_group(Timestamp::from_millis(6).unwrap())
+			.unwrap()
+			.start(),
+		6
+	);
 	for start in [6, 3] {
 		assert_eq!(
 			pair.producer.create_group(start).map(|_| ()).unwrap_err().to_string(),
@@ -604,9 +617,9 @@ fn one_name_keys_its_stream_and_datagram_tracks_apart() {
 	let mut datagram_reader = consuming.consume_datagrams(net_datagrams.consume(), "audio").unwrap();
 
 	// The same plaintext at the same identity in each kind: group 0 frame 0, and datagram 0.
-	let mut group = track.append_group(0).unwrap();
+	let mut group = track.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	group.write_frame(ms(1), b"same").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(datagrams.append(ms(1), b"same").unwrap(), 0);
 	assert_eq!(read_frame(&mut recv_group(&mut track_reader)).plaintext, &b"same"[..]);
 	match recv_datagram(&mut datagram_reader) {
@@ -630,7 +643,7 @@ fn one_name_keys_its_stream_and_datagram_tracks_apart() {
 	let mut reader = consuming.consume(forged.subscribe(subscribe_all()), "audio").unwrap();
 	let mut group = forged.create_group(moq_net::group::Info { start: 0 }).unwrap();
 	group.write_frame(ms(1), sealed).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(
 		recv_group(&mut reader)
 			.poll_read_frame(&kio::Waiter::noop())
@@ -665,12 +678,32 @@ fn reproduced_track_resumes_above_its_marks() {
 	for start in [0, 4] {
 		assert_eq!(again.create_group(start).map(|_| ()).unwrap_err().to_string(), "reuse");
 	}
-	assert_eq!(again.append_group(5).unwrap().start(), 5);
+	assert_eq!(
+		again.append_group(Timestamp::from_millis(5).unwrap()).unwrap().start(),
+		5
+	);
 	// Two live producers of the name share one start namespace.
 	let mut other = generation.produce(net_track(&name), "video").unwrap();
-	assert_eq!(other.append_group(5).map(|_| ()).unwrap_err().to_string(), "reuse");
-	assert_eq!(other.append_group(6).unwrap().start(), 6);
-	assert_eq!(again.append_group(6).map(|_| ()).unwrap_err().to_string(), "reuse");
+	assert_eq!(
+		other
+			.append_group(Timestamp::from_millis(5).unwrap())
+			.map(|_| ())
+			.unwrap_err()
+			.to_string(),
+		"reuse"
+	);
+	assert_eq!(
+		other.append_group(Timestamp::from_millis(6).unwrap()).unwrap().start(),
+		6
+	);
+	assert_eq!(
+		again
+			.append_group(Timestamp::from_millis(6).unwrap())
+			.map(|_| ())
+			.unwrap_err()
+			.to_string(),
+		"reuse"
+	);
 
 	// A datagram track of the name has sequences of its own, and resumes above them too.
 	let datagrams = || {
@@ -690,7 +723,10 @@ fn reproduced_track_resumes_above_its_marks() {
 	let mut fresh = fresh
 		.produce(net_track(&fresh.name("video").unwrap()), "video")
 		.unwrap();
-	assert_eq!(fresh.append_group(0).unwrap().start(), 0);
+	assert_eq!(
+		fresh.append_group(Timestamp::from_millis(0).unwrap()).unwrap().start(),
+		0
+	);
 	// Consuming never claims.
 	consume(&generation)
 		.consume(net.subscribe(subscribe_all()), "video")
@@ -749,9 +785,9 @@ fn broadcast_speaks_semantic_names() {
 	assert_eq!(video.name(), physical.as_str());
 
 	let mut reader = resolve(&protected.consumer.subscribe("video", subscribe_all()).unwrap()).unwrap();
-	let mut group = video.append_group(1).unwrap();
+	let mut group = video.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group.write_frame(ms(1), b"frame").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"frame"[..]);
 
 	// The relay's view holds only the physical name.
@@ -778,7 +814,7 @@ fn reserved_track_serves_on_demand() {
 
 	let mut audio = request.accept(timed());
 	let mut reader = resolve(&subscribing).unwrap();
-	let mut group = audio.append_group(1).unwrap();
+	let mut group = audio.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group.write_frame(ms(1), b"opus").unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"opus"[..]);
 }
@@ -790,20 +826,40 @@ fn broadcast_claims_span_outputs() {
 	let mut video = first.create_track("video", timed()).unwrap();
 	video.create_group(2).unwrap();
 	let mut audio = first.reserve_track("audio").unwrap().accept(timed());
-	audio.append_group(0).unwrap();
+	audio.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	let mut voice = first.create_datagrams("voice", timed_datagrams()).unwrap();
 	voice.append(ms(1), b"opus").unwrap();
 
 	// A clone of the generation on another output resumes each name above its marks.
 	let second = crate::e2ee::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation);
 	let mut video = second.create_track("video", timed()).unwrap();
-	assert_eq!(video.append_group(2).map(|_| ()).unwrap_err().to_string(), "reuse");
-	assert_eq!(video.append_group(3).unwrap().start(), 3);
+	assert_eq!(
+		video
+			.append_group(Timestamp::from_millis(2).unwrap())
+			.map(|_| ())
+			.unwrap_err()
+			.to_string(),
+		"reuse"
+	);
+	assert_eq!(
+		video.append_group(Timestamp::from_millis(3).unwrap()).unwrap().start(),
+		3
+	);
 	let request = second.reserve_track("audio").unwrap();
 	assert_eq!(request.name(), "audio");
 	let mut audio = request.accept(timed());
-	assert_eq!(audio.append_group(0).map(|_| ()).unwrap_err().to_string(), "reuse");
-	assert_eq!(audio.append_group(1).unwrap().start(), 1);
+	assert_eq!(
+		audio
+			.append_group(Timestamp::from_millis(0).unwrap())
+			.map(|_| ())
+			.unwrap_err()
+			.to_string(),
+		"reuse"
+	);
+	assert_eq!(
+		audio.append_group(Timestamp::from_millis(1).unwrap()).unwrap().start(),
+		1
+	);
 	let mut voice = second.create_datagrams("voice", timed_datagrams()).unwrap();
 	assert_eq!(voice.append(ms(1), b"opus").unwrap(), 1);
 }
@@ -851,9 +907,9 @@ fn requests_serve_undeclared_names() {
 	let mut track = request.accept(timed());
 	assert_eq!(protected.producer.generation().claims(), 1);
 	let mut reader = resolve(&subscribing).unwrap();
-	let mut group = track.append_group(1).unwrap();
+	let mut group = track.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group.write_frame(ms(1), b"42").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"42"[..]);
 
 	// The handler's own consumer reads the broadcast under semantic names too.
@@ -936,8 +992,18 @@ fn requests_claim_only_accepted_names() {
 	other.create_track("video", timed()).unwrap().create_group(5).unwrap();
 	let mut video = request.accept(timed());
 	assert_eq!(generation.claims(), 1);
-	assert_eq!(video.append_group(5).map(|_| ()).unwrap_err().to_string(), "reuse");
-	assert_eq!(video.append_group(6).unwrap().start(), 6);
+	assert_eq!(
+		video
+			.append_group(Timestamp::from_millis(5).unwrap())
+			.map(|_| ())
+			.unwrap_err()
+			.to_string(),
+		"reuse"
+	);
+	assert_eq!(
+		video.append_group(Timestamp::from_millis(6).unwrap()).unwrap().start(),
+		6
+	);
 }
 
 #[test]
@@ -961,7 +1027,10 @@ fn requests_serve_a_dropped_name_above_its_marks() {
 	assert_eq!(request.name(), "presence");
 	let mut track = request.accept(timed());
 	assert_eq!(track.create_group(3).map(|_| ()).unwrap_err().to_string(), "reuse");
-	assert_eq!(track.append_group(4).unwrap().start(), 4);
+	assert_eq!(
+		track.append_group(Timestamp::from_millis(4).unwrap()).unwrap().start(),
+		4
+	);
 	let mut reader = resolve(&subscribing).unwrap();
 	assert_eq!(recv_group(&mut reader).start(), 4);
 }
@@ -1050,9 +1119,9 @@ fn new_epoch_authenticates_old_does_not() {
 
 	let net = net_track(&new.name("video").unwrap());
 	let mut producer = new.produce(net.clone(), "video").unwrap();
-	let mut group = producer.append_group(1).unwrap();
+	let mut group = producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group.write_frame(ms(1), b"fresh").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut consumer = consume(&new).consume(net.subscribe(subscribe_all()), "video").unwrap();
 	assert_eq!(read_frame(&mut recv_group(&mut consumer)).plaintext, &b"fresh"[..]);
@@ -1128,9 +1197,9 @@ fn failed_opens_spend_the_key() {
 #[test]
 fn grouped_authentication_ends_track() {
 	let mut pair = pair("video");
-	let mut group = pair.producer.append_group(0).unwrap();
+	let mut group = pair.producer.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	group.write_frame(ms(1), b"ok").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	// Tamper with a second group by writing ciphertext directly.
 	let semantic = pair.semantic.as_str();
@@ -1139,7 +1208,7 @@ fn grouped_authentication_ends_track() {
 	payload[0] ^= 1;
 	let mut bad = pair.net.create_group(moq_net::group::Info { start: 1 }).unwrap();
 	bad.write_frame(ms(2), payload).unwrap();
-	bad.close().unwrap();
+	bad.finish().unwrap();
 
 	let waiter = kio::Waiter::noop();
 	let mut first = recv_group(&mut pair.consumer);
@@ -1277,7 +1346,7 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 fn a_held_group_keeps_demand_after_the_track_drops() {
 	let mut pair = pair("video");
 	let demand = pair.net.demand();
-	let mut open = pair.producer.append_group(1).unwrap();
+	let mut open = pair.producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	open.write_frame(ms(1), b"ok").unwrap();
 
 	let mut group = recv_group(&mut pair.consumer);
@@ -1405,9 +1474,9 @@ fn duplicate_datagram_is_bounded() {
 #[test]
 fn cancellation_ends_consumer() {
 	let mut pair = pair("video");
-	let mut group = pair.producer.append_group(1).unwrap();
+	let mut group = pair.producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group.write_frame(ms(1), b"x").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	pair.producer.finish().unwrap();
 	let waiter = kio::Waiter::noop();
 	let mut group = recv_group(&mut pair.consumer);
@@ -1430,7 +1499,7 @@ fn secrets_stay_out_of_debug() {
 #[test]
 fn failed_group_write_does_not_burn_nonce() {
 	let mut pair = pair("video");
-	let mut group = pair.producer.append_group(1).unwrap();
+	let mut group = pair.producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	// (2^61-1) seconds overflows conversion to the milli-scale track.
 	let huge = moq_net::Timestamp::from_secs((1 << 61) - 1).unwrap();
 	assert!(group.write_frame(huge, b"bad").is_err());
@@ -1441,7 +1510,7 @@ fn failed_group_write_does_not_burn_nonce() {
 	group.write_frame(ms(1), b"ok").unwrap();
 	assert_eq!(group.invocations(), 1);
 	assert_eq!(group.next_frame(), 1);
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	let mut group = recv_group(&mut pair.consumer);
 	assert_eq!(read_frame(&mut group).plaintext, &b"ok"[..]);
@@ -1450,14 +1519,14 @@ fn failed_group_write_does_not_burn_nonce() {
 #[test]
 fn failed_net_write_after_encryption_aborts_the_group() {
 	let mut pair = pair("video");
-	let mut first = pair.producer.append_group(0).unwrap();
+	let mut first = pair.producer.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
 	first.write_frame(ms(10), b"start").unwrap();
-	first.close().unwrap();
+	first.finish().unwrap();
 
 	// The net track refuses a first frame that rewinds past the one before it, only after
 	// the frame was encrypted, so the group can no longer line its transport index up with
 	// the nonce.
-	let mut group = pair.producer.append_group(1).unwrap();
+	let mut group = pair.producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	let err = group.write_frame(ms(5), b"rewind").unwrap_err();
 	assert!(matches!(err, Error::Net(moq_net::Error::TimestampMismatch)), "{err:?}");
 	// The track's grouped key: one frame in each group.
@@ -1465,7 +1534,7 @@ fn failed_net_write_after_encryption_aborts_the_group() {
 	let after = group.write_frame(ms(20), b"after").unwrap_err();
 	assert_eq!(after.to_string(), err.to_string());
 	assert_eq!(group.invocations(), 2);
-	assert_eq!(group.close().unwrap_err().to_string(), err.to_string());
+	assert_eq!(group.finish().unwrap_err().to_string(), err.to_string());
 
 	// Subscribers see the group end with the failure instead of waiting on it.
 	let mut start = recv_group(&mut pair.consumer);
@@ -1487,10 +1556,10 @@ fn resumed_group_opens_at_transport_index() {
 	let mut subscriber = net.subscribe(subscribe_all());
 	let mut producer = generation.produce(net, "video").unwrap();
 
-	let mut group = producer.append_group(1).unwrap();
+	let mut group = producer.append_group(Timestamp::from_millis(1).unwrap()).unwrap();
 	group.write_frame(ms(1), b"zero").unwrap();
 	group.write_frame(ms(2), b"one").unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 
 	// Simulate a resume at object 1: skip frame 0 on the net cursor before wrapping.
 	let Poll::Ready(Ok(Some(mut net_group))) = subscriber.poll_recv_group(&kio::Waiter::noop()) else {

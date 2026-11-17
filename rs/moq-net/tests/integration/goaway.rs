@@ -382,7 +382,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		audio_group
 			.write_frame(audio_group.at_start(), b"audio".as_ref())
 			.expect("write frame");
-		audio_group.close().expect("finish group");
+		audio_group.finish().expect("finish group");
 
 		// Client consumes into its own origin.
 		let sub_origin = produce_origin();
@@ -407,7 +407,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		group
 			.write_frame(group.at_start(), b"before".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()
@@ -445,7 +445,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		group
 			.write_frame(group.at_start(), b"after".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()

@@ -1481,7 +1481,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let mut ids = Vec::<i32>::new();
 		let callback = unsafe { OnStatus::new((&mut ids as *mut Vec<i32>).cast(), Some(received)) }.unwrap();
@@ -1616,7 +1616,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		async fn frame(&self) -> Option<u128> {

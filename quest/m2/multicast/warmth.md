@@ -90,7 +90,7 @@ when readers only join (Imase and Waxman, 1991). Leaves and moves are what
 the sweep adds to that.
 
 A cost that depends on who subscribed is outside the
-[proof](/quest/m2/multicast/proof.md)'s theorem. Argue it separately and
+[proof](/rs/moq-net/verify/route-algebra/README.md)'s theorem. Argue it separately and
 sweep it: taking a route only makes it cheaper for others, and leaving one
 only worsens an offer nobody uses. A cycle that outlasts the messages in
 flight fails the mechanism; count the transient ones with the readers they
