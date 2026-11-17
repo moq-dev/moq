@@ -1623,12 +1623,12 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(lease.token().root, Path::new("anon").unwrap());
-		assert_eq!(lease.token().publish, patterns(&[""]));
-		assert_eq!(lease.token().subscribe, patterns(&[""]));
+		assert_eq!(lease.token().publish, patterns(&[""]).into());
+		assert_eq!(lease.token().subscribe, patterns(&[""]).into());
 
 		// Dialed above it, the grant reaches only that name.
 		let lease = auth.admit(auth.request(moq_auth::Transport::Quic, "/")).await.unwrap();
-		assert_eq!(lease.token().publish, patterns(&["anon"]));
+		assert_eq!(lease.token().publish, patterns(&["anon"]).into());
 
 		// Nothing beneath it, and no other name, is reached.
 		for path in ["/anon/room", "/anonymous", "/other"] {
