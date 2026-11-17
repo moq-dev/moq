@@ -21,7 +21,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import type * as group from "../group.ts";
-import { Cost, type Hop, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
+import { Cost, type Hop, routesEqual, type WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
 import {
 	type DropRun,
@@ -51,14 +51,9 @@ import { max, min } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
 import type { Resolved } from "../window.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
-import {
-	type AnnounceBroadcast,
-	AnnounceInit,
-	AnnounceOk,
-	type AnnounceRequest,
-	encodeAnnounceBroadcast,
-	type Offer,
-} from "./announce.ts";
+import { type Add, AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
+import { AnnounceStream } from "./announce_stream.ts";
+import { Answer } from "./answer.ts";
 import { Datagram as DatagramMessage, type Datagrams, DatagramsInfo, DatagramsUpdate } from "./datagram.ts";
 import { closeViolation } from "./error.ts";
 import type { Fetch } from "./fetch.ts";
@@ -585,6 +580,10 @@ export class Publisher {
 	// announced before the grant it would be checked against.
 	#ready: Promise<void>;
 
+	// Lite-07: answers the prefixes the peer asks for, and its loop once the peer asked.
+	#answer?: Answer;
+	#answering?: Promise<void>;
+
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
 	// and reuse it for every later TRACK request of the same track. Keyed by the
@@ -631,6 +630,17 @@ export class Publisher {
 		const origin = publish && wireOf(publish);
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
+		if (hasRoutes(version)) {
+			this.#answer = new Answer({
+				version,
+				advertised: this.#advertised,
+				origin,
+				grant: this.#grant,
+				ready: this.#ready,
+				closing: this.#withdrawal.closing,
+				stream: AnnounceStream.of(quic, version),
+			});
+		}
 
 		// Grab the datagram writer up front when the transport carries datagrams (no group
 		// fallback, so it stays undefined otherwise). One writer for all subscriptions.
@@ -640,7 +650,33 @@ export class Publisher {
 	}
 
 	/**
-	 * Handles an announce interest message.
+	 * Whether the peer's edit continues in its next message, which must be its next ANNOUNCE_REQUEST.
+	 *
+	 * @internal
+	 */
+	continuing(): boolean {
+		return this.#answer?.continuing() ?? false;
+	}
+
+	/**
+	 * Lite-07 ANNOUNCE_REQUEST: the peer edits the prefixes it asks for, answered on this
+	 * session's Announce Stream. Throws a {@link ProtocolViolation} for an edit the peer may not send.
+	 *
+	 * @internal
+	 */
+	request(more: boolean, remove: bigint[], add: Add[]): void {
+		if (!this.#answer) throw new ProtocolViolation("ANNOUNCE_REQUEST before lite-07");
+		const started = this.#answering === undefined;
+		const answering = this.#answer.request(more, remove, add);
+		if (!started) return;
+		this.#answering = this.#withdrawal.track(answering);
+		// The session is ending under it, or its Announce Stream broke, which closes it: its close
+		// says why.
+		this.#answering.catch((err: unknown) => console.debug("announce stream failed:", err));
+	}
+
+	/**
+	 * Handles a pre-lite-07 announce interest message.
 	 * @param msg - The announce interest message
 	 * @param stream - The stream to write announcements to
 	 *
@@ -653,7 +689,6 @@ export class Publisher {
 	async #runAnnounce(msg: AnnounceRequest, stream: Stream) {
 		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
-		if (hasRoutes(this.version)) return this.#runRouted(msg, stream);
 
 		// Keyed by suffix, valued by identity plus route, so a republish diffs as a restart
 		// and a re-price as an update.
@@ -731,8 +766,8 @@ export class Publisher {
 			await encodeAnnounceBroadcast(stream.writer, { status: "endedId", id }, this.version);
 		};
 
-		// A hidden route stays off the wire unless the request opted in.
-		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
+		// A hidden route stays off the wire: only a lite-07 request can opt in.
+		const carries = (covered: Path.Valid) => !hiddenBelow(msg.prefix, covered);
 
 		// What the peer currently sees: the table under the prefix, less whatever our grant
 		// does not let us publish.
@@ -837,190 +872,6 @@ export class Publisher {
 			}
 		} finally {
 			dispose();
-		}
-	}
-
-	// Lite-07: answer the peer's request from this origin's own route. A browser forwards nothing,
-	// so the stream carries at most one route, this origin's, and only while it shows the peer one
-	// of its claims. Mirrors `publisher/routed.rs` in rs/moq-net for a node that does not proxy.
-	async #runRouted(msg: AnnounceRequest, stream: Stream) {
-		const origin = this.#publish && wireOf(this.#publish);
-
-		// The route while the peer holds it: from the first claim shown until the last one goes.
-		// `certified` is whether its last floor certified, so a grant change alone re-floors it.
-		let route: { id: bigint; node: bigint; certified?: boolean } | undefined;
-		let nextRoute = 0n;
-		let nextAnnounce = 0n;
-		// The claims the peer holds, by suffix.
-		const live = new Map<Path.Valid, { id: bigint; snap: Advertised }>();
-
-		// A hidden claim stays off the wire unless the request opted in.
-		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
-		const visible = (table: Advertisements): Map<Path.Valid, Advertised> => {
-			const out = presented(msg.prefix, table, carries, true);
-			const grant = this.#grant?.peek();
-			if (grant) {
-				for (const suffix of [...out.keys()]) {
-					if (!grant.publish.matches(Path.join(msg.prefix, suffix))) out.delete(suffix);
-				}
-			}
-			return out;
-		};
-		// Whether a floor may certify the whole requested prefix: nothing the handle's scope or our
-		// grant leaves out lies beneath it, since the peer cannot tell what was left out from what
-		// is gone. A hidden claim left out does not count: the peer did not ask to see it.
-		const certified = () => {
-			const grant = this.#grant?.peek();
-			if (grant && !grant.publish.contains(Path.Pattern.subtree(msg.prefix))) return false;
-			return origin?.covers(msg.prefix) ?? true;
-		};
-
-		const write = (out: AnnounceBroadcast) => encodeAnnounceBroadcast(stream.writer, out, this.version);
-
-		// End the route on the wire: it retires every claim under it.
-		const end = async () => {
-			if (!route) return;
-			const { id } = route;
-			route = undefined;
-			live.clear();
-			await write({ status: "routeEnd", id });
-		};
-
-		// Bring the peer's view in line with the origin's: one batch of claim changes, closed by its
-		// floor, ending the route once it shows nothing.
-		const sync = async () => {
-			// Read together, so the floor certifies exactly the claims it closes.
-			const table = this.#advertised.peek();
-			const identity = origin?.own.identity.peek();
-			const revision = origin?.own.revision();
-			const latest = table && identity ? visible(table) : new Map<Path.Valid, Advertised>();
-			const certifies = certified();
-
-			// A rotated identity ends the old route with every claim under it.
-			if (route && route.node !== identity?.node) await end();
-			if (!identity) return;
-
-			let changed = false;
-			for (const [suffix, { id }] of [...live]) {
-				if (latest.has(suffix)) continue;
-				live.delete(suffix);
-				changed = true;
-				console.debug(`announce: broadcast=${suffix} active=false`);
-				await write({ status: "endedId", id });
-			}
-			for (const [suffix, snap] of latest) {
-				const prev = live.get(suffix);
-				if (prev && !restarted(prev.snap, snap) && routesEqual(onWire(prev.snap.route), onWire(snap.route)))
-					continue;
-				changed = true;
-				if (!route) {
-					route = { id: nextRoute++, node: identity.node };
-					// The origin's own route covers every path, so the requested prefix too.
-					await write({ status: "routeStart", node: identity.node, suffix: Path.empty(), offer: offer() });
-				}
-				const { instance, epoch, cost } = snap.route;
-				// How much broader the claim is than the prefix it is presented at.
-				const above = snap.route.above ?? 0n;
-				if (!prev) {
-					const id = nextAnnounce++;
-					live.set(suffix, { id, snap });
-					console.debug(`announce: broadcast=${suffix} active=true instance=${instance}`);
-					await write({ status: "active", suffix, route: route.id, instance, epoch, cost, above });
-				} else if (restarted(prev.snap, snap)) {
-					live.set(suffix, { id: prev.id, snap });
-					console.debug(`announce: broadcast=${suffix} restart=true instance=${instance} epoch=${epoch}`);
-					await write({ status: "restart", id: prev.id, instance, epoch, cost, above });
-				} else {
-					live.set(suffix, { id: prev.id, snap });
-					await write({ status: "update", id: prev.id, cost, above });
-				}
-			}
-			if (!route || (!changed && route.certified === certifies)) return;
-			route.certified = certifies;
-			await write({ status: "floor", id: route.id, revision: certifies ? revision : undefined });
-			if (live.size === 0) await end();
-		};
-
-		// The origin's own route: a path of its own hop alone, learned on no session, at the top
-		// priority and no cost. It forwards no other. Mirrors the origin's offer in rs/moq-net.
-		const offer = (): Offer => ({
-			path: origin ? [{ node: origin.own.hop, session: 0n }] : [],
-			draining: false,
-			priority: 127,
-			metric: 0n,
-			downOnly: false,
-		});
-		// What the peer decodes for a claim: lite-07 carries its instance, epoch, cost, and how far above its path it is.
-		const onWire = (route: WireRoute): WireRoute => ({ ...route, auth: undefined });
-		const restarted = (prev: Advertised, next: Advertised): boolean =>
-			!sameInstance(prev, next) || (prev.route.epoch ?? 0n) !== (next.route.epoch ?? 0n);
-
-		// Anything that may change what the peer is owed marks the stream dirty and wakes the loop,
-		// which alone writes. A change landing mid-sync leaves it dirty for the next pass.
-		let dirty = true;
-		let notify: (() => void) | undefined;
-		const poke = () => {
-			dirty = true;
-			notify?.();
-		};
-
-		// The subscriber sends nothing after its ANNOUNCE_REQUEST: a clean FIN ends the stream, and
-		// anything else is a violation. Mirrors rs/moq-net.
-		let departed: Error | null | undefined;
-		void (async () => {
-			try {
-				if (!(await stream.reader.done())) throw new ProtocolViolation("a message after ANNOUNCE_REQUEST");
-				departed = null;
-			} catch (err) {
-				departed = error(err);
-			}
-			notify?.();
-		})();
-
-		// Woken by the origin's claims, our grant, or the identity they are originated under.
-		const sources = [this.#advertised, this.#grant, origin?.own.identity];
-		const stops = sources.map((source) => source?.subscribe(poke));
-		try {
-			// Nothing is announced before the grant it would be checked against. A local close
-			// meanwhile finishes the stream with nothing announced.
-			const ready = this.#ready.then(() => "ready" as const);
-			if ((await race([ready, stream.reader.closed, this.#withdrawal.closing])) !== "ready") {
-				if (this.#withdrawal.closing.peek()) {
-					stream.close();
-					await stream.writer.closed;
-				}
-				return;
-			}
-
-			await new AnnounceOk(UNKNOWN_HOP, 0).encode(stream.writer, this.version);
-			dirty = false;
-			await sync();
-			// Every route the peer holds has its floor by now.
-			await write({ status: "synced" });
-
-			for (;;) {
-				if (departed instanceof Error) throw departed;
-				if (departed === null || this.#withdrawal.closing.peek()) break;
-				if (dirty) {
-					dirty = false;
-					await sync();
-					continue;
-				}
-				// The origin closed: the last sync ended its claims and route, and the stream finishes.
-				if (this.#advertised.peek() === undefined) break;
-				const woke = new Promise<void>((resolve) => {
-					notify = resolve;
-				});
-				await race([woke, this.#withdrawal.closing]);
-				notify = undefined;
-			}
-			if (this.#withdrawal.closing.peek()) {
-				await end();
-				stream.close();
-				await stream.writer.closed;
-			}
-		} finally {
-			for (const stop of stops) stop?.();
 		}
 	}
 
@@ -2776,7 +2627,12 @@ export class Publisher {
 	 * @internal
 	 */
 	async drain(): Promise<void> {
-		const [withdrawn] = await Promise.allSettled([this.#withdrawal.close()]);
+		const [withdrawn] = await Promise.allSettled([
+			// Lite-07: the stream finishes once every route on it is ended, which says this side is leaving.
+			this.#withdrawal.close().then(async () => {
+				if (hasRoutes(this.version)) await AnnounceStream.of(this.#quic, this.version).finish();
+			}),
+		]);
 		// Only after the withdrawals, so a request that arrived while they were in flight is
 		// waited for too. Owed requests run on their own meanwhile, so this adds no delay.
 		while (this.#owed.size > 0) await Promise.allSettled(this.#owed);
@@ -2786,6 +2642,7 @@ export class Publisher {
 	close() {
 		// The broadcasts belong to the origin, which outlives this session; closing here
 		// only drops the borrow. The peer sees the unannounce when the streams die.
+		this.#answer?.close();
 
 		// Release the datagram writer's lock so the stream can be torn down.
 		this.#datagramWriter?.close();

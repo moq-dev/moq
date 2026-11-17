@@ -6,16 +6,17 @@ import { Signal } from "@moq/signals";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { StreamCode, StreamError } from "../error.ts";
 import { hooks, type Run } from "../internal.ts";
+import { requestedGroups } from "../mock.ts";
 import { Tail } from "../tail.ts";
 import { Timestamp } from "../time.ts";
-import type { Fill, Producer } from "../track.ts";
+import type { FillGroups, Producer } from "../track.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refused } from "./fills.ts";
 
 const enc = new TextEncoder();
 
 // A copy whose first group is 4, read from group 0 with no budget, and the fill for 0 to 4 its
 // reader asks of it.
-async function missing(): Promise<{ broadcast: BroadcastProducer; track: Producer; fill: Fill; close(): void }> {
+async function missing(): Promise<{ broadcast: BroadcastProducer; track: Producer; fill: FillGroups; close(): void }> {
 	const broadcast = new BroadcastProducer();
 	const track = broadcast.createTrack("video", { maxAge: null });
 	const group = track.createGroup(4n);
@@ -28,8 +29,8 @@ async function missing(): Promise<{ broadcast: BroadcastProducer; track: Produce
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
-	const fill = await requests.requestedFill();
-	if (!fill) throw new Error("no fill");
+	const fill = await requestedGroups(requests);
+	if (fill?.kind !== "groups") throw new Error("no fill of groups");
 	expect([fill.start, fill.end]).toEqual([0n, 4n]);
 	return {
 		broadcast,
@@ -287,7 +288,7 @@ test("range fills: a range start past the asked groups refuses only the fills ow
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
-	const again = await requests.requestedFill();
+	const again = await requestedGroups(requests);
 	expect(again?.wanted()).toBe(0n);
 
 	again?.close();
@@ -344,8 +345,8 @@ test("range fills: a passing refusal ends with the fills it answered", async () 
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
-	const again = await requests.requestedFill();
-	if (!again) throw new Error("no fill");
+	const again = await requestedGroups(requests);
+	if (again?.kind !== "groups") throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(again.wanted()).toBe(1n);
@@ -416,8 +417,8 @@ test("range fills: a recovery's refusal is taken once", async () => {
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
-	const again = await requests.requestedFill();
-	if (!again) throw new Error("no fill");
+	const again = await requestedGroups(requests);
+	if (again?.kind !== "groups") throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(again.wanted()).toBe(1n);
@@ -464,8 +465,8 @@ test("range fills: an older recovery ending keeps a newer one's coverage", async
 		.ordered()
 		.nextGroup()
 		.catch(() => undefined);
-	const again = await requests.requestedFill();
-	if (!again) throw new Error("no fill");
+	const again = await requestedGroups(requests);
+	if (again?.kind !== "groups") throw new Error("no fill of groups");
 	fills.push(again);
 	fills.poll(tail, true);
 	expect(opened.map((entry) => entry.groups)).toEqual([

@@ -24,6 +24,13 @@ import { ZodMiniUnknown } from "zod/mini";
 import { infer } from "zod/mini";
 import { output } from "zod/mini";
 
+export type Access = output<typeof AccessSchema>;
+
+export const AccessSchema: ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+	path: ZodMiniArray<ZodMiniString<string>>;
+	rate: ZodMiniNumber<number>;
+}, $strict>]>;
+
 export type Algorithm = infer<typeof AlgorithmSchema>;
 
 export const AlgorithmSchema: ZodMiniEnum<{
@@ -72,7 +79,7 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 		path: ZodMiniArray<ZodMiniString<string>>;
 		rate: ZodMiniNumber<number>;
 	}, $strict>]>>;
-}, $strict>, ZodMiniTransform<Omit<Omit<{
+}, $strict>, ZodMiniTransform<Omit<{
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
 	iat?: number | undefined;
@@ -87,12 +94,7 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 		path: string[];
 		rate: number;
 	} | undefined;
-}, "get" | "put">, "publish" | "subscribe"> & {
-	publish?: string[];
-	publish_rate?: number;
-	subscribe?: string[];
-	subscribe_rate?: number;
-}, {
+}, "get" | "put">, {
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
 	iat?: number | undefined;
@@ -114,9 +116,13 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 
 export type Grant = infer<typeof GrantSchema>;
 
-export const GrantSchema: ZodMiniPipe<ZodMiniObject<{
+export const GrantSchema: ZodMiniObject<{
 	expires: ZodMiniOptional<ZodMiniInt>;
 	label: ZodMiniOptional<ZodMiniString<string>>;
+	link: ZodMiniOptional<ZodMiniEnum<{
+		peer: "peer";
+		upstream: "upstream";
+	}>>;
 	mounts: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniString<string>>>;
 	peer: ZodMiniOptional<ZodMiniBoolean<boolean>>;
 	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
@@ -130,47 +136,7 @@ export const GrantSchema: ZodMiniPipe<ZodMiniObject<{
 		rate: ZodMiniNumber<number>;
 	}, $strict>]>>;
 	tier: ZodMiniOptional<ZodMiniString<string>>;
-	upstream: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-}, $strip>, ZodMiniTransform<Omit<{
-	expires?: number | undefined;
-	label?: string | undefined;
-	mounts?: Record<string, string> | undefined;
-	peer?: boolean | undefined;
-	publish?: string[] | {
-		path: string[];
-		rate: number;
-	} | undefined;
-	revalidate?: number | undefined;
-	root?: string | undefined;
-	subscribe?: string[] | {
-		path: string[];
-		rate: number;
-	} | undefined;
-	tier?: string | undefined;
-	upstream?: boolean | undefined;
-}, "publish" | "subscribe"> & {
-	publish?: string[];
-	publish_rate?: number;
-	subscribe?: string[];
-	subscribe_rate?: number;
-}, {
-	expires?: number | undefined;
-	label?: string | undefined;
-	mounts?: Record<string, string> | undefined;
-	peer?: boolean | undefined;
-	publish?: string[] | {
-		path: string[];
-		rate: number;
-	} | undefined;
-	revalidate?: number | undefined;
-	root?: string | undefined;
-	subscribe?: string[] | {
-		path: string[];
-		rate: number;
-	} | undefined;
-	tier?: string | undefined;
-	upstream?: boolean | undefined;
-}>>;
+}, $strict>;
 
 export { InvalidPattern } from "@moq/pattern";
 
@@ -580,6 +546,13 @@ export const KeySetSchema: ZodMiniObject<{
 	}, $strip>], "kty">>;
 }, $strip>;
 
+export type Link = infer<typeof LinkSchema>;
+
+export const LinkSchema: ZodMiniEnum<{
+	peer: "peer";
+	upstream: "upstream";
+}>;
+
 export type Operation = infer<typeof OperationSchema>;
 
 export const OperationSchema: ZodMiniEnum<{
@@ -642,6 +615,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	node: ZodMiniString<string>;
 	path: ZodMiniString<string>;
 	query: ZodMiniOptional<ZodMiniString<string>>;
+	relay: ZodMiniOptional<ZodMiniString<string>>;
 	remote: ZodMiniOptional<ZodMiniString<string>>;
 	role: ZodMiniOptional<ZodMiniEnum<{
 		publisher: "publisher";
@@ -682,6 +656,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	node: ZodMiniString<string>;
 	path: ZodMiniString<string>;
 	query: ZodMiniOptional<ZodMiniString<string>>;
+	relay: ZodMiniOptional<ZodMiniString<string>>;
 	remote: ZodMiniOptional<ZodMiniString<string>>;
 	role: ZodMiniOptional<ZodMiniEnum<{
 		publisher: "publisher";
@@ -722,6 +697,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	node: ZodMiniString<string>;
 	path: ZodMiniString<string>;
 	query: ZodMiniOptional<ZodMiniString<string>>;
+	relay: ZodMiniOptional<ZodMiniString<string>>;
 	remote: ZodMiniOptional<ZodMiniString<string>>;
 	role: ZodMiniOptional<ZodMiniEnum<{
 		publisher: "publisher";
@@ -768,6 +744,7 @@ export const RequestSchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 	path: ZodMiniString<string>;
 	query: ZodMiniOptional<ZodMiniString<string>>;
 	reason: ZodMiniString<string>;
+	relay: ZodMiniOptional<ZodMiniString<string>>;
 	remote: ZodMiniOptional<ZodMiniString<string>>;
 	role: ZodMiniOptional<ZodMiniEnum<{
 		publisher: "publisher";
@@ -861,25 +838,6 @@ export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<Zo
 export function authorize(claims: Claims, path: string): Permissions;
 
 export { compareSpecificity } from "@moq/pattern";
-
-export function encodeGrant(grant: Grant): {
-	expires?: number;
-	label?: string;
-	mounts?: Record<string, string>;
-	peer?: boolean;
-	publish?: string[] | {
-		path: string[];
-		rate: number;
-	};
-	revalidate?: number;
-	root?: string;
-	subscribe?: string[] | {
-		path: string[];
-		rate: number;
-	};
-	tier?: string;
-	upstream?: boolean;
-};
 
 export function patterns(texts: readonly string[] | undefined): Patterns;
 

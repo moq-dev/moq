@@ -261,8 +261,8 @@ impl Version {
 		self.has_ranges()
 	}
 
-	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
-	/// requests decode as not opted in.
+	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in, one for each prefix it adds.
+	/// Added in lite-07; older requests decode as not opted in.
 	pub fn has_hidden(self) -> bool {
 		!matches!(
 			self,
@@ -397,11 +397,12 @@ impl Version {
 		)
 	}
 
-	/// Whether the announce stream carries the route layer: ROUTE_START, ROUTE_UPDATE,
-	/// ROUTE_HOLD, ROUTE_END, DEAD, and ANNOUNCE_FLOOR toward the subscriber, and nothing
-	/// back. A claim names its Route ID in place of a hop chain, ANNOUNCE_OK and SETUP
-	/// carry no Hop ID, and requests name the origin's Node ID and its route's depth.
-	/// Added in lite-07.
+	/// Whether each endpoint says everything about discovery and routing on one
+	/// unidirectional Announce Stream: ANNOUNCE_REQUEST edits of the prefixes it wants,
+	/// and ANNOUNCE_OK, ROUTE_START, ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, DEAD, the claims,
+	/// ANNOUNCE_FLOOR, and SYNCED answering its peer's. A claim names its Route ID in
+	/// place of a hop chain, ANNOUNCE_OK and SETUP carry no Hop ID, and requests name the
+	/// origin's Node ID and its route's depth. Added in lite-07.
 	pub(crate) fn has_routes(self) -> bool {
 		!matches!(
 			self,

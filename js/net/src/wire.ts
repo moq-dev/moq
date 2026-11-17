@@ -173,6 +173,11 @@ export interface Established {
 	 * it: lite-07's floors. Unset where every claim covers its subtree.
 	 */
 	covers?(node: bigint, at: Path.Valid, path: Path.Valid): boolean;
+	/**
+	 * Changes whenever what {@link covers} answers may have changed with no route reporting it:
+	 * a floor moving what another claim of its origin node covers.
+	 */
+	readonly coverage?: Getter<number>;
 	// private: plumbing
 	/**
 	 * This session's side of its auth handle.

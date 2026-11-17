@@ -22,6 +22,8 @@ export const StreamId = {
 export const DataType = {
 	Group: 0,
 	Setup: 1,
+	/** Lite-07: the sender's one Announce Stream. */
+	Announce: 3,
 } as const;
 
 /** A unidirectional data-stream type. See {@link DataType}. */

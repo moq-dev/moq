@@ -52,7 +52,7 @@ import {
 } from "./internal.ts";
 import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
-import { keyOf, Timescale, type Timestamp } from "./time.ts";
+import { floorAt, keyOf, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkSequence, max, min, UNBOUNDED } from "./util/sequence.ts";
 import {
 	bounded,
@@ -70,7 +70,7 @@ import {
 } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.ts";
 
-export { Fill, Requests } from "./fill.ts";
+export { type Fill, FillGroups, FillLookup, Requests } from "./fill.ts";
 
 // The group a non-blocking read takes, skipping drops and throwing the track's error;
 // `undefined` when nothing is deliverable now.
@@ -313,9 +313,18 @@ export interface Delay {
 	 * means `0`; `null` means not stated, which only a peer whose wire cannot carry it (moq-lite
 	 * before 07, moq-transport) sends. A media consumer reads an unstated minimum as `0`.
 	 *
-	 * The aggregate across subscribers is the smallest stated one, so an unstated minimum never
-	 * pulls it to zero, and it is forwarded upstream as is. A publisher may use it, such as to
-	 * start a cold join that far back; nothing reads it there yet.
+	 * A live join, `{ start: { relative: 0n } }` with no end, starts this far behind the live edge:
+	 * at the newest group that began at or before the live edge minus this, so a player's buffer
+	 * arrives full instead of filling in real time. The hop serving it measures from what it holds:
+	 * in media time from the newest frame on a timed track, and by arrival on its own clock on a
+	 * scale-less one. With no such group held it starts at the oldest one, and never fetches
+	 * upstream for more. {@link Delay.max} still skips what has gone stale. Any other range, the
+	 * default oldest start included, and a resumed subscription ignore it, and changing it later
+	 * moves nothing already started.
+	 *
+	 * The aggregate across subscribers is the largest stated one, which a relay forwards upstream,
+	 * so the copy it fills reaches back for the reader that buffers most; each reader's own
+	 * minimum then bounds what it reads of that copy.
 	 */
 	min?: Duration | null;
 	/**
@@ -424,11 +433,11 @@ function orderOf(order: Order | undefined): Order {
 	return order;
 }
 
-// The smaller of two minimums, ignoring one that went unstated (`null`).
-function smallest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
+// The larger of two minimums, ignoring one that went unstated (`null`).
+function largest(a: Duration | null | undefined, b: Duration | null | undefined): Duration | null {
 	if (a === null || a === undefined) return b ?? null;
 	if (b === null || b === undefined) return a;
-	return a.min(b);
+	return a.max(b);
 }
 
 // Aggregate the preferences of `states`, matching Rust's Subscription::poll_combined.
@@ -445,8 +454,8 @@ function combineSubscriptions(states: Iterable<TrackState>): Subscription | unde
 		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
 		combined.delay = {
 			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
-			// Only stated minimums count, so one that went unstated never pulls the smallest to zero.
-			min: smallest(combined.delay?.min, subscription.delay?.min),
+			// The largest stated, so an upstream starts far enough back for the reader that buffers most.
+			min: largest(combined.delay?.min, subscription.delay?.min),
 		};
 		// One live subscriber held behind another's backlog is worse than a backlog sent late.
 		combined.order =
@@ -748,9 +757,9 @@ class TrackState {
 	// One past the highest group received, including evicted content.
 	received = new Signal(0n);
 	/**
-	 * The declared end, by {@link Producer.finishAt} or a clean close at the head of the
-	 * sequence after the highest produced, with the error the track ended with there. One
-	 * value, so a wake on it sees both. Mirrors the Rust `End`.
+	 * The declared end, by {@link Producer.finishAt}, {@link Producer.fail}, or a clean close at
+	 * the head of the sequence after the highest produced, with the error the track ended with
+	 * there. One value, so a wake on it sees both. Mirrors the Rust `End`.
 	 */
 	end = new Signal<End | undefined>(undefined);
 	// A wire subscription's pending tail still owes a group below the end, so reaching the
@@ -2193,15 +2202,13 @@ export class Producer {
 	 * group, independently of closure. Throws if the track is closed, already has an end, or
 	 * `end` would orphan a group or frame already produced.
 	 *
-	 * With an `error`, the track ended that way rather than cleanly, yet keeps its history, unlike
-	 * {@link abort}: readers still get every group below the end, and a reader reaching the end
-	 * gets the error instead of the end of stream.
+	 * Always a clean end; {@link fail} ends the track in error.
 	 */
-	finishAt(end: Position, error?: Error): void {
+	finishAt(end: Position): void {
 		if (this.#state.closed.peek() !== undefined) throw new Error("track is closed");
 		const declared = this.#state.end.peek()?.at;
 		if (declared !== undefined) throw new Error(`track already ends at ${declared.group}/${declared.frame}`);
-		this.#declareEnd(end, error, false);
+		this.#declareEnd(end, undefined, false);
 	}
 
 	// The wire's end: repeating it is a no-op, and a mid-group end may refine the group
@@ -2371,6 +2378,21 @@ export class Producer {
 	}
 
 	/**
+	 * End the track with `error` after the highest sequence written, the end {@link finish}
+	 * declares, returning it as {@link Finished}. Mirrors the Rust `fail`.
+	 *
+	 * Unlike {@link abort}, the track keeps its history: readers still get every group below the
+	 * end, and a reader reaching the end gets `error` instead of the end of stream. Like
+	 * {@link finish}, a no-op once an end is declared or the track closed: the outcome already
+	 * given stands, so a cleanup path can fail whatever the track's state.
+	 */
+	fail(error: Error): Finished {
+		if (this.#state.end.peek() === undefined && this.#state.closed.peek() === undefined)
+			this.#declareEnd({ group: this.#received, frame: 0 }, error, false);
+		return this;
+	}
+
+	/**
 	 * Abort the track and every subscriber, mirroring the error to their open groups. Terminal
 	 * and idempotent.
 	 *
@@ -2386,8 +2408,8 @@ export class Producer {
 	/**
 	 * Release this producer, like dropping the last Rust producer. Idempotent.
 	 *
-	 * With an end declared ({@link finish} or {@link finishAt}), the track ends there and its
-	 * subscribers drain to it. Without one, the track aborts: nothing finished it.
+	 * With an end declared ({@link finish}, {@link finishAt}, or {@link fail}), the track ends
+	 * there and its subscribers drain to it. Without one, the track aborts: nothing finished it.
 	 */
 	close(): void {
 		if (this.#state.end.peek() !== undefined) this.#close(undefined);
@@ -3107,7 +3129,13 @@ export class Subscriber {
 
 	// Resolve this reader's ranges again, as when they are replaced.
 	#resolve(): void {
-		this.#window = new Window(this.#state.update.peek()?.ranges ?? [{}], this.#latestGroup(), this.#holdings());
+		const update = this.#state.update.peek();
+		this.#window = new Window(
+			update?.ranges ?? [{}],
+			this.#latestGroup(),
+			this.#holdings(),
+			update?.delay?.min ?? undefined,
+		);
 		// Leaves the lookups the old ranges asked, which a settled window never reads again.
 		if (this.#lookups.length > 0) this.#lookUp();
 		this.#moved();
@@ -3162,7 +3190,47 @@ export class Subscriber {
 			complete: () => state.closed.peek() !== undefined,
 			// A received copy's handler is its session, which fetches by group alone.
 			looksUp: () => !receivedCopy(producer) && fillsOf(producer).serving,
+			reachBack: (_latest, min) => this.#reachBack(min),
 		};
+	}
+
+	// Where a live join holding `min` behind the live edge starts, as {@link Holdings.reachBack}
+	// says: in media time from the newest frame held, or on a scale-less track, by arrival on this
+	// hop's clock, as expiry measures it. Always a group held: the newest one starting by the
+	// target, or the oldest one when none does, so nothing below what this hop holds is asked for.
+	// Mirrors the Rust `TrackState::reach_back`.
+	#reachBack(min: Duration): { anchor?: Anchor } | undefined {
+		const timeline = this.#state.timeline;
+		// The newest group held for which `f` holds, failed ones aside.
+		const newest = (f: (group: GroupConsumer) => boolean) =>
+			timeline.findLast((g) => !hooks.groupFailed(g) && f(g));
+		const held = (group: GroupConsumer | undefined) => {
+			const at = group ?? timeline.find((g) => !hooks.groupFailed(g));
+			return at && { anchor: { absolute: at.sequence } };
+		};
+		const info = this.#state.info.peek();
+		// Until the track is accepted, whether it is timed at all is unknown.
+		if (info === undefined) return undefined;
+		const scale = info.timescale;
+		if (scale == null) {
+			const at = now();
+			return held(newest((group) => at.since(hooks.groupArrived(group)).ge(min)));
+		}
+		const stamped = newest((group) => hooks.groupTimestamp(group) !== undefined);
+		const started = stamped && hooks.groupTimestamp(stamped);
+		if (!stamped || !started) return undefined;
+		// In the track's own scale, which holds every timestamp it accepted. The Min Age rounds up
+		// to whole ticks, so the start is never newer than it allows.
+		const back = (BigInt(Math.ceil(min.asNanos())) * BigInt(scale) + 999_999_999n) / 1_000_000_000n;
+		// Floored exactly, as Rust's `Timestamp::convert`: an accepted timestamp may sit between ticks.
+		const edge = BigInt(floorAt(hooks.groupLatest(stamped) ?? started, scale));
+		const target = edge > back ? edge - back : 0n;
+		return held(
+			newest((group) => {
+				const start = hooks.groupTimestamp(group);
+				return start !== undefined && BigInt(floorAt(start, scale)) <= target;
+			}),
+		);
 	}
 
 	// Resolve what the groups now held settle: a relative anchor waiting on a first group once
@@ -4768,8 +4836,10 @@ export class Subscriber {
 		const reordered = subscription.order !== this.#state.update.peek()?.order;
 		this.#state.update.set(subscription);
 		if (replaced) this.#resolve();
+		// A live join not yet started reaches back by the Min Age stated when it starts.
+		else this.#window.min = subscription.delay?.min ?? undefined;
 		// A fill's order follows its readers, so its handler wakes to serve the new first group.
-		else if (reordered) this.#fillsMoved();
+		if (!replaced && reordered) this.#fillsMoved();
 	}
 }
 

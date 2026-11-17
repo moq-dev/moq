@@ -23,6 +23,7 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 
 # Conventions
 
+- Only TypeScript callers are supported, so don't add runtime checks for misuse the types already rule out (extra or wrong-typed arguments, impossible variants). Validate only data that crosses a trust boundary: wire, JSON (zod schemas), and user input such as element attributes.
 - Only browser performance counts; accept a small regression that shows only on node or bun.
 - Give each entrypoint a `@module` block. Hide deprecated exports with `@internal` or drop them; never annotate "use X".
 - `just js check` includes the build, since declaration emit catches errors `--noEmit` misses, and rejects importing a `@moq/*` package the manifest doesn't declare.

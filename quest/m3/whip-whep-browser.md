@@ -21,7 +21,7 @@ Moved to m3 2026-11-12 (maintainer, /quest-audit): a downstream deployment serve
 Kept in m3 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
 audit recommended making this recipe a gate for the cut while the stack
 stayed vendored; the maintainer chose to
-[return to upstream str0m](/quest/m2/str0m-upstream.md) instead (rejected:
+[return to upstream str0m](https://github.com/moq-dev/moq/pull/8963) instead (rejected:
 keep the vendored stack and gate the cut on this). That switch is checked by
 one manual Chrome publish and play, so this recipe is still the first
 automated browser run against the gateway.

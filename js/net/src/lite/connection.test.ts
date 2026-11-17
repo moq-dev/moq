@@ -12,6 +12,8 @@ import * as Path from "../path.ts";
 import { acceptBudget, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { wireOf } from "../wire.ts";
+import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import { AnnounceStream } from "./announce_stream.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -776,7 +778,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const deadline = mockDeadline();
 	const version = Version.DRAFT_07;
 	const pair = createMockTransportPair(ALPN_07_WIP);
-	const fin = holdFins(pair.server, "incoming-bidi");
+	// Lite-07 withdraws on its unidirectional Announce Stream.
+	const fin = holdFins(pair.server, "uni");
 	const source = new Producer();
 	const destination = new Producer();
 	const broadcastRoute = source.route(Path.from("room"));
@@ -1025,3 +1028,201 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 		},
 	);
 }
+
+// Lite-07: each endpoint sends everything it says about discovery and routing on one
+// unidirectional Announce Stream, which the peer may only finish.
+async function announceStream(pair: { server: MockTransport }) {
+	const writer = await Writer.open(pair.server, { version: Version.DRAFT_07 });
+	await writer.u53(DataType.Announce);
+	const send = (msg: AnnounceBroadcast) => encodeAnnounceBroadcast(writer, msg, Version.DRAFT_07);
+	return { writer, send };
+}
+
+const ROOM = Path.from("room");
+
+for (const [name, violate] of [
+	[
+		"a second Announce Stream",
+		async (pair) => {
+			await announceStream(pair);
+			await announceStream(pair);
+		},
+	],
+	[
+		"a reset Announce Stream",
+		async (pair) => {
+			const { writer, send } = await announceStream(pair);
+			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			writer.reset(new Error("gone"));
+		},
+	],
+	[
+		"an Announce Stream finished inside a message",
+		async (pair) => {
+			const { writer } = await announceStream(pair);
+			// An ANNOUNCE_REQUEST of five bytes, of which one arrives.
+			await writer.write(new Uint8Array([16, 5, 0]));
+			writer.close();
+		},
+	],
+	[
+		"an ANNOUNCE_REQUEST nesting one prefix below another",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({
+				status: "request",
+				more: false,
+				remove: [],
+				add: [
+					{ prefix: ROOM, hidden: false },
+					{ prefix: Path.from("room/cam"), hidden: false },
+				],
+			});
+		},
+	],
+	[
+		"an ANNOUNCE_REQUEST adding a prefix below one already asked for",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			await send({
+				status: "request",
+				more: false,
+				remove: [],
+				add: [{ prefix: Path.from("room/cam"), hidden: false }],
+			});
+		},
+	],
+	[
+		"an ANNOUNCE_REQUEST removing an unknown Prefix ID",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({ status: "request", more: false, remove: [3n], add: [] });
+		},
+	],
+	[
+		"a message inside an edit",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({ status: "request", more: true, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			await send({ status: "ok" });
+		},
+	],
+	[
+		"the parts of an edit nesting one prefix below another",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({ status: "request", more: true, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			await send({
+				status: "request",
+				more: false,
+				remove: [],
+				add: [{ prefix: Path.from("room/cam"), hidden: false }],
+			});
+		},
+	],
+	[
+		"a DEAD moving a route the stream never started",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({
+				status: "dead",
+				dead: { kind: "closed", hop: { node: 2n, session: 1n }, far: 3n, gone: false, moved: 1n },
+			});
+		},
+	],
+	[
+		"an ANNOUNCE_OK answering no ANNOUNCE_REQUEST",
+		async (pair) => {
+			const { send } = await announceStream(pair);
+			await send({ status: "ok" });
+		},
+	],
+] as [string, (pair: { server: MockTransport }) => Promise<void>][]) {
+	test(`${name} closes moq-lite-07 with PROTOCOL_VIOLATION`, async () => {
+		const pair = createMockTransportPair(ALPN_07_WIP);
+		const origin = new Producer();
+		const connection = new Connection({
+			url: new URL("https://relay.example/"),
+			quic: pair.client,
+			version: Version.DRAFT_07,
+			publish: origin.consume(),
+		});
+		try {
+			await violate(pair);
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			connection.abort();
+			origin.close();
+		}
+	});
+}
+
+// The peer finishing its Announce Stream is leaving: its routes end, the session stays, and the
+// prefixes it asked for are still answered.
+test("a finished Announce Stream ends the peer's routes and keeps moq-lite-07 answering", async () => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const up = new Producer();
+	const down = new Producer();
+	const fromClient = new Producer();
+	const fromServer = new Producer();
+	const url = new URL("https://localhost/test");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, publish: up.consume(), consume: fromServer }),
+		accept({ url, transport: pair.server, publish: down.consume(), consume: fromClient }),
+	]);
+	const cam = up.route(Path.from("up/cam"));
+	const room = down.route(Path.from("down/room"));
+	const atServer = fromClient.routes();
+	const atClient = fromServer.routes();
+	let closed = false;
+	void pair.server.closed.then(() => {
+		closed = true;
+	});
+	try {
+		expect(await atServer.next()).toMatchObject({ prefix: Path.from("up/cam"), kind: "start" });
+		expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/room"), kind: "start" });
+
+		// The client finishes its stream, as it does when it leaves.
+		await AnnounceStream.of(pair.client, version).finish();
+		expect(await atServer.next()).toMatchObject({ prefix: Path.from("up/cam"), kind: "offline" });
+		expect(closed).toBe(false);
+
+		// What the client asked for is still answered.
+		const late = down.route(Path.from("down/late"));
+		expect(await atClient.next()).toMatchObject({ prefix: Path.from("down/late"), kind: "start" });
+		expect(closed).toBe(false);
+		late.broadcast.close();
+	} finally {
+		atServer.close();
+		atClient.close();
+		client.abort();
+		server.abort();
+		cam.broadcast.close();
+		room.broadcast.close();
+		for (const origin of [up, down, fromClient, fromServer]) origin.close();
+	}
+});
+
+// Lite-07 has no bidirectional Announce stream: its type is one the version does not know,
+// which resets the stream and keeps the session.
+test("a bidirectional stream of the Announce type is unknown to moq-lite-07", async () => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+	let closed = false;
+	void pair.client.closed.then(() => {
+		closed = true;
+	});
+	try {
+		const stream = await Stream.open(pair.server, { version });
+		await stream.writer.u53(StreamId.Announce);
+		await stream.writer.write(new Uint8Array([1, 0]));
+		await expect(stream.reader.readAll()).rejects.toThrow();
+		await settle();
+		expect(closed).toBe(false);
+	} finally {
+		connection.abort();
+	}
+});

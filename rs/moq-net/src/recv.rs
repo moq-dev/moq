@@ -97,34 +97,34 @@ impl Group {
 		self.writer.take().expect("group owned until consumed")
 	}
 
-	/// Finish receiving a group closed without saying where it ends, as a bare FIN does,
+	/// Finish receiving a group ended without saying where it ends, as a bare FIN does,
 	/// without running cancellation cleanup.
-	pub fn close(mut self) -> Result<(), Error> {
-		self.writer.take().expect("group owned until consumed").close()?;
+	pub fn finish(mut self) -> Result<(), Error> {
+		self.writer.take().expect("group owned until consumed").finish()?;
 		self.armed = false;
 		Ok(())
 	}
 
 	/// Finish receiving a whole group that ends at `end`, as GROUP_END says, without running
-	/// cancellation cleanup. An `end` the group refuses (see [`group::Producer::finish`]) is
+	/// cancellation cleanup. An `end` the group refuses (see [`group::Producer::finish_at`]) is
 	/// [`Error::MalformedTrack`], which aborts the group; one already aborted stays so.
-	pub fn finish(mut self, end: u64) -> Result<(), Error> {
+	pub fn finish_at(mut self, end: u64) -> Result<(), Error> {
 		if self.check_end(end).is_err() {
 			let _ = self.abort(Error::MalformedTrack);
 			return Err(Error::MalformedTrack);
 		}
-		let _ = self.writer.take().expect("group owned until consumed").finish(end);
+		let _ = self.writer.take().expect("group owned until consumed").finish_at(end);
 		self.armed = false;
 		Ok(())
 	}
 
-	/// Finish receiving as the stream ended: whole at a GROUP_END's `end`, else closed. Only
-	/// an `end` the group refuses fails (see [`Self::finish`]).
+	/// Finish receiving as the stream ended: whole at a GROUP_END's `end`, else without one.
+	/// Only an `end` the group refuses fails (see [`Self::finish_at`]).
 	pub fn end(self, end: Option<u64>) -> Result<(), Error> {
 		match end {
-			Some(end) => self.finish(end),
+			Some(end) => self.finish_at(end),
 			None => {
-				let _ = self.close();
+				let _ = self.finish();
 				Ok(())
 			}
 		}

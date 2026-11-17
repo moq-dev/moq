@@ -1,3 +1,4 @@
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
@@ -8,12 +9,12 @@ import { EchoSchema } from "./echo";
 import { TRACK } from "./format";
 import { IncludeSchema } from "./include";
 import { JsonSchema } from "./json";
-import { MediaSchema } from "./media";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { named, object, renditions, section } from "./section";
+import { renditions } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
+import { TimelineSchema } from "./timeline";
 import { track } from "./track";
 import { VideoSchema } from "./video";
 
@@ -46,17 +47,18 @@ const VersionSchema = z.number().check(
 /**
  * The root catalog: the base sections every hang broadcast carries.
  *
- * The media sections are `video`, `audio`, and `text`, alongside `media`, which holds what applies
- * to every audio and video track: the broadcast's `clock` (the one wall-clock mapping) and its
- * `join` interval. `json` and `binary` list application data tracks that aren't media. A section is omitted
+ * The media sections are `video`, `audio`, and `text`, alongside `sync`, the broadcast's timeline:
+ * its `clock` (the one wall-clock mapping) and its join `interval`. `json` and `binary` list application data tracks that aren't media. A section is omitted
  * when it holds no tracks. `stats` names the publisher's media snapshot track, `echo`
  * solicits viewer feedback under a relative broadcast prefix, and `include` lists whole
  * broadcasts without opening them; each shares this catalog's PTS timeline and root settings.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
- * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
+ * application can add its own sections (e.g. `com.example.scte35`) without modifying hang. A base consumer
  * ignores the extra sections; an extended consumer validates them with its own schema, typically
- * built via `z.extend(RootSchema, { ... })`.
+ * built via `z.extend(RootSchema, { ... })`. An application names its own sections with a
+ * namespaced key (`com.example.telemetry`): every section defined here must have its shape when
+ * present, or parsing refuses the whole catalog, the same as Rust.
  *
  * The root `version` is the oldest moq-hang draft that reads the catalog correctly, absent while
  * that is 3. Parsing throws {@link UnsupportedVersion} when it is above {@link VERSION}; a
@@ -67,28 +69,17 @@ export const RootSchema = z.looseObject({
 	version: z.optional(VersionSchema),
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// What applies to every audio and video track, omitted when it holds nothing. `media` is a
-	// generic key an application may already carry, so a value that isn't an object decodes as
-	// absent; an object with a malformed clock fails the catalog, the same as Rust. See `MediaSchema`
-	// for its lenient `join`.
-	media: object(MediaSchema),
-	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
-	// else's and decodes as absent. See `named`.
-	stats: named(StatsSchema, "track"),
-	echo: named(EchoSchema, "path"),
-	// `text`, `json`, and `binary` are generic enough keys that an application could have been
-	// carrying its own before these sections were reserved, so a value that isn't a section decodes
-	// as absent rather than failing the whole catalog. A value that IS a section but carries a
-	// malformed entry (a rendition with no `format`, a track with no `mode`) still fails, the same
-	// as Rust, rather than silently dropping every caption or data track. See `section`.
-	text: section(TextSchema, "renditions"),
-	json: section(JsonSchema, "tracks"),
-	binary: section(BinarySchema, "tracks"),
-	// A new key, so a malformed entry fails the catalog, the same as Rust.
+	// The broadcast's timeline, omitted when it holds nothing.
+	sync: z.optional(TimelineSchema),
+	stats: z.optional(StatsSchema),
+	echo: z.optional(EchoSchema),
+	text: z.optional(TextSchema),
+	json: z.optional(JsonSchema),
+	binary: z.optional(BinarySchema),
 	include: z.optional(renditions(IncludeSchema, "include")),
 });
 
-/** The root catalog object: the media sections, `media`, the data track sections, plus any app extensions. */
+/** The root catalog object: the media sections, `sync`, the data track sections, plus any app extensions. */
 export type Root = z.infer<typeof RootSchema>;
 
 /**
@@ -106,11 +97,7 @@ function minVersion(root: Root): number | undefined {
 		root.binary?.tracks,
 	].some((entries) => Object.entries(entries ?? {}).some(([id, config]) => track(id, config) !== id));
 
-	// moq-hang-04: a reader that ignores video `warmup` assumes every group starts at a keyframe,
-	// and hands its decoder one that starts at a converging picture instead.
-	const warmup = Object.values(root.video?.renditions ?? {}).some((config) => (config.warmup ?? 0) > 0);
-
-	return renamed || warmup ? 4 : undefined;
+	return renamed ? 4 : undefined;
 }
 
 /** A catalog update used one rendition ID for both a video and an audio rendition. */
@@ -136,7 +123,7 @@ export function checkRenditions(root: Root): Root {
 /**
  * The catalog as a publisher writes it: refused as every reader refuses it, with the root
  * `version` computed rather than carried, so an edit can't claim less than the catalog uses, and an
- * empty `media` left off the wire.
+ * empty `sync` left off the wire.
  *
  * Throws {@link DuplicateRendition}. Mirrors Rust's catalog serializer.
  */
@@ -144,7 +131,7 @@ export function encode(root: Root): Root {
 	checkRenditions(root);
 	const value = { ...root };
 	delete value.version;
-	if (value.media && value.media.clock === undefined && value.media.join === undefined) delete value.media;
+	if (value.sync && value.sync.clock === undefined && value.sync.interval === undefined) delete value.sync;
 	const version = minVersion(root);
 	if (version !== undefined) value.version = version;
 	return value;
@@ -183,24 +170,41 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 	return root;
 }
 
+/** Options for {@link watch}. */
+export type WatchConfig = {
+	/** The caller's playout delay behind the live edge; omitted reads only the newest catalog. */
+	delay?: Duration;
+};
+
 /**
- * Subscribe to a broadcast's catalog and iterate validated root updates.
+ * Subscribe to a broadcast's catalog and iterate validated root updates, each with its timestamp.
+ *
+ * An update takes effect at `at` on the broadcast's media timeline, so a caller holds one it reads
+ * before its media reaches `at`, and applies one read late, or the first it reads, at once. On a
+ * scale-less catalog track `at` is a group key with no time, so the update applies on arrival.
+ *
+ * Without a `delay`, it reads only the newest catalog, for a caller that applies each on arrival. A
+ * caller that holds updates passes its playout delay and reads, in order, every update it may still
+ * need: one stays deliverable until it falls `delay` behind the live edge.
  *
  * Throws {@link UnsupportedVersion}, {@link DuplicateRendition}, or {@link EscapingBroadcast} on an
  * update that fails validation. `broadcast` references are checked against the handle's `path` and
  * yielded unresolved.
  */
-export async function* watch(broadcast: Moq.Broadcast.Consumer): AsyncIterable<Root> {
+export async function* watch(broadcast: Moq.Broadcast.Consumer, config?: WatchConfig): AsyncIterable<Moq.Timed<Root>> {
+	const delay = config?.delay ?? Duration.ZERO;
+	const holds = !delay.isZero();
 	const consumer = new Json.Snapshot.Consumer<Root>({
 		track: broadcast.track(TRACK),
 		schema: RootSchema,
 		priority: PRIORITY.catalog,
+		delay,
 	});
 	try {
 		for (;;) {
-			const root = await consumer.latest();
-			if (!root) return;
-			yield checkResolvable(checkRenditions(root.value), broadcast.path);
+			const next = await (holds ? consumer.next() : consumer.latest());
+			if (!next) return;
+			yield { value: checkResolvable(checkRenditions(next.value), broadcast.path), at: next.at };
 		}
 	} finally {
 		consumer.close();

@@ -118,7 +118,14 @@ T until(moq::Future<T> future, Clock::time_point deadline, const char *what) {
 std::string patterns(const std::vector<std::string> &list) {
     std::string out = "[";
     for (size_t i = 0; i < list.size(); i++) {
-        out += (i == 0 ? "\"" : ", \"") + list[i] + "\"";
+        out += i == 0 ? "\"" : ", \"";
+        for (char c : list[i]) {
+            if (c == '"' || c == '\\') {
+                out += '\\';
+            }
+            out += c;
+        }
+        out += "\"";
     }
     return out + "]";
 }
@@ -385,7 +392,7 @@ int subscribe(
     // The catalog is a live track. A lazy publisher (e.g. the browser, which only encodes on
     // demand) may announce a rendition in a later update rather than the first snapshot, so
     // wait for a catalog that has both video and audio. A finished fixture has video only.
-    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer), read_deadline, "catalog consumer");
+    auto catalogs = until(moq::MediaCatalogConsumer::subscribe(consumer, {}), read_deadline, "catalog consumer");
     std::optional<moq::Catalog> catalog;
     while (!catalog || catalog->video.empty() || (!finish && catalog->audio.empty())) {
         catalog = until(catalogs->next(), read_deadline, "catalog");

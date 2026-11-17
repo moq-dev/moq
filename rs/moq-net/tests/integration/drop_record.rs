@@ -41,7 +41,7 @@ fn write(source: &track::Producer, key: u64, millis: u64) {
 	group
 		.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
 		.unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 }
 
 /// A publisher, a relay subscribing to it, and a viewer subscribing to the relay.
@@ -405,8 +405,9 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 				true => expiring(EXPIRY),
 				false => cache::Pool::new(cache::Config::default().with_capacity(4 * PAYLOAD as u64)),
 			};
-			// One stream of credit: group 0's, held from the relay, so the rest queue.
-			let chain = Chain::with_credit([LITE07, LITE07], [pool, forever(), forever()], Some(1)).await;
+			// One stream of credit past the Announce Stream: group 0's, held from the
+			// relay, so the rest queue.
+			let chain = Chain::with_credit([LITE07, LITE07], [pool, forever(), forever()], Some(2)).await;
 			let mut reader = chain.subscribe(reading(None, [support::keys(0..)])).await;
 			chain.upstream.server_transport.hold_unis();
 			let write = |key: u64| {
@@ -414,7 +415,7 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 				group
 					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
 					.unwrap();
-				group.close().unwrap();
+				group.finish().unwrap();
 			};
 			for key in 0..4 {
 				write(key);

@@ -35,13 +35,13 @@ fn publish(origin: &moq_net::origin::Producer) -> (moq_net::origin::Route, moq_n
 		.unwrap();
 	broadcast.announce().unwrap();
 	for (start, end) in [(0, Some(500)), (1000, None)] {
-		let mut group = track.append_group(start).unwrap();
+		let mut group = track.append_group(Timestamp::from_millis(start).unwrap()).unwrap();
 		group
 			.write_frame(Timestamp::from_millis(start).unwrap(), b"x".as_slice())
 			.unwrap();
 		match end {
-			Some(end) => group.finish(end).unwrap(),
-			None => group.close().unwrap(),
+			Some(end) => group.finish_at(end).unwrap(),
+			None => group.finish().unwrap(),
 		};
 	}
 	(broadcast, track)

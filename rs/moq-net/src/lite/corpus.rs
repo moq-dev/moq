@@ -74,11 +74,6 @@ fn run(case: &Case, data: &[u8]) -> String {
 	match case.message {
 		Message::Announce => match super::AnnounceBroadcast::decode_slice(data, version) {
 			Ok((super::AnnounceBroadcast::Refused { .. }, used)) if used == data.len() => "withdrawn".to_string(),
-			Ok((super::AnnounceBroadcast::Dead(super::Dead::Closed { moved, .. }), used))
-				if used == data.len() && moved.iter().any(|(_, heard)| heard.is_err()) =>
-			{
-				"withdrawn".to_string()
-			}
 			decoded => outcome(data, version, decoded),
 		},
 		Message::AnnounceInit => {

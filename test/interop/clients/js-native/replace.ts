@@ -103,6 +103,7 @@ try {
 			const filling = (async () => {
 				for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 					try {
+						if (fill.kind === "lookup") continue; // no time lookups here
 						if (fill.start < sequence) continue; // history the replacement no longer holds
 						assert.equal(fill.start, future);
 						assert.equal(fill.end, future + 1n);

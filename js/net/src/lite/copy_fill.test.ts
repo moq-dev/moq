@@ -11,12 +11,12 @@ import { accept as acceptSession, connect as connectSession } from "../connectio
 import { StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, requestedGroups } from "../mock.ts";
 import { lines } from "../open.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
-import type { Fill, Producer, Subscriber, Subscription } from "../track.ts";
+import type { FillGroups, Producer, Subscriber, Subscription } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
 import { Publisher as LitePublisher } from "./publisher.ts";
@@ -40,7 +40,7 @@ async function peers(alpn: string) {
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	const requests = track.requests();
 	void (async () => {
-		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
 			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 				if (sequence === 1n) {
 					fill.dropGroups(1n, 2n);
@@ -255,10 +255,10 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and keeps it open.
 	const requests = track.requests();
-	const fills: Fill[] = [];
+	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requests.requestedFill();
-		if (!fill) throw new Error("no fill");
+		const fill = await requestedGroups(requests);
+		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = fill.accept(0n);
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -322,10 +322,10 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 	write(track.createGroup(1n), 1n, "live");
 	// The archive answers group 0 with one frame and never finishes it.
 	const requests = track.requests();
-	const fills: Fill[] = [];
+	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requests.requestedFill();
-		if (!fill) throw new Error("no fill");
+		const fill = await requestedGroups(requests);
+		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = fill.accept(0n);
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -395,10 +395,10 @@ test("copy fill: a yielded group its subscription's drop names ends", async () =
 	// The archive answers group 0 with one frame and keeps it open, so its stream is still open, and
 	// group 1 whole.
 	const requests = track.requests();
-	const fills: Fill[] = [];
+	const fills: FillGroups[] = [];
 	const archived = (async () => {
-		const fill = await requests.requestedFill();
-		if (!fill) throw new Error("no fill");
+		const fill = await requestedGroups(requests);
+		if (fill?.kind !== "groups") throw new Error("no fill of groups");
 		fills.push(fill);
 		const group = fill.accept(0n);
 		group.writeFrame({ payload: enc.encode("old 0"), timestamp: Timestamp.fromMillis(0) });
@@ -501,7 +501,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		let archived = false;
 		const requests = track.requests();
 		void (async () => {
-			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+			for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
 				for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
 					if (sequence !== 2n || !archived) {
 						fill.refuseGroups(sequence, sequence + 1n, new StreamError(StreamCode.NotFound));

@@ -200,7 +200,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("media", timed()).unwrap();
 		let format = Hang::Legacy(crate::container::Kind::Video);
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		let mut live = GroupConsumer::new(group.consume(), Hang::Legacy(crate::container::Kind::Video));
 
 		format
@@ -215,7 +215,7 @@ mod tests {
 		assert_eq!(second.payload, b"delta".as_slice());
 		assert!(live.read().now_or_never().is_none(), "the open group has nothing more");
 
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert!(live.read().await.unwrap().is_none());
 	}
 

@@ -115,7 +115,7 @@ Recommendations for the PR:
 - The refresh signal's shape on `Demand`: recommend one awaitable that
   resolves each time a new group is asked for and is cleared by the next
   `append_group`, so the three hand-written comparisons become one call and
-  no caller sees a group number. `Fill::wanted()` returns `Option<u64>`
+  no caller sees a group number. `FillGroups::wanted()` returns `Option<u64>`
   with a third meaning (the next group to serve); leave it, or rename it in
   the same PR if it reads as the same thing.
 - Mirror `wanted` and the signal in `@moq/net` and the bindings' demand
@@ -140,4 +140,3 @@ Wire: lite-07-wip TRACK_INFO gains the interval; SUBSCRIBE_UPDATE keeps
 ## Related
 
 - [Hang thumbnails](/quest/m4/hang-thumbnail.md) - the one-frame track this refreshes
-- [Writing a group needs no invented start](/quest/m2/group-api.md) - changes `append_group` beside the `Demand` this changes

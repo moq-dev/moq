@@ -610,17 +610,18 @@ test("multiple subscriber options aggregate like Rust", async () => {
 		delay: { min: Duration.millis(50), max: Duration.millis(250) },
 		ranges: [{ start: { absolute: 5n } }],
 	});
-	// A minimum that went unstated, as a legacy peer's does, never pulls the smallest to zero.
+	// A minimum that went unstated, as a legacy peer's does, counts for nothing.
 	const legacy = producer.subscribe({
 		delay: { min: null, max: Duration.millis(0) },
 		ranges: [{ start: { absolute: 5n } }],
 	});
 
 	// One descending subscriber makes the aggregate descending, so a live reader is never held
-	// behind another's backlog.
+	// behind another's backlog. The largest minimum wins, so an upstream reaches back far enough
+	// for the reader that buffers most.
 	expect(producer.subscription.peek()).toEqual({
 		priority: 7,
-		delay: { min: Duration.millis(50), max: Duration.millis(250) },
+		delay: { min: Duration.millis(400), max: Duration.millis(250) },
 		order: "descending",
 		ranges: [{ start: { absolute: 5n } }],
 	});
@@ -858,6 +859,137 @@ test("a time range reads the groups containing its times, settling its end as gr
 	four.writeFrame(textFrame("4", Timestamp.fromMillis(4000)));
 	expect(read()).toEqual([]);
 	expect(hooks.servingEnd(reader)).toBe(4n);
+});
+
+// Every group `reader` can take now, in delivery order.
+function readable(reader: ReturnType<TrackProducer["subscribe"]>): bigint[] {
+	const got: bigint[] = [];
+	for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) got.push(group.sequence);
+	return got;
+}
+
+// A timed track of 500 ms groups 0 through 10, each presenting at its start.
+function halfSecondGroups(): TrackProducer {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	for (let sequence = 0n; sequence <= 10n; sequence++) appendHalfSecond(producer, sequence);
+	return producer;
+}
+
+function appendHalfSecond(producer: TrackProducer, sequence: bigint): void {
+	const group = producer.createGroup(sequence);
+	group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(Number(sequence) * 500)));
+	group.finish();
+}
+
+test("a live join reaches back by its min age", () => {
+	const producer = halfSecondGroups();
+	const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [LIVE] });
+	// The newest frame presents at 5 s, so the join starts at the group containing 3 s.
+	expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
+	appendHalfSecond(producer, 11n);
+	expect(readable(reader)).toEqual([11n]);
+});
+
+test("a min age update reaches a live join not yet started", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	const reader = producer.subscribe({ delay: { min: Duration.secs(1), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(reader)).toEqual([]);
+	reader.update({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [LIVE] });
+	for (let sequence = 0n; sequence <= 10n; sequence++) appendHalfSecond(producer, sequence);
+	expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
+});
+
+test("a live join without a min age starts at the latest group, and the oldest start ignores it", () => {
+	const producer = halfSecondGroups();
+	const all = Array.from({ length: 11 }, (_, sequence) => BigInt(sequence));
+	for (const min of [null, Duration.ZERO]) {
+		const live = producer.subscribe({ delay: { min, max: Duration.secs(30) }, ranges: [LIVE] });
+		expect(readable(live)).toEqual([10n]);
+	}
+	for (const min of [null, Duration.ZERO, Duration.secs(2)]) {
+		const oldest = producer.subscribe({ delay: { min, max: Duration.secs(30) } });
+		expect(readable(oldest)).toEqual(all);
+	}
+	// Past everything held, it starts at the oldest group; a named start ignores it.
+	const far = producer.subscribe({ delay: { min: Duration.secs(60), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(far)).toEqual(all);
+	const named = producer.subscribe({
+		delay: { min: Duration.secs(2), max: Duration.secs(30) },
+		ranges: [{ start: { relative: 1n } }],
+	});
+	expect(readable(named)).toEqual([9n, 10n]);
+});
+
+test("a live join reads nothing until the groups held measure the live edge", () => {
+	const producer = new TrackProducer("test");
+	// Groups written before accept say nothing yet of whether the track is timed.
+	const groups = Array.from({ length: 11 }, (_, sequence) => producer.createGroup(BigInt(sequence)));
+	const reader = producer.subscribe({ delay: { min: Duration.secs(2), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(reader)).toEqual([]);
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	// Accepted, but still only headers: nothing to measure by.
+	expect(readable(reader)).toEqual([]);
+	for (const [sequence, group] of groups.entries()) {
+		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(sequence * 500)));
+		group.finish();
+	}
+	expect(readable(reader)).toEqual([6n, 7n, 8n, 9n, 10n]);
+});
+
+test("a live join reaches back by ticks rounded up, at any timestamp the track accepts", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	// Past what microseconds can hold as a safe number.
+	const base = 10_000_000_000_000;
+	for (let sequence = 0; sequence <= 2; sequence++) {
+		const group = producer.createGroup(BigInt(sequence));
+		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(base + sequence)));
+		group.finish();
+	}
+	// 1.5 ms back from 2 ms past the base is 0.5 ms past it, which only group 0 starts by.
+	const reader = producer.subscribe({
+		delay: { min: Duration.micros(1500), max: Duration.secs(30) },
+		ranges: [LIVE],
+	});
+	expect(readable(reader)).toEqual([0n, 1n, 2n]);
+});
+
+test("a live join measures timestamps between ticks, floored", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null });
+	for (const [sequence, ms] of [0.5, 1.5, 2.5].entries()) {
+		const group = producer.createGroup(BigInt(sequence));
+		group.writeFrame(textFrame(`${sequence}`, Timestamp.fromMillis(ms)));
+		group.finish();
+	}
+	// The edge floors to 2 ms, so 1 ms back is the group starting by 1 ms.
+	const reader = producer.subscribe({ delay: { min: Duration.millis(1), max: Duration.secs(30) }, ranges: [LIVE] });
+	expect(readable(reader)).toEqual([1n, 2n]);
+});
+
+test("a scale-less join reaches back by arrival", () => {
+	const clock = manualTime(0);
+	try {
+		const producer = new TrackProducer("test");
+		producer.accept({ maxAge: null });
+		// Group N arrives N seconds in, and the join comes at 5 s.
+		for (let sequence = 0n; sequence < 5n; sequence++) {
+			const group = producer.createGroup(sequence);
+			group.writeFrame(textFrame(`${sequence}`, Timestamp.unscaled(sequence)));
+			group.finish();
+			clock.set(Number(sequence + 1n) * 1000);
+		}
+		const reader = producer.subscribe({
+			delay: { min: Duration.millis(2500), max: Duration.secs(30) },
+			ranges: [LIVE],
+		});
+		expect(readable(reader)).toEqual([2n, 3n, 4n]);
+		producer.close();
+	} finally {
+		clock.installed.close();
+	}
 });
 
 // A reached end leaves a held group that may still start, so a time start still waits on it.
@@ -4871,9 +5003,9 @@ test("reading a shed frame head requests refresh", async () => {
 	producer.close();
 });
 
-// An end declared with an error keeps the history below it: a reader gets every group, then the
+// A track ended by `fail` keeps the history below its end: a reader gets every group, then the
 // error, even one arriving after the producer closed.
-test("an errored end keeps its history", async () => {
+test("a failed track keeps its history", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
 	for (const sequence of [0n, 1n]) {
 		const group = producer.createGroup(sequence);
@@ -4882,7 +5014,7 @@ test("an errored end keeps its history", async () => {
 		group.finish();
 	}
 	const failed = new StreamError(StreamCode(71));
-	producer.finishAt({ group: 2n, frame: 0 }, failed);
+	producer.fail(failed);
 	producer.close();
 	expect(producer.closed.peek()).toBe(failed);
 
@@ -4906,6 +5038,40 @@ test("an errored end keeps its history", async () => {
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0n);
 	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1n);
 	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
+});
+
+// `fail` ends where `finish` would, after the highest group written, so a late group below it is
+// still taken. Like `finish`, it leaves whatever outcome was already given.
+test("fail ends at the live edge and leaves an end already given", async () => {
+	const failed = new StreamError(StreamCode(71));
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const latest = producer.createGroup(2n);
+	latest.writeFrame(textFrame("c", Timestamp.fromMillis(2)));
+	latest.finish();
+	producer.fail(failed);
+	expect(() => producer.createGroup(3n)).toThrow();
+	const late = producer.createGroup(1n);
+	late.writeFrame(textFrame("b", Timestamp.fromMillis(1)));
+	late.finish();
+	const sub = producer.subscribe({ ranges: [{ start: { absolute: 1n } }], delay: { max: Duration.millis(30_000) } });
+	expect((await sub.recvGroup())?.sequence).toBe(1n);
+	expect((await sub.recvGroup())?.sequence).toBe(2n);
+	await expect(sub.recvGroup()).rejects.toBe(failed);
+	producer.close();
+
+	// An end already declared stands: the track still finishes cleanly.
+	const finished = new TrackProducer("finished").accept({ timescale: Timescale.MILLI, maxAge: null });
+	finished.finish();
+	finished.fail(failed);
+	finished.close();
+	expect(finished.closed.peek()).toBeNull();
+
+	// So does an abort.
+	const aborted = new TrackProducer("aborted").accept({ timescale: Timescale.MILLI, maxAge: null });
+	const cause = new StreamError(StreamCode(70));
+	aborted.abort(cause);
+	aborted.fail(failed);
+	expect(aborted.closed.peek()).toBe(cause);
 });
 
 // Creating a group says nothing about the gap it leaves: groups may be created out of order. An

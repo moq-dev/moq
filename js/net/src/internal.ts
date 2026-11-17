@@ -83,20 +83,11 @@ export function groupBounds(groups: Groups = {}): { start: bigint; end?: bigint 
 
 /**
  * The announce-interest prefix a scope needs on a prefix-shaped wire: its literal head.
- * The peer echoes every suffix beneath it, and the caller filters what arrives.
- *
- * A head cut at an escaped `/`, such as `a\` from `a\/*`, ends in half an escape, so it
- * falls back to its parent.
+ * The peer echoes every suffix beneath it, and the caller filters what arrives. A pattern's
+ * literal segments are spelled like a path's, so its head is always a path.
  */
 export function scopeHead(scope: Path.Pattern): Path.Valid {
-	let head = scope.head;
-	for (;;) {
-		try {
-			return Path.from(head);
-		} catch {
-			head = head.slice(0, Math.max(head.lastIndexOf("/"), 0));
-		}
-	}
+	return Path.from(scope.head);
 }
 
 /**
@@ -1472,11 +1463,13 @@ export function mostSpecific<T>(
 
 /** Covering prefixes, most specific first, including the empty root. */
 export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
-	for (;;) {
-		yield path;
-		if (path === "") return;
-		const slash = path.lastIndexOf("/");
-		path = (slash < 0 ? "" : path.slice(0, slash)) as Path.Valid;
+	const segments = Path.parts(path);
+	let end = path.length;
+	for (let i = segments.length; ; i--) {
+		yield path.slice(0, end) as Path.Valid;
+		if (i === 0) return;
+		// Drop the last segment and the `/` before it, if any.
+		end = Math.max(end - segments[i - 1].length - 1, 0);
 	}
 }
 

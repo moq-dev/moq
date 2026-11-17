@@ -121,7 +121,7 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"before"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(read(&mut sub).await, Some((0, b"before".to_vec())), "{version}");
 		assert_eq!(opened(&pair, SUBSCRIBE_TRACKS), 0, "{version}: listed unasked");
 
@@ -135,7 +135,7 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 		group
 			.write_frame(moq_net::Timestamp::unscaled(group.start), &b"after"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		assert_eq!(read(&mut sub).await, Some((1, b"after".to_vec())), "{version}");
 		assert_eq!(subscribes(&pair), 1, "{version}");
 	}

@@ -20,7 +20,7 @@ pub(super) struct Subscriptions {
 	priority: BTreeMap<i8, usize>,
 	// Keyed by budget, so `None` counts as the widest of all.
 	max_delay: BTreeMap<Duration, usize>,
-	// Only stated minimums count, so an unstated one never pulls the smallest to zero.
+	// Only stated minimums count, so an unstated one never reads as zero.
 	min_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
@@ -65,7 +65,8 @@ impl Subscriptions {
 			(
 				*self.priority.last_key_value().unwrap().0,
 				Delay {
-					min: self.min_delay.first_key_value().map(|(min, _)| *min),
+					// The largest, so an upstream starts far enough back for the reader that buffers most.
+					min: self.min_delay.last_key_value().map(|(min, _)| *min),
 					max: Some(*self.max_delay.last_key_value().unwrap().0).filter(|budget| *budget != Duration::MAX),
 				},
 				if self.descending == 0 {

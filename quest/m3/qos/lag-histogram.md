@@ -45,8 +45,10 @@ Decided 2026-10-26 (maintainer, on #6791), each with its reason:
   `Billing` mints an offset whenever a write ends a frame and retires them
   oldest first, so the frontier rides those offsets rather than minting its
   own.
-- **No hook, no fields.** A subscription whose backend reports `poll_acked`
-  unsupported (qmux, the browser transport) keeps no frontier and adds
+- **No hook, no fields.** A subscription whose backend cannot see
+  acknowledgments (`poll_acked` answers `Unsupported`, as the browser
+  transport does, or `Sent`, as qmux does once its link took the bytes, which
+  says nothing of when the peer got them) keeps no frontier and adds
   nothing to `lag` or `dropped`. A node serving only such viewers leaves both
   absent. Document this in `doc/concept/stats.md`.
 - **The lag edge is the newest group's.** On the branch, `Produced.newest` is

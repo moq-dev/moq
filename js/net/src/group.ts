@@ -704,16 +704,22 @@ export class Producer {
 	}
 
 	/**
-	 * Marks the group complete, returning it as {@link Finished}: no more frames will be written.
-	 * Idempotent.
-	 *
-	 * `end`, in the track's timescale, says the group is whole and ends there, as the Rust
-	 * `group::Producer::finish` does; without it the group only closed, as the Rust `close` does:
-	 * every frame written reaches its readers, but they can't tell the group is whole. An `end` at
-	 * or before the group's start throws {@link TimestampMismatch}.
+	 * Ends the group without saying where it ends, returning it as {@link Finished}: every frame
+	 * written reaches its readers, but they can't tell the group is whole. Idempotent, as the
+	 * Rust `group::Producer::finish`.
 	 */
-	finish(end?: bigint): Finished {
-		if (end !== undefined && end <= this.sequence) throw new TimestampMismatch();
+	finish(): Finished {
+		this.#end(null);
+		return this;
+	}
+
+	/**
+	 * Ends the group whole at `end`, the exclusive end of its presentation in the track's
+	 * timescale, returning it as {@link Finished}, as the Rust `group::Producer::finish_at`. An
+	 * `end` at or before the group's start throws {@link TimestampMismatch}.
+	 */
+	finishAt(end: bigint): Finished {
+		if (end <= this.sequence) throw new TimestampMismatch();
 		if (this.#state.closed.peek() === undefined) this.#state.end = end;
 		this.#end(null);
 		return this;
@@ -1007,7 +1013,7 @@ export class Consumer {
 
 	/**
 	 * Where the group ends in its track's timescale, once its producer finished it whole with
-	 * {@link Producer.finish}'s `end`: undefined while it is open, or when it only closed.
+	 * {@link Producer.finishAt}'s `end`: undefined while it is open, or when it ended without one.
 	 */
 	get end(): bigint | undefined {
 		return this.#state.closed.peek() === null ? this.#state.end : undefined;

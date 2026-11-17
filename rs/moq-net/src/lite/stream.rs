@@ -41,6 +41,8 @@ pub enum DataType {
 	Group = 0,
 	/// The lite-05+ SETUP stream: one SETUP message, then FIN.
 	Setup = 1,
+	/// The lite-07+ Announce Stream: everything an endpoint says about routing.
+	Announce = 3,
 }
 
 impl<'a> Decode<'a, Version> for DataType {
