@@ -106,7 +106,7 @@ pub struct MoqClientTls {
 /// QUIC transport tuning, mirroring moq-tokio's QUIC config. Ignored by the WebSocket fallback.
 ///
 /// Null fields use the library default, which [`moq_client_defaults`] reports where there is
-/// one; `gso`, `mtu_discovery`, and `congestion_control` leave the choice to the backend.
+/// one; `gso` and `mtu_discovery` leave the choice to the backend.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqQuicConfig {
 	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint; 0 is refused.
@@ -127,7 +127,7 @@ pub struct MoqQuicConfig {
 	/// Path MTU discovery: probes for the largest packet size the path allows.
 	#[uniffi(default = None)]
 	pub mtu_discovery: Option<bool>,
-	/// The congestion control family.
+	/// The congestion control algorithm, BBR v3 when null.
 	#[uniffi(default = None)]
 	pub congestion_control: Option<Arc<MoqCongestionControl>>,
 	/// Directory, which must exist, to write qlog traces into.
@@ -139,7 +139,7 @@ pub struct MoqQuicConfig {
 	pub keylog: Option<bool>,
 }
 
-/// The congestion control family for a QUIC connection.
+/// The congestion control algorithm for a QUIC connection.
 ///
 /// An immutable object rather than an enum, so a new algorithm joins as a constructor without
 /// breaking callers that switch over a closed enum.
@@ -149,23 +149,23 @@ pub struct MoqCongestionControl(moq_tokio::quic::CongestionControl);
 
 #[uniffi::export]
 impl MoqCongestionControl {
-	/// Loss-based (CUBIC): chases throughput, so the send rate sawtooths.
+	/// BBR v3, the default: keeps queues short and the send rate steady enough for an encoder
+	/// to track.
 	#[uniffi::constructor]
-	pub fn loss() -> Arc<Self> {
-		Arc::new(Self(moq_tokio::quic::CongestionControl::Loss))
+	pub fn bbr() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Bbr))
 	}
 
-	/// Delay-based (BBR v3), the default: keeps queues short and the send rate steady enough for
-	/// an encoder to track.
+	/// CUBIC: chases throughput, so the send rate sawtooths.
 	#[uniffi::constructor]
-	pub fn delay() -> Arc<Self> {
-		Arc::new(Self(moq_tokio::quic::CongestionControl::Delay))
+	pub fn cubic() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Cubic))
 	}
 
 	/// No congestion control and no pacing, for tests and controlled links.
 	#[uniffi::constructor]
-	pub fn none() -> Arc<Self> {
-		Arc::new(Self(moq_tokio::quic::CongestionControl::None))
+	pub fn unlimited() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Unlimited))
 	}
 }
 
@@ -177,7 +177,7 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 		quic.keep_alive = config.keep_alive.map(Into::into);
 		quic.gso = config.gso;
 		quic.mtu_discovery = config.mtu_discovery;
-		quic.congestion_control = config.congestion_control.map(|family| family.0);
+		quic.congestion_control = config.congestion_control.map(|algorithm| algorithm.0);
 		quic.qlog = config.qlog.map(Into::into);
 		quic.keylog = config
 			.keylog

@@ -412,8 +412,8 @@ class QuicConfig:
     ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
     (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
     raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
-    the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
-    ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
+    the ping interval (zero uses the default). ``gso`` and ``mtu_discovery`` leave the
+    choice to the backend when ``None``, and a ``None`` ``congestion_control`` runs BBR v3. ``qlog`` is a
     directory, which must exist, for qlog traces.
     ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
     decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.
