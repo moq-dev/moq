@@ -16,6 +16,11 @@ recorded the numbers in
 [release-perf.md](/.github/release-perf.md#relay-cpu-2026-11-16) and accepted
 the rest of the cost for the cut.
 
+Decided 2026-11-17 (maintainer, on
+[moq-dev/moq#8979](https://github.com/moq-dev/moq/pull/8979#issuecomment-6937624164)):
+the cut does not wait on this; it follows the cut in m3. Rejected: moving it
+to m2.
+
 Facts:
 
 - Every subscriber of a track wakes on each group at once. Its
@@ -48,16 +53,6 @@ Measure futex and total instructions per frame in both workloads with
 `just bench-profile instructions chat "2 8 16" tokio-workers origin/main`,
 and relay CPU with `just bench-relay origin/release quic`, both before and
 after; `just bench-fanout` checks the single-threaded count did not grow.
-
-## Waiting
-
-- Maintainer: whether the cut waits on this. Recommended: no, it follows the
-  cut in m3. With the fix in
-  [moq-dev/moq#8979](https://github.com/moq-dev/moq/pull/8979), relay CPU per
-  frame against `release` reads a median +8.7% in `chat` and +18.8% in
-  `fanout` (signs vary across pairs) and -15.2% in `video`, memory is below
-  `release`, and the change reworks the drop cursor's judgement, which is too
-  large to review beside the cut. Otherwise `quest mv` it into m2.
 
 ## Related
 
