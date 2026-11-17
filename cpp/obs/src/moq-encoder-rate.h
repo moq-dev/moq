@@ -3,6 +3,7 @@
 
 #include <obs-data.h>
 #include <cctype>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -58,6 +59,9 @@ inline MoQPeak EncoderPeak(const std::string &id, obs_data_t *settings)
 	return {key, kbps, averaged ? obs_data_get_int(settings, "bitrate") : 0};
 }
 
+// x264's own default constant quality level, which a lossless CRF of 0 gives way to.
+constexpr long long kDefaultX264Crf = 23;
+
 inline bool IsNvenc(const std::string &id)
 {
 	return id.rfind("obs_nvenc_", 0) == 0;
@@ -78,7 +82,7 @@ inline long long ConfiguredCapKbps(const std::string &id, obs_data_t *settings)
 
 // The options in `x264opts` that set a rate of their own: OBS applies them after its rate
 // parameters, so `vbv-maxrate` and `vbv-bufsize` replace the VBV (0 disables it), `bitrate`
-// replaces the rate mode, and `qp` drops the VBV for constant QP.
+// replaces the rate mode, and `qp` or a `crf` of 0 (lossless) drops the VBV for constant QP.
 inline std::string StripX264RateOptions(const std::string &options, std::vector<std::string> *removed)
 {
 	std::istringstream input(options);
@@ -89,7 +93,10 @@ inline std::string StripX264RateOptions(const std::string &options, std::vector<
 		for (char &c : name)
 			if (c == '_')
 				c = '-';
-		if (name == "vbv-maxrate" || name == "vbv-bufsize" || name == "bitrate" || name == "qp") {
+		const size_t assign = option.find('=');
+		const bool lossless = name == "crf" && assign != std::string::npos &&
+				      std::atof(option.c_str() + assign + 1) <= 0;
+		if (name == "vbv-maxrate" || name == "vbv-bufsize" || name == "bitrate" || name == "qp" || lossless) {
 			removed->push_back(option);
 			continue;
 		}
@@ -144,6 +151,12 @@ inline MoQCap EnforceCap(const std::string &id, obs_data_t *read, obs_data_t *wr
 	if (id == "obs_x264") {
 		set_mode(mode == "CBR" ? "CBR" : "VBR");
 		set_int("bitrate", cap_kbps);
+		// A CRF of 0 is lossless, which x264 runs as constant QP with no VBV. CBR ignores the setting.
+		if (mode != "CBR" && obs_data_get_int(read, "crf") <= 0) {
+			obs_data_set_int(write, "crf", kDefaultX264Crf);
+			result.changed = true;
+			result.replaced.push_back("crf 0");
+		}
 		// A buffer of its own can hold a burst past the cap; unset, OBS sizes it to the bitrate.
 		if (use_bufsize) {
 			obs_data_set_bool(write, "use_bufsize", false);

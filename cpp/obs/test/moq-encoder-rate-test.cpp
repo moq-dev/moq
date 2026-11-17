@@ -66,8 +66,10 @@ int main()
 		obs_data_set_string(&user, "rate_control", c.before);
 		obs_data_set_int(&user, "bitrate", 6000);
 		obs_data_set_int(&user, "buffer_size", 20000);
+		obs_data_set_int(&user, "crf", 23);
 		obs_data_set_bool(&user, "use_bufsize", true);
-		obs_data_set_string(&user, "x264opts", "tune=film vbv-bufsize=0 vbv_maxrate=0 qp=20 bitrate=1 crf=20");
+		obs_data_set_string(&user, "x264opts",
+				    "tune=film vbv-bufsize=0 vbv_maxrate=0 qp=20 bitrate=1 crf=20 crf=0");
 		assert(ConfiguredCapKbps("obs_x264", &user) == 6000);
 		const MoQCap cap = EnforceCap("obs_x264", &user, &patch, 6000);
 		assert(cap.changed);
@@ -78,12 +80,30 @@ int main()
 		assert(!patch.values.count("bitrate"));
 		assert(!obs_data_get_bool(&patch, "use_bufsize"));
 		assert(std::string(obs_data_get_string(&patch, "x264opts")) == "tune=film crf=20");
-		// Four options and the buffer, plus the mode when it changed.
-		assert(cap.replaced.size() == 5 + (std::string(c.before) != c.after && *c.before ? 1 : 0));
+		// Five options and the buffer, plus the mode when it changed.
+		assert(cap.replaced.size() == 6 + (std::string(c.before) != c.after && *c.before ? 1 : 0));
 	}
+	// A lossless CRF, in the setting or the options, is a constant QP with no VBV.
+	obs_data_t lossless, lossless_patch;
+	obs_data_set_string(&lossless, "rate_control", "CRF");
+	obs_data_set_int(&lossless, "bitrate", 6000);
+	obs_data_set_int(&lossless, "crf", 0);
+	const MoQCap crf0 = EnforceCap("obs_x264", &lossless, &lossless_patch, 6000);
+	assert(crf0.changed && obs_data_get_int(&lossless_patch, "crf") == 23);
+	// CBR ignores the setting, and only a zero option is lossless.
+	obs_data_t cbr_crf, cbr_crf_patch;
+	obs_data_set_string(&cbr_crf, "rate_control", "CBR");
+	obs_data_set_int(&cbr_crf, "bitrate", 6000);
+	obs_data_set_int(&cbr_crf, "crf", 0);
+	obs_data_set_string(&cbr_crf, "x264opts", "crf=0.0 crf=18");
+	EnforceCap("obs_x264", &cbr_crf, &cbr_crf_patch, 6000);
+	assert(!cbr_crf_patch.values.count("crf"));
+	assert(std::string(obs_data_get_string(&cbr_crf_patch, "x264opts")) == "crf=18");
+
 	// A compliant encoder is not touched.
 	obs_data_t clean, nothing;
 	obs_data_set_string(&clean, "rate_control", "VBR");
+	obs_data_set_int(&clean, "crf", 23);
 	obs_data_set_int(&clean, "bitrate", 6000);
 	obs_data_set_string(&clean, "x264opts", "tune=film crf=20");
 	const MoQCap untouched = EnforceCap("obs_x264", &clean, &nothing, 6000);
