@@ -12,6 +12,10 @@ type Update =
 	| { readonly kind: "gap" }
 	| { readonly kind: "end"; readonly group: bigint; readonly end: Duration };
 
+// How far, in microseconds, pre-roll output may end past the pre-roll: it absorbs the restamped
+// timestamps' rounding, and is shorter than any codec frame (Opus's shortest is 2.5 ms).
+const PREROLL_SLACK = 1_000;
+
 /** An encoded frame handed to the decoder, on the timeline the decoder saw it. */
 export interface Encoded {
 	/** Microseconds. */
@@ -138,12 +142,15 @@ export class Terminal {
 		return preroll;
 	}
 
-	/** Whether a decoded sample is pre-roll output, which only primes the decoder. */
+	/**
+	 * Whether a decoded sample is pre-roll output alone, which only primes the decoder. A sample
+	 * reaching past the pre-roll holds the audio after the gap, so it is not.
+	 */
 	primes(sample: SampleSpan): boolean {
 		const end = this.#prerollEnd;
 		if (end === undefined) return false;
-		const middle = sample.timestamp + (sample.numberOfFrames * 500_000) / sample.sampleRate;
-		if (middle < end) return true;
+		const sampleEnd = sample.timestamp + (sample.numberOfFrames * 1_000_000) / sample.sampleRate;
+		if (sampleEnd <= end + PREROLL_SLACK) return true;
 		this.#prerollEnd = undefined;
 		return false;
 	}

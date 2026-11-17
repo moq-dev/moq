@@ -686,8 +686,7 @@ export class Decoder {
 			let written: number | undefined;
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					this.#count(key, { decoded: 1 });
-					const landed = this.#emit(data);
+					const landed = this.#emit(data, key);
 					if (landed !== undefined) written = Math.max(written ?? landed, landed);
 				},
 				error: (error) => failure.set(error),
@@ -781,8 +780,7 @@ export class Decoder {
 			let written: number | undefined;
 			const decoder = new AudioDecoder({
 				output: (data) => {
-					this.#count(key, { decoded: 1 });
-					const landed = this.#emit(data);
+					const landed = this.#emit(data, key);
 					if (landed !== undefined) written = Math.max(written ?? landed, landed);
 				},
 				error: (error) => failure.set(error),
@@ -1051,13 +1049,15 @@ export class Decoder {
 		this.#handover.declared(end);
 	}
 
-	// Place decoded audio, returning where the PCM written ends, in microseconds.
-	#emit(sample: AudioData): number | undefined {
+	// Count and place decoded audio, returning where the PCM written ends, in microseconds.
+	#emit(sample: AudioData, key: Key | undefined): number | undefined {
 		// Whatever becomes of it, the output answers the frames it was decoded from, so the gate counts
 		// only what still decodes. Reported after any insert, so the gate always counts the frame as
 		// either decoding or in the ring.
-		// Pre-roll output answers no frame: it only primes the decoder, and the warmup trims it.
+		// Pre-roll output answers no frame: it only primes the decoder, and the warmup trims it. It is
+		// not counted as decoded either, since the frames it came from already were.
 		const preroll = this.#terminal.primes(sample);
+		if (!preroll) this.#count(key, { decoded: 1 });
 		const decoded = sample.timestamp + (sample.numberOfFrames / sample.sampleRate) * 1_000_000;
 		let landed: number | undefined;
 		try {

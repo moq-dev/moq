@@ -533,6 +533,7 @@ it("re-primes the decoder on the warmup before a gap, so the frame after it play
 		await microtasks();
 		await playback.play();
 		const played = audioChunks.length;
+		const decoded = playback.feedback().audio?.decoded ?? 0;
 		playback.push({
 			kind: "gap",
 			timestamp: Duration.micros(frameTimestamp + 20_000),
@@ -551,6 +552,8 @@ it("re-primes the decoder on the warmup before a gap, so the frame after it play
 			at,
 		]);
 		expect(playback.inserted()).toContain(at);
+		// The pre-roll's output is not counted as decoded again; only the frame after the gap is.
+		expect(playback.feedback().audio?.decoded).toBe(decoded + 1);
 	} finally {
 		playback.close();
 		await microtasks();

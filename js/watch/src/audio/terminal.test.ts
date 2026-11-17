@@ -146,6 +146,25 @@ test("a gap re-primes the decoder on the warmup before it, so the audio after it
 	expect(terminal.span(opus(1_020_000))).toEqual({ timestamp: 1_013_500, frameOffset: 0, frames: 960 });
 });
 
+// A decoder that coalesces outputs can hand back the pre-roll and the frame after the gap together.
+test("output reaching past the pre-roll holds the audio after the gap", () => {
+	const terminal = new Terminal();
+	terminal.clear(0, 80_000);
+	for (let i = 0; i < 4; i++) {
+		terminal.update(frame(0n, i * 20_000));
+		terminal.decoded(packet(i * 20_000), Duration.micros(20_000));
+	}
+	terminal.update(gap);
+	terminal.update(frame(1n, 1_000_000));
+	expect(terminal.preroll()).toHaveLength(4);
+
+	// 20 ms of pre-roll alone, then the other 60 ms of it with the frame after the gap.
+	expect(terminal.primes(opus(920_000))).toBe(true);
+	const coalesced = { timestamp: 940_000, sampleRate: 48_000, numberOfFrames: 4 * 960 };
+	expect(terminal.primes(coalesced)).toBe(false);
+	expect(terminal.span(coalesced)).toEqual({ timestamp: 1_000_000, frameOffset: 3 * 960, frames: 960 });
+});
+
 test("gaps closer than the warmup still play, the pre-roll carrying over the last one", () => {
 	const terminal = new Terminal();
 	terminal.clear(0, 80_000);
