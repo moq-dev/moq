@@ -288,7 +288,7 @@ export class Decoder {
 		});
 		this.#output = this.#signals.computed((effect) => {
 			const ring = effect.get(this.#ring);
-			return ring ? effect.get(ring.output) : undefined;
+			return ring ? effect.get(ring.lead) : undefined;
 		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());
