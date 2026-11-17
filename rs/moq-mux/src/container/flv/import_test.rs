@@ -860,7 +860,7 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video: snapshot.video.renditions.keys().next().unwrap().clone(),
-		clock: snapshot.media.clock.expect("the catalog advertises a clock"),
+		clock: snapshot.sync.clock.expect("the catalog advertises a clock"),
 		arrival: before..=after,
 		refused,
 	}
@@ -914,7 +914,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let provisional = catalog.snapshot().media.clock.expect("a clock");
+	let provisional = catalog.snapshot().sync.clock.expect("a clock");
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut importer = Import::new(broadcast, catalog.reserve());
 
@@ -922,7 +922,7 @@ async fn first_catalog_carries_the_anchored_clock() {
 	assert_eq!(clocks.drain(), vec![], "the sequence headers alone publish nothing");
 
 	importer.decode(frames).unwrap();
-	let anchored = catalog.snapshot().media.clock.expect("a clock");
+	let anchored = catalog.snapshot().sync.clock.expect("a clock");
 	assert_ne!(anchored, provisional, "the first frame anchors the clock");
 	let published = clocks.drain();
 	assert!(!published.is_empty(), "the first frame publishes the catalog");

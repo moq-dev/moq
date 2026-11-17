@@ -69,5 +69,4 @@ publisher is renamed). moq-ffi and moq-c keep their names. Wire: none.
 
 ## Related
 
-- [One device selector](/quest/m2/native-media-config.md) - changes `encode::Config` in the same crate
 - [A published capture exposes its grant](/quest/m3/video-publish-grant.md) - adds a getter to the capture handle this runs on

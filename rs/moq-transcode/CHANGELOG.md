@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- [**breaking**] `Config::decoder_device` and `Config::encoder_device`, each a `moq_video::Device` present on every platform and feature set, replace the `cfg`-gated `vaapi`, `v4l2_decoder`, and `v4l2_encoder` paths, and also place NVIDIA work on a chosen GPU.
 - `active::Consumer` stops reporting a rendition the ladder retired before it encoded a frame, so a source that keeps resizing no longer grows every cursor.
 
 ### Fixed

@@ -27,7 +27,7 @@ Each ships inside `moq-cli` as `moq import <gateway>`, and all but RTSP as `moq 
 | --- | --- |
 | [RTMP](/bin/rtmp) | Accept RTMP/E-RTMP pushes from OBS or FFmpeg; serve RTMP plays; restream to Twitch-style endpoints. |
 | [SRT](/bin/srt) | Accept SRT contribution; serve SRT to players; pull from or push to a remote SRT endpoint. |
-| [WebRTC](/bin/rtc) | WHIP ingest and WHEP playback in either HTTP role. |
+| [WebRTC](/bin/webrtc) | WHIP ingest and WHEP playback in either HTTP role. |
 | [HLS](/bin/hls) | Serve any broadcast as HLS from the relay cache; import a remote HLS playlist. |
 | [RTSP](/bin/cli#import) | Pull an IP camera's H.264/H.265 and AAC from its own network. |
 

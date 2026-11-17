@@ -1942,7 +1942,8 @@ mod test {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		assert_eq!(catalog.audio.renditions.len(), 1, "program 50 publishes its stream");
 	}
 
@@ -1982,7 +1983,8 @@ mod test {
 			.next()
 			.await
 			.unwrap()
-			.expect("a catalog");
+			.expect("a catalog")
+			.value;
 		catalog.audio.renditions.len()
 	}
 
@@ -2445,7 +2447,8 @@ mod test {
 				.next()
 				.await
 				.unwrap()
-				.expect("a catalog");
+				.expect("a catalog")
+				.value;
 			let renditions: Vec<_> = catalog.audio.renditions.iter().collect();
 			assert_eq!(renditions.len(), 1, "{path} carries its own program's one stream");
 			let (name, config) = renditions[0];
@@ -2459,7 +2462,7 @@ mod test {
 			assert!(fills.contains(&frame.payload[4]), "{path} carries only its own program");
 			let skew = Duration::from_secs(2);
 			let wall = catalog
-				.media
+				.sync
 				.clock
 				.expect("the catalog advertises a clock")
 				.wall_clock(frame.timestamp)

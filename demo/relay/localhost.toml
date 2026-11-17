@@ -15,7 +15,7 @@ bind = "[::]:4443"
 # This is used for local development, in conjunction with a fingerprint, or with TLS verification disabled.
 tls.generate = ["localhost"]
 
-# Every version, plus the opt-in moq-lite-07-wip that sockets (such as MoQ Boy's) need.
+# Every version, plus the opt-in moq-lite-07-wip that CARLA's sockets need.
 version = [
     "moq-lite-07-wip",
     "moq-lite-06",

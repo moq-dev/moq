@@ -123,11 +123,11 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Timestamp, track::I
 	match timed {
 		true => producer.write_frame(millis(7), &b"frame"[..]).unwrap(),
 		false => {
-			let mut group = producer.append_group(7).unwrap();
+			let mut group = producer.append_group(Timestamp::unscaled(7)).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"frame"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 	let received = next_frame(&mut subscriber).await;
@@ -205,7 +205,7 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 			group
 				.write_frame(moq_net::Timestamp::unscaled(group.start), &b"untimed"[..])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		kio::clock::sleep(Duration::from_secs(1)).await;
 
@@ -299,7 +299,9 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 		let groups = request.requests();
 		let _track = request.accept(untimed());
 		let request = match futures::future::select(std::pin::pin!(groups.requested_fill()), &mut waiting).await {
-			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
+			futures::future::Either::Left((request, _)) => {
+				support::groups(request.expect("the fetch reaches the publisher"))
+			}
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
 		let mut group = request.accept(3, timed()).unwrap();
@@ -309,7 +311,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 				Bytes::from_static(b"segment"),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 
 		let mut fetched = waiting.await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().unwrap();

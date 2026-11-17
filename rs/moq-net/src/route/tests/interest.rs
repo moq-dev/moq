@@ -356,6 +356,127 @@ fn a_scope_with_several_regions_asks_for_each() {
 	);
 }
 
+/// A node wanting more prefixes than one request holds asks for the prefix they share,
+/// inside each region of the neighbour's scope, so the neighbour never refuses the set.
+#[test]
+fn a_set_too_large_for_one_request_is_asked_for_coarsely() {
+	let long = |head: &str, n: usize| p(&format!("{head}/{}", format!("{n:02}").repeat(500)));
+	let fits = |set: &BTreeSet<Path>| path::ask_bytes(set, &Path::empty()) <= path::ASK_BYTES;
+	let wanted: BTreeSet<Path> = (0..40).flat_map(|n| [long("live/a", n), long("live/b", n)]).collect();
+	assert!(!fits(&wanted));
+
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(wanted.clone()).unwrap();
+	router.connect(1, 1, Link::default()).unwrap();
+	assert_eq!(router.asks(1), BTreeSet::from([p("live")]));
+
+	// Each region's prefixes give way on their own, and only until the set fits.
+	let link = Link {
+		scope: Some(Scope {
+			regions: vec![p("live/a"), p("live/b")],
+			qualify: Arc::new(|id| id | QUALIFIED),
+		}),
+		..Link::default()
+	};
+	router.connect(2, 2, link).unwrap();
+	let asks = router.asks(2);
+	assert!(fits(&asks));
+	assert!(
+		asks.contains(&p("live/a")) != asks.contains(&p("live/b")),
+		"{}",
+		asks.len()
+	);
+	assert_eq!(asks.len(), 41);
+	assert!(
+		asks.iter()
+			.all(|prefix| wanted.contains(prefix) || prefix.as_str().len() == 6)
+	);
+
+	// A set that fits is asked for as it is.
+	let few: BTreeSet<Path> = wanted.iter().take(8).cloned().collect();
+	router.watch(few.clone()).unwrap();
+	assert_eq!(router.asks(1), few);
+
+	// A prefix alone in its region gives way to the region, so none is dropped.
+	let alone: BTreeSet<Path> = (0..80).map(|n| long(&format!("r{n}"), n)).collect();
+	assert!(!fits(&alone));
+	router.watch(alone.clone()).unwrap();
+	let link = Link {
+		scope: Some(Scope {
+			regions: (0..80).map(|n| p(&format!("r{n}"))).collect(),
+			qualify: Arc::new(|id| id | QUALIFIED),
+		}),
+		..Link::default()
+	};
+	router.connect(3, 3, link).unwrap();
+	let asks = router.asks(3);
+	assert!(fits(&asks));
+	assert_eq!(asks.len(), 80, "every region is still asked for");
+	assert!(
+		asks.iter()
+			.all(|asked| alone.iter().any(|prefix| prefix.has_prefix(asked)))
+	);
+
+	// The session sends each prefix as it follows its root, which is what must fit.
+	let root = p(&"root".repeat(250));
+	let beneath: BTreeSet<Path> = (0..80).map(|n| root.join(&p(&format!("r{n}"))).unwrap()).collect();
+	assert!(!fits(&beneath));
+	router.watch(beneath.clone()).unwrap();
+	let link = Link {
+		root: root.clone(),
+		..Link::default()
+	};
+	router.connect(4, 4, link).unwrap();
+	assert_eq!(router.asks(4), beneath);
+}
+
+/// Swapping a set near the limit for another names every removed prefix's Prefix ID
+/// beside every added prefix, past one request: the router still asks it as one edit,
+/// which the session sends in as many messages as it takes, so nothing still wanted goes
+/// unrequested in between.
+#[test]
+fn a_swap_too_large_for_one_request_goes_as_one_edit() {
+	let fits = |set: &BTreeSet<Path>| path::ask_bytes(set, &Path::empty()) <= path::ASK_BYTES;
+	let set = |head: &str, n: usize| -> BTreeSet<Path> { (0..n).map(|i| p(&format!("{head}/{i:05}"))).collect() };
+	let mut old = set("x", 5000);
+	old.insert(p("a"));
+	let narrowed = set("a", 2000);
+	let new: BTreeSet<Path> = narrowed.iter().cloned().chain(set("y", 3000)).collect();
+	assert!(fits(&old) && fits(&new));
+	let asked = |router: &mut path::Router<usize, u8>| -> Vec<path::Edit> {
+		(router.drain().into_iter())
+			.filter_map(|out| match out {
+				path::Out::Ask { edit, .. } => Some(edit),
+				_ => None,
+			})
+			.collect()
+	};
+
+	let mut router = path::Router::<usize, u8>::new(99, 1, Doubt::DEFAULT);
+	router.watch(old.clone()).unwrap();
+	router.connect(1, 1, Link::default()).unwrap();
+	router.edited(1);
+	asked(&mut router);
+
+	router.watch(new.clone()).unwrap();
+	let edits = asked(&mut router);
+	let [edit] = edits.as_slice() else {
+		panic!("one edit: {}", edits.len());
+	};
+	let add: BTreeSet<Path> = edit.add.iter().cloned().collect();
+	let remove: BTreeSet<Path> = edit.remove.iter().cloned().collect();
+	// Past one ANNOUNCE_REQUEST, the session sends it in parts.
+	let ids = (0..edit.remove.len() as u64).map(|id| id << 30).collect();
+	let adds = edit.add.iter().map(|prefix| (prefix.clone(), false)).collect();
+	assert!(crate::lite::request_parts(ids, adds, crate::lite::Version::Lite07).len() > 1);
+	assert_eq!(add, new.difference(&old).cloned().collect());
+	assert_eq!(remove, old.difference(&new).cloned().collect());
+	assert!(narrowed.is_subset(&add) && remove.contains(&p("a")));
+	router.edited(1);
+	assert!(asked(&mut router).is_empty());
+	assert_eq!(router.asks(1), new);
+}
+
 /// Widening several prefixes into one keeps the route this node was using at any of
 /// them, though the sender reflects a cheaper one from another prefix there: that
 /// one crosses a node this node doubts, which only a route already in use may stay

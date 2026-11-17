@@ -1,24 +1,18 @@
 {
 	"name": "@moq/ui",
 	"type": "module",
-	"version": "0.1.0",
-	"description": "Presentation components shared by the @moq/watch and @moq/publish overlays",
+	"version": "0.0.0",
+	"description": "Presentation code the @moq/watch and @moq/publish overlays share, bundled into each",
 	"license": "(MIT OR Apache-2.0)",
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/moq-dev/moq.git",
-		"directory": "js/ui"
-	},
+	"private": true,
 	"exports": {
 		".": "./src/index.ts",
 		"./stats.css": "./src/stats.css"
 	},
 	"sideEffects": false,
 	"scripts": {
-		"build": "rm -rf dist && vite build && tsc -p tsconfig.build.json && bun ../common/package.ts",
 		"check": "tsc --noEmit",
-		"test": "bun test --pass-with-no-tests",
-		"release": "bun ../common/release.ts"
+		"test": "bun test --pass-with-no-tests"
 	},
 	"dependencies": {
 		"@moq/signals": "workspace:^"

@@ -39,7 +39,7 @@ doc = false
 # `cluster::Options::network`, which routes peer dials over in-memory links, the `sim`
 # network of named relays those links join, and `cluster::Options::sim`, which binds
 # them on a simulated QUIC host.
-test-support = ["kio/sim", "moq-tokio/sim"]
+test-support = ["kio/sim", "moq-tokio/test-support"]
 jemalloc = ["moq-tokio/jemalloc"]
 
 [dependencies]
@@ -113,6 +113,8 @@ moq-congestion = { path = "../moq-congestion" }
 # The shared session bench fills FETCH runs through the `fuzz` module.
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
+# The tests dial and serve bare QUIC and WebTransport through moq-tokio's driver.
+moq-tokio = { path = "../moq-tokio", features = ["test-support"] }
 pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }

@@ -78,7 +78,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 		.unwrap();
 	let mut cached = track.append_next().unwrap();
 	cached.write_frame(cached.at_start(), b"cached".as_ref()).unwrap();
-	cached.close().unwrap();
+	cached.finish().unwrap();
 	broadcast.announce().unwrap();
 
 	let consumer = nodes.last().unwrap().consume();
@@ -126,7 +126,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	let mut live = track.append_next().unwrap();
 	live.write_frame(Timestamp::from_millis(1).unwrap(), b"live".as_ref())
 		.unwrap();
-	live.close().unwrap();
+	live.finish().unwrap();
 	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: the live group did not arrive"))

@@ -11,6 +11,7 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
 import { hooks, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
+import { requestedGroups } from "./mock.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
@@ -285,9 +286,9 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 	const handles = sources.map((source) => source.consume());
 	const [ta, tb] = sources.map(copy);
 	const requests = tb.producer.requests();
-	const fills: track.Fill[] = [];
+	const fills: track.FillGroups[] = [];
 	void (async () => {
-		for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) fills.push(fill);
+		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) fills.push(fill);
 	})();
 	tb.write(6n);
 	tb.producer.finish();
@@ -3237,7 +3238,7 @@ test("a routed track's errored end outlives the copy that declared it", async ()
 	const sub = front.consumer.track("seq").subscribe();
 	ta.write(0n);
 	const failed = new StreamError(StreamCode(71));
-	ta.producer.finishAt({ group: 1n, frame: 0 }, failed);
+	ta.producer.fail(failed);
 	const group = await sub.recvGroup();
 	expect(group?.sequence).toBe(0n);
 	group?.close();
@@ -3290,7 +3291,8 @@ test("an end a replaced copy declared holds across a swap", async () => {
 	expect(await sub.finished()).toEqual({ group: 2n, frame: 0 });
 
 	// A copy declaring another end leaves the first one, and its error with it.
-	tb.producer.finishAt({ group: 3n, frame: 0 }, new StreamError(StreamCode(70), { message: "other" }));
+	// Past its live edge, which only a received copy declares with an error.
+	hooks.endTrack(tb.producer, { group: 3n, frame: 0 }, new StreamError(StreamCode(70), { message: "other" }));
 	await settle();
 	expect(sub.closed.peek()).not.toBeInstanceOf(Error);
 	expect(hooks.subscriberEnd(sub)).toEqual({ group: 2n, frame: 0 });
