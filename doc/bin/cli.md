@@ -162,6 +162,13 @@ joins mid-recording is kept, though only the finished file indexes it.
 fragmented, in place and the same way: it indexes every fragment written in full,
 late renditions included, and cuts a partial one at the end.
 
+The recorder holds an exclusive file lock on its output while it records, and the
+OS drops the lock with a killed recorder. `repair` refuses a file it can't lock,
+since a recorder still has it open and repairing it would corrupt it. A filesystem
+without file locks (some network mounts) is refused by both: the recorder won't start there.
+On Windows the lock also blocks other programs from reading the file until the
+recording finishes, so copy or preview it afterwards.
+
 ```bash
 moq ... export mp4 --output recording.mp4
 moq repair mp4 recording.mp4

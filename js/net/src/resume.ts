@@ -68,7 +68,7 @@ import {
 	runGaps,
 } from "./internal.ts";
 import { grace } from "./ledger.ts";
-import type { Lister, Tracks, TracksEvent } from "./listing.ts";
+import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/sequence.ts";
 import { clamped, type Resolved, type Window } from "./window.ts";
@@ -433,11 +433,6 @@ class Reader implements ResumeSource {
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
 	#drops: DropRun[] = [];
-	/**
-	 * The stale runs reported since the last {@link reofferStale}, whichever copy gave them up: an
-	 * update reopens each, and the copy that reported it may no longer serve.
-	 */
-	#reportedStale: Run[] = [];
 	/** A copy that declared the track's end ran out cleanly at it, even if since let go. */
 	#settled = false;
 	/** Whether groups were ever asked for; until then the reader keeps no replaced copy. */
@@ -749,36 +744,6 @@ class Reader implements ResumeSource {
 		return holding;
 	}
 
-	/**
-	 * Fresh reads of the groups in `[start, end)` the serving copy still caches and judges fresh,
-	 * handed out as any group of that copy is, and the runs still given up: all of them while no
-	 * copy serves. Mirrors the Rust `Reader::reoffer_groups`.
-	 */
-	reofferGroups(start: bigint, end: bigint, from = 0): { groups: GroupConsumer[]; givenUp: Run[] } {
-		const serving = this.#serving();
-		if (!serving) return { groups: [], givenUp: [{ start, end }] };
-		const { groups, givenUp } = hooks.reofferGroups(serving.sub, start, end, from);
-		return { groups: groups.map((group) => this.#handOut(serving, group)), givenUp };
-	}
-
-	/**
-	 * Take back every stale run: those queued here, those this reader reported, and those the
-	 * serving copy reported, which its cursor owes again. What this reader reported counts
-	 * whichever copy gave it up, since a route change since leaves the serving copy knowing
-	 * nothing of it, though the update reopened it. Only the serving copy is judged again: a
-	 * replaced copy may no longer deliver, so what it gave up is the new route's to deliver or
-	 * give up. Mirrors the Rust `Reader::reoffer_stale`.
-	 */
-	reofferStale(): Run[] {
-		const taken = this.#reportedStale;
-		this.#reportedStale = [];
-		for (const run of this.#drops) if (run.stale !== undefined) insertRun(taken, run.start, run.end);
-		this.#drops = this.#drops.filter((run) => run.stale === undefined);
-		const serving = this.#serving();
-		if (serving) for (const run of hooks.reofferStale(serving.sub)) insertRun(taken, run.start, run.end);
-		return taken;
-	}
-
 	cachedGroup(sequence: bigint, from = 0): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -918,8 +883,8 @@ class Reader implements ResumeSource {
 		if (this.#closed) return undefined;
 		const serving = this.#serving();
 		if (serving) {
-			// A received stale run queued here that new terms superseded since is unknown again: the
-			// copy no longer holds it, and its upstream re-offers or drops it again.
+			// A received stale run queued here that a new upstream subscription superseded since is
+			// unknown again: the copy no longer holds it.
 			for (const run of this.#drops) {
 				if (!run.received) continue;
 				const held = hooks.staleHeld(serving.sub, run.start, run.end);
@@ -930,7 +895,7 @@ class Reader implements ResumeSource {
 				// A route failing is no verdict: another route may still deliver the group, and
 				// one it failed while buffered is handed out to continue through its recovery.
 				if (routeFailed(dropped.error)) continue;
-				// A stale run the copy holds came from its upstream, which new terms may supersede.
+				// A stale run the copy holds came from its upstream, which a new subscription may supersede.
 				const received =
 					dropped.stale !== undefined && hooks.staleHeld(serving.sub, dropped.start, dropped.end).length > 0;
 				this.#drops = insertDrop(this.#drops, dropped.start, dropped.end, { ...dropped, received });
@@ -951,9 +916,6 @@ class Reader implements ResumeSource {
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);
-					if (run.stale !== undefined) insertRun(this.#reportedStale, open.start, open.end);
-					// A skip or final drop is final, so no update reopens a stale report it replaced.
-					else this.#reportedStale = removeRun(this.#reportedStale, open.start, open.end);
 					return { kind: "drop", ...open, error: run.error, skip: run.skip, stale: run.stale };
 				}
 			}
@@ -1269,11 +1231,6 @@ class Reader implements ResumeSource {
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
 		this.#newest = max(this.#newest ?? 0n, group.sequence);
-		// The group won over any stale report on it, whichever copy made it, so no update reopens
-		// it.
-		if (this.#reportedStale.length > 0) {
-			this.#reportedStale = removeRun(this.#reportedStale, group.sequence, group.sequence + 1n);
-		}
 		// Another copy holding the group, now or once it lands there, is where a failure continues
 		// it, so it stays while the group is read; see #backs. Recorded even with one copy, since a
 		// later route's copy may come to hold it.
@@ -1376,6 +1333,11 @@ class Reader implements ResumeSource {
 		return this.#learnEnd();
 	}
 
+	skippedBelow(key: bigint): bigint {
+		this.sync();
+		return this.#copies.reduce((longest, copy) => max(longest, hooks.skippedBelow(copy.sub, key)), 0n);
+	}
+
 	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
 	starts(from: bigint): (bigint | undefined)[] | undefined {
 		this.sync();
@@ -1467,6 +1429,12 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		return serving ? hooks.objectLargest(serving.sub) : this.#ended?.object;
+	}
+
+	largestFinished(position: track.Position): boolean {
+		this.sync();
+		const serving = this.#serving();
+		return serving !== undefined && hooks.largestFinished(serving.sub, position);
 	}
 
 	peekLargest(): { largest?: track.Position; ended: boolean } {
@@ -1851,12 +1819,13 @@ export class Front {
 	 */
 	async #list(lister: Lister): Promise<void> {
 		const closed = this.consumer.closed;
-		// What the front lists, the source being read, and its pending next event.
+		// What the front lists, by kind and name, the source being read, and its pending next event.
+		type Named = { name: string; datagrams?: boolean };
 		let listing:
 			| {
-					listed: Set<string>;
-					/** Names an earlier source listed that the current one has yet to list. */
-					stale: Set<string>;
+					listed: Map<string, Named>;
+					/** Tracks an earlier source listed that the current one has yet to list. */
+					stale: Map<string, Named>;
 					source?: Source;
 					reader?: Tracks;
 					next?: Promise<{ event?: TracksEvent; err?: Error }>;
@@ -1874,14 +1843,15 @@ export class Front {
 			);
 		// Forwarded as the source reported it, finished or not.
 		const unlist = (
-			listed: Set<string>,
-			stale: Set<string>,
-			event: { kind: "removed" | "finished"; name: string },
+			listed: Map<string, Named>,
+			stale: Map<string, Named>,
+			event: { kind: "removed" | "finished"; name: string; datagrams?: boolean },
 		) => {
-			stale.delete(event.name);
-			if (!listed.delete(event.name)) return;
-			if (event.kind === "finished") lister.finish(event.name);
-			else lister.remove(event.name);
+			const key = keyOf(event.name, event.datagrams);
+			stale.delete(key);
+			if (!listed.delete(key)) return;
+			if (event.kind === "finished") lister.finish(event.name, event.datagrams);
+			else lister.remove(event.name, event.datagrams);
 		};
 		try {
 			for (;;) {
@@ -1908,11 +1878,11 @@ export class Front {
 					lister.end();
 					continue;
 				}
-				listing ??= { listed: new Set(), stale: new Set() };
+				listing ??= { listed: new Map(), stale: new Map() };
 				if (listing.source !== this.#source) {
 					listing.reader?.close();
 					listing.source = this.#source;
-					listing.stale = new Set(listing.listed);
+					listing.stale = new Map(listing.listed);
 					listing.next = undefined;
 					try {
 						listing.reader = this.#source?.wire.tracks();
@@ -1955,17 +1925,18 @@ export class Front {
 						lister.end();
 					}
 				} else if (event.kind === "added") {
-					if (!listing.stale.delete(event.name) && !listing.listed.has(event.name)) {
-						listing.listed.add(event.name);
-						lister.add(event.name, event.info);
+					const key = keyOf(event.name, event.datagrams);
+					if (!listing.stale.delete(key) && !listing.listed.has(key)) {
+						listing.listed.set(key, { name: event.name, datagrams: event.datagrams });
+						lister.add(event.name, event);
 					}
 				} else if (event.kind === "removed" || event.kind === "finished") {
 					unlist(listing.listed, listing.stale, event);
 				} else {
 					// What the new source still lacks at its SYNCED is gone.
-					for (const name of listing.stale) {
-						listing.listed.delete(name);
-						lister.remove(name);
+					for (const [key, { name, datagrams }] of listing.stale) {
+						listing.listed.delete(key);
+						lister.remove(name, datagrams);
 					}
 					listing.stale.clear();
 					lister.synced();

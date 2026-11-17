@@ -135,8 +135,6 @@ A relay forwards the block to a peer of that encoding unchanged, so the block ne
 Every property of the object, serialized as the track's Version serializes an object's properties, in ascending ID order.
 Immutable Properties (0x0b) are in the same encoding, as the publisher sent them.
 It MUST NOT be empty or longer than 65,536 bytes.
-On a timed track an object with a FRAME MUST NOT carry one longer than 65,526 bytes, leaving room for the largest Timestamp a relay restates ([Timestamps](#timestamps)): a one-byte key and a value of up to nine bytes.
-A relay MUST refuse a {{moqt}} object whose properties, less its mutable Timestamp, exceed that, so every object it forwards fits.
 A receiver MUST treat a block the track's Version would refuse as malformed, as it MUST a block on an object that Version could not send with properties.
 Only draft 14 lets a status object carry them, so a block on the END_OF_GROUP record needs a Version of draft 14.
 The Version also gives each property its meaning: drafts 18 and 19 serialize a block alike, but only drafts 19 and later assign property 0x06 to SUBGROUP_DELIVERY_TIMEOUT, so a relay knows not to forward a 0x06 to a draft that would read it differently.
@@ -144,17 +142,12 @@ Other properties are opaque to this extension.
 
 ## Timestamps {#timestamps}
 A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
-A nonzero Version identifies timestamps from MoQ Transport, which may be arrival times and need not rise with Group Sequence.
+A nonzero Version identifies a track from MoQ Transport, whose objects take their time from their Group ID, in the track's Timescale.
 The receiver MUST NOT apply moq-lite's group-start rewind check to such a track; a Version of zero retains that check.
 Without this extension, or in a listing ({{track}}), the receiver may check them like native moq-lite timestamps and refuse a Group that rewinds.
 
-On a timed track, the FRAME's Timestamp is the object's time, and nothing else carries it.
-The Property Block MUST NOT contain a mutable Timestamp (0x10) there; a receiver MUST treat one as malformed.
-A relay forwarding the object to {{moqt}} restates the time as the mutable Timestamp, unless a Timestamp inside the Immutable Properties already says it.
-A sealed Timestamp is in the track's Timescale ({{moql}} TRACK_INFO), and a relay MUST NOT forward one to a peer of other units, which would change its meaning.
-
-On an untimed track there is no FRAME Timestamp, so a mutable Timestamp stays in the Property Block as an opaque property.
-Likewise, the END_OF_GROUP record has no FRAME and so no time of its own beside the block, so its mutable Timestamp stays there on any track.
+The FRAME's Timestamp is the object's time.
+A Timestamp property (0x10) a {{moqt}} publisher attached, mutable or sealed, is opaque like any other: it stays in the Property Block, and a relay neither reads nor restates it.
 
 
 # Track Stream {#track}

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Regenerates src/bindings/libva.rs from the vendored headers in libva/. Needs
-# bindgen-cli on the PATH (`nix shell nixpkgs#rust-bindgen --command ./bindgen.sh`).
-# Passing a libva release tag (e.g. `./bindgen.sh 2.23.0`) first refreshes
-# libva/ and LICENSE.libva from that release.
+# Regenerates src/bindings/libva.rs from the headers of the libva release below,
+# and LICENSE.libva from its license. Needs git and bindgen-cli on the PATH
+# (`nix shell nixpkgs#rust-bindgen --command ./bindgen.sh`). Bump the tag to
+# move the bindings to a newer libva.
 #
 # The C types the bindings use are fixed-width or symbolic (`c_char`), so one
 # file serves every target. The exception is libva's own: two VPP structs pad to
@@ -13,28 +13,22 @@ cd "$(dirname "$0")"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-if [ $# -gt 0 ]; then
-    # Only what bindgen reads: meson.build (version), va/*.h{,.in}, va/drm/va_drm.h.
-    git clone --depth 1 --branch "$1" https://github.com/intel/libva.git "$work/libva"
-    rm -rf libva
-    mkdir -p libva/va/drm
-    cp "$work/libva/meson.build" libva/meson.build
-    cp "$work"/libva/va/*.h "$work"/libva/va/*.h.in libva/va/
-    cp "$work/libva/va/drm/va_drm.h" libva/va/drm/va_drm.h
-    cp "$work/libva/COPYING" LICENSE.libva
-fi
+tag=2.23.0
+libva="$work/libva"
+git clone --quiet --depth 1 --branch "$tag" https://github.com/intel/libva.git "$libva"
+cp "$libva/COPYING" LICENSE.libva
 
 # libva generates va_version.h from a template at build time, and installs
 # va_drm.h beside va.h; stage both where `#include <va/...>` finds them.
 mkdir -p "$work/va"
-version() { sed -nE "s/^$1\s*=\s*([0-9]+).*/\1/p" libva/meson.build; }
+version() { sed -nE "s/^$1\s*=\s*([0-9]+).*/\1/p" "$libva/meson.build"; }
 major=$(version va_api_major_version)
 minor=$(version va_api_minor_version)
 micro=$(version va_api_micro_version)
 sed -e "s/@VA_API_MAJOR_VERSION@/$major/" -e "s/@VA_API_MINOR_VERSION@/$minor/" \
     -e "s/@VA_API_MICRO_VERSION@/$micro/" -e "s/@VA_API_VERSION@/$major.$minor.$micro/" \
-    libva/va/va_version.h.in >"$work/va/va_version.h"
-cp libva/va/drm/va_drm.h "$work/va/va_drm.h"
+    "$libva/va/va_version.h.in" >"$work/va/va_version.h"
+cp "$libva/va/drm/va_drm.h" "$work/va/va_drm.h"
 
 # `--dynamic-loading` emits a `Va` struct of function pointers that libloading
 # resolves at runtime, rather than link-time externs, so libva is dlopen'd. A
@@ -54,7 +48,7 @@ generate() {
         --allowlist-type '.*ExternalBuffers.*|.*PRIME.*|.*H264.*|.*HEVC.*|VACodedBufferSegment|VAEncMisc.*|VASurfaceDecodeMBErrors|VADecodeErrorType|.*VAProc.*|VAEncPacked.*' \
         --dynamic-loading Va \
         --output "$2" \
-        -- -Ilibva -I"$work" -ffreestanding --target="$1"
+        -- -I"$libva" -I"$work" -ffreestanding --target="$1"
 }
 generate x86_64-unknown-linux-gnu "$work/wide.rs"
 generate i686-unknown-linux-gnu "$work/narrow.rs"

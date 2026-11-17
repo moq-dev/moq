@@ -36,6 +36,9 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track subscriber.
 	///
+	/// Takes a subscriber where [`snapshot::Consumer::new`](crate::snapshot::Consumer::new) takes the
+	/// track: every record matters here, so the caller picks the subscription's delay budget and
+	/// priority, while a snapshot only wants the newest value and subscribes itself at a zero delay.
 	/// A [compressed](moq_net::track::Info::compression) track reads the same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Subscriber, config: Config) -> Self {
 		Self {
@@ -124,10 +127,10 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.append(crate::Timed {
-						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
+					.append(
+						&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
 						at,
-					})
+					)
 					.unwrap();
 			}
 			let _finished = producer.finish().unwrap();

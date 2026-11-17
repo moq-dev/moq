@@ -439,6 +439,8 @@ pub enum MoqTransport {
 	WebTransport,
 	/// A transport this version of the bindings cannot name yet.
 	Unknown,
+	/// A TCP connection using qmux framing inside TLS, a `tls://` stream link.
+	Tls,
 }
 
 impl From<moq_tokio::Transport> for MoqTransport {
@@ -447,6 +449,7 @@ impl From<moq_tokio::Transport> for MoqTransport {
 			moq_tokio::Transport::Quic => Self::Quic,
 			moq_tokio::Transport::WebSocket => Self::WebSocket,
 			moq_tokio::Transport::Tcp => Self::Tcp,
+			moq_tokio::Transport::Tls => Self::Tls,
 			moq_tokio::Transport::Unix => Self::Unix,
 			moq_tokio::Transport::WebTransport => Self::WebTransport,
 			_ => Self::Unknown,
@@ -465,6 +468,7 @@ mod transport_tests {
 			(Transport::Quic, MoqTransport::Quic),
 			(Transport::WebSocket, MoqTransport::WebSocket),
 			(Transport::Tcp, MoqTransport::Tcp),
+			(Transport::Tls, MoqTransport::Tls),
 			(Transport::Unix, MoqTransport::Unix),
 			(Transport::WebTransport, MoqTransport::WebTransport),
 		] {

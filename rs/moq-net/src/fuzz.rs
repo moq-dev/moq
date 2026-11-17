@@ -20,7 +20,7 @@ pub use request::request;
 pub use session::{session_ietf, session_lite};
 
 /// Lite-07 publisher run loops for the publisher bench.
-pub use crate::lite::{CoverageBench, PausedBench};
+pub use crate::lite::CoverageBench;
 
 use bytes::Bytes;
 
@@ -147,7 +147,6 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 						ietf::Version::Draft22,
 					)
 					.unwrap(),
-					..Default::default()
 				},
 			})
 		});
@@ -377,25 +376,14 @@ fn ietf_paths(data: &[u8], version: ietf::Version) {
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	// The body doesn't say whether it carries a timestamp, so try both readings.
-	let mut any = false;
-	for timed in [true, false] {
-		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
-			continue;
-		};
-		any = true;
-		let Some(decoded) = decoded else {
-			continue;
-		};
-		let Ok(first) = decoded.encode_bytes(version) else {
-			continue;
-		};
-		let echo = lite::Datagram::decode(first, version, |_| timed)
-			.expect("could not decode our own encoding")
-			.expect("encoded datagram decoded as padding");
+	let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version) else {
+		return false;
+	};
+	if let Ok(first) = decoded.encode_bytes(version) {
+		let echo = lite::Datagram::decode(first, version).expect("could not decode our own encoding");
 		assert_eq!(echo, decoded, "datagram did not survive a round trip");
 	}
-	any
+	true
 }
 
 /// Decode one moq-lite wire object from arbitrary bytes.
@@ -439,8 +427,8 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		25 => roundtrip::<lite::AuthOk, _>(rest, &mut Vec::new(), version),
 		26 => roundtrip::<lite::AuthError, _>(rest, &mut Vec::new(), version),
 		27 => roundtrip::<lite::AuthReply, _>(rest, &mut Vec::new(), version),
-		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
-		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::Lite(version)),
+		28 => roundtrip::<crate::setup::Client, _>(rest, &mut Vec::new(), crate::Version::lite(version)),
+		29 => roundtrip::<crate::setup::Server, _>(rest, &mut Vec::new(), crate::Version::lite(version)),
 		30 => roundtrip::<lite::Datagrams<'_>, _>(rest, &mut Vec::new(), version),
 		31 => roundtrip::<lite::DatagramsUpdate, _>(rest, &mut Vec::new(), version),
 		32 => roundtrip::<lite::DatagramsInfo, _>(rest, &mut Vec::new(), version),
@@ -1509,6 +1497,7 @@ impl LiteSample {
 			Self::Group => lite::Group {
 				subscribe: 3,
 				key: 1_234,
+				previous: None,
 				frame_start: 0,
 			}
 			.encode(w, version)
@@ -1522,17 +1511,16 @@ impl LiteSample {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_delay: std::time::Duration::from_secs(10),
+				max_delay: Some(std::time::Duration::from_secs(10)),
 				min_delay: None,
 				ranges: vec![lite::Range::OLDEST],
-				update: 0,
 			}
 			.encode(w, version)
 			.unwrap(),
 			Self::Datagram => lite::Datagram {
 				subscribe: 3,
 				sequence: 1_234,
-				timestamp: Some(1_234_567_890),
+				timestamp: 1_234_567_890,
 				payload: bytes::Bytes::new(),
 			}
 			.encode(w, version)
@@ -1565,7 +1553,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version)
 				.map(|_| 1)
 				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
@@ -1642,7 +1630,7 @@ fn setup<'a, T>(data: &'a [u8], scratch: &'a mut Vec<u8>, version: ietf::Version
 where
 	T: Decode<'a, crate::Version> + Encode<crate::Version>,
 {
-	let outer = crate::Version::Ietf(version);
+	let outer = crate::Version::ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
 		let parameters = parameters(&message);
 		if ietf::decode_peer_setup(parameters, version, true).is_ok() {
@@ -1723,26 +1711,24 @@ impl Default for Messages {
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
 				priority: 3,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				ranges: vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: None,
 				}],
-				update: 0,
 			},
 			lite_update: lite::SubscribeUpdate {
 				wanted_group: None,
 				order: crate::track::Order::Descending,
 				priority: 4,
-				max_delay: Duration::from_millis(500),
+				max_delay: Some(Duration::from_millis(500)),
 				min_delay: None,
 				// Lite-06, the bench's version, restates the ranges.
 				ranges: lite::RangeEdit::Replace(vec![lite::Range {
 					start: Some(lite::Anchor::Absolute(crate::track::Position::group(1_000))),
 					end: Some(lite::Anchor::Absolute(crate::track::Position::group(2_001))),
 				}]),
-				update: 0,
 			},
 			lite_start: lite::SubscribeResponse::Start(lite::SubscribeStart {
 				largest: None,
@@ -1758,10 +1744,10 @@ impl Default for Messages {
 			lite_group: lite::Group {
 				subscribe: 7,
 				key: 123_456,
+				previous: None,
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
-				max_age: None,
 				new_group: None,
 				request_id: ietf::RequestId(2),
 				track_namespace: Path::from_static("room/alice"),
@@ -1907,11 +1893,10 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			depth: 0,
 			track: track.into(),
 			priority: 0,
-			max_delay: std::time::Duration::ZERO,
+			max_delay: Some(std::time::Duration::ZERO),
 			min_delay: None,
 			ranges: vec![lite::Range::OLDEST],
 			order: track::Order::Descending,
-			update: 0,
 		}
 		.encode(w, BENCH_LITE)
 		.unwrap(),
@@ -1929,7 +1914,6 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			range_filters: false,
 			authorization_token: None,
 			new_group: None,
-			max_age: None,
 		}
 		.encode(w, BENCH_IETF)
 		.unwrap(),
@@ -2252,7 +2236,7 @@ pub fn seeds() -> Vec<Seed> {
 
 	// SETUP has its own type prefix, which uniform bodies cannot synthesize.
 	for (index, version) in IETF_VERSIONS.iter().enumerate() {
-		let outer = crate::Version::Ietf(*version);
+		let outer = crate::Version::ietf(*version);
 		let parameters = ietf::Parameters::default().encode_bytes(*version).unwrap();
 		let messages = vec![(26, crate::setup::Setup { parameters }.encode_bytes(outer).unwrap())];
 		for (kind, message) in messages {
@@ -2268,7 +2252,7 @@ pub fn seeds() -> Vec<Seed> {
 
 	// The `moql` SETUP pair, framed as lite-01/02, also has its own type prefix.
 	for (index, version) in LITE_VERSIONS.iter().enumerate() {
-		let outer = crate::Version::Lite(*version);
+		let outer = crate::Version::lite(*version);
 		let client = crate::setup::Client {
 			versions: coding::Versions::from([outer.into()]),
 			parameters: Default::default(),

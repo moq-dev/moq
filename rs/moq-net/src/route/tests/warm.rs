@@ -116,7 +116,29 @@ pub(super) struct Arm {
 	/// the route layer's routes follow links and claims, never demand, so no relay's
 	/// pull is another's reason to move.
 	pub reroute: bool,
+	/// Readers are ranked, and a relay takes a warm copy only from a neighbour feeding
+	/// a reader ranked below every one it feeds itself: such a copy is there whatever
+	/// this relay does, so it costs the cold price of the link alone. A relay heads for
+	/// the cheapest such copy or its route whenever either changes, so a pull follows a
+	/// copy that turns warm later.
+	pub order: Option<Order>,
+	/// With [`Arm::order`], a copy costs what it does from the publisher, its offer plus
+	/// the link, rather than the link alone, and a live pull stays unless another
+	/// source is strictly cheaper than it, priced at the warm link it flows over.
+	pub summed: bool,
 }
+
+/// How [`Arm::order`] ranks a reader, then by its relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Order {
+	/// Its relay's route cost: a relay nearer the publisher ranks first.
+	Route,
+	/// The rendezvous hash of its relay and the broadcast, which no route changes.
+	Hash,
+}
+
+/// A reader's rank under [`Arm::order`]: lower ranks first.
+pub(super) type Rank = (u64, Node);
 
 impl Arm {
 	pub fn name(self) -> String {
@@ -140,7 +162,13 @@ impl Arm {
 		let stay = if self.stay { "+stay" } else { "" };
 		let rejoin = if self.rejoin { "+rejoin" } else { "" };
 		let reroute = if self.reroute { "+reroute" } else { "" };
-		format!("{mode}{hops}{merge}{chain}{stay}{rejoin}{reroute}")
+		let order = match self.order {
+			None => "",
+			Some(Order::Route) => "+order_route",
+			Some(Order::Hash) => "+order_hash",
+		};
+		let summed = if self.summed { "+summed" } else { "" };
+		format!("{mode}{hops}{merge}{chain}{stay}{rejoin}{reroute}{order}{summed}")
 	}
 }
 
@@ -170,6 +198,9 @@ pub(super) struct Signal {
 	pub cost: Metric,
 	pub path: Vec<Node>,
 	pub marked: bool,
+	/// With [`Arm::order`], the lowest rank among the readers the sender feeds besides
+	/// its receiver.
+	pub rank: Option<Rank>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,6 +222,9 @@ struct Pull {
 	merged: bool,
 	/// The relays whose demand alone it carries, as last told the parent.
 	chain: Vec<Node>,
+	/// With [`Arm::order`], the lowest rank among the readers it feeds, as last told
+	/// the parent.
+	rank: Option<Rank>,
 }
 
 #[derive(Clone, Debug)]
@@ -201,6 +235,12 @@ enum Msg {
 		stream: u64,
 		open: bool,
 		chain: Vec<Node>,
+		rank: Option<Rank>,
+	},
+	/// A change to the lowest rank a payload subscription feeds, with [`Arm::order`].
+	Rank {
+		stream: u64,
+		rank: Option<Rank>,
 	},
 	/// A change to the relays whose demand alone a payload subscription carries.
 	Chain {
@@ -255,6 +295,8 @@ struct Carry {
 	answered: BTreeMap<(Node, u64), Option<Signal>>,
 	/// The relays whose demand alone each subscription through it carries.
 	chains: BTreeMap<(Node, u64), Vec<Node>>,
+	/// The lowest rank each subscription through it feeds, with [`Arm::order`].
+	ranks: BTreeMap<(Node, u64), Option<Rank>>,
 	/// Neighbours it asks, with each one's latest word.
 	asks: BTreeMap<Node, Option<Signal>>,
 	/// The query it holds open to each.
@@ -327,6 +369,8 @@ pub(super) struct Sent {
 	pub adverts: usize,
 	/// Updates to the relays whose demand alone a payload subscription carries.
 	pub chains: usize,
+	/// Updates to the lowest rank a payload subscription feeds, with [`Arm::order`].
+	pub ranks: usize,
 }
 
 impl Sent {
@@ -334,9 +378,10 @@ impl Sent {
 		self.subscribes + self.answers + self.warm()
 	}
 
-	/// What only a warm signal costs: queries, their answers, adverts, and chain updates.
+	/// What only a warm signal costs: queries, their answers, adverts, and chain and
+	/// rank updates.
 	pub fn warm(self) -> usize {
-		self.asks + self.told + self.adverts + self.chains
+		self.asks + self.told + self.adverts + self.chains + self.ranks
 	}
 }
 
@@ -351,6 +396,7 @@ impl std::ops::Add for Sent {
 			told: self.told + more.told,
 			adverts: self.adverts + more.adverts,
 			chains: self.chains + more.chains,
+			ranks: self.ranks + more.ranks,
 		}
 	}
 }
@@ -366,6 +412,7 @@ impl std::ops::Sub for Sent {
 			told: self.told - was.told,
 			adverts: self.adverts - was.adverts,
 			chains: self.chains - was.chains,
+			ranks: self.ranks - was.ranks,
 		}
 	}
 }
@@ -609,6 +656,7 @@ impl WarmSim {
 		match &msg {
 			Msg::Subscribe { .. } => self.sent.subscribes += 1,
 			Msg::Chain { .. } => self.sent.chains += 1,
+			Msg::Rank { .. } => self.sent.ranks += 1,
 			Msg::Answer { .. } => self.sent.answers += 1,
 			Msg::Ask { .. } => self.sent.asks += 1,
 			Msg::Told { .. } => self.sent.told += 1,
@@ -618,6 +666,7 @@ impl WarmSim {
 		let stream = match &msg {
 			Msg::Subscribe { stream, .. }
 			| Msg::Chain { stream, .. }
+			| Msg::Rank { stream, .. }
 			| Msg::Answer { stream, .. }
 			| Msg::Ask { stream, .. }
 			| Msg::Told { stream, .. } => *stream as usize,
@@ -683,6 +732,7 @@ impl WarmSim {
 				cost: 0,
 				path: Vec::new(),
 				marked: false,
+				rank: None,
 			});
 		}
 		let signal = self.live(node, cast)?;
@@ -691,6 +741,9 @@ impl WarmSim {
 		let cost = match (self.arm.mode, carry.others(peer)) {
 			// A join along the route needs no cost, only the confirmation.
 			(Mode::Path, _) => 0,
+			// The copy is there whoever asks: what it costs reads no relay's demand, so
+			// no rank's choice moves another's price.
+			_ if self.arm.order.is_some() => signal.cost + price.warm,
 			(_, true) => signal.cost + price.warm,
 			(_, false) => signal.cost + price.cold,
 		};
@@ -699,13 +752,41 @@ impl WarmSim {
 			false => Vec::new(),
 		};
 		let marked = signal.marked || self.upstream.contains(&(node, carry.up.as_ref()?.via));
-		Some(Signal { cost, path, marked })
+		let rank = self.arm.order.and_then(|_| self.rank(node, cast, Some(peer)));
+		Some(Signal {
+			cost,
+			path,
+			marked,
+			rank,
+		})
 	}
 
 	/// The warm signal `node` gives `peer`: its offer, while it has demand besides `peer`.
 	fn warm(&self, node: Node, cast: usize, peer: Node) -> Option<Signal> {
 		self.carry(node, cast).filter(|carry| carry.others(peer))?;
 		self.offer(node, cast, peer)
+	}
+
+	/// The rank of a reader at `node`, with [`Arm::order`].
+	fn own(&self, node: Node, cast: usize) -> Option<Rank> {
+		let order = self.arm.order?;
+		self.carry(node, cast).filter(|carry| carry.reader)?;
+		Some(match order {
+			// A reader whose relay has no route yet ranks last among them.
+			Order::Route => (self.route(node, cast).map_or(Metric::MAX, |(_, cost)| cost), node),
+			Order::Hash => (self.hash(cast, node), node),
+		})
+	}
+
+	/// The lowest rank among the readers `node` feeds, its own and each subscription's
+	/// through it, leaving out `besides`'s.
+	fn rank(&self, node: Node, cast: usize, besides: Option<Node>) -> Option<Rank> {
+		let carry = self.carry(node, cast)?;
+		let below = (carry.down.iter())
+			.filter(|&(&child, _)| Some(child) != besides)
+			.flat_map(|(&child, streams)| streams.iter().map(move |&stream| (child, stream)))
+			.filter_map(|key| carry.ranks.get(&key).copied().flatten());
+		self.own(node, cast).into_iter().chain(below).min()
 	}
 
 	/// Every source `node` could pull `cast` from: its route, and each warm neighbour it
@@ -736,27 +817,50 @@ impl WarmSim {
 		};
 		// Without the chain, an ancestor's warmth may be this relay's own demand.
 		// A relay that never moves for price has no reason to fence its own warmth off.
-		let ancestors: Vec<Node> = match self.arm.chain || self.arm.stay {
+		let ancestors: Vec<Node> = match self.arm.chain || self.arm.stay || self.arm.order.is_some() {
 			true => Vec::new(),
 			false => self
 				.live(node, cast)
 				.map_or_else(Vec::new, |signal| signal.path.clone()),
 		};
+		// Only a copy that feeds a reader ranked below every one this relay feeds, which
+		// is there whatever this relay does. Its parent's answer counts as much as an
+		// advert: a parent need not advertise to a relay already pulling from it.
+		let mine = self.arm.order.and_then(|_| self.rank(node, cast, None));
+		let mut heard = heard;
+		if self.arm.order.is_some()
+			&& let Some(pull) = &carry.up
+			&& let State::Live(signal) = &pull.state
+			&& !heard.iter().any(|&(via, _)| via == pull.via)
+		{
+			heard.push((pull.via, signal));
+		}
 		for (via, signal) in heard {
 			if !self.is_open(node, via)
 				|| carry.down.contains_key(&via)
 				|| ancestors.contains(&via)
 				|| (self.arm.hops && signal.path.contains(&node))
+				|| (self.arm.order.is_some() && !signal.rank.is_some_and(|rank| Some(rank) < mine))
 			{
 				continue;
 			}
 			out.push(Choice {
 				via,
-				cost: signal.cost + self.price(via, node).cold,
+				cost: self.copy(signal, via, node),
 				offered: Some(signal.cost),
 			});
 		}
 		out
+	}
+
+	/// What `signal`'s copy at `via` costs `node`: its offer and the cold link, or with
+	/// [`Arm::order`] and not [`Arm::summed`] the link alone.
+	fn copy(&self, signal: &Signal, via: Node, node: Node) -> Metric {
+		let link = self.price(via, node).cold;
+		match self.arm.order.is_some() && !self.arm.summed {
+			true => link,
+			false => signal.cost + link,
+		}
 	}
 
 	/// The cheapest of `options`, a warm copy before the route, then the higher hash.
@@ -780,7 +884,8 @@ impl WarmSim {
 		}
 		self.queries(node, cast);
 		self.pull(node, cast);
-		self.own(node, cast);
+		self.chained(node, cast);
+		self.ranked(node, cast);
 		self.answer(node, cast);
 		self.tell(node, cast);
 		self.advertise(node, cast);
@@ -885,10 +990,12 @@ impl WarmSim {
 			true => (self.carry(node, cast)).map_or_else(|| vec![node], |carry| carry.chain(node)),
 			false => Vec::new(),
 		};
+		let rank = self.rank(node, cast, Some(via));
 		let open = Msg::Subscribe {
 			stream,
 			open: true,
 			chain: chain.clone(),
+			rank,
 		};
 		self.send(node, via, Lane::Pull, cast, open);
 		Pull {
@@ -897,11 +1004,36 @@ impl WarmSim {
 			state: State::Pending,
 			merged: false,
 			chain,
+			rank,
+		}
+	}
+
+	/// Tell each parent when the lowest rank its pull feeds changes, with [`Arm::order`].
+	fn ranked(&mut self, node: Node, cast: usize) {
+		if self.arm.order.is_none() {
+			return;
+		}
+		let carry = self.entry(node, cast);
+		let pulls: Vec<(Node, u64, Option<Rank>)> = (carry.up.iter().chain(carry.next.iter()))
+			.map(|pull| (pull.via, pull.stream, pull.rank))
+			.collect();
+		for (via, stream, was) in pulls {
+			let rank = self.rank(node, cast, Some(via));
+			if rank == was {
+				continue;
+			}
+			let carry = self.entry(node, cast);
+			for pull in [&mut carry.up, &mut carry.next].into_iter().flatten() {
+				if pull.stream == stream {
+					pull.rank = rank;
+				}
+			}
+			self.send(node, via, Lane::Pull, cast, Msg::Rank { stream, rank });
 		}
 	}
 
 	/// Tell each parent when the relays whose demand alone its pull carries change.
-	fn own(&mut self, node: Node, cast: usize) {
+	fn chained(&mut self, node: Node, cast: usize) {
 		// A join along the route prices nothing, so it needs no chain.
 		if self.arm.mode == Mode::Path || !self.arm.chain {
 			return;
@@ -928,6 +1060,7 @@ impl WarmSim {
 				stream,
 				open: false,
 				chain: Vec::new(),
+				rank: None,
 			};
 			self.send(node, pull.via, Lane::Pull, cast, close);
 		}
@@ -974,6 +1107,10 @@ impl WarmSim {
 		};
 		if self.arm.stay {
 			self.stay(node, cast, &up, &options, best);
+			return;
+		}
+		if self.arm.order.is_some() {
+			self.ordered(node, cast, &up, &options, best);
 			return;
 		}
 		let moving = self.entry(node, cast).next.as_ref().map(|next| next.via);
@@ -1114,6 +1251,40 @@ impl WarmSim {
 		}
 	}
 
+	/// [`Arm::order`]'s rule for a relay already pulling, from its route and the copies
+	/// feeding a lower rank. A live pull heads for the best of them, and with
+	/// [`Arm::summed`] stays while still among them unless another is strictly cheaper
+	/// than it, priced at the warm link it already flows over; it keeps flowing until
+	/// the new one is live. A pending
+	/// pull is replaced outright by a better one, and a lost one, or one through itself, by
+	/// a fresh choice. With no source left it lets go, so a neighbour pulling through it
+	/// that is its only way out chooses again.
+	fn ordered(&mut self, node: Node, cast: usize, up: &Pull, options: &[Choice], best: Option<Choice>) {
+		let hops = self.arm.hops;
+		match (&up.state, best) {
+			(State::Live(signal), Some(best)) if !(hops && signal.path.contains(&node)) => {
+				let own = signal.cost + self.price(up.via, node).warm;
+				let kept = self.arm.summed && options.iter().any(|choice| choice.via == up.via);
+				let target = match kept && best.cost >= own {
+					true => up.via,
+					false => best.via,
+				};
+				self.toward(node, cast, target, false);
+			}
+			(State::Pending, Some(best)) if best.via == up.via => {}
+			(_, best) => {
+				let carry = self.entry(node, cast);
+				let (old, next) = (carry.up.take(), carry.next.take());
+				self.unsubscribe(node, cast, old);
+				self.unsubscribe(node, cast, next);
+				if let Some(best) = best {
+					let pull = self.subscribe(node, cast, best.via);
+					self.entry(node, cast).up = Some(pull);
+				}
+			}
+		}
+	}
+
 	/// Move toward `target` unless already there or on the way, marking a new pull the
 	/// merge asked for.
 	fn toward(&mut self, node: Node, cast: usize, target: Node, merged: bool) {
@@ -1206,6 +1377,9 @@ impl WarmSim {
 
 	/// Whether `audience` lets `node` advertise `signal` to `peer`.
 	fn scoped(&self, audience: Audience, node: Node, cast: usize, peer: Node, signal: &Signal) -> bool {
+		// Priced from the publisher, even where the taker prices it at the link alone: a
+		// copy at the link alone beats nearly any route, so a warm core would tell every
+		// core it meshes with. A relay already pulling keeps its parent by its answer.
 		let price = signal.cost + self.price(node, peer).cold;
 		let heard = self
 			.net
@@ -1274,9 +1448,16 @@ impl WarmSim {
 				stream,
 				open: true,
 				chain,
+				rank,
 			} => {
 				carry.down.entry(from).or_default().insert(stream);
 				carry.chains.insert((from, stream), chain);
+				carry.ranks.insert((from, stream), rank);
+			}
+			Msg::Rank { stream, rank } => {
+				if carry.down.get(&from).is_some_and(|streams| streams.contains(&stream)) {
+					carry.ranks.insert((from, stream), rank);
+				}
 			}
 			// Only while the subscription is open: it may have closed since.
 			Msg::Chain { stream, chain } => {
@@ -1290,6 +1471,7 @@ impl WarmSim {
 				close(&mut carry.down, from, stream);
 				carry.answered.remove(&(from, stream));
 				carry.chains.remove(&(from, stream));
+				carry.ranks.remove(&(from, stream));
 			}
 			Msg::Answer { stream, offer } => {
 				for pull in [&mut carry.up, &mut carry.next].into_iter().flatten() {
@@ -1369,6 +1551,7 @@ impl WarmSim {
 				carry.down.remove(&y);
 				carry.answered.retain(|&(child, _), _| child != y);
 				carry.chains.retain(|&(child, _), _| child != y);
+				carry.ranks.retain(|&(child, _), _| child != y);
 				carry.asks.remove(&y);
 				carry.unanswered.remove(&y);
 				carry.asking.remove(&y);

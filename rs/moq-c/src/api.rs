@@ -3208,6 +3208,23 @@ pub unsafe extern "C" fn moq_publish_media_demand(
 	})
 }
 
+/// Abort a media track with an application error code, but only while nobody wants it.
+///
+/// This is how an on-demand publisher ends a track once its [moq_publish_media_demand] watcher
+/// reports `MOQ_DEMAND_UNWANTED`: releasing the track instead fails a reader that joined in
+/// between. Returns 1 once the track is closed, which releases the handle, and `0` when a reader
+/// wants it again, which leaves the handle serving: wait for `MOQ_DEMAND_UNWANTED` from a new
+/// watcher, since one that already reported it misses a reader that came and went. A container
+/// handle is refused, as for [moq_publish_media_demand]. A negative code is a failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_media_abort_unwanted(media: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let media = ffi::parse_id(media)?;
+		let closed = State::lock().publish.media_abort_unwanted(media, error_code)?;
+		Ok(i32::from(closed))
+	})
+}
+
 /// Stop a demand watcher from [moq_publish_track_demand], [moq_publish_media_demand],
 /// [`crate::moq_encode_video_demand`], or [`crate::moq_encode_audio_demand`].
 ///
@@ -3661,18 +3678,25 @@ unsafe fn parse_track_info(info: *const moq_track_info) -> Result<moq_net::track
 	}
 }
 
-/// Append a new group to a raw track, returning a group producer.
+/// Append the next group to a raw track, starting at `start`, returning a group producer.
 ///
 /// Groups are delivered independently and each may contain any number of frames
-/// written via [moq_publish_group_frame]. Each starts after the last group; read the
-/// group's with [moq_publish_group_start].
+/// written via [moq_publish_group_frame]. `start` is converted to the track's timescale,
+/// as a frame's timestamp is; a scale-less track takes the unscaled group key (`has_scale`
+/// false). A start at or before a group the track holds, or one that doesn't match the
+/// track, fails. Read the group's start in the track's timescale with
+/// [moq_publish_group_start]. NULL fails with `MOQ_ERROR_INVALID_POINTER`.
 ///
 /// Returns a non-zero handle to the group on success, or a negative code on failure.
+///
+/// # Safety
+/// - `start` must be a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_track_group(track: u32) -> i32 {
+pub unsafe extern "C" fn moq_publish_track_group(track: u32, start: *const moq_timestamp) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		State::lock().publish.track_group(track)
+		let start = unsafe { ffi::parse_timestamp(start)? };
+		State::lock().publish.track_group(track, start)
 	})
 }
 
@@ -3820,6 +3844,23 @@ pub extern "C" fn moq_publish_track_abort(track: u32, error_code: u16) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		State::lock().publish.track_abort(track, error_code)
+	})
+}
+
+/// Abort a raw track with an application error code, but only while nobody wants it.
+///
+/// This is how an on-demand publisher ends a track once its [moq_publish_track_demand] watcher
+/// reports `MOQ_DEMAND_UNWANTED`: releasing the track instead fails a reader that joined in
+/// between, which reads a drop rather than the track. Returns 1 once the track is closed, which
+/// releases the handle, and `0` when a reader wants it again, which leaves the handle serving:
+/// wait for `MOQ_DEMAND_UNWANTED` from a new watcher, since one that already reported it misses
+/// a reader that came and went. A negative code is a failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_publish_track_abort_unwanted(track: u32, error_code: u16) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let closed = State::lock().publish.track_abort_unwanted(track, error_code)?;
+		Ok(i32::from(closed))
 	})
 }
 
@@ -4151,7 +4192,7 @@ pub unsafe extern "C" fn moq_publish_group_frame(
 /// Read the start of a raw group, which names it within its track.
 ///
 /// On a scale-less track this is the key every [moq_publish_group_frame] timestamp carries
-/// (unscaled, `has_scale` false), including for a group [moq_publish_track_group] numbered.
+/// (unscaled, `has_scale` false).
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -4405,7 +4446,7 @@ pub unsafe extern "C" fn moq_publish_json_window(
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
 		let config = unsafe { config.as_ref() }.ok_or(Error::InvalidPointer)?;
-		let mut producer = moq_json::window::ProducerConfig::default();
+		let mut producer = moq_json::window::Config::default();
 		if config.checkpoint_records > 0 {
 			let records = usize::try_from(config.checkpoint_records)
 				.map_err(|_| Error::InvalidConfig(format!("checkpoint_records {}", config.checkpoint_records)))?;
@@ -4489,7 +4530,8 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 	})
 }
 
-/// Create a catalog consumer for a broadcast.
+/// Create a catalog consumer for a broadcast, for a reader playing `delay_us` microseconds
+/// behind the live edge.
 ///
 /// `on_catalog` is invoked with a positive catalog ID for each catalog update
 /// (usable to query video/audio track information), then exactly once more with
@@ -4498,6 +4540,12 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 /// touched again, so release `user_data` there. The terminal callback fires even
 /// after [moq_consume_catalog_cancel].
 ///
+/// Each update takes effect at its [moq_consume_catalog_timestamp]. A zero `delay_us` delivers
+/// only the newest catalog, for a reader that applies each on arrival. A reader that holds each
+/// update until its media reaches the update's timestamp passes its playout delay instead, and
+/// receives in order every update it may still need: one stays deliverable until it falls
+/// `delay_us` behind the live edge.
+///
 /// Returns a non-zero handle on success, or a negative code on failure.
 ///
 /// # Safety
@@ -4505,13 +4553,38 @@ pub extern "C" fn moq_publish_json_window_finish(window: u32) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_catalog(
 	broadcast: u32,
+	delay_us: u64,
 	on_catalog: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
+		let delay = std::time::Duration::from_micros(delay_us);
 		let on_catalog = unsafe { ffi::OnStatus::new(user_data, on_catalog)? };
-		State::lock().consume.catalog(broadcast, on_catalog)
+		State::lock().consume.catalog(broadcast, delay, on_catalog)
+	})
+}
+
+/// Query the media timestamp a catalog snapshot takes effect at.
+///
+/// A reader holds a snapshot it receives before its media reaches this time, and applies one
+/// received late, or the first it receives, at once. On a scale-less catalog track `has_scale` is
+/// false and `value` is a group key with no time, so the snapshot applies on arrival.
+///
+/// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` is a valid pointer to a [moq_timestamp] struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_catalog_timestamp(catalog: u32, dst: *mut moq_timestamp) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+		let timestamp = State::lock().consume.catalog_timestamp(catalog)?;
+		unsafe { dst.write(timestamp) };
+		Ok(())
 	})
 }
 

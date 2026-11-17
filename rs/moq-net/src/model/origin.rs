@@ -34,7 +34,7 @@ use crate::{
 /// passes through, so a receiver can spot its own id and reject a loop.
 ///
 /// A transit fact the origin and the relays fill in: applications pass plain ids
-/// ([`Config::hop`]) and read them back ([`RouteInfo::hops`]).
+/// ([`Config::node`]) and read them back ([`RouteInfo::hops`]).
 ///
 /// Local hops come from a [`NonZeroU64`] or [`Hop::random`], so loop detection can work.
 /// Remote peers may still send `0`; it is legal on the wire, names nobody, and marks the
@@ -97,14 +97,14 @@ impl Hop {
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
-	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
-	/// for loop detection, and the route identity it declares on moq-lite-07, which also
+	/// The origin's Node ID: its identity on every wire, appended to broadcast hop chains
+	/// for loop detection and declared as the route identity on moq-lite-07, which also
 	/// names it in the hops of each route it forwards there. Random by
 	/// default, so each process is a fresh identity. Set one only if it is fresh per
 	/// process too: a restarted process numbers its lite-07 sessions from 1 again, so a
 	/// peer that still remembers one of the old process's sessions as closed refuses
 	/// the routes through the new one's session of the same number.
-	pub hop: NonZeroU64,
+	pub node: NonZeroU64,
 
 	/// The key this origin proves to every lite-07 peer, which files the routes it sends
 	/// under it when its grant is scoped. Origins sharing a key fail over as one. `None`
@@ -166,11 +166,11 @@ pub(super) const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
 const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
 
 impl Default for Config {
-	/// A fresh random hop with no byte target and the default idle expiry.
+	/// A fresh random node with no byte target and the default idle expiry.
 	fn default() -> Self {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
-			hop: random_id(),
+			node: random_id(),
 			route_key: None,
 			max_hops: MAX_HOP_LIMIT,
 			pool,
@@ -181,9 +181,12 @@ impl Default for Config {
 }
 
 impl Config {
-	/// Config for the given origin hop id with no byte target and the default idle expiry.
-	pub fn new(hop: NonZeroU64) -> Self {
-		Self { hop, ..Self::default() }
+	/// Config for the given origin node with no byte target and the default idle expiry.
+	pub fn new(node: NonZeroU64) -> Self {
+		Self {
+			node,
+			..Self::default()
+		}
 	}
 }
 
@@ -191,7 +194,7 @@ impl Config {
 /// restarts.
 ///
 /// Older `@moq/lite` clients decode the exclude hop as a JavaScript number and reject
-/// values above 2^53-1, so generated ids stay in that range while [`Config::hop`] accepts
+/// values above 2^53-1, so generated ids stay in that range while [`Config::node`] accepts
 /// any non-zero 64-bit id.
 pub(crate) fn random_id() -> NonZeroU64 {
 	NonZeroU64::MIN.saturating_add(kio::clock::rng().random_range(0..(1u64 << 53) - 1))
@@ -423,16 +426,20 @@ impl From<u64> for Cost {
 
 /// How much an endpoint prefers a link over its others; higher wins.
 ///
-/// Every link starts at the neutral [`Preference::default`] (0), which is also what
+/// Every link starts at the neutral [`Priority::default`] (0), which is also what
 /// a broadcast published locally ranks. A positive value promotes a link and a
-/// negative one demotes it. See [`Producer::with_preference`].
+/// negative one demotes it. See [`Producer::with_priority`].
+///
+/// This ranks a route's link, as a Route Offer's priority does. A
+/// [`track::Subscription`](crate::track::Subscription)'s `priority` ranks one
+/// subscription against the others sharing a connection.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Preference(i8);
+pub struct Priority(i8);
 
-impl Preference {
+impl Priority {
 	/// Rank a link.
-	pub const fn new(preference: i8) -> Self {
-		Self(preference)
+	pub const fn new(priority: i8) -> Self {
+		Self(priority)
 	}
 
 	/// The rank.
@@ -441,9 +448,9 @@ impl Preference {
 	}
 }
 
-impl From<i8> for Preference {
-	fn from(preference: i8) -> Self {
-		Self::new(preference)
+impl From<i8> for Priority {
+	fn from(priority: i8) -> Self {
+		Self::new(priority)
 	}
 }
 
@@ -511,10 +518,10 @@ pub struct RouteInfo {
 	pub(crate) lane: Lane,
 
 	/// The session it arrived on is going away (the peer sent a GOAWAY): it ranks below
-	/// every other eligible route, whatever its preference or cost, yet still serves when
+	/// every other eligible route, whatever its priority or cost, yet still serves when
 	/// nothing else does.
 	///
-	/// A preference state, never a saturated metric. Local, like [`Self::via`]: never
+	/// A ranking state, never a saturated metric. Local, like [`Self::via`]: never
 	/// forwarded, so a relay advertises a draining route at its real cost and its
 	/// readers never see the flag.
 	pub(crate) draining: bool,
@@ -559,7 +566,7 @@ pub(crate) struct Lane {
 	/// them never follows it.
 	pub path: std::sync::Arc<[u64]>,
 	/// The lowest priority of a link on the route's path, which ranks the route where a
-	/// session's preference does, or `None` for a route the route layer did not select.
+	/// session's priority does, or `None` for a route the route layer did not select.
 	pub priority: Option<i8>,
 	/// How many segments the claim's own prefix lacks of the path it entered at, which a
 	/// stream presenting a broader claim at a narrower request reports: 0 for a claim
@@ -606,7 +613,7 @@ impl RouteInfo {
 	}
 
 	/// What pulling content via this route costs, accumulated per link: lower wins
-	/// among routes of the same link preference and anonymity, with ties broken by a
+	/// among routes of the same link priority and anonymity, with ties broken by a
 	/// broadcast published on this origin, then hop length, then a hash of the instance
 	/// and the requested path (except for a route that entered here, at its own path),
 	/// and finally the most recently announced route. See [`Cost`].
@@ -853,7 +860,7 @@ impl<'a> Epochs<'a> {
 /// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
 /// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
 /// every other eligible route and serves only as a last resort. Then the route layer's
-/// selected route ahead of its alternates. Then the higher link [`Preference`], so
+/// selected route ahead of its alternates. Then the higher link [`Priority`], so
 /// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
@@ -890,10 +897,10 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		entry.draining || !entry.available,
 		// The route layer's selected route ahead of its alternates.
 		!entry.lane.selected,
-		// A lite-07 route ranks by the lowest preference of any link on its path.
+		// A lite-07 route ranks by the lowest priority of any link on its path.
 		Reverse(match entry.lane.priority {
-			Some(priority) => entry.preference.min(Preference::new(priority)),
-			None => entry.preference,
+			Some(priority) => entry.priority.min(Priority::new(priority)),
+			None => entry.priority,
 		}),
 		anonymous,
 		entry.cost,
@@ -918,7 +925,7 @@ type RouteOrder = (
 	bool,
 	bool,
 	bool,
-	Reverse<Preference>,
+	Reverse<Priority>,
 	bool,
 	Cost,
 	bool,
@@ -1368,8 +1375,8 @@ struct RouteEntry {
 	cost: Cost,
 	/// The auth the request advertising the route carries; see [`RouteInfo::auth`].
 	auth: Option<crate::auth::Credential>,
-	/// The rank of the link the entry arrived on; see [`Producer::with_preference`].
-	preference: Preference,
+	/// The rank of the link the entry arrived on; see [`Producer::with_priority`].
+	priority: Priority,
 	/// The announcing session's declared or assigned identity. Split-horizon
 	/// matches this as well as [`Self::hops`], so an anonymous hop 0 still
 	/// cannot echo back to the session it came from.
@@ -2248,7 +2255,7 @@ pub struct Announce {
 pub struct Producer {
 	// Identity for this origin. Appended to route hops when re-announcing so
 	// downstream relays can detect loops and prefer the shortest path.
-	hop: NonZeroU64,
+	node: NonZeroU64,
 	max_hops: NonZeroUsize,
 
 	// The absolute patterns this handle may publish under.
@@ -2278,8 +2285,8 @@ pub struct Producer {
 	// [`Self::with_link`]).
 	link: Link,
 
-	// The rank of that link; see [`Self::with_preference`].
-	preference: Preference,
+	// The rank of that link; see [`Self::with_priority`].
+	priority: Priority,
 
 	// Whether the consumers taken from this handle proxy; see [`Self::with_proxy`].
 	proxy: bool,
@@ -2311,7 +2318,7 @@ impl Producer {
 		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold, config.route_key)));
 		let pool = config.pool.clone();
 		let producer = Self {
-			hop: config.hop,
+			node: config.node,
 			max_hops: config.max_hops.min(MAX_HOP_LIMIT),
 			scope: scope.clone(),
 			root: Path::default(),
@@ -2320,7 +2327,7 @@ impl Producer {
 			cache_duration: config.cache_duration,
 			stats: stats::Session::default(),
 			link: Link::Local,
-			preference: Preference::default(),
+			priority: Priority::default(),
 			proxy: false,
 			tasks,
 			timers: timers.clone(),
@@ -2374,20 +2381,20 @@ impl Producer {
 	}
 
 	/// Rank the link this handle (and any handle derived from it) is given to:
-	/// higher wins, and every handle starts at the neutral [`Preference::default`].
+	/// higher wins, and every handle starts at the neutral [`Priority::default`].
 	///
 	/// Applies to the routes a session lands from its peer through this handle, not to
 	/// a route created here. Only an instance's newest epoch is
-	/// eligible, but among eligible routes preference decides before cost, so links to different
+	/// eligible, but among eligible routes priority decides before cost, so links to different
 	/// operators rank by this instead of comparing their metrics. Hand each CDN's
 	/// session its own rank to use the primary while it has a route and fail over to
 	/// the next.
 	///
-	/// A moq-lite-07 route ranks by the lowest preference of any link on its path, so
+	/// A moq-lite-07 route ranks by the lowest priority of any link on its path, so
 	/// two relays never prefer each other's paths forever. A link promoted above the
 	/// links before it gains nothing there: demote the fallbacks instead.
-	pub fn with_preference(mut self, preference: Preference) -> Self {
-		self.preference = preference;
+	pub fn with_priority(mut self, priority: Priority) -> Self {
+		self.priority = priority;
 		self
 	}
 
@@ -2405,10 +2412,10 @@ impl Producer {
 		self
 	}
 
-	/// The rank of the link this handle is given to; see [`Self::with_preference`].
+	/// The rank of the link this handle is given to; see [`Self::with_priority`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn preference(&self) -> Preference {
-		self.preference
+	pub(crate) fn priority(&self) -> Priority {
+		self.priority
 	}
 
 	/// The link this handle's routes arrive on; see [`Self::with_link`].
@@ -2438,7 +2445,7 @@ impl Producer {
 	pub fn config(&self) -> Config {
 		let shared = self.shared.lock();
 		Config {
-			hop: self.hop,
+			node: self.node,
 			max_hops: self.max_hops,
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
@@ -2447,15 +2454,15 @@ impl Producer {
 		}
 	}
 
-	/// This origin's hop id; see [`Config::hop`].
-	pub fn hop(&self) -> NonZeroU64 {
-		self.hop
+	/// This origin's Node ID; see [`Config::node`].
+	pub fn node(&self) -> NonZeroU64 {
+		self.node
 	}
 
-	/// Whether `id`, as a peer declared it, names this origin: its hop id, or the Node ID
+	/// Whether `id`, as a peer declared it, names this origin: its node, or the Node ID
 	/// its moq-lite-07 sessions declare.
 	pub fn is_own(&self, id: NonZeroU64) -> bool {
-		id == self.hop || self.consume().node_id() == Some(id)
+		id == self.node || self.consume().node_id() == Some(id)
 	}
 
 	/// The key sessions prove for this origin.
@@ -2480,7 +2487,7 @@ impl Producer {
 		// ever be queued on the detached submission handle.
 		let (tasks, _) = TaskSet::new();
 		Self {
-			hop: random_id(),
+			node: random_id(),
 			scope: OriginScope::empty(),
 			max_hops: MAX_HOP_LIMIT,
 			root: Path::default(),
@@ -2489,7 +2496,7 @@ impl Producer {
 			cache_duration: None,
 			stats: stats::Session::default(),
 			link: Link::Local,
-			preference: Preference::default(),
+			priority: Priority::default(),
 			proxy: false,
 			tasks,
 			timers: Deadlines::new(Instant::ZERO),
@@ -2566,7 +2573,7 @@ impl Producer {
 		// hidden from cursors and requests until it announces. The entry lives
 		// as long as the route, or until the broadcast closes.
 		let announcing = Announcing {
-			hop: Hop::from(self.hop),
+			hop: Hop::from(self.node),
 			shared: self.shared.clone(),
 			requested: full.clone(),
 			prefixes: vec![(full.clone(), claim)],
@@ -2574,7 +2581,7 @@ impl Producer {
 			excluded: self.scope.excluded.clone(),
 			local: true,
 			link: self.link,
-			preference: Preference::default(),
+			priority: Priority::default(),
 			stats: self.stats.clone(),
 		};
 		let info = broadcast::Info {
@@ -2859,7 +2866,7 @@ impl Producer {
 		let rooted = patterns.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		Ok(Producer {
-			hop: self.hop,
+			node: self.node,
 			max_hops: self.max_hops,
 			scope,
 			root,
@@ -2868,7 +2875,7 @@ impl Producer {
 			cache_duration: self.cache_duration,
 			stats: self.stats.clone(),
 			link: self.link,
-			preference: self.preference,
+			priority: self.priority,
 			proxy: self.proxy,
 			tasks: self.tasks.clone(),
 			timers: self.timers.clone(),
@@ -2998,7 +3005,7 @@ struct Announcing {
 	/// The link the producer's routes arrive on.
 	link: Link,
 	/// The rank of that link; a broadcast published here is on none, so it ranks at the default.
-	preference: Preference,
+	priority: Priority,
 	stats: stats::Session,
 }
 
@@ -3015,7 +3022,7 @@ impl Announcing {
 			return Err(Error::Unauthorized);
 		}
 		Ok(Self {
-			hop: Hop::from(producer.hop),
+			hop: Hop::from(producer.node),
 			shared: producer.shared.clone(),
 			requested: requested.clone(),
 			prefixes: vec![(requested, claim)],
@@ -3023,7 +3030,7 @@ impl Announcing {
 			excluded: producer.scope.excluded.clone(),
 			local: false,
 			link: producer.link,
-			preference: producer.preference,
+			priority: producer.priority,
 			stats: producer.stats.clone(),
 		})
 	}
@@ -3070,7 +3077,7 @@ impl Announcing {
 				hops: route.hops.clone(),
 				cost: route.cost,
 				auth: route.auth.clone(),
-				preference: self.preference,
+				priority: self.priority,
 				via,
 				local: self.local,
 				link: self.link,
@@ -4367,12 +4374,12 @@ struct FrontListing {
 	/// The source being read.
 	source: Option<u64>,
 	reader: Option<broadcast::Tracks>,
-	/// Every name the front lists.
-	listed: HashSet<Arc<str>>,
-	/// Names an earlier source listed that the current one has yet to list. A source of the
+	/// Every track the front lists, by kind and name.
+	listed: HashSet<(broadcast::Kind, Arc<str>)>,
+	/// Tracks an earlier source listed that the current one has yet to list. A source of the
 	/// same instance lists the same tracks, so its readers see no churn: what it still lacks
 	/// at its SYNCED is gone.
-	stale: HashSet<Arc<str>>,
+	stale: HashSet<(broadcast::Kind, Arc<str>)>,
 }
 
 /// A track the ended front left in flight, held until its last reader leaves. It
@@ -5543,27 +5550,30 @@ impl kio::Task for FrontServe {
 					// The lister refuses only once the broadcast ended, which ends the front too.
 					match result {
 						Ok(Some(broadcast::TracksEvent::Added { name, info })) => {
-							if !state.stale.remove(&name) && state.listed.insert(name.clone()) {
-								let _ = self.lister.add(name, info);
+							let key = (info.kind(), name);
+							if !state.stale.remove(&key) && state.listed.insert(key.clone()) {
+								let _ = self.lister.add(key.1, info);
 							}
 						}
 						// Forwarded as the source reported it, finished or not.
-						Ok(Some(broadcast::TracksEvent::Removed { name })) => {
-							state.stale.remove(&name);
-							if state.listed.remove(&name) {
-								let _ = self.lister.remove(&name);
+						Ok(Some(broadcast::TracksEvent::Removed { kind, name })) => {
+							let key = (kind, name);
+							state.stale.remove(&key);
+							if state.listed.remove(&key) {
+								let _ = self.lister.remove(kind, key.1);
 							}
 						}
-						Ok(Some(broadcast::TracksEvent::Finished { name })) => {
-							state.stale.remove(&name);
-							if state.listed.remove(&name) {
-								let _ = self.lister.finish(&name);
+						Ok(Some(broadcast::TracksEvent::Finished { kind, name })) => {
+							let key = (kind, name);
+							state.stale.remove(&key);
+							if state.listed.remove(&key) {
+								let _ = self.lister.finish(kind, key.1);
 							}
 						}
 						Ok(Some(broadcast::TracksEvent::Synced)) => {
-							for name in state.stale.drain() {
-								state.listed.remove(&name);
-								let _ = self.lister.remove(&name);
+							for (kind, name) in state.stale.drain() {
+								state.listed.remove(&(kind, name.clone()));
+								let _ = self.lister.remove(kind, name);
 							}
 							self.lister.synced();
 						}
@@ -7452,7 +7462,7 @@ impl Consume<track::Consumer> for track::Consumer {
 #[derive(Clone)]
 pub struct Consumer {
 	// Identity of the origin this consumer was derived from.
-	hop: NonZeroU64,
+	node: NonZeroU64,
 	max_hops: NonZeroUsize,
 	scope: OriginScope,
 
@@ -7508,7 +7518,7 @@ pub struct Consumer {
 impl Consumer {
 	fn from_producer(producer: &Producer, stats: stats::Session) -> Self {
 		Self {
-			hop: producer.hop,
+			node: producer.node,
 			max_hops: producer.max_hops,
 			scope: producer.scope.clone(),
 			root: producer.root.clone(),
@@ -7529,9 +7539,9 @@ impl Consumer {
 		}
 	}
 
-	/// This origin's hop id; see [`Config::hop`].
-	pub fn hop(&self) -> NonZeroU64 {
-		self.hop
+	/// This origin's Node ID; see [`Config::node`].
+	pub fn node(&self) -> NonZeroU64 {
+		self.node
 	}
 
 	/// The key sessions prove for this origin.
@@ -7560,7 +7570,7 @@ impl Consumer {
 		let node = self.shared.lock().route_node.clone();
 		let id = match node {
 			Some((node, _)) => Some(node.declared()),
-			None => crate::route::node::declared_for(self.hop),
+			None => crate::route::node::declared_for(self.node),
 		};
 		id.and_then(NonZeroU64::new)
 	}
@@ -7588,7 +7598,7 @@ impl Consumer {
 		// is the same whichever handle creates it. No `..self` here, so a new per-handle
 		// field cannot leak in.
 		let own = |upstream| Self {
-			hop: self.hop,
+			node: self.node,
 			max_hops: self.max_hops,
 			scope: OriginScope::default(),
 			root: Path::default(),
@@ -7613,7 +7623,7 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.hop(), self.timers.clone());
+		let node = crate::route::Node::origin(self.node(), self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),
@@ -8113,7 +8123,7 @@ impl Consumer {
 	/// one instance's route covering it and materializes it, from the broadcast itself
 	/// or from the peer that announced the route. The order is the most specific prefix,
 	/// then, within one instance, only its highest epoch is eligible, cheaper or not.
-	/// Among instances it is the preferred link ([`Producer::with_preference`]), then
+	/// Among instances it is the preferred link ([`Producer::with_priority`]), then
 	/// the cheapest, then a broadcast published on this origin, then the shortest hop
 	/// chain, then a hash of the instance and the path, which every relay agrees on and
 	/// which spreads a pool's paths over its hosts.
@@ -9133,10 +9143,10 @@ mod tests {
 	#[kio::test]
 	async fn default_config_mints_a_real_hop() {
 		let config = Config::default();
-		assert!(config.hop.get() < 1 << 53, "older JS clients decode it as a number");
+		assert!(config.node.get() < 1 << 53, "older JS clients decode it as a number");
 		let (producer, _driver) = Producer::new(config.clone());
-		assert_eq!(producer.hop(), config.hop);
-		assert_eq!(producer.consume().hop(), config.hop);
+		assert_eq!(producer.node(), config.node);
+		assert_eq!(producer.consume().node(), config.node);
 	}
 
 	#[kio::test]
@@ -10682,7 +10692,7 @@ mod tests {
 
 		let demoted = producer
 			.clone()
-			.with_preference(Preference::new(-1))
+			.with_priority(Priority::new(-1))
 			.forward("room", RouteInfo::new().with_hops(hops(&[10])).with_cost(1))
 			.unwrap();
 		let unranked = producer
@@ -10853,7 +10863,7 @@ mod tests {
 
 		let draining = producer
 			.clone()
-			.with_preference(Preference::new(1))
+			.with_priority(Priority::new(1))
 			.forward(
 				"room",
 				RouteInfo::new().with_hops(hops(&[10])).with_cost(1).with_draining(true),
@@ -10861,7 +10871,7 @@ mod tests {
 			.unwrap();
 		let demoted = producer
 			.clone()
-			.with_preference(Preference::new(-1))
+			.with_priority(Priority::new(-1))
 			.forward("room", RouteInfo::new().with_hops(hops(&[11])).with_cost(5))
 			.unwrap();
 		let _bob = consumer.request("room/bob", None);
@@ -11196,12 +11206,17 @@ mod tests {
 		assert!(first.is_clone(&second), "the newcomer joins the front");
 	}
 
+	/// The next event, a datagram track's name prefixed `d:`.
 	#[cfg(feature = "async")]
 	async fn listed(tracks: &mut broadcast::Tracks) -> String {
+		let named = |kind: broadcast::Kind, name: Arc<str>| match kind {
+			broadcast::Kind::Track => name.to_string(),
+			broadcast::Kind::Datagrams => format!("d:{name}"),
+		};
 		match tracks.next().await {
-			Ok(Some(broadcast::TracksEvent::Added { name, .. })) => format!("+{name}"),
-			Ok(Some(broadcast::TracksEvent::Removed { name })) => format!("-{name}"),
-			Ok(Some(broadcast::TracksEvent::Finished { name })) => format!("~{name}"),
+			Ok(Some(broadcast::TracksEvent::Added { name, info })) => format!("+{}", named(info.kind(), name)),
+			Ok(Some(broadcast::TracksEvent::Removed { kind, name })) => format!("-{}", named(kind, name)),
+			Ok(Some(broadcast::TracksEvent::Finished { kind, name })) => format!("~{}", named(kind, name)),
 			Ok(Some(broadcast::TracksEvent::Synced)) => "synced".into(),
 			Ok(None) => "end".into(),
 			Err(err) => format!("error: {err}"),
@@ -11224,8 +11239,15 @@ mod tests {
 
 		let _audio = source.broadcast().create_track("audio", None).unwrap();
 		assert_eq!(listed(&mut tracks).await, "+audio");
+		let datagrams = source
+			.broadcast()
+			.create_datagrams("video", Default::default())
+			.unwrap();
+		assert_eq!(listed(&mut tracks).await, "+d:video");
 		drop(video);
 		assert_eq!(listed(&mut tracks).await, "-video");
+		datagrams.finish();
+		assert_eq!(listed(&mut tracks).await, "~d:video");
 
 		drop(source);
 		assert_eq!(listed(&mut tracks).await, "end");

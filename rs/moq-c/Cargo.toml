@@ -24,7 +24,7 @@ openh264 = ["moq-video/openh264"]
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 bytes = { workspace = true }
-hang = { workspace = true }
+hang = { workspace = true, features = ["async"] }
 kio = { workspace = true, features = ["async"] }
 # Codecs only: OBS and the other C consumers do their own device I/O.
 moq-audio = { workspace = true }

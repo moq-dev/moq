@@ -35,7 +35,7 @@ pub async fn connect(
 	let (cluster, auth) = (cluster.clone(), auth.clone());
 	drop(kio::clock::sim::spawn(async move {
 		let server = moq_net::Server::new().with_versions(version.into());
-		let Ok(handshake) = server.accept_request(moq_net::time::Instant::now(), relay_link).await else {
+		let Ok(handshake) = server.handshake(moq_net::time::Instant::now(), relay_link).await else {
 			return;
 		};
 		let request = Accepted::new(handshake, moq_auth::Transport::Quic);

@@ -124,7 +124,7 @@ int32_t moq_publish_container_finish(uint32_t container);
 int32_t moq_publish_media_finish(uint32_t media);
 int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, moq_timestamp timestamp);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_track_info *info);
-int32_t moq_publish_track_group(uint32_t track);
+int32_t moq_publish_track_group(uint32_t track, const moq_timestamp *start);
 int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_start(uint32_t group, uint64_t *dst);
@@ -168,7 +168,8 @@ int32_t moq_consume_closed(uint32_t broadcast, moq_status_callback on_closed, vo
 int32_t moq_consume_closed_cancel(uint32_t watcher);
 
 // Consuming: Catalog
-int32_t moq_consume_catalog(uint32_t broadcast, moq_status_callback on_catalog, void *user_data);
+int32_t moq_consume_catalog(uint32_t broadcast, uint64_t delay_us, moq_status_callback on_catalog, void *user_data);
+int32_t moq_consume_catalog_timestamp(uint32_t catalog, moq_timestamp *dst);
 int32_t moq_consume_catalog_cancel(uint32_t catalog);
 int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);

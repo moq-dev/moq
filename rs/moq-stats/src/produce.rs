@@ -603,11 +603,17 @@ struct Output<V> {
 /// They are compressed and keep merge-patch deltas inside the track's own
 /// DEFLATE window, so a joiner asks for a fresh group once the deltas outweigh
 /// eight snapshots.
+///
+/// A superseded group never goes stale on the publisher's say: a reader that needs every
+/// delta, such as one metering counters, waits for a group's finish even when the next
+/// group lands first, as its own [`Delay::max`](track::Delay::max) allows. A latest-only
+/// reader still skips one the moment a newer one arrives.
 fn info() -> track::Info {
 	track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_compression(moq_net::track::Compression::Deflate)
 		.with_refresh(8)
+		.with_max_age(None)
 }
 
 /// The snapshot codec every stats track encodes with.
@@ -1650,6 +1656,69 @@ mod tests {
 				(1_307, 2_614),
 				"broadcast totals never reset on re-hold"
 			);
+		}
+	}
+
+	/// A reader that waits for late groups reads a stats group to its end even when the next
+	/// group lands first, as it can on a relay when the group's finish trails the next
+	/// group's stream. A cut there would drop the deltas a counter's reader needs.
+	#[tokio::test(start_paused = true)]
+	async fn a_patient_reader_waits_for_a_finish_behind_the_next_group() {
+		for version in ["moq-lite-06", "moq-lite-07-wip"].map(|value| value.parse().unwrap()) {
+			let origin = produce_origin();
+			let route = origin
+				.route(Path::from_static(".stats/node"), origin::RouteOptions::default())
+				.unwrap();
+			let track = route.broadcast().create_track("t.json", info()).unwrap();
+			let (middle, _middle_cache) = relay();
+			let (edge, _edge_cache) = relay();
+			let _links = [
+				link(&origin, &middle, version).await,
+				link(&middle, &edge, version).await,
+			];
+			let at = |secs| Timestamp::from_secs(secs).unwrap();
+			let mut first = track.append_group(at(1)).unwrap();
+			first.write_frame(at(1), b"{}".to_vec()).unwrap();
+
+			let consumer = edge.consume().with_hidden(true);
+			let remote = consumer.request(".stats/node", None).await.unwrap();
+			let patient =
+				track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+			let mut ordered = remote
+				.track("t.json")
+				.unwrap()
+				.subscribe(patient)
+				.await
+				.unwrap()
+				.ordered();
+			let mut reading = loop {
+				match ordered.next_group().await.unwrap().unwrap() {
+					track::Item::Group(group) => break group,
+					// Keys below where the subscription began were never this reader's.
+					track::Item::Gap { .. } => continue,
+				}
+			};
+			assert_eq!(reading.read_frame().await.unwrap().unwrap().payload, b"{}".as_slice());
+			first.write_frame(at(2), b"{\"a\":1}".to_vec()).unwrap();
+			assert_eq!(
+				reading.read_frame().await.unwrap().unwrap().payload,
+				b"{\"a\":1}".as_slice()
+			);
+
+			let mut second = track.append_group(at(3)).unwrap();
+			second.write_frame(at(3), b"{\"a\":1}".to_vec()).unwrap();
+			// A latest-only reader at the edge sees the next group arrive there.
+			let mut latest = remote.track("t.json").unwrap().subscribe(None).await.unwrap();
+			while latest.recv_group().await.unwrap().unwrap().start != second.start {}
+			first.finish().unwrap();
+			assert!(
+				reading.read_frame().await.unwrap().is_none(),
+				"{version}: the group ends cleanly"
+			);
+			match ordered.next_group().await.unwrap().unwrap() {
+				track::Item::Group(group) => assert_eq!(group.start, second.start, "{version}"),
+				track::Item::Gap { range, error } => panic!("{version}: groups {range:?} given up: {error}"),
+			}
 		}
 	}
 
@@ -3090,9 +3159,19 @@ mod tests {
 				.expect("listing")
 				.expect("live");
 			let (name, listed) = match event {
-				broadcast::TracksEvent::Added { name, .. } => (name, true),
-				broadcast::TracksEvent::Removed { name } | broadcast::TracksEvent::Finished { name } => (name, false),
-				broadcast::TracksEvent::Synced => continue,
+				broadcast::TracksEvent::Added {
+					name,
+					info: broadcast::Listed::Track(_),
+				} => (name, true),
+				broadcast::TracksEvent::Removed {
+					kind: broadcast::Kind::Track,
+					name,
+				}
+				| broadcast::TracksEvent::Finished {
+					kind: broadcast::Kind::Track,
+					name,
+				} => (name, false),
+				_ => continue,
 			};
 			if let Some((bucket, _)) = crate::parse_bucket_track(&name) {
 				return (bucket.as_str().to_string(), listed);

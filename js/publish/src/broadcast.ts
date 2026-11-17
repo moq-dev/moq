@@ -83,7 +83,7 @@ export type BroadcastInput = {
 	 * which solicits it; undefined (the default) solicits none. A path that walks above the root from
 	 * the broadcast name is left out of the catalog with a warning, since every viewer would refuse it.
 	 */
-	echo: Getter<Moq.Path.Relative | undefined>;
+	echoPath: Getter<Moq.Path.Relative | undefined>;
 
 	/** Which renditions wait for a subscriber before encoding. Defaults to `"retain"`. */
 	onDemand: Getter<OnDemand>;
@@ -198,7 +198,7 @@ export class Broadcast {
 			maxAge: getter(props?.maxAge),
 			stats: getter(props?.stats ?? false),
 			probe: getter(props?.probe),
-			echo: getter(props?.echo),
+			echoPath: getter(props?.echoPath),
 			onDemand: getter(props?.onDemand ?? "retain"),
 		};
 
@@ -366,7 +366,7 @@ export class Broadcast {
 	// Solicit feedback in the catalog's `echo` section. A path above the root names no broadcast, and a
 	// viewer refuses the whole catalog for it, so it is left out instead.
 	#runEcho(effect: Effect) {
-		const path = effect.get(this.in.echo);
+		const path = effect.get(this.in.echoPath);
 		if (path === undefined) return;
 		const name = effect.get(this.in.name);
 		if (Moq.Path.tryResolve(name, path) === undefined) {
@@ -406,7 +406,7 @@ export class Broadcast {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
 
-		effect.interval(() => writer.update(this.#stats()), Duration.millis(Report.INTERVAL));
+		effect.interval(() => writer.update(this.#stats()), Report.INTERVAL);
 	}
 
 	// What each listed rendition has sent, keyed by its catalog ID, and the connection's round-trip time.

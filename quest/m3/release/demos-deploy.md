@@ -25,9 +25,9 @@ format, which `main` restored in
 [moq-dev/moq#8936](https://github.com/moq-dev/moq/pull/8936), so the hosted relays need no
 new version for it and the auth server keeps `demo/viewer/**`. CARLA was
 added on `main` after `release` branched; its restored format
-([its quest](/quest/m2/sockets/carla.md)) uses the same grant. Read both
-quests' merged PRs for the grants they settled before deploying, since each
-re-decides its grant rather than restoring it blindly.
+([moq-dev/moq#8937](https://github.com/moq-dev/moq/pull/8937)) uses the same
+grant. Read both quests' merged PRs for the grants they settled before
+deploying, since each re-decides its grant rather than restoring it blindly.
 
 The cut publishes no MoQ Boy package
 ([moq-dev/moq#8446](https://github.com/moq-dev/moq/pull/8446), 2026-11-10):
@@ -56,7 +56,3 @@ package.
   drive Chrome for that check.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [CARLA drivers publish their controls again](/quest/m2/sockets/carla.md) - settles the worker's and drivers' grants this deploys

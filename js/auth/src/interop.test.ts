@@ -32,6 +32,12 @@ describe("Rust-serialized contract", () => {
 		expect(request.reason).toBe("invalid");
 	});
 
+	test("parse the stream link transports from Rust", () => {
+		for (const transport of ["tcp", "tls"] as const) {
+			expect(RequestSchema.parse({ ...JSON.parse(RUST_REQUEST), transport }).transport).toBe(transport);
+		}
+	});
+
 	test("parse gateway transports and stable end reasons from Rust", () => {
 		for (const transport of ["rtmp", "srt", "webrtc"] as const) {
 			for (const reason of ["narrowed", "shutdown"]) {

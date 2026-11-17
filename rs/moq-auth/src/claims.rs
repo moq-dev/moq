@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 /// already could. A key with no scope at all is unrestricted, so keys minted before
 /// scopes existed keep working.
 ///
-/// Legacy `put`/`get` prefix scopes load as subtree patterns, and a scope that only
-/// grants subtrees is written that way so older readers load it too.
+/// Legacy `put`/`get` prefix scopes load as subtree patterns; a scope is always written
+/// as `publish` and `subscribe`.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq, Eq)]
 #[serde(try_from = "crate::wire::Object<crate::wire::Scope>", into = "crate::wire::Scope")]
 pub struct Scope {
@@ -107,14 +107,12 @@ impl Permissions {
 ///     .with_subscribe(["**".parse().unwrap()]);
 /// ```
 ///
-/// Legacy `moq-token` claims are read too: each `put`/`get` prefix `p` is the subtree
-/// `p/**`. Claims that only grant subtrees are written that way, so every published
-/// verifier accepts them; anything else is written as `publish`/`subscribe`, which an
-/// older verifier refuses rather than misreads. A capped role is written as
-/// `{"path": [...], "rate": bps}`, which every published verifier refuses rather than
-/// drop the cap. The registered `iss`, `sub`, and `jti`
-/// claims are read and ignored; any other field fails verification, since it might
-/// narrow the grant, and a misspelled `root` would otherwise widen it.
+/// Grants are written as `publish` and `subscribe`. Legacy `moq-token` claims are read
+/// too: each `put`/`get` prefix `p` is the subtree `p/**`. A capped role is written as
+/// `{"path": [...], "rate": bps}`, which every older verifier refuses rather than drop
+/// the cap. The registered `iss` and `sub` claims are read and ignored; any other field
+/// fails verification, since it might narrow the grant, and a misspelled `root` would
+/// otherwise widen it.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 #[serde(try_from = "crate::wire::Object<crate::wire::Claims>", into = "crate::wire::Claims")]
 #[non_exhaustive]
@@ -139,6 +137,9 @@ pub struct Claims {
 	/// The time before which the token is refused, as a unix timestamp (`nbf`).
 	/// Enforced by [`Key::verify`](crate::Key::verify).
 	pub not_before: Option<kio::clock::Wall>,
+
+	/// The token's identifier (`jti`), which its issuer may record to revoke it.
+	pub id: Option<crate::TokenId>,
 }
 
 impl Claims {
@@ -186,6 +187,14 @@ impl Claims {
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
 	pub fn with_issued(mut self, at: impl Into<Option<kio::clock::Wall>>) -> Self {
 		self.issued = at.into();
+		self
+	}
+
+	/// Identify the token, such as for its issuer to revoke it. Nothing invents one.
+	///
+	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
+	pub fn with_id(mut self, id: impl Into<Option<crate::TokenId>>) -> Self {
+		self.id = id.into();
 		self
 	}
 
@@ -287,6 +296,7 @@ mod tests {
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
+			id: None,
 		}
 	}
 
@@ -445,7 +455,7 @@ mod tests {
 	}
 
 	#[test]
-	fn scope_writes_legacy_prefixes_only_when_faithful() {
+	fn scope_writes_patterns() {
 		let subtrees = Scope {
 			root: "demo".into(),
 			publish: patterns(&["room/**"]),
@@ -453,7 +463,7 @@ mod tests {
 		};
 		assert_eq!(
 			serde_json::to_string(&subtrees).unwrap(),
-			r#"{"root":"demo","put":["room"],"get":[""]}"#
+			r#"{"root":"demo","publish":["room/**"],"subscribe":["**"]}"#
 		);
 
 		let exact = Scope {
@@ -547,31 +557,37 @@ mod tests {
 	}
 
 	#[test]
-	fn test_claims_write_legacy_prefixes_only_when_faithful() {
-		// Every grant is a subtree, so the legacy form says exactly the same thing.
+	fn test_claims_write_patterns_and_id() {
 		let subtrees = Claims {
 			root: "live".into(),
 			publish: patterns(&["camera1/**"]).into(),
 			subscribe: patterns(&["**"]).into(),
 			..Default::default()
-		};
+		}
+		.with_id(crate::TokenId::decode("abc-123").unwrap());
 		let json = serde_json::to_string(&subtrees).unwrap();
-		assert_eq!(json, r#"{"root":"live","put":["camera1"],"get":[""]}"#);
+		assert_eq!(
+			json,
+			r#"{"root":"live","publish":["camera1/**"],"subscribe":["**"],"jti":"abc-123"}"#
+		);
 		let back: Claims = serde_json::from_str(&json).unwrap();
 		assert_eq!(back.publish, subtrees.publish);
 		assert_eq!(back.subscribe, subtrees.subscribe);
+		assert_eq!(back.id, subtrees.id);
+	}
 
-		// One grant a prefix can't say moves the whole document to patterns.
-		let mixed = Claims {
-			root: "live".into(),
-			publish: patterns(&["camera1/**"]).into(),
-			subscribe: patterns(&["*/chat"]).into(),
-			..Default::default()
-		};
-		assert_eq!(
-			serde_json::to_string(&mixed).unwrap(),
-			r#"{"root":"live","publish":["camera1/**"],"subscribe":["*/chat"]}"#
-		);
+	#[test]
+	fn test_claims_refuse_an_unbounded_id() {
+		let long = format!(r#"{{"publish":["**"],"jti":"{}"}}"#, "x".repeat(129));
+		for json in [
+			r#"{"publish":["**"],"jti":7}"#,
+			r#"{"publish":["**"],"jti":null}"#,
+			r#"{"publish":["**"],"jti":""}"#,
+			r#"{"publish":["**"],"jti":"has space"}"#,
+			long.as_str(),
+		] {
+			assert!(serde_json::from_str::<Claims>(json).is_err(), "{json}");
+		}
 	}
 
 	#[test]

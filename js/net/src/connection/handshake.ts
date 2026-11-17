@@ -44,7 +44,6 @@ export async function exchangeSetup(
 	solicit: boolean | undefined;
 	declaredSolicit: boolean;
 	hidden: boolean;
-	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	peerImplementation: string | undefined;
@@ -53,7 +52,6 @@ export async function exchangeSetup(
 	Ietf.implementationIntoSetup(params, implementation);
 	if (solicit) Ietf.solicitIntoSetup(params);
 	Ietf.hiddenIntoSetup(params);
-	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params);
 	// Only a client presents a connection credential.
 	if (client && token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: token });
@@ -85,7 +83,6 @@ export async function exchangeSetup(
 		solicit: received.solicit,
 		declaredSolicit: solicit,
 		hidden: received.hidden,
-		maxAge: received.maxAge,
 		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
 		peerImplementation: received.implementation,
@@ -115,7 +112,6 @@ async function receiveSetup(
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
-	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Hop | undefined;
 	implementation: string | undefined;
@@ -178,7 +174,6 @@ async function receiveSetup(
 		early,
 		solicit: Ietf.solicitFromSetup(setup.parameters),
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
-		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
 		activeCount: Ietf.activeCountFromSetup(setup.parameters),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters),
 		implementation: Ietf.implementationFromSetup(setup.parameters),

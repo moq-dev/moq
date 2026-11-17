@@ -124,13 +124,6 @@ const kinds: { name: string; estimates: boolean; shape: (quic: MockTransport) =>
 			Object.assign(quic, { transport: "websocket" });
 		},
 	},
-	{
-		name: "WebRTC",
-		estimates: false,
-		shape: (quic) => {
-			Object.assign(quic, { transport: "webrtc" });
-		},
-	},
 ];
 
 for (const kind of kinds) {

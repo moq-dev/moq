@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Duration, Instant, now, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
@@ -10,8 +10,10 @@ import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync, Track } from "../sync";
+import { stubSupport } from "../webcodecs.test-util";
 import { Decoder } from "./decoder";
 import { Source } from "./source";
+import { supported } from "./supported";
 
 const flush = () => yieldNow();
 
@@ -50,10 +52,7 @@ async function play(catalog: Signal<Catalog.Root>): Promise<{
 	decoder: Decoder;
 }> {
 	const broadcast = new Signal<Broadcast | undefined>(watchBroadcast(catalog));
-	const source = new Source({
-		broadcast,
-		supported: async () => true,
-	});
+	const source = new Source({ broadcast });
 	const sync = new Sync({ delay: Duration.millis(0) });
 	await settle();
 	const decoder = new Decoder({ source, sync });
@@ -62,6 +61,12 @@ async function play(catalog: Signal<Catalog.Root>): Promise<{
 }
 
 describe("Decoder jitter across a source switch", () => {
+	let decoder: Disposable;
+	beforeEach(() => {
+		decoder = stubSupport({ video: () => true });
+	});
+	afterEach(() => decoder[Symbol.dispose]());
+
 	it("keeps the outgoing floor when the next source reuses the track name", async () => {
 		const outgoing = new Signal<Catalog.Root>({
 			video: { renditions: { video: config({ delay: 200, jitter: 60 }) } },
@@ -375,7 +380,7 @@ async function guardedPlayback(
 		producer.close();
 		mediaProducer.close();
 	};
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
 	const delay = new Signal<Delay>(initial ?? (lookahead ? Duration.millis(100) : "instant"));
 	const sync = new Sync({ delay, lookahead: Duration.millis(lookahead) });
 	const enabled = new Signal(true);
@@ -499,6 +504,27 @@ for (const kind of ["legacy", "cmaf"] as const) {
 	}
 }
 
+// Signals compare a write against the value it replaced, so a range changed in place after delivery
+// is a change no subscriber hears about.
+it("never changes the buffered ranges it already reported", async () => {
+	const reads = Array.from({ length: 8 }, (_, i) => sample(0n, i * 20_000, i === 0));
+	const playback = await guardedPlayback("legacy", reads, [], false, 1000);
+	const show = (ranges: Container.BufferedRanges) =>
+		ranges.map((r) => `${r.start.asMicros()}-${r.end.asMicros()}`).join();
+	const seen: [Container.BufferedRanges, string][] = [];
+	const dispose = playback.decoder.out.buffered.subscribe((ranges) => seen.push([ranges, show(ranges)]));
+	try {
+		await microtasks();
+		expect(seen.length).toBeGreaterThan(1);
+		for (const [ranges, shown] of seen) expect(show(ranges)).toBe(shown);
+		expect(show(playback.decoder.out.buffered.peek())).toBe(seen.at(-1)?.[1] ?? "");
+	} finally {
+		dispose();
+		playback.close();
+		await microtasks();
+	}
+});
+
 it("promoting from no active track holds its picture and timestamp until a frame arrives", async () => {
 	const playback = await guardedPlayback("legacy", [sample(10n, 1000)]);
 	try {
@@ -523,7 +549,7 @@ it("configures an avc3 rendition with the avc1 string WebCodecs accepted, leavin
 	});
 	try {
 		const rendition = playback.catalog.peek().video?.renditions?.video;
-		expect(rendition && (await Decoder.supported(rendition))).toBe(true);
+		expect(rendition && (await supported(rendition))).toBe(true);
 		expect(rendition?.codec).toBe("avc3.640028");
 		expect(playback.configures.at(-1)?.codec).toBe("avc1.640028");
 	} finally {

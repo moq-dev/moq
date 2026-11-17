@@ -33,9 +33,9 @@ class Enabled extends Moq.Signals.Signal<boolean> {
 		super(false);
 	}
 
-	override set(value: boolean, notify?: boolean): void {
+	override set(value: boolean, force?: true): void {
 		this.#wanted = value;
-		super.set(value && this.#running, notify);
+		super.set(value && this.#running, force);
 	}
 
 	run(running: boolean): void {

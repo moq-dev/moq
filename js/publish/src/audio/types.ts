@@ -1,11 +1,12 @@
 /**
- * The kind of audio being encoded. Drives the default Opus application/signal settings on the
- * encoder, each of which an explicit OpusConfig can still override.
- * - "voice": speech (microphone). Opus application=voip + signal=voice.
+ * What the audio carries, driving the default Opus application/signal settings on the encoder,
+ * each of which an explicit OpusConfig can still override. A source without one leaves both to
+ * the browser, which suits an unknown source like file playback.
+ * - "voice": speech (microphone). Opus application=voip + signal=voice, and nothing is sent once the
+ *   talker has been silent for 200 ms: that pause is a declared end, as a mute's is.
  * - "music": music or mixed content (screen/tab capture). Opus application=audio + signal=music.
- * - "auto": let the encoder decide. Opus defaults (good for unknown sources like file playback).
  */
-export type Kind = "voice" | "music" | "auto";
+export type Kind = "voice" | "music";
 
 /**
  * Which codec is in use, ignoring its tuning knobs. Lives here rather than next to the codec
@@ -15,8 +16,8 @@ export type CodecMime = "opus" | "aac";
 
 /**
  * Where audio comes from: a live capture track, or a stream of samples we decoded ourselves.
- * A bare track is accepted for backwards compatibility and treated as kind="auto".
- * Prefer the `{ track, kind }` object form so the encoder can pick the right Opus settings.
+ * A bare track carries no kind. Prefer the `{ track, kind }` object form when the kind is known,
+ * so the encoder can pick the right Opus settings.
  */
 export type Source = StreamTrack | SourceConfig | SampleSource;
 
@@ -24,8 +25,8 @@ export type Source = StreamTrack | SourceConfig | SampleSource;
 export interface SourceConfig {
 	/** The track to capture. */
 	track: StreamTrack;
-	/** What kind of audio the track carries, driving the Opus defaults. */
-	kind: Kind;
+	/** What kind of audio the track carries, driving the Opus defaults. Omit it when unknown. */
+	kind?: Kind;
 }
 
 /**
@@ -45,8 +46,8 @@ export interface SampleSource {
 	/** The channel count the samples were decoded at. */
 	channelCount: number;
 
-	/** What kind of audio these samples carry, driving the Opus defaults. */
-	kind: Kind;
+	/** What kind of audio these samples carry, driving the Opus defaults. Omit it when unknown. */
+	kind?: Kind;
 }
 
 /** Whether this source is a stream of decoded samples rather than a live capture track. */
@@ -55,15 +56,15 @@ export function isSampleSource(source: Source): source is SampleSource {
 	return "samples" in source;
 }
 
-/** What kind of audio the source carries. A bare track says nothing, so it's "auto". */
-export function sourceKind(source: Source): Kind {
-	return "track" in source || "samples" in source ? source.kind : "auto";
+/** What kind of audio the source carries, if it says. A bare track says nothing. */
+export function sourceKind(source: Source): Kind | undefined {
+	return "track" in source || "samples" in source ? source.kind : undefined;
 }
 
 /** Resolve the bare-track shorthand to its full config form. */
 export function normalizeSource(source: StreamTrack | SourceConfig): SourceConfig {
 	// Structural check rather than `instanceof MediaStreamTrack` so this stays correct across realms.
-	return "track" in source ? source : { track: source, kind: "auto" };
+	return "track" in source ? source : { track: source };
 }
 
 /** The `getUserMedia` constraints that apply to audio. */

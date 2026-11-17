@@ -138,7 +138,7 @@ async fn native_sessions_supply_direct_wire_counters() {
 	wire_sources(false).await;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 #[tokio::test]
 async fn uring_sessions_supply_direct_wire_counters() {
 	match moq_uring::Worker::new(Default::default()) {

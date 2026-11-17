@@ -8,8 +8,6 @@
 
 mod edit;
 mod export;
-pub mod fragment;
-mod fragmenter;
 mod import;
 pub(crate) mod metadata;
 mod muxer;
@@ -17,7 +15,6 @@ mod sample;
 mod text;
 
 pub use export::*;
-pub use fragmenter::*;
 pub use import::*;
 pub use muxer::*;
 
@@ -707,8 +704,7 @@ pub(crate) struct FragmentInfo {
 /// Encode a single-traf moof+mdat fragment anchored at its own first frame.
 ///
 /// The fragment stands alone: its `tfdt` is `frames[0]`'s presentation time, so it decodes
-/// without reference to whatever came before it. To cut a stream into one fragment per
-/// frame, on a single continuous decode timeline, use [`Fragmenter`].
+/// without reference to whatever came before it.
 ///
 /// Returns an empty `Bytes` when `frames` is empty.
 pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<Bytes> {
@@ -743,7 +739,7 @@ fn timestamp_ticks(timestamp: Timestamp, timescale: moq_net::Timescale) -> Resul
 /// the moof and mdat header.
 ///
 /// `base_dts` is already at the track's timescale, so it is the same unit the `trun` sample
-/// durations are written in. That's what lets [`Fragmenter`] carry a timeline across
+/// durations are written in. That's what lets [`Export`] carry a timeline across
 /// calls without a rounding step between them.
 ///
 /// Frames arrive in decode order carrying presentation timestamps. DTS is authored by

@@ -17,10 +17,12 @@ does. A grant can label its session's stats independently of its authorization
 root. Tokens are interchangeable with the Rust side. Grants and claims are
 [`Pattern`](https://www.npmjs.com/package/@moq/pattern) unions: `foo` is one
 broadcast, `foo/**` is a subtree, `**` is everything. A claim or grant role is
-an `Access`: its pattern array, or `{ path, rate }` with a bitrate cap. The
-types are the wire shape, so a typed `Grant` is the JSON to answer with, and the
-relay refuses a field it does not know; key scopes bound paths only, and
-`authorize` checks paths only.
+an `Access`: its pattern array, or `{ path, rate }` with a bitrate cap. A
+`Grant` is typed as its wire shape, so a typed `Grant` is the JSON to answer
+with, and the relay refuses a field it does not know. `Claims` spell a token's
+`exp`, `iat`, `nbf`, and `jti` as `expires`, `issued`, `notBefore`, and `id`, as
+the Rust crate does. Key scopes bound paths only, and `Claims.authorize` checks
+paths only.
 
 ```bash
 bun add @moq/auth

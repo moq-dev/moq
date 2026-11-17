@@ -323,7 +323,7 @@ impl<E: CatalogExt> Outputs<E> {
 		// One snapshot per group while deltas are disabled.
 		#[cfg(test)]
 		let before = self.hang_track.largest();
-		self.hang.update(moq_json::Timed::new(catalog, at))?;
+		self.hang.update(catalog, at)?;
 		#[cfg(test)]
 		if self.hang_track.largest() != before {
 			self.published[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);

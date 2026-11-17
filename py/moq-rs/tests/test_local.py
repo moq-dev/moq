@@ -625,7 +625,7 @@ async def test_fetch_group_and_serve_dynamic_miss():
     track = broadcast.publish_track("events", moq.TrackInfo(timescale=1_000_000))
     consumer = broadcast.consume()
 
-    cached = track.append_group()
+    cached = track.append_group(moq.Timestamp(0, 1_000_000))
     cached.write_frame(b"cached", moq.Timestamp(0, 1_000_000))
     cached.finish()
 
@@ -985,18 +985,14 @@ async def test_dynamic_broadcast_request_can_reject():
         await asyncio.wait_for(requesting, timeout=5.0)
 
 
-def test_raw_append_group_start_increments():
-    """append_group hands out monotonically increasing start."""
+def test_raw_append_group_starts_at_its_timestamp():
+    """append_group starts the group at its timestamp, in the track's timescale."""
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("seq")
+    track = broadcast.publish_track("seq", moq.TrackInfo(timescale=1_000_000))
 
-    starts = []
-    for _ in range(5):
-        group = track.append_group()
-        starts.append(group.start)
-        group.finish()
-
-    assert starts == [0, 1, 2, 3, 4]
+    group = track.append_group(moq.Timestamp(2, 1_000))
+    assert group.start == 2_000
+    group.finish()
 
 
 def test_raw_group_write_multiple_frames():
@@ -1004,7 +1000,7 @@ def test_raw_group_write_multiple_frames():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("chunks", moq.TrackInfo(timescale=1_000_000))
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp(0, 1_000_000))
     for i in range(10):
         group.write_frame(f"frame-{i}".encode(), moq.Timestamp(i, 1_000_000))
     group.finish()
@@ -1015,7 +1011,7 @@ def test_raw_group_empty_payload():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("empty")
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp.unscaled(0))
     group.write_frame(b"", moq.Timestamp.unscaled(group.start))
     group.finish()
 
@@ -1023,7 +1019,7 @@ def test_raw_group_empty_payload():
 def test_raw_group_write_after_finish_fails():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("t")
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp.unscaled(0))
     group.finish()
 
     with pytest.raises(Exception):
@@ -1033,7 +1029,7 @@ def test_raw_group_write_after_finish_fails():
 def test_raw_group_abort_after_finish():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("t")
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp.unscaled(0))
     group.finish()
     group.abort(409)
 
@@ -1069,7 +1065,7 @@ def test_raw_sparse_groups_and_known_end():
     track.finish()
 
     with pytest.raises(Exception):
-        track.append_group()
+        track.append_group(moq.Timestamp.unscaled(5))
 
 
 def test_raw_parallel_groups():
@@ -1078,9 +1074,8 @@ def test_raw_parallel_groups():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("parallel", moq.TrackInfo(timescale=1_000_000))
 
-    # Without a start, each append takes the next start past the largest.
-    g0 = track.append_group()
-    g1 = track.append_group()
+    g0 = track.append_group(moq.Timestamp(0, 1_000_000))
+    g1 = track.append_group(moq.Timestamp(1, 1_000_000))
     assert g0.start == 0
     assert g1.start == 1
 
@@ -1228,7 +1223,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("backlog", moq.TrackInfo(max_age=None, timescale=1_000_000))
     for ms in range(3):
-        group = track.append_group()
+        group = track.append_group(moq.Timestamp(ms, 1_000))
         group.write_frame(b"x", moq.Timestamp(ms, 1_000))
         group.finish()
 
@@ -1244,7 +1239,7 @@ async def test_ascending_subscription_reads_a_cached_backlog_oldest_first():
         group = await asyncio.wait_for(consumer.recv_group(), timeout=5.0)
         assert group is not None
         starts.append(group.start)
-    assert starts == [0, 1, 2]
+    assert starts == [0, 1_000, 2_000]
 
 
 async def test_time_anchor_starts_at_the_group_containing_it():
@@ -1274,7 +1269,7 @@ async def test_raw_group_producer_consume_direct():
     """Consume a single group directly from the group producer."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("group-direct")
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp.unscaled(0))
     group_consumer = group.consume()
     assert group_consumer.start == group.start
 
@@ -1319,7 +1314,7 @@ async def test_raw_group_start():
 
         sent_starts = []
         for i in range(3):
-            group = raw.append_group()
+            group = raw.append_group(moq.Timestamp(i, 1_000_000))
             sent_starts.append(group.start)
             group.write_frame(f"msg-{i}".encode(), moq.Timestamp(i, 1_000_000))
             group.finish()
@@ -1400,17 +1395,17 @@ async def test_container_group_decodes_arrival_order():
     track = broadcast.publish_track("audio", moq.TrackInfo(timescale=1_000_000))
     consumer = await broadcast.consume().subscribe_track("audio")
 
-    first = track.append_group()
+    first = track.append_group(moq.Timestamp(1, 1_000))
     first.write_frame(_legacy(1_000_000, b"a"), moq.Timestamp(1, 1_000))
     first_media = await _recv_media(consumer)
     frame = await asyncio.wait_for(anext(first_media), timeout=5.0)
     assert (frame.payload, frame.timestamp, frame.keyframe) == (b"a", moq.Timestamp(1_000_000, 1_000_000), True)
 
     # A newer group lands while the first is stalled mid-way.
-    second = track.append_group()
+    second = track.append_group(moq.Timestamp(2, 1_000))
     second.write_frame(_legacy(1_040_000, b"c"), moq.Timestamp(2, 1_000))
     second_media = await _recv_media(consumer)
-    assert second_media.start == 1
+    assert second_media.start == 2_000
     frame = await asyncio.wait_for(anext(second_media), timeout=5.0)
     assert (frame.payload, frame.timestamp) == (b"c", moq.Timestamp(1_040_000, 1_000_000))
 
@@ -1431,14 +1426,14 @@ async def test_container_group_takes_over_an_unread_group():
     track = broadcast.publish_track("audio", moq.TrackInfo(timescale=1_000_000))
     consumer = await broadcast.consume().subscribe_track("audio")
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp(1, 1_000))
     group.write_frame(_legacy(1_000_000, b"a"), moq.Timestamp(1, 1_000))
     raw = await _recv_raw(consumer)
     assert await raw.read_frame() is not None
     with pytest.raises(moq.Error.AlreadyCommitted):
         moq.media.GroupConsumer(raw, _LEGACY)
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp(2, 1_000))
     group.write_frame(_legacy(1_020_000, b"b"), moq.Timestamp(2, 1_000))
     raw = await _recv_raw(consumer)
     media = moq.media.GroupConsumer(raw, _LEGACY)
@@ -1454,7 +1449,7 @@ async def test_container_group_fails_loudly():
     track = broadcast.publish_track("audio", moq.TrackInfo(timescale=1_000_000))
     consumer = await broadcast.consume().subscribe_track("audio")
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp(1, 1_000))
     # A truncated varint timestamp: the 2-byte form with only its first byte.
     group.write_frame(b"\x40", moq.Timestamp(1, 1_000))
     raw = await _recv_raw(consumer)
@@ -1479,7 +1474,7 @@ async def test_raw_multi_frame_group():
         broadcast_consumer = await consumer.request(announcement.prefix)
         raw_consumer = await broadcast_consumer.subscribe_track("chunks")
 
-        group_producer = raw.append_group()
+        group_producer = raw.append_group(moq.Timestamp.unscaled(0))
         chunks = [b"chunk-0", b"chunk-1", b"chunk-2"]
         for chunk in chunks:
             group_producer.write_frame(chunk, moq.Timestamp.unscaled(group_producer.start))
@@ -1526,7 +1521,7 @@ async def test_raw_read_frame_preserves_timestamp():
     assert frame.payload == b"ready"
     assert frame.timestamp == moq.Timestamp(12_345, 1_000_000)
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp(23_456, 1_000_000))
     group_consumer = group.consume()
     group.write_frame(b"group", moq.Timestamp(23_456, 1_000_000))
     group.finish()
@@ -1543,7 +1538,7 @@ async def test_read_frame_skips_remaining_frames_in_group():
     track = broadcast.publish_track("mixed", moq.TrackInfo(max_age=None))
     consumer = track.consume(moq.Subscription(delay=moq.Delay(max=timedelta(seconds=1)), ranges=FROM_GROUP_0))
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp.unscaled(0))
     group.write_frame(b"first", moq.Timestamp.unscaled(group.start))
     group.write_frame(b"second-ignored", moq.Timestamp.unscaled(group.start))
     group.finish()
@@ -1579,7 +1574,7 @@ async def test_read_frame_skips_empty_group_on_open_track():
     track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     consumer = track.consume()
 
-    track.append_group().finish()
+    track.append_group(moq.Timestamp(0, 1_000_000)).finish()
 
     read = asyncio.create_task(consumer.read_frame())
     await polled()
@@ -1598,8 +1593,8 @@ async def test_read_frame_skips_empty_then_populated_groups():
     track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     consumer = track.consume()
 
-    track.append_group().finish()
-    track.append_group().finish()
+    track.append_group(moq.Timestamp(0, 1_000_000)).finish()
+    track.append_group(moq.Timestamp(1_000, 1_000_000)).finish()
     track.write_frame(b"populated", moq.Timestamp(2_000, 1_000_000))
 
     frame = await asyncio.wait_for(consumer.read_frame(), timeout=5.0)
@@ -1614,7 +1609,7 @@ async def test_read_frame_keeps_group_across_cancelled_call():
     track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000_000))
     consumer = track.consume()
 
-    group = track.append_group()
+    group = track.append_group(moq.Timestamp(3_000, 1_000_000))
     read = asyncio.create_task(consumer.read_frame())
     await polled()
     assert not read.done()

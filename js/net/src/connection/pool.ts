@@ -29,7 +29,7 @@ import {
 } from "./connect.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { Goaway as GoawayType, Handover as HandoverType, Redirect as RedirectType } from "./goaway.ts";
-import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import { type Backoff as BackoffType, pumpAnnounced, Reload, type ReloadStatus } from "./reload.ts";
 import type { Session as SessionType } from "./session.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
@@ -71,7 +71,7 @@ export interface ConnectionProps {
 	consume?: Origin.Producer;
 
 	/** Backoff settings for the reconnect loop; an unset field uses its default. */
-	delay?: ReloadDelay;
+	backoff?: BackoffType;
 
 	/**
 	 * Credentials to present, kept apart from the URL; see {@link ConnectProps.tokens}. Pass a
@@ -120,7 +120,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * `goaway` policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, delay, timeout, goaway, tokens, a pinned
+ * Options the pool cannot honor (transport options, backoff, timeout, goaway, tokens, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -330,7 +330,7 @@ export class Connection {
 				versions,
 				webtransport: props.webtransport,
 				websocket: props.websocket,
-				delay: props.delay,
+				backoff: props.backoff,
 				timeout: props.timeout,
 				goaway: props.goaway,
 				tokens: props.tokens,
@@ -456,7 +456,7 @@ export namespace Connection {
 	/** Options for {@link Connection.accept}. @reexport */
 	export type AcceptProps = AcceptPropsType;
 	/** Backoff settings for a private reconnect loop. @reexport */
-	export type Backoff = ReloadDelay;
+	export type Backoff = BackoffType;
 	/** How a connection hands over to a new session after the relay's GOAWAY. @reexport */
 	export type Handover = HandoverType;
 	/** What to do with the URI a relay names in its GOAWAY. @reexport */
@@ -518,8 +518,8 @@ function refuse(props?: ConnectionProps): void {
 	if (props.websocket !== undefined) {
 		throw new Error("websocket options cannot be shared; pass share: false");
 	}
-	if (props.delay !== undefined) {
-		throw new Error("delay cannot be shared; pass share: false");
+	if (props.backoff !== undefined) {
+		throw new Error("backoff cannot be shared; pass share: false");
 	}
 	if (props.tokens !== undefined) {
 		throw new Error("tokens cannot be shared; pass share: false");
@@ -537,7 +537,7 @@ function requiresPrivate(props: ConnectionProps): boolean {
 	return (
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
-		props.delay !== undefined ||
+		props.backoff !== undefined ||
 		props.tokens !== undefined ||
 		props.timeout !== undefined ||
 		props.goaway !== undefined ||

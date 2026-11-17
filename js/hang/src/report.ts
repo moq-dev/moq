@@ -3,12 +3,13 @@
  * @module
  */
 
+import { Duration } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import type * as z from "zod/mini";
 
-/** How often a reporter writes, in milliseconds: about once a second, as the hang draft asks. */
-export const INTERVAL = 1000;
+/** How often a reporter writes: about once a second, as the hang draft asks. */
+export const INTERVAL = Duration.secs(1);
 
 // Below every media track, so a report never delays the media it describes.
 const PRIORITY = -128;
@@ -51,7 +52,7 @@ export class Writer<T, I = T> {
 	update(value: I): void {
 		if (this.#closed || this.track.demand().wanted.peek() === undefined) return;
 		try {
-			this.#producer.update({ value: this.#schema.parse(value), at: Moq.Time.Timestamp.unscaled(this.#key++) });
+			this.#producer.update(this.#schema.parse(value), Moq.Time.Timestamp.unscaled(this.#key++));
 		} catch (err) {
 			console.warn("a report track failed; closing it", err);
 			this.#closed = true;

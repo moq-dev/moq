@@ -131,6 +131,7 @@ type Catalog = {
   "json": JsonTracks | undefined,
   "binary": BinaryTracks | undefined,
   "include": Record<string, {
+    "version": number | undefined,
     "broadcast": string,
     "instance": string | undefined,
   }> | undefined,
@@ -150,18 +151,22 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, an optional `sync` section ({{sync}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed in `include` ({{include}}).
+This specification defines audio, video, and text media tracks, an optional `sync` section ({{sync}}) holding the clock that maps content time to wall time and the interval a viewer can join on, the `version` of the catalog and of each entry ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed in `include` ({{include}}).
 
 ## Version {#catalog-version}
-The root `version` field is the oldest draft of this specification that reads the catalog correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
+The `version` field is the oldest draft of this specification that reads what carries it correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
 If absent, it is 3.
+The root carries one for the whole catalog, and each entry of a map keyed by ID (an audio, video, or text rendition, a data track, or an include) carries one for itself.
 
 A consumer MUST ignore fields it does not recognize.
-A consumer MUST refuse a catalog whose `version` is above the draft it implements, or is not a non-negative integer, rather than read it; one that refuses SHOULD tell its user to upgrade.
+A consumer MUST refuse a catalog whose root `version` is above the draft it implements, or any `version` that is not a non-negative integer, rather than read it; one that refuses SHOULD tell its user to upgrade.
+A consumer MUST read an entry's `version` before the rest of the entry, and MUST skip an entry whose `version` is above the draft it implements: it reads the catalog as if that entry were absent, so the entry is never malformed.
+One that skips an entry SHOULD tell its user that an upgrade would show more.
 
-A publisher writes the highest draft whose fields the catalog uses that an older consumer would misread, and omits `version` while that is 3.
-A change raises the version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
-This draft needs `version` 4 only for a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead.
+A publisher writes on each entry the highest draft whose fields the entry uses that an older consumer would misread, and on the root the highest such draft for the root's own fields, omitting each `version` while it is 3.
+A field one entry carries raises only that entry's `version`, so an older consumer still plays the rest of the catalog, including a compatibility rendition beside the new one.
+A change raises a version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
+This draft writes no root `version`, and needs an entry `version` of 4 only for a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead.
 
 Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `sync` ({{sync}}) only offers the clock and join interval, which an older consumer goes without; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `include` ({{include}}) only offers broadcasts to open on selection; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup` ({{field-warmup}}), and the data track estimates are hints.
 
@@ -513,7 +518,7 @@ type TextConfig = {
   "format": "vtt" | "ttml" | "utf8" | string,
   "role": "subtitle" | "caption" | string | undefined,
   "lang": string | undefined,
-  // plus the common rendition fields, except `enabled`
+  // plus the common rendition fields, except `bitrate` and `enabled`
 }
 ~~~
 
@@ -594,6 +599,7 @@ A consumer discovers these tracks the same way it discovers media, by reading th
 ### JSON {#json-tracks}
 ~~~
 type JsonSchema = {
+  "version": number | undefined,
   "mode": Mode,
   "schema": string | undefined,
   "broadcast": string | undefined,
@@ -611,6 +617,7 @@ It is descriptive: a consumer that does not recognize it MUST still be able to r
 ### Binary {#binary-tracks}
 ~~~
 type BinarySchema = {
+  "version": number | undefined,
   "mode": Mode,
   "mime": string | undefined,
   "broadcast": string | undefined,
@@ -683,11 +690,13 @@ Audio, video, and text renditions share the following fields, extending the WebC
 
 ~~~
 type CommonExtensions = {
+  "version": number | undefined,
   "broadcast": string | undefined,
   "instance": string | undefined,
   "track": string | undefined,
   "label": string | undefined,
   "container": Container,
+  "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
   "enabled": boolean | undefined,
@@ -754,6 +763,13 @@ Multiple renditions MAY use the same label.
 ### container {#field-container}
 The container used to frame this rendition's media, as described in {{container}}.
 If absent, it defaults to `{ "kind": "legacy" }`.
+
+### bitrate {#field-bitrate}
+The highest bitrate the publisher configures the rendition's encoder for, in bits per second.
+For video it is the encoder's rate-control target at its busiest, averaged over the encoder's own window, typically on the order of a second: a quiet scene sends well below it, and a busy one approaches it.
+It is not a hard bound: a publisher does not declare the window, and a frame or a short burst, or an encoder overshooting its target, can exceed it.
+A consumer SHOULD price the rendition at this value, such as when it selects among renditions or probes for a higher one, instead of at a measured average, and MAY add headroom for bursts.
+If absent, a consumer SHOULD assume no ceiling is known.
 
 ### jitter {#field-jitter}
 The maximum media span, in milliseconds, that a publisher hands to the transport behind a frame's presentation timestamp.
@@ -1037,7 +1053,7 @@ This document has no IANA actions.
 - Replaced the root `archive` section and its per-track timelines with the root `sync` section ({{sync}}). Its `interval` is the longest group of any audio or video track, fixed for the broadcast, and the grid an edge numbers HLS and DASH segments on, each segment the smallest whole multiple of it at least a second long, from each group's first timestamp ({{hls}}); the root `clock` moved to `sync.clock`. Segment indexes, frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone.
 - A reader refuses a JSON frame in which an object repeats a member name.
 - A malformed audio or video rendition ({{malformed}}) refuses the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
-- Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID needs 4. Consumers MUST ignore unknown fields.
+- Added `version` on the root and on each rendition, data track, and include ({{catalog-version}}): the oldest draft that reads it. A consumer refuses a catalog whose root `version` is above its own, and skips an entry whose `version` is. A `track` other than the entry's ID needs an entry `version` of 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Removed the viewer feedback `latency` field.
@@ -1051,6 +1067,7 @@ This document has no IANA actions.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 
+- Defined the rendition `bitrate` ({{field-bitrate}}): the ceiling of the encoder's rate-control target, which a consumer prices the rendition at.
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new stream Instance.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.

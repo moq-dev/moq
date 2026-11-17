@@ -3,8 +3,8 @@
 A browser tab reads 300 live tracks through a Rust relay over WebTransport,
 three times the ~100 streams Chromium and Firefox let a server open to one
 session. The relay hands the streams it can open to the highest-priority
-groups and, on lite-07, makes room with a YIELDED reset that pauses a
-lower-priority group for a later stream to continue.
+groups and makes room by resetting a lower-priority group's stream with
+TOO\_FAR\_BEHIND, which gives that group up; the tab fetches it whole instead.
 
 ## Running
 
@@ -35,10 +35,12 @@ The driver plays every other part:
   open: a frame at its start, one halfway through, and its end as the next
   group starts, 40 groups at 200 ms. The high tier starts its groups half an
   interval after the others, while their streams hold every credit the browser
-  gave, so the relay must pause a lower group (YIELDED) to make room.
+  gave, so the relay must reset a lower group's stream to make room.
 - **The reader** is a page built from `src/` with Vite, in Playwright's
   Chromium or Firefox. It dials the relay over WebTransport only and subscribes
-  to every track in three tiers of subscriber priority:
+  to every track in three tiers of subscriber priority. A group that stops
+  early for any reason but going stale (`OLD`) is fetched, as a reader that
+  still wants it would:
 
   | Tier | Priority | Tracks | Delay budget |
   | --- | --- | --- | --- |
@@ -50,22 +52,21 @@ A cell passes when:
 
 - the high tier read every group whole, every frame in order;
 - every subscription ended cleanly within 10 s of the publisher finishing
-  (the relay drains the last groups in under a second on loopback);
-- on lite-07, every track read its final group whole, since its readers wait
-  for every group the relay owes them. A lite-06 reader has no drops to wait
-  on, so it ends at the end it was told, and a starved track may lose the
-  final group still queued for credit;
+  (the relay drains the last groups in under a second on loopback). A
+  lite-07 reader waits for every group the relay owes it, so ending shows
+  each group it missed was named in a drop;
 - the tiers read frames in priority order, and the low tier lost some, so the
   cap bound;
-- on lite-07, the relay log shows paused groups continued, the YIELDED path.
+- some group stopped early, so the relay reset a stream to make room, and
+  every group the tab fetched came back whole.
 
-With every tier at one priority, the high tier misses groups past its budget
-and the relay continues no paused group, so the run fails.
+With every tier at one priority, the high tier misses groups past its budget,
+so the run fails.
 
 Both browsers mishandle a reset that lands just after its stream's data,
-before the page read it, which a YIELDED reset of a freshly opened stream
-does: Chromium loses the reset, leaving the stream open forever, and Firefox
-reports it as a bare `TypeError` without its code. The `@moq/net` reader
-copes, since a lite-07 publisher follows every reset with a continuation or a
-drop, so a failure here that names a stream left open or an uncoded
-`TypeError` is worth checking against those first.
+before the page read it, which a reset of a freshly opened stream does:
+Chromium loses the reset, leaving the stream open forever, and Firefox reports
+it as a bare `TypeError` without its code. The `@moq/net` reader copes, since
+the relay also names every group it resets in a drop, so a failure here that
+names a stream left open or an uncoded `TypeError` is worth checking against
+those first.
