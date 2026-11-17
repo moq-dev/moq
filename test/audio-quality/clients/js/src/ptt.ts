@@ -147,9 +147,9 @@ async function attach() {
 	if (!root || root === attached) return;
 	attached = root;
 	const context = root.context as AudioContext;
-	// A constant microphone tone makes a loud output quantum the utterance's audible onset. The
-	// threshold clears the comfort noise the player fills a declared silence with (at most -60 dBFS
-	// RMS) and sits far below the -12 dBFS tone. Map its render timestamp through
+	// A microphone tone that never drops below -30 dBFS makes a loud output quantum the utterance's
+	// audible onset. The threshold clears the comfort noise the player fills a declared silence with
+	// (at most -60 dBFS RMS) and sits below the tone's dips. Map its render timestamp through
 	// getOutputTimestamp, rather than timing the port message.
 	const source = `class Tap extends AudioWorkletProcessor {
 		loud = false;

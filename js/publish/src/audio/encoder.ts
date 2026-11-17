@@ -20,6 +20,7 @@ import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import type { AudioFrame, Capture, Format } from "./capture";
 import { Gain } from "./gain";
+import { Gate } from "./gate";
 import { Resampler } from "./resampler";
 import type { CodecMime, Kind } from "./types";
 import { sourceKind } from "./types";
@@ -195,8 +196,9 @@ export class Encoder {
 		return this.in.capture.peek();
 	}
 
-	// The exact encoder settings and probed decoder description, advertised before the first frame.
-	#config = new Signal<(Resolved & { encoder: AudioEncoderConfig }) | undefined>(undefined);
+	// The exact encoder settings and probed decoder description, advertised before the first frame, and
+	// whether the source is a voice, whose silence is not sent.
+	#config = new Signal<(Resolved & { encoder: AudioEncoderConfig; voice: boolean }) | undefined>(undefined);
 
 	// The last Opus probe: the encoder settings it ran with, serialized, and the description it
 	// produced. Kept across a disable so re-enabling with the same capture format and settings
@@ -555,15 +557,16 @@ export class Encoder {
 		this.#spacing.set(groupSpacing(join, resolved));
 		const source = capture ? effect.get(capture.in.source) : undefined;
 		const kind = source ? sourceKind(source) : undefined;
+		const voice = kind === "voice";
 		const encoderConfig = toEncoderConfig(resolved, kind, this.#opusOptions(effect));
 		if (resolved.catalog.codec !== "opus") {
-			this.#config.set({ ...resolved, encoder: encoderConfig });
+			this.#config.set({ ...resolved, encoder: encoderConfig, voice });
 			return;
 		}
 
 		const key = JSON.stringify(encoderConfig);
 		if (this.#probed?.key === key) {
-			this.#config.set(withDescription(resolved, encoderConfig, this.#probed.description));
+			this.#config.set({ ...withDescription(resolved, encoderConfig, this.#probed.description), voice });
 			return;
 		}
 
@@ -612,7 +615,7 @@ export class Encoder {
 				if (failure) throw failure;
 				encoder.close();
 				this.#probed = { key, description };
-				this.#config.set(withDescription(resolved, encoderConfig, description));
+				this.#config.set({ ...withDescription(resolved, encoderConfig, description), voice });
 			} catch (error) {
 				if (superseded.aborted) return;
 				this.#config.set(undefined);
@@ -717,6 +720,10 @@ export class Encoder {
 							});
 				let resampler = createResampler();
 				let framer = createFramer(resolved, config.sampleRate);
+				// A voice's silence is dropped here, before it costs an encode, as a mute's is.
+				const gate = resolved.voice
+					? new Gate({ sampleRate: config.sampleRate, frame: frameDuration(resolved) })
+					: undefined;
 
 				// What the codec still owes, in submission order: each input's timestamp, or a break whose
 				// marker goes down once every chunk before it is out. Chunks are stamped from here, never
@@ -791,6 +798,11 @@ export class Encoder {
 				let paused = false;
 				// A pause left retained audio, so the timeline breaks after it rather than at once.
 				let breakPending = false;
+				// End the epoch where the encoded audio stops, or once the audio retained before it is.
+				const pause = () => {
+					if (backlog.empty) cut();
+					else breakPending = true;
+				};
 
 				const backlog = new Backlog(retention, config.sampleRate);
 				const deadline = new Signal<Duration | undefined>(undefined);
@@ -847,6 +859,20 @@ export class Encoder {
 					this.#next = contiguous;
 				};
 
+				// Encode a captured frame now, or retain it until a subscriber wants it.
+				const take = (data: AudioFrame, end: Duration) => {
+					const pending = breakPending;
+					breakPending = false;
+					if (this.#encoding && backlog.empty) {
+						if (pending) cut();
+						submit(data, end);
+						return;
+					}
+					// It waits for a subscriber. Started here rather than from the backlog, which may not
+					// keep the frame: a zero max age retains nothing.
+					backlog.push(data, end, clock(), pending);
+				};
+
 				const pipeline: Pipeline = {
 					channelCount: config.numberOfChannels,
 					drain: () => {
@@ -878,17 +904,16 @@ export class Encoder {
 						const frames = framer.push(input);
 						for (const [i, data] of frames.entries()) {
 							if (!this.#live) continue;
-							const pending = breakPending;
-							breakPending = false;
 							const end = frames[i + 1]?.timestamp ?? framer.next;
-							if (this.#encoding && backlog.empty) {
-								if (pending) cut();
-								submit(data, end);
+							if (!gate) {
+								take(data, end);
 								continue;
 							}
-							// It waits for a subscriber. Started here rather than from the backlog, which
-							// may not keep the frame: a zero max age retains nothing.
-							backlog.push(data, end, clock(), pending);
+							const open = gate.open;
+							const passed = gate.push(data, end);
+							// The talker fell silent: declare the end now, not when speech resumes.
+							if (open && !gate.open) pause();
+							for (const entry of passed) take(entry.frame, entry.end);
 						}
 						deadline.set(backlog.deadline);
 					},
@@ -907,8 +932,9 @@ export class Encoder {
 					// The capture resumes on a later timeline, so drop the partial frame and filter state.
 					resampler = createResampler();
 					framer = createFramer(resolved, config.sampleRate);
-					if (backlog.empty) cut();
-					else breakPending = true;
+					// The gate would miss a resume that leaves no gap in the timeline.
+					gate?.reset();
+					pause();
 				});
 
 				// Publish it last: the read loop starts pushing the moment this is visible.
@@ -1013,6 +1039,11 @@ export function groupSpacing(join: Duration, resolved: Resolved): Duration {
 	const frame = resolved.frameDuration?.asMicros() ?? (AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate;
 	const frames = Math.max(1, Math.ceil(join.asMicros() / frame));
 	return Duration.micros(frames * frame);
+}
+
+// How much audio each encoded frame carries.
+function frameDuration(resolved: Resolved): Duration {
+	return resolved.frameDuration ?? Duration.micros((AAC_FRAME_SAMPLES * 1_000_000) / resolved.catalog.sampleRate);
 }
 
 // The resolved config with the encoder settings and the probed decoder description, if the codec emitted one.

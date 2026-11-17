@@ -320,3 +320,10 @@ what would need a breaking release had it landed right after the cut:
   Catalog at timestamp no longer waits
   for `@moq/net` by start, and the bindings shrank to a rename, since the model
   already filled each field with the start.
+
+Decided 2026-11-17 (maintainer, on
+[moq-dev/moq#8998](https://github.com/moq-dev/moq/pull/8998#issuecomment-6947837677)):
+✅ [rising background noise](/quest/m2/voice-rising-noise.md) joins m2 though
+it breaks nothing. It ports libopus's analysis step, so the browser voice gate
+that PR ships suppresses noise starting mid-call as the Rust publisher's
+libopus does (rejected: a faster SILK floor rise; dropping it).

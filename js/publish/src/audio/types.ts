@@ -2,7 +2,8 @@
  * What the audio carries, driving the default Opus application/signal settings on the encoder,
  * each of which an explicit OpusConfig can still override. A source without one leaves both to
  * the browser, which suits an unknown source like file playback.
- * - "voice": speech (microphone). Opus application=voip + signal=voice.
+ * - "voice": speech (microphone). Opus application=voip + signal=voice, and nothing is sent once the
+ *   talker has been silent for 200 ms: that pause is a declared end, as a mute's is.
  * - "music": music or mixed content (screen/tab capture). Opus application=audio + signal=music.
  */
 export type Kind = "voice" | "music";
