@@ -347,7 +347,7 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            moq_delay delay = {.max_us = MAX_DELAY_US};
+            moq_delay delay = {.min_unstated = true, .max_us = MAX_DELAY_US};
             int32_t track = moq_consume_video((uint32_t)catalog, 0, &delay, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
