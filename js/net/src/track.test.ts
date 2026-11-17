@@ -1046,6 +1046,18 @@ test("an untimed track refuses a time anchor", () => {
 	expect(() => reader.tryRecvGroup()).toThrow(TimestampMismatch);
 });
 
+// A moq-transport frame's time is its Group ID, so its starts never rewind and index like any.
+test("a moq-transport copy resolves a time anchor", () => {
+	const producer = new TrackProducer("test");
+	producer.accept({ timescale: Timescale.MILLI, maxAge: null, ietf: IetfVersion.DRAFT_18 });
+	for (let sequence = 0n; sequence < 3n; sequence++) stampGroup(producer, sequence, Number(sequence) * 1000);
+	const reader = producer.subscribe({
+		delay: { max: null },
+		ranges: [{ start: { time: Timestamp.fromMillis(1500) } }],
+	});
+	expect(readable(reader)).toEqual([1n, 2n]);
+});
+
 test("only unstated minimums aggregate to an unstated one", () => {
 	const producer = new TrackProducer("test");
 	producer.subscribe({ delay: { min: null } });
