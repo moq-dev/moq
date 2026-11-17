@@ -8,7 +8,6 @@ import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../
 import { Stream } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import { after } from "../util/timer.ts";
-import * as Extensions from "./extensions.ts";
 import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { DEFAULT_TIMEOUT, exchangeSetup, handsOff } from "./handshake.ts";
 import type { Session } from "./session.ts";
@@ -40,13 +39,6 @@ export interface AcceptProps {
 	 */
 	consume?: OriginProducer;
 
-	/**
-	 * The moq-transport extensions to offer, each on unless set to `false`.
-	 *
-	 * @internal Tests only; nothing outside the package consumes it.
-	 */
-	extensions?: Extensions.Extensions;
-
 	/** The implementation this side advertises in SETUP; see the `implementation` connect option. */
 	implementation?: string;
 }
@@ -56,8 +48,6 @@ type SessionProps = {
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
-	/** The moq-transport extensions this side offers. */
-	extensions: Extensions.Offered;
 	/** The implementation this side advertises in SETUP; empty sends nothing. */
 	implementation: string;
 };
@@ -115,7 +105,6 @@ async function acceptInner(
 	const wiring: SessionProps = {
 		publish: props.publish,
 		client: false,
-		extensions: Extensions.offered(props.extensions),
 		implementation: props.implementation ?? IMPLEMENTATION,
 	};
 

@@ -1,6 +1,6 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
-import { VERSION, VersionSchema } from "./version";
+import { u53Schema } from "./integers.ts";
+import { VERSION, VersionSchema } from "./version.ts";
 
 /** The entries each parsed map skipped, keyed by the map itself. Read through `skipped` in `root.ts`. */
 export const SKIPPED = new WeakMap<object, Record<string, number>>();

@@ -3,23 +3,23 @@ import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import * as z from "zod/mini";
-import { AudioSchema } from "./audio";
-import { BinarySchema } from "./binary";
-import { EchoSchema } from "./echo";
-import { TRACK } from "./format";
-import { IncludeSchema } from "./include";
-import { JsonSchema } from "./json";
-import type { RelativeBroadcast } from "./path";
-import { PRIORITY } from "./priority";
-import { renditions, SKIPPED } from "./section";
-import { StatsSchema } from "./stats";
-import { TextSchema } from "./text";
-import { TimelineSchema } from "./timeline";
-import { track } from "./track";
-import { UnsupportedVersion, VERSION, VersionSchema } from "./version";
-import { VideoSchema } from "./video";
+import { AudioSchema } from "./audio.ts";
+import { BinarySchema } from "./binary.ts";
+import { EchoSchema } from "./echo.ts";
+import { TRACK } from "./format.ts";
+import { IncludeSchema } from "./include.ts";
+import { JsonSchema } from "./json.ts";
+import type { RelativeBroadcast } from "./path.ts";
+import { PRIORITY } from "./priority.ts";
+import { renditions, SKIPPED } from "./section.ts";
+import { StatsSchema } from "./stats.ts";
+import { TextSchema } from "./text.ts";
+import { TimelineSchema } from "./timeline.ts";
+import { track } from "./track.ts";
+import { UnsupportedVersion, VERSION, VersionSchema } from "./version.ts";
+import { VideoSchema } from "./video.ts";
 
-export { UnsupportedVersion, VERSION } from "./version";
+export { UnsupportedVersion, VERSION } from "./version.ts";
 
 // Thrown rather than reported as an issue, so it surfaces as itself and before any section, which
 // the newer draft may have reshaped.

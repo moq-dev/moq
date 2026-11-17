@@ -326,7 +326,6 @@ impl Config {
 		deprecated.extend(self.listen.deprecated());
 		deprecated.extend(self.connect.deprecated());
 		deprecated.extend(self.cluster.deprecated());
-		deprecated.extend(self.auth.deprecated());
 		if let Some(server) = &self.server {
 			deprecated.toml("[server]", "[listen]", None);
 			deprecated.extend(server.deprecated());
@@ -363,8 +362,8 @@ impl Config {
 			.get_or_insert(moq_tokio::quic::DEFAULT_MAX_STREAMS);
 		// A relay keeps the moq-transport object state it forwards across a moq-lite hop to
 		// another relay. Only negotiated when both sides offer it, so other peers never see it.
-		self.listen.extensions.ietf = true;
-		self.connect.extensions.ietf = true;
+		self.listen.ietf = true;
+		self.connect.ietf = true;
 		// Name the relay ahead of its core unless the embedder set a name (empty omits it),
 		// and dial cluster peers under the same name.
 		let implementation = self
@@ -553,21 +552,20 @@ mod tests {
 		}
 	}
 
-	/// The moq-transport extension choices are file-only, so the loader must carry them through.
+	/// The SETUP extensions are no setting: the relay always offers `ietf` on its own links,
+	/// and a file naming either table is refused.
 	#[test]
-	fn loader_keeps_toml_extension_settings() {
+	fn extension_tables_are_refused() {
 		let dir = tempfile::tempdir().unwrap();
-		let path = dir.path().join("relay.toml");
-		std::fs::write(
-			&path,
-			"[listen.extensions]\nietf = true\n\n[connect.extensions]\nsolicit = false\n",
-		)
-		.unwrap();
-		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]).unwrap();
-		assert!(config.listen.extensions.ietf);
-		assert!(config.listen.extensions.solicit);
-		assert!(!config.connect.extensions.solicit);
-		assert!(!config.connect.extensions.ietf);
+		for table in [
+			"[listen.extensions]\nietf = true\n",
+			"[connect.extensions]\nsolicit = false\n",
+		] {
+			let path = dir.path().join("relay.toml");
+			std::fs::write(&path, table).unwrap();
+			let parsed = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.into()]);
+			assert!(parsed.is_err(), "{table}");
+		}
 	}
 
 	#[test]
@@ -824,34 +822,13 @@ max_streams = 64
 		assert!(err.contains("both directions"), "{err}");
 	}
 
-	/// A 0.14 `[auth]` config with `key` and `public` would otherwise boot with
-	/// every JWT ignored; each removed key refuses with its replacement named.
+	/// A 0.14 `[auth]` key is an unknown key like any other, never a tailored refusal.
 	#[test]
-	fn released_auth_keys_refuse_to_boot() {
-		let toml = r#"
-[auth]
-key = "root.jwk"
-key_dir = "keys/"
-auth_api = "https://api.example.com/auth"
-domains = ["example.com"]
-mtls_tier = "internal"
-public = "anon/**"
-
-[auth.tls]
-root = ["ca.pem"]
-"#;
-		let config: Config = toml::from_str(toml).expect("released config must still parse");
-		let err = config.resolve().expect_err("must refuse").to_string();
-		for old in [
-			"[auth] key -> --auth-url to `moq auth serve --key`",
-			"[auth] key_dir -> --auth-url to `moq auth serve --key-dir`",
-			"[auth] auth_api -> ",
-			"[auth] domains -> ",
-			"[auth] mtls_tier -> --auth-url to `moq auth serve --tier`",
-			"[auth.tls] -> --connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
-		] {
-			assert!(err.contains(old), "{old}: {err}");
+	fn a_released_auth_key_is_an_unknown_key() {
+		for key in ["key", "key_dir", "auth_api", "domains", "mtls_tier"] {
+			toml::from_str::<Config>(&format!("[auth]\n{key} = \"x\"\n")).expect_err(key);
 		}
+		toml::from_str::<Config>("[auth.tls]\nroot = [\"ca.pem\"]\n").expect_err("tls");
 	}
 
 	#[test]
@@ -888,46 +865,28 @@ root = ["ca.pem"]
 		assert_eq!(config.connect.tls.root, vec![std::path::PathBuf::from("mesh.pem")]);
 	}
 
-	/// The released auth variables, each with the spelling its refusal names.
-	const RELEASED_AUTH_ENV: [(&str, &str); 7] = [
-		("MOQ_AUTH_KEY", "--auth-key / MOQ_AUTH_KEY"),
-		("MOQ_AUTH_KEY_DIR", "--auth-key-dir / MOQ_AUTH_KEY_DIR"),
-		("MOQ_AUTH_API", "--auth-api / MOQ_AUTH_API"),
-		("MOQ_AUTH_PUBLIC_API", "--auth-public-api / MOQ_AUTH_PUBLIC_API"),
-		("MOQ_AUTH_DOMAIN", "--auth-domain / MOQ_AUTH_DOMAIN"),
-		("MOQ_AUTH_MTLS_TIER", "--auth-mtls-tier / MOQ_AUTH_MTLS_TIER"),
-		("MOQ_AUTH_TLS_ROOT", "--auth-tls-* / MOQ_AUTH_TLS_*"),
-	];
-
-	/// The environment is the half a removed flag silently misses: a relay deployed
-	/// through it never typed the flag.
+	/// A 0.14 auth variable or flag is unknown like any other: startup stops naming it,
+	/// so a left-over `MOQ_AUTH_KEY` never boots a relay with its tokens ignored.
 	#[test]
-	fn released_auth_env_refuses_to_boot() {
-		let env = RELEASED_AUTH_ENV
-			.iter()
-			.fold(test_env::Env::default(), |env, (var, _)| env.set(var, "x"));
-		if !env.isolate() {
+	fn a_released_auth_variable_and_flag_are_unknown() {
+		if !test_env::Env::default().set("MOQ_AUTH_KEY", "root.jwk").isolate() {
 			return;
 		}
-		// One refusal names every variable, so the operator fixes them all in one pass.
-		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**"])
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon/**"])
 			.expect_err("must refuse")
 			.to_string();
-		for (var, spelling) in RELEASED_AUTH_ENV {
-			assert!(err.contains(spelling), "{var}: {err}");
-		}
+		assert!(err.contains("MOQ_AUTH_KEY"), "{err}");
 	}
 
-	/// 0.14 took the bare flag, so it has to parse to be refused by name.
 	#[test]
-	fn released_auth_flag_refuses_to_boot() {
-		if !test_env::Env::without(&RELEASED_AUTH_ENV.map(|(var, _)| var)).isolate() {
+	fn a_released_auth_flag_is_unknown() {
+		if !test_env::Env::without(&["MOQ_AUTH_KEY"]).isolate() {
 			return;
 		}
-		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "**", "--auth-tls-disable-verify"])
+		let err = Config::parse_and_merge(["moq-relay", "--auth-public", "anon/**", "--auth-key", "root.jwk"])
 			.expect_err("must refuse")
 			.to_string();
-		assert!(err.contains("--auth-tls-* / MOQ_AUTH_TLS_*"), "{err}");
+		assert!(err.contains("--auth-key"), "{err}");
 	}
 
 	/// A released flag and a released table are refused together, in one message.
