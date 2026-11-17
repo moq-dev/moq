@@ -4,9 +4,9 @@
  * @module
  */
 import * as z from "zod/mini";
-import { u53Schema } from "./catalog/integers";
-import { renditions } from "./catalog/section";
-import { measurementSchema } from "./snapshot";
+import { u53Schema } from "./catalog/integers.ts";
+import { renditions } from "./catalog/section.ts";
+import { measurementSchema } from "./snapshot.ts";
 /** Transport gauges and cumulative loss counters known to the observer. */
 export const TransportSchema = z.object({
 	// Latest round-trip time in milliseconds.
