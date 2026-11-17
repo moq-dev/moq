@@ -463,7 +463,9 @@ describe("estimate publication window", () => {
 		const leading = await sent();
 		await advance(990);
 		expect((await consumer.latest())?.value.video?.renditions.v.delay).toBe(Catalog.u53(7));
-		expect(await sent()).toBe((leading ?? 0n) + 1n);
+		// One trailing group, starting where the window ends.
+		expect(leading).toBe(1n);
+		expect(await sent()).toBe(1000n);
 		producer.mutate((catalog) => {
 			if (!catalog.video) throw new Error("video missing");
 			catalog.video.renditions.other = { codec: "avc1.640028", container: { kind: "legacy" } };

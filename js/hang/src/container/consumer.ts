@@ -932,7 +932,11 @@ export class Consumer {
 					this.#hole = head.late;
 					// Joining at the first arrival leaves no hole to wait for; a floor does.
 					const startup = this.#start === undefined && !this.#floored;
-					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp.asMicros());
+					// The publisher declares the starts it never produced, so a run it skipped holds no group
+					// to wait for or lose, as in Rust's `poll_continues`.
+					const contiguous =
+						this.#track.isSkipped(this.#active, head.consumer.start) ||
+						ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp.asMicros());
 					const empty = head.empty && head.consumer.done;
 					const wait = this.#holeWait(this.#delay.peek(), this.#wait.peek());
 					const bound = this.#bound();

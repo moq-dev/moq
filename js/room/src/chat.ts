@@ -8,6 +8,7 @@ import { Duration, type Instant, now } from "@moq/clock";
 import * as Json from "@moq/json";
 import { type Broadcast, Time, type Timed, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { after } from "./start.ts";
 
 /** Name of the track carrying the chat window. */
 export const TRACK = "chat";
@@ -25,6 +26,7 @@ export function info(): Pick<Track.Info, "priority" | "timescale"> {
 
 /** Publishes chat messages and retires them after ten seconds, including while idle. */
 export class Publisher {
+	#track: Track.Producer;
 	#producer: Json.Window.Producer<string>;
 	#expires = new Signal<Instant[]>([]);
 	#signals = new Effect();
@@ -37,6 +39,7 @@ export class Publisher {
 	/** Publish a chat window over an existing track. */
 	constructor(track: Track.Producer) {
 		// Every edit restates the retained window, so a late reader never replays expired records.
+		this.#track = track;
 		this.#producer = new Json.Window.Producer({ track, ops: false });
 		this.#signals.run((effect) => {
 			const next = effect.get(this.#expires)[0];
@@ -49,7 +52,7 @@ export class Publisher {
 	send(text: string): void {
 		if (!text) return;
 		this.expire();
-		this.#producer.push(text, Time.Timestamp.now());
+		this.#producer.push(text, after(this.#track, Time.Timestamp.now()));
 		this.#expires.update((expires) => [...expires, now().saturatingAdd(HISTORY)]);
 	}
 
@@ -60,7 +63,7 @@ export class Publisher {
 		let count = 0;
 		while (count < expires.length && expires[count].le(at)) count++;
 		if (!count) return;
-		this.#producer.pop(count, Time.Timestamp.now());
+		this.#producer.pop(count, after(this.#track, Time.Timestamp.now()));
 		this.#expires.set(expires.slice(count));
 	}
 

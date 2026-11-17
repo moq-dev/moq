@@ -19,6 +19,7 @@ import type * as Publish from "@moq/publish";
 import { Effect, type Getter, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Watch from "@moq/watch";
 import * as z from "zod/mini";
+import { after } from "./start.ts";
 
 /** Delivery priority for hang metadata tracks: below the catalog, above audio. */
 export const PRIORITY = 90;
@@ -193,7 +194,7 @@ function serveSnapshot<T>(
 		effect.cleanup(() => producer.finish());
 
 		effect.run((effect) => {
-			producer.update(value(effect), Moq.Time.Timestamp.now());
+			producer.update(value(effect), after(track, Moq.Time.Timestamp.now()));
 		});
 	});
 }

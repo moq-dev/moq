@@ -214,17 +214,23 @@ export class Producer {
 		// Nothing is measured across the break, so a missing end has no cadence to estimate from.
 		// An explicit end keeps the cadence until #close validates it, in case it throws.
 		if (end === undefined) this.#interval = undefined;
-		this.#close(end);
-		this.#interval = undefined;
-		const edge = end ?? this.#liveEdge;
-		if (this.#marked || edge === undefined) return;
-
+		// The live edge once the open group closes, which raises it to the furthest point written.
+		const written = this.#group && this.#end !== undefined ? this.#end : undefined;
+		const edge = end ?? (written === undefined ? this.#liveEdge : Math.max(this.#liveEdge ?? written, written));
 		// The marker starts one microsecond before the live edge, so media resuming right at the edge
 		// still starts after it, but not below the newest frame, which it would otherwise claim to end
 		// before; and past the newest group, since starts strictly increase.
-		const largest = this.#track.largest()?.group;
-		let timestamp = Math.max(edge - 1, this.#newest ?? 0);
-		if (largest !== undefined && BigInt(timestamp) <= largest) timestamp = Number(largest + 1n);
+		let timestamp: number | undefined;
+		if (!this.#marked && edge !== undefined) {
+			const largest = this.#track.largest()?.group;
+			timestamp = Math.max(edge - 1, this.#newest ?? 0);
+			if (largest !== undefined && BigInt(timestamp) <= largest) timestamp = Number(largest + 1n);
+		}
+		// The open group ends whole at the marker, so a reader can tell the marker follows it.
+		this.#close(end, timestamp);
+		this.#interval = undefined;
+		if (timestamp === undefined) return;
+
 		const group = this.#track.appendGroup(Time.Timestamp.fromMicros(timestamp));
 		group.writeFrame({
 			payload:
@@ -238,8 +244,9 @@ export class Producer {
 		this.#marked = true;
 	}
 
-	// Flush and close the current group at the supplied or estimated end timestamp.
-	#close(end?: number) {
+	// Flush and close the current group at the supplied or estimated end timestamp, whole at `whole`
+	// when a marker follows it.
+	#close(end?: number, whole?: number) {
 		if (!this.#group) return;
 		if (
 			this.#format.kind === "video" &&
@@ -255,7 +262,8 @@ export class Producer {
 		const bound = this.#reordered ? undefined : end;
 		this.#format.finishGroup(this.#group, bound === undefined ? undefined : Duration.micros(bound));
 		// A group ends whole where its content stops, which bounds its reach without a successor.
-		if (bound !== undefined && BigInt(bound) > this.#group.start) this.#group.finishAt(BigInt(bound));
+		const at = whole ?? bound;
+		if (at !== undefined && BigInt(at) > this.#group.start) this.#group.finishAt(BigInt(at));
 		else this.#group.finish();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
