@@ -482,7 +482,7 @@ struct MtlsRules {
 		setting = "mtls.link"
 	)]
 	#[serde(skip_serializing_if = "Option::is_none")]
-	link: Option<moq_auth::serve::Link>,
+	link: Option<moq_auth::Link>,
 
 	/// Rules for particular certificates, keyed by the SHA-256 of a leaf or of a
 	/// certificate it was issued under.
@@ -1059,7 +1059,7 @@ mod tests {
 		);
 		assert!(policy.public.publish.is_empty());
 		assert_eq!(policy.mtls.publish, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Upstream));
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Upstream));
 		assert_eq!(policy.tier.as_deref(), Some("internal"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.expires, Some(std::time::Duration::from_secs(7200)));
@@ -1129,9 +1129,8 @@ subscribe = ["**"]
 link = "peer"
 
 [mtls.certificates.{leaf}]
-publish = ["alice/**"]
+publish = {{ path = ["alice/**"], rate = 1000000 }}
 link = "none"
-publish_rate = 1000000
 "#
 			),
 		)
@@ -1148,12 +1147,13 @@ publish_rate = 1000000
 		assert_eq!(policy.tier.as_deref(), Some("from-flag"));
 		assert_eq!(policy.revalidate, Some(std::time::Duration::from_secs(30)));
 		assert_eq!(policy.mtls.subscribe, ["**".parse().unwrap()].into_iter().collect());
-		assert_eq!(policy.mtls_link, Some(moq_auth::serve::Link::Peer));
+		assert_eq!(policy.mtls_link, Some(moq_auth::Link::Peer));
 		let rule = &policy.certificates[&leaf.parse().unwrap()];
-		assert_eq!(rule.publish, Some(["alice/**".parse().unwrap()].into_iter().collect()));
+		let publish = rule.publish.as_ref().expect("the rule names publish");
+		assert_eq!(publish.path, ["alice/**".parse().unwrap()].into_iter().collect());
+		assert_eq!(publish.rate, moq_auth::Rate::from_bps(1_000_000).ok());
 		assert_eq!(rule.subscribe, None);
 		assert_eq!(rule.link, Some(moq_auth::serve::RuleLink::None));
-		assert_eq!(rule.publish_rate, moq_auth::Rate::from_bps(1_000_000).ok());
 
 		// A flag replaces the file's list rather than adding to it.
 		let (serve, _) = merged(&["moq", "auth", "serve", path, "--mtls-subscribe", "room/**"]).unwrap();
@@ -1205,7 +1205,7 @@ publish_rate = 1000000
 			expires: None,
 			issuer: "CN=affiliates".into(),
 		});
-		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish;
+		let publish = |grant: Option<moq_auth::Grant>| grant.unwrap().publish.path;
 		assert_eq!(
 			publish(server.answer(&session).await.unwrap()),
 			["**".parse().unwrap()].into_iter().collect()

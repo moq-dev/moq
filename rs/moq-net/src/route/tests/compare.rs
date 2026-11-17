@@ -12,13 +12,18 @@
 use std::collections::BTreeSet;
 
 use super::multi::{Broadcast, MultiSim, Suspect, Tie, Tune};
+use super::multicast::RelaySim;
 use super::*;
 
-/// A router under comparison: today's rule, or the multicast epic's prototype.
+/// A router under comparison: today's rule, the multicast epic's prototype, or its
+/// production router.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Arm {
 	Path(Rule),
 	Multi(Tune),
+	/// [`relay::Router`]: the rule [`Self::KEPT`] measures, as it ships, its readers
+	/// showing a lost claim unavailable for this long before offline.
+	Relay(Duration),
 }
 
 impl Arm {
@@ -58,7 +63,9 @@ impl Arm {
 		epoch: false,
 	});
 	/// [`Self::LEAN`], with the floor kept per pair of relays: what the bake-off recommends.
-	pub const KEPT: Self = Self::Multi(Tune {
+	pub const KEPT: Self = Self::Multi(Self::TUNE);
+	/// The prototype's settings under [`Self::KEPT`]: floor, epoch, batch, drain, and claimed.
+	pub const TUNE: Tune = Tune {
 		suspect: Suspect::Never,
 		quiet: false,
 		floor: true,
@@ -67,7 +74,10 @@ impl Arm {
 		drain: true,
 		claimed: true,
 		epoch: true,
-	});
+	};
+
+	/// The production router as it ships.
+	pub const RELAY: Self = Self::Relay(relay::debounce(HOP));
 
 	/// The epic's rule with `tune` changed from how it is written.
 	pub fn with(tune: impl FnOnce(&mut Tune)) -> Self {
@@ -80,6 +90,8 @@ impl Arm {
 		let tune = match self {
 			Self::Path(rule) => return rule.as_str().into(),
 			Self::Multi(tune) => tune,
+			Self::Relay(debounce) if debounce.is_zero() => return "relay-undebounced".into(),
+			Self::Relay(_) => return "relay".into(),
 		};
 		let parts = [
 			(tune.suspect == Suspect::Flagged, "+suspect"),
@@ -99,6 +111,7 @@ impl Arm {
 		match self {
 			Self::Path(rule) => Box::new(Sim::with(rule, nodes)),
 			Self::Multi(tune) => Box::new(MultiSim::new(tune, nodes)),
+			Self::Relay(debounce) => Box::new(RelaySim::new(nodes, debounce)),
 		}
 	}
 }
@@ -216,12 +229,16 @@ pub(super) trait Net {
 	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool>;
 	fn sent(&self) -> Sent;
 	fn held(&self) -> Held;
+	/// The session floors `nodes` keep, where the rule keeps any.
+	fn floors(&self, _nodes: &[Node]) -> usize {
+		0
+	}
 	fn faults(&self) -> Faults;
 	/// Routes, claims, and streams visited.
 	fn work(&self) -> usize;
 }
 
-fn tally(kinds: impl Iterator<Item = Kind>) -> (usize, usize, usize) {
+pub(super) fn tally(kinds: impl Iterator<Item = Kind>) -> (usize, usize, usize) {
 	let (mut offline, mut unavailable, mut starts) = (0, 0, 0);
 	for kind in kinds {
 		match kind {
@@ -631,9 +648,13 @@ fn pair(a: Node, b: Node) -> (Node, Node) {
 impl Lab {
 	/// Build `mesh` on `rule`'s router, with every publisher announcing, and let it settle.
 	pub fn new(arm: impl Into<Arm>, mesh: &Mesh) -> Self {
-		let nodes = mesh.relays + mesh.homes.len();
+		Self::with(arm.into().net(mesh.relays + mesh.homes.len()), mesh)
+	}
+
+	/// Build `mesh` on `net`, with a node for every relay and publisher.
+	pub fn with(net: Box<dyn Net>, mesh: &Mesh) -> Self {
 		let mut lab = Self {
-			net: arm.into().net(nodes),
+			net,
 			mesh: mesh.clone(),
 			up: BTreeSet::new(),
 			linked: BTreeSet::new(),

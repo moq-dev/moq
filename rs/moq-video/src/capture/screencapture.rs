@@ -158,7 +158,7 @@ async fn open(config: &Config, filter: &SCContentFilter, size: (u32, u32)) -> Re
 		configuration.setHeight(height as usize);
 		configuration.setPixelFormat(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
 		configuration.setMinimumFrameInterval(CMTime::new(1, fps));
-		configuration.setShowsCursor(config.cursor);
+		configuration.setShowsCursor(config.cursor.drawn());
 	}
 
 	let chan = FrameChannel::new();

@@ -12,7 +12,7 @@ The [hang media format](/concept/hang) on top of `moq-net`: the catalog that
 describes renditions with WebCodecs-style decoder configs, and the frame that
 carries a timestamp with each payload.
 
-- **Catalog.** `Catalog` types video, audio, and text renditions, the `json` and `binary` data tracks, and the `archive` entry. Add your own sections through its type parameter, or read unknown ones as raw JSON. `Catalog::subscribe(&broadcast)` follows it live, failing with `Error::UnsupportedVersion` on a catalog that needs a newer moq-hang draft.
+- **Catalog.** `Catalog` types video, audio, and text renditions, the `json` and `binary` data tracks, and the `sync` section. Add your own sections through its type parameter, or read unknown ones as raw JSON. `Catalog::subscribe(&broadcast)` follows it live, yielding the newest update with the media timestamp it takes effect at; `catalog::Consumer::new(track, delay)` instead yields, in order, every update a reader playing `delay` behind the live edge may still need. Both fail with `Error::UnsupportedVersion` on a catalog that needs a newer moq-hang draft.
 - **Frames.** `container::Frame` encodes and decodes the `legacy` container, and `container::track_info` declares a media track. A rendition may instead declare `cmaf` or `loc`; an unknown container kind is kept rather than failing the catalog.
 - **Codecs described**: H.264, H.265, VP8, VP9, AV1, AAC, Opus, PCM, FLAC, MP3, MP2, AC-3, E-AC-3.
 
@@ -27,7 +27,7 @@ hang is the format, not the pipeline. [`moq-mux`](/lib/rs/moq-mux) produces the
 catalog for you and decodes any container in group order
 (`moq_mux::container::Consumer`). Its `Delay { min, max }` says how far behind
 the live edge to play: it skips groups that fall past `max`, and starts at the
-group covering the live edge less `min` (your playout delay), plus a rendition's
+group covering the live edge less `min` (your playout delay), plus an audio rendition's
 catalog `warmup` passed to a `Playout`, waiting up to that long for it when the
 newest group arrives first. Both default to zero, which starts at the newest
 group at once. A backlog that landed before the first read starts within `max`

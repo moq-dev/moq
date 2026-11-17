@@ -296,12 +296,7 @@ impl Producer {
 	/// while this producer is still held. Readers keep every packet published before it.
 	fn fail_track(&mut self) {
 		let _ = self.track.cut(None);
-		let track = self.track.track();
-		let next = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
-		let _ = track.clone().finish_at(
-			moq_net::track::Position::group(next),
-			Some(moq_net::StreamError::Internal.into()),
-		);
+		let _ = self.track.track().clone().fail(moq_net::StreamError::Internal.into());
 	}
 
 	/// The name of the published track, which is [`Options::track`] resolved.
@@ -789,6 +784,20 @@ impl Producer {
 	/// real cause rather than [`moq_net::Error::Dropped`]. Pending samples are dropped.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the producer back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the producer back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> Result<(), Self> {
+		self.track.abort_unwanted(err).map_err(|track| Self { track, ..self })
 	}
 }
 

@@ -1,9 +1,7 @@
-//! GOAWAY, the graceful drain signal, split into a [Producer] and [Consumer] handle.
+//! GOAWAY, the graceful drain signal.
 //!
-//! A session sends its own GOAWAY through the [Producer] from
-//! `Session::drain`, and observes the peer's on the
-//! [Consumer] from `Session::draining`. A session
-//! sends at most one, which is why [`Producer::send`] consumes the handle.
+//! A session sends its own [Goaway] with `Session::goaway`, at most once, and
+//! observes the peer's on the [Consumer] from `Session::draining`.
 //!
 //! Draining works the same on a version with no GOAWAY message: the deadline is
 //! the sender's own timer, so it force-closes on schedule whether or not the peer
@@ -71,14 +69,17 @@ impl Goaway {
 	}
 
 	/// Force-close the session with [`Error::GoawayTimeout`] if the peer is still
-	/// around after `timeout`.
+	/// around after `timeout`, or never with `None` (the default).
 	///
-	/// Zero means no deadline. Positive values round up to the next millisecond
-	/// and saturate at the wire's 62-bit millisecond limit, so the local deadline
-	/// agrees with what a moq-transport peer receives.
-	pub fn with_timeout(mut self, timeout: Duration) -> Self {
-		let millis = timeout.as_nanos().div_ceil(1_000_000).min(u128::from(MAX_TIMEOUT_MS)) as u64;
-		self.timeout = (millis != 0).then(|| Duration::from_millis(millis));
+	/// Zero closes the session at once, without waiting for the GOAWAY to be written, so
+	/// the peer may never receive it or its redirect URI; a redirect needs a nonzero
+	/// timeout to arrive. Other values round up to the next millisecond and saturate at
+	/// the wire's 62-bit millisecond limit, so the local deadline agrees with what a
+	/// moq-transport peer receives.
+	pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
+		self.timeout = timeout.map(|timeout| {
+			Duration::from_millis(timeout.as_nanos().div_ceil(1_000_000).min(u128::from(MAX_TIMEOUT_MS)) as u64)
+		});
 		self
 	}
 
@@ -90,56 +91,6 @@ impl Goaway {
 	/// The drain deadline sent to the peer, if any.
 	pub fn timeout(&self) -> Option<Duration> {
 		self.timeout
-	}
-}
-
-/// Sends this session's single GOAWAY.
-///
-/// Obtained from `Session::drain`.
-pub struct Producer {
-	trigger: kio::Producer<Option<Goaway>>,
-	/// Whether this side may name a redirect URI. A client may not,
-	/// since it cannot tell a server to open connections (draft-22 section 9.2).
-	redirect: bool,
-}
-
-impl Producer {
-	/// Send the GOAWAY, consuming the handle: a session may only send one.
-	///
-	/// The timeout starts at the driver poll this send wakes, independent of the
-	/// GOAWAY's own write. The session must stay driven for the message to reach the wire. With
-	/// [`Goaway::timeout`] set, the driver force-closes the session once the
-	/// deadline passes, so awaiting `Session::closed`
-	/// is how a caller observes the drain finishing either way. That holds on a
-	/// version with no GOAWAY message too, where the deadline is all the peer gets.
-	///
-	/// # Errors
-	///
-	/// Returns [`Error::ProtocolViolation`] when a client names a
-	/// redirect URI, which the peer would be required to close the session over,
-	/// or when the URI exceeds the 8,192-byte wire cap.
-	///
-	/// Returns [`Error::Duplicate`] if this session already sent one. The wire
-	/// carries at most one either way, so the second message is dropped rather
-	/// than replacing the first, but the caller is told rather than left guessing.
-	pub fn send(self, goaway: Goaway) -> Result<()> {
-		if !self.redirect && !goaway.uri.is_empty() {
-			return Err(Error::ProtocolViolation);
-		}
-		// Both wires cap the URI, so sending a longer one would just get the session
-		// closed by the peer. Refuse it here, the one chokepoint both wires funnel
-		// through, rather than at each encoder.
-		if goaway.uri.len() > MAX_URI {
-			return Err(Error::ProtocolViolation);
-		}
-		// The session closing first is not an error: there is nothing left to drain.
-		if let Ok(mut state) = self.trigger.write() {
-			if state.is_some() {
-				return Err(Error::Duplicate);
-			}
-			*state = Some(goaway);
-		}
-		Ok(())
 	}
 }
 
@@ -311,7 +262,7 @@ impl Deadline {
 
 /// The halves held by the public [`crate::Session`].
 pub(crate) struct Handle {
-	/// Cloned into each [`Producer`] handed out by `crate::Session::drain`.
+	/// Fired once by [`Self::send`].
 	trigger: kio::Producer<Option<Goaway>>,
 	/// Whether this side may name a redirect URI in its own GOAWAY.
 	redirect: bool,
@@ -348,14 +299,25 @@ impl Handle {
 		(handle, protocol)
 	}
 
-	/// A send half. Handing one out is always allowed; sending twice is what
-	/// [`Producer::send`] refuses, so a caller never has to ask whether the slot
-	/// is still free before deciding how to shut down.
-	pub fn producer(&self) -> Producer {
-		Producer {
-			trigger: self.trigger.clone(),
-			redirect: self.redirect,
+	/// Send this session's GOAWAY; see `crate::Session::goaway`.
+	pub fn send(&self, goaway: Goaway) -> Result<()> {
+		if !self.redirect && !goaway.uri.is_empty() {
+			return Err(Error::ProtocolViolation);
 		}
+		// Both wires cap the URI, so sending a longer one would just get the session
+		// closed by the peer. Refuse it here, the one chokepoint both wires funnel
+		// through, rather than at each encoder.
+		if goaway.uri.len() > MAX_URI {
+			return Err(Error::ProtocolViolation);
+		}
+		// The session closing first is not an error: there is nothing left to drain.
+		if let Ok(mut state) = self.trigger.write() {
+			if state.is_some() {
+				return Err(Error::Duplicate);
+			}
+			*state = Some(goaway);
+		}
+		Ok(())
 	}
 
 	/// Watch the local deadline on the driver's `runtime` without holding up the protocol's writes.
@@ -393,8 +355,7 @@ mod tests {
 		assert!(deadline.poll(&waiter).is_pending());
 
 		handle
-			.producer()
-			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
+			.send(Goaway::new().with_timeout(Some(Duration::from_secs(1))))
 			.unwrap();
 		let sent = crate::time::Instant::ZERO.saturating_add(Duration::from_secs(5));
 		runtime.advance(sent);
@@ -415,15 +376,9 @@ mod tests {
 	fn only_the_first_send_wins() {
 		let (handle, protocol) = Handle::new(true);
 
-		handle
-			.producer()
-			.send(Goaway::redirect("https://first.example/"))
-			.unwrap();
+		handle.send(Goaway::redirect("https://first.example/")).unwrap();
 
-		let err = handle
-			.producer()
-			.send(Goaway::redirect("https://second.example/"))
-			.unwrap_err();
+		let err = handle.send(Goaway::redirect("https://second.example/")).unwrap_err();
 		assert!(matches!(err, Error::Duplicate));
 
 		assert_eq!(
@@ -439,7 +394,6 @@ mod tests {
 	fn client_redirect_is_refused() {
 		let (handle, _protocol) = Handle::new(false);
 		let err = handle
-			.producer()
 			.send(Goaway {
 				uri: "https://elsewhere.example/".to_string(),
 				..Default::default()
@@ -449,20 +403,35 @@ mod tests {
 
 		// An empty URI ("I am going away") is still allowed.
 		let (handle, _protocol) = Handle::new(false);
-		handle.producer().send(Goaway::default()).unwrap();
+		handle.send(Goaway::default()).unwrap();
 	}
 
 	#[test]
 	fn timeout_matches_wire_milliseconds() {
-		assert_eq!(Goaway::new().with_timeout(Duration::ZERO).timeout(), None);
+		assert_eq!(Goaway::new().with_timeout(None).timeout(), None);
 		assert_eq!(
-			Goaway::new().with_timeout(Duration::from_micros(1)).timeout(),
+			Goaway::new().with_timeout(Some(Duration::ZERO)).timeout(),
+			Some(Duration::ZERO)
+		);
+		assert_eq!(
+			Goaway::new().with_timeout(Some(Duration::from_micros(1))).timeout(),
 			Some(Duration::from_millis(1))
 		);
 		assert_eq!(
-			Goaway::new().with_timeout(Duration::MAX).timeout(),
+			Goaway::new().with_timeout(Some(Duration::MAX)).timeout(),
 			Some(Duration::from_millis(MAX_TIMEOUT_MS))
 		);
+	}
+
+	/// A zero timeout closes the session at once, not never.
+	#[test]
+	fn a_zero_timeout_closes_at_once() {
+		let runtime = crate::time::Deadlines::new(crate::time::Instant::ZERO);
+		let (handle, _protocol) = Handle::new(true);
+		let mut deadline = handle.deadline(&runtime);
+		let waiter = kio::Waiter::noop();
+		handle.send(Goaway::new().with_timeout(Some(Duration::ZERO))).unwrap();
+		assert_eq!(deadline.poll(&waiter), Poll::Ready(Some(Duration::ZERO)));
 	}
 
 	/// A URI past the wire cap is refused at the send chokepoint rather than
@@ -470,15 +439,11 @@ mod tests {
 	#[test]
 	fn oversized_uri_is_refused() {
 		let (handle, _protocol) = Handle::new(true);
-		let err = handle
-			.producer()
-			.send(Goaway::redirect("x".repeat(MAX_URI + 1)))
-			.unwrap_err();
+		let err = handle.send(Goaway::redirect("x".repeat(MAX_URI + 1))).unwrap_err();
 		assert!(matches!(err, Error::ProtocolViolation));
 
 		let (handle, _protocol) = Handle::new(true);
 		handle
-			.producer()
 			.send(Goaway::redirect("x".repeat(MAX_URI)))
 			.expect("exactly at the cap is fine");
 	}

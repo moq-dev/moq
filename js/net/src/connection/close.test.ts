@@ -14,25 +14,28 @@ function holdFin(transport: MockTransport) {
 	const reached = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	let enabled = false;
-	const wrap = (stream: WebTransportBidirectionalStream): WebTransportBidirectionalStream => {
-		const writer = stream.writable.getWriter();
-		return {
-			readable: stream.readable,
-			writable: new WritableStream<Uint8Array>({
-				write: (bytes) => writer.write(bytes),
-				abort: (reason) => writer.abort(reason),
-				async close() {
-					await writer.close();
-					if (enabled) {
-						reached.resolve();
-						await release.promise;
-					}
-				},
-			}),
-		} as WebTransportBidirectionalStream;
+	const hold = (writable: WritableStream<Uint8Array>): WritableStream<Uint8Array> => {
+		const writer = writable.getWriter();
+		return new WritableStream<Uint8Array>({
+			write: (bytes) => writer.write(bytes),
+			abort: (reason) => writer.abort(reason),
+			async close() {
+				await writer.close();
+				if (enabled) {
+					reached.resolve();
+					await release.promise;
+				}
+			},
+		});
 	};
+	const wrap = (stream: WebTransportBidirectionalStream): WebTransportBidirectionalStream =>
+		({ readable: stream.readable, writable: hold(stream.writable) }) as WebTransportBidirectionalStream;
 	const create = transport.createBidirectionalStream.bind(transport);
 	transport.createBidirectionalStream = async (options) => wrap(await create(options));
+	// Lite-07 withdraws on its unidirectional Announce Stream.
+	const createUni = transport.createUnidirectionalStream.bind(transport);
+	transport.createUnidirectionalStream = async (options) =>
+		hold(await createUni(options)) as Awaited<ReturnType<typeof createUni>>;
 	Object.defineProperty(transport, "incomingBidirectionalStreams", {
 		value: transport.incomingBidirectionalStreams.pipeThrough(
 			new TransformStream({
