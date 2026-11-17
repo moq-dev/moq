@@ -20,4 +20,11 @@ raced against the stream's open), that is a bug in `js/net`, fixed there with
 a regression test. Only if the trace shows the close is merely slow is the fix
 in the test, by the epic's rules.
 
+Seen again 2026-11-17 on
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987): 2 of 7 full
+suite runs, 0 of 17 runs of the file. One path to check first:
+`Connection.#runUni` (`js/net/src/lite/connection.ts`) reads the stream's type
+before it knows it holds the Announce Stream, so a reset that lands before
+that read fails a stream that never named itself, which breaks nothing.
+
 Public API: none. Wire: none.

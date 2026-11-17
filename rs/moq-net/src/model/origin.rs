@@ -100,10 +100,10 @@ pub struct Config {
 	/// The origin's identity on every wire: the hop id appended to broadcast hop chains
 	/// for loop detection, and the route identity it declares on moq-lite-07, which also
 	/// names it in the hops of each route it forwards there. Random by
-	/// default, so each process is a fresh identity. Set one only if it is fresh per
-	/// process too: a restarted process numbers its lite-07 sessions from 1 again, so a
-	/// peer that still remembers one of the old process's sessions as closed refuses
-	/// the routes through the new one's session of the same number.
+	/// default, so each process is a fresh identity. One kept across restarts needs a
+	/// wall clock that only moves forward: lite-07 names each run of it by when the
+	/// process started, and a routing peer that remembers a session of a later run as
+	/// closed refuses the session of a run that started before it, logging why.
 	pub hop: NonZeroU64,
 
 	/// Longest hop path a session using this origin accepts or forwards (default 32).

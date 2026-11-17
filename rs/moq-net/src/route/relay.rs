@@ -672,6 +672,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		if self.peers.contains_key(&peer) {
 			return Err(Error::Duplicate);
 		}
+		// A start only grows. Every path through a session of a start below one known
+		// closed is refused for good, so a relay whose clock went back would peer and
+		// route nothing: refuse it here, where its operator sees why.
+		if let Role::Routing(node) = &port.role {
+			let known = (self.closed).range((node.relay, Id::MIN)..=(node.relay, Id::MAX));
+			if known.into_iter().any(|(_, (start, _))| *start > node.start) {
+				return Err(Error::Regressed);
+			}
+		}
 		self.sessions += 1;
 		let ask: BTreeSet<Path> = match &port.role {
 			// Of a scoped neighbour, only what its grant covers, the wider of two nested.
@@ -3341,6 +3350,54 @@ mod tests {
 				},
 			)
 			.unwrap();
+	}
+
+	/// A relay whose start is below one of its sessions known closed is refused as a
+	/// routing neighbour: every path through its new sessions would be, silently.
+	#[test]
+	fn a_start_that_went_back_is_refused() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		let started = |start| NodeId { relay: 7, start };
+		let origin = Hop {
+			node: node(5),
+			session: 0,
+		};
+		let through = Hop {
+			node: started(5),
+			session: 1,
+		};
+		let sender = Hop {
+			node: node(2),
+			session: 1,
+		};
+		let offer = Offer {
+			path: vec![origin, through, sender].into(),
+			draining: false,
+			priority: i8::MAX,
+			cost: 2,
+			marked: false,
+		};
+		let route = Msg::Route {
+			origin: node(5),
+			offer: Some(offer),
+		};
+		router.recv(2, route).unwrap();
+		let dead = Msg::Dead {
+			hop: through,
+			far: node(5),
+		};
+		router.recv(2, dead).unwrap();
+
+		assert_eq!(
+			router.connect(3, port(Role::Routing(started(4)))),
+			Err(Error::Regressed)
+		);
+		// The same run, and any later one, peers.
+		router.connect(3, port(Role::Routing(started(5)))).unwrap();
+		router.connect(4, port(Role::Routing(started(6)))).unwrap();
+		// Only a routing neighbour names a start.
+		router.connect(5, port(Role::Endpoint)).unwrap();
 	}
 
 	/// A claim lost with nothing to replace it shows unavailable for the debounce, then

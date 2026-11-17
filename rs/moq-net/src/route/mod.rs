@@ -173,4 +173,8 @@ pub(crate) enum Error {
 	Malformed,
 	#[error("a message the neighbor's role never sends")]
 	Role,
+	#[error(
+		"a routing neighbor started before a session of its relay known closed: its clock went back, or two relays share an id"
+	)]
+	Regressed,
 }

@@ -245,6 +245,8 @@ impl Routed {
 			role,
 		};
 		let stream = (node.connect(subscriber.peer_setup.tag(), port))
+			// Said here, since the peer is told only that it broke the protocol.
+			.inspect_err(|err| tracing::warn!(%err, peer = ?routing, "the route layer refused the session"))
 			.map_err(refused)?
 			.with_clock(subscriber.runtime.clone());
 		Ok(Self {

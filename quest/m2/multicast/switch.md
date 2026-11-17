@@ -13,6 +13,16 @@ below, each decided there or in the plan it came from.
 
 ## Plan
 
+Decided 2026-11-17 (maintainer, on
+[that PR](https://github.com/moq-dev/moq/pull/8987#issuecomment-6958210502)):
+
+- ✅ The switch merged without the moq-cluster retirement and the
+  crate-private route items, which land here before the cut (rejected:
+  holding the switch for them).
+- ✅ This quest is kept.
+- ✅ The adopted-claim gap is closed before the cut, not left to the
+  implementer; how is still a recommendation.
+
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit), and still
 to do. The cut freezes the public API and the wire, so these land before it:
 
@@ -46,6 +56,18 @@ to do. The cut freezes the public API and the wire, so these land before it:
   means "named none", a special case inside a value, which AGENTS.md forbids
   in public API.
 
+- ✅ A claim adopted over a marked link that does not route never reaches an
+  upstream through a peer. Today such a claim is withheld from a marked
+  routing neighbour, but still floods to unmarked routing neighbours, who may
+  forward it over their own marked links. It matters at a rollout: with two
+  releases side by side a relay's upstream speaks an older version and does
+  not route, so the relay adopts what it learns there, and a pair of edges
+  could carry a broadcast from one core to another. Recommended, not decided:
+  a second, marked identity and route for what a node adopts across a marked
+  link, so the route rule's own mark carries it. Test it with an upstream on
+  lite-06 between two cores, as `rs/moq-relay/tests/integration/upstream_links.rs`
+  does on lite-07.
+
 Left by the switch, for the implementer to decide and list in the PR:
 
 - The announce-churn mitigations (`DEFAULT_UPDATE_HOLD` and
@@ -54,11 +76,6 @@ Left by the switch, for the implementer to decide and list in the PR:
   saying they are temporary. Gate what
   [acceptance](/quest/m2/cluster-routes/acceptance.md) does not retire on the
   lite-06 session path under one named marker.
-- An adopted claim that crossed a marked link is withheld from a marked
-  routing neighbour, but still floods to unmarked routing neighbours, who may
-  forward it over their own marked links. Recommended: a second, marked
-  identity and route for what a node adopts across a marked link, so the
-  route rule's own mark carries it.
 - The path-rule benches (drain, repath, follow) left `benches/routes.rs` with
   the old router and have no equivalent on the new one. Add them, swept over
   both axes.
