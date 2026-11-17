@@ -57,6 +57,14 @@ inline bool WaitFor(const std::function<bool()> &done, std::chrono::milliseconds
 	return true;
 }
 
+// Lets a session the test just saw go live outlast moq-ffi's healthy bar, which has no
+// override: a session its peer closes sooner ends the client, as a refused one does, where
+// one closed later redials.
+inline void OutlastHealthy()
+{
+	std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+
 // Runs whatever `worker` already queued, so a test checks what an object's dropped calls
 // did without waiting out a window. Dropping a moq::Continuation does not recall a result
 // whose delivery already began, which can still queue after this returns: a check after
