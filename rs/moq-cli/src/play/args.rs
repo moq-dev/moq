@@ -93,15 +93,14 @@ pub struct Args {
 	#[usage(long, value_name = "PATH", value_hint = usage_rs::ValueHint::FilePath, extensions("ndjson"))]
 	pub metrics: Option<PathBuf>,
 
-	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
-	/// first that encodes, decodes, and scales.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	/// The render node the decoder opens, such as `/dev/dri/renderD129`: VA-API
+	/// opens it, and NVDEC the NVIDIA GPU behind it. Defaults to the first that
+	/// encodes, decodes, and scales. Linux only.
+	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath, conflicts = "--v4l2-decoder")]
 	pub vaapi_device: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M decoder node, such as `/dev/video10`. Defaults to the first
-	/// that decodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that decodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_DECODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_decoder: Option<std::path::PathBuf>,
 }
