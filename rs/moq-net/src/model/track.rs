@@ -8027,6 +8027,8 @@ struct Cursor {
 	/// One past the highest key returned by `next_group`.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
 	next_key: u64,
+	/// The absolute arrival index [`Self::late`] has read up to.
+	late: usize,
 	/// Exclusive upper key bound for `next_group` and `recv_group`. `None` means no
 	/// cap. Set by `set_range`;
 	/// can be raised, lowered, or unset at any time. Groups at or past the cap stay in
@@ -8046,8 +8048,9 @@ struct Cursor {
 	/// [`Subscriber`], which drains this after every read.
 	stale: stats::Content,
 	/// Groups the seek path has convicted but whose keys no caller has committed
-	/// past yet, keyed by key; see [`Self::commit_seek_stale`].
-	seek_pending: BTreeMap<u64, stats::Content>,
+	/// past yet, keyed by key, with the budget that convicted each; see
+	/// [`Self::commit_seek_stale`].
+	seek_pending: BTreeMap<u64, (stats::Content, Duration)>,
 	/// What this cursor handed out, skipped, gave up, and reported.
 	record: Record,
 	/// The drops a wire publisher forwards, once it first polls for one.
@@ -8392,6 +8395,7 @@ impl Cursor {
 			filter: Box::new(filter),
 			index: 0,
 			next_key: 0,
+			late: 0,
 			end_key: None,
 			// Uncapped, the servable groups are the window's.
 			servable: published.servable.clone(),
@@ -8456,6 +8460,21 @@ impl Cursor {
 				.map_or(Poll::Pending, Poll::Ready),
 			Poll::Pending => Poll::Pending,
 		}
+	}
+
+	/// The keys that landed in this cursor's window since it last looked, below `below`: a key
+	/// cursor already read past them, so it never hands them out.
+	fn late(&mut self, below: u64) -> Vec<u64> {
+		let state = self.state.read();
+		let from = self.late.max(state.offset);
+		self.late = state.offset + state.arrival.len();
+		state
+			.arrival
+			.iter()
+			.skip(from - state.offset)
+			.map(|(key, _)| *key)
+			.filter(|key| *key < below && self.filter.window.contains(*key))
+			.collect()
 	}
 
 	/// Resolve [`Self::servable`] again once the window or cap moved, and publish it to the
@@ -9623,7 +9642,7 @@ impl Cursor {
 				// the edge can be evicted), so the group may still be delivered.
 				// Re-snapshot on every re-examination so the eventual count reflects the
 				// group's latest observed content.
-				self.seek_pending.insert(group.start, group.content());
+				self.seek_pending.insert(group.start, (group.content(), drift.budget));
 				floor = group.start.saturating_add(1);
 				continue;
 			}
@@ -9690,8 +9709,15 @@ impl Cursor {
 	/// then be delivered after all.
 	fn commit_seek_stale(&mut self, committed: u64) {
 		let keep = self.seek_pending.split_off(&committed);
-		for (_, content) in std::mem::replace(&mut self.seek_pending, keep) {
+		for (key, (content, budget)) in std::mem::replace(&mut self.seek_pending, keep) {
 			self.stale.add(content);
+			// Given up for good now, so it is as reported as a write-off is: a key-order
+			// reader tells its caller the group will not come.
+			if self.drops.is_some()
+				&& let Some(end) = key.checked_add(1)
+			{
+				self.record.pending.insert(key..end, Pending::own(Hole::stale(budget)));
+			}
 		}
 	}
 }
@@ -10233,6 +10259,54 @@ impl Subscriber {
 				}) || owed())
 	}
 
+	/// The keys that landed on this copy since the last call, below `below`.
+	pub(super) fn late(&mut self, below: u64) -> Vec<u64> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.late(below),
+			Inner::Resume(resume, _) => resume.late(below),
+		}
+	}
+
+	/// Report the groups that landed below where this key-order reader had read, which it
+	/// never hands out, as given up `Old`. A group it handed out or judged stale is already
+	/// settled, so the record blocks it.
+	fn note_late(&mut self) {
+		let mut late = match &mut self.inner {
+			Inner::Plain(cursor) => cursor.late(cursor.next_key),
+			Inner::Resume(resume, logical) => resume.late(logical.record.delivered.floor()),
+		};
+		// A copy's window can be wider than this reader's ranges and bounds, so a late key they
+		// leave out is no gap of this reader's, as the plain path's window already clips it.
+		if matches!(self.inner, Inner::Resume(..)) {
+			late.retain(|key| !self.runs_in_range(*key, key.saturating_add(1)).is_empty());
+		}
+		let record = match &mut self.inner {
+			Inner::Plain(cursor) => &mut cursor.record,
+			Inner::Resume(_, logical) => &mut logical.record,
+		};
+		for key in late {
+			if let Some(end) = key.checked_add(1) {
+				DropCursor::give_up(record, key..end, Hole::drop(StreamError::Old));
+			}
+		}
+	}
+
+	/// Record `key` as served, so no cut or drop of it is reported afterwards.
+	fn settle(&mut self, key: u64) {
+		if let Some(end) = key.checked_add(1) {
+			self.settle_range(key..end);
+		}
+	}
+
+	/// Record `keys` as served or reported, so no cut or drop of them is reported again.
+	fn settle_range(&mut self, keys: ops::Range<u64>) {
+		let record = match &mut self.inner {
+			Inner::Plain(cursor) => &mut cursor.record,
+			Inner::Resume(_, logical) => &mut logical.record,
+		};
+		record.tell(keys, Report::Settled);
+	}
+
 	/// The key cursor behind [`Ordered`], which owns the only public door to it.
 	pub(super) fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group(true, waiter)
@@ -10245,7 +10319,14 @@ impl Subscriber {
 	/// The two advance independently, and interleaving them produces a group stream that
 	/// is neither, which is why the choice is a handle rather than a method.
 	pub fn ordered(self) -> Ordered {
-		Ordered { inner: self }
+		Ordered {
+			inner: self,
+			held: None,
+			gaps: BTreeMap::new(),
+			at: 0,
+			started: false,
+			idle: None,
+		}
 	}
 
 	/// Whether `other` was cloned from this subscriber (shares the same underlying state).
@@ -10832,7 +10913,7 @@ impl Subscriber {
 /// Created by [`Subscriber::ordered`], which consumes the subscriber, so a track is read
 /// one way or the other and never both. Every group it returns has a higher key
 /// than the last, so a late arrival (network reordering, or a gap the cache filled after
-/// the fact) is skipped rather than delivered out of turn.
+/// the fact) is reported as a [gap](Item::Gap) rather than delivered out of turn.
 ///
 /// # Age and skipping
 ///
@@ -10863,11 +10944,56 @@ impl Subscriber {
 /// ordered moq-transport FETCH. A moq-transport SUBSCRIBE signals no gaps, so there a group
 /// lost in transit can hold the ordered reader at its hole until the track ends.
 ///
+/// A group this reader gives up on is not lost silently: it comes back as an
+/// [`Item::Gap`], so a reader that paces on what was sent counts the loss instead of
+/// waiting for a group that will never come. That is every group the publisher or a relay
+/// dropped, the transport evicted, the budget aged out, a fetch could not find, or that
+/// landed after the read passed its key (reported as `Old`). A gap carries the keys it
+/// spans and is returned once, after any group the read still owes below it and before
+/// the next group above it, or when the track ends. Keys the publisher declared skipped
+/// (see [`Producer::skip_groups`]) were never groups, so they are no gap;
+/// [`Self::is_skipped`] answers for them.
+///
 /// The budget is updatable mid-stream through [`Self::control`]. [`Duration::ZERO`] (the
 /// default) keeps only what nothing newer has superseded, so a consumer that stalls and
 /// resumes rejoins the live edge instead of replaying at 1x.
 pub struct Ordered {
 	inner: Subscriber,
+	/// A group read and not yet returned, because a gap below it goes first.
+	held: Option<Box<group::Consumer>>,
+	/// The gaps found and not yet returned, as `start => (end, error)`. They never overlap, and
+	/// a drop found while others wait goes in order among them.
+	gaps: BTreeMap<u64, (u64, Error)>,
+	/// One past the highest key returned, as a group or the end of a gap.
+	at: u64,
+	/// Whether the drop record exists. It holds only what happened after it began, so it
+	/// starts before the first read.
+	started: bool,
+	/// The read that last parked, answered again until something it parked on fires.
+	idle: Option<Box<idle::Idle>>,
+}
+
+/// What an [`Ordered`] read returns next.
+pub enum Item {
+	/// A group, with a higher key than any group returned before.
+	Group(group::Consumer),
+	/// Groups this reader gave up on, which it will not return.
+	Gap {
+		/// The keys given up, as group starts.
+		range: ops::Range<u64>,
+		/// Why: what a read of those groups would have ended with.
+		error: Error,
+	},
+}
+
+impl Item {
+	/// The group, or `None` for a gap.
+	pub fn group(self) -> Option<group::Consumer> {
+		match self {
+			Self::Group(group) => Some(group),
+			Self::Gap { .. } => None,
+		}
+	}
 }
 
 impl Ordered {
@@ -10886,7 +11012,8 @@ impl Ordered {
 		self.inner.broadcast()
 	}
 
-	/// The next group with a higher key than any previously returned.
+	/// The next group with a higher key than any previously returned, or a gap this reader
+	/// gave up on (see [Gaps](Self#gaps)).
 	///
 	/// Honors the group range set by [`Subscriber::with_range`] before [`Subscriber::ordered`]:
 	/// a group past the cap stays in the producer's cache and becomes eligible again if
@@ -10895,12 +11022,192 @@ impl Ordered {
 	/// Later reads return `Ok(None)` immediately too; widening the ranges with
 	/// [`Self::update`] resumes reading above the last key returned.
 	///
-	/// Returns `Ok(Some(group))` when a group is available, `Ok(None)` when the track is
+	/// Returns `Ok(Some(item))` when a group or gap is available, `Ok(None)` when the track is
 	/// finished (including an abort after its declared end settled, see [`Producer::abort`])
 	/// or the ranges are read, or the error when the track has been aborted short of its end.
+	/// Every gap is returned before the end, even a clean one.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		self.inner.poll_next_group(waiter)
+	pub fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Item>>> {
+		if idle::Idle::parked(&self.idle, (), waiter) {
+			return Poll::Pending;
+		}
+		let mut idle = idle::Idle::start(&mut self.idle, waiter);
+		let polled = self.poll_item(idle.waiter());
+		idle.finish(&mut self.idle, (), polled.is_pending());
+		polled
+	}
+
+	fn poll_item(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Item>>> {
+		// Gaps are recorded only once polled for, so before the first read.
+		if !self.started {
+			self.started = true;
+			self.find_gap(true, waiter);
+		}
+		let read = self.read(waiter);
+		// After the read, which judged what it walked past: a group it handed out leaves only
+		// what that queued, and anything else judges the live edge for the gaps it parks on.
+		self.find_gap(!matches!(read, Poll::Ready(Ok(Some(_)))), waiter);
+		match read {
+			Poll::Ready(Ok(Some(group))) => {
+				let key = group.start;
+				match self.lowest_gap() {
+					// The gap lies wholly below it, or around it: the part below goes first.
+					Some((at, span)) if span.start < key => {
+						// What lies above the group, or above the run when it ends before it, waits.
+						let resume = if span.end <= key {
+							span.end
+						} else {
+							key.saturating_add(1)
+						};
+						let below = span.start..span.end.min(key);
+						let item = self.take_gap(at, below, resume);
+						self.held = Some(Box::new(group));
+						Poll::Ready(Ok(Some(item)))
+					}
+					// A group handed out is no gap, even one a drop also named, as a cut group is.
+					lowest => {
+						if let Some((at, span)) = lowest
+							&& span.start == key
+						{
+							self.cut_gap(at, span.start, key.saturating_add(1));
+						}
+						self.at = self.at.max(key.saturating_add(1));
+						Poll::Ready(Ok(Some(Item::Group(group))))
+					}
+				}
+			}
+			// What the read still owes lies above the gap, so the gap goes first.
+			Poll::Pending => match self.next_gap() {
+				Some(item) => Poll::Ready(Ok(Some(item))),
+				None => Poll::Pending,
+			},
+			// Every gap is returned before the end.
+			Poll::Ready(end) => match self.lowest_gap() {
+				Some((at, span)) => {
+					let resume = span.end;
+					Poll::Ready(Ok(Some(self.take_gap(at, span, resume))))
+				}
+				None => Poll::Ready(end.map(|_| None)),
+			},
+		}
+	}
+
+	/// The next group in key order: the one held behind a gap, if the ranges still cover it.
+	fn read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(group) = self.held.take() {
+			let key = group.start;
+			if !self.inner.runs_in_range(key, key.saturating_add(1)).is_empty() {
+				return Poll::Ready(Ok(Some(*group)));
+			}
+			// A range moved off it. With nothing in range above, it waits for the range to widen
+			// again, and the read waits or ends as it does for capped ranges; otherwise the read
+			// passes it.
+			if self.inner.runs_in_range(key, u64::MAX).is_empty() {
+				self.held = Some(group);
+			}
+		}
+		let read = self.inner.poll_next_group(waiter);
+		if let Poll::Ready(Ok(Some(group))) = &read {
+			// Handed out, so no later cut or drop of it is a gap.
+			self.inner.settle(group.start);
+		}
+		read
+	}
+
+	/// The lowest run of a gap the ranges cover now, as the gap's key in `gaps` and the keys of
+	/// it that run covers, since the ranges may have moved since the gap was found. A gap they
+	/// exclude waits, in case they widen again.
+	fn lowest_gap(&mut self) -> Option<(u64, ops::Range<u64>)> {
+		// The fields borrow apart, so the map is walked in place and the walk stops at the
+		// first gap the ranges cover.
+		let Self { inner, gaps, .. } = self;
+		gaps.iter().find_map(|(start, (end, _))| {
+			let runs = inner.runs_in_range(*start, *end);
+			Some((*start, runs.into_iter().next()?))
+		})
+	}
+
+	/// Take `given` from the gap `lowest_gap` found, as an item. What lies from `resume` on stays
+	/// a gap, to be clipped and returned later, as does what lies below `given`.
+	fn take_gap(&mut self, at: u64, given: ops::Range<u64>, resume: u64) -> Item {
+		let error = self.cut_gap(at, given.start, resume);
+		self.give(given, error)
+	}
+
+	/// Remove `from..resume` from the gap held at `at`, returning its error. What lies below
+	/// `from`, which the ranges leave out, and from `resume` on stay gaps, to be clipped and
+	/// returned later.
+	fn cut_gap(&mut self, at: u64, from: u64, resume: u64) -> Error {
+		let (end, error) = self.gaps.remove(&at).expect("the lowest gap is held");
+		if at < from {
+			self.gaps.insert(at, (from, error.clone()));
+		}
+		if end > resume {
+			self.gaps.insert(resume, (end, error.clone()));
+		}
+		error
+	}
+
+	/// Look for every drop recorded, in whatever order they come.
+	fn find_gap(&mut self, judge: bool, waiter: &kio::Waiter) {
+		self.inner.note_late();
+		loop {
+			let polled = match judge {
+				true => self.inner.poll_drop(waiter),
+				false => self.inner.poll_queued_drop(waiter),
+			};
+			let Poll::Ready((range, hole)) = polled else {
+				return;
+			};
+			match hole {
+				Hole::Drop { error, .. } => {
+					// A final drop replaces a stale one still waiting, rather than overlap it.
+					self.forget_gaps(range.clone());
+					self.gaps.insert(range.start, (range.end, error.into()));
+				}
+				// A skip was never a group: nothing was given up, and it replaces a drop
+				// still waiting.
+				Hole::Skip => self.forget_gaps(range),
+			}
+		}
+	}
+
+	/// Remove `skipped` from the gaps waiting, splitting those it only partly covers.
+	fn forget_gaps(&mut self, skipped: ops::Range<u64>) {
+		// The gaps never overlap, so their ends rise with their starts: walk down from the
+		// highest one that starts below the skip's end, and stop at the first that ends before it.
+		let hit: Vec<u64> = self
+			.gaps
+			.range(..skipped.end)
+			.rev()
+			.take_while(|(_, (end, _))| *end > skipped.start)
+			.map(|(start, _)| *start)
+			.collect();
+		for start in hit {
+			let (end, error) = self.gaps.remove(&start).expect("the gap was just found");
+			if start < skipped.start {
+				self.gaps.insert(start, (skipped.start, error.clone()));
+			}
+			if end > skipped.end {
+				self.gaps.insert(skipped.end, (end, error));
+			}
+		}
+	}
+
+	/// The lowest gap, once nothing the read still owes lies below it.
+	fn next_gap(&mut self) -> Option<Item> {
+		let (at, span) = self.lowest_gap()?;
+		let ready = span.start <= self.at || self.inner.next_in_range(self.at).is_none_or(|owed| owed >= span.start);
+		let resume = span.end;
+		ready.then(|| self.take_gap(at, span, resume))
+	}
+
+	/// A gap as an item, which the read has now moved past.
+	fn give(&mut self, range: ops::Range<u64>, error: Error) -> Item {
+		self.at = self.at.max(range.end);
+		// Told once: no later drop of these keys is a gap again.
+		self.inner.settle_range(range.clone());
+		Item::Gap { range, error }
 	}
 
 	/// Narrow subsequent reads to these group keys, as [`Subscriber::with_range`] does: a
@@ -10916,6 +11223,8 @@ impl Ordered {
 	/// [`Self::with_range`] on a reader held in place.
 	#[cfg(test)]
 	fn set_range(&mut self, groups: impl RangeBounds<u64>) {
+		// A moved range notifies nothing a parked read waits on.
+		idle::Idle::disarm(&mut self.idle);
 		self.inner.set_range(groups);
 	}
 
@@ -10934,6 +11243,7 @@ impl Ordered {
 	///
 	/// Returns [`Error::Closed`] if the track already ended.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
+		idle::Idle::disarm(&mut self.idle);
 		self.inner.update(subscription)
 	}
 
@@ -11909,6 +12219,30 @@ mod test {
 	}
 
 	/// Every group a reader hands out with the frame indices it reads, until one would block.
+	/// What an ordered read returns until it ends, as `group 2` or `gap 1..2 (error)`.
+	#[cfg(feature = "async")]
+	fn items(ordered: &mut Ordered) -> Vec<String> {
+		let mut items = Vec::new();
+		while let Some(next) = ordered.next_group().now_or_never() {
+			match next {
+				Ok(Some(Item::Group(group))) => items.push(format!("group {}", group.start)),
+				Ok(Some(Item::Gap { range, error })) => items.push(format!("gap {range:?} ({error})")),
+				Ok(None) => return items,
+				Err(err) => {
+					items.push(format!("error ({err})"));
+					return items;
+				}
+			}
+		}
+		items.push("pending".to_string());
+		items
+	}
+
+	/// An ordered read that expects no gap, as the groups it returns.
+	fn groups_only(polled: Poll<Result<Option<Item>>>) -> Poll<Result<Option<group::Consumer>>> {
+		polled.map(|res| res.map(|item| item.map(|item| item.group().expect("a group, not a gap"))))
+	}
+
 	fn read_groups(
 		mut next: impl FnMut(&kio::Waiter) -> Poll<Result<Option<group::Consumer>>>,
 	) -> Vec<(u64, Vec<u64>)> {
@@ -11948,7 +12282,7 @@ mod test {
 		let mut arrival = bounded();
 		assert_eq!(read_groups(|waiter| arrival.poll_recv_group(waiter)), want);
 		let mut ordered = bounded().ordered();
-		assert_eq!(read_groups(|waiter| ordered.poll_next_group(waiter)), want);
+		assert_eq!(read_groups(|waiter| groups_only(ordered.poll_next_group(waiter))), want);
 	}
 
 	/// A group missing its head is never served short: reading it is [`Error::Lagged`],
@@ -15683,8 +16017,10 @@ mod test {
 	#[cfg(feature = "async")]
 	fn drain_ordered(subscriber: &mut Ordered) -> Vec<u64> {
 		let mut keys = Vec::new();
-		while let Some(Ok(Some(group))) = subscriber.next_group().now_or_never() {
-			keys.push(group.start);
+		while let Some(Ok(Some(item))) = subscriber.next_group().now_or_never() {
+			if let Item::Group(group) = item {
+				keys.push(group.start);
+			}
 		}
 		keys
 	}
@@ -16063,8 +16399,8 @@ mod test {
 		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..2));
 		assert_eq!(drain(&mut subscriber), vec![1]);
 		let mut subscriber = producer.subscribe(Subscription::default().with_range(0..2)).ordered();
-		let next = subscriber.next_group().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(next.start, 1);
+		// Group 0 is stale against it, which the read reports before the group.
+		assert_eq!(items(&mut subscriber), ["gap 0..1 (old)", "group 1"]);
 
 		// A budget that covers it delivers the range, and nothing above it.
 		let mut subscriber = producer.subscribe(replay().with_end(2));
@@ -16920,12 +17256,8 @@ mod test {
 		let mut ordered = producer.subscribe(replay()).ordered();
 		drop(producer);
 
-		let first = ordered.next_group().now_or_never().expect("group 0").unwrap().unwrap();
-		assert_eq!(first.start, 0);
-		let second = ordered.next_group().now_or_never().expect("group 2").unwrap().unwrap();
-		assert_eq!(second.start, 2);
-		let done = ordered.next_group().now_or_never().expect("end").unwrap();
-		assert!(done.is_none(), "missing groups below the boundary are not an error");
+		// A group never produced below a later one is given up, and the end is clean.
+		assert_eq!(items(&mut ordered), ["group 0", "gap 1..2 (not found)", "group 2"]);
 	}
 
 	/// A finished track ends both readers with nothing left in range, whether the range
@@ -16945,7 +17277,7 @@ mod test {
 			}
 			let _producer = producer.finish().unwrap();
 			for key in 0..3 {
-				let Poll::Ready(Ok(Some(group))) = ordered.poll_next_group(&kio::Waiter::noop()) else {
+				let Poll::Ready(Ok(Some(Item::Group(group)))) = ordered.poll_next_group(&kio::Waiter::noop()) else {
 					panic!("group {key}, given_up={given_up}")
 				};
 				assert_eq!(group.start, key);
@@ -16953,6 +17285,18 @@ mod test {
 					panic!("arrival group {key}, given_up={given_up}")
 				};
 				assert_eq!(group.start, key);
+			}
+			// The group given up is reported, then the read ends.
+			if given_up {
+				let Poll::Ready(Ok(Some(Item::Gap { range, error }))) = ordered.poll_next_group(&kio::Waiter::noop())
+				else {
+					panic!("the given up group is reported")
+				};
+				assert_eq!(range, 3..4);
+				assert!(
+					matches!(error, Error::Stream(StreamError::DeliveryTimeout)),
+					"{error:?}"
+				);
 			}
 			assert!(
 				matches!(ordered.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
@@ -17008,9 +17352,23 @@ mod test {
 		late.write_frame(late.key_time(), &b"late"[..]).unwrap();
 		let late = late.finish().unwrap();
 		assert_eq!(late.frame_count(), 1);
-		let first = ordered.next_group().now_or_never().expect("group 0").unwrap().unwrap();
+		let first = ordered
+			.next_group()
+			.now_or_never()
+			.expect("group 0")
+			.unwrap()
+			.unwrap()
+			.group()
+			.unwrap();
 		assert_eq!(first.start, 0);
-		let second = ordered.next_group().now_or_never().expect("group 1").unwrap().unwrap();
+		let second = ordered
+			.next_group()
+			.now_or_never()
+			.expect("group 1")
+			.unwrap()
+			.unwrap()
+			.group()
+			.unwrap();
 		assert_eq!(second.start, 1);
 		let done = ordered.next_group().now_or_never().expect("end").unwrap();
 		assert!(done.is_none(), "the finished track ends after its late group");
@@ -17226,7 +17584,7 @@ mod test {
 		let mut ordered = producer.subscribe(replay().with_range(0..)).ordered();
 		for key in 0..2 {
 			assert_eq!(arrival.assert_group().start, key);
-			assert_eq!(ordered.next_group().await.unwrap().unwrap().start, key);
+			assert_eq!(ordered.next_group().await.unwrap().unwrap().group().unwrap().start, key);
 		}
 		assert!(matches!(arrival.recv_group().await, Err(Error::App(7))));
 		assert!(matches!(ordered.next_group().await, Err(Error::App(7))));
@@ -17264,7 +17622,7 @@ mod test {
 		let mut reader = producer.subscribe(replay().with_range(0..)).ordered();
 		let _finished = producer.clone().fail(Error::App(7)).unwrap();
 		for key in 0..3 {
-			assert_eq!(reader.next_group().await.unwrap().unwrap().start, key);
+			assert_eq!(reader.next_group().await.unwrap().unwrap().group().unwrap().start, key);
 		}
 		assert!(matches!(reader.next_group().await, Err(Error::App(7))));
 		assert!(matches!(producer.append_next(), Err(Error::Closed)));
@@ -17344,7 +17702,12 @@ mod test {
 		// Missing lower groups do not hold either reader for the wire's grace.
 		// The last group's own stream remains open independently of the track end.
 		assert_eq!(arrival.assert_group().start, 2);
-		assert_eq!(ordered.next_group().await.unwrap().unwrap().start, 2);
+		// They are reported as one gap, since nothing was produced below the group.
+		let Some(Item::Gap { range, .. }) = ordered.next_group().await.unwrap() else {
+			panic!("the missing groups are reported")
+		};
+		assert_eq!(range, 0..2);
+		assert_eq!(ordered.next_group().await.unwrap().unwrap().group().unwrap().start, 2);
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 		assert!(ordered.next_group().now_or_never().unwrap().unwrap().is_none());
 
@@ -17354,10 +17717,15 @@ mod test {
 			arrival.recv_group().now_or_never().unwrap(),
 			Err(Error::Timeout)
 		));
-		assert!(matches!(
-			ordered.next_group().now_or_never().unwrap(),
-			Err(Error::Timeout)
-		));
+		let next = ordered.next_group().now_or_never().unwrap();
+		assert!(
+			matches!(next, Err(Error::Timeout)),
+			"{:?}",
+			next.map(|i| i.map(|i| match i {
+				Item::Gap { range, error } => format!("{range:?} {error}"),
+				_ => "group".into(),
+			}))
+		);
 	}
 
 	/// A received copy's end holds readers at a hole below it, since a lower group's stream
@@ -17973,7 +18341,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|group| group.map(|group| group.start));
+			.map(|item| item.map(|item| item.group().expect("a group").start));
 		assert!(matches!(res, Err(Error::Timeout)), "expected the abort, got {res:?}");
 	}
 
@@ -18104,7 +18472,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|group| group.map(|group| group.start));
+			.map(|item| item.map(|item| item.group().expect("a group").start));
 		assert!(matches!(end, Ok(None)), "expected the clean end, got {end:?}");
 	}
 
@@ -18132,7 +18500,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|group| group.map(|group| group.start));
+			.map(|item| item.map(|item| item.group().expect("a group").start));
 		assert!(
 			matches!(end, Ok(None)),
 			"capped at the end: expected the clean end, got {end:?}"
@@ -18156,7 +18524,7 @@ mod test {
 			.next_group()
 			.now_or_never()
 			.expect("should not block")
-			.map(|group| group.map(|group| group.start));
+			.map(|item| item.map(|item| item.group().expect("a group").start));
 		assert!(
 			matches!(end, Ok(None)),
 			"gap below the cap: expected the clean end, got {end:?}"
@@ -18964,6 +19332,309 @@ mod test {
 		assert_eq!(drain_ordered(&mut consumer), [0, 1]);
 	}
 
+	/// A group the track gives up on comes back as a gap, in key order among the groups, with
+	/// why; a group already returned is no gap, nor is a key the publisher skipped.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_reports_what_it_gives_up() {
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 0, None);
+		put(&producer, 3, None);
+		producer.drop_groups(1..3, StreamError::DeliveryTimeout);
+		producer.skip_groups(4..6);
+		put(&producer, 6, None);
+		assert_eq!(
+			items(&mut ordered),
+			[
+				"group 0",
+				"gap 1..3 (delivery timeout)",
+				"group 3",
+				"group 6",
+				"pending"
+			],
+			"a skip is no gap"
+		);
+
+		// A group handed out and then cut is read as the failure it is, never reported twice.
+		let cut = producer.create_group(group::Info { start: 7 }).unwrap();
+		let Poll::Ready(Ok(Some(Item::Group(read)))) = ordered.poll_next_group(&kio::Waiter::noop()) else {
+			panic!("group 7 is ready")
+		};
+		assert_eq!(read.start, 7);
+		cut.abort(Error::Cancel).unwrap();
+		assert_eq!(items(&mut ordered), ["pending"]);
+	}
+
+	/// A gap waits behind a group the read still owes below it, and goes out once nothing is
+	/// owed, or the end comes: every gap is returned before the track ends.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_gap_waits_behind_what_is_owed_below_it() {
+		let producer = received_producer(None);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		producer.drop_groups(4..5, StreamError::DeliveryTimeout);
+		assert_eq!(
+			items(&mut ordered),
+			["group 0", "pending"],
+			"group 1 is owed below the gap"
+		);
+		put(&producer, 1, None);
+		assert_eq!(
+			items(&mut ordered),
+			["group 1", "group 2", "pending"],
+			"group 3 is owed below the gap"
+		);
+		put(&producer, 3, None);
+		assert_eq!(
+			items(&mut ordered),
+			["group 3", "gap 4..5 (delivery timeout)", "pending"]
+		);
+
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 0, None);
+		producer.drop_groups(1..2, StreamError::DeliveryTimeout);
+		let _producer = producer.finish().unwrap();
+		assert_eq!(
+			items(&mut ordered),
+			["group 0", "gap 1..2 (delivery timeout)"],
+			"the end is clean after every gap"
+		);
+	}
+
+	/// A gap returned is told once: a later drop of the same keys, even a final one that would
+	/// replace a stale report on the wire, is no second gap.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_gap_is_returned_once() {
+		let producer = received_producer(None);
+		let budget = Duration::from_millis(50);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		assert_eq!(items(&mut ordered), ["group 0", "pending"]);
+		// The budget gives up on the group still owed, as stale.
+		elapse(&producer, budget);
+		assert_eq!(items(&mut ordered), ["gap 1..2 (old)", "group 2", "pending"]);
+		producer.drop_groups(1..2, StreamError::DeliveryTimeout);
+		put(&producer, 3, None);
+		assert_eq!(items(&mut ordered), ["group 3", "pending"]);
+	}
+
+	/// A skip replaces a drop still waiting for the groups below it, so the keys it names are
+	/// no gap, and the part of a drop it leaves still is.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_skip_replaces_a_buffered_gap() {
+		let producer = received_producer(None);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		producer.drop_groups(4..8, StreamError::DeliveryTimeout);
+		assert_eq!(items(&mut ordered), ["group 0", "pending"]);
+		producer.skip_groups(5..7);
+		producer.drop_groups(1..2, StreamError::DeliveryTimeout);
+		assert_eq!(
+			items(&mut ordered),
+			["gap 1..2 (delivery timeout)", "group 2", "pending"]
+		);
+		put(&producer, 3, None);
+		assert_eq!(
+			items(&mut ordered),
+			[
+				"group 3",
+				"gap 4..5 (delivery timeout)",
+				"gap 7..8 (delivery timeout)",
+				"pending"
+			]
+		);
+	}
+
+	/// A group landing after the read passed its key is given up as old, since the read never
+	/// goes back; the group it was passed for is no gap.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_cached_group_the_seek_passes_as_stale_is_a_gap() {
+		let producer = received_producer(None);
+		put(&producer, 0, None);
+		put(&producer, 1, None);
+		elapse(&producer, Duration::from_millis(100));
+		put(&producer, 2, None);
+		let budget = Duration::from_millis(50);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(budget)))
+			.ordered();
+		assert_eq!(items(&mut ordered), ["gap 0..1 (old)", "group 1", "group 2", "pending"]);
+	}
+
+	/// A final drop replaces the part of a stale gap it covers while that gap still waits, so
+	/// the buffered gaps never overlap: the stale run keeps what lies either side of it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_buffered_gap_gives_way_to_what_replaces_it() {
+		let producer = received_producer(None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		ordered.gaps.insert(4, (8, StreamError::Old.into()));
+		ordered.forget_gaps(5..7);
+		ordered.gaps.insert(5, (7, StreamError::DeliveryTimeout.into()));
+		let held: Vec<_> = ordered.gaps.iter().map(|(start, (end, _))| (*start, *end)).collect();
+		assert_eq!(held, [(4, 5), (5, 7), (7, 8)]);
+		ordered.forget_gaps(0..100);
+		assert!(ordered.gaps.is_empty());
+	}
+
+	/// What a range excludes from a gap that is partly covered stays a gap, so a range that
+	/// widens again over it reports it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_gap_a_range_clips_keeps_what_the_range_excluded() {
+		let producer = received_producer(None);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.ordered();
+		put(&producer, 2, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
+		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
+		ordered.set_range(4..5);
+		assert_eq!(items(&mut ordered), ["gap 4..5 (delivery timeout)", "pending"]);
+		ordered.set_range(..);
+		assert_eq!(
+			items(&mut ordered),
+			["gap 3..4 (delivery timeout)", "gap 5..6 (delivery timeout)", "pending"]
+		);
+	}
+
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_late_arrival_is_a_gap() {
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 0, None);
+		put(&producer, 5, None);
+		assert_eq!(items(&mut ordered), ["group 0", "group 5", "pending"]);
+		put(&producer, 3, None);
+		assert_eq!(items(&mut ordered), ["gap 3..4 (old)", "pending"]);
+		put(&producer, 6, None);
+		assert_eq!(
+			items(&mut ordered),
+			["group 6", "pending"],
+			"reported once, nothing else"
+		);
+	}
+
+	/// A gap is clipped to what the reader asked for.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_gap_is_clipped_to_the_reader_range() {
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered().with_range(2..4);
+		producer.drop_groups(0..6, StreamError::DeliveryTimeout);
+		put(&producer, 5, None);
+		assert_eq!(items(&mut ordered), ["gap 2..4 (delivery timeout)", "pending"]);
+	}
+
+	/// A drop found while a higher gap waits goes out first, in key order, rather than staying
+	/// hidden behind it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_lower_drop_found_late_goes_before_a_buffered_gap() {
+		let producer = received_producer(None);
+		let mut ordered = producer
+			.subscribe(Subscription::default().with_delay(Delay::default().with_max(None)))
+			.ordered();
+		put(&producer, 0, None);
+		put(&producer, 2, None);
+		producer.drop_groups(4..5, StreamError::DeliveryTimeout);
+		assert_eq!(items(&mut ordered), ["group 0", "pending"]);
+		producer.drop_groups(1..2, StreamError::DeliveryTimeout);
+		assert_eq!(
+			items(&mut ordered),
+			["gap 1..2 (delivery timeout)", "group 2", "pending"]
+		);
+		put(&producer, 3, None);
+		assert_eq!(
+			items(&mut ordered),
+			["group 3", "gap 4..5 (delivery timeout)", "pending"]
+		);
+	}
+
+	/// A range narrowed after a gap went out ahead of a group read keeps that group back,
+	/// handing it out again once the range widens, and clips the gaps still waiting.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_range_moved_after_a_gap_applies_to_what_is_buffered() {
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 2, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
+		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
+		ordered.set_range(..2);
+		assert_eq!(
+			items(&mut ordered),
+			["pending"],
+			"capped below the held group, which waits for the range"
+		);
+		ordered.set_range(..4);
+		assert_eq!(
+			items(&mut ordered),
+			["group 2", "gap 3..4 (delivery timeout)", "pending"],
+			"the held group returns, and the gap above is clipped to the range"
+		);
+
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 2, None);
+		put(&producer, 3, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
+		ordered.set_range(3..);
+		assert_eq!(
+			items(&mut ordered),
+			["group 3", "pending"],
+			"a floor raised over the held group passes it"
+		);
+	}
+
+	/// A gap a moved range only partly covers returns that part, and the rest stays for the
+	/// range to widen over.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_moved_range_returns_a_buffered_gap_by_the_part_it_covers() {
+		let producer = track_producer("test", None);
+		let mut ordered = producer.subscribe(replay()).ordered();
+		put(&producer, 2, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		producer.drop_groups(3..6, StreamError::DeliveryTimeout);
+		let first = ordered.next_group().now_or_never().expect("ready").unwrap().unwrap();
+		assert!(matches!(first, Item::Gap { range, .. } if range == (0..2)));
+		ordered.set_range(..4);
+		assert_eq!(
+			items(&mut ordered),
+			["group 2", "gap 3..4 (delivery timeout)", "pending"],
+			"capped inside the gap"
+		);
+		ordered.set_range(..);
+		assert_eq!(
+			items(&mut ordered),
+			["gap 4..6 (delivery timeout)", "pending"],
+			"widening returns the rest"
+		);
+	}
+
 	/// The wait follows the reader's budget: a zero budget waits for nothing, a budget
 	/// narrowed mid-wait ends it, and an unbounded one waits until the hole resolves.
 	#[test]
@@ -19014,7 +19685,9 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed");
+			.expect("track should not be closed")
+			.group()
+			.expect("a group");
 		assert_eq!(group.start, 5);
 
 		// Seq 3 arrives late, skipped because 3 <= 5.
@@ -19029,26 +19702,14 @@ mod test {
 			.unwrap()
 			.finish()
 			.unwrap();
-		// Seq 7 arrives and is returned.
+		// Seq 7 arrives and is returned, after the groups it passed are reported.
 		producer
 			.create_group(group::Info { start: 7 })
 			.unwrap()
 			.finish()
 			.unwrap();
 
-		let group = consumer
-			.next_group()
-			.now_or_never()
-			.expect("should not block")
-			.expect("would have errored")
-			.expect("track should not be closed");
-		assert_eq!(group.start, 7);
-
-		// No more groups. This would block.
-		assert!(
-			consumer.next_group().now_or_never().is_none(),
-			"should block waiting for a higher key"
-		);
+		assert_eq!(items(&mut consumer), ["gap 3..5 (old)", "group 7", "pending"]);
 	}
 
 	#[test]
@@ -19074,7 +19735,9 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed");
+			.expect("track should not be closed")
+			.group()
+			.expect("a group");
 		assert_eq!(group.start, 3);
 
 		let group = consumer
@@ -19082,7 +19745,9 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed");
+			.expect("track should not be closed")
+			.group()
+			.expect("a group");
 		assert_eq!(group.start, 5);
 	}
 
@@ -19279,7 +19944,9 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.expect("would have errored")
-			.expect("track should not be closed");
+			.expect("track should not be closed")
+			.group()
+			.expect("a group");
 		assert_eq!(group.start, 3);
 
 		// The plain handle walks arrivals, so it still starts at seq 5.
@@ -19303,9 +19970,42 @@ mod test {
 		consumer.set_range(..3);
 
 		// Groups 0, 1, 2 are within the cap.
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 1);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			0
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			1
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			2
+		);
 
 		// Group 3 is beyond the cap: next_group parks even though cached groups exist.
 		assert!(
@@ -19329,20 +20029,86 @@ mod test {
 		}
 
 		consumer.set_range(..2);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 1);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			0
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			1
+		);
 		assert!(consumer.next_group().now_or_never().is_none(), "capped at 2");
 
 		// Raise the cap; previously-blocked cached groups become available again.
 		consumer.set_range(..5);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 3);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 4);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			2
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			3
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			4
+		);
 		assert!(consumer.next_group().now_or_never().is_none(), "capped at 5");
 
 		// Remove the cap; everything remaining flows.
 		consumer.set_range(..);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 5);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			5
+		);
 		assert!(consumer.next_group().now_or_never().is_none(), "no more groups");
 	}
 
@@ -19361,9 +20127,42 @@ mod test {
 		}
 
 		// Drain everything with no cap.
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 1);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			0
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			1
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			2
+		);
 
 		// Lower the cap below the cursor. New groups beyond the cap are blocked.
 		consumer.set_range(..2);
@@ -19384,8 +20183,30 @@ mod test {
 
 		// Restoring the cap to no-limit (or any value >= cursor) releases them.
 		consumer.set_range(..);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 3);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 4);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			3
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			4
+		);
 	}
 
 	#[test]
@@ -19425,16 +20246,71 @@ mod test {
 			.unwrap();
 
 		// next_group walks in key order through everything <= cap.
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 2);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 3);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 4);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 5);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			2
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			3
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			4
+		);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			5
+		);
 		// Now blocked: 8 is still beyond the cap.
 		assert!(consumer.next_group().now_or_never().is_none());
 
 		// Raise the cap; cached seq 8 is finally served.
 		consumer.set_range(..11);
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 8);
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			8
+		);
 	}
 
 	/// `recv_group` (arrival order) honors the `end_at` cap like `next_group`: a group
@@ -19692,8 +20568,26 @@ mod test {
 			group.finish().unwrap();
 		}
 
-		assert_eq!(consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start, 0);
-		let mut last = consumer.next_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
+			0
+		);
+		let mut last = consumer
+			.next_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap()
+			.group()
+			.unwrap();
 		assert_eq!(last.start, 1);
 		last = last.with_range(..end.frame);
 		assert_eq!(
@@ -19734,7 +20628,15 @@ mod test {
 			.unwrap();
 		assert!(matches!(producer.append_next(), Err(Error::BoundsExceeded(_))));
 		assert_eq!(
-			consumer.next_group().now_or_never().unwrap().unwrap().unwrap().start,
+			consumer
+				.next_group()
+				.now_or_never()
+				.unwrap()
+				.unwrap()
+				.unwrap()
+				.group()
+				.unwrap()
+				.start,
 			u64::MAX - 1
 		);
 		// The track's end lands on the reserved key.
@@ -20374,7 +21276,14 @@ mod test {
 		assert_eq!(cut.start, 0);
 		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
 		arrival.assert_no_group();
-		let cut = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
+		let cut = ordered
+			.next_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap()
+			.group()
+			.unwrap();
 		assert_eq!(cut.start, 0);
 		assert!(matches!(cut.with_range(200..).read_frame().await, Err(Error::App(5))));
 		assert!(
@@ -20829,8 +21738,11 @@ mod test {
 		let mut sub = producer.subscribe(replay().with_range(0..2)).ordered();
 		let reading = kio::clock::sim::spawn(async move {
 			let mut read = Vec::new();
-			while let Some(group) = sub.next_group().await.unwrap() {
-				read.push(group.start);
+			while let Some(item) = sub.next_group().await.unwrap() {
+				read.push(match item {
+					Item::Group(group) => format!("group {}", group.start),
+					Item::Gap { range, .. } => format!("gap {range:?}"),
+				});
 			}
 			read
 		});
@@ -20839,7 +21751,7 @@ mod test {
 			.expect("the head is asked")
 			.unwrap();
 		request.reject(Error::NotFound);
-		assert_eq!(reading.await.unwrap(), [1]);
+		assert_eq!(reading.await.unwrap(), ["gap 0..1", "group 1"]);
 	}
 
 	/// A refused mid-group end caps none of its group's copies, even one that fit under it.
@@ -24068,8 +24980,8 @@ mod test {
 		while let Poll::Ready(Some(key)) = fill.poll_wanted_changed(&waiter) {
 			write_filled(fill.accept(key, None), key);
 			served.push(key);
-			while let Poll::Ready(Ok(Some(group))) = ordered.poll_next_group(&waiter) {
-				read.push(group.start);
+			while let Poll::Ready(Ok(Some(item))) = ordered.poll_next_group(&waiter) {
+				read.push(item.group().expect("a group").start);
 			}
 		}
 		assert_eq!(served, [3, 2, 1, 0]);
@@ -26703,7 +27615,14 @@ mod test {
 		assert_eq!(arrival.assert_group().start, 1);
 		assert!(matches!(arrival.recv_group().now_or_never(), Some(Ok(None))));
 
-		let mut first = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
+		let mut first = ordered
+			.next_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap()
+			.group()
+			.unwrap();
 		assert_eq!(first.start, 0);
 		assert!(matches!(first.read_frame().now_or_never(), Some(Err(Error::App(5)))));
 		assert_eq!(drain_ordered(&mut ordered), [1]);
@@ -26807,7 +27726,14 @@ mod test {
 
 		assert_eq!(drain_ordered(&mut ordered), [0]);
 		ordered = ordered.with_range(..);
-		let mut reoffered = ordered.next_group().now_or_never().unwrap().unwrap().unwrap();
+		let mut reoffered = ordered
+			.next_group()
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap()
+			.group()
+			.unwrap();
 		assert_eq!(reoffered.start, 1);
 		assert!(matches!(
 			reoffered.read_frame().now_or_never(),

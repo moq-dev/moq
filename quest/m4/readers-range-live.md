@@ -3,8 +3,7 @@
 ## Goal
 
 The readers that wait for the largest group and raise their floor to
-start near it (moq-video and `@moq/room` chat; moq-audio already subscribes
-with `Range::live()`)
+start near it (moq-audio, moq-video, and `@moq/room` chat)
 subscribe with a relative range instead, with no change in what they play:
 `Range::live()` for a start at the newest group, and a relative start for a
 reader that looks back, such as moq-video's warmup lane, which keeps its

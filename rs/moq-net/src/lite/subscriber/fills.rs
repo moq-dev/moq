@@ -861,7 +861,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 		for key in 0..3 {
-			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
+			let Poll::Ready(Ok(Some(track::Item::Group(group)))) = reader.poll_next_group(&waiter) else {
 				panic!("group {key} was delivered");
 			};
 			assert_eq!(group.start, key);

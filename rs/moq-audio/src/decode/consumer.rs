@@ -225,20 +225,22 @@ impl Consumer {
 		// The whole delay from the start, as the container keeps it: the transport enforces the
 		// max too, so a narrower one while joining would drop the groups queued behind a reader
 		// slow to take its first, and the publisher should never see a stated zero min first.
-		let mut subscription =
-			playout.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio));
+		let mut subscriber = track
+			.subscribe(
+				playout
+					.subscription(moq_net::track::Subscription::default().with_priority(hang::catalog::PRIORITY.audio)),
+			)
+			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
-		// start, like any other join. A live start counts from the latest group each hop
-		// holds from its live feed, so it names no cached group that would ask the publisher
-		// to rewind for everyone reading.
-		if options.start == Start::Latest {
-			subscription = subscription.with_ranges([moq_net::track::Range::live()]);
-		}
-		let mut subscriber = track.subscribe(subscription).await?;
-		// The live edge is known only once the feed is live, so wait for it rather than read
-		// the backlog of a warm copy still waiting on its source; the wait ends with the track.
-		if options.start == Start::Latest {
-			subscriber.largest().await;
+		// start, like any other join. Move the local cursor, not Subscription::ranges: the
+		// latter is aggregated across subscribers and can ask the publisher to rewind for
+		// everyone. The live edge is known only once the feed is live, so wait for it rather
+		// than read the backlog of a warm copy still waiting on its source; the wait ends
+		// with the track.
+		if options.start == Start::Latest
+			&& let Some(live_edge) = subscriber.largest().await
+		{
+			subscriber = subscriber.with_range(live_edge.group..);
 		}
 		let track = subscriber;
 		let max_age = track.info().max_age;
