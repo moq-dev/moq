@@ -120,13 +120,7 @@ fn replay(gap: i64, by: impl Fn(Clock) -> i64) -> (Vec<u8>, usize) {
 /// fails. A restart comes with the input the importer did not take: its remainder followed by
 /// the pieces never fed.
 fn feed(data: &[u8], chunk: usize) -> Result<Option<(Restart, Vec<u8>)>, super::Error> {
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(
-		&mut broadcast,
-		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
-	)
-	.unwrap();
-	let mut import = Import::new(broadcast, catalog.reserve());
+	let (_catalog, mut import) = open();
 	for (index, piece) in data.chunks(chunk).enumerate() {
 		if let Some(restart) = import.decode_or_restart(piece)? {
 			let mut rest = restart.remainder.to_vec();
@@ -138,6 +132,75 @@ fn feed(data: &[u8], chunk: usize) -> Result<Option<(Restart, Vec<u8>)>, super::
 	}
 	let _finished = import.finish()?;
 	Ok(None)
+}
+
+/// An importer onto a fresh broadcast, with the catalog it must outlive.
+fn open() -> (crate::catalog::Producer<Ext>, Import<Ext>) {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
+	)
+	.unwrap();
+	let import = Import::new(broadcast, catalog.reserve());
+	(catalog, import)
+}
+
+/// Edit the one PSI section `pkt` starts behind its pointer_field, then mend its CRC.
+fn mend(pkt: &mut [u8; 188], edit: impl FnOnce(&mut [u8])) {
+	assert_eq!(pkt[1] & 0x40, 0x40, "a section starts here");
+	let payload = if pkt[3] & 0x20 != 0 { 5 + usize::from(pkt[4]) } else { 4 };
+	let section = payload + 1 + usize::from(pkt[payload]);
+	let len = 3 + (usize::from(pkt[section + 1] & 0x0f) << 8 | usize::from(pkt[section + 2]));
+	edit(&mut pkt[section..section + len - 4]);
+	let crc = super::psi::CRC.checksum(&pkt[section..section + len - 4]);
+	pkt[section + len - 4..section + len].copy_from_slice(&crc.to_be_bytes());
+}
+
+/// The clip with its PAT naming `transport_stream_id` 7.
+fn retagged(ts: &[u8]) -> Vec<u8> {
+	let mut out = ts.to_vec();
+	for pkt in out.as_chunks_mut::<188>().0.iter_mut().filter(|pkt| pid(&pkt[..]) == 0) {
+		mend(pkt, |section| section[3..5].copy_from_slice(&7u16.to_be_bytes()));
+	}
+	out
+}
+
+/// The clip, then a `discontinuity_indicator` on its clock PID, then the clip again as another
+/// source: its PAT names `transport_stream_id` 7 and its streams and clock sit on other PIDs.
+/// The old PIDs never speak again, so the flagged break stays judged until the input ends.
+pub(super) fn flagged_switch() -> Vec<u8> {
+	const PCR_PID: u16 = 0x100;
+	const PMT_PID: u16 = 0x1000;
+	let moved = |pid: u16| if matches!(pid, 0x100 | 0x101) { pid + 0x100 } else { pid };
+	let mut second = retagged(CLIP);
+	for pkt in second.as_chunks_mut::<188>().0 {
+		let pid = moved(pid(&pkt[..]));
+		pkt[1] = (pkt[1] & 0xe0) | (pid >> 8) as u8;
+		pkt[2] = pid as u8;
+		if pid == PMT_PID && pkt[1] & 0x40 != 0 {
+			mend(pkt, |section| {
+				let write = |section: &mut [u8], at: usize| {
+					let pid = moved(u16::from_be_bytes([section[at], section[at + 1]]) & 0x1fff);
+					section[at] = (section[at] & 0xe0) | (pid >> 8) as u8;
+					section[at + 1] = pid as u8;
+				};
+				write(section, 8);
+				let mut at = 12 + (usize::from(section[10] & 0x0f) << 8 | usize::from(section[11]));
+				while at < section.len() {
+					write(section, at + 1);
+					at += 5 + (usize::from(section[at + 3] & 0x0f) << 8 | usize::from(section[at + 4]));
+				}
+			});
+		}
+	}
+	let mut data = CLIP.to_vec();
+	// An adaptation field alone, flagging the break.
+	let mut flagged = [0xff; 188];
+	flagged[..6].copy_from_slice(&[0x47, (PCR_PID >> 8) as u8, PCR_PID as u8, 0x20, 183, 0x80]);
+	data.extend_from_slice(&flagged);
+	data.extend_from_slice(&second);
+	data
 }
 
 /// The input from the first packet of `pass` that carries a timestamp.
@@ -183,13 +246,7 @@ fn an_unflagged_switch_restarts_either_way() {
 #[test]
 fn a_switch_fails_a_raw_import() {
 	let (data, _) = replay(SWITCH, |_| 0);
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(
-		&mut broadcast,
-		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<Ext>::default()),
-	)
-	.unwrap();
-	let mut import = Import::new(broadcast, catalog.reserve());
+	let (_catalog, mut import) = open();
 	let err = import.decode(&data).unwrap_err();
 	assert!(matches!(err, super::Error::Restarted(Step::Leap { .. })), "{err:?}");
 	let again = import.decode(&[]).unwrap_err();
@@ -197,24 +254,29 @@ fn a_switch_fails_a_raw_import() {
 	let _finished = import.finish().unwrap();
 }
 
+/// A switch the input ends while judging is found by `finish`, which fails as `decode` would
+/// have rather than drop the broadcast after the step.
+#[test]
+fn a_switch_found_at_the_end_fails_a_raw_finish() {
+	let (_catalog, mut import) = open();
+	import.decode(&flagged_switch()).unwrap();
+	let err = import.finish().err().expect("the switch fails the finish");
+	let identity = Step::Identity {
+		transport_stream_id: 7,
+		program_number: 1,
+	};
+	assert!(
+		matches!(&err, super::Error::Restarted(step) if *step == identity),
+		"{err:?}"
+	);
+}
+
 /// A source switch whose PAT names another `transport_stream_id` before its first clock
 /// reading restarts at that PAT, where the old program's identity check would otherwise fail
 /// the whole import. The new instance reads the PAT itself, however the input is split.
 #[test]
 fn another_identity_restarts_at_its_pat() {
-	let mut second = shift(CLIP, |_| -SWITCH);
-	for pkt in second.as_chunks_mut::<188>().0 {
-		if pid(pkt) != 0 {
-			continue;
-		}
-		// A single-section PAT behind a zero pointer_field: retag its transport_stream_id.
-		assert_eq!(pkt[1] & 0x40, 0x40);
-		let section = 5 + usize::from(pkt[4]);
-		let len = 3 + (usize::from(pkt[section + 1] & 0x0f) << 8 | usize::from(pkt[section + 2]));
-		pkt[section + 3..section + 5].copy_from_slice(&7u16.to_be_bytes());
-		let crc = super::psi::CRC.checksum(&pkt[section..section + len - 4]);
-		pkt[section + len - 4..section + len].copy_from_slice(&crc.to_be_bytes());
-	}
+	let second = retagged(&shift(CLIP, |_| -SWITCH));
 	let pat = second
 		.as_chunks::<188>()
 		.0

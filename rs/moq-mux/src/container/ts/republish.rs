@@ -205,15 +205,30 @@ impl Republish {
 			self.instance.announce_if_listed()?;
 			return Ok(None);
 		};
+		self.republish(restart).map(Some)
+	}
+
+	/// No input follows: read what the current instance held while judging a step, and
+	/// republish at a step it reaches.
+	fn settle(&mut self) -> Result<Option<Republished>> {
+		match self.instance.import.settle()? {
+			Some(restart) => self.republish(restart).map(Some),
+			None => Ok(None),
+		}
+	}
+
+	/// Finish the current instance before `restart`'s step and open the next, holding the input
+	/// from the step on for it.
+	fn republish(&mut self, restart: super::Restart) -> Result<Republished> {
 		let mux_rate = self.instance.catalog.snapshot().ext.mpegts.mux_rate;
 		let next = self.target.open(moq_net::origin::RouteOptions::hidden(), mux_rate)?;
 		self.held = restart.remainder;
 		// The finished instance ends as it drops, withdrawing its announcement.
 		let finished = std::mem::replace(&mut self.instance, next).finish(false)?;
-		Ok(Some(Republished {
+		Ok(Republished {
 			step: restart.step,
 			stats: finished.stats(),
-		}))
+		})
 	}
 
 	/// What every elementary stream of the current instance has delivered; see [`Import::stats`].
@@ -224,12 +239,17 @@ impl Republish {
 	/// Finish the current instance's media tracks, then its catalog while it still lists them,
 	/// and return the [`Finished`] broadcast.
 	///
-	/// Input still held after a [`Republished`] is read first, republishing again at any step in
-	/// it. Fails when the input ended before the instance declared a track, so nothing was
-	/// announced. A finish that fails aborts every track with the cause.
+	/// Input still held after a [`Republished`], or while a step was judged, is read first,
+	/// republishing again at any step in it. Fails when the input ended before the instance
+	/// declared a track, so nothing was announced. A finish that fails aborts every track with
+	/// the cause.
 	pub fn finish(mut self) -> Result<Finished> {
 		loop {
-			match self.decode(&[]) {
+			let next = match self.decode(&[]) {
+				Ok(None) => self.settle(),
+				next => next,
+			};
+			match next {
 				Ok(Some(republished)) => {
 					tracing::warn!(step = %republished.step, "the source changed at end of input; republishing")
 				}
@@ -294,7 +314,7 @@ impl Finished {
 
 #[cfg(test)]
 mod tests {
-	use super::super::step_test::{SWITCH, shift};
+	use super::super::step_test::{SWITCH, flagged_switch, shift};
 	use super::*;
 
 	/// 5 s of H.264 and AAC at a constant 400 kb/s, so the first instance measures a rate.
@@ -391,6 +411,29 @@ mod tests {
 		assert!(republish.decode(&[]).unwrap().is_none());
 		let finished = republish.finish().unwrap();
 		assert!(delivered(&finished.stats()));
+	}
+
+	/// A switch the input ends while judging is found by `finish`, which republishes the
+	/// broadcast after it rather than drop it.
+	#[test]
+	fn a_switch_found_at_the_end_republishes() {
+		let origin = crate::source::produce_origin();
+		let mut republish = Republish::new(
+			origin,
+			moq_net::Path::from_static("demo"),
+			moq_net::Instance::random(),
+			catalog::Config::default(),
+		)
+		.unwrap();
+		let first = republish.instance();
+		let decoded = republish.decode(&flagged_switch()).unwrap();
+		assert!(decoded.is_none(), "the switch is still judged: {decoded:?}");
+		let finished = republish.finish().unwrap();
+		assert_ne!(finished.route.instance(), first, "the finish republished");
+		assert!(
+			delivered(&finished.stats()),
+			"the next instance read the input after the step"
+		);
 	}
 
 	/// Held input that fails to decode at the finish aborts the instance reading it, so its

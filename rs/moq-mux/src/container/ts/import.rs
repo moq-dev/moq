@@ -425,6 +425,15 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 	}
 
+	/// No input follows: read what a step still being judged held, returning a restart it
+	/// reaches, as [`decode_or_restart`](Self::decode_or_restart) does.
+	pub(super) fn settle(&mut self) -> Result<Option<super::Restart>> {
+		match self.steps.settle() {
+			true => self.decode_or_restart(&[]),
+			false => Ok(None),
+		}
+	}
+
 	/// [`decode`](Self::decode), returning a restart as a value with the input from the step on,
 	/// for [`Republish`](super::Republish) to read into a new instance.
 	pub(super) fn decode_or_restart(&mut self, data: &[u8]) -> Result<Option<super::Restart>> {
@@ -1853,7 +1862,11 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush any buffered PES, finish every track, and return the [`Finished`] import.
 	///
-	/// A finish that fails aborts every track with the cause, so it can't be retried.
+	/// Input held while a step was judged is read first, failing with
+	/// [`Restarted`](Error::Restarted) if it reaches one, since this import would drop the
+	/// broadcast after it. A step [`decode`](Self::decode) already reported ends the instance
+	/// there instead. A finish that fails aborts every track with the cause, so it can't be
+	/// retried.
 	pub fn finish(mut self) -> Result<Finished<E>> {
 		self.finish_in_place()?;
 		Ok(Finished { import: self })
@@ -1880,10 +1893,11 @@ impl<E: catalog::Catalog> Import<E> {
 
 	/// Flush the input and finish every track, stopping at the first failure.
 	fn end(&mut self) -> Result<()> {
-		// A step still being judged never completed: what it held routes as read. The instance
-		// ends before any step that routing reaches, so what follows that step is not this one's.
-		if self.steps.settle() {
-			let _restart = self.decode_or_restart(&[])?;
+		// A step still being judged never completed: what it held routes as read. A step that
+		// routing reaches fails the finish rather than drop the broadcast after it; `Republish`
+		// settles first, so it republishes that broadcast instead.
+		if let Some(restart) = self.settle()? {
+			return Err(Error::Restarted(restart.step));
 		}
 		self.demux.finish();
 		for pid in self.headers.keys().copied().collect::<Vec<_>>() {
