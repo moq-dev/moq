@@ -20,9 +20,12 @@ Rewritten 2026-11-15 (maintainer, /quest-plan on
 to build, item 14 of the [epic](/quest/m3/cache-routing/README.md)'s earlier
 Plan, is replaced.
 
-Recommended 2026-11-16 on
-[moq-dev/moq#8903](https://github.com/moq-dev/moq/pull/8903), awaiting the
-maintainer's confirmation at merge: **a settled pull stays.** A relay chooses
+Decided 2026-11-16 (maintainer, merge pick of
+[moq-dev/moq#8903](https://github.com/moq-dev/moq/pull/8903), which
+recommended it): **a settled pull stays**, unless
+[the spike](/quest/m3/cache-routing/settle.md) the maintainer asked for with
+that pick finds a rule that moves a pull for price and still settles; this
+Plan is then rewritten for that rule. A relay chooses
 where to pull when its demand starts, from its route and the warm copies it
 has heard of by then. After that it chooses again only on an outside event:
 its parent loses its upstream, its pull runs through itself, its session
@@ -256,7 +259,7 @@ copy on a stale advert, give that relay demand and so a join of its own, or
 end another relay's pull, so "once per pull" does not bound the number of
 pulls after the last outside event (an automated review on #8903). The sweep
 agrees with settling, though it is no proof: 6,000 churned meshes, 2,000 per
-kind, all settled. The port's model gate below closes it, and if the model
+kind, all settled. [The spike](/quest/m3/cache-routing/settle.md)'s model closes it, and if the model
 cannot rule out repeated warm retries within one epoch, a relay whose warm
 choice is lost or fails closed takes its route until its route or its own
 demand next changes; no timer.
@@ -286,15 +289,12 @@ that loses the one uplink leaves every drone it fed choosing again at once:
   itself, so a rule that never offered a copy passed. Port the warmth shapes
   and the churn sweep onto production relays: pops, drones in turn and at
   once, the lost uplink, the ring, the tiers, and random churned mesh 503.
-- Model-check settling with TLA+, as the route layer's handoff is: a few
-  relays, readers starting and stopping, links failing, stale adverts, and
-  two relays pending on each other with no further route event. Check both
-  that the pull graph stops changing once the outside events stop and the
-  updates drain, and that every reader whose relay has a route is then fed.
-  If the model finds warm retries that repeat within one route and demand
-  epoch, bound them: a relay whose warm choice is lost or fails closed takes
-  its route until its route or its own demand next changes. The query is
-  enabled only once the model holds with it.
+- Port the rule [the spike](/quest/m3/cache-routing/settle.md) model-checked
+  with TLA+, and keep that model in step with the port. If its model found
+  warm retries that repeat within one route and demand epoch, the rule it
+  hands over already bounds them: a relay whose warm choice is lost or fails
+  closed takes its route until its route or its own demand next changes.
+  The query is enabled only once the model holds with it.
 - Bound the warm state a peer can make a relay hold: one advert per
   neighbour per Instance the relay has a route for, a path no longer than the
   route layer's hop limit, and adverts for anything else dropped. Adverts are
@@ -358,6 +358,7 @@ none. Nothing lite-07 freezes changes.
 ## Required
 
 - [The switch](/quest/m2/multicast/switch.md) - the route layer it ranks on
+- [The spike](/quest/m3/cache-routing/settle.md) - the rule to port, model-checked to settle
 
 ## Related
 
