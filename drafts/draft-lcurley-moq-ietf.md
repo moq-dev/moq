@@ -143,8 +143,6 @@ Other properties are opaque to this extension.
 ## Timestamps {#timestamps}
 A relay MUST preserve a relayed track's Timescale and timestamps across a negotiated hop.
 A nonzero Version identifies a track from MoQ Transport, whose objects take their time from their Group ID, in the track's Timescale.
-The receiver MUST NOT apply moq-lite's group-start rewind check to such a track; a Version of zero retains that check.
-Without this extension, or in a listing ({{track}}), the receiver may check them like native moq-lite timestamps and refuse a Group that rewinds.
 
 The FRAME's Timestamp is the object's time.
 A Timestamp property (0x10) a {{moqt}} publisher attached, mutable or sealed, is opaque like any other: it stays in the Property Block, and a relay neither reads nor restates it.

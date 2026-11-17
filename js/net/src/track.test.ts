@@ -1037,17 +1037,13 @@ test("a drop a time end settles over is reported", () => {
 	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 1n, end: 2n, error: DROPPED });
 });
 
-test("an untimed track or a moq-transport copy refuses a time anchor", () => {
+test("an untimed track refuses a time anchor", () => {
 	const ranges = [{ start: { time: Timestamp.fromMillis(0) } }];
 	const untimed = new TrackProducer("test");
 	untimed.accept({});
 	const reader = untimed.subscribe({ ranges });
 	untimed.createGroup(0n).finish();
 	expect(() => reader.tryRecvGroup()).toThrow(TimestampMismatch);
-
-	const copy = new TrackProducer("test");
-	copy.accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_18 });
-	expect(() => copy.subscribe({ ranges }).tryRecvGroup()).toThrow("moq-transport");
 });
 
 test("only unstated minimums aggregate to an unstated one", () => {
@@ -4289,11 +4285,12 @@ test("an endless track with gaps remembers only those within the budget", () => 
 	}
 });
 
-for (const [name, extra] of [
-	["unchecked", { unchecked: true }],
-	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }],
+for (const [name, extra, checked] of [
+	["unchecked", { unchecked: true }, false],
+	// A moq-transport frame's time is its Group ID, so it cannot rewind and is checked.
+	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }, true],
 ] as const) {
-	test(`${name} survives normalization and skips the rewind check`, () => {
+	test(`${name} survives normalization and ${checked ? "keeps" : "skips"} the rewind check`, () => {
 		for (const timescale of [null, Timescale.MILLI]) {
 			const info = authoredInfo({ ...extra, timescale });
 			expect(info).toMatchObject(extra);
@@ -4302,8 +4299,12 @@ for (const [name, extra] of [
 		const producer = new TrackProducer("rewind").accept({ timescale: Timescale.MILLI, ...extra });
 		try {
 			stampGroup(producer, 0n, 1000);
-			stampGroup(producer, 1n, 500);
-			producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+			if (checked) {
+				expect(() => stampGroup(producer, 1n, 500)).toThrow(TimestampMismatch);
+			} else {
+				stampGroup(producer, 1n, 500);
+				producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+			}
 		} finally {
 			producer.finish();
 			producer.close();

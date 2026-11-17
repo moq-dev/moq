@@ -181,7 +181,6 @@ pub struct Info {
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
 	/// Whether this copy's groups skip the rewind check: set on a lite-05/06 copy, whose
 	/// untimed origin stamps send times, so an older group fetched later looks like a rewind.
-	/// A track with moq-transport provenance ([`Self::ietf`]) skips it too.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) unchecked: bool,
 }
@@ -305,8 +304,7 @@ impl Info {
 		}
 	}
 
-	/// The original moq-transport publisher's draft, whose timestamps may rewind, or
-	/// `None` for a native moq-lite track.
+	/// The original moq-transport publisher's draft, or `None` for a native moq-lite track.
 	pub(crate) fn ietf(&self) -> Option<crate::ietf::Version> {
 		self.properties.as_ref().map(|properties| properties.version)
 	}
@@ -1227,11 +1225,7 @@ impl TrackState {
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
 	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, key: u64) -> Option<Neighbors> {
-		if self
-			.info
-			.as_ref()
-			.is_some_and(|info| info.unchecked || info.ietf().is_some())
-		{
+		if self.info.as_ref().is_some_and(|info| info.unchecked) {
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);

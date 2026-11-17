@@ -176,11 +176,11 @@ export interface Info {
 	 * one is pending. `0` asks on any join after a delta. An integer in `0..2^32`.
 	 */
 	refresh: number | null;
-	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
+	/** The original moq-transport publisher's draft. @internal */
 	ietf?: IetfVersion;
 	/**
 	 * Whether this copy's groups skip the rewind check, since its timestamps may be lite-05/06 send
-	 * times. An {@link Info.ietf} track skips it too. Mirrors the Rust `track::Info::unchecked`.
+	 * times. Mirrors the Rust `track::Info::unchecked`.
 	 * @internal
 	 */
 	unchecked?: boolean;
@@ -2193,10 +2193,9 @@ export class Producer {
 		return group;
 	}
 
-	// Whether this track's timestamps may rewind (see {@link Info.unchecked} and {@link Info.ietf}).
+	// Whether this track's timestamps may rewind (see {@link Info.unchecked}).
 	#unchecked(): boolean {
-		const info = this.#state.info.peek();
-		return info?.unchecked === true || info?.ietf !== undefined;
+		return this.#state.info.peek()?.unchecked === true;
 	}
 
 	/**
@@ -3238,10 +3237,6 @@ export class Subscriber {
 		}
 		const info = this.#state.info.peek();
 		if (info && info.timescale == null && hasTime(ranges)) return new TimestampMismatch();
-		// Its timestamps may rewind, so its group starts are never checked or indexed.
-		if (info?.ietf !== undefined && hasTime(ranges)) {
-			return new Error("a time anchor needs timestamps that never rewind, which moq-transport does not promise");
-		}
 		if (this.#resume || this.#window.settled) return undefined;
 		// The live feed had no group when the ranges resolved, so the newest one then was the first.
 		const latest = this.#window.pending ? this.#state.first : this.#latestGroup();
