@@ -18456,6 +18456,7 @@ rec {
           {
             name = "hang";
             packageId = "hang";
+            features = [ "async" ];
           }
           {
             name = "kio";
