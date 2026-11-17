@@ -43,7 +43,6 @@ mod session_revalidate;
 mod shutdown_signal;
 mod smoke;
 #[cfg(feature = "test-support")]
-mod socket_auth;
 mod stack;
 mod tenant_matrix;
 mod upstream_links;

@@ -267,15 +267,6 @@ impl Version {
 		self.has_ranges()
 	}
 
-	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in, one for each prefix it adds.
-	/// Added in lite-07; older requests decode as not opted in.
-	pub(crate) fn has_hidden(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether ANNOUNCE_START may copy a path head from a live
 	/// announcement on the same stream. Added in lite-07.
 	pub(crate) fn has_announce_compression(self) -> bool {

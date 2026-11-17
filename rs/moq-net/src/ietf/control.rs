@@ -59,7 +59,7 @@ impl Control {
 		// No peer reaches 2^62 requests, and refusing the IDs past it keeps `peer_next` from
 		// overflowing on a varint that can carry a full 64 bits.
 		if id.0 >= 1 << 62 || id.0 % 2 != state.peer_next % 2 {
-			return Err(SessionError::InvalidRequestId.into());
+			return Err(crate::ietf::error::session::INVALID_REQUEST_ID.into());
 		}
 		if id.0 < state.peer_next {
 			return Ok(());
@@ -119,7 +119,7 @@ mod tests {
 				assert!(
 					matches!(
 						control.accept(RequestId(id)),
-						Err(Error::Session(SessionError::InvalidRequestId))
+						Err(Error::Session(crate::ietf::error::session::INVALID_REQUEST_ID))
 					),
 					"accepted wrong-parity ID {id}"
 				);
@@ -136,7 +136,7 @@ mod tests {
 		for id in [1 << 62, u64::MAX - 1] {
 			assert!(matches!(
 				control.accept(RequestId(id)),
-				Err(Error::Session(SessionError::InvalidRequestId))
+				Err(Error::Session(crate::ietf::error::session::INVALID_REQUEST_ID))
 			));
 		}
 		assert!(matches!(control.goaway(), Err(Error::Session(SessionError::Internal))));

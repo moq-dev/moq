@@ -1,7 +1,6 @@
 /*
  * A port of SILK's voice activity detector (silk/VAD.c, silk/ana_filt_bank_1.c, silk/sigm_Q15.c,
- * silk/lin2log.c) and the integer-ratio path of its downsampler (silk/resampler_private_down_FIR.c,
- * silk/resampler_private_AR2.c, silk/resampler_rom.c) from libopus 1.6.1.
+ * silk/lin2log.c) from libopus 1.6.1.
  *
  * Copyright (c) 2006-2011, Skype Limited. All rights reserved.
  * Redistribution and use in source and binary forms, with or without modification, are permitted
@@ -25,7 +24,6 @@
  */
 
 import type { AudioFrame } from "./capture";
-import { Resampler } from "./resampler";
 
 // The fixed-point arithmetic is SILK's, bit for bit, so the decisions match libopus's on the same
 // samples. Each helper is the silk macro of the same name on int32 values.
@@ -121,78 +119,10 @@ const SNR_FACTOR_Q16 = 45000;
 // SILK_FIX_CONST(SPEECH_ACTIVITY_DTX_THRES, 8): below this, libopus marks a frame inactive.
 const ACTIVITY_THRESHOLD_Q8 = 13;
 
-// silk_Resampler_1_2_COEFS and silk_Resampler_1_3_COEFS: two AR2 coefficients, then half of a
-// symmetric FIR.
-const DECIMATE: Record<number, Int16Array> = {
-	2: Int16Array.of(616, -14323, -10, 39, 58, -46, -84, 120, 184, -315, -541, 1284, 5380, 9024),
-	3: Int16Array.of(16102, -15162, -13, 0, 20, 26, 5, -31, -43, -4, 65, 90, 7, -157, -248, -44, 593, 1583, 2612, 3271),
-};
-
-// SILK's integer-ratio downsampler: a second-order AR filter, then a symmetric FIR read every
-// `ratio` samples. Streams across calls of any length.
-class Decimator {
-	readonly #ratio: number;
-	readonly #coefs: Int16Array;
-	readonly #order: number;
-	readonly #ar = new Int32Array(2);
-	// The AR output not yet consumed by the FIR, led by the FIR's history.
-	#buf: Int32Array;
-
-	constructor(ratio: number) {
-		this.#ratio = ratio;
-		this.#coefs = DECIMATE[ratio];
-		this.#order = (this.#coefs.length - 2) * 2;
-		this.#buf = new Int32Array(this.#order);
-	}
-
-	push(input: Int16Array): Int16Array {
-		const buf = new Int32Array(this.#buf.length + input.length);
-		buf.set(this.#buf);
-		const a0 = this.#coefs[0];
-		const a1 = this.#coefs[1];
-		let s0 = this.#ar[0];
-		let s1 = this.#ar[1];
-		for (let k = 0; k < input.length; k++) {
-			const out = (s0 + (input[k] << 8)) | 0;
-			buf[this.#buf.length + k] = out;
-			const out32 = out << 2;
-			s0 = smlawb(s1, out32, a0);
-			s1 = smulwb(out32, a1);
-		}
-		this.#ar[0] = s0;
-		this.#ar[1] = s1;
-
-		const order = this.#order;
-		const half = order >> 1;
-		const count = buf.length < order ? 0 : Math.floor((buf.length - order) / this.#ratio) + 1;
-		const output = new Int16Array(count);
-		for (let n = 0; n < count; n++) {
-			const at = n * this.#ratio;
-			let res = 0;
-			for (let i = 0; i < half; i++) {
-				res = smlawb(res, (buf[at + i] + buf[at + order - 1 - i]) | 0, this.#coefs[2 + i]);
-			}
-			output[n] = sat16(rshiftRound(res, 6));
-		}
-		this.#buf = buf.slice(count * this.#ratio);
-		return output;
-	}
-}
-
-// The rates SILK runs at, and how to get there from each capture rate by an integer ratio.
-const DIRECT: Record<number, { rate: number; ratio: number }> = {
-	8000: { rate: 8000, ratio: 1 },
-	12000: { rate: 12000, ratio: 1 },
-	16000: { rate: 16000, ratio: 1 },
-	24000: { rate: 12000, ratio: 2 },
-	32000: { rate: 16000, ratio: 2 },
-	48000: { rate: 16000, ratio: 3 },
-};
-
 /** @internal Constructor options for {@link Vad}. */
 export interface VadProps {
-	/** The rate the PCM arrives at, in Hz. */
-	sampleRate: number;
+	/** The rate the PCM arrives at, in Hz: one SILK encodes at directly without the analysis. */
+	sampleRate: 8000 | 12000;
 
 	/** The analysis block, which SILK takes as 10 or 20 ms. */
 	block: 10 | 20;
@@ -203,18 +133,12 @@ export interface VadProps {
  * band's noise floor, and scores speech by how far the bands rise above it.
  *
  * The floor adapts fast for the first 20 seconds and slowly after, so a steady noise that starts
- * later, louder than the room, reads as speech until the floor catches up with it. libopus at
- * complexity 7 and up also asks its tonality analysis, which this leaves out.
+ * later, louder than the room, reads as speech until the floor catches up with it. libopus decides
+ * DTX on it alone only at 8 and 12 kHz, where it runs no tonality analysis.
  *
- * Takes frames of any length and scores each complete block at the rate SILK would encode speech
- * at: 16 kHz from 48 kHz capture.
+ * Takes frames of any length and scores each complete block.
  */
 export class Vad {
-	readonly #sampleRate: number;
-	readonly #ratio: number;
-	// Linear conversion first, for a rate with no integer path to SILK's.
-	#resampler?: Resampler;
-	#decimator?: Decimator;
 	readonly #length: number;
 	readonly #block: 10 | 20;
 
@@ -234,13 +158,8 @@ export class Vad {
 	#counter = 15;
 
 	constructor(props: VadProps) {
-		this.#sampleRate = props.sampleRate;
-		const path = DIRECT[props.sampleRate] ?? DIRECT[48_000];
-		this.#ratio = path.ratio;
-		this.#filters();
-
 		this.#block = props.block;
-		this.#length = (path.rate / 1000) * props.block;
+		this.#length = (props.sampleRate / 1000) * props.block;
 		this.#pending = new Int16Array(this.#length);
 
 		for (let b = 0; b < BANDS; b++) {
@@ -255,16 +174,9 @@ export class Vad {
 	 * completes none. Stereo is scored on its mid channel, as SILK does.
 	 */
 	push(frame: AudioFrame): boolean | undefined {
-		let input = mono(frame.channels);
-		if (this.#resampler) {
-			const resampled = this.#resampler.push({ timestamp: frame.timestamp, channels: [input] });
-			if (!resampled) return undefined;
-			input = resampled.channels[0];
-		}
-
-		let pcm: Int16Array = new Int16Array(input.length);
+		const input = mono(frame.channels);
+		const pcm = new Int16Array(input.length);
 		for (let i = 0; i < input.length; i++) pcm[i] = sat16(Math.round(input[i] * 32768));
-		if (this.#decimator) pcm = this.#decimator.push(pcm);
 
 		let result: boolean | undefined;
 		for (let offset = 0; offset < pcm.length; ) {
@@ -282,19 +194,10 @@ export class Vad {
 
 	/** Forget the signal, as after a break in the timeline, but keep the learned noise floor. */
 	reset(): void {
-		this.#filters();
 		this.#filled = 0;
 		for (const state of this.#ana) state.fill(0);
 		this.#hp = 0;
 		this.#subframe.fill(0);
-	}
-
-	#filters(): void {
-		this.#resampler =
-			DIRECT[this.#sampleRate] === undefined
-				? new Resampler({ from: this.#sampleRate, to: 48_000, channels: 1 })
-				: undefined;
-		this.#decimator = this.#ratio > 1 ? new Decimator(this.#ratio) : undefined;
 	}
 
 	/** silk_VAD_GetSA_Q8: the speech activity of one block, in Q8. Exposed to compare against libopus. */
@@ -304,13 +207,14 @@ export class Vad {
 		const dec2 = frameLength >> 2;
 		const dec3 = frameLength >> 3;
 
-		// [0-1 kHz | scratch | 1-2 kHz | 2-4 kHz | 4-8 kHz], at 16 kHz.
+		// The four bands, an octave each from the top, with scratch after the lowest:
+		// [0-1/16 | scratch | 1/16-1/8 | 1/8-1/4 | 1/4-1/2 of the rate].
 		const offsets = [0, dec3 + dec2, 0, 0];
 		offsets[2] = offsets[1] + dec3;
 		offsets[3] = offsets[2] + dec2;
 		const x = new Int16Array(offsets[3] + dec1);
 
-		// 0-8 kHz to 0-4 and 4-8, then 0-4 to 0-2 and 2-4, then 0-2 to 0-1 and 1-2.
+		// Split the whole band in halves, then the lower half twice more.
 		anaFiltBank1(pIn, 0, this.#ana[0], x, 0, offsets[3], frameLength);
 		anaFiltBank1(x, 0, this.#ana[1], x, 0, offsets[2], dec1);
 		anaFiltBank1(x, 0, this.#ana[2], x, 0, offsets[1], dec2);

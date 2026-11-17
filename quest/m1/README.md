@@ -41,7 +41,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   2026-11-13, below, and 2026-11-14 (maintainer): byte streams moved to Kixel,
   which builds its own on moq-net's public API, and sockets dropped their
   `tcp` protocol. Socket endpoints followed on 2026-11-16 (maintainer,
-  /quest-plan of the pre-cut audit): [they leave moq](/quest/m2/sockets/README.md)
+  /quest-plan of the pre-cut audit): [they leave moq](https://github.com/moq-dev/moq/pull/9029)
   for Kixel before the cut.
 - ✅ Also moved here: the two reconnect fixes whose bugs came from PRs that
   are on `main` and not on `release`, so the cut would publish them; the Go
