@@ -182,7 +182,7 @@ async fn ratio_joins_cross_two_relays() {
 		let mut baseline = remote.subscribe(None).await.unwrap();
 		assert_eq!(baseline.info().refresh, (name == "moq-lite-07-wip").then_some(1));
 		crate::support::harness::subscribed(&producer).await;
-		let mut group = producer.append_group(0).unwrap();
+		let mut group = producer.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 		group.write_frame(moq_net::Timestamp::unscaled(0), &b"key"[..]).unwrap();
 		group.write_frame(moq_net::Timestamp::unscaled(0), &b"abc"[..]).unwrap();
 		let mut received = baseline.recv_group().await.unwrap().unwrap();

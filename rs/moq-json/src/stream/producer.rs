@@ -102,6 +102,24 @@ impl<T: Serialize> Producer<T> {
 		self.inner.lock().unwrap().track.abort(err);
 		Ok(())
 	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
+	/// [`abort`](Self::abort) leaves it.
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		let mut inner = self.inner.lock().unwrap();
+		// The check and the abort are one step on the track; the rest is the same cleanup.
+		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
+			drop(inner);
+			return Err(self);
+		}
+		inner.track.abort(err);
+		Ok(())
+	}
 }
 
 /// A log whose producer [finished](Producer::finish) it: it can still be read or aborted, but
@@ -229,8 +247,7 @@ impl Track {
 	/// Open the log's group if it isn't already, starting at its first record's `timestamp`.
 	fn open(&mut self, timestamp: moq_net::Timestamp) -> std::result::Result<(), moq_net::Error> {
 		if self.group.is_none() {
-			let start = timestamp.value();
-			self.group = Some(self.inner.append_group(start)?);
+			self.group = Some(self.inner.append_group(timestamp)?);
 		}
 		Ok(())
 	}
@@ -269,7 +286,7 @@ impl Track {
 		// would leave the track open with `group` already taken, so a later append would open a
 		// second group. That is exactly the split log ending the track exists to prevent.
 		let group = match self.group.take() {
-			Some(group) => group.close().map(drop),
+			Some(group) => group.finish().map(drop),
 			None => Ok(()),
 		};
 		// This shared state keeps its own clone, whose appends the end refuses.

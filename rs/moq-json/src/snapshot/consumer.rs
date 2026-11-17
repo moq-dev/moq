@@ -25,6 +25,14 @@ pub struct Config {
 	/// Delivery priority of the consumer's subscription, higher first, as
 	/// [`Subscription::priority`](moq_net::track::Subscription::priority).
 	pub priority: i8,
+
+	/// The reader's playout delay behind the live edge, the subscription's
+	/// [`Delay`](moq_net::track::Delay) `min` and `max`.
+	///
+	/// Zero (the default) skips a snapshot the moment a newer one arrives. A reader that holds each
+	/// snapshot until media reaches its timestamp sets its delay, so a superseded snapshot it may
+	/// still need stays deliverable that long and [`Consumer::next`] yields it.
+	pub delay: std::time::Duration,
 }
 
 /// Consumes a JSON value from a track, reconstructing it from snapshots and deltas.
@@ -34,10 +42,11 @@ pub struct Config {
 /// When something else already owns the track, use the [`Decoder`]
 /// directly.
 ///
-/// A snapshot is superseded the moment a newer one exists, so the consumer subscribes itself at a
-/// zero [`max`](moq_net::track::Delay::max) delay and keeps that subscription to itself: a group
-/// is skipped once a newer one arrives, and a lower group the subscription still owes never holds
-/// up a newer one.
+/// A snapshot is superseded the moment a newer one exists, so by default the consumer subscribes
+/// itself at a zero [`max`](moq_net::track::Delay::max) delay and keeps that subscription to
+/// itself: a group is skipped once a newer one arrives, and a lower group the subscription still
+/// owes never holds up a newer one. [`Config::delay`] keeps superseded groups for a reader that
+/// applies each snapshot at its timestamp.
 pub struct Consumer<T> {
 	track: Track,
 	name: String,
@@ -51,15 +60,19 @@ impl<T: DeserializeOwned> Consumer<T> {
 	///
 	/// Takes the track where the stream and window consumers take a subscriber: a superseded value
 	/// is worthless, so the consumer owns its subscription instead of letting a caller pick a budget
-	/// that would deliver one. Subscribes right away at [`Config::priority`] and a zero
-	/// [`max`](moq_net::track::Delay::max) delay, with default preferences otherwise; no handle to that subscription leaves the
+	/// that would deliver one. Subscribes right away at [`Config::priority`] and [`Config::delay`], with default
+	/// preferences otherwise; no handle to that subscription leaves the
 	/// consumer, so nothing can change its budget. A read waits until the subscription resolves,
 	/// and fails if it cannot. A [compressed](moq_net::track::Info::compression) track reads the
 	/// same: moq-net inflates it.
 	pub fn new(track: moq_net::track::Consumer, config: Config) -> Self {
 		let subscription = moq_net::track::Subscription::default()
 			.with_priority(config.priority)
-			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO));
+			.with_delay(
+				moq_net::track::Delay::default()
+					.with_min(config.delay)
+					.with_max(config.delay),
+			);
 		let name = track.name().to_string();
 		let mut track = Track::Subscribing(track.subscribe(subscription).into_inner());
 		// Join now when the track already resolves, as an in-process one does, so the publisher
@@ -86,7 +99,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// Get the newest state and its timestamp, discarding superseded groups and intermediate yields.
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
-	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
+	/// a subsequent `next` resumes after it. On a scale-less track `at` is the group key.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<crate::Timed<T>>>> {
 		self.poll_read(waiter, true)
@@ -217,6 +230,23 @@ mod subscription {
 		let subscription = track.subscription().expect("the consumer subscribed");
 		assert_eq!(subscription.priority, 5);
 		assert_eq!(subscription.delay.max, Some(std::time::Duration::ZERO));
+	}
+
+	#[test]
+	fn a_holding_reader_subscribes_at_its_delay() {
+		let track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("data", moq_net::track::Info::default())
+			.unwrap();
+		let delay = std::time::Duration::from_millis(1500);
+		let config = Config {
+			delay,
+			..Default::default()
+		};
+		let _consumer = Consumer::<serde_json::Value>::new(track.consume(), config);
+		let subscription = track.subscription().expect("the consumer subscribed");
+		assert_eq!(subscription.delay.min, Some(delay));
+		assert_eq!(subscription.delay.max, Some(delay));
 	}
 }
 

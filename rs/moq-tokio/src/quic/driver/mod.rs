@@ -1,5 +1,8 @@
 //! An async QUIC driver: [`moq_quic`]'s state machine on tokio sockets and timers.
 //!
+//! Public only with the `test-support` feature, for tests, benches, and the QUIC interop
+//! example: it can change in any release. MoQ sessions reach it through `connect` and `listen`.
+//!
 //! It exposes moq-quic streams and datagrams with:
 //! [`send::Group`]s that schedule streams and datagrams together, [`send::Stream::reset_at`] to
 //! keep a prefix reliable, [`recv::Stream::poll_lease`] to hold receive credit until a message is
@@ -56,7 +59,7 @@ mod mutex;
 pub mod recv;
 mod runtime;
 pub mod send;
-#[cfg(feature = "sim")]
+#[cfg(feature = "test-support")]
 pub mod sim;
 mod work_limiter;
 

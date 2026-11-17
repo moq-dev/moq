@@ -96,7 +96,7 @@ export class Renderer {
 				const display = current
 					? { width: current.displayWidth, height: current.displayHeight }
 					: effect.get(this.in.display);
-				return display ? Video.rotateVideoDimensions(display, effect.get(this.in.rotation)) : undefined;
+				return display ? Video.rotateDimensions(display, effect.get(this.in.rotation)) : undefined;
 			}),
 			presentation: this.#signals.computed((effect) => ({
 				flip: effect.get(this.in.flip),

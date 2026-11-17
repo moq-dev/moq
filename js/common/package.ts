@@ -2,11 +2,13 @@
 // This creates a dist/ folder with the correct paths and dependencies for publishing
 // Split from release.ts to allow building packages without publishing
 
+import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { publint } from "publint";
 import { formatMessage } from "publint/utils";
 import { checkPackageConstructors } from "./constructors.ts";
+import { specifiers } from "./deps.ts";
 
 checkPackageConstructors(process.cwd());
 
@@ -73,15 +75,21 @@ if (pkg.bin) {
 	}
 }
 
+// The directory of a workspace package, named without its scope.
+function workspaceDir(name: string): string {
+	return `../${name.includes("/") ? name.split("/")[1] : name}`;
+}
+
 function rewriteWorkspaceDependency(dependencies?: Record<string, string>) {
 	if (!dependencies) return;
 	for (const [name, version] of Object.entries(dependencies)) {
 		if (typeof version === "string" && version.startsWith("workspace:")) {
 			// Read the actual version from the workspace package
-			// Handle both scoped (@scope/name) and unscoped (name) packages
-			const packageDir = name.includes("/") ? name.split("/")[1] : name;
-			const workspacePkgPath = `../${packageDir}/package.json`;
-			const workspacePkg = JSON.parse(readFileSync(workspacePkgPath, "utf8"));
+			const workspacePkg = JSON.parse(readFileSync(`${workspaceDir(name)}/package.json`, "utf8"));
+			if (workspacePkg.private && !pkg.private) {
+				console.error(`${pkg.name} depends on the private ${name}; bundle it from devDependencies instead`);
+				process.exit(1);
+			}
 			dependencies[name] = `^${workspacePkg.version}`;
 			console.log(`🔗 Converted ${name}: ${version} → ^${workspacePkg.version}`);
 		}
@@ -91,6 +99,66 @@ function rewriteWorkspaceDependency(dependencies?: Record<string, string>) {
 // Convert workspace dependencies to published versions
 rewriteWorkspaceDependency(pkg.dependencies);
 rewriteWorkspaceDependency(pkg.peerDependencies);
+
+function files(dir: string): string[] {
+	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+		const path = join(dir, entry.name);
+		return entry.isDirectory() ? files(path) : [path];
+	});
+}
+
+// A private workspace package ships inside each published package that imports it: Vite bundles
+// its code and stylesheets, and here its declarations are emitted to dist/bundled/<dir>, with each
+// import of it in this package's declarations pointed at that copy.
+for (const [name, version] of Object.entries<string>(pkg.devDependencies ?? {})) {
+	if (!version.startsWith("workspace:")) continue;
+	const source = workspaceDir(name);
+	const bundled = JSON.parse(readFileSync(`${source}/package.json`, "utf8"));
+	if (!bundled.private) continue;
+
+	const imports = (file: string) =>
+		specifiers(readFileSync(file, "utf8")).some((s) => s === name || s.startsWith(`${name}/`));
+	const importers = files("dist").filter((file) => file.endsWith(".d.ts") && imports(file));
+	if (importers.length === 0) continue;
+
+	const out = join("dist", "bundled", source.slice("../".length));
+	console.log(`📎 Bundling the declarations of ${name} into ${out}...`);
+	const tsc = ["x", "--no-install", "tsc", "-p", `${source}/tsconfig.build.json`, "--outDir", out];
+	execFileSync(process.execPath, tsc, { stdio: "inherit" });
+	const literal = new RegExp(`(["'])${name}(/[^"']*)?\\1`, "g");
+	for (const file of importers) {
+		const body = readFileSync(file, "utf8").replace(literal, (_, quote: string, subpath = "") => {
+			const target = bundled.exports?.[`.${subpath}`];
+			if (typeof target !== "string" || !target.endsWith(".ts")) {
+				console.error(`${file}: imports ${name}${subpath}, which has no such code export`);
+				process.exit(1);
+			}
+			// A module specifier separates with "/" on every platform, unlike a Windows path.
+			const path = relative(dirname(file), join(out, rewritePath(target, "js")))
+				.split(sep)
+				.join("/");
+			return `${quote}${path.startsWith(".") ? path : `./${path}`}${quote}`;
+		});
+		writeFileSync(file, body);
+	}
+}
+
+// What ships imports no @moq package it does not depend on, such as a private one left unbundled.
+const declared = new Set([
+	pkg.name,
+	...Object.keys(pkg.dependencies ?? {}),
+	...Object.keys(pkg.peerDependencies ?? {}),
+]);
+for (const file of files("dist")) {
+	if (!file.endsWith(".js") && !file.endsWith(".d.ts")) continue;
+	for (const specifier of specifiers(readFileSync(file, "utf8"))) {
+		const [scope, base] = specifier.split("/");
+		if (scope === "@moq" && base && !declared.has(`${scope}/${base}`)) {
+			console.error(`${file}: imports ${specifier}, which ${pkg.name} does not depend on`);
+			process.exit(1);
+		}
+	}
+}
 
 pkg.devDependencies = undefined;
 pkg.scripts = undefined;

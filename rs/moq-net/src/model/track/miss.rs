@@ -1669,7 +1669,7 @@ mod tests {
 				track
 					.create_group(crate::group::Info { start: key })
 					.unwrap()
-					.close()
+					.finish()
 					.unwrap();
 			}
 			let requests = handled.then(|| track.requests());
@@ -1730,7 +1730,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		track.start_at(3).unwrap();
@@ -1804,7 +1804,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 2 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let state = track.state.read();
 		assert!(state.drops.is_empty(), "recreation removed the last drop run");
@@ -1875,7 +1875,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		track.start_at(3).unwrap();
@@ -1952,7 +1952,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		let mut misses = Misses::default();
@@ -2003,7 +2003,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 1 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let state = track.state.read();
 		assert!(
@@ -2089,7 +2089,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		let mut misses = Misses::default();
@@ -2147,7 +2147,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 4 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let state = track.state.read();
 		let opened = state.cache.pool().now_wall();
@@ -2353,7 +2353,7 @@ mod tests {
 				track
 					.create_group(crate::group::Info { start: key })
 					.unwrap()
-					.close()
+					.finish()
 					.unwrap();
 			}
 			if next(2) == 0 {
@@ -2456,7 +2456,7 @@ mod tests {
 			track
 				.create_group(crate::group::Info { start: key })
 				.unwrap()
-				.close()
+				.finish()
 				.unwrap();
 		}
 		// Four groups below where the feed starts, 1, 3, 5, and 7, each a fill of its own.
@@ -2483,7 +2483,7 @@ mod tests {
 		);
 
 		// One fill answers: only its join is looked at again, and the later task wakes.
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let woken = second.0.load(Ordering::Relaxed);
@@ -2532,7 +2532,7 @@ mod tests {
 		track
 			.create_group(crate::group::Info { start: 8 })
 			.unwrap()
-			.close()
+			.finish()
 			.unwrap();
 		let track = track.finish().unwrap();
 		// Group 0 lies below where the feed starts: only a fill may deliver it.
@@ -2560,7 +2560,7 @@ mod tests {
 			"a no-op poll leaves the real registrations in place"
 		);
 
-		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_groups(&kio::Waiter::new(cx.waker().clone())))
 			.await
 			.unwrap();
 		let (read_woken, drops_woken) = (read.0.load(Ordering::Relaxed), drops.0.load(Ordering::Relaxed));

@@ -49,21 +49,25 @@ pub struct Args {
 	#[usage(long)]
 	encoder_sessions: Option<std::num::NonZeroUsize>,
 
-	/// The VA-API render node, such as `/dev/dri/renderD129`. Defaults to the
-	/// first that encodes, decodes, and scales.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	#[usage(long, env = "MOQ_VAAPI_DEVICE", value_hint = usage_rs::ValueHint::FilePath)]
+	/// The render node the decoder and encoders open, such as
+	/// `/dev/dri/renderD129`: VA-API opens it, and NVDEC and NVENC the NVIDIA
+	/// GPU behind it. Defaults to the first that encodes, decodes, and scales.
+	/// Linux only.
+	#[usage(
+		long,
+		env = "MOQ_VAAPI_DEVICE",
+		value_hint = usage_rs::ValueHint::FilePath,
+		conflicts("--v4l2-encoder", "--v4l2-decoder")
+	)]
 	pub vaapi_device: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M encoder node, such as `/dev/video11`. Defaults to the first
-	/// that encodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that encodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_ENCODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_encoder: Option<std::path::PathBuf>,
 
 	/// The V4L2 M2M decoder node, such as `/dev/video10`. Defaults to the first
-	/// that decodes H.264.
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
+	/// that decodes H.264. Linux only.
 	#[usage(long, env = "MOQ_V4L2_DECODER", value_hint = usage_rs::ValueHint::FilePath)]
 	pub v4l2_decoder: Option<std::path::PathBuf>,
 }
@@ -131,15 +135,8 @@ pub async fn run(moq: MoqSide, args: Args, net: Net) -> anyhow::Result<()> {
 	if let Some(serving) = args.encoder_sessions {
 		config.sessions = moq_transcode::Sessions::new(serving);
 	}
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	{
-		config.vaapi = args.vaapi_device.clone();
-	}
-	#[cfg(all(target_os = "linux", feature = "v4l2"))]
-	{
-		config.v4l2_encoder = args.v4l2_encoder.clone();
-		config.v4l2_decoder = args.v4l2_decoder.clone();
-	}
+	config.decoder_device = crate::device(&args.vaapi_device, &args.v4l2_decoder);
+	config.encoder_device = crate::device(&args.vaapi_device, &args.v4l2_encoder);
 
 	let source_path = moq_net::Path::try_from(
 		moq.broadcast

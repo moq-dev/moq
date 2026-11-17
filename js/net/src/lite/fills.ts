@@ -115,7 +115,7 @@ export interface FillAsk {
 export class RangeFills {
 	readonly #copy: track.Producer;
 	readonly #recover: (groups: Run, priority: number) => RecoveryHandle;
-	#held: track.Fill[] = [];
+	#held: track.FillGroups[] = [];
 	/** What the subscription asks for the fills now. */
 	ask: FillAsk = { groups: [], priority: NO_PRIORITY };
 	// Bumped on every input `poll` reads that no other signal reports.
@@ -153,7 +153,7 @@ export class RangeFills {
 		return this.#recoveries.size > 0;
 	}
 
-	push(fill: track.Fill): void {
+	push(fill: track.FillGroups): void {
 		this.#held.push(fill);
 		this.#bump();
 	}
@@ -252,7 +252,7 @@ export class RangeFills {
 		const ask: FillAsk = { groups: [], priority: NO_PRIORITY };
 		// Every run a held fill still owes, recovered or not.
 		const owed: Run[] = [];
-		const held: track.Fill[] = [];
+		const held: track.FillGroups[] = [];
 		// Not asked of the subscription: a run being recovered waits on its own, and a group already
 		// refused is answered once its fill reaches it.
 		const waiting = [...this.#recovering];
@@ -414,14 +414,14 @@ export class RangeFills {
 }
 
 // The run `fill` owes first in its order, extending from the group it owes first.
-function nextRun(fill: track.Fill): Run | undefined {
+function nextRun(fill: track.FillGroups): Run | undefined {
 	const owed = wantedRuns(fill);
 	return fill.order === "ascending" ? owed[0] : owed.at(-1);
 }
 
 // Answer `[start, end)` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
 // anything else is refused for now, recorded nowhere.
-function answer(refusal: Refusal, fill: track.Fill, start: bigint, end: bigint): void {
+function answer(refusal: Refusal, fill: track.FillGroups, start: bigint, end: bigint): void {
 	if (refusal.lost) fill.dropGroups(start, end);
 	else fill.refuseGroups(start, end, refusal.error);
 }

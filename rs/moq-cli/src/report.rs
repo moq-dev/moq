@@ -489,8 +489,8 @@ async fn write_echo(
 	mut stdout: impl tokio::io::AsyncWrite + Unpin,
 ) -> anyhow::Result<()> {
 	// Announcements leave hidden routes out unless asked, and a prefix naming one asks.
-	let hidden = prefix.split('/').any(|segment| segment.starts_with('.'));
 	let prefix = moq_net::Path::new(&prefix)?;
+	let hidden = prefix.parts().any(|segment| segment.starts_with('.'));
 	let mut announced = origin.clone().with_hidden(hidden).announced();
 	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
 	let mut readers = Readers::default();

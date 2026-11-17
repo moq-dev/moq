@@ -153,12 +153,15 @@ impl Recording {
 	fn add(&mut self, track: &str, groups: &[&[u64]]) {
 		let source = self.sources.get_mut(track).unwrap();
 		for &frames in groups {
-			let mut group = source.media.append_group(frames[0]).unwrap();
+			let mut group = source
+				.media
+				.append_group(Timestamp::from_micros(frames[0]).unwrap())
+				.unwrap();
 			for (index, &micros) in frames.iter().enumerate() {
 				let timestamp = Timestamp::from_micros(micros).unwrap();
 				group.write_frame(timestamp, legacy(track, micros, index == 0)).unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 	}
 
@@ -205,7 +208,7 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Bytes {
 /// configs, so no init needs media.
 fn catalog() -> hang::Catalog {
 	let mut catalog = hang::Catalog::default();
-	catalog.media.join = hang::catalog::Join::new(Duration::from_secs(2));
+	catalog.sync.interval = Some(Duration::from_secs(2));
 	for (name, width, height) in [("360p", 640, 360), ("1080p", 1920, 1080)] {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(width);

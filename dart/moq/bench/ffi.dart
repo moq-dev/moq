@@ -175,7 +175,7 @@ Future<void> main() async {
     });
   }
 
-  call('sequence', group.sequence);
+  call('start', group.start);
   call('info', consumer.info);
   consumer.dispose();
   group.dispose();

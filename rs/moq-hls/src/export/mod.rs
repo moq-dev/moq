@@ -2,7 +2,7 @@
 //!
 //! A [`Broadcaster`] subscribes to one broadcast's catalog and each rendition's media track,
 //! reading only each group's first frame timestamp, which the transport carries. Playlists and
-//! manifests are a pure function of those timestamps and the catalog's `media.join.interval`,
+//! manifests are a pure function of those timestamps and the catalog's `sync.interval`,
 //! and media bytes move only when an HTTP client requests a segment, which FETCHes exactly the
 //! groups that segment holds from the relay cache and transmuxes them to CMAF. The media
 //! subscriptions that index each group count toward no stats session, so a source whose origin
@@ -529,8 +529,8 @@ enum Role {
 	/// A root broadcast, following its catalog's includes when an HTTP server serves it.
 	Root(Option<Box<include::Producer>>),
 	/// A broadcast included in a root broadcast. Its renditions take the root catalog's
-	/// `media`, so they share the root's timeline and grid whatever the include declares.
-	Include(kio::Consumer<hang::catalog::Media>),
+	/// `sync`, so they share the root's timeline and grid whatever the include declares.
+	Include(kio::Consumer<hang::catalog::Timeline>),
 }
 
 /// Follows a broadcast's catalog into its rendition set, as a driver task.
@@ -602,7 +602,7 @@ impl WatchCatalog {
 			}));
 		}
 		if let (Role::Include(root), Some(catalog)) = (&self.role, &latest)
-			&& let Poll::Ready(Ok(())) = root.poll(waiter, |media| match **media != catalog.media {
+			&& let Poll::Ready(Ok(())) = root.poll(waiter, |sync| match **sync != catalog.sync {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}) {
@@ -616,7 +616,7 @@ impl WatchCatalog {
 		match &self.role {
 			Role::Root(Some(include)) => include.sync(&self.source, &catalog),
 			Role::Root(None) => {}
-			Role::Include(root) => catalog.media = *root.read(),
+			Role::Include(root) => catalog.sync = *root.read(),
 		}
 		self.renditions.sync(&self.source, &catalog);
 		if let (Role::Include(_), Watch::Reading { latest, .. }) = (&self.role, &mut self.state) {
@@ -730,7 +730,7 @@ mod tests {
 	/// An empty catalog declaring a two-second join interval.
 	fn joined() -> moq_mux::catalog::hang::Catalog {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
-		catalog.media.join = hang::catalog::Join::new(INTERVAL);
+		catalog.sync.interval = Some(INTERVAL);
 		catalog
 	}
 
@@ -975,13 +975,13 @@ mod tests {
 		let renditions = renditions::Producer::spawned(Config::default().window);
 		let mut cursor = renditions.subscribe();
 		let mut catalog = catalog_with_both();
-		catalog.media.join = None;
+		catalog.sync.interval = None;
 		renditions.sync(&upstream, &catalog);
 		assert!(renditions.get(Kind::Video, "video0").is_none());
 		assert!(renditions.get(Kind::Audio, "audio0").is_none());
 		assert!(next_event(&mut cursor).await.is_none(), "nothing is announced early");
 
-		catalog.media.join = hang::catalog::Join::new(INTERVAL);
+		catalog.sync.interval = Some(INTERVAL);
 		renditions.sync(&upstream, &catalog);
 		let mut added = 0;
 		while let Some(event) = next_event(&mut cursor).await {
@@ -1273,7 +1273,7 @@ mod tests {
 		let all: Vec<_> = refused.into_iter().chain([(Kind::Video, "video0")]).collect();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for &(kind, name) in &all {
 					match kind {
 						Kind::Video => {
@@ -1508,7 +1508,7 @@ mod tests {
 		for group in 2..5 {
 			let mut writing = media.create_group(group.into()).unwrap();
 			write_keyframe(&mut writing, group);
-			writing.close().unwrap();
+			writing.finish().unwrap();
 		}
 		until_listed(&rendition, 4).await;
 		let segment = rendition
@@ -1543,7 +1543,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for name in ["video0", "video1"] {
 					let config = if name == inline { inline_vp8() } else { video_config() };
 					catalog.video.renditions.insert(name.into(), config);
@@ -1584,7 +1584,7 @@ mod tests {
 		write_keyframe(&mut open, sequence);
 		let mut next = media.create_group((sequence + 1).into()).unwrap();
 		write_keyframe(&mut next, sequence + 1);
-		next.close().unwrap();
+		next.finish().unwrap();
 		(media, open)
 	}
 
@@ -1633,7 +1633,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
@@ -1668,7 +1668,7 @@ mod tests {
 		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("id=\"video/video0\""), "{manifest}");
 	}
@@ -1684,7 +1684,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for name in ["video0", "video1"] {
 					let config = if name == "video1" { inline_vp8() } else { video_config() };
 					catalog.video.renditions.insert(name.into(), config);
@@ -1708,7 +1708,7 @@ mod tests {
 		failed(&broken).await;
 		assert!(broadcaster.manifest(None).unwrap().is_none());
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(manifest) = broadcaster.manifest(None).unwrap() {
@@ -1816,7 +1816,7 @@ mod tests {
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 		assert!(!manifest.contains("type=\"static\""), "{manifest}");
 
-		open.close().unwrap();
+		open.finish().unwrap();
 		let manifest = listed_in_manifest(&broadcaster).await;
 		assert!(manifest.contains("type=\"static\""), "{manifest}");
 	}
@@ -1844,7 +1844,7 @@ mod tests {
 				.is_err(),
 			"resolved without a listable video"
 		);
-		open.close().unwrap();
+		open.finish().unwrap();
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
 			.expect("video0 is listable once its init is built");
@@ -1872,7 +1872,7 @@ mod tests {
 		for sequence in 0..3 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		kio::clock::timeout(Duration::from_secs(1), waiting)
 			.await
@@ -1890,7 +1890,7 @@ mod tests {
 		for sequence in 0..4 {
 			let mut group = media.create_group(sequence.into()).unwrap();
 			write_keyframe(&mut group, sequence);
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
@@ -2540,7 +2540,7 @@ mod tests {
 		);
 
 		import.decode(&fragments).unwrap();
-		let anchored = catalog.snapshot().media.clock.expect("the catalog advertises a clock");
+		let anchored = catalog.snapshot().sync.clock.expect("the catalog advertises a clock");
 
 		kio::clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
@@ -3641,7 +3641,7 @@ mod tests {
 				.write_to(&mut group)
 				.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		/// Write group `sequence` at `pts_ms` with a single keyframe.
@@ -3665,7 +3665,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		/// Write group `sequence` at `2 * sequence` seconds: one GOP per grid line.
@@ -3724,7 +3724,7 @@ mod tests {
 		/// [`with`](Self::with), on a join interval of `interval`.
 		fn joined(video: &[&str], audio: &[&str], interval: Duration) -> Self {
 			let mut catalog = joined();
-			catalog.media.join = hang::catalog::Join::new(interval);
+			catalog.sync.interval = Some(interval);
 			for name in video {
 				let config = video_config();
 				catalog.video.renditions.insert(name.to_string(), config);
@@ -3939,7 +3939,7 @@ mod tests {
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default()).unwrap();
 		catalog
 			.mutate(|catalog| {
-				catalog.media.join = hang::catalog::Join::new(INTERVAL);
+				catalog.sync.interval = Some(INTERVAL);
 				for name in ["video0", "video1"] {
 					catalog.video.renditions.insert(name.into(), video_config());
 				}
@@ -4050,7 +4050,7 @@ mod tests {
 			init: muxer.init().unwrap().expect("a VP8 init from the coded size"),
 		};
 		let mut catalog = joined();
-		catalog.media.join = hang::catalog::Join::new(INTERVAL);
+		catalog.sync.interval = Some(INTERVAL);
 		catalog.video.renditions.insert("video0".to_string(), config);
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let test = Groups {
@@ -4068,7 +4068,7 @@ mod tests {
 			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let bytes = muxer.fragment(sequence as u32, &frames, None).unwrap();
 			group.write_frame(frames[0].timestamp, bytes).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		fragment(0, 500, 2_400);
 		fragment(1, 2_500, 4_400);
@@ -4652,7 +4652,7 @@ mod tests {
 			}
 			.write_to(&mut group)
 			.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		media.at(cap + 1, 2_000);
 		media.at(cap + 2, 4_000);
@@ -4786,7 +4786,7 @@ mod tests {
 		// The interval is fixed for a broadcast instance; should it change anyway, every rendition
 		// is rebuilt on the new grid, keeping its playlist URI's target.
 		let original = test.rendition("video0");
-		test.catalog.media.join = hang::catalog::Join::new(Duration::from_secs(3));
+		test.catalog.sync.interval = Some(Duration::from_secs(3));
 		test.sync();
 		let replacement = test.rendition("video0");
 		assert!(!Arc::ptr_eq(&original, &replacement), "a new interval rebuilds");

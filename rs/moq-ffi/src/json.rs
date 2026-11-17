@@ -32,6 +32,34 @@ pub struct MoqJsonSnapshotConfig {
 	pub deltas: bool,
 }
 
+/// Options for a JSON snapshot consumer's subscription, mirroring
+/// [`moq_json::snapshot::consumer::Config`].
+///
+/// A null config means priority 0 and a zero delay. Uniffi can't default a duration, so Kotlin
+/// and Dart name `delay` in a config they build, while the Python, Go, and Swift wrappers default
+/// it to zero.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct MoqJsonSnapshotConsumerConfig {
+	/// Delivery priority of the subscription, higher first, as
+	/// [`MoqSubscription::priority`](crate::consumer::MoqSubscription::priority).
+	#[uniffi(default = 0)]
+	pub priority: i8,
+	/// The reader's playout delay behind the live edge, the subscription's `delay.min` and
+	/// `delay.max`. Zero skips a snapshot the moment a newer one arrives. A reader that holds each
+	/// snapshot until media reaches its timestamp sets its delay, so a superseded snapshot it may
+	/// still need stays deliverable that long and `next()` yields it.
+	pub delay: std::time::Duration,
+}
+
+impl From<MoqJsonSnapshotConsumerConfig> for moq_json::snapshot::consumer::Config {
+	fn from(config: MoqJsonSnapshotConsumerConfig) -> Self {
+		let mut out = Self::default();
+		out.priority = config.priority;
+		out.delay = config.delay;
+		out
+	}
+}
+
 /// Options for a JSON window producer (a sliding run of records).
 ///
 /// Compression is the track's, as for [`MoqJsonSnapshotConfig`].
@@ -72,6 +100,8 @@ mod tests {
 	fn record_defaults_match_moq_json() {
 		let snapshot = moq_json::snapshot::Config::default();
 		assert!(snapshot.deltas, "update #[uniffi(default)] on deltas");
+		let consumer = moq_json::snapshot::consumer::Config::default();
+		assert_eq!(consumer.priority, 0, "update #[uniffi(default)] on priority");
 		let window = moq_json::window::Config::default();
 		assert_eq!(
 			window.checkpoint_records, None,
@@ -192,6 +222,31 @@ impl MoqJsonSnapshotProducer {
 		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				let _ = self.alive.close();
+				Ok(true)
+			}
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
+	}
+
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -233,14 +288,17 @@ impl MoqJsonSnapshotConsumer {
 	/// Subscribe to the track `name` on `broadcast` and read it as a JSON snapshot track (lossy
 	/// latest-value).
 	///
-	/// The consumer owns its subscription, at a zero `delay.max` and `priority` (higher first, as
-	/// [`MoqSubscription::priority`](crate::consumer::MoqSubscription::priority)): a read waits for
-	/// it to resolve and fails if it cannot. Reads a compressed track the same as a plain one.
-	#[uniffi::constructor(default(priority = 0))]
-	pub fn new(broadcast: &MoqBroadcastConsumer, name: String, priority: i8) -> Result<Arc<Self>, MoqError> {
+	/// The consumer owns its subscription, at `config`'s priority and delay (null for priority 0 and
+	/// a zero delay): a read waits for it to resolve and fails if it cannot. Reads a compressed
+	/// track the same as a plain one.
+	#[uniffi::constructor(default(config = None))]
+	pub fn new(
+		broadcast: &MoqBroadcastConsumer,
+		name: String,
+		config: Option<MoqJsonSnapshotConsumerConfig>,
+	) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let mut config = moq_json::snapshot::consumer::Config::default();
-		config.priority = priority;
+		let config = config.map(Into::into).unwrap_or_default();
 		let consumer = moq_json::snapshot::Consumer::<Value>::new(broadcast.inner.track(&name)?, config);
 		Ok(Arc::new(Self {
 			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
@@ -347,6 +405,28 @@ impl MoqJsonStreamProducer {
 		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => Ok(true),
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
+	}
+
 	/// Finish the track, closing the group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -412,7 +492,6 @@ impl MoqJsonStreamConsumer {
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_json::window::Producer<Value>>>>,
-	demand: moq_net::track::Demand,
 
 	/// Closed on finish or drop, which stops the refresh task.
 	alive: kio::Producer<()>,
@@ -488,7 +567,6 @@ impl MoqJsonWindowProducer {
 				return Err(moq_net::Error::TimestampMismatch.into());
 			}
 			Ok(Self {
-				demand: track.demand(),
 				inner: Arc::new(std::sync::Mutex::new(Some(moq_json::window::Producer::new(
 					track, config,
 				)))),
@@ -527,8 +605,33 @@ impl MoqJsonWindowProducer {
 
 	/// A watch-only handle to whether this track has subscribers.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
-		self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?;
-		Ok(MoqTrackDemand::new(self.demand.clone()))
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+	}
+
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				let _ = self.alive.close();
+				Ok(true)
+			}
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
 	}
 
 	/// Finish the track, closing any open group.

@@ -279,14 +279,14 @@ mod test {
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
-		let mut group = track.append_group(0).unwrap();
+		let mut group = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		group
 			.write_frame(
 				moq_net::Timestamp::from_millis(10_000).unwrap(),
 				bytes::Bytes::from_static(b"{}"),
 			)
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		track
 	}
 
@@ -383,11 +383,11 @@ mod test {
 		let subscriber = track.subscribe(subscription);
 
 		// Both groups stay open, the way a publisher writing to two at once leaves them.
-		let mut first = track.append_group(0).unwrap();
+		let mut first = track.append_group(moq_net::Timestamp::from_millis(0).unwrap()).unwrap();
 		first
 			.write_frame(moq_net::Timestamp::from_millis(0).unwrap(), br#"{"n":0}"#.as_slice())
 			.unwrap();
-		let mut second = track.append_group(1).unwrap();
+		let mut second = track.append_group(moq_net::Timestamp::from_millis(1).unwrap()).unwrap();
 		second
 			.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), br#"{"n":1}"#.as_slice())
 			.unwrap();

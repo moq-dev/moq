@@ -85,7 +85,7 @@ try {
 		Catalog.encode({
 			video: { renditions: renditions.video },
 			audio: { renditions: renditions.audio },
-			media: { join: { interval: Catalog.u53(INTERVAL) } },
+			sync: { interval: Catalog.u53(INTERVAL) },
 		}),
 		Moq.Time.Timestamp.now(),
 	);

@@ -240,6 +240,20 @@ impl<T: Serialize> Snapshot<T> {
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
 	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged, entry included, when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the handle back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
+	}
 }
 
 /// Publishes an append-log JSON track, advertised in the catalog for as long as this handle lives.
@@ -340,6 +354,20 @@ impl<T: Serialize> Stream<T> {
 	/// catalog entry.
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged, entry included, when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the handle back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
 	}
 }
 
@@ -615,14 +643,14 @@ mod test {
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
-		let published = catalog.snapshot().media.clock;
+		let published = catalog.snapshot().sync.clock;
 		let before = catalog.clock().now();
 		// The stream starts an hour in, far from the ten seconds a fresh clock reads.
 		let first = catalog
 			.timebase()
 			.shift(moq_net::Timestamp::from_micros(3_600_000_000).unwrap())
 			.unwrap();
-		assert_eq!(catalog.snapshot().media.clock, published, "the clock never moves");
+		assert_eq!(catalog.snapshot().sync.clock, published, "the clock never moves");
 		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
 		status.update(&json!({ "live": true }), catalog.clock().now()).unwrap();
 		chat.append(&json!({ "n": 1 }), catalog.clock().now()).unwrap();

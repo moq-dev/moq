@@ -60,6 +60,13 @@ impl<T> Producer<T> {
 		self.inner.lock().unwrap().track.inner.subscribe(None)
 	}
 
+	/// A watch-only handle to the underlying track's subscriber demand.
+	///
+	/// Weak, so holding it neither keeps the track open nor contends with publishing.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.lock().unwrap().track.inner.demand()
+	}
+
 	/// The retained checkpoint suffix, oldest first.
 	///
 	/// This is the complete window unless [`Config::checkpoint_records`] is set.
@@ -123,6 +130,24 @@ impl<T> Producer<T> {
 	/// it closed: their next edit fails with `err`.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		self.inner.lock().unwrap().abort(err.into());
+		Ok(())
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`]. Clones sharing the track see it as
+	/// [`abort`](Self::abort) leaves it.
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		let mut inner = self.inner.lock().unwrap();
+		// The check and the abort are one step on the track; the rest is the same cleanup.
+		if inner.track.inner.clone().abort_unwanted(err.clone()).is_err() {
+			drop(inner);
+			return Err(self);
+		}
+		inner.abort(err.into());
 		Ok(())
 	}
 }
@@ -249,7 +274,7 @@ impl<T> Inner<T> {
 		// The group closes either way, so reset first: a `close` error must not leave the encoder
 		// appending ops to a group that is gone.
 		self.encoder.reset();
-		group.close()?;
+		group.finish()?;
 		Ok(())
 	}
 
@@ -363,20 +388,19 @@ impl Track {
 	/// A start at or before the newest group's is [`moq_net::Error::TimestampMismatch`], refused
 	/// before the previous group closes.
 	fn write_header(&mut self, timestamp: moq_net::Timestamp, payload: bytes::Bytes) -> Result<()> {
-		let start = timestamp.value();
-		let mut group = self.inner.append_group(start)?;
-		self.largest = Some(start);
+		let mut group = self.inner.append_group(timestamp)?;
+		self.largest = Some(group.start);
 
 		// The previous group is complete; no more frames will be appended to it.
 		if let Some(previous) = self.group.take() {
-			previous.close()?;
+			previous.finish()?;
 		}
 
 		if let Err(err) = group.write_frame(timestamp, payload) {
 			// `append_group` already published this group, and a rejected frame (too large) doesn't
 			// close the track. Dropping the handle does NOT close the group, so leaving it would strand
 			// any subscriber that advanced into it with nothing to read and no end.
-			let _ = group.close();
+			let _ = group.finish();
 			return Err(err.into());
 		}
 
@@ -396,7 +420,7 @@ impl Track {
 
 	fn finish(&mut self) -> Result<()> {
 		if let Some(group) = self.group.take() {
-			group.close()?;
+			group.finish()?;
 		}
 		// Another handle may have declared the end already, which stands. This shared state
 		// keeps its own clone, whose appends the end refuses.

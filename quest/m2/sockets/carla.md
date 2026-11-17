@@ -64,7 +64,8 @@ Restore the format, not the commit. For the PR:
     needs it. The demo works without it.
   - The anonymous grant. Recommended: `demo/viewer/**` returns to
     `demo/relay/prod.toml` and the `packaging/moq-relay/relay.toml` sample,
-    shared with [MoQ Boy](/quest/m2/sockets/boy.md). Anyone who can publish
+    shared with MoQ Boy, whose viewers publish under `demo/viewer/` again
+    ([moq-dev/moq#8936](https://github.com/moq-dev/moq/pull/8936)). Anyone who can publish
     under `viewer/carla/` can claim a driver id; the lease stays
     cooperative, and the README says so as it did.
   - The version list. Recommended: the worker and the player offer their

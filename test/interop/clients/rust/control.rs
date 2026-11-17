@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
 	for byte in [1, 2] {
 		group.write_frame(moq_net::Timestamp::unscaled(group.start), vec![byte])?;
 	}
-	group.close()?;
+	group.finish()?;
 	route.announce()?;
 
 	let socket = moq_tokio::websocket::Listener::bind("127.0.0.1:0".parse()?).await?;

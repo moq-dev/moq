@@ -121,7 +121,7 @@ typealias AudioRendition = uniffi.moq.MoqRendition.Audio
 /** A catalog rendition and live delivery options. */
 typealias TrackConfig = uniffi.moq.MoqMediaTrackConfig
 
-/** A catalog rendition's group sequence and fetch delivery options. */
+/** A catalog rendition's group start and fetch delivery options. */
 typealias GroupConfig = uniffi.moq.MoqMediaGroupConfig
 
 /** The packaging advertised for a media track. */
@@ -141,7 +141,7 @@ fun CatalogConsumer.updates(): Flow<Catalog> = pull({ cancel() }) { next() }
  * updates (use [updates] for that).
  */
 suspend fun catalog(broadcast: dev.moq.BroadcastConsumer): Catalog {
-    val consumer = CatalogConsumer.subscribe(broadcast)
+    val consumer = CatalogConsumer.subscribe(broadcast, java.time.Duration.ZERO)
     try {
         return consumer.next() ?: throw MoqException.Closed()
     } finally {

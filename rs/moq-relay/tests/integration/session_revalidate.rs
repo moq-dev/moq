@@ -106,6 +106,7 @@ impl Script {
 			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
+			_ => return StatusCode::BAD_REQUEST.into_response(),
 		};
 		match answer {
 			Answer::Grant(grant) => Json(grant).into_response(),

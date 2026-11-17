@@ -82,7 +82,7 @@ public final class BroadcastRequest: Sendable {
             try ffi.route(options: MoqRouteOptions(hidden: hidden, cost: cost, instance: instance, epoch: epoch)))
     }
 
-    /// Serve held content under the claim's continuous sequence space, without an exact route.
+    /// Serve held content under the claim's continuous group starts, without an exact route.
     public func serve(broadcast: BroadcastConsumer) throws {
         try ffi.serve(broadcast: broadcast.ffi)
     }

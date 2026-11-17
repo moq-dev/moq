@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hang::catalog::{AudioCodec, AudioConfig, Include, Join, VideoCodec, VideoConfig};
+use hang::catalog::{AudioCodec, AudioConfig, Include, VideoCodec, VideoConfig};
 use moq_mux::catalog::hang::Catalog;
 use moq_net::{Instance, Timestamp, track};
 use tower::ServiceExt;
@@ -18,7 +18,7 @@ struct Published {
 
 fn catalog() -> Catalog {
 	let mut catalog = Catalog::default();
-	catalog.media.join = Join::new(Duration::from_secs(2));
+	catalog.sync.interval = Some(Duration::from_secs(2));
 	let mut video = VideoConfig::new(VideoCodec::VP8);
 	video.coded_width = Some(320);
 	video.coded_height = Some(240);
@@ -73,7 +73,7 @@ fn frames(track: &track::Producer, first: u64) {
 		}
 		.write_to(&mut group)
 		.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 }
 
@@ -560,7 +560,7 @@ async fn includes_take_the_roots_grid_and_denied_ones_are_not_advertised() {
 	let child = Instance::random();
 	// The include declares its own interval, which HLS ignores for the root's.
 	let mut value = catalog();
-	value.media.join = Join::new(Duration::from_secs(1));
+	value.sync.interval = Some(Duration::from_secs(1));
 	let include = publish(&origin, "room/ladder", &child, &value);
 	let server = Server::new(origin.consume(), Default::default()).unwrap();
 	master(&server, "include/", true).await;
