@@ -20,7 +20,14 @@ import type * as Instance from "../instance.ts";
 import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
-import { type Add, type AnnounceBroadcast, AnnounceHistory, type Claim, requestFits, requestParts } from "./announce.ts";
+import {
+	type Add,
+	type AnnounceBroadcast,
+	AnnounceHistory,
+	type Claim,
+	requestFits,
+	requestParts,
+} from "./announce.ts";
 import type { Version } from "./version.ts";
 
 /** What a `routes()` reader asked for. */

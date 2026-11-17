@@ -1260,11 +1260,9 @@ impl AnnounceRun {
 				advertised.hops = hops.clone();
 				advertised.cost = cost;
 				match advertised.id {
-					Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::Update {
-						id,
-						hops,
-						cost,
-					})?,
+					Some(id) => stream
+						.writer
+						.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?,
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
 						suffix: lite::PathRef::literal(suffix),
@@ -1910,9 +1908,9 @@ impl<R: Request> RequestServe<R> {
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
 						let path = R::target(msg).0.clone();
-						let filtered = self
-							.shared
-							.poll_node_filter(origin, &path, R::instance(msg), R::node(msg), waiter);
+						let filtered =
+							self.shared
+								.poll_node_filter(origin, &path, R::instance(msg), R::node(msg), waiter);
 						let Some(origin) = ready!(filtered) else {
 							return Poll::Ready(Err(Error::Unroutable));
 						};
@@ -3709,8 +3707,12 @@ mod announce_test {
 		kio::clock::sim::yield_now().await;
 		let first = sent(&mut answer);
 		let told = |msgs: &[lite::AnnounceBroadcast]| {
-			let starts = msgs.iter().filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
-			let ends = msgs.iter().filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { .. }));
+			let starts = msgs
+				.iter()
+				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+			let ends = msgs
+				.iter()
+				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { .. }));
 			(starts.count(), ends.count())
 		};
 		assert_eq!(told(&first), (1, 0), "{first:?}");
@@ -3783,7 +3785,11 @@ mod announce_test {
 			kio::clock::sim::yield_now().await;
 			let sent = sent(&mut answer);
 			assert_eq!(sent.first(), Some(&lite::AnnounceBroadcast::Ok), "{sent:?}");
-			assert_eq!(sent.last(), Some(&lite::AnnounceBroadcast::Synced { prefix }), "{sent:?}");
+			assert_eq!(
+				sent.last(),
+				Some(&lite::AnnounceBroadcast::Synced { prefix }),
+				"{sent:?}"
+			);
 			assert_eq!((told(&sent), sent.len()), (1, 3), "{sent:?}");
 		}
 	}
@@ -3890,10 +3896,7 @@ mod announce_test {
 
 		drop(shown);
 		kio::clock::sim::yield_now().await;
-		assert_eq!(
-			sent(&mut answer),
-			[lite::AnnounceBroadcast::End { id: 0, lost: false }]
-		);
+		assert_eq!(sent(&mut answer), [lite::AnnounceBroadcast::End { id: 0, lost: false }]);
 
 		let _again = origin.announce("y", origin::RouteInfo::new()).unwrap();
 		kio::clock::sim::yield_now().await;
@@ -4113,13 +4116,7 @@ mod announce_test {
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[
-				lite::AnnounceBroadcast::Update {
-					id: 0,
-					hops,
-					cost,
-				},
-			] => {
+			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
 				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}

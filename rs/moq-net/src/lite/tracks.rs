@@ -219,13 +219,22 @@ mod test {
 		let msg = Tracks {
 			broadcast: Path::from_static("room/alice"),
 			instance: Some(instance.clone()),
-			node: Some(crate::route::NodeId { relay: 0x7a3f, start: 9 }),
+			node: Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9,
+			}),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
 		let (got, _) = Tracks::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(got.broadcast, Path::from_static("room/alice"));
 		assert_eq!(got.instance, Some(instance));
-		assert_eq!(got.node, Some(crate::route::NodeId { relay: 0x7a3f, start: 9 }));
+		assert_eq!(
+			got.node,
+			Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9
+			})
+		);
 	}
 
 	#[test]

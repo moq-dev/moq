@@ -578,13 +578,11 @@ impl Answer {
 	/// shows. A claim that goes is `lost`, or else ended.
 	fn sync(&mut self, writer: &mut Writer, key: Named, lost: bool) -> Result<(), Error> {
 		let depth = self.depth(&key.0);
-		let wanted = (self.told.get(&key))
-			.filter(|_| self.shows(&key.0))
-			.map(|(_, claim)| {
-				let mut claim = claim.clone();
-				claim.item.above = claim.item.above.min(depth);
-				claim
-			});
+		let wanted = (self.told.get(&key)).filter(|_| self.shows(&key.0)).map(|(_, claim)| {
+			let mut claim = claim.clone();
+			claim.item.above = claim.item.above.min(depth);
+			claim
+		});
 		match (self.live.get(&key), wanted) {
 			(None, Some(claim)) => {
 				// The peer names every claim from the session's root.

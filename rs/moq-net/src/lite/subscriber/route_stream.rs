@@ -201,7 +201,13 @@ impl RouteStream {
 		let answering = self.publish.origin.route_node();
 		let shared = answering.same(&subscriber.origin.route_node());
 		let routing = peer.filter(|_| self.publish.routing && shared);
-		let mut routed = Routed::new(subscriber, link_cost, &permit, shared.then_some(&self.publish.origin), routing)?;
+		let mut routed = Routed::new(
+			subscriber,
+			link_cost,
+			&permit,
+			shared.then_some(&self.publish.origin),
+			routing,
+		)?;
 		let mut streams = vec![routed.stream()];
 		if !shared {
 			let port = relay::Port {

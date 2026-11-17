@@ -1,6 +1,4 @@
-//! The multicast epic's route rule as one node's state machine, beside
-//! [`super::path::Router`] until the switch puts lite-07 sessions on it
-//! (`quest/m2/multicast/switch.md`).
+//! The route rule every lite-07 session runs, as one node's state machine.
 //!
 //! A route leads to a forwarding node that announces claims, never to a publisher: an
 //! endpoint's claims belong to the relay it connects to, which announces them under its
@@ -69,8 +67,8 @@ use kio::clock::Instant;
 
 use crate::Path;
 
-use super::reader::Reader;
 use super::prefix::{ancestors, below, within_any, within_set};
+use super::reader::Reader;
 use super::{Error, Event, Id, Item, Key, MAX_HOPS, Metric, Rev, Shown};
 
 /// How a forwarding node names itself on a path: its relay, and which start of that
@@ -707,7 +705,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			remove: Vec::new(),
 			add: ask.into_iter().collect(),
 		};
-		self.peers.get_mut(&peer).expect("just connected").asking.push_back(edit.clone());
+		self.peers
+			.get_mut(&peer)
+			.expect("just connected")
+			.asking
+			.push_back(edit.clone());
 		self.out.push((peer, Msg::Ask(edit)));
 		Ok(())
 	}
@@ -1012,7 +1014,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				let mut lost = Vec::new();
 				for prefix in &edit.remove {
 					peer.asked.remove(prefix);
-					lost.extend(peer.given.keys().filter(|(path, _)| super::prefix::within(path, prefix)).cloned());
+					lost.extend(
+						peer.given
+							.keys()
+							.filter(|(path, _)| super::prefix::within(path, prefix))
+							.cloned(),
+					);
 				}
 				for broadcast in lost {
 					self.peers.get_mut(&from).expect("a neighbour").given.remove(&broadcast);
@@ -2003,18 +2010,22 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// chooses among them: of the best precedence, available, and reached by a route.
 	pub fn ways(&self, broadcast: &Broadcast<I>) -> Vec<Way<N, A>> {
 		let closest = self.closest(broadcast).map(|(origin, _)| origin);
-		let top = (self.claims_of(broadcast)).map(|(_, claim)| precedence(&claim.item)).min();
+		let top = (self.claims_of(broadcast))
+			.map(|(_, claim)| precedence(&claim.item))
+			.min();
 		let mut ways = Vec::new();
 		for (origin, claim) in self.claims_of(broadcast) {
 			if Some(precedence(&claim.item)) != top || claim.unavailable {
 				continue;
 			}
 			// Every neighbour that gave this node its own claim serves it, so a reader
-			// already holds another copy when the one it follows closes.
+			// already holds another copy when the one it follows closes. Each leads to
+			// the same claimant, so none ranks ahead here: the reader takes the cheapest,
+			// and the newest of those, so a peer that reconnects serves the moment its
+			// new session gives the claim.
 			if origin == self.me
 				&& let Some(givers) = self.givers.get(broadcast)
 			{
-				let source = self.sources.get(broadcast);
 				for (peer, given) in givers {
 					self.visit();
 					if precedence(&given.item) != precedence(&claim.item) || given.unavailable {
@@ -2026,7 +2037,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						origin,
 						next: Next::Local(*peer),
 						claim: given,
-						closest: closest == Some(origin) && source == Some(peer),
+						closest: closest == Some(origin),
 					});
 				}
 				continue;

@@ -29,8 +29,8 @@ use crate::{Instance, Path};
 
 use super::{
 	Error, Id, Item, Kind, Metric,
-	relay::{self, Next, NodeId, Port, Role, Router},
 	prefix::ancestors,
+	relay::{self, Next, NodeId, Port, Role, Router},
 };
 
 /// One session, or one mount a session answers through.
@@ -267,7 +267,9 @@ impl Node {
 			router.connect(key, port).expect("a fresh key");
 			// The origin answers at once: its table is what it holds.
 			router.recv(key, Msg::Edited).expect("the origin was asked");
-			router.recv(key, Msg::Synced(Path::empty())).expect("the origin was asked");
+			router
+				.recv(key, Msg::Synced(Path::empty()))
+				.expect("the origin was asked");
 		}
 		router.drain();
 		Self {
@@ -450,6 +452,7 @@ impl Stream {
 	}
 
 	/// The next message to send the peer already queued, without waiting.
+	#[cfg(any(test, feature = "fuzz"))]
 	pub fn try_wire(&self) -> Option<Msg> {
 		// Checked under the read lock, which wakes no waiter when nothing is queued.
 		let empty = self.queue.read().wire.is_empty();
@@ -470,6 +473,7 @@ impl Stream {
 	}
 
 	/// The next change to what the session serves already queued, without waiting.
+	#[cfg(any(test, feature = "fuzz"))]
 	pub fn try_serve(&self) -> Option<Output> {
 		// Checked under the read lock, which wakes no waiter when nothing is queued.
 		let empty = self.queue.read().serve.is_empty();

@@ -144,7 +144,10 @@ async fn a_session_asks_for_what_its_readers_want() {
 	let Some(Msg::Ask(edit)) = stream.try_wire() else {
 		panic!("the node asks for the prefix");
 	};
-	assert_eq!((edit.remove.as_slice(), edit.add.as_slice()), (&[][..], &[room.clone()][..]));
+	assert_eq!(
+		(edit.remove.as_slice(), edit.add.as_slice()),
+		(&[][..], &[room.clone()][..])
+	);
 	let requests = routed.ask(edit);
 	assert_eq!(
 		requests,
@@ -331,6 +334,8 @@ async fn a_routing_neighbour_keeps_a_whole_permit() {
 	let (subscriber, _consumer) = forwarding();
 	let mut routed = routing(&subscriber);
 	routed.limit(&Permit::default()).unwrap();
+	// A grant that names everything confines nothing, as a relay's token for a peer does.
+	routed.limit(&limited("**")).unwrap();
 	let narrowed = routed.limit(&limited("live/**"));
 	assert!(matches!(narrowed, Err(Error::Unauthorized)), "{narrowed:?}");
 }

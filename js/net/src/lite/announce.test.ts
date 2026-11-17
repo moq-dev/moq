@@ -435,7 +435,8 @@ test("a lite-07 claim round-trips with its exact bytes", async () => {
 	}
 	// An own claim is the bytes every endpoint sends: no cost, the top priority, no chain.
 	const start = await bytes(
-		(w) => encodeAnnounceBroadcast(w, { status: "start", suffix: Path.empty(), instance: b, claim: ownClaim(0n) }, v),
+		(w) =>
+			encodeAnnounceBroadcast(w, { status: "start", suffix: Path.empty(), instance: b, claim: ownClaim(0n) }, v),
 		v,
 	);
 	expect([...start]).toEqual([0, 12, 0, 0, 0, 1, 0x62, 0, 0, 0, 0, 0, 0xff, 0]);
@@ -448,12 +449,15 @@ test("a lite-07 claim round-trips with its exact bytes", async () => {
 	await expect(
 		bytes((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from("x"), hops: [] }, v), v),
 	).rejects.toThrow();
-	await expect(bytes((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [] }, v), v)).rejects.toThrow();
+	await expect(
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [] }, v), v),
+	).rejects.toThrow();
 });
 
 test("a lite-07 claim refuses Node ID 0, unknown flags, and too long a chain", async () => {
 	const v = Version.DRAFT_07;
-	const change = (claim: Claim) => bytes((w) => encodeAnnounceBroadcast(w, { status: "change", id: 0n, claim }, v), v);
+	const change = (claim: Claim) =>
+		bytes((w) => encodeAnnounceBroadcast(w, { status: "change", id: 0n, claim }, v), v);
 	const full = Array.from({ length: CHAIN_MAX }, (_, i) => BigInt(i + 1));
 	expect(await roundTrip({ status: "change", id: 0n, claim: { ...ownClaim(0n), chain: full } }, v)).toMatchObject({
 		claim: { chain: full },

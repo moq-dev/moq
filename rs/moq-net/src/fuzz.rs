@@ -1088,7 +1088,9 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 				.start(Some(suffix))
 				.and_then(|suffix| suffix.ok_or(crate::Error::ProtocolViolation))
 				.map(|suffix| Announced::Start(suffix, claim.chain)),
-			lite::AnnounceBroadcast::Change { id, claim } => decoder.get(id).map(|_| Announced::Update(id, claim.chain)),
+			lite::AnnounceBroadcast::Change { id, claim } => {
+				decoder.get(id).map(|_| Announced::Update(id, claim.chain))
+			}
 			lite::AnnounceBroadcast::End { id, .. } => decoder.end(id).map(|_| Announced::End(id)),
 			lite::AnnounceBroadcast::Update { id, hops, .. } => {
 				decoder.get(id).map(|_| Announced::Update(id, hops.into_ids()))

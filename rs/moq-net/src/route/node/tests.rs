@@ -208,7 +208,14 @@ fn a_routed_claim_names_its_node() {
 	let relay = node.connect(1, port(Role::Routing(id(7)))).unwrap();
 	relay.recv(Msg::Edited).unwrap();
 	let offer = Offer {
-		path: [Hop { node: far, session: 0 }, Hop { node: id(7), session: 4 }].into(),
+		path: [
+			Hop { node: far, session: 0 },
+			Hop {
+				node: id(7),
+				session: 4,
+			},
+		]
+		.into(),
 		draining: false,
 		priority: i8::MAX,
 		cost: 3,
@@ -253,7 +260,11 @@ fn an_orphan_is_released_when_the_reader_lets_go() {
 	let left = Arc::new(AtomicU8::new(Left::HELD));
 	publisher.orphan(node.me(), &room, Box::new(Left(left.clone())));
 	drop(publisher);
-	assert_eq!(left.load(Ordering::SeqCst), Left::HELD, "the reader still shows the claim");
+	assert_eq!(
+		left.load(Ordering::SeqCst),
+		Left::HELD,
+		"the reader still shows the claim"
+	);
 
 	expire(&node, &clock);
 	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);

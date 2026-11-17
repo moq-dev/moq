@@ -15,8 +15,7 @@ use std::{
 };
 
 use crate::{
-	Error, Instance, Path,
-	lite,
+	Error, Instance, Path, lite,
 	route::{
 		self, NodeId,
 		node::{self, Change, Claim, Msg},
@@ -132,7 +131,11 @@ pub(in crate::lite) struct Routed {
 
 /// The absolute prefixes a session asks a peer that grants `permit` for, to serve
 /// `wants`: the wider of any two nested.
-fn asks(root: &Path, permit: &crate::auth::Permit, wants: &BTreeMap<Path, Option<crate::model::Snapshot>>) -> BTreeSet<Path> {
+fn asks(
+	root: &Path,
+	permit: &crate::auth::Permit,
+	wants: &BTreeMap<Path, Option<crate::model::Snapshot>>,
+) -> BTreeSet<Path> {
 	let granted = permit.granted_regions();
 	let mut relative: Vec<Path> = Vec::new();
 	for want in wants.keys() {
@@ -475,7 +478,10 @@ impl Routed {
 				};
 				let broadcast = wire.path.map(|path| (path, wire.instance));
 				if self.routing {
-					if let Some((_, claims)) = wire.origin.and_then(|origin| self.routes.get_mut(self.named.get(&origin)?)) {
+					if let Some((_, claims)) = wire
+						.origin
+						.and_then(|origin| self.routes.get_mut(self.named.get(&origin)?))
+					{
 						claims.remove(&id);
 					}
 					self.pending.push(Pending { id, broadcast, change });
@@ -486,7 +492,11 @@ impl Routed {
 			}
 			// The peer's own requests go to the half answering them, and lite-07 has its
 			// own form of a claim.
-			Wire::Request { .. } | Wire::Active { .. } | Wire::Ended { .. } | Wire::EndedId { .. } | Wire::Update { .. } => {
+			Wire::Request { .. }
+			| Wire::Active { .. }
+			| Wire::Ended { .. }
+			| Wire::EndedId { .. }
+			| Wire::Update { .. } => {
 				return Err(Error::ProtocolViolation);
 			}
 			Wire::Skipped => {}
@@ -548,7 +558,9 @@ impl Routed {
 			changes.push((broadcast, pending.change));
 		}
 		let floor = revision;
-		self.stream.recv(Msg::Claims { origin, changes, floor }).map_err(refused)
+		self.stream
+			.recv(Msg::Claims { origin, changes, floor })
+			.map_err(refused)
 	}
 
 	/// Tell the node's other sessions what the messages received changed.
@@ -742,9 +754,10 @@ fn admits(origin: &crate::origin::Producer, root: &Path, permit: &crate::auth::P
 			.is_some_and(|relative| permit.within_limit(relative.as_str()))
 }
 
-/// Whether `permit` trusts the peer with the whole tree: no region or limit confines it.
+/// Whether `permit` trusts the peer with the whole tree: neither grant confines it,
+/// whether by setting no patterns or by one that covers everything.
 pub(in crate::lite) fn whole(permit: &crate::auth::Permit) -> bool {
-	permit.regions().is_none() && permit.limit().is_none() && permit.granted_regions().is_none()
+	permit.covers_subtree("")
 }
 
 #[cfg(test)]

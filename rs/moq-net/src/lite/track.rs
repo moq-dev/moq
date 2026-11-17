@@ -522,7 +522,10 @@ mod test {
 		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, msg.node);
 
 		// No node is a Node ID of 0, which nothing follows.
-		let unnamed = Track { node: None, ..msg.clone() };
+		let unnamed = Track {
+			node: None,
+			..msg.clone()
+		};
 		let buf = unnamed.encode_bytes(Version::Lite07).unwrap();
 		assert_eq!(&buf[..], [10, 4, b'r', b'o', b'o', b'm', 0, 0, 0, 1, b'v']);
 		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, None);

@@ -288,7 +288,10 @@ async fn a_claim_without_a_route_goes_offline_after_the_debounce() {
 	assert_eq!(seen.iter().filter(|seen| withdrawn(seen)).count(), 1, "{seen:?}");
 	let ended = seen.last().unwrap();
 	assert!(withdrawn(ended), "{seen:?}");
-	assert!(ended.at >= DEBOUNCE && ended.at < DEBOUNCE + Duration::from_millis(100), "{seen:?}");
+	assert!(
+		ended.at >= DEBOUNCE && ended.at < DEBOUNCE + Duration::from_millis(100),
+		"{seen:?}"
+	);
 }
 
 /// `W` reaches `P` through `A`. `Y` and `Z` peer with `W` and with each other, and carry
@@ -395,4 +398,45 @@ async fn a_peer_that_stops_reading_is_closed() {
 	let after = kio::clock::now().saturating_duration_since(start);
 	assert!(closed.is_ok(), "the session closes");
 	assert!(after >= HOLD, "not before the hold: {after:?}");
+}
+
+/// `P` and `W` are endpoints, with no relay between them, and `W` reads `P`'s broadcast.
+/// `P` closes it: `W` is shown its end at once, never the claim unavailable and then
+/// offline, which only a lost claim is.
+#[kio::test]
+async fn an_endpoint_closing_its_broadcast_ends_it_for_its_reader() {
+	let version = lite07();
+	let [p, w] = [(), ()].map(|()| {
+		let (producer, driver) = origin::Producer::new(origin::Config::default());
+		support::harness::spawn(driver);
+		producer
+	});
+	let live = publish(&p, "live");
+	let track = live.broadcast().create_track("video", timed()).unwrap();
+	let _p_w = link(version, &p, &w).await;
+	quiesce().await;
+
+	let mut watch = record(&w, "live").await;
+	let broadcast = w.consume().request("live", None).await.unwrap();
+	let mut rx = read(broadcast.track("video").unwrap().subscribe(None).await.unwrap());
+	let mut group = track.append_next().unwrap();
+	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
+	group.finish().unwrap();
+	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
+
+	let start = kio::clock::now();
+	live.broadcast().close();
+	quiesce().await;
+	let seen = watch.seen(start);
+	assert!(
+		matches!(
+			seen[..],
+			[Seen {
+				kind: support::Kind::End,
+				available: true,
+				..
+			}]
+		),
+		"the reader is shown one end: {seen:?}"
+	);
 }

@@ -25,9 +25,6 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long any one read may take, in virtual time.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a lite-07 relay doubts the far end of a closed session.
-const DOUBT: Duration = Duration::from_secs(1);
-
 /// Short readers in each burst, re-reading the catalog and leaving.
 const BURST: usize = 4;
 
@@ -154,8 +151,6 @@ impl Topology {
 	async fn trigger(&mut self, trigger: Trigger) {
 		match trigger {
 			Trigger::Disconnect => abort(self.a_to_r.take().unwrap()),
-			// `P` is the far end of `A`'s closed session, but `B`'s route begins at `P`, so
-			// doubt about `P` does not keep `R` off it.
 			Trigger::Unannounce => abort(self.p_to_a.take().unwrap()),
 			Trigger::BetterRoute => {
 				let direct = link(self.version, &self.publisher, &self.subscriber, None).await;
@@ -166,9 +161,6 @@ impl Topology {
 				settle().await;
 				let a_to_r = link(self.version, &self.relay_a, &self.subscriber, None).await;
 				self.a_to_r = Some(a_to_r);
-				// `R` doubts `A` for a second after its session closed, so the routes the
-				// new session carries count only once that lifts.
-				kio::clock::sleep(DOUBT).await;
 			}
 		}
 		settle().await;

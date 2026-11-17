@@ -1664,13 +1664,7 @@ export class Producer implements Table {
 		return this.#serving(prefix, WireRoute.normalize(route), false, false, true);
 	}
 
-	#serving(
-		prefix: Path.Valid,
-		route: WireRoute,
-		originated: boolean,
-		publishes: boolean,
-		visible: boolean,
-	): Claim {
+	#serving(prefix: Path.Valid, route: WireRoute, originated: boolean, publishes: boolean, visible: boolean): Claim {
 		prefix = this.#scope.prefix(prefix);
 		// A route that names no instance serves one of its own, and a claim hands that one to its jobs.
 		const minted = route.instance === undefined;

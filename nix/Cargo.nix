@@ -19019,10 +19019,6 @@ rec {
             optional = true;
           }
           {
-            name = "data-encoding";
-            packageId = "data-encoding";
-          }
-          {
             name = "kio";
             packageId = "kio";
             optional = true;
@@ -19049,12 +19045,6 @@ rec {
             optional = true;
             usesDefaultFeatures = false;
             features = [ "std" ];
-          }
-          {
-            name = "serde";
-            packageId = "serde";
-            optional = true;
-            features = [ "derive" ];
           }
           {
             name = "thiserror";
@@ -19104,10 +19094,6 @@ rec {
             packageId = "serde_json";
           }
           {
-            name = "tempfile";
-            packageId = "tempfile";
-          }
-          {
             name = "tokio";
             packageId = "tokio";
             features = [
@@ -19126,10 +19112,7 @@ rec {
         features = {
           "async" = [ "kio?/async" ];
           "cpu" = [ "dep:rind" ];
-          "default" = [
-            "endpoint"
-            "e2ee"
-          ];
+          "default" = [ "e2ee" ];
           "e2ee" = [
             "cpu"
             "dep:base64"
@@ -19140,26 +19123,18 @@ rec {
             "dep:uuid"
             "dep:zeroize"
           ];
-          "endpoint" = [
-            "dep:moq-net"
-            "dep:rind"
-            "dep:zeroize"
-          ];
           "provider" = [
             "cpu"
             "dep:rind-rustls"
             "dep:rustls"
           ];
-          "serde" = [ "dep:serde" ];
         };
         resolvedDefaultFeatures = [
           "async"
           "cpu"
           "default"
           "e2ee"
-          "endpoint"
           "provider"
-          "serde"
         ];
       };
       "moq-ffi" = rec {
@@ -20145,11 +20120,6 @@ rec {
             name = "url";
             packageId = "url";
           }
-          {
-            name = "zeroize";
-            packageId = "zeroize";
-            features = [ "derive" ];
-          }
         ];
         devDependencies = [
           {
@@ -20763,12 +20733,6 @@ rec {
               "async"
               "client"
             ];
-          }
-          {
-            name = "moq-crypto";
-            packageId = "moq-crypto";
-            usesDefaultFeatures = false;
-            features = [ "endpoint" ];
           }
           {
             name = "moq-net";

@@ -313,7 +313,8 @@ impl Server {
 				client_setup.setup.path.clone(),
 				client_setup.setup.role,
 				// Lite-07 declares a Node ID where older versions declare a Hop ID.
-				(client_setup.setup.hop).or((client_setup.setup.node).and_then(|node| crate::route::node::hop(node.relay))),
+				(client_setup.setup.hop)
+					.or((client_setup.setup.node).and_then(|node| crate::route::node::hop(node.relay))),
 				client_setup.setup.token.clone(),
 				client_setup.setup.implementation.clone(),
 				PausedHandshake::LiteSetup {

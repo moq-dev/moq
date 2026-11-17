@@ -369,7 +369,10 @@ mod test {
 			id: 7,
 			broadcast: Path::from_static("room/alice"),
 			instance: None,
-			node: Some(crate::route::NodeId { relay: 0x7a3f, start: 9 }),
+			node: Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9,
+			}),
 			track: "audio".into(),
 			priority: -3,
 		};
@@ -377,7 +380,13 @@ mod test {
 		let (decoded, _) = Datagrams::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(decoded.id, 7);
 		assert_eq!(decoded.broadcast, request.broadcast);
-		assert_eq!(decoded.node, Some(crate::route::NodeId { relay: 0x7a3f, start: 9 }));
+		assert_eq!(
+			decoded.node,
+			Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9
+			})
+		);
 		assert_eq!(decoded.track, "audio");
 		assert_eq!(decoded.priority, -3);
 		assert!(matches!(

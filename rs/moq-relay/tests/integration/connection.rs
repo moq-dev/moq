@@ -135,27 +135,31 @@ async fn assert_refused(result: Result<moq_net::Session, moq_net::Error>) {
 	assert_eq!(moq_net::SessionError::from(&err), moq_net::SessionError::Unauthorized);
 }
 
-/// A session declaring the relay's own identity (its Hop ID, or its Node ID from
-/// lite-07) is the relay reaching itself, so it is refused instead of served with
-/// every route it sends dropped as reflected. A session declaring any other is served.
+/// A session declaring the relay's own Hop ID is the relay reaching itself, so it is
+/// refused instead of served with every route it sends dropped as reflected. A session
+/// declaring any other is served. From lite-07 a session that only publishes forwards
+/// nothing and declares no identity; `a_relay_dialing_itself_on_lite07_is_refused` covers
+/// the relay that dials itself as a peer.
 #[kio::test]
 async fn a_session_declaring_the_relays_own_hop_is_refused() {
 	for alpn in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
-		let version = alpn.parse().unwrap();
+		let version: moq_net::Version = alpn.parse().unwrap();
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::cluster();
-		let client = moq_net::Client::new().with_publisher(cluster.origin.consume());
-		let err = match connect(client, version, &cluster, &auth).await {
-			Ok(session) => kio::clock::timeout(TIMEOUT, session.closed())
-				.await
-				.expect("the relay must close a session declaring its own identity"),
-			Err(err) => err,
-		};
-		assert_eq!(
-			moq_net::SessionError::from(&err),
-			moq_net::SessionError::Internal,
-			"{alpn}"
-		);
+		if alpn != "moq-lite-07-wip" {
+			let client = moq_net::Client::new().with_publisher(cluster.origin.consume());
+			let err = match connect(client, version, &cluster, &auth).await {
+				Ok(session) => kio::clock::timeout(TIMEOUT, session.closed())
+					.await
+					.expect("the relay must close a session declaring its own identity"),
+				Err(err) => err,
+			};
+			assert_eq!(
+				moq_net::SessionError::from(&err),
+				moq_net::SessionError::Internal,
+				"{alpn}"
+			);
+		}
 
 		let client = moq_net::Client::new().with_publisher(sim::origin().consume());
 		let session = connect(client, version, &cluster, &auth)

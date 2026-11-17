@@ -1479,9 +1479,7 @@ impl RouteEntry {
 	/// appears in the chain. Hop 0 identifies nobody, so it is never excluded.
 	fn visible_to(&self, exclude: Option<Hop>) -> bool {
 		match exclude {
-			Some(peer) if peer != Hop::UNKNOWN => {
-				self.via != peer && !self.hops.contains(&peer)
-			}
+			Some(peer) if peer != Hop::UNKNOWN => self.via != peer && !self.hops.contains(&peer),
 			_ => true,
 		}
 	}
@@ -3915,18 +3913,36 @@ fn lock_own(own: &std::sync::Mutex<OwnClaims>) -> std::sync::MutexGuard<'_, OwnC
 
 impl OwnClaims {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut changed = Vec::new();
+		let mut open = true;
+		// One change to the table reaches both cursors, so neither is read without the
+		// other: a claim fed between the two would be filed as one that crossed a marked
+		// link, or as one that did not, for no longer than that, and a peer shown the
+		// difference sees the claim lost.
 		loop {
-			if let Poll::Ready(event) = self.downstream.poll_next(waiter) {
+			let mut progressed = false;
+			while open && let Poll::Ready(event) = self.downstream.poll_next(waiter) {
 				match event {
-					Some(event) => self.local(event),
-					None => return Poll::Ready(()),
+					Some(event) => changed.push(self.local(event)),
+					None => open = false,
 				}
-				continue;
+				progressed = true;
 			}
-			match ready!(self.routes.poll_next(waiter)) {
-				Some(event) => self.apply(event),
-				None => return Poll::Ready(()),
+			while open && let Poll::Ready(event) = self.routes.poll_next(waiter) {
+				match event {
+					Some(event) => changed.extend(self.apply(event)),
+					None => open = false,
+				}
+				progressed = true;
 			}
+			if !open || !progressed {
+				break;
+			}
+		}
+		self.feed(changed);
+		match open {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
 		}
 	}
 }
@@ -3935,15 +3951,19 @@ impl OwnClaims {
 	/// Feed the node every change the table already holds, so a stream registered next
 	/// sees them without waiting for the driver.
 	fn catch_up(&mut self) {
+		let mut changed = Vec::new();
 		while let Some(event) = self.downstream.try_next() {
-			self.local(event);
+			changed.push(self.local(event));
 		}
 		while let Some(event) = self.routes.try_next() {
-			self.apply(event);
+			changed.extend(self.apply(event));
 		}
+		self.feed(changed);
 	}
 
-	fn apply(&mut self, event: RouteEvent) {
+	/// The best route at a prefix changed: the prefix whose claim is to be fed again, if
+	/// one is left there.
+	fn apply(&mut self, event: RouteEvent) -> Option<Path> {
 		use crate::route::node::{Attr, Change, Claim};
 		let announce = match event {
 			RouteEvent {
@@ -3958,13 +3978,11 @@ impl OwnClaims {
 					};
 					self.node.own(false, (announce.prefix, instance), change);
 				}
-				return;
+				return None;
 			}
 		};
 		let route = announce.route;
-		let Some(instance) = route.instance else {
-			return;
-		};
+		let instance = route.instance?;
 		let claim = Claim {
 			item: Attr {
 				epoch: route.epoch,
@@ -3980,24 +3998,26 @@ impl OwnClaims {
 		};
 		// Only a route published here has crossed no node.
 		let learned = !route.hops.is_empty();
-		let was = self.best.insert(announce.prefix.clone(), (instance.clone(), claim, learned));
+		let was = self
+			.best
+			.insert(announce.prefix.clone(), (instance.clone(), claim, learned));
 		// Another instance took the prefix: the one it served before is gone.
 		if let Some((was, ..)) = was.filter(|(was, ..)| *was != instance) {
 			self.node.own(false, (announce.prefix.clone(), was), Change::Ended);
 		}
-		self.feed(announce.prefix);
+		Some(announce.prefix)
 	}
 
-	/// The route not learned upstream changed at a prefix: whether the claim there may
-	/// go to an upstream peer follows it.
-	fn local(&mut self, event: RouteEvent) {
+	/// The route not learned upstream changed at a prefix, which is returned: whether
+	/// the claim there may go to an upstream peer follows it.
+	fn local(&mut self, event: RouteEvent) -> Path {
 		match event {
 			RouteEvent {
 				kind: RouteKind::End | RouteKind::Offline,
 				announce,
 			} => {
 				self.local.remove(&announce.prefix);
-				self.feed(announce.prefix);
+				announce.prefix
 			}
 			RouteEvent {
 				kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
@@ -4006,20 +4026,25 @@ impl OwnClaims {
 				if let Some(instance) = announce.route.instance {
 					self.local.insert(announce.prefix.clone(), instance);
 				}
-				self.feed(announce.prefix);
+				announce.prefix
 			}
 		}
 	}
 
-	/// Feed the node the claim at `prefix`, marked unless a route not learned upstream
-	/// serves the same instance there, and unless this origin forwards what it learned.
-	fn feed(&self, prefix: Path) {
-		let Some((instance, claim, learned)) = self.best.get(&prefix) else {
-			return;
-		};
-		let marked = (*learned && !self.proxy) || self.local.get(&prefix) != Some(instance);
-		let change = crate::route::node::Change::Live(claim.clone());
-		self.node.own(marked, (prefix, instance.clone()), change);
+	/// Feed the node the claim at each of `prefixes`, marked unless a route not learned
+	/// upstream serves the same instance there, and unless this origin forwards what it
+	/// learned.
+	fn feed(&self, mut prefixes: Vec<Path>) {
+		prefixes.sort();
+		prefixes.dedup();
+		for prefix in prefixes {
+			let Some((instance, claim, learned)) = self.best.get(&prefix) else {
+				continue;
+			};
+			let marked = (*learned && !self.proxy) || self.local.get(&prefix) != Some(instance);
+			let change = crate::route::node::Change::Live(claim.clone());
+			self.node.own(marked, (prefix, instance.clone()), change);
+		}
 	}
 }
 
@@ -8683,8 +8708,7 @@ impl Routes {
 	/// than not heard yet. A session joining the scope later, such as a reconnect,
 	/// takes this back until it syncs too; routes published on this origin
 	/// itself never wait. On moq-lite-07 a session syncs only once this origin
-	/// shows every route its peer sent, so a redial waits out the doubt a closed
-	/// session left on that peer.
+	/// shows every claim its peer sent.
 	///
 	/// Synced is relative to the session's peer, never global: a relay answers with
 	/// what it holds without waiting on its own upstreams. Versions that cannot mark
@@ -10608,7 +10632,10 @@ mod tests {
 		let _native = producer
 			.announce(
 				"room",
-				RouteInfo::new().with_hops(hops(&[10])).with_cost(5).with_node(Some(node_id(10))),
+				RouteInfo::new()
+					.with_hops(hops(&[10]))
+					.with_cost(5)
+					.with_node(Some(node_id(10))),
 			)
 			.unwrap();
 		announced.expect_next_active("room").await;
@@ -16508,7 +16535,9 @@ mod tests {
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
 		let changes = route_changes(&stream);
 		assert!(
-			changes.iter().any(|(path, live)| path.as_str() == "room/alice" && !live),
+			changes
+				.iter()
+				.any(|(path, live)| path.as_str() == "room/alice" && !live),
 			"the stream is told the withdrawal: {changes:?}"
 		);
 	}

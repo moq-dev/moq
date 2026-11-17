@@ -139,9 +139,9 @@ hidden names work exactly as before.
   timeline. A relay drops its copy of the old stream, so a new subscriber never
   sees its cached groups.
 
-The instance, the epoch, and the restart message travel on moq-lite 07, which
-is opt-in. `ANNOUNCE_START` and `ANNOUNCE_RESTART` carry the instance and
-epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
+The instance and the epoch travel on moq-lite 07, which
+is opt-in. `ANNOUNCE_START` carries the instance and epoch, `ANNOUNCE_UPDATE`
+a higher epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
 pin. A restart onto another instance, or a higher epoch of the same one, is
 advertised before the old one is withdrawn, so the path is never absent. Older
 moq-lite versions and moq-transport carry no instance, so the receiving session

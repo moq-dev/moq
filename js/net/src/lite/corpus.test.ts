@@ -80,7 +80,11 @@ test("the corpus has cases", () => {
 const ROUTING = new Set([3, 7, 8, 9, 10]);
 
 function routing(c: Case): boolean {
-	return c.message === "announce" && version(c.version) === Version.DRAFT_07 && ROUTING.has(Number.parseInt(c.hex.slice(0, 2), 16));
+	return (
+		c.message === "announce" &&
+		version(c.version) === Version.DRAFT_07 &&
+		ROUTING.has(Number.parseInt(c.hex.slice(0, 2), 16))
+	);
 }
 
 for (const c of cases) {

@@ -271,9 +271,6 @@ needs() {
     return 1
 }
 
-# The browsers whose tabs prove their route key to the relay (route-key.ts).
-ROUTE_KEY_ENGINES=(chromium firefox)
-
 # True if any browser/native JS client is in play (they share one bun install).
 needs_js() {
     needs js || needs js-native || needs js-native-node || needs js-native-bun
@@ -512,9 +509,6 @@ plan_pass() {
         fi
         if [[ "$VERSION" == auto ]] && needs js; then
             record "not run" case="refused session" subscriber=js
-            for engine in "${ROUTE_KEY_ENGINES[@]}"; do
-                record "not run" case="route key $engine" subscriber=js version=moq-lite-07-wip
-            done
         fi
     fi
     [[ "$IN_TREE" -eq 1 ]] || return 0
@@ -987,10 +981,9 @@ fi
 # info stays the base, ahead of the inherited RUST_LOG so its own level still wins: a filter naming
 # only targets, such as quinn=debug, would otherwise silence every other warning, such as why the
 # relay refused a request. Connection spans and clean closes must survive an
-# inherited warn-only filter. The route key lane reads the relay's debug line for each verified proof,
-# and the idle-out check its upstream subscribe and fetch starts.
+# inherited warn-only filter. The idle-out check reads its upstream subscribe and fetch starts.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
-    "RUST_LOG=info,${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::setup=debug,moq_net::lite::subscriber=debug" \
+    "RUST_LOG=info,${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::subscriber=debug" \
     "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -2353,41 +2346,6 @@ run_matrix() {
         fi
     fi
 
-    # Each browser's lite-07 session proves its route key when that build can, and the relay
-    # verifies it. A build the lite-07 cut waits on skips, except under CI_STRICT (release PRs);
-    # route-key.ts passes one that connects unproven by design. The relay reads no version from
-    # the tab beyond lite-07's, so one pass covers it.
-    if [[ "$VERSION" == auto ]] && needs js; then
-        echo "=== browser route key ==="
-        local engine status
-        for engine in "${ROUTE_KEY_ENGINES[@]}"; do
-            log="$HARNESS_RUN/route-key-$engine.log"
-            if is_broken js; then
-                echo "  FAIL  route key $engine (browser client unavailable)"
-                record fail case="route key $engine" subscriber=js version=moq-lite-07-wip detail="browser client unavailable"
-                overall=1
-                continue
-            fi
-            started=$SECONDS
-            status=0
-            (cd "$CLIENTS/js" && bun route-key.ts --url "$(token_url --subscribe "route-key-$$")" \
-                --relay-log "$HARNESS_RUN/relay.log" --engine "$engine" --timeout "$TIMEOUT") >"$log" 2>&1 || status=$?
-            grep -m1 '^BROWSER ' "$log" | sed 's/^BROWSER /  /' || true
-            local cell=(case="route key $engine" subscriber=js version=moq-lite-07-wip seconds=$((SECONDS - started)) log="$log")
-            if [[ "$status" -eq 0 ]]; then
-                echo "  PASS  route key $engine ($((SECONDS - started))s)"
-                record pass "${cell[@]}"
-            elif [[ "$status" -eq 77 && -z "${CI_STRICT:-}" ]]; then
-                echo "  SKIP  route key $engine: $(grep -m1 '^SKIP ' "$log" | cut -c6-)"
-                record skip "${cell[@]}" detail="$(grep -m1 '^SKIP ' "$log" | cut -c6-)"
-            else
-                echo "  FAIL  route key $engine ($((SECONDS - started))s)"
-                record fail "${cell[@]}" detail="$(grep -m1 '^\(SKIP\|FAIL\) ' "$log" || echo "route-key.ts exited $status")"
-                sed 's/^/        /' "$log" >&2 || true
-                overall=1
-            fi
-        done
-    fi
 }
 
 # A publisher and fresh readers exercise on-demand claims through this run's relay.

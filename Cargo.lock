@@ -4656,7 +4656,6 @@ dependencies = [
  "tracing",
  "url",
  "workspace-hack",
- "zeroize",
 ]
 
 [[package]]

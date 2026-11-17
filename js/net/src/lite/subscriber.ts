@@ -1318,10 +1318,7 @@ export class Subscriber {
 			// Gave up, perhaps handed a stream as it did: the catch below hands back any stream.
 			if (!stream || cut.aborted) throw cut.reason;
 			await stream.writer.u53(StreamId.Tracks);
-			await new TracksMessage(broadcast, consumed.instance).encode(
-				stream.writer,
-				this.version,
-			);
+			await new TracksMessage(broadcast, consumed.instance).encode(stream.writer, this.version);
 			let synced = false;
 			const answering = consumed.answering;
 			let unanswered = answering ? AbortSignal.any([stop, answering]) : stop;

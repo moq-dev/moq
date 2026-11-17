@@ -165,10 +165,7 @@ test("lite-07 SETUP sends no Node ID and checks the one it is sent", async () =>
 });
 
 test("SETUP with implementation round-trips", async () => {
-	const got = await roundTrip(
-		new Setup({ implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }),
-		Version.DRAFT_07,
-	);
+	const got = await roundTrip(new Setup({ implementation: "moq-ffi/0.4.12 moq-net-rs/0.3.10" }), Version.DRAFT_07);
 	expect(got.implementation).toBe("moq-ffi/0.4.12 moq-net-rs/0.3.10");
 });
 

@@ -125,8 +125,7 @@ impl AnnounceDecoder {
 		self.live.next.saturating_sub(1)
 	}
 
-	/// The suffix of the live id an ANNOUNCE_UPDATE or ANNOUNCE_RESTART names, which
-	/// stays live. An id whose path was refused has none.
+	/// The suffix of the live id an ANNOUNCE_UPDATE names, which stays live. An id whose path was refused has none.
 	pub fn get(&self, id: u64) -> Result<Path, Error> {
 		self.live.suffix(id).cloned()
 	}
@@ -249,7 +248,6 @@ impl AnnounceEncoder {
 		self.live.suffixes.insert(id, suffix);
 		(Some(id), path)
 	}
-
 
 	/// An ANNOUNCE_END for a live `id`.
 	pub fn end(&mut self, id: u64) {

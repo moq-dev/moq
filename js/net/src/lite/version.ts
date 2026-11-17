@@ -417,7 +417,6 @@ export function keepsSubscribeOpen(version: Version): boolean {
 	return hasRanges(version);
 }
 
-
 /** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
  * the instance they pin. Added in lite-07. Older versions carry nothing, so the receiving session
  * mints an instance for each announcement. */
@@ -693,7 +692,6 @@ export function hasRoutes(version: Version): boolean {
 			return true;
 	}
 }
-
 
 /** Whether SETUP recognizes the Implementation parameter, added in lite-07. */
 export function hasImplementation(version: Version): boolean {

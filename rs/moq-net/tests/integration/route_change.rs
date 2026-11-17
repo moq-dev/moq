@@ -455,7 +455,8 @@ async fn route_dies_across_instances(version: &str, trigger: Trigger) {
 	}
 
 	// Inspect the downstream cursor, not R's model: older wires carry end/start,
-	// while lite-07 carries ANNOUNCE_RESTART. An in-place update must fail here.
+	// while lite-07 starts the next instance before ending the last. An in-place
+	// update must fail here.
 	if version.alpn() == "moq-lite-07-wip" {
 		match announced.next().await.expect("announced") {
 			origin::RouteEvent {
@@ -599,8 +600,7 @@ macro_rules! route_change_tests {
 					run(Trigger::Disconnect, Position::MidGroup).await;
 				}
 
-				/// `B`'s route begins at `P`, the far end of the closed link, so doubt about
-				/// `P` does not keep `R` off it: the subscription moves at once.
+				/// `B` still reaches `P`, so the subscription moves at once.
 				#[kio::test]
 				async fn unannounce_between_groups() {
 					run(Trigger::Unannounce, Position::BetweenGroups).await;

@@ -69,12 +69,12 @@ These land with the next breaking release.
   HLS exporter numbers segments on from the media tracks themselves; Rust
   publishers and `@moq/publish` declare it. Neither side reads the other's
   shape, so upgrade HLS exporters and their publishers together.
-- **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
-  instance, or a higher epoch of the same one, now serves the prefix. lite-06's
-  `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it always meant. Elsewhere,
-  a restart is still an end then a start.
+- **Announce restarts.** On moq-lite 07 another instance at a path starts
+  before the one it replaces ends, and `ANNOUNCE_UPDATE` carries a higher epoch
+  of the same one. lite-06's `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as
+  it always meant. Elsewhere, a restart is still an end then a start.
 - **Publisher instances ride the route.** moq-lite 07 carries the instance and
-  epoch after the path in `ANNOUNCE_START` and `ANNOUNCE_RESTART`, and the
+  epoch after the path in `ANNOUNCE_START`, and the
   pinned instance in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
   carry none, so the receiving session mints an instance per announcement:
   default lite-06 sessions, including cluster GOAWAY redials, lose seamless

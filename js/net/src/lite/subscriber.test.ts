@@ -2583,11 +2583,7 @@ async function unpinnedPool(version: Version, streams: FakeStream[], announced: 
 	const path = Path.from("pool");
 	await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
 	await send((writer) =>
-		encodeAnnounceBroadcast(
-			writer,
-			{ status: "active", suffix: path, hops: [PUBLISHER_A] },
-			version,
-		),
+		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
 	);
 	await announced.next();
 	const withdraw = async () => {
@@ -2602,11 +2598,7 @@ async function unpinnedPool(version: Version, streams: FakeStream[], announced: 
 	};
 	const announce = async () => {
 		await send((writer) =>
-			encodeAnnounceBroadcast(
-				writer,
-				{ status: "active", suffix: path, hops: [PUBLISHER_B] },
-				version,
-			),
+			encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
 		);
 		await announced.next();
 	};
@@ -2904,11 +2896,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 		await new AnnounceOk(PEER, 0).encode(peer, version);
 		const pool = Path.from("pool");
 		const job = Path.from("pool/job");
-		await encodeAnnounceBroadcast(
-			peer,
-			{ status: "active", suffix: pool, hops: [PUBLISHER_A] },
-			version,
-		);
+		await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, version);
 		await announced.next();
 		const held = subscriber.consume(job);
 		const pending = held
@@ -2917,11 +2905,7 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])(
 			.catch((err: unknown) => err);
 		await opened(1);
 		await streams[1].reading;
-		await encodeAnnounceBroadcast(
-			peer,
-			{ status: "active", suffix: job, hops: [PUBLISHER_B] },
-			version,
-		);
+		await encodeAnnounceBroadcast(peer, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version);
 		await announced.next();
 		expect(await pending).toBeInstanceOf(Error);
 		await streams[1].aborted;

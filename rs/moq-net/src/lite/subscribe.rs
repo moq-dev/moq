@@ -1582,8 +1582,17 @@ mod test {
 	#[test]
 	fn node_roundtrips_only_on_lite07() {
 		let mut msg = subscribe_sample();
-		msg.node = Some(crate::route::NodeId { relay: 0x7a3f, start: 9 });
-		assert_eq!(roundtrip(&msg, Version::Lite07).node, Some(crate::route::NodeId { relay: 0x7a3f, start: 9 }));
+		msg.node = Some(crate::route::NodeId {
+			relay: 0x7a3f,
+			start: 9,
+		});
+		assert_eq!(
+			roundtrip(&msg, Version::Lite07).node,
+			Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9
+			})
+		);
 		assert_eq!(roundtrip(&msg, Version::Lite06).node, None);
 	}
 

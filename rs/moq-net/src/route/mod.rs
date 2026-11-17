@@ -15,9 +15,9 @@
 )]
 
 pub(crate) mod node;
+mod prefix;
 mod reader;
 pub(crate) mod relay;
-mod prefix;
 
 #[cfg(test)]
 mod tests;
@@ -27,9 +27,9 @@ use std::fmt;
 use crate::Path;
 
 pub(crate) use node::Node;
-pub(crate) use relay::NodeId;
 #[cfg(feature = "async")]
 pub(crate) use prefix::{ancestors, within};
+pub(crate) use relay::NodeId;
 
 /// A claim's attributes as the router carries them down a stream.
 pub(crate) trait Item: Clone + Eq + fmt::Debug {

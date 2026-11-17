@@ -890,4 +890,3 @@ impl<'a> Message<'a> for AnnounceOk {
 		w.varint(self.active)
 	}
 }
-

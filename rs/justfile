@@ -18,17 +18,12 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuz
 default:
     just check
 
-# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
+# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/failover/FailoverChain.tla`.
 # Pass `-config rs/<path>.cfg` for a config not named after the spec, and
 # `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
 # sh/tlc.py says how a run shares the host.
 tla spec *args:
     python3 sh/tlc.py rs/{{ spec }} {{ args }}
-
-# Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
-# Pass `-D=<VARIANT>` for a variant the model defines.
-tamarin spec *args:
-    nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover --prove {{ args }} rs/{{ spec }}
 
 # Default features for the selected packages; `features` covers the feature
 # matrix nightly and on release PRs. No `cargo check` pass: clippy is a

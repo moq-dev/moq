@@ -10,7 +10,7 @@
 //! messages each session sent, which carry every ROUTE, DEAD, and claim batch.
 //!
 //! The mesh fixtures port moq-dev/moq#4644's live-graph withdrawal and failover tests,
-//! which ran on lite-06 under a hold-down, to the path rule.
+//! which ran on lite-06 under a hold-down, to lite-07's route rule.
 
 use crate::mesh_withdraw::{PRODUCTION, PRODUCTION_LATENCY_MS};
 use crate::path_routes::{DEBOUNCE, HOLD, lite07};
@@ -597,8 +597,7 @@ async fn live_mesh_withdraw_retracts_once_without_latency() {
 /// again with at most one retraction and one re-announcement each (no hunting), and every
 /// reader on a relay whose route stayed usable gets every frame, once and in order.
 ///
-/// Every route left begins at the publisher's relay, the far end of each closed link, so
-/// doubt keeps no relay off one. A relay whose own link closed moves onto a neighbour's
+/// A relay whose own link closed moves at once onto a neighbour's
 /// direct route, which may be stale too, until the news arrives. Measured over the five
 /// publishers: 18 relays retracted and announced again, most within milliseconds, and the
 /// readers on 3 of them lost their subscription.
@@ -951,7 +950,7 @@ async fn residual_two_depths_of_one_claim_subscribe_twice() {
 /// `P` publishes `live` through `X` to `A` and through `Y` to `B`, and through `C` to
 /// both at a higher cost. `A` and `B` link to each other cheaply, at 50 ms each way, so
 /// each prefers the other's route over `C`'s. Two unrelated links close at once, `X`'s to
-/// `A` and `Y`'s to `B`: each relay doubts only its own lost hop, so `A` moves onto `B`'s
+/// `A` and `Y`'s to `B`: each relay knows only its own lost hop, so `A` moves onto `B`'s
 /// direct route and `B` onto `A`'s, both stale, and the routes loop until the news
 /// crosses. Readers on `A` and `B` follow `video` from before the cut, and readers asking
 /// for `audio`, which nobody read yet, join while the loop stands.

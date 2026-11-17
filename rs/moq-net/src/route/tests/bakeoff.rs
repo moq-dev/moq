@@ -224,10 +224,8 @@ pub(super) fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 	// A mesh too small for its gateways is left out.
 	shapes.extend(
 		[
-			grants("two_meshes_one_grant", joined(2, relays / 2, 1, false, publishers),
-			),
-			grants("two_meshes_two_grants", joined(2, relays / 2, 2, false, publishers),
-			),
+			grants("two_meshes_one_grant", joined(2, relays / 2, 1, false, publishers)),
+			grants("two_meshes_two_grants", joined(2, relays / 2, 2, false, publishers)),
 			grants("three_meshes_chain", joined(3, relays / 3, 1, false, publishers)),
 			grants("three_meshes_ring", joined(3, relays / 3, 1, true, publishers)),
 		]
@@ -604,10 +602,7 @@ fn a_relay_with_no_claim_offers_no_route() {
 		let all = held(Arm::TUNED, publishers);
 		for arm in [Arm::LEAN, Arm::RELAY] {
 			let lean = held(arm, publishers);
-			println!(
-				"{publishers} publishers: {all:?} {lean:?} under {}",
-				arm.name()
-			);
+			println!("{publishers} publishers: {all:?} {lean:?} under {}", arm.name());
 			assert!(
 				lean.offers * 15 <= all.offers * publishers.min(9) + all.offers,
 				"{publishers} under {}",

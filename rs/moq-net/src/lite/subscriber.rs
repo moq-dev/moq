@@ -10124,12 +10124,7 @@ mod tests {
 	async fn a_lite07_peer_keeps_one_announce_stream() {
 		const VERSION: Version = Version::Lite07;
 		use crate::lite::test_transport::{Close, ScriptedSession};
-		let script = || {
-			announce_script(
-				VERSION,
-				&[&announce_ok(VERSION, 0), &announce_start(VERSION, "room")],
-			)
-		};
+		let script = || announce_script(VERSION, &[&announce_ok(VERSION, 0), &announce_start(VERSION, "room")]);
 		let waiter = kio::Waiter::noop();
 
 		let session = ScriptedSession::new(script());
@@ -10192,7 +10187,10 @@ mod tests {
 			.encode(w, VERSION)
 			.unwrap()
 		};
-		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &part, &announce_start(VERSION, "room")]);
+		let script = announce_script(
+			VERSION,
+			&[&announce_ok(VERSION, 0), &part, &announce_start(VERSION, "room")],
+		);
 		let (mut routes, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let result = routes.poll(&kio::Waiter::noop());
 		assert!(

@@ -69,8 +69,6 @@ class FakeSession {
 	/** Called as the forwarder closes a request, before its stream can wind down. */
 	onClose?: () => void;
 
-
-
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
 

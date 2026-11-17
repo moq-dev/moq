@@ -43,8 +43,6 @@ const HELD: [(usize, usize); 4] = [(10, 10), (10_000, 10), (10, 100), (10_000, 1
 /// `(prefixes, claims)` shapes for a node following one origin per prefix.
 const FOLLOWED: [(usize, usize); 4] = [(16, 1), (1_024, 1), (16, 16), (1_024, 16)];
 
-
-
 /// `(claims, lag)` shapes for a relay hearing a stream that lags another.
 const LAGGING: [(usize, usize); 4] = [(100, 1), (10_000, 1), (100, 100), (10_000, 10_000)];
 
