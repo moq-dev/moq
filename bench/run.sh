@@ -74,14 +74,23 @@ case $MODE in
         CRITERION_CARGO_ARGS=()
         CRITERION_FILTER_ARGS=()
         parsing_filters=false
+        previous=
         for argument in "${@:2}"; do
             if [[ $argument == -- && $parsing_filters == false ]]; then
                 parsing_filters=true
             elif [[ $parsing_filters == true ]]; then
                 CRITERION_FILTER_ARGS+=("$argument")
             else
+                # The base build matches each package against the base's names, so it takes
+                # only a name or a glob, as a separate argument.
+                if [[ -n $BASE ]] && { [[ $argument == --package=* || $argument == -p?* ]] ||
+                    [[ ($previous == -p || $previous == --package) && $argument == *[@:#]* ]]; }; then
+                    echo "--criterion takes a package as -p NAME or a glob, not $argument" >&2
+                    exit 2
+                fi
                 CRITERION_CARGO_ARGS+=("$argument")
             fi
+            previous=$argument
         done
         ;;
     --audio)

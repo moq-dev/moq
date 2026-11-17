@@ -135,6 +135,20 @@ class Builds(unittest.TestCase):
                     self.assertNotEqual((evidence / "criterion-base.targets").read_text(), "")
                 self.assertEqual(len(run("git", "worktree", "list", "--porcelain").stdout.split("worktree ")) - 1, 1)
 
+    def test_base_rejects_a_package_it_cannot_match(self):
+        # A version or URL spec would match no base name, so its existing benches would pass as new.
+        for args in (["-p", "moq-relay@0.0.0"], ["--package=moq-relay"], ["-pmoq-relay"]):
+            with self.subTest(args=args):
+                result = subprocess.run(
+                    ["bash", "bench/run.sh", "--criterion", *args],
+                    cwd=ROOT,
+                    env=dict(os.environ, BENCH_BASE="HEAD"),
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("takes a package as -p NAME or a glob", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
