@@ -4707,7 +4707,7 @@ impl Producer {
 	}
 
 	/// Forget what was given up in `groups`, as the cache pool's expiry or debt does.
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn forget_drops(&self, groups: ops::Range<u64>) {
 		self.modify().unwrap().forget_drops(groups);
 	}
