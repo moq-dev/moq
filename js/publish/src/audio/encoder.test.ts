@@ -634,7 +634,7 @@ test("muting sends nothing and marks where the audio ends, keeping the rendition
 	expect(FakeAudioEncoder.probes).toHaveLength(1);
 });
 
-// With `capture="release"` a mute closes the microphone, taking its format away. The rendition stays
+// With `idle="release"` a mute closes the microphone, taking its format away. The rendition stays
 // advertised, still enabled, through the mute. Once unmuted it is disabled until the microphone
 // reopens, so one that never does isn't advertised as sending.
 test("a muted rendition keeps its config enabled while its capture is released", async () => {

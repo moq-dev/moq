@@ -176,7 +176,7 @@ async function measure(
 			for (const player of players) {
 				if (ranges(player) !== JSON.stringify([{ start: newest, end: newest }]))
 					throw new Error(`skip left ${ranges(player)}`);
-				if (player.received.slice(0, groups).some((group) => !group.isClosed))
+				if (player.received.slice(0, groups).some((group) => group.closed.peek() === undefined))
 					throw new Error("skipped group left open");
 				const read = await player.consumer.next();
 				if (read?.kind !== "frame" || read.frame.timestamp.asMicros() !== timestamp(groups, 0))

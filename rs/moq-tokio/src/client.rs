@@ -150,9 +150,15 @@ impl Client {
 		policy.timeout = resolved.timeout;
 		policy.pinned = !config.tls.fingerprint.is_empty();
 
-		let mut moq = moq_net::Client::new()
-			.with_versions(versions.clone())
-			.with_extensions(config.extensions);
+		let mut moq = moq_net::Client::new().with_versions(versions.clone());
+		#[cfg(feature = "relay")]
+		{
+			moq = moq.with_ietf(config.ietf);
+		}
+		#[cfg(feature = "test-support")]
+		{
+			moq = moq.with_solicit(!config.decline_solicit);
+		}
 		if let Some(implementation) = &config.implementation {
 			moq = moq.with_implementation(implementation);
 		}

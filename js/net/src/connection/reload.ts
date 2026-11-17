@@ -93,13 +93,13 @@ export type ReloadDelay = {
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
  * {@link connect} directly when you have a session to hand over. Every attempt advertises
- * the default {@link ConnectProps.implementation} and {@link ConnectProps.extensions}.
+ * the default {@link ConnectProps.implementation}.
  *
  * @internal
  */
 export type ReloadProps = Omit<
 	ConnectProps,
-	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens" | "viewers"
+	"url" | "signal" | "transport" | "implementation" | "tokens" | "viewers"
 > & {
 	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
 	tokens?: readonly string[] | Signal<readonly string[]>;
@@ -247,7 +247,7 @@ export class Reload {
 	 * its rate rather than encode at zero. It is sampled from the transport only
 	 * while a reservation reads it, so the first reservation after none waits one
 	 * snapshot for its slice. It stays `undefined` on a transport that cannot
-	 * report one: the WebSocket fallback, WebRTC, WebTransport without
+	 * report one: the WebSocket fallback, WebTransport without
 	 * `getStats()`, or Safari's stub, which reads as none.
 	 */
 	readonly allocator: Allocator;

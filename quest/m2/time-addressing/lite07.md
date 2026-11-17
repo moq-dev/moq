@@ -138,7 +138,7 @@ is free only until lite-07 freezes:
 - ✅ SUBSCRIBE_DROP names a span and carries no group count (rejected: a
   count, which would also have let SUBSCRIBE_SKIP become a drop with a
   count of 0). Today's `Group Count` is a count of keys, so it becomes the
-  span's end. [Group drops](/quest/m2/group-drops.md) reports the span.
+  span's end. `track::Ordered`'s `Gap` reports the span.
 
 Recommendations for the same PR, not decided:
 
@@ -188,5 +188,4 @@ TRACKS_ADD change, and the Padding stream and datagram types go.
 ## Related
 
 - [YIELDED deferred](/quest/m2/yield-defer.md) - removes continuations, the last use of GROUP's `Frame Start`
-- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - reads the spans SUBSCRIBE_DROP names
 - [Refresh a track](/quest/m2/refresh-interval.md) - raises the `Wanted Group` this turns into a start time

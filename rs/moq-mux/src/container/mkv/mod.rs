@@ -63,6 +63,14 @@ pub enum Error {
 	#[error("invalid Block payload")]
 	InvalidBlock,
 
+	/// A laced Block's lace sizes do not fit its payload.
+	#[error("invalid MKV lacing")]
+	InvalidLacing,
+
+	/// A laced Block's track has no DefaultDuration to time the frames after its first.
+	#[error("MKV lacing requires a positive TrackEntry DefaultDuration")]
+	LacingDuration,
+
 	/// The block timestamp precedes the start of the timeline.
 	#[error("negative block timestamp")]
 	NegativeBlockTimestamp,
