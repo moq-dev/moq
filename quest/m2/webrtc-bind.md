@@ -30,7 +30,7 @@ Facts found by the audit:
   on the first accept (`:170`, `:192`-`:196`), "so `Server::new` can stay
   synchronous".
 - The CLI logs "serving WebRTC" and calls `notify_ready()` with no UDP
-  socket bound (`rs/moq-cli/src/rtc.rs:144`-`:147`), so a bad `--udp-bind`
+  socket bound (`rs/moq-cli/src/webrtc.rs:144`-`:147`), so a bad `--udp-bind`
   surfaces as an HTTP error on the first WHIP or WHEP request.
 - `server::Config` and `server::Socket` derive `Clone`
   (`rs/moq-webrtc/src/server/mod.rs:129`, `:149`), and `Socket` has one
@@ -46,7 +46,7 @@ Facts found by the audit:
   (`rs/moq-webrtc/src/client/mod.rs:21`) is read at
   `client/whip.rs:28` and `client/whep.rs:27` and set by nothing: both CLI
   call sites pass `client::Config::default()`
-  (`rs/moq-cli/src/rtc.rs:103`, `:125`).
+  (`rs/moq-cli/src/webrtc.rs:103`, `:125`).
 - `moq-webrtc` has never been published under this name (the API diff marks
   it new), so all of this is free until the cut.
 
@@ -64,14 +64,11 @@ For the PR:
 - An advertised candidate is sent exactly as given. Keep the existing
   default for an unspecified bind address (loopback with the bound port).
   Test that a `--public-addr` with its own port reaches the SDP answer.
-- Fix the flag's `requires = "rtc-listen"`
-  (`rs/moq-cli/src/rtc.rs:34`), which names no flag.
 - Recommended, not decided by the maintainer: record the crate's version
   line in the PR. The manifest reads `0.3.12`
   (`rs/moq-webrtc/Cargo.toml:8`), so `just version 0.22.0` moves it onto the
   shared line; that is right, since published moq-cli depends on it.
-- Update `doc/bin/rtc.md` (renamed by [the gateway alignment](/quest/m2/gateway-align.md))
-  and `rs/moq-webrtc/MIGRATE.md`.
+- Update `doc/bin/webrtc.md` and `rs/moq-webrtc/MIGRATE.md`.
 
 Public API: moq-webrtc breaks (`Server::new` becomes `Server::bind`, the
 socket's place, `client::Config::ice_candidates`), free while unpublished.
@@ -79,6 +76,4 @@ CLI: `--public-addr` now advertises its port. Wire: none.
 
 ## Related
 
-- [The gateways admit a session the same way](/quest/m2/gateway-align.md) - changes the same crate's request and client names, and renames the CLI endpoint
-- [moq-webrtc runs on upstream str0m](/quest/m2/str0m-upstream.md) - swaps the stack under the same session code
 - [A WebRTC feed on the shared port](/quest/m3/one-port/rtc-feed.md) - adds the second socket source this leaves room for

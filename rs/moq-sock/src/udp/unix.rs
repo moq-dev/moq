@@ -14,10 +14,10 @@ use std::{
 
 use socket2::SockRef;
 
-use super::{EcnCodepoint, RecvMeta, Transmit, TransportError, UdpSockRef, cmsg};
+use super::{EcnCodepoint, RecvMeta, Transmit, UdpSockRef, cmsg};
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
-use super::linux::{LinuxError, gso};
+use super::linux::gso;
 
 /// Tokio-compatible UDP socket with some useful specializations
 ///
@@ -36,9 +36,9 @@ pub struct UdpSocketState {
 	/// which is not supported on Linux <3.13 and results in not sending the UDP packet at all.
 	sendmsg_einval: AtomicBool,
 
-	/// Cached `SO_SNDBUF`.
+	/// `SO_SNDBUF` once [`Self::new`] raised it to the safe minimum.
 	#[cfg(apple)]
-	send_buffer_size: AtomicUsize,
+	send_buffer_size: usize,
 }
 
 impl UdpSocketState {
@@ -153,7 +153,7 @@ impl UdpSocketState {
 			may_fragment,
 			sendmsg_einval: AtomicBool::new(false),
 			#[cfg(apple)]
-			send_buffer_size: AtomicUsize::new(io.send_buffer_size().unwrap_or(usize::MAX)),
+			send_buffer_size: io.send_buffer_size().unwrap_or(usize::MAX),
 		})
 	}
 
@@ -200,68 +200,6 @@ impl UdpSocketState {
 		recv_single(socket.0, bufs, meta)
 	}
 
-	/// Enables asynchronous transport-layer error reception for this socket
-	///
-	/// On Linux and Android, this enables the socket error queue via
-	/// `IP_RECVERR`/`IPV6_RECVERR`, allowing ICMP errors to be retrieved with
-	/// [`recv_transport_error`]. On other platforms, this method is a no-op and
-	/// [`recv_transport_error`] will always return `None`.
-	///
-	/// # Cost
-	///
-	/// On Linux and Android, queued ICMP errors are charged against the socket's
-	/// receive buffer (`sk_rmem_alloc`). If the buffer is full, incoming errors
-	/// are silently dropped by the kernel. There is no overhead when the error
-	/// queue is empty.
-	///
-	/// # Usage
-	///
-	/// When this feature is enabled, the kernel may return a pending error on the
-	/// next `sendmsg` or `recvmsg` call, preventing that operation from completing.
-	/// To avoid this, callers should drain the error queue via
-	/// [`recv_transport_error`] before sending or receiving.
-	///
-	/// [`recv_transport_error`]: Self::recv_transport_error
-	pub fn enable_transport_errors(&self, _socket: UdpSockRef<'_>) -> io::Result<()> {
-		#[cfg(any(target_os = "linux", target_os = "android"))]
-		{
-			let io = _socket.0;
-			let addr = io.local_addr()?;
-			let is_ipv4 = addr.family() == libc::AF_INET as libc::sa_family_t;
-
-			if is_ipv4 || !io.only_v6()? {
-				set_socket_option(&*io, libc::IPPROTO_IP, libc::IP_RECVERR, OPTION_ON)?;
-			}
-
-			if !is_ipv4 {
-				set_socket_option(&*io, libc::IPPROTO_IPV6, libc::IPV6_RECVERR, OPTION_ON)?;
-			}
-		}
-
-		Ok(())
-	}
-
-	/// Receives one pending asynchronous transport-layer error from this socket
-	///
-	/// Returns `None` if the error queue is empty or the underlying platform is
-	/// unsupported. On Linux and Android, errors are only available if
-	/// [`enable_transport_errors`] has been called first.
-	///
-	/// Returns an error if the underlying system call fails unexpectedly.
-	///
-	/// [`enable_transport_errors`]: Self::enable_transport_errors
-	pub fn recv_transport_error(&self, _socket: UdpSockRef<'_>) -> io::Result<Option<TransportError>> {
-		#[cfg(any(target_os = "linux", target_os = "android"))]
-		{
-			Ok(LinuxError::recv(_socket.0)?.map(TransportError::from))
-		}
-
-		#[cfg(not(any(target_os = "linux", target_os = "android")))]
-		{
-			Ok(None)
-		}
-	}
-
 	/// Maximum number of segments to transmit if Generic Send Offload (GSO) is enabled
 	///
 	/// This is 1 if the platform doesn't support GSO.
@@ -280,43 +218,6 @@ impl UdpSocketState {
 	#[inline]
 	pub fn gro_segments(&self) -> usize {
 		self.gro_segments
-	}
-
-	/// Resize the send buffer of `socket` to `bytes`
-	///
-	/// On Apple platforms, `bytes` is silently raised to a safe minimum if smaller.
-	#[inline]
-	pub fn set_send_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-		#[cfg(apple)]
-		let bytes = if bytes < Self::MIN_SAFE_SNDBUF {
-			crate::udp::log::debug!("raising requested SO_SNDBUF from {bytes} to {}", Self::MIN_SAFE_SNDBUF);
-			Self::MIN_SAFE_SNDBUF
-		} else {
-			bytes
-		};
-		socket.0.set_send_buffer_size(bytes)?;
-		#[cfg(apple)]
-		self.send_buffer_size
-			.store(socket.0.send_buffer_size().unwrap_or(bytes), Ordering::Relaxed);
-		Ok(())
-	}
-
-	/// Resize the receive buffer of `socket` to `bytes`
-	#[inline]
-	pub fn set_recv_buffer_size(&self, socket: UdpSockRef<'_>, bytes: usize) -> io::Result<()> {
-		socket.0.set_recv_buffer_size(bytes)
-	}
-
-	/// Get the size of the `socket` send buffer
-	#[inline]
-	pub fn send_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-		socket.0.send_buffer_size()
-	}
-
-	/// Get the size of the `socket` receive buffer
-	#[inline]
-	pub fn recv_buffer_size(&self, socket: UdpSockRef<'_>) -> io::Result<usize> {
-		socket.0.recv_buffer_size()
 	}
 
 	/// Whether transmitted datagrams might get fragmented by the IP layer
@@ -348,7 +249,7 @@ impl UdpSocketState {
 	#[cfg(apple)]
 	pub(crate) fn check_send_buffer_limit(&self, resid: usize, hdr: &impl cmsg::MsgHdr) -> io::Result<()> {
 		let needed = resid.saturating_add(hdr.control_len());
-		let sndbuf = self.send_buffer_size.load(Ordering::Relaxed);
+		let sndbuf = self.send_buffer_size;
 		if needed > sndbuf {
 			crate::udp::log::debug!("EMSGSIZE for {needed}-byte send: exceeds SO_SNDBUF ({sndbuf})");
 			return Err(io::Error::from_raw_os_error(libc::EMSGSIZE));

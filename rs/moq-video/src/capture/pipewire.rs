@@ -69,7 +69,7 @@ pub(super) mod camera;
 
 /// Open a system-picked screen or window and stream frames from a PipeWire thread.
 pub(super) async fn open(config: &Config, selection: &portal::Selection) -> Result<Stream, Error> {
-	let (node_id, fd, session) = portal_negotiate(config.cursor, selection).await?;
+	let (node_id, fd, session) = portal_negotiate(config.cursor.drawn(), selection).await?;
 	start(
 		config,
 		Capture {

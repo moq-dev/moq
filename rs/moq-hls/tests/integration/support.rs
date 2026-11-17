@@ -149,7 +149,7 @@ impl Publisher {
 /// any media and a recorder can start first. The two-second GOPs pack two to a segment.
 pub fn catalog_config() -> moq_mux::catalog::Config {
 	let mut catalog = moq_mux::catalog::hang::Catalog::default();
-	catalog.media.join = hang::catalog::Join::new(Duration::from_secs(4));
+	catalog.sync.interval = Some(Duration::from_secs(4));
 	moq_mux::catalog::Config::default().with_catalog(catalog)
 }
 

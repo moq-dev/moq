@@ -171,7 +171,7 @@ async def main() -> None:
 
     track = moq.BroadcastProducer().publish_track("calls")
     group = track.append_group().consume()
-    call("sequence", lambda: group.sequence, results)
+    call("start", lambda: group.start, results)
     consumer = track.consume()
     call("info", consumer.info, results)
 

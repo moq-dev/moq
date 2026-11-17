@@ -22,7 +22,7 @@ pub struct Frame {
 
 /// Exclusive writer for one group; frames are numbered from 0 in write order.
 ///
-/// Dropping without [`Self::close`] or [`Self::abort`] lets the net group close uncleanly.
+/// Dropping without [`Self::finish`] or [`Self::abort`] lets the net group close uncleanly.
 pub struct Producer {
 	// The error that aborted the group once a write failed after encryption.
 	inner: std::result::Result<moq_net::group::Producer, Error>,
@@ -91,13 +91,13 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Close the group without a known end. No more frames will be written.
+	/// Finish the group without a known end. No more frames will be written.
 	///
 	/// # Errors
 	///
 	/// A net error if the group is already closed, or the error a failed write aborted it with.
-	pub fn close(self) -> Result<()> {
-		self.inner?.close()?;
+	pub fn finish(self) -> Result<()> {
+		self.inner?.finish()?;
 		Ok(())
 	}
 

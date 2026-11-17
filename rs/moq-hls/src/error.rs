@@ -1,4 +1,4 @@
-//! Errors for the HLS / LL-HLS gateway.
+//! Errors for the HLS and DASH gateway.
 
 /// Which HLS sequence counter a value belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

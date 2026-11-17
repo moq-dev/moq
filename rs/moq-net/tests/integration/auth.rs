@@ -122,8 +122,8 @@ async fn lite_07_a_scoped_withdrawal_ends() {
 }
 
 #[kio::test]
-async fn lite_07_a_scope_change_reopens_without_letting_go() {
-	a_scope_change_reopens_without_letting_go(LITE_07).await
+async fn lite_07_a_scope_change_edits_without_letting_go() {
+	a_scope_change_edits_without_letting_go(LITE_07).await
 }
 
 #[kio::test]
@@ -820,10 +820,10 @@ async fn a_scoped_withdrawal_ends(version: &'static str) {
 	.expect("timed out");
 }
 
-/// Widening the limit to a second prefix reopens the relay's request above both, and
-/// narrowing it reopens the request at the first again, each without letting go of what
-/// the limit kept: the old request serves until the new one is synced.
-async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
+/// Widening the limit to a second prefix edits what the relay asks for to add it, and
+/// narrowing it removes it again, each without letting go of what the limit kept: the
+/// prefix both sets hold is never asked for again.
+async fn a_scope_change_edits_without_letting_go(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
 		let relay = produce_origin(1);
@@ -842,7 +842,7 @@ async fn a_scope_change_reopens_without_letting_go(version: &'static str) {
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(kinds(&mut routes, "a/x"), [origin::RouteKind::Start]);
 
-		// Widened past what the first request asked for: the new one carries `b`.
+		// Widened past what the relay asked for: the edit adds `b`.
 		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let b = publisher.route("b/y", moq_net::origin::RouteOptions::hidden()).unwrap();
@@ -898,8 +898,8 @@ async fn lite_07_a_scope_widened_to_the_root_reopens_without_letting_go() {
 }
 
 /// A session holding all the announce slots it may has no room to hear its peer's claims
-/// twice, so the old request gives its slots to the new one during a scope change,
-/// rather than the handover running the peer past its cap.
+/// twice, and a scope change sends none again: the edit keeps what both sets cover, so
+/// the peer stays within its cap.
 async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static str) {
 	within(async {
 		let publisher = produce_origin(2);
@@ -927,7 +927,7 @@ async fn a_scope_change_at_the_announce_cap_keeps_the_session(version: &'static 
 
 		pair.server.auth().authorize(&grant(&["a", "b"], &[]));
 		kio::clock::sleep(Duration::from_secs(1)).await;
-		assert_eq!(kinds(&mut routes, "a/x"), [], "the handover let go of a/x");
+		assert_eq!(kinds(&mut routes, "a/x"), [], "the edit let go of a/x");
 		assert_eq!(pair.server_transport.close_reason(), None);
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
@@ -2265,7 +2265,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 			.await;
 		assert!(matches!(concurrent, Err(Error::Duplicate)), "{:?}", concurrent.err());
 
-		first.server.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.server.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		support::Draining::recv(&first.client.draining())
 			.await
 			.expect("the GOAWAY");
@@ -2321,7 +2321,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		// Its first poll queues the token; the driver runs only once this side drains.
 		let mut adding = Box::pin(added(&handle, "late"));
 		assert!(adding.as_mut().now_or_never().is_none());
-		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
+		first.client.goaway(moq_net::goaway::Goaway::new()).unwrap();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_tokens.next().now_or_never().is_none(),

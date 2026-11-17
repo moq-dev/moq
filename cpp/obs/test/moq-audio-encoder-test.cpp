@@ -213,7 +213,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 
 	auto announced = TestOk(origin->consume()->follow("room", nullptr), "follow");
 	auto consumer = TestOk(announced->available().get(), "available");
-	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "catalog consumer");
+	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer, {}).get(), "catalog consumer");
 	std::optional<moq::Catalog> catalog;
 	while (!catalog || catalog->audio.empty()) {
 		auto next = catalogs->next();
