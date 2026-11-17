@@ -64,7 +64,7 @@ try route.announce() // hidden routes are invisible; hold the route while it sho
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` requests a drain immediately; `try await session.closed()` waits for it and throws on delivery failure. `cancel(code: 0)` remains immediate.
 
-A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
+A note on enum casing: `MoqError` keeps Rust's PascalCase variants, some with no payload (`MoqError.Closed`) and some carrying named fields (`MoqError.Transport(reason: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Selectors Rust can add to are objects with constructors (`AudioCodec.opus()`, `VideoCodec.h264()`, `Compression.deflate()`), and `Transport` and `Video.Surface` carry an `.unknown` case for what this version cannot name yet.
 
 ## API shape
 
@@ -96,7 +96,7 @@ JSON tracks live under the `Json` namespace, mirroring the `moq-json` crate, and
 (lossless append-log, every record preserved in order), or `Json.WindowProducer`/`Json.WindowConsumer`
 (a sliding window of records a reader can join at any point, not advertised in the catalog). Values encode/decode at the boundary with
 `JSONEncoder`/`JSONDecoder`; the consumer is an `AsyncSequence` of the decoded type. Publish the
-track with `TrackInfo(compression: .deflate)`; consumers read it the same either way. Every JSON write
+track with `TrackInfo(maxAge: 0, timescale: 1_000_000, compression: Compression.deflate())`; consumers read it the same either way. Every JSON write
 (snapshot update, stream append, window push or pop) takes a timestamp on the broadcast clock (`Media.CatalogProducer.now()`), so the
 track needs a timescale.
 

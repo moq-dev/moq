@@ -35,16 +35,14 @@ removal, a rename, or a wire, catalog, or format change that is free until
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
-- **moq-net API.** [Groups](/quest/m2/group-api.md),
-  [reconnect](/quest/m2/reconnect-off.md), [names](/quest/m2/net-renames.md),
-  and [session codes](/quest/m2/session-codes.md).
+- **moq-net API.** [Names](/quest/m2/net-renames.md) and
+  [session codes](/quest/m2/session-codes.md).
   [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
 - **Relay and transports.** [CPU](/quest/m2/relay-cpu.md), which the
   memory pairing found; [congestion names](/quest/m2/congestion-names.md);
-  [config names](/quest/m2/relay-config-names.md) and
   [the 0.14 leftovers](/quest/m2/relay-014-leftovers.md); and
   [transport names](/quest/m2/transport-names.md).
 - **Auth and crypto.** [Grants](/quest/m2/auth-grants.md),
@@ -65,14 +63,13 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [sink names](/quest/m2/audio-sink-names.md),
   [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
   [the WebRTC bind](/quest/m2/webrtc-bind.md),
-  [gateway admission](/quest/m2/gateway-align.md), and
+  [the WHEP pull's announcement](/quest/m2/whep-pull-announce.md), and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **JS and browser.** [`@moq/net`](/quest/m2/js-net-api.md),
   [signals](/quest/m2/signals-semantics.md), [`@moq/ui`](/quest/m2/ui-private.md),
   and [room, publish, and OBS names](/quest/m2/browser-packages.md).
-- **Bindings.** [Open selectors](/quest/m2/ffi-open-selectors.md),
-  [Dart as experimental](/quest/m2/dart-experimental.md), and
+- **Bindings.** [Dart as experimental](/quest/m2/dart-experimental.md) and
   [the C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).

@@ -725,7 +725,9 @@ impl Drop for Held {
 /// configured here or found on the LAN; it never dials a URL learned from an
 /// announcement.
 ///
-/// Hop-based routing on broadcasts prevents announcement loops regardless of topology.
+/// A relay drops any route that names it, so announcements never loop whatever the
+/// topology: a moq-lite-07 route names each relay it crossed, and older versions
+/// carry that hop list on each broadcast.
 #[serde_with::serde_as]
 #[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -747,7 +749,13 @@ pub struct Config {
 	)]
 	pub route_key: Option<PathBuf>,
 
-	/// Longest hop path accepted or forwarded, from 1 to 32 (default 32).
+	/// Legacy: longest hop path accepted or forwarded on moq-lite-03 to 06, from 1 to 32
+	/// (default 32).
+	///
+	/// Also bounds moq-transport's MoQ Cluster extension. A moq-lite-07 route stops at
+	/// 32 nodes whatever this is, so the setting leaves with moq-lite-06. Until then, a
+	/// moq-lite-07 route that crossed in from moq-lite-06 is dropped when the chain it
+	/// carries, plus its publisher, is longer than this.
 	#[usage(
 		name = "cluster-max-hops",
 		long = "cluster-max-hops",
@@ -780,7 +788,7 @@ pub struct Config {
 	#[serde_as(as = "serde_with::OneOrMany<_>")]
 	pub connect: Vec<Peer>,
 
-	/// Dynamic peer-list source and its independent TLS trust.
+	/// Dynamic peer-list source and its independent server trust.
 	#[usage(flatten)]
 	pub api: api::Config,
 
@@ -876,14 +884,14 @@ impl Config {
 			found.flag(
 				"--cluster-connect-api-tls-root",
 				Some("MOQ_CLUSTER_CONNECT_API_TLS_ROOT"),
-				"--cluster-api-tls-root",
+				"--cluster-api-root",
 			);
 		}
 		if self.removed_api.is_some() {
 			found.toml("[cluster] connect_api", "[cluster.api] url", None);
 		}
 		if self.removed_api_root.is_some() {
-			found.toml("[cluster] connect_api_tls_root", "[cluster.api.tls] root", None);
+			found.toml("[cluster] connect_api_tls_root", "[cluster.api] root", None);
 		}
 		const ID: &str = "the Hop ID is random on every start and nothing pins it";
 		if self.removed_id.is_some() {
@@ -1857,7 +1865,7 @@ impl Cluster {
 				.context("cluster.api.url with an http(s) URL needs a dial template (call Cluster::with_connect)")?
 				.tls
 				.build()?;
-			Some(crate::http_client::build(&tls, &self.config.api.tls.root)?)
+			Some(crate::http_client::build(&tls, &self.config.api.root)?)
 		} else {
 			None
 		};
@@ -2309,8 +2317,8 @@ impl Cluster {
 	/// redial moves to a fresh socket rather than retrying one the path may be
 	/// dropping.
 	///
-	/// Every peer client's reconnect loop gives up eventually: a zero backoff
-	/// timeout, which would retry forever, takes [`PEER_RETRY`] instead. The
+	/// Every peer client's reconnect loop gives up eventually: an unset or `none`
+	/// backoff timeout, which would retry forever, takes [`PEER_RETRY`] instead. The
 	/// redial loop already retries forever, and only it re-reads `cluster.token`,
 	/// so an unending inner loop could keep presenting a rotated-out token.
 	///
@@ -3948,7 +3956,7 @@ mod tests {
 
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
-		let toml = "[cluster.api]\nurl = \"https://api.example.com/cluster/connect\"\ntls.root = [\"api.pem\"]\n";
+		let toml = "[cluster.api]\nurl = \"https://api.example.com/cluster/connect\"\nroot = [\"api.pem\"]\n";
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("cluster-connect-api-toml.toml");
 		std::fs::write(&path, toml).unwrap();
@@ -3959,7 +3967,7 @@ mod tests {
 			config.cluster.api.url.as_deref(),
 			Some("https://api.example.com/cluster/connect")
 		);
-		assert_eq!(config.cluster.api.tls.root, vec![PathBuf::from("api.pem")]);
+		assert_eq!(config.cluster.api.root, vec![PathBuf::from("api.pem")]);
 	}
 
 	#[tokio::test]

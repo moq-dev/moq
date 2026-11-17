@@ -222,6 +222,31 @@ impl MoqJsonSnapshotProducer {
 		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				let _ = self.alive.close();
+				Ok(true)
+			}
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
+	}
+
 	/// Finish the track, closing any open group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -380,6 +405,28 @@ impl MoqJsonStreamProducer {
 		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => Ok(true),
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
+	}
+
 	/// Finish the track, closing the group.
 	pub fn finish(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
@@ -445,7 +492,6 @@ impl MoqJsonStreamConsumer {
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowProducer {
 	inner: Arc<std::sync::Mutex<Option<moq_json::window::Producer<Value>>>>,
-	demand: moq_net::track::Demand,
 
 	/// Closed on finish or drop, which stops the refresh task.
 	alive: kio::Producer<()>,
@@ -521,7 +567,6 @@ impl MoqJsonWindowProducer {
 				return Err(moq_net::Error::TimestampMismatch.into());
 			}
 			Ok(Self {
-				demand: track.demand(),
 				inner: Arc::new(std::sync::Mutex::new(Some(moq_json::window::Producer::new(
 					track, config,
 				)))),
@@ -560,8 +605,33 @@ impl MoqJsonWindowProducer {
 
 	/// A watch-only handle to whether this track has subscribers.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
-		self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?;
-		Ok(MoqTrackDemand::new(self.demand.clone()))
+		let guard = self.inner.lock().unwrap();
+		Ok(MoqTrackDemand::new(guard.as_ref().ok_or(MoqError::Closed)?.demand()))
+	}
+
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let producer = guard.take().ok_or(MoqError::Closed)?;
+		match producer.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => {
+				let _ = self.alive.close();
+				Ok(true)
+			}
+			Err(producer) => {
+				*guard = Some(producer);
+				Ok(false)
+			}
+		}
 	}
 
 	/// Finish the track, closing any open group.

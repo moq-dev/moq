@@ -10,7 +10,7 @@
 
 import { type Dispose, type GetPromise, race } from "@moq/signals";
 import type * as announce from "../announced.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway } from "../connection/goaway.ts";
 import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { Cost, type Hop, routesEqual, WireRoute } from "../hop.ts";
@@ -61,7 +61,7 @@ export interface Session {
 	slots: Slots;
 	/** Rank a route last once the peer sent GOAWAY. */
 	drained(route: WireRoute): WireRoute;
-	goaway?: GetPromise<Drain>;
+	goaway?: GetPromise<Goaway>;
 	/** What covers a path changed with no claim reporting it: every selection is checked anew. */
 	revalidate(): void;
 	/** Send one message on this session's Announce Stream. */

@@ -240,6 +240,20 @@ impl<T: Serialize> Snapshot<T> {
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
 	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged, entry included, when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the handle back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
+	}
 }
 
 /// Publishes an append-log JSON track, advertised in the catalog for as long as this handle lives.
@@ -340,6 +354,20 @@ impl<T: Serialize> Stream<T> {
 	/// catalog entry.
 	pub fn abort(self, err: moq_net::Error) -> crate::Result<()> {
 		Ok(self.inner.abort(err)?)
+	}
+
+	/// [`abort`](Self::abort) the track only while nobody wants it, handing the handle back
+	/// unchanged, entry included, when a reader does.
+	///
+	/// This is how an on-demand publisher ends a track once its [`demand`](Self::demand) reports
+	/// nobody wants it: dropping or aborting it instead fails a reader that joined in between.
+	/// See [`moq_net::track::Producer::abort_unwanted`].
+	#[expect(
+		clippy::result_large_err,
+		reason = "hand the handle back to keep serving without allocating on an idle check"
+	)]
+	pub fn abort_unwanted(self, err: moq_net::Error) -> std::result::Result<(), Self> {
+		self.inner.abort_unwanted(err).map_err(|inner| Self { inner, ..self })
 	}
 }
 

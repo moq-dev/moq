@@ -4980,7 +4980,7 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		reader
 	};
 	let first = id(group_cb.recv_reading(&mut reader));
@@ -5025,7 +5025,7 @@ fn a_rejected_group_request_binds_only_its_readers() {
 		group
 			.write_frame(moq_net::Timestamp::from_millis(10).unwrap(), &b"live"[..])
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		drop(producer.clone().finish().unwrap());
 	}
 	let subscribe = || {
@@ -7406,16 +7406,16 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
-	assert!(config.has_backoff_max);
 	assert_eq!(
-		config.backoff_max_us,
-		expected.connect.backoff.max().unwrap_or_default().as_micros() as u64
+		config
+			.has_backoff_max
+			.then(|| std::time::Duration::from_micros(config.backoff_max_us)),
+		expected.connect.backoff.max()
 	);
-	assert!(config.has_backoff_timeout);
-	assert_eq!(
-		expected.connect.backoff.timeout().unwrap_or_default(),
-		std::time::Duration::from_micros(config.backoff_timeout_us)
-	);
+	assert!(!config.backoff_max_unlimited);
+	// No give-up is both the default and the absent value.
+	assert!(!config.has_backoff_timeout);
+	assert_eq!(expected.connect.backoff.timeout(), None);
 
 	let websocket = expected.connect.websocket.resolve();
 	assert!(config.has_websocket_enabled);
@@ -7454,30 +7454,53 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 }
 
-/// Presence flags preserve explicit zero durations; backoff zero retries forever,
-/// while keep-alive zero resolves to the derived interval.
+/// Presence flags preserve explicit zero durations; keep-alive zero resolves to the
+/// derived interval.
 #[test]
 fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();
-	config.backoff_timeout_us = 0;
-	config.has_backoff_timeout = true;
 	config.quic_keep_alive_us = 0;
 	config.has_quic_keep_alive = true;
-
-	let explicit = parsed(&config);
 	assert_eq!(
-		explicit.connect.backoff.timeout,
+		parsed(&config).quic.keep_alive,
 		Some((std::time::Duration::ZERO).into())
 	);
-	assert_eq!(explicit.quic.keep_alive, Some((std::time::Duration::ZERO).into()));
 
-	// Without the flags the same zeroes mean nothing at all.
-	let defaults = parsed(&client_config());
-	assert_ne!(
-		defaults.connect.backoff.timeout,
-		Some((std::time::Duration::ZERO).into())
-	);
-	assert_eq!(defaults.quic.resolve().keep_alive, None);
+	// Without the flag the same zero means nothing at all.
+	assert_eq!(parsed(&client_config()).quic.resolve().keep_alive, None);
+}
+
+/// The backoff's `max` and `timeout` each read absent as the default, off as no bound, and
+/// zero as zero, resolving to what moq-tokio's flags `none` and `0s` do.
+#[test]
+fn a_backoff_bound_is_unset_off_zero_or_a_value() {
+	let defaults = crate::client::Config::default().connect.backoff;
+	let three = std::time::Duration::from_secs(3);
+	let bounds = |config: &moq_client_config| {
+		let backoff = parsed(config).connect.backoff;
+		(backoff.max(), backoff.timeout())
+	};
+
+	assert_eq!(bounds(&client_config()), (defaults.max(), defaults.timeout()));
+	assert_eq!(defaults.timeout(), None, "absent is already off");
+
+	let mut off = client_config();
+	off.backoff_max_unlimited = true;
+	assert_eq!(bounds(&off), (None, None));
+
+	for value in [std::time::Duration::ZERO, three] {
+		let mut set = client_config();
+		set.backoff_max_us = value.as_micros() as u64;
+		set.has_backoff_max = true;
+		set.backoff_timeout_us = value.as_micros() as u64;
+		set.has_backoff_timeout = true;
+		assert_eq!(bounds(&set), (Some(value), Some(value)), "{value:?}");
+	}
+
+	let mut both = client_config();
+	both.has_backoff_max = true;
+	both.backoff_max_unlimited = true;
+	assert!(unsafe { crate::parse_client(Some(&both)) }.is_err());
 }
 
 #[test]

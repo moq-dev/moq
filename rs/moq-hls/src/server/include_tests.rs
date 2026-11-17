@@ -73,7 +73,7 @@ fn frames(track: &track::Producer, first: u64) {
 		}
 		.write_to(&mut group)
 		.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 	}
 }
 
