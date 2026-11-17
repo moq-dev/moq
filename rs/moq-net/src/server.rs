@@ -100,6 +100,7 @@ pub struct Server {
 	implementation: Option<String>,
 	timeout: Option<Duration>,
 	receive_window: Option<NonZeroU64>,
+	allocator: Option<crate::bandwidth::Allocator>,
 }
 
 impl Default for Server {
@@ -114,6 +115,7 @@ impl Default for Server {
 			implementation: None,
 			timeout: Some(DEFAULT_TIMEOUT),
 			receive_window: None,
+			allocator: None,
 		}
 	}
 }
@@ -140,6 +142,22 @@ impl Server {
 		self
 	}
 
+	/// Share `allocator`'s reservations with every session this server accepts.
+	///
+	/// The accepting mirror of [`Client::with_allocator`](crate::Client::with_allocator):
+	/// each session probes for what the reservations add up to, and its
+	/// [`Session::allocator`](crate::Session::allocator) reserves into the same registry.
+	/// Without one, each session starts an empty registry of its own.
+	pub fn with_allocator(mut self, allocator: crate::bandwidth::Allocator) -> Self {
+		self.allocator = Some(allocator);
+		self
+	}
+
+	/// The registry the next session probes for.
+	fn allocator(&self) -> crate::bandwidth::Allocator {
+		self.allocator.clone().unwrap_or_default()
+	}
+
 	/// Attach a per-connection [`stats::Session`] context. The session's publish
 	/// (egress) and subscribe (ingress) origin handles are tagged with it, so all
 	/// traffic counters are attributed through the model for this session's lifetime,
@@ -163,10 +181,23 @@ impl Server {
 		self
 	}
 
-	/// Choose which extensions to offer in SETUP. Defaults to every moq-transport one, and
-	/// not [`ietf`](setup::Extensions::ietf), which only relays turn on.
-	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
-		self.extensions = extensions;
+	/// Offer the `ietf` extension on moq-lite-07, so a hop between relays carries the
+	/// moq-transport state of a track a moq-transport publisher made. Off by default.
+	///
+	/// Behind the `relay` feature: moq-relay's door for its own links, not an API.
+	#[cfg(feature = "relay")]
+	pub fn with_ietf(mut self, ietf: bool) -> Self {
+		self.extensions.ietf = ietf;
+		self
+	}
+
+	/// Whether to offer MoQ Solicit on moq-transport, which every session does. Off acts as a
+	/// moq-transport peer without it.
+	///
+	/// Behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn with_solicit(mut self, solicit: bool) -> Self {
+		self.extensions.solicit = solicit;
 		self
 	}
 
@@ -293,7 +324,7 @@ impl Server {
 				credential: start.credential,
 				estimate: Some(start.estimate),
 				peer_target: Some(start.peer_target),
-				bandwidth: crate::bandwidth::Allocator::default(),
+				bandwidth: self.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
 				datagrams_unrouted: start.datagrams_unrouted,
@@ -937,7 +968,7 @@ impl PausedIetf {
 				credential: None,
 				estimate: None,
 				peer_target: None,
-				bandwidth: crate::bandwidth::Allocator::default(),
+				bandwidth: server.allocator(),
 				viewers: Default::default(),
 				peer_implementation,
 				datagrams_unrouted: None,
@@ -1068,7 +1099,7 @@ impl NegotiatedStart {
 				credential: start.credential,
 				estimate: Some(start.estimate),
 				peer_target: Some(start.peer_target),
-				bandwidth: crate::bandwidth::Allocator::default(),
+				bandwidth: server.allocator(),
 				viewers,
 				peer_implementation: start.peer_implementation,
 				datagrams_unrouted: start.datagrams_unrouted,
@@ -1820,6 +1851,31 @@ mod tests {
 			let _issued = received.accept(crate::auth::Grant::all());
 			assert!(verdict.grant().await.is_ok(), "granting admits at {version:?}");
 		}
+	}
+
+	/// An accepted session reserves into the registry the server was given, so one
+	/// allocator spans every session a server accepts, as a client's spans its dials.
+	#[kio::test]
+	async fn an_accepted_session_shares_the_servers_allocator() {
+		let allocator = crate::bandwidth::Allocator::default();
+		let mut target = allocator.target();
+		let session = FakeSession::new(ALPN_18, [ietf_setup(ietf::Version::Draft18, None)]);
+		let request = Server::new()
+			.with_allocator(allocator.clone())
+			.handshake(kio::clock::now(), session)
+			.await
+			.expect("accept");
+		let (session, _driver) = request.ok().await.expect("ok");
+
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("t", crate::track::Info::timed()).unwrap();
+		let _reserved = session
+			.allocator()
+			.reserve(&track.demand(), crate::bandwidth::Rate::from_bps(1_000_000));
+		assert_eq!(
+			target.poll_changed(&kio::Waiter::noop()),
+			std::task::Poll::Ready(crate::bandwidth::Rate::from_bps(1_000_000))
+		);
 	}
 
 	/// A peer that never takes the SETUP reply is refused at the handshake's deadline

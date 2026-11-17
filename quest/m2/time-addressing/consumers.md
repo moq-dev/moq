@@ -135,9 +135,7 @@ them.
 ## Required
 
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - the JS API these consume
-- [Lite-07 by start](/quest/m2/time-addressing/lite07.md) - GROUP_END carries the end the duration marker did
 
 ## Related
 
-- [The archive format ships as version 2](/quest/m2/archive-v2.md) - freezes the keys this made starts
 - [A group's frames present before the next group starts](/quest/m3/groups-never-overlap.md) - tightens the group rule a declared end relies on

@@ -1,13 +1,18 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
+import { u53Schema } from "./integers.ts";
+import { VERSION, VersionSchema } from "./version.ts";
+
+/** The entries each parsed map skipped, keyed by the map itself. Read through `skipped` in `root.ts`. */
+export const SKIPPED = new WeakMap<object, Record<string, number>>();
 
 /**
- * A catalog map keyed by ID (renditions, data tracks, includes), refusing the catalog if any
- * entry is malformed.
+ * A catalog map keyed by ID (renditions, data tracks, includes), skipping an entry newer than this
+ * reader and refusing the catalog if any other entry is malformed.
  *
- * Each entry must parse with `schema`; the issue names the entry. An unknown container
- * or extension field is not malformed, so it never refuses the catalog. Mirrors the Rust
- * `deserialize_entries`.
+ * An entry's `version` is read before the rest of it, since a newer draft may have reshaped the
+ * entry; one above {@link VERSION} is skipped and recorded in {@link SKIPPED}. Every other entry
+ * must parse with `schema`; the issue names the entry. An unknown container or extension field is
+ * not malformed, so it never refuses the catalog. Mirrors the Rust `deserialize_entries`.
  *
  * @param schema - one entry's schema.
  * @param kind - what an entry is, naming it in the issue (`rendition`, `include`).
@@ -20,8 +25,29 @@ export function renditions<T extends z.ZodMiniType>(schema: T, kind = "rendition
 		),
 		z.transform((raw, ctx) => {
 			const kept: [string, z.infer<T>][] = [];
+			const skipped: [string, number][] = [];
 			for (const [id, value] of Object.entries(raw)) {
-				const result = schema.safeParse(value);
+				let entry = value;
+				if (typeof value === "object" && value !== null && Object.hasOwn(value, "version")) {
+					// Taken out rather than left to the entry: written versions are computed, never carried.
+					const { version, ...rest } = value as Record<string, unknown>;
+					const checked = VersionSchema.safeParse(version);
+					if (!checked.success) {
+						ctx.issues.push({
+							code: "custom",
+							message: `malformed ${kind} ${id}: ${checked.error.message}`,
+							input: value,
+						});
+						continue;
+					}
+					if (checked.data > VERSION) {
+						skipped.push([id, checked.data]);
+						continue;
+					}
+					entry = rest;
+				}
+
+				const result = schema.safeParse(entry);
 				if (result.success) kept.push([id, result.data]);
 				else
 					ctx.issues.push({
@@ -31,7 +57,9 @@ export function renditions<T extends z.ZodMiniType>(schema: T, kind = "rendition
 					});
 			}
 			// fromEntries defines each key as its own property, so `__proto__` stays an ID.
-			return Object.fromEntries(kept) as Record<string, z.infer<T>>;
+			const map = Object.fromEntries(kept) as Record<string, z.infer<T>>;
+			if (skipped.length > 0) SKIPPED.set(map, Object.fromEntries(skipped));
+			return map;
 		}),
 	);
 }

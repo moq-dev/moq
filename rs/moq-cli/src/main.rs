@@ -40,6 +40,17 @@ use tokio_util::sync::CancellationToken;
 #[global_allocator]
 static ALLOC: moq_tokio::jemalloc::Allocator = moq_tokio::jemalloc::Allocator;
 
+/// The device a render node flag (`--vaapi-device`) and a V4L2 node flag name.
+/// Each command declares the two in conflict, so at most one is set.
+#[cfg(any(feature = "capture", feature = "transcode", feature = "play"))]
+fn device(render: &Option<std::path::PathBuf>, video: &Option<std::path::PathBuf>) -> moq_video::Device {
+	match (render, video) {
+		(Some(node), _) => moq_video::Device::Render(node.clone()),
+		(None, Some(node)) => moq_video::Device::Video(node.clone()),
+		(None, None) => moq_video::Device::Auto,
+	}
+}
+
 /// Everything needed to build MoQ clients/servers.
 #[derive(Clone)]
 struct Net {
@@ -222,10 +233,11 @@ impl Serving {
 	}
 }
 
-/// Whether ordinary clients may use this transport on the shared LAN server.
+/// Whether ordinary clients may use this transport on the shared LAN server. A TLS stream link is
+/// public the same way plaintext TCP is.
 fn is_public_transport(transport: moq_tokio::Transport, public_quic: bool) -> bool {
 	match transport {
-		moq_tokio::Transport::Tcp | moq_tokio::Transport::Unix => true,
+		moq_tokio::Transport::Tcp | moq_tokio::Transport::Tls | moq_tokio::Transport::Unix => true,
 		_ => public_quic,
 	}
 }
@@ -1409,7 +1421,7 @@ mod tests {
 						.await
 						.unwrap()
 						.ordered();
-					let mut group = track.next_group().await.unwrap().unwrap();
+					let mut group = track.next_group().await.unwrap().unwrap().group().unwrap();
 					group.read_frame().await.unwrap().unwrap().payload
 				})
 				.await
@@ -1733,6 +1745,7 @@ mod tests {
 	#[test]
 	fn explicit_stream_listeners_are_public_without_exposing_mesh_quic() {
 		assert!(is_public_transport(moq_tokio::Transport::Tcp, false));
+		assert!(is_public_transport(moq_tokio::Transport::Tls, false));
 		assert!(is_public_transport(moq_tokio::Transport::Unix, false));
 		assert!(!is_public_transport(moq_tokio::Transport::Quic, false));
 		assert!(is_public_transport(moq_tokio::Transport::Quic, true));

@@ -298,7 +298,9 @@ Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another
 subscriber of the same track asked for more. Widening them, including lowering
 the start, also serves the cached groups they newly cover, never one already
-served. A reader that has accounted for every group its bounded ranges cover
+served or reported. A report is final: raising max delay afterwards does not
+bring back a group reported `OLD`, though a relay whose own reader allows more
+asks upstream for it again. A reader that has accounted for every group its bounded ranges cover
 ends, and repeated reads end immediately too. Widening the ranges resumes reading.
 A moq-lite-07 publisher ends a bounded subscription once it covered it, and the
 copy stays cached for the same ranges until an update asks for groups it did not
@@ -328,6 +330,14 @@ upstream as that ID, where a start selects the first group at or after it
 rather than the one containing it. moq-lite 01 and 02 carry no start, so every
 subscription there starts at the live group.
 
+A group ends one of three ways: finished at the time it ends, so it is whole;
+closed, so every frame written arrives but it may have held more, as when a
+relay stops sending a group that went stale; or aborted with an error. A
+finished group's end also bounds how long it stays fresh, so the last group of
+a paused track still ages out. Over the work-in-progress moq-lite 07 each group
+also names the start of the group before it, so a reader sees a gap at once;
+older versions and moq-transport carry neither the end nor the previous start.
+
 Order only decides what goes first, never what is skipped, so catching up oldest
 first needs a max delay that covers the backlog. When a relay serves subscribers of
 both orders from one upstream subscription, it asks upstream for newest first, and
@@ -350,7 +360,7 @@ track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE`, arrive
 untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
 frames go out stamped with their send time; the work-in-progress 07 carries it
-untimed.
+without a timescale, each frame stamped with its group's start.
 
 A publisher refuses a group that starts before a lower one, and so does a
 moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
@@ -449,9 +459,10 @@ suits real-time audio and sensor data. There is no stream fallback, so a
 datagram that doesn't fit isn't delivered.
 
 Datagram tracks have a namespace apart from stream tracks, so `audio` as
-datagrams and `audio` as streams are two independent tracks. Nothing on the
-wire says which kind a name is: the application knows from its catalog or by
-convention, so a broadcast's track listing never includes a datagram track. In
+datagrams and `audio` as streams are two independent tracks. A broadcast's
+track listing says which kind each track is, and lists datagram tracks only
+over the work-in-progress moq-lite 07; elsewhere the application knows the kind
+from its catalog or by convention. In
 Rust, `broadcast.create_datagrams(name, info)` publishes one and
 `broadcast.datagrams(name)` reads it. In JavaScript use
 `broadcast.createDatagrams(name, info)` and `broadcast.datagrams(name)`.

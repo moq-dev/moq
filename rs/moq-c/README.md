@@ -168,7 +168,8 @@ int32_t moq_consume_closed(uint32_t broadcast, moq_status_callback on_closed, vo
 int32_t moq_consume_closed_cancel(uint32_t watcher);
 
 // Consuming: Catalog
-int32_t moq_consume_catalog(uint32_t broadcast, moq_status_callback on_catalog, void *user_data);
+int32_t moq_consume_catalog(uint32_t broadcast, uint64_t delay_us, moq_status_callback on_catalog, void *user_data);
+int32_t moq_consume_catalog_timestamp(uint32_t catalog, moq_timestamp *dst);
 int32_t moq_consume_catalog_cancel(uint32_t catalog);
 int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);

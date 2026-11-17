@@ -22,7 +22,7 @@
 		"./src/support/element.ts"
 	],
 	"scripts": {
-		"build": "rm -rf dist && vite build && tsc -p tsconfig.build.json && bun ../common/package.ts",
+		"build": "rm -rf dist && vite build && tsc -p tsconfig.build.json && bun ../common/package.ts && tsc --project test-dts/tsconfig.json",
 		"check": "tsc --noEmit",
 		"test": "bun test --only-failures",
 		"release": "bun ../common/release.ts"
@@ -34,12 +34,12 @@
 		"@moq/net": "workspace:^",
 		"@moq/msf": "workspace:^",
 		"@moq/signals": "workspace:^",
-		"@moq/ui": "workspace:^",
 		"@moq/video": "workspace:^",
 		"media-captions": "0.0.18"
 	},
 	"devDependencies": {
 		"@moq/libav": "workspace:^",
+		"@moq/ui": "workspace:^",
 		"@types/audioworklet": "^0.0.100",
 		"@types/bun": "^1.4.4",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",

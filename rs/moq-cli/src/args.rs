@@ -534,7 +534,6 @@ impl MoqSide {
 		found.extend(self.quic.deprecated());
 		found.extend(self.server.deprecated());
 		found.extend(self.cluster.deprecated());
-		found.extend(self.auth.deprecated());
 		if self.name.is_some() {
 			found.flag("--name", None, "--broadcast");
 		}
@@ -1811,6 +1810,18 @@ mod tests {
 				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
 				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
 			}
+		}
+	}
+
+	/// The WebRTC media socket flags configure the listener, so a dialer refuses them.
+	#[test]
+	fn webrtc_media_flags_need_the_listener() {
+		for flag in [["--udp-bind", "[::]:5000"], ["--public-addr", "203.0.113.1:5000"]] {
+			let listen = [&["webrtc", "--listen", "127.0.0.1:8443"][..], &flag].concat();
+			export(&listen).unwrap().validate().unwrap();
+			let connect = [&["webrtc", "--connect", "http://remote/whip"][..], &flag].concat();
+			let err = export(&connect).err().expect("a dialer took a listener flag");
+			assert!(err.to_string().contains("--listen"), "{flag:?}: {err}");
 		}
 	}
 

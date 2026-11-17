@@ -170,6 +170,8 @@ export class BucketReader {
 				this.close();
 				return undefined;
 			}
+			// Buckets are tracks of groups, so a datagram track of the same name is not one.
+			if (event.kind === "synced" || event.datagrams) continue;
 			if (event.kind === "added" && parseBucketTrack(event.name)?.bucket === this.#bucket) {
 				// A newer run supersedes the current one.
 				if (this.#run) this.#end(this.#run);

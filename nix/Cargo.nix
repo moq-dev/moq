@@ -18456,6 +18456,7 @@ rec {
           {
             name = "hang";
             packageId = "hang";
+            features = [ "async" ];
           }
           {
             name = "kio";
@@ -18536,6 +18537,12 @@ rec {
           {
             name = "moq-loc";
             packageId = "moq-loc";
+          }
+          {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            usesDefaultFeatures = false;
+            features = [ "test-support" ];
           }
           {
             name = "moq-video";
@@ -19278,6 +19285,12 @@ rec {
             packageId = "moq-shaper";
           }
           {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            usesDefaultFeatures = false;
+            features = [ "test-support" ];
+          }
+          {
             name = "moq-video";
             packageId = "moq-video";
             features = [ "openh264" ];
@@ -19806,10 +19819,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "anyhow";
-            packageId = "anyhow";
-          }
-          {
             name = "base64";
             packageId = "base64 0.23.1";
           }
@@ -19928,6 +19937,10 @@ rec {
           }
         ];
         devDependencies = [
+          {
+            name = "anyhow";
+            packageId = "anyhow";
+          }
           {
             name = "bench-harness";
             packageId = "bench-harness";
@@ -20179,6 +20192,14 @@ rec {
             target = { target, features }: (target."unix" or false);
           }
           {
+            name = "moq-net";
+            packageId = "moq-net";
+            features = [
+              "relay"
+              "test-support"
+            ];
+          }
+          {
             name = "proptest";
             packageId = "proptest";
             usesDefaultFeatures = false;
@@ -20218,6 +20239,8 @@ rec {
           "async"
           "default"
           "fuzz"
+          "relay"
+          "test-support"
         ];
       };
       "moq-net-fuzz" = rec {
@@ -20323,7 +20346,11 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
-            features = [ "fuzz" ];
+            features = [
+              "fuzz"
+              "relay"
+              "test-support"
+            ];
           }
           {
             name = "serde_json";
@@ -20800,6 +20827,7 @@ rec {
             name = "moq-tokio";
             packageId = "moq-tokio";
             usesDefaultFeatures = false;
+            features = [ "relay" ];
           }
           {
             name = "moq-uring";
@@ -20962,7 +20990,11 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
-            features = [ "fuzz" ];
+            features = [
+              "fuzz"
+              "relay"
+              "test-support"
+            ];
           }
           {
             name = "moq-shaper";
@@ -22055,13 +22087,16 @@ rec {
             "dep:tikv-jemallocator"
             "dep:tikv-jemalloc-ctl"
           ];
+          "relay" = [ "moq-net/relay" ];
           "test-support" = [
             "kio/sim"
             "moq-quic/sim"
+            "moq-net/test-support"
           ];
         };
         resolvedDefaultFeatures = [
           "jemalloc"
+          "relay"
           "test-support"
         ];
       };

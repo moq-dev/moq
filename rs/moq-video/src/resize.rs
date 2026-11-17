@@ -1,6 +1,6 @@
 //! Frame resizing options.
 
-use crate::Output;
+use crate::{Device, Output};
 
 /// Options for [`Frame::resize`](crate::Frame::resize).
 ///
@@ -16,10 +16,9 @@ pub struct Config {
 	/// downloads first and always scales on the CPU. [`Output::Render`] is
 	/// `Native` for a surface `render::Renderer` imports and `Cpu` otherwise.
 	pub output: Output,
-	/// The VA-API render node that scales a DMA-BUF, such as `/dev/dri/renderD129`.
-	///
-	/// `None` uses the node the VA-API codecs share. Name the encoder's node so
-	/// the scaled buffer imports into it without a copy.
-	#[cfg(all(target_os = "linux", feature = "vaapi"))]
-	pub vaapi: Option<std::path::PathBuf>,
+	/// The render node that scales a DMA-BUF. [`Device::Auto`] (the default)
+	/// uses the node the VA-API codecs share; name the encoder's node so the
+	/// scaled buffer imports into it without a copy. Every other surface scales
+	/// on the device that holds it, so this names nothing for them.
+	pub device: Device,
 }

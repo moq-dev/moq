@@ -4519,6 +4519,1004 @@
 		"refused": true
 	},
 	{
+		"name": "null video broadcast",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"broadcast": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video instance",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"instance": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video track",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"track": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video label",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"label": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video container",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"container": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video description",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"description": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video codedWidth",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"codedWidth": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video codedHeight",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"codedHeight": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video displayAspectWidth",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"displayAspectWidth": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video displayAspectHeight",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"displayAspectHeight": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video color",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video projection",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"projection": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video stereo",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"stereo": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video interlaced",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"interlaced": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video framerate",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"framerate": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video reorder",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"reorder": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video bitrate",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"bitrate": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video enabled",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"enabled": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video preference",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"preference": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video optimizeForLatency",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"optimizeForLatency": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video jitter",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"jitter": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video delay",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"delay": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio broadcast",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"broadcast": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio instance",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"instance": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio track",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"track": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio label",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"label": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio container",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"container": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio description",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"description": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio layout",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"layout": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio bitrate",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"bitrate": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio enabled",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"enabled": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio jitter",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"jitter": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio warmup",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"warmup": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null audio delay",
+		"catalog": {
+			"audio": {
+				"renditions": {
+					"probe": {
+						"codec": "opus",
+						"sampleRate": 48000,
+						"numberOfChannels": 2,
+						"delay": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text broadcast",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"broadcast": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text instance",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"instance": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text track",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"track": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text role",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"role": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text lang",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"lang": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text label",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"label": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text container",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"container": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text jitter",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"jitter": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null text delay",
+		"catalog": {
+			"text": {
+				"renditions": {
+					"probe": {
+						"format": "vtt",
+						"delay": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null json broadcast",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"mode": "snapshot",
+						"broadcast": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null json instance",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"mode": "snapshot",
+						"instance": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null json track",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"mode": "snapshot",
+						"track": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null json schema",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"mode": "snapshot",
+						"schema": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null json bitrate",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"mode": "snapshot",
+						"bitrate": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null json jitter",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"mode": "snapshot",
+						"jitter": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null json delay",
+		"catalog": {
+			"json": {
+				"tracks": {
+					"probe": {
+						"mode": "snapshot",
+						"delay": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null binary broadcast",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": {
+						"mode": "stream",
+						"broadcast": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null binary instance",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": {
+						"mode": "stream",
+						"instance": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null binary track",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": {
+						"mode": "stream",
+						"track": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null binary mime",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": {
+						"mode": "stream",
+						"mime": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null binary bitrate",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": {
+						"mode": "stream",
+						"bitrate": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null binary jitter",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": {
+						"mode": "stream",
+						"jitter": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null binary delay",
+		"catalog": {
+			"binary": {
+				"tracks": {
+					"probe": {
+						"mode": "stream",
+						"delay": null
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video color primaries",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": {
+							"primaries": null
+						}
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video color transfer",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": {
+							"transfer": null
+						}
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video color matrix",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": {
+							"matrix": null
+						}
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video color range",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": {
+							"range": null
+						}
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video color mastering",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": {
+							"mastering": null
+						}
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video color contentLight",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"color": {
+							"contentLight": null
+						}
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video projection fov",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"probe": {
+						"codec": "avc1.64001f",
+						"projection": {
+							"kind": "equirectangular",
+							"fov": null
+						}
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video section display",
+		"catalog": {
+			"video": {
+				"renditions": {},
+				"display": null
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video section rotation",
+		"catalog": {
+			"video": {
+				"renditions": {},
+				"rotation": null
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null video section flip",
+		"catalog": {
+			"video": {
+				"renditions": {},
+				"flip": null
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null include instance",
+		"catalog": {
+			"include": {
+				"probe": {
+					"broadcast": "./a.hang",
+					"instance": null
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "null root version",
+		"catalog": {
+			"version": null
+		},
+		"refused": true
+	},
+	{
+		"name": "null unknown rendition field is ignored",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"ok": {
+						"codec": "avc1.64001f",
+						"com.example.tag": null
+					}
+				}
+			}
+		},
+		"video": ["ok"]
+	},
+	{
 		"name": "mis-shaped stats null",
 		"catalog": {
 			"video": {
@@ -4916,5 +5914,197 @@
 			"com.example.text": null
 		},
 		"video": ["ok"]
+	},
+	{
+		"name": "a newer entry is skipped",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"next": {
+						"version": 5,
+						"codec": 42
+					}
+				}
+			},
+			"audio": {
+				"renditions": {
+					"next": {
+						"version": 6
+					}
+				}
+			},
+			"text": {
+				"renditions": {
+					"next": {
+						"version": 5
+					}
+				}
+			},
+			"json": {
+				"tracks": {
+					"next": {
+						"version": 5
+					}
+				}
+			},
+			"binary": {
+				"tracks": {
+					"next": {
+						"version": 5,
+						"mode": []
+					}
+				}
+			},
+			"include": {
+				"next": {
+					"version": 5,
+					"broadcast": 7
+				}
+			}
+		},
+		"video": ["compat"],
+		"skipped": {
+			"video": {
+				"next": 5
+			},
+			"audio": {
+				"next": 6
+			},
+			"text": {
+				"next": 5
+			},
+			"json": {
+				"next": 5
+			},
+			"binary": {
+				"next": 5
+			},
+			"include": {
+				"next": 5
+			}
+		}
+	},
+	{
+		"name": "a supported entry version is read",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"zero": {
+						"version": 0,
+						"codec": "avc1.64001f"
+					},
+					"four": {
+						"version": 4,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"video": ["four", "zero"]
+	},
+	{
+		"name": "a newer root version refuses despite entry versions",
+		"catalog": {
+			"version": 5,
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"next": {
+						"version": 5
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version \"5\" refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": "5",
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version -1 refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": -1,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version 4.5 refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": 4.5,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version null refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": null,
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
+	},
+	{
+		"name": "entry version [] refuses the catalog",
+		"catalog": {
+			"video": {
+				"renditions": {
+					"compat": {
+						"codec": "avc1.64001f"
+					},
+					"bad": {
+						"version": [],
+						"codec": "avc1.64001f"
+					}
+				}
+			}
+		},
+		"refused": true
 	}
 ]
