@@ -616,10 +616,12 @@ impl IngestClock {
 		});
 		let fallback = to_u64(media_us as i128 + offset);
 		let previous = track.last_output_us;
-		// Where the track's last frame puts this one if its timeline just continues.
-		let continued = previous
-			.zip(track.last_media_us)
-			.map(|(output, media)| to_u64(output as i128 + media_us.saturating_sub(media) as i128));
+		// Where the track's last frame puts this one if its timeline just continues, never
+		// behind it: a reordered picture decodes before the last, as its media time says.
+		let continued = previous.zip(track.last_media_us).map(|(output, media)| {
+			let next = output as i128 + media_us as i128 - media as i128;
+			to_u64(next.max(output as i128 + 1))
+		});
 		track.last_media_us = Some(media_us);
 		track.last_output_us = Some(fallback);
 
@@ -635,7 +637,7 @@ impl IngestClock {
 			Some(mapped) => mapped.max(previous.map_or(fallback, |last| last.saturating_add(1))),
 			None => fallback,
 		};
-		let step = continued.is_some_and(|continued| output.abs_diff(continued) > STEP_US);
+		let step = continued.is_some_and(|continued| output > continued.saturating_add(STEP_US));
 		let (output, stepped) = match continued {
 			Some(continued) if step && !opens_group => (continued, false),
 			_ => (output, step),
@@ -673,7 +675,7 @@ impl IngestClock {
 	}
 }
 
-/// How far a frame may land from where its track's timeline continues before it is a step: a
+/// How far a frame may land ahead of where its track's timeline continues before it is a step: a
 /// sender report's own correction, which readers absorb, stays under it.
 const STEP_US: u64 = 20_000;
 
@@ -1231,6 +1233,29 @@ mod tests {
 		assert!(key.stepped, "the keyframe takes the step");
 		assert_eq!(key.timestamp_us, 1_500_000);
 		assert!(!frame(&mut clock, video, 1_240, 0, video_base, false).stepped);
+	}
+
+	/// A reordered picture, which decodes before the one sent ahead of it, lands where its own media
+	/// time puts it before the reports, and is no step after them.
+	#[test]
+	fn a_reordered_picture_is_no_step() {
+		let mut clock = IngestClock::default();
+		let video = Mid::from("1");
+		let t0 = Instant::now();
+		let at = |ms: u64| t0.saturating_add(Duration::from_millis(ms));
+		let base = 8_000_000_000;
+		let times = |clock: &mut IngestClock, frames: [u64; 3]| {
+			frames.map(|ms| {
+				let mapped = clock.normalize(video, at(ms), base + ms * 1_000, ms == 100);
+				assert!(!mapped.stepped);
+				mapped.timestamp_us
+			})
+		};
+		assert_eq!(times(&mut clock, [100, 166, 133]), [0, 66_000, 33_000]);
+		let report_time = UNIX_EPOCH + Duration::from_secs(1_700_000_001);
+		clock.observe(video, sender_info(2, report_time, base + 133_000));
+		// With one track the reports change nothing, and a delta keeps its place.
+		assert_eq!(times(&mut clock, [200, 266, 233]), [100_000, 166_000, 133_000]);
 	}
 
 	fn sender_info(ssrc: u32, ntp_time: SystemTime, rtp_us: u64) -> SenderInfo {
