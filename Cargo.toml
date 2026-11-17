@@ -79,9 +79,7 @@ rust-version = "1.91"
 allow_attributes_without_reason = "warn"
 
 [workspace.dependencies]
-aes = "0.9"
 anyhow = "1"
-arrayvec = "0.7.6"
 ash = "0.38"
 async-trait = "0.1"
 # Keep axum's defaults except tower-log, which enables tracing-to-log macros workspace-wide.
@@ -103,17 +101,13 @@ bitflags = "2"
 bitstream-io = "4.10"
 block2 = "0.6.2"
 bytes = "1"
-ccm = { version = "0.6", default-features = false }
 clap = { version = "4", features = ["derive"] }
-combine = "4.6.6"
-crc = "3"
 # CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
 data-encoding = "2.11"
 dispatch2 = "0.3.1"
 ebml-iterable = "0.7.1"
-fastrand = "2"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
 h2 = "0.4"
@@ -192,7 +186,6 @@ moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = fals
 moq-webrtc = { version = "0.3.12", path = "rs/moq-webrtc" }
 mp4-atom = "0.17.1"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
-nom = { version = "8", default-features = false, features = ["std"] }
 num_enum = "0.7"
 objc2 = "0.6.4"
 objc2-av-foundation = "0.3.2"
@@ -202,8 +195,6 @@ objc2-screen-capture-kit = "0.3.2"
 # Default features off so a consumer that only needs InMemory does not pull the
 # local-filesystem stack; `fs` (and cloud backends) are opted in by the caller.
 object_store = { version = "0.14", default-features = false }
-once_cell = "1.21.3"
-pcap-file = "2"
 pem = "4.0.0"
 percent-encoding = "2"
 pkcs1 = { version = "0.8.0", features = ["alloc"] }
@@ -226,6 +217,7 @@ rind-jsonwebtoken = "11.0.2"
 rind-object-store = "0.14.2"
 rind-rcgen = "0.14.2"
 rind-rustls = "0.23.2"
+rind-str0m = "0.25.2"
 rustc-hash = "2.1.3"
 rustls-native-certs = "0.8.5"
 sd-notify = "0.5"
@@ -235,8 +227,8 @@ serde_json = "1"
 serde_with = "3"
 slab = "0.4.12"
 socket2 = "0.6"
-spki = "0.8"
-subtle = "2.6"
+# default-features off drops str0m's aws-lc-rs crypto provider; rind-str0m supplies rind's.
+str0m = { version = "0.25", default-features = false }
 tempfile = "3"
 thiserror = "2"
 time = "0.3"
@@ -259,7 +251,6 @@ web-transport-proto = "0.6.4"
 web-transport-trait = "0.5"
 wgpu = "30"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
-x509-cert = { version = "0.3", default-features = false }
 x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
 

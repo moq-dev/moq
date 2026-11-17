@@ -33,7 +33,8 @@ A broadcast is named by a path: non-empty segments joined by `/`, such as
 `room/alice`. A path never starts or ends with `/` or doubles one, and a `\`
 only escapes a `\` or `/` (how a moq-transport namespace field holding one is
 spelled), so each name has one spelling, and every API and peer refuses any
-other. The empty path is the root, which prefixes every path.
+other. An escaped `/` stays inside its segment: `room/a\/b` has two segments,
+one per namespace field. The empty path is the root, which prefixes every path.
 
 ## Discovery
 
@@ -205,8 +206,9 @@ matches `room` and every descendant. Segments are separated by `/`:
 | `pre*suf` | One segment with that prefix and suffix, without overlapping them. |
 | `**` | Zero or more segments. |
 
-A pattern may contain at most 32 segments and one `**`. There is no escape for
-a literal `*`. The empty pattern matches the empty path.
+A pattern may contain at most 32 segments and one `**`. A literal escapes a `/`
+the way a path does, so `room/a\/b/*` names a namespace field holding a `/`;
+there is no escape for a literal `*`. The empty pattern matches the empty path.
 
 A subscriber watching under a root sees advertisements named relative to that
 root. When several routes advertise one prefix, each reader sees the best route
@@ -283,6 +285,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 | **Priority** (-128..127, default 0) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. The publisher's track priority breaks ties between subscriptions at one priority. From a native Rust publisher over QUIC or WebTransport, subscriptions at the same priority and publisher priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. Unset leaves the publisher's max age alone to bound it. |
+| **Min delay** | The playout buffer the subscriber holds behind the live edge. A join from the latest group starts at the newest group beginning this far behind it, so the buffer arrives full instead of filling in real time, and no fuller. The hop answering measures from what it holds: media time on a timed track, arrival time on an untimed one, and it never fetches upstream to reach further. Zero (the default) reaches back nothing, and a range from the oldest group or a named start ignores it. Carried by moq-lite 07, where a relay asks upstream for the largest its subscribers state. |
 | **Ranges** | Which groups to ask for: from the oldest group, a number of groups back from the latest, or the group containing a time, through an end that includes its group. Each group arrives whole, from its first frame. The default asks for everything max delay allows. Max delay still caps every range. |
 
 On moq-lite 05 and later, a publisher explicitly reports groups that will not arrive.

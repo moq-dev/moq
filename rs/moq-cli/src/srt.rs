@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
-use moq_srt::{Reject, Request, Server};
+use moq_srt::{Export, Import, Reject, Request, Server};
 use moq_tokio::RedactedUrl;
 use url::Url;
 
@@ -77,8 +77,12 @@ impl ImportArgs {
 
 /// Point a multi-program refusal at the flag that resolves it.
 fn suggest_program(err: moq_srt::Error) -> anyhow::Error {
-	let multiplex = matches!(&err, moq_srt::Error::Mux(moq_mux::Error::Other(inner))
-		if inner.is::<moq_mux::container::ts::MultipleProgramsError>());
+	let multiplex = matches!(
+		err,
+		moq_srt::Error::Mux(moq_mux::Error::Ts(
+			moq_mux::container::ts::Error::MultiplePrograms { .. }
+		))
+	);
 	let err = anyhow::Error::from(err);
 	if multiplex {
 		err.context("choose one with `--program <n>`, or publish each with `--program all`")
@@ -107,15 +111,18 @@ pub async fn listen_import(
 				let name = name.clone();
 				let ingest = ingest.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish.with_program(program).accept(&origin, &name, &ingest).await {
+					let mut import = Import::new(&origin, name.clone());
+					import.ingest = ingest;
+					import.program = program;
+					if let Err(err) = publish.accept(import).await {
 						let err = suggest_program(err);
 						tracing::warn!(%name, err = format!("{err:#}"), "SRT ingest ended with error");
 					}
 				});
 			}
-			Request::Subscribe(subscribe) => {
+			Request::Play(play) => {
 				tokio::spawn(async move {
-					let _ = subscribe.reject(Reject::Forbidden).await;
+					let _ = play.reject(Reject::Forbidden).await;
 				});
 			}
 			_ => {}
@@ -140,12 +147,14 @@ pub async fn listen_export(
 
 	while let Some(request) = server.accept().await {
 		match request {
-			Request::Subscribe(subscribe) => {
+			Request::Play(play) => {
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					let subscribe = subscribe.with_follow(follow).with_stitch(stitch);
-					if let Err(err) = subscribe.accept(&origin, &name).await {
+					let mut export = Export::new(&origin, name.clone());
+					export.follow = follow;
+					export.stitch = stitch;
+					if let Err(err) = play.accept(export).await {
 						tracing::warn!(%name, %err, "SRT request ended with error");
 					}
 				});
@@ -174,13 +183,12 @@ pub async fn connect_import(
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "SRT client pulling");
 	notify_ready();
 
-	let client = moq_srt::Client::new(addr, resource)
-		.with_latency(latency)
-		.with_program(program);
-	client
-		.pull(&target.origin, name, &target.ingest)
-		.await
-		.map_err(suggest_program)
+	let mut client = moq_srt::Client::new(addr, resource);
+	client.latency = latency;
+	let mut import = Import::new(&target.origin, name);
+	import.ingest = target.ingest;
+	import.program = program;
+	client.pull(import).await.map_err(suggest_program)
 }
 
 /// Push a broadcast from the Origin to a remote SRT server (export).
@@ -195,11 +203,12 @@ pub async fn connect_export(
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "SRT client pushing");
 	notify_ready();
 
-	let client = moq_srt::Client::new(addr, resource)
-		.with_latency(args.endpoint.latency.into())
-		.with_follow(args.follow.into())
-		.with_stitch(args.stitch);
-	Ok(client.publish(&origin, moq_srt::dial::Publish::new(name)).await?)
+	let mut client = moq_srt::Client::new(addr, resource);
+	client.latency = args.endpoint.latency.into();
+	let mut export = Export::new(&origin, name);
+	export.follow = args.follow.into();
+	export.stitch = args.stitch;
+	Ok(client.publish(export).await?)
 }
 
 /// Parse `srt://host:port?streamid=<resource>` into a resolved address and resource.

@@ -83,4 +83,10 @@ export interface Specificity {
 }
 
 export function compareSpecificity(a: Specificity, b: Specificity): number;
+
+export function escape(content: string): string;
+
+export function parts(path: string, limit?: number): string[];
+
+export function unescape(segment: string): string;
 ```

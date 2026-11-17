@@ -75,8 +75,8 @@ Recommended in the same PR, from the audit, not individually decided:
   outside two tests since peer-to-peer left in
   [moq-dev/moq#8771](https://github.com/moq-dev/moq/pull/8771). A supplied
   transport may still label itself, so drop it only if the Kixel check
-  finds no use, with Rust's `Transport::WebRtc`
-  ([transport sweep](/quest/m2/unused-api/transport.md)).
+  finds no use, as Rust's `Transport::WebRtc` went in
+  [moq-dev/moq#8957](https://github.com/moq-dev/moq/pull/8957).
 
 Kept on purpose although nothing in the repository calls them:
 `peerImplementation`, `setCost`, `Error.RefusedRedirect`,

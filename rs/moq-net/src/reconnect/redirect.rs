@@ -384,7 +384,7 @@ mod tests {
 			"a peer-named host is refused without resolving it"
 		);
 		assert_eq!(
-			super::super::Goaway::default().redirect,
+			super::super::Handover::default().redirect,
 			Redirect::SameHost,
 			"and the default config carries that default"
 		);

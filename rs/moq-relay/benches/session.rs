@@ -92,7 +92,7 @@ impl Backend for Relay {
 			while let Some(admission) = admissions.next().await {
 				let mut grant = Grant::new(Pattern::all(), Pattern::all());
 				grant.root = Some(String::new());
-				grant.peer = admission.request.path == "/peer";
+				grant.link = (admission.request.path == "/peer").then_some(moq_auth::Link::Peer);
 				admission.grant(lease::Consumer::fixed(grant));
 			}
 		});

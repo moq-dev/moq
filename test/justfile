@@ -315,6 +315,10 @@ resume-model:
 tla *paths:
     bash ../sh/tla.sh {{ paths }}
 
+# Type-check the route rule's convergence proof (rs/moq-net/verify/route-algebra) with its own pinned Agda.
+route-proof:
+    nix build ..#route-proof --no-link --print-build-logs
+
 # Prove the route key model, and that each variant breaks the lemmas it names.
 route-key-model:
     bash route-key-model.sh

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::Instant;
-use moq_net::track::{Anchor, Delay, Order, Position, Range, Subscription};
+use moq_net::track::{Anchor, Delay, Item, Order, Position, Range, Subscription};
 use moq_net::{StreamError, Timescale, group};
 use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutPayload};
@@ -218,8 +218,12 @@ impl<S: ObjectStore> Track<S> {
 						}
 					}
 					None => {
-						if let Poll::Ready(next) = ordered.poll_next_group(waiter) {
-							return Poll::Ready(Event::Next(next));
+						// A group the track gave up on is stored as the hole it leaves.
+						while let Poll::Ready(next) = ordered.poll_next_group(waiter) {
+							match next {
+								Ok(Some(Item::Gap { .. })) => continue,
+								next => return Poll::Ready(Event::Next(next.map(|item| item.and_then(Item::group)))),
+							}
 						}
 					}
 				}
@@ -320,7 +324,7 @@ impl<S: ObjectStore> Track<S> {
 				|| match (self.timescale, frame.timestamp) {
 					(Some(timescale), Some(pts)) => {
 						let duration = units(config.duration, timescale);
-						let first = building.object.start()?.pts.expect("a timed object starts timed");
+						let first = building.object.timestamp().expect("a timed object starts timed");
 						match boundary {
 							true => pts.saturating_sub(first) >= duration,
 							// An oversized group splits once its own run here reaches the duration.

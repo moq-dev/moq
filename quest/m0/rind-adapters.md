@@ -7,10 +7,11 @@ rind-rustls, rind-jsonwebtoken, rind-object-store, and rind-rcgen that make
 each adapter's API its upstream's, on the day they publish: the PR is ready
 before they publish and merges when they do.
 
-Non-goal: replacing the dimpl and str0m providers vendored under
-`rs/moq-webrtc/src/vendor`, which are MoQ's own code and depend on neither
-rind-dimpl nor rind-str0m. They call rind directly, so rind 0.4 still reaches
-them.
+moq-webrtc also depends on rind-str0m, and rind-dimpl through it, since it
+moved to upstream str0m ([moq-dev/moq#8963](https://github.com/moq-dev/moq/pull/8963)).
+Their crates.io releases require rind 0.3, so the rind 0.4 release carries
+patch releases of both too, and this PR raises `rind-str0m` with the other
+adapters.
 
 ## Plan
 
@@ -74,10 +75,9 @@ Shipped code, each call and what it becomes:
   becomes `PrivatePkcs8KeyDer::from(key_pair.serialize_der())`. The serial it
   sets on lines 1263-1265 already covers rind-rcgen's removed
   `serial_number()`.
-- `rs/moq-webrtc/src/vendor/dimpl/certificate.rs:39` (rind-rcgen):
-  `generate(..)` becomes `generate_for(..)`; line 76's
-  `key_pair.to_pkcs8().secret_pkcs8_der().to_vec()` becomes
-  `key_pair.serialize_der()`.
+- `rs/moq-webrtc/src/session.rs`'s `rtc_config` (rind-str0m): drop the
+  `.expect(..)` after `rind_str0m::default_provider()` if the CPU-check
+  removal makes it infallible, with the `moq_crypto::cpu::check()` before it.
 - `rs/moq-relay/examples/embed.rs:23` (rind-rustls): drop the `.unwrap()`
   after `rind_rustls::default_provider()`.
 
@@ -87,9 +87,9 @@ all the same mechanical edits. Find them with:
 - `rind_rustls::default_provider()`: 105 lines in 40 files, plus 5 bare
   `default_provider()` calls in `rs/moq-quic/src/tests/mod.rs` and
   `rs/moq-tokio/src/quic/driver/tests.rs`, which import it by `use`.
-- `KeyPair::generate(&`: 78 lines in 38 files. One asks for P-384,
-  `rs/moq-webrtc/src/vendor/dimpl/tests/dtls12/handshake.rs:841`, so use
-  `generate_for` everywhere rather than the P-256 default.
+- `KeyPair::generate(&`: 78 lines in 38 files at `985e8897`, fewer since
+  the vendored dimpl left. Use `generate_for` everywhere rather than the
+  P-256 default.
 - `to_pkcs8().secret_pkcs8_der()`: 60 lines in 33 files. The other
   `to_pkcs8()` calls (`rs/moq-auth/src/key.rs:574`, `:587`, and
   `rs/moq-auth/src/generate.rs:41`) are rind's own key types and do not
@@ -122,18 +122,10 @@ rind 0.4 itself changes three things, of which MoQ uses two:
     moq-auth, moq-e2ee, moq-hls, moq-quic, moq-rtmp, moq-tokio
     (`rs/moq-tokio/src/crypto.rs:7`), moq-uring, moq-webrtc, and qmux, with
     the doc comments that name it.
-  - The vendored providers, which call rind directly:
-    `rs/moq-webrtc/src/vendor/dimpl/crypto/rind/mod.rs:24-25` and
-    `rs/moq-webrtc/src/vendor/str0m_rind/lib.rs:19-20` return
-    `rind::cpu::MissingFeature` after `rind::cpu::check()`, so their
-    `default_provider()` becomes infallible, and
-    `rs/moq-webrtc/src/vendor/dimpl/error.rs:363` drops
-    `UnsupportedCpu(rind::cpu::MissingFeature)`.
 - Agreement keys keep their public key
   ([kixel-ai/rind#529](https://github.com/kixel-ai/rind/pull/529)):
-  `agreement::PrivateKey::public_key()` returns a borrow. The vendored dimpl
-  provider calls it at `rs/moq-webrtc/src/vendor/dimpl/crypto/rind/kx.rs:38`;
-  check that line and the rest of that file against #529's Public API section.
+  `agreement::PrivateKey::public_key()` returns a borrow. Only rind-dimpl
+  calls it, so its patch release absorbs the change.
 - AES-CBC encryption takes a typed `CbcIv`
   ([kixel-ai/rind#530](https://github.com/kixel-ai/rind/pull/530)): MoQ calls no
   AES-CBC encryption, by grep at that commit.

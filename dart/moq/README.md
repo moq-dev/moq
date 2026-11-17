@@ -1,5 +1,7 @@
 # moq
 
+**Experimental:** the API may change in any release, and nobody has run it on iOS or in a Flutter application yet.
+
 Idiomatic Dart and Flutter bindings for Media over QUIC.
 
 ```dart

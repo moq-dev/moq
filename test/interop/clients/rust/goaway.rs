@@ -19,9 +19,10 @@ async fn endpoint(
 
 fn write(track: &mut moq_net::track::Producer, sequence: u64) -> anyhow::Result<()> {
 	// The track carries no timescale, so its groups count up from 0.
-	let mut group = track.append_group(sequence)?;
-	group.write_frame(moq_net::Timestamp::unscaled(sequence), vec![sequence as u8; 32])?;
-	group.close()?;
+	let start = moq_net::Timestamp::unscaled(sequence);
+	let mut group = track.append_group(start)?;
+	group.write_frame(start, vec![sequence as u8; 32])?;
+	group.finish()?;
 	Ok(())
 }
 
@@ -61,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
 		output.next_line().await?.as_deref() == Some("first group"),
 		"JS did not read first group"
 	);
-	session.drain().send(moq_net::goaway::Goaway::redirect(&second_url))?;
+	session.goaway(moq_net::goaway::Goaway::redirect(&second_url))?;
 	let replacement = second.accept().await.context("replacement accept")?.ok().await?;
 	ensure!(replacement.version() == version, "wrong replacement negotiated version");
 	// First exercise the replacement while the drained route still serves. A JS

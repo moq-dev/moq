@@ -8,16 +8,16 @@
 //!
 //! A [`Producer`] writes, under its prefix:
 //!
-//! - `<track>/.info`: the track's properties as JSON, `{"version":4,"priority":0,"timescale":1000}`,
+//! - `<track>/.info`: the track's properties as JSON, `{"version":2,"priority":0,"timescale":1000}`,
 //!   written before its first object. `timescale` is absent on an untimed track. Properties never
 //!   change for a track name. The source's max age is not stored: it bounds the live cache, not
 //!   the archive.
-//! - `<track>/<group>-<frame>-<pts>` on a timed track, `<track>/<group>-<frame>` on an untimed
-//!   one: an object, keyed by its first sequence, the index of its first frame within it, and
-//!   that frame's timestamp in the track's timescale. Each field is 19 zero-padded decimal digits,
-//!   so a sorted listing is content order and answers group and time lookups; there is no index
-//!   object. A group may split between frames across objects, which the frame index keeps unique
-//!   and ordered even where timestamps repeat or go backward. Every object is written once.
+//! - `<track>/<group>-<frame>`: an object, keyed by its first group's start and the index of its
+//!   first frame within that group. Each field is 19 zero-padded decimal digits, so a sorted
+//!   listing is content order; on a timed track a group's start is its time in the track's
+//!   timescale, so the same listing answers time lookups, and there is no index object. A group
+//!   may split between frames across objects, which the frame index keeps unique and ordered.
+//!   Every object is written once.
 //! - `<track>/end`: how the track's last run ended, `{"finish":{"group":5,"frame":0}}` for a
 //!   clean end at that exclusive position or `{"error":52}` for the stream error code. It sorts
 //!   after every object key, and DVR pruning never deletes it.
@@ -32,7 +32,7 @@
 //!
 //! ```text
 //! Object {
-//!   Version (i) = 4,
+//!   Version (i) = 2,
 //!   Frame Start (i),      // the first group's first frame index
 //!   Entry Count (i),
 //!   Entry (..) ...,
@@ -40,16 +40,20 @@
 //! }
 //!
 //! Entry {
-//!   Sequence (i),         // absolute for the first entry, then current - previous - 1
+//!   Group Start (i),      // absolute for the first entry, then current - previous - 1
 //!   Frame Count (i),      // at least 1
 //!   Frame (..) ...,
 //! }
 //!
 //! Frame {
-//!   [Timestamp (i)],      // exactly when the track's .info declares a timescale
+//!   [Timestamp (i)],      // absolute, exactly when the track's .info declares a timescale
 //!   Length (i),
 //! }
 //! ```
+//!
+//! JSON readers ignore members they do not know, so a later writer may add a member a reader can
+//! safely skip without a new version; anything that changes what existing bytes mean takes one.
+//! A reader accepts exactly [`VERSION`] and refuses any other with [`Error::Version`].
 //!
 //! An archive records stream tracks only. A datagram track is live-only, so a broadcast's
 //! archive holds none of its datagram tracks.
@@ -74,15 +78,10 @@ pub use info::Info;
 pub use producer::Producer;
 pub use store::Store;
 
-/// Recording format version written into `.info` and the binary envelope.
-pub const VERSION: u64 = 4;
+/// The archive format version, written into `.info` and every object, and the only one read.
+pub const VERSION: u64 = 2;
 
-/// The oldest recording format version a [`Consumer`] accepts. Version 2 stored `.info`'s
-/// priority as its moq-lite byte, and versions 2 and 3 give each object entry a form, which
-/// a reader accepts only as a group.
-pub(crate) const VERSION_MIN: u64 = 2;
-
-/// Largest sequence, frame index, or timestamp value the format allows (`2^53 - 1`).
+/// Largest group start, frame index, or timestamp value the format allows (`2^53 - 1`).
 pub const ID_MAX: u64 = (1 << 53) - 1;
 
 /// Decimal width of each object key field.
