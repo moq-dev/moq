@@ -550,11 +550,16 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The replacement case is quarantined from the default run off Chromium: on Firefox its
-fallback intermittently misses the switch bound, as often with the audio fixes that
-restored it on Chromium as without them. Run it explicitly with
-`--media-cases replacement --media-engines firefox`; its content, sync, switch, and
-fallback assertions remain active.
+Off Chromium, the replacement case skips its IETF draft 22 viewer and reports it as
+quarantined. The fallback rejoins an incumbent that encodes its audio on demand, so the
+incumbent replays the audio it captured while nobody listened, from where the returning
+subscription says it plays. moq-transport states no delay, so the incumbent can only cut
+that replay at the retention, and a WebSocket delivers all of it ahead of the live edge;
+Chromium's WebTransport delivers newest first. This is a known moq-transport limitation.
+A lite-07 viewer states its delay, so the replay starts there; a lite-06 viewer states
+only its max delay, which bounds it to about two seconds. Either way the player decodes
+audio that trails the clock past its bound only to warm the codec, so the moq-lite
+viewers rejoin at the live edge on every engine.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media

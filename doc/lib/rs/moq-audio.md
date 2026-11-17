@@ -39,7 +39,8 @@ glides onto its clock, instead of writing silence or failing at each step.
 
 Without a subscriber the encoder keeps raw PCM
 up to the track's `max_age`, then encodes the part of that history within the
-subscribers' max delay before continuing live when someone subscribes. With an unlimited `max_age` it keeps at most 30 seconds
+subscribers' min delay (their playout delay plus the codec's warmup), or their max delay
+when they state no min, before continuing live when someone subscribes. With an unlimited `max_age` it keeps at most 30 seconds
 (about 11.5 MB for 48 kHz stereo f32). Set `encode::Capture::retain` to false
 to encode continuously instead. Dropping an encoder leaves the shared capture running. A device
 failure keeps the retained history on the track until it is subscribed or expires, then the

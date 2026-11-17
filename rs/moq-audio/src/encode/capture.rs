@@ -547,10 +547,11 @@ mod tests {
 		}
 	}
 
-	/// Subscribe with a `max` delay, which bounds how much retained history the encoder replays.
-	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, max: Duration) -> Track<Wire> {
-		let subscription =
-			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(max));
+	/// Subscribe playing `delay` behind the live edge, which bounds how much retained history the
+	/// encoder replays.
+	async fn subscribe(broadcast: &moq_net::broadcast::Consumer, delay: Duration) -> Track<Wire> {
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_min(delay).with_max(delay));
 		let subscriber = broadcast.track("audio").unwrap().subscribe(subscription).await.unwrap();
 		Track::new(subscriber, Wire(Kind::Audio))
 	}

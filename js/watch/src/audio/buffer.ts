@@ -187,6 +187,15 @@ export class Backpressure {
 		});
 	}
 
+	/**
+	 * Release a frame at once whose output the ring would skip unheard, so a backlog behind the clock
+	 * decodes at the codec's pace, only to warm it, rather than at the pace the ring drains. It counts
+	 * as decoding until its output answers it.
+	 */
+	pass(timestamp: number): void {
+		this.#decoding.push(timestamp);
+	}
+
 	/** The ring was flushed for a new timeline: its playhead is unknown until the next frame anchors it. */
 	reset(): void {
 		this.#playhead = undefined;
@@ -614,8 +623,24 @@ export class AudioBuffer {
 	 * whose whole target fits the floor. Resolves early, releasing the wait, once `signal` aborts.
 	 */
 	wait(timestamp: number, signal: AbortSignal): Promise<void> {
+		if (this.stale(timestamp)) {
+			this.#backpressure.pass(timestamp);
+			return Promise.resolve();
+		}
 		// The worklet-reported playhead lags by a state-message interval, which only holds frames longer.
 		return this.#backpressure.wait(timestamp, signal);
+	}
+
+	/**
+	 * Whether media at `timestamp`, in microseconds, trails the shared clock past the bound, so the ring
+	 * would skip it unheard, as a publisher's replayed backlog does on a rejoin. The decoder still
+	 * decodes it to warm the codec, but writes none of it: a ring anchored on it would play catch-up
+	 * instead of the live edge.
+	 */
+	stale(timestamp: number): boolean {
+		const position = this.#sync?.position();
+		if (position === undefined) return false;
+		return position * 1000 - timestamp > Math.max(this.#bound.asMicros(), WINDOW);
 	}
 
 	/** Stop observing the worklet and release every pending wait. */
