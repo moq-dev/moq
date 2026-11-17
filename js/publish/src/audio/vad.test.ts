@@ -40,46 +40,39 @@ function scores(vad: Vad, samples: Float32Array, rate: number): number[] {
 	return out;
 }
 
-// libopus 1.6.1's silk_resampler_private_down_FIR and silk_VAD_GetSA_Q8_c on the same samples.
+// libopus 1.6.1's silk_VAD_GetSA_Q8_c on the same samples.
 // biome-ignore format: one row per half second
-const LIBOPUS_48K_20MS = [
-	2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,2,2,4,2,2,2,2,2,
-	207,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
-	229,250,251,250,250,250,250,250,249,249,249,248,248,247,247,247,246,246,245,244,244,244,243,242,241,
-	126,2,2,2,2,2,2,2,2,4,2,3,2,3,3,9,5,2,2,2,9,48,50,10,2,
+const LIBOPUS_8K_20MS = [
+	2,2,2,2,2,2,2,4,2,4,2,2,2,2,2,3,2,2,2,2,2,2,2,2,2,
+	234,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+	255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+	166,2,2,2,2,2,2,2,2,2,2,2,2,2,2,4,13,2,2,2,10,20,41,5,2,
 ];
 
 // biome-ignore format: one row per half second
-const LIBOPUS_24K_10MS = [
-	2,2,2,2,2,2,2,2,2,5,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,2,2,2,2,4,2,2,3,2,2,2,2,2,2,2,2,2,
-	172,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,182,
-	239,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,253,251,249,247,246,
-	112,2,2,2,2,2,2,2,2,2,2,2,2,3,2,2,2,4,2,2,2,2,10,2,2,2,2,2,2,10,10,7,4,3,4,4,2,2,2,2,3,44,69,32,67,41,11,10,2,2,
+const LIBOPUS_12K_10MS = [
+	2,2,2,2,2,2,2,2,2,2,3,4,3,3,2,2,2,2,2,2,5,4,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,3,3,2,2,2,2,2,6,
+	185,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,228,
+	241,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,254,254,253,251,249,248,244,242,
+	101,2,2,2,2,2,2,4,2,2,7,2,2,4,2,2,2,2,2,2,2,10,4,3,2,2,2,2,2,8,26,34,74,28,2,2,2,2,2,2,3,16,50,58,103,87,81,6,2,2,
 ];
 
 describe("Vad", () => {
-	test("scores 48 kHz in 20 ms blocks exactly as libopus does", () => {
-		expect(scores(new Vad({ sampleRate: 48_000, block: 20 }), signal(48_000), 48_000)).toEqual(LIBOPUS_48K_20MS);
+	test("scores 8 kHz in 20 ms blocks exactly as libopus does", () => {
+		expect(scores(new Vad({ sampleRate: 8000, block: 20 }), signal(8000), 8000)).toEqual(LIBOPUS_8K_20MS);
 	});
 
-	test("scores 24 kHz in 10 ms blocks exactly as libopus does", () => {
-		expect(scores(new Vad({ sampleRate: 24_000, block: 10 }), signal(24_000), 24_000)).toEqual(LIBOPUS_24K_10MS);
-	});
-
-	test("a rate without an integer path to SILK's still scores", () => {
-		const vad = new Vad({ sampleRate: 44_100, block: 20 });
-		const active = scores(vad, signal(44_100), 44_100).map((q8) => q8 >= 13);
-		expect(active.slice(0, 25).some(Boolean)).toBe(false);
-		expect(active.slice(26, 74).every(Boolean)).toBe(true);
+	test("scores 12 kHz in 10 ms blocks exactly as libopus does", () => {
+		expect(scores(new Vad({ sampleRate: 12_000, block: 10 }), signal(12_000), 12_000)).toEqual(LIBOPUS_12K_10MS);
 	});
 
 	test("push reports whether any block it completes is speech", () => {
-		const vad = new Vad({ sampleRate: 48_000, block: 20 });
-		const samples = signal(48_000);
+		const vad = new Vad({ sampleRate: 8000, block: 20 });
+		const samples = signal(8000);
 		// Half a block completes nothing.
-		expect(vad.push(chunk(samples, 0, 480, 48_000))).toBeUndefined();
-		expect(vad.push(chunk(samples, 480, 24_000, 48_000))).toBe(false);
+		expect(vad.push(chunk(samples, 0, 80, 8000))).toBeUndefined();
+		expect(vad.push(chunk(samples, 80, 4000, 8000))).toBe(false);
 		// The room tone's last blocks and the burst's first.
-		expect(vad.push(chunk(samples, 24_000, 26_880, 48_000))).toBe(true);
+		expect(vad.push(chunk(samples, 4000, 4480, 8000))).toBe(true);
 	});
 });

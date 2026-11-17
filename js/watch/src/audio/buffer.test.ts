@@ -725,6 +725,36 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
+	// The ring renders ahead of what sounds by the context's current lead, which a fall in the output
+	// latency shortens at once, where `output` holds its peak for five seconds.
+	it("reports how far the worklet renders ahead of what sounds now", () => {
+		const clock = started();
+		const { buffer, state, context } = fake(300);
+		try {
+			context.baseLatency = 0.01;
+			context.outputLatency = 0.25;
+			context.currentTime = 1;
+			context.sounding = 0.74;
+			state(ms(0), false, 0);
+			expect(buffer.lead.peek()).toEqual(Duration.millis(260));
+			// The output latency fell to 20 ms: the peak stays, and the lead follows.
+			context.outputLatency = 0.02;
+			context.currentTime = 2;
+			context.sounding = 1.97;
+			state(ms(0), false, 0);
+			expect(buffer.output.peek()).toEqual(Duration.millis(260));
+			expect(buffer.lead.peek()).toEqual(Duration.millis(30));
+			// A move of a couple of milliseconds, a render callback's worth of noise, is left alone.
+			context.currentTime = 3;
+			context.sounding = 2.972;
+			state(ms(0), false, 0);
+			expect(buffer.lead.peek()).toEqual(Duration.millis(30));
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
 	// Startup holds only what the ring must from the first message, before any state report.
 	it("holds the delay less the output latency the context reports at construction", () => {
 		const sent: Message[] = [];

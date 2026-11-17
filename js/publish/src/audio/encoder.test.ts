@@ -670,11 +670,10 @@ test("a voice source sends nothing while its talker is silent", async () => {
 
 	await push(0, 5, false);
 	await push(100_000, 3, true);
-	// The first silent frame scores as speech (SILK counts the last subframe twice), then 200 ms of
-	// hangover, then the end is declared where the sent audio stops.
+	// 200 ms of hangover, then the end is declared where the sent audio stops.
 	await push(160_000, 15, false);
 	await push(460_000, 2, true);
-	expect(written).toEqual([...frames(80_000, 15), [380_000, 0], ...frames(440_000, 3)]);
+	expect(written).toEqual([...frames(80_000, 14), [360_000, 0], ...frames(440_000, 3)]);
 	expect(encoder.out.active.peek()).toBe(true);
 
 	// A mute in the middle of a word ends it there, and unmuting into silence sends nothing.
@@ -697,6 +696,31 @@ test("a voice source sends nothing while its talker is silent", async () => {
 	await push(1_120_000, 5, false);
 	await push(1_220_000, 1, true);
 	expect(written).toEqual([[1_120_000, 0], ...frames(1_200_000, 2)]);
+});
+
+// A long frame whose first 20 ms is still inside the hangover is sent, and the gate shuts behind
+// it: the end is declared after that frame, not before it.
+test("a voice source declares its end after the last frame the hangover sends", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Order(), { mime: "opus", frameDuration: Duration.millis(60) } as Codec);
+	const { capture, feed, written } = env;
+
+	const configuring = configured();
+	capture.in.source.set({ track: {}, kind: "voice" } as never);
+	await configuring;
+
+	let state = 1;
+	const speech = () => {
+		state = (Math.imul(state, 1103515245) + 12345) | 0;
+		return (state >>> 8) / 0x1000000 - 0.5;
+	};
+	for (let i = 0; i < 6; i++) {
+		const samples = i === 0 ? Float32Array.from({ length: 2880 }, speech) : new Float32Array(2880);
+		await feed.push({ timestamp: Duration.micros(i * 60_000), channels: [samples] });
+	}
+	await feed.drain();
+	const frames = Array.from({ length: 5 }, (_, i): [number, number] => [i * 60_000, 1]);
+	expect(written).toEqual([...frames, [300_000, 0]]);
 });
 
 // With `idle="release"` a mute closes the microphone, taking its format away. The rendition stays

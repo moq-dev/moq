@@ -81,7 +81,7 @@ impl SetupAccept {
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
-					accept_error = Some(crate::lite::error::from_transport(err));
+					accept_error = Some(Error::from_transport(err));
 					break;
 				}
 			}
@@ -764,7 +764,7 @@ impl PresentToken {
 							let Ok(code) = u32::try_from(refused.code) else {
 								return Poll::Ready(Error::ProtocolViolation);
 							};
-							let err = match crate::lite::error::from_session_code(code) {
+							let err = match crate::SessionError::from_code(code) {
 								crate::SessionError::Unsupported => Error::Unsupported,
 								code => Error::Session(code),
 							};
@@ -847,7 +847,7 @@ impl SendSetup {
 	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Waiting for stream credit on our own session handle.
 		let stream = wait!(Open => self.session.poll_open_uni(&mut self.open, waiter, Default::default()))
-			.map_err(crate::lite::error::from_transport)?;
+			.map_err(Error::from_transport)?;
 		let mut writer: Writer<crate::transport::boxed::SendStream, Version> =
 			Writer::new(stream, self.version).with_stats(&self.stats);
 		writer.buffer(&super::DataType::Setup)?;
