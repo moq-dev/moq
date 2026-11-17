@@ -90,6 +90,13 @@ encoder's `muted` instead: it sends nothing, keeps the rendition enabled, and
 marks where each utterance ends, so listeners stay subscribed and treat the gap
 as intentional silence.
 
+A `voice` source, which the microphone is, does the same on its own while its
+talker is silent: SILK's voice activity detector (from libopus) scores each
+frame, and 200 ms after speech stops nothing more is sent and the end is
+declared, so listeners play comfort noise instead of receiving encoded silence.
+Speech reopens it with the frame before it, so a soft onset is not clipped.
+Music and sources without a kind always send.
+
 Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: "all"` also gates video, which then loses its unsubscribed past.
 Bandwidth reservations still follow subscriptions; unwatched video uses its

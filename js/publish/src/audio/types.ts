@@ -1,7 +1,8 @@
 /**
  * The kind of audio being encoded. Drives the default Opus application/signal settings on the
  * encoder, each of which an explicit OpusConfig can still override.
- * - "voice": speech (microphone). Opus application=voip + signal=voice.
+ * - "voice": speech (microphone). Opus application=voip + signal=voice, and nothing is sent while the
+ *   talker is silent: each pause is a declared end, as a mute's is.
  * - "music": music or mixed content (screen/tab capture). Opus application=audio + signal=music.
  * - "auto": let the encoder decide. Opus defaults (good for unknown sources like file playback).
  */

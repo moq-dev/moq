@@ -31,4 +31,4 @@ Decided 2026-11-16 (maintainer, /quest-plan):
 
 ## Related
 
-- [A browser voice source sends nothing while its talker is silent](/quest/m1/voice-silence.md) - the browser publisher's gate, on the same wire shape
+- [A browser voice source stops sending soon after background noise rises](/quest/m2/voice-rising-noise.md) - the browser gate's SILK VAD lags libopus's analysis, which this quest's DTX runs
