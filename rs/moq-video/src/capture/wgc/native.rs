@@ -294,7 +294,11 @@ impl Capture {
 				.into_iter()
 				.chain(startup.deadline)
 				.chain(pending.as_ref().map(|_| pace.deadline()))
-				.chain(self.window.and(opened).map(|_| Instant::now().saturating_add(MINIMIZE_POLL)))
+				.chain(
+					self.window
+						.and(opened)
+						.map(|_| Instant::now().saturating_add(MINIMIZE_POLL)),
+				)
 				.min();
 			match signal.wait(deadline) {
 				Event::Stop => return Ok(()),
