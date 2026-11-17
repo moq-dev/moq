@@ -1246,6 +1246,31 @@ impl MoqMediaTrackProducer {
 		Ok(())
 	}
 
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let MediaProducer { import, video } = guard.take().ok_or(MoqError::Closed)?;
+		match import.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => Ok(true),
+			Err(import) => {
+				*guard = Some(MediaProducer {
+					import: Box::new(import),
+					video,
+				});
+				Ok(false)
+			}
+		}
+	}
+
 	/// Finish this track and finalize encoding.
 	///
 	/// The broadcast keeps the finished track until it ends, so its finish still holds it. A
@@ -1383,6 +1408,31 @@ impl MoqMediaTrackStreamProducer {
 			reason: format!("set enabled failed: {err}"),
 		})?;
 		Ok(())
+	}
+
+	/// Abort this track with an application error code, but only while nobody wants it.
+	///
+	/// This is how an on-demand publisher ends a track once [`MoqTrackDemand::wanted_changed`]
+	/// returns null. Releasing it instead fails a reader that joined in between. Returns true
+	/// once the track is closed, and this handle's later calls fail with `Closed`. Returns
+	/// false, leaving the track unchanged, when a reader wants it again, so keep serving and
+	/// wait for the next null on a fresh `demand()`: one that already returned null misses a
+	/// reader that came and went, and waits on. Fails with `Closed` once finished, like every
+	/// other call.
+	pub fn abort_unwanted(&self, error_code: u16) -> Result<bool, MoqError> {
+		let _guard = crate::ffi::enter();
+		let mut guard = self.inner.lock().unwrap();
+		let MediaStreamProducer { import, priority } = guard.take().ok_or(MoqError::Closed)?;
+		match import.abort_unwanted(moq_net::Error::App(error_code)) {
+			Ok(()) => Ok(true),
+			Err(import) => {
+				*guard = Some(MediaStreamProducer {
+					import: Box::new(import),
+					priority,
+				});
+				Ok(false)
+			}
+		}
 	}
 
 	/// Finalize the track, publishing the last access unit still waiting for a following start code.
@@ -1642,7 +1692,7 @@ mod read_tests {
 					}],
 				)
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		// Newest first, all before the first read. Group 4 covers the min delay alone, so
 		// without the warmup the start would skip group 3; only the warmup's reach keeps it.
@@ -1709,7 +1759,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		first.close().unwrap();
+		first.finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("expected frame")
 		};
@@ -1728,7 +1778,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		marker.close().unwrap();
+		marker.finish().unwrap();
 		assert!(
 			matches!(reader.next().await.unwrap(), Some(MoqMediaRead::Gap { timestamp, duration }) if timestamp == micros(10_000) && duration == Duration::from_millis(10))
 		);
@@ -1748,7 +1798,7 @@ mod read_tests {
 				}],
 			)
 			.unwrap();
-		resumed.close().unwrap();
+		resumed.finish().unwrap();
 		let Some(MoqMediaRead::Frame { frame }) = reader.next().await.unwrap() else {
 			panic!("end is not EOF")
 		};
@@ -2051,14 +2101,10 @@ mod catalog_tests {
 			.await
 			.unwrap();
 			for ms in [1_000, 2_000, 3_000] {
-				let mut group = track.append_group(ms).unwrap();
-				group
-					.write_frame(
-						moq_net::Timestamp::from_millis(ms).unwrap(),
-						format!(r#"{{"app":{ms}}}"#),
-					)
-					.unwrap();
-				group.close().unwrap();
+				let at = moq_net::Timestamp::from_millis(ms).unwrap();
+				let mut group = track.append_group(at).unwrap();
+				group.write_frame(at, format!(r#"{{"app":{ms}}}"#)).unwrap();
+				group.finish().unwrap();
 			}
 			drop(track.finish().unwrap());
 

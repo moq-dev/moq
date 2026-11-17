@@ -44,7 +44,7 @@ impl FillAsk {
 	}
 
 	/// Count `fill`'s preferences in.
-	fn add(&mut self, fill: &track::Fill) {
+	fn add(&mut self, fill: &track::FillGroups) {
 		self.priority = self.priority.max(fill.priority());
 		self.max_delay = match (self.max_delay, fill.max_delay()) {
 			(Some(ours), Some(theirs)) => Some(ours.max(theirs)),
@@ -100,7 +100,7 @@ impl FillAsk {
 /// stream still arriving would reset it.
 #[derive(Default)]
 pub(super) struct RangeFills {
-	held: Vec<track::Fill>,
+	held: Vec<track::FillGroups>,
 	/// What the upstream subscription asks for the fills now.
 	pub ask: FillAsk,
 	/// Asked groups no fill owes any more whose stream is still being read.
@@ -128,7 +128,7 @@ impl RangeFills {
 		self.held.is_empty() && self.ask.is_empty() && self.recoveries.is_empty()
 	}
 
-	pub fn push(&mut self, fill: track::Fill) {
+	pub fn push(&mut self, fill: track::FillGroups) {
 		self.held.push(fill);
 	}
 
@@ -477,7 +477,7 @@ impl Refusal {
 
 	/// Answer `groups` of `fill`: a lost group is named dropped, as a FETCH's miss is, and
 	/// anything else is refused for now, recorded nowhere.
-	fn answer(&self, fill: &track::Fill, groups: Range<u64>) {
+	fn answer(&self, fill: &track::FillGroups, groups: Range<u64>) {
 		match &self.err {
 			StreamError::NotFound if self.lost => fill.drop_groups(groups),
 			StreamError::NotFound => fill.refuse_groups(groups, Error::NotFound),
@@ -801,7 +801,7 @@ mod tests {
 
 	/// A track whose cache evicted groups 0..3, with a reader of them whose fill is the next
 	/// request.
-	fn missed() -> (track::Producer, track::Requests, track::Ordered, track::Fill) {
+	fn missed() -> (track::Producer, track::Requests, track::Ordered, track::FillGroups) {
 		let producer = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
 			"test",
@@ -815,7 +815,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		// From group 0, which a time start names whatever is held, so the reader asks the
 		// missing groups straight away rather than looking up where its start falls.
@@ -827,7 +827,7 @@ mod tests {
 	}
 
 	/// A reader of groups 0..3, and the fill it asks for.
-	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::Fill) {
+	fn ask(producer: &track::Producer, requests: &track::Requests) -> (track::Ordered, track::FillGroups) {
 		let waiter = kio::Waiter::noop();
 		let mut reader = producer
 			.subscribe(
@@ -837,7 +837,7 @@ mod tests {
 			)
 			.ordered();
 		assert!(reader.poll_next_group(&waiter).is_pending(), "groups 0..3 are owed");
-		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_groups(&waiter) else {
 			panic!("groups 0..3 are a miss");
 		};
 		(reader, fill)
@@ -864,7 +864,7 @@ mod tests {
 			group
 				.write_frame(crate::Timestamp::from_millis(key * 1000).unwrap(), b"x".as_slice())
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		for key in 0..3 {
 			let Poll::Ready(Ok(Some(group))) = reader.poll_next_group(&waiter) else {
@@ -886,7 +886,7 @@ mod tests {
 			.ordered();
 		let _ = reader.poll_next_group(&waiter);
 		assert!(
-			requests.poll_requested_fill(&waiter).is_pending(),
+			requests.poll_requested_groups(&waiter).is_pending(),
 			"a lost group is not asked again"
 		);
 	}

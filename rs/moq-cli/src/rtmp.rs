@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Context;
-use moq_rtmp::{Client, Connect, Request, Server};
+use moq_rtmp::{Client, Connect, Export, Import, Pull, Push, Request, Server};
 use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
@@ -79,7 +79,9 @@ pub async fn listen_import(target: ImportTarget, addr: SocketAddr) -> anyhow::Re
 				let name = name.clone();
 				let ingest = ingest.clone();
 				tokio::spawn(async move {
-					if let Err(err) = publish.accept(&origin, &name, &ingest).await {
+					let mut import = Import::new(&origin, name.clone());
+					import.ingest = ingest;
+					if let Err(err) = publish.accept(import).await {
 						tracing::warn!(%name, %err, "RTMP ingest ended with error");
 					}
 				});
@@ -114,7 +116,9 @@ pub async fn listen_export(
 				let origin = origin.clone();
 				let name = name.clone();
 				tokio::spawn(async move {
-					if let Err(err) = play.with_delay(delay).accept(&origin, &name).await {
+					let mut export = Export::new(&origin, name.clone());
+					export.delay = delay;
+					if let Err(err) = play.accept(export).await {
 						tracing::warn!(%name, %err, "RTMP play ended with error");
 					}
 				});
@@ -142,7 +146,9 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	notify_ready();
 
 	let client = Client::connect(connect).await?;
-	Ok(client.pull(&key, &target.origin, name, &target.ingest).await?)
+	let mut pull = Pull::new(&key, &target.origin, name);
+	pull.ingest = target.ingest;
+	Ok(client.pull(pull).await?)
 }
 
 /// Push a broadcast from the Origin to a remote RTMP server (export).
@@ -168,8 +174,10 @@ pub async fn connect_export(
 	tracing::info!(url = %connect.url, %name, "RTMP client pushing");
 	notify_ready();
 
-	let client = Client::connect(connect).await?.with_delay(delay);
-	Ok(client.publish(&key, source).await?)
+	let client = Client::connect(connect).await?;
+	let mut push = Push::new(&key, source);
+	push.delay = delay;
+	Ok(client.publish(push).await?)
 }
 
 /// Split `rtmp[s]://host[:port]/<app>/<key>` into what to dial and the stream key.

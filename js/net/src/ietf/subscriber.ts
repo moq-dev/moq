@@ -4,7 +4,7 @@ import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import * as broadcast from "../broadcast.ts";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway } from "../connection/goaway.ts";
 import { BroadcastCache } from "../consume.ts";
 import type * as datagram from "../datagram.ts";
 import * as DatagramStream from "../datagram_stream.ts";
@@ -20,7 +20,7 @@ import {
 	sessionCause,
 	unauthorized,
 } from "../error.ts";
-import { type Fill, fillChanged, type Requests, wantedRuns } from "../fill.ts";
+import { type FillGroups, fillChanged, type Requests, wantedRuns } from "../fill.ts";
 import type * as netGroup from "../group.ts";
 import { Cost, routesEqual, UNKNOWN_HOP, type WireRoute } from "../hop.ts";
 import { finalSequence, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -217,7 +217,7 @@ export class Subscriber {
 	#activeCount: boolean;
 
 	// Settles when the peer sends GOAWAY, ranking this session's routes last.
-	#goaway?: GetPromise<Drain>;
+	#goaway?: GetPromise<Goaway>;
 	// Our grant: a subscription it stops covering is cancelled. Undefined until
 	// the peer answers, which allows everything.
 	#grant?: Getter<Grant | undefined>;
@@ -253,7 +253,7 @@ export class Subscriber {
 		/** Whether both SETUPs declared MoQ Active Count. */
 		activeCount?: boolean;
 		/** Settles when the peer sends GOAWAY. */
-		goaway?: GetPromise<Drain>;
+		goaway?: GetPromise<Goaway>;
 		/** The union of our tokens' grants, which bounds what we subscribe to. */
 		grant?: Getter<Grant | undefined>;
 		auth?: AuthSession;
@@ -1150,6 +1150,11 @@ export class Subscriber {
 			for (;;) {
 				const fill = await untilAborted(requests.requestedFill(), signal);
 				if (!fill) break;
+				// FETCH asks by group alone, so a lookup goes unanswered and its reader falls back.
+				if (fill.kind === "lookup") {
+					fill.close();
+					continue;
+				}
 				const run = async () => {
 					try {
 						// The join may already bring a miss in this run. Let it answer first instead
@@ -1191,7 +1196,7 @@ export class Subscriber {
 	async #runRangeFetch(
 		broadcast: Path.Valid,
 		producer: track.Producer,
-		options: { fill: Fill; start: bigint; end: bigint; signal: AbortSignal },
+		options: { fill: FillGroups; start: bigint; end: bigint; signal: AbortSignal },
 	) {
 		const { fill, start, end: until, signal } = options;
 		const version = this.#session.version;

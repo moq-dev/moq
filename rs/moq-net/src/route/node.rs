@@ -1247,7 +1247,8 @@ impl Stream {
 			tag,
 			node: state.router.hop_of(self.key),
 		};
-		// A mount hears nothing, so it asks for nothing and files nothing.
+		// A mount hears nothing, so it asks for nothing and files nothing; it closes under
+		// its session's scope (`Router::disconnect`), which a permit may change.
 		let link = Link {
 			scope: None,
 			interest: BTreeSet::new(),

@@ -32,7 +32,7 @@ typealias Frame = uniffi.moq.MoqVideoFrame
 /** One encoded access unit from an [Encoder]. */
 typealias Packet = uniffi.moq.MoqVideoPacket
 
-/** H.264 or H.265. */
+/** Selects the video encoder codec. Build one with `Codec.h264()` or `Codec.h265()`. */
 typealias Codec = uniffi.moq.MoqVideoCodec
 
 /** A CPU pixel layout (I420 or RGBA). */
@@ -122,26 +122,16 @@ class DecodedFrame internal constructor(private val inner: uniffi.moq.MoqVideoDe
     fun pixels(format: PixelFormat): ByteArray = inner.pixels(format)
 
     /** The decoder's platform surface, or null when the frame is in CPU memory. */
-    fun surface(): Surface? = inner.surface()?.let(Surface::from)
+    fun surface(): Surface? = inner.surface()
 
     /** Release the frame's surface back to the decoder. */
     override fun close() = inner.close()
 }
 
 /**
- * The platform image backing a [DecodedFrame], when [DecoderOutput] asked for one. Match it with an
- * `else` branch, since new platforms add kinds.
+ * The platform image backing a [DecodedFrame], when [DecoderOutput] asked for one: a
+ * `uniffi.moq.MoqVideoSurface.PixelBuffer` (macOS and iOS), valid while its frame lives, or
+ * `uniffi.moq.MoqVideoSurface.Unknown` for a kind this version cannot name yet. Kotlin can't reach
+ * a sealed type's subtypes through this alias, so match on the full names.
  */
-abstract class Surface internal constructor() {
-    /** A borrowed `CVPixelBufferRef` address (macOS and iOS), valid while its frame lives. */
-    data class PixelBuffer(val pointer: ULong) : Surface()
-
-    /** A surface kind this version of the package does not know yet. */
-    data object Unknown : Surface()
-
-    internal companion object {
-        /** Maps a generated surface, so a variant this package predates is [Unknown]. */
-        fun from(surface: MoqVideoSurface): Surface =
-            (surface as? MoqVideoSurface.PixelBuffer)?.let { PixelBuffer(it.pointer) } ?: Unknown
-    }
-}
+typealias Surface = MoqVideoSurface

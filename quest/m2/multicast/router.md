@@ -114,4 +114,24 @@ the [epic](/quest/m2/multicast/README.md)'s items 13 and 14):
 - Selected routes looped for a moment in partitions and deaths (up to 3 rounds
   at 32 relays, where today's reached 4); requests must fail closed first.
 
+Found 2026-11-16 by the [proof](/rs/moq-net/verify/route-algebra/README.md)
+([moq-dev/moq#8904](https://github.com/moq-dev/moq/pull/8904), whose
+`rs/moq-net/verify/route-algebra/README.md` holds the arguments):
+
+- Candidates order by rank, then no marked link on the path, then the next hop
+  in use, the shorter path, and the neighbour (the epic's item 13, the mark's
+  place decided by the coordinator pending the maintainer's confirmation).
+  `route/relay.rs` keeps its own copy of this order; make it match.
+- Order equal routes by the neighbour's Node ID, or give the proof's binding
+  the key the router orders them by: the proof orders them by the neighbour,
+  the prototype by its simulation's node index.
+- Record the chain as the claim instance's path: the announcing relay first,
+  then each grant's exporter and adopter, so a node refuses a claim naming it
+  in the role it would take. The prototype records only the adopters, so it
+  refuses fewer echoes than the proof assumes.
+- Move the binding: point `route/tests/algebra.rs` and `route/tests/sticky.rs`
+  at the router's own functions for a node's own route, sending a route on,
+  taking one in, ordering candidates, and listing them, regenerate
+  `Vectors.agda`, and run `just test route-proof`.
+
 Public API: none. Wire: none.

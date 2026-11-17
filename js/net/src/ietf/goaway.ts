@@ -1,5 +1,5 @@
 import { Duration } from "@moq/clock";
-import type { Drain } from "../connection/goaway.ts";
+import type { Goaway } from "../connection/goaway.ts";
 import { ProtocolViolation } from "../error.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { toNumber } from "../util/bigint.ts";
@@ -45,7 +45,7 @@ export class GoAway {
 	}
 
 	/** The drain signal this message carries. A zero timeout is the wire saying "none". */
-	drain(): Drain {
+	drain(): Goaway {
 		return {
 			uri: this.newSessionUri,
 			timeout: this.timeout > 0n ? Duration.millis(toNumber(this.timeout)) : undefined,

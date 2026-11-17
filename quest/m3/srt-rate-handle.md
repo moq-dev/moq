@@ -52,15 +52,14 @@ enforcement needs it and nobody owned it.
   included, stays under the cap is untouched; under the cap nothing changes.
 
 Public API: a rate handle and a rate-limit close reason on moq-srt's server.
-The handle is `moq_net::bandwidth::Limit`, the one WHIP takes in
-`whip::Request.rate` (2026-11-07, maintainer, /quest-plan from the API shape
-audit), not a moq-srt copy. It reaches a server ingest as the `rate` field
-on `moq_mux::Ingest`, which [the gateway alignment](/quest/m2/gateway-align.md)
-adds before the cut in place of `whip::Request.rate` (2026-11-16,
+The handle is `moq_net::bandwidth::Limit`, the one WHIP enforces
+(2026-11-07, maintainer, /quest-plan from the API shape audit), not a
+moq-srt copy. It reaches an ingest, `Publish::accept` or `Client::pull`, as
+the `rate` field of `moq_mux::Ingest`, which WHIP already reads (2026-11-16,
 maintainer, /quest-plan of the pre-cut audit), so this quest enforces a
-field that already exists. The egress cap is a field on the SRT egress
-request struct the same quest adds, and a dial-out push takes it as a field
-on `moq_srt::dial::Publish`, never as a `with_*` setter. Wire: none.
+field that already exists. The egress cap is a field on `moq_srt::Export`,
+which both `Play::accept` and a dial-out `Client::publish` take, never a
+`with_*` setter. Wire: none.
 
 ## Required
 
@@ -69,5 +68,4 @@ on `moq_srt::dial::Publish`, never as a `with_*` setter. Wire: none.
 ## Related
 
 - [moq-webrtc pacing](/quest/m3/rtc-pacing.md) - the same pacing and retransmit charging on WHEP
-- [The gateways admit a session the same way](/quest/m2/gateway-align.md) - adds `Ingest::rate` and the request structs the caps ride
 - [moq-srt wire source](/quest/m3/wire-stats/srt.md) - per-connection byte counts from the same socket
