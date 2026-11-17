@@ -5030,7 +5030,8 @@ impl Producer {
 	/// the track is closed, including when it was already closed; existing handles
 	/// may still observe its final state, and a later lookup requests the track afresh.
 	/// `Err(producer)` leaves the track unchanged so the caller can continue serving and
-	/// wait for the next unwanted wake.
+	/// wait for `None` on a fresh clone of its [`Demand`]: one that already returned `None`
+	/// misses a reader that came and went, and waits on.
 	///
 	/// The abort is the same as [`Self::abort`]. A reader still in a group it was handed
 	/// counts as a consumer until it reads the group's end.

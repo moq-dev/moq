@@ -983,6 +983,43 @@ void main() {
     broadcast.close();
   });
 
+  test('JSON abortUnwanted keeps a reader that joined late', () async {
+    final broadcast = MoqBroadcastProducer();
+    final producer = moq_json.StreamProducer(
+      broadcast: broadcast,
+      track: broadcast.publishTrack(
+        name: 'events',
+        info: MoqTrackInfo(timescale: 1000000),
+      ),
+    );
+    final demand = producer.demand();
+    while (await demand.wantedChanged().timeout(timeout) != null) {}
+
+    final late = moq_json.StreamConsumer(
+      track: await broadcast
+          .consume()
+          .subscribeTrack(name: 'events', subscription: null)
+          .timeout(timeout),
+    );
+    expect(producer.abortUnwanted(errorCode: 7), isFalse);
+    producer.append(
+      value: jsonEncode('still serving'),
+      timestamp: Duration.zero.toTimestamp(),
+    );
+    final record = await late.next().timeout(timeout);
+    expect(jsonDecode(record!.value), 'still serving');
+
+    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    late.cancel();
+    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    expect(producer.abortUnwanted(errorCode: 7), isTrue);
+    expect(
+      () => producer.abortUnwanted(errorCode: 7),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    broadcast.close();
+  });
+
   test('JSON window yields pushes and pops in order', () async {
     final broadcast = MoqBroadcastProducer();
     final producer = moq_json.WindowProducer(
