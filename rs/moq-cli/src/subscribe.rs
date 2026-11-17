@@ -394,6 +394,8 @@ impl Subscribe {
 		// Held until the file closes, which `moq repair mp4` reads as a recorder still writing.
 		// The OS drops it with a killed recorder, so that recording stays repairable. A file that
 		// can't be locked could never be repaired safely, so it isn't recorded.
+		// On Windows the lock is mandatory and also blocks other readers; a shared lock wouldn't
+		// help, since it denies writes to the handle holding it too.
 		if let Err(err) = file.try_lock() {
 			drop(file);
 			tokio::fs::remove_file(&path).await?;

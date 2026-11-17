@@ -166,6 +166,8 @@ The recorder holds an exclusive file lock on its output while it records, and th
 OS drops the lock with a killed recorder. `repair` refuses a file it can't lock,
 since a recorder still has it open and repairing it would corrupt it. A filesystem
 without file locks (some network mounts) is refused by both: the recorder won't start there.
+On Windows the lock also blocks other programs from reading the file until the
+recording finishes, so copy or preview it afterwards.
 
 ```bash
 moq ... export mp4 --output recording.mp4
