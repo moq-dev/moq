@@ -456,10 +456,16 @@ export class Truck {
 			this.#sentAt.clear();
 		});
 
-		this.#control = publishControl(effect, origin, driverPath(this.name, id));
+		const control = publishControl(effect, origin, driverPath(this.name, id));
+		this.#control = control;
 		effect.cleanup(() => {
 			this.#control = undefined;
 		});
+		// A closed publication drops every command, so letting go beats staying active on it.
+		if (effect.get(control.closed) !== undefined) {
+			this.#release();
+			return;
+		}
 		// The claim, which the activation's own heartbeat sent before the track existed.
 		this.#heartbeat();
 	}

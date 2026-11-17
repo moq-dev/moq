@@ -293,7 +293,11 @@ def _number(value: Any) -> float:
 def _number_or_none(value: Any) -> float | None:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    # An integer past the float range, which `float` refuses rather than rounding to infinity.
+    except OverflowError:
+        return None
     return number if math.isfinite(number) else None
 
 

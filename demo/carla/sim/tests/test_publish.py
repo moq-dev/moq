@@ -65,6 +65,15 @@ def test_malformed_timestamp_does_not_drop_driver_command() -> None:
     assert command.timestamps == (TimestampEntry(label="received", ts=12.5),)
 
 
+def test_an_integer_past_the_float_range_is_not_a_number() -> None:
+    command = parse_command("driver", {"type": "drive", "sequence": 10**400, "throttle": 10**400})
+
+    assert command is not None
+    assert command.sequence == 0
+    assert command.state is not None
+    assert command.state.throttle == 0.0
+
+
 def test_only_the_players_pipeline_stages_are_kept() -> None:
     stages = [{"label": "received", "ts": 1.0}, {"label": "decoded", "ts": 2.0}]
     junk = [{"label": "x" * 10_000, "ts": 3.0}] * 1_000
