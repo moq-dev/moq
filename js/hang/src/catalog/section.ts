@@ -1,5 +1,5 @@
 import * as z from "zod/mini";
-import { u53Schema } from "./integers";
+import { u53Schema } from "./integers.ts";
 
 /**
  * A catalog map keyed by ID (renditions, data tracks, includes), refusing the catalog if any

@@ -149,7 +149,7 @@ would need a breaking release had it landed right after the cut:
   waits on nixpkgs as well as the cut; dropping the check, which would find a
   transcript flaw only after the freeze.
 - ✅ The wire half of group drops split out as its own quest, which this
-  waited on in place of [the public drop signal](/quest/m2/group-drops.md),
+  waited on in place of the public drop signal,
   an API change that doesn't touch the wire. It settled without a
   wire-format change ([moq-dev/moq#8774](https://github.com/moq-dev/moq/pull/8774)):
   both publishers already name a Group Stream the subscriber stopped in
@@ -169,8 +169,7 @@ audited the lite-07 draft for what it could lose):
 
 - ✅ [YIELDED continuations](/quest/m2/yield-defer.md) leave lite-07 for
   lite-08, where they are designed with takeover (rejected: keep them).
-- ✅ The `ietf` extension stays, and
-  [rides only moq-transport tracks](/quest/m2/ietf-records-per-track.md)
+- ✅ The `ietf` extension stays, and rides only moq-transport tracks
   (rejected: as it is, where every frame on a relay link carries a record).
 - ✅ The `\` path escape is finished rather than
   removed: moq-transport names a track by a tuple, and the escape is how a
@@ -199,7 +198,6 @@ the version that ships them.
 ## Required
 
 - [YIELDED deferred](/quest/m2/yield-defer.md) - removes reset code 0x3C and continuations from the lite-07 wire
-- [ietf records per track](/quest/m2/ietf-records-per-track.md) - changes the extension's framing on relay links
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
 - [@moq/net by start](/quest/m2/time-addressing/js.md) - JS speaks the same lite-07 wire

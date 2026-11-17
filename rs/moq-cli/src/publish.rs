@@ -293,11 +293,12 @@ impl FinishedDecoder {
 }
 
 /// Point a multi-program refusal at the flag that resolves it.
-fn suggest_program(err: anyhow::Error) -> anyhow::Error {
-	if err.is::<ts::MultipleProgramsError>() {
-		err.context("choose one with `--program <n>`, or publish each with `--program all`")
-	} else {
-		err
+fn suggest_program(err: ts::Error) -> anyhow::Error {
+	let multiplex = matches!(err, ts::Error::MultiplePrograms { .. });
+	let err = anyhow::Error::from(err);
+	match multiplex {
+		true => err.context("choose one with `--program <n>`, or publish each with `--program all`"),
+		false => err,
 	}
 }
 

@@ -1927,7 +1927,7 @@ mod tests {
 	/// The same, without blocking: `None` once nothing more is buffered.
 	fn try_next_frame(track: &mut track::Ordered) -> Option<moq_net::frame::Frame> {
 		use futures::FutureExt;
-		let mut group = track.next_group().now_or_never()?.expect("ok")?;
+		let mut group = track.next_group().now_or_never()?.expect("ok")?.group()?;
 		group.read_frame().now_or_never()?.expect("ok")
 	}
 
@@ -3212,7 +3212,7 @@ mod tests {
 			let mut track = subscribe(broadcast, &name).await;
 			let mut first = None;
 			while let Some(group) = futures::FutureExt::now_or_never(track.next_group()) {
-				let start = group.unwrap().unwrap().start;
+				let start = group.unwrap().unwrap().group().expect("a group").start;
 				first = Some(first.map_or(start, |first: u64| first.min(start)));
 			}
 			let first = first.expect("a run's first group is listed");

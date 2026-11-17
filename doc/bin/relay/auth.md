@@ -332,7 +332,7 @@ so a session presenting one is refused rather than admitted on the public
 grant. The patterns are rooted at `/`, like a token with an empty root (see
 [Path matching](#path-matching)): `anon/**` admits a session dialed at `/`,
 `/anon`, or `/anon/room`, and refuses one dialed anywhere else. A pattern with
-no wildcard, such as `anon`, refuses to start; write `anon/**` for the subtree.
+no wildcard names one broadcast: `anon` is the broadcast `anon`, and `anon/**` is the subtree.
 `public = "**"` opens everything and is for development only. With
 `--auth-url` the anonymous rules live on the server instead
 (`moq auth serve --public-*`).

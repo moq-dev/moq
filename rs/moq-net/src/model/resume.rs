@@ -926,6 +926,21 @@ impl Subscriber {
 		self.reader().take(candidate)
 	}
 
+	/// The keys that landed on any copy since the last call, below `below`; see
+	/// [`track::Subscriber::note_late`].
+	pub(super) fn late(&mut self, below: u64) -> Vec<u64> {
+		let mut reader = self.reader();
+		reader
+			.copies
+			.iter_mut()
+			.filter_map(|copy| match &mut copy.sub {
+				Sub::Ready(sub) => Some(sub.late(below)),
+				Sub::Pending(_) => None,
+			})
+			.flatten()
+			.collect()
+	}
+
 	/// Forget the gaps in `delivered` below each group past the reader's budget, judged on
 	/// the newest copy that answered; see [`track::Subscriber::forget_past_budget`].
 	pub(super) fn forget_past_budget(&self, delivered: &mut Delivered) {
@@ -1904,14 +1919,18 @@ impl Reader {
 			// A received stale run queued here that a new upstream subscription superseded since
 			// is unknown again: the copy no longer holds it, and that subscription may deliver it. Checked
 			// only once the copy let a stale run go, never on every poll: each poll reports one
-			// run, so a check per poll would cost the received runs squared to drain them.
-			let current = sub.stale_revision();
-			if self.received_checked != Some(current) {
-				for run in self.received.iter() {
-					superseded.extend(sub.stale_held(run.clone()).gaps(run));
+			// run, so a check per poll would cost the received runs squared to drain them. With
+			// none received there is nothing to check, so a live reader never reads the revision
+			// through the track lock every subscriber shares.
+			if !self.received.is_empty() {
+				let current = sub.stale_revision();
+				if self.received_checked != Some(current) {
+					for run in self.received.iter() {
+						superseded.extend(sub.stale_held(run.clone()).gaps(run));
+					}
 				}
+				self.received_checked = Some(current);
 			}
-			self.received_checked = Some(current);
 			loop {
 				let polled = match probe {
 					true => sub.poll_drop(waiter),
@@ -5279,6 +5298,99 @@ mod test {
 			};
 			keys.push(group.start);
 		}
+	}
+
+	/// A front's key-order reader reports a group that lands on its copy after the read passed
+	/// its key, as old, and never one it handed out.
+	#[test]
+	fn a_front_reports_a_late_arrival_as_a_gap() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR).ordered();
+		let waiter = kio::Waiter::noop();
+		let read = |sub: &mut track::Ordered| -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+				});
+			}
+			items
+		};
+		write(&a, 0);
+		write(&a, 5);
+		assert_eq!(read(&mut sub), ["group 0", "group 5"]);
+		write(&a, 3);
+		assert_eq!(read(&mut sub), ["gap 3..4 (old)"]);
+		write(&a, 6);
+		assert_eq!(read(&mut sub), ["group 6"]);
+	}
+
+	/// A front served by another front reports a late arrival on the inner copy too.
+	#[test]
+	fn a_nested_front_reports_a_late_arrival_as_a_gap() {
+		let inner_routes = Producer::new();
+		let inner = logical(&inner_routes);
+		let b = copy();
+		inner_routes.serve(b.consume());
+		let routes = Producer::new();
+		let outer = logical(&routes);
+		routes.serve(inner.consume());
+		let mut sub = subscribe(&outer, HOUR).ordered();
+		let waiter = kio::Waiter::noop();
+		let read = |sub: &mut track::Ordered| -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+				});
+			}
+			items
+		};
+		write(&b, 0);
+		write(&b, 5);
+		assert_eq!(read(&mut sub), ["group 0", "group 5"]);
+		write(&b, 3);
+		assert_eq!(read(&mut sub), ["gap 3..4 (old)"]);
+	}
+
+	/// A late arrival the reader's ranges leave out is no gap of its own: it is neither reported
+	/// nor held, and widening the ranges does not report it later, as the read never goes back.
+	#[test]
+	fn a_front_ignores_a_late_arrival_its_ranges_exclude() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR).ordered().with_range(50..);
+		let waiter = kio::Waiter::noop();
+		let read = |sub: &mut track::Ordered| -> Vec<String> {
+			let mut items = Vec::new();
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+				items.push(match item {
+					track::Item::Group(group) => format!("group {}", group.start),
+					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
+				});
+			}
+			items
+		};
+		write(&a, 50);
+		write(&a, 60);
+		assert_eq!(read(&mut sub), ["group 50", "group 60"]);
+		for key in (0..40).step_by(2) {
+			write(&a, key);
+			assert!(read(&mut sub).is_empty(), "group {key} is outside the ranges");
+		}
+		let mut sub = sub.with_range(..);
+		let widened = read(&mut sub);
+		assert!(
+			widened.is_empty(),
+			"an ordered read never goes back, so widening reports no gap and returns no group: {widened:?}"
+		);
 	}
 
 	/// Lowering a front reader's local floor offers the cached groups below the old one it

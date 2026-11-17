@@ -472,6 +472,71 @@ async fn an_origin_eviction_drop_is_forwarded_final() {
 	}
 }
 
+/// A group the publisher's origin reclaimed before it was sent reaches an ordered reader on
+/// the far side of a relay as a gap, so the groups it receives plus the spans it is told of
+/// cover every group written, with nothing held waiting for one that will not come.
+#[kio::test]
+async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
+	const EXPIRY: Duration = Duration::from_secs(10);
+	const PAYLOAD: usize = 16 * 1024;
+	const WRITTEN: u64 = 4;
+	for versions in [[LITE06, LITE06], [LITE07, LITE07]] {
+		kio::clock::timeout(TIMEOUT * 10, async {
+			// One stream of credit past the Announce Stream that lite-07 holds: group 0's, held from the relay,
+			// so the rest queue.
+			let credit = if versions == [LITE07, LITE07] { 2 } else { 1 };
+			let chain = Chain::with_credit(versions, [expiring(EXPIRY), forever(), forever()], Some(credit)).await;
+			// A budget bounds the wait on a group a hop judged stale; none would fill it instead.
+			let mut reader = chain
+				.subscribe(reading(Duration::from_secs(3600), [support::keys(0..)]))
+				.await
+				.ordered();
+			chain.upstream.server_transport.hold_unis();
+			for key in 0..WRITTEN {
+				let mut group = chain.source.create_group(moq_net::group::Info { start: key }).unwrap();
+				group
+					.write_frame(Timestamp::from_millis(key * 1000).unwrap(), vec![0u8; PAYLOAD])
+					.unwrap();
+				group.finish().unwrap();
+			}
+			// Nobody reads the queued groups, so the origin reclaims all but the newest.
+			kio::clock::sleep(EXPIRY * 3).await;
+			chain.upstream.server_transport.release_unis();
+			let finished = chain.source.clone().finish().unwrap();
+
+			let mut got = BTreeSet::new();
+			let mut told = BTreeSet::new();
+			while let Some(item) = kio::clock::timeout(TIMEOUT, reader.next_group())
+				.await
+				.expect("the reader stalled on a group that will not come")
+				.expect("the reader runs on")
+			{
+				match item {
+					track::Item::Group(group) => assert!(got.insert(group.start), "group {} twice", group.start),
+					track::Item::Gap { range, .. } => {
+						for key in range {
+							assert!(told.insert(key), "group {key} reported twice");
+						}
+					}
+				}
+			}
+			assert!(got.is_disjoint(&told), "{versions:?}: {got:?} also reported {told:?}");
+			assert!(
+				got.contains(&(WRITTEN - 1)),
+				"{versions:?}: the newest is delivered: {got:?}"
+			);
+			assert_eq!(
+				got.union(&told).copied().collect::<Vec<_>>(),
+				(0..WRITTEN).collect::<Vec<_>>(),
+				"{versions:?}: delivered {got:?} and reported {told:?}"
+			);
+			drop(finished);
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{versions:?}: timed out"));
+	}
+}
+
 /// A run dropped before the track's first group is settled through a relay for a later
 /// reader whose range covers it: the reader gets the group after it and ends, as one reading the
 /// relay's own cache does.

@@ -4,7 +4,7 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
-import { rotateVideoDimensions } from "@moq/video";
+import { rotateDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { Order } from "./order";
 import { type Identity, identity, type Listing, Publication, type Slot } from "./publication";
@@ -335,7 +335,7 @@ export class Broadcast {
 				const section: Catalog.Video = { renditions: video };
 				// display is optional in the schema, so it gates only itself, not the whole section.
 				if (display) {
-					const { width, height } = rotateVideoDimensions(display, rotation);
+					const { width, height } = rotateDimensions(display, rotation);
 					section.display = { width: Catalog.u53(width), height: Catalog.u53(height) };
 				}
 				if (flip) section.flip = true;
