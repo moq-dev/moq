@@ -20,7 +20,6 @@
 		"@moq/signals": "workspace:*",
 		"@moq/obs": "workspace:*",
 		"@moq/stats": "workspace:*",
-		"@moq/ui": "workspace:*",
 		"@moq/video": "workspace:*",
 		"@moq/watch": "workspace:*",
 		"typedoc": "^0.28.20",

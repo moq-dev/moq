@@ -180,6 +180,9 @@ pub struct MockSendStream {
 	/// Where to log the first byte written, the stream type (see
 	/// [`MockSession::bidi_types`]), until it is written.
 	first_byte: Option<StreamTypes>,
+	/// Where to log every byte written, for a uni stream (see
+	/// [`MockSession::uni_writes`]).
+	log: Option<Arc<Mutex<Vec<u8>>>>,
 	/// Finished or reset.
 	done: bool,
 	/// Finished, so the FIN is acknowledged when [`Self::ack`] says so.
@@ -230,6 +233,9 @@ impl poll::SendStream for MockSendStream {
 			return self.wrote(buf.first().copied(), written);
 		}
 		let written = self.inner.poll_write(waiter, buf);
+		if let (Some(log), Poll::Ready(Ok(size))) = (&self.log, &written) {
+			log.lock().unwrap().extend_from_slice(&buf[..*size]);
+		}
 		self.wrote(buf.first().copied(), written)
 	}
 
@@ -238,6 +244,15 @@ impl poll::SendStream for MockSendStream {
 		if self.conn.hold_writes.load(Ordering::Relaxed) {
 			let written = poll::Session::poll_closed(&self.session, waiter).map(Err);
 			return self.wrote(first, written);
+		}
+		// A logged stream writes one chunk at a time, so the log sees each byte.
+		if self.log.is_some() {
+			let chunk = buf.chunk().to_vec();
+			let written = poll::SendStream::poll_write(self, waiter, &chunk);
+			if let Poll::Ready(Ok(size)) = written {
+				buf.advance(size);
+			}
+			return written;
 		}
 		let written = self.inner.poll_write_buf(waiter, buf);
 		self.wrote(first, written)
@@ -460,6 +475,8 @@ struct Side {
 	withhold_bidi_fins: Arc<AtomicBool>,
 	/// The first byte of each bidi stream this side opened.
 	bidi_types: StreamTypes,
+	/// What this side wrote on each uni stream it opened.
+	uni_writes: Mutex<Vec<Arc<Mutex<Vec<u8>>>>>,
 	/// Stream resets sent by this side.
 	resets: Resets,
 	/// What [`poll::Session::metrics`] reports.
@@ -518,6 +535,7 @@ impl MockSession {
 			withhold_fin: None,
 			withheld: false,
 			first_byte: None,
+			log: None,
 			done: false,
 			finished: false,
 			ack: false,
@@ -600,6 +618,9 @@ impl poll::Session for MockSession {
 		let mut send = self.send(send, line);
 		poll::SendStream::set_priority(&mut send, options.priority);
 		send.ack = send.line.held;
+		let log = Arc::new(Mutex::new(Vec::new()));
+		self.side.uni_writes.lock().unwrap().push(log.clone());
+		send.log = Some(log);
 		Poll::Ready(Ok(send))
 	}
 
@@ -906,6 +927,18 @@ impl MockSession {
 		self.side.bidi_types.read().clone()
 	}
 
+	/// What this side wrote, after the stream type, on each uni stream it opened whose
+	/// first byte is `kind`.
+	pub fn uni_writes(&self, kind: u8) -> Vec<Vec<u8>> {
+		let streams = self.side.uni_writes.lock().unwrap();
+		streams
+			.iter()
+			.map(|stream| stream.lock().unwrap().clone())
+			.filter(|bytes| bytes.first() == Some(&kind))
+			.map(|bytes| bytes[1..].to_vec())
+			.collect()
+	}
+
 	/// Wait for `count` streams of `kind` to reach the wire.
 	pub async fn bidi_count(&self, kind: u8, count: usize) {
 		kio::wait(|waiter| {
@@ -952,6 +985,7 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			no_datagrams: Default::default(),
 			withhold_bidi_fins: Default::default(),
 			bidi_types: Default::default(),
+			uni_writes: Default::default(),
 			resets: Default::default(),
 			stats: Default::default(),
 			stats_reads: Default::default(),

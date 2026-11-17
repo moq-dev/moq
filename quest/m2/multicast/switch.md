@@ -3,7 +3,8 @@
 ## Goal
 
 Every lite-07 session in Rust drives the
-[new router](/quest/m2/multicast/router.md) on one announce stream per side,
+new router (`route::relay::Router`, from
+[moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)) on one announce stream per side,
 the draft specifies it, and the old rule is gone: ROUTE_HOLD, the doubt,
 DEAD's moved list, the Route Key Parameter with its proof and symbolic model,
 qualified Node IDs, routes per prefix with their Route Suffix and Route
@@ -98,6 +99,40 @@ for the wire:
 - A claim's end carries one bit, ended or lost, and a claim carries the lowest
   link priority to its publisher and a draining bit beside its cost and chain.
 - A claims message with no change still carries its floor.
+- Among routes of equal rank a node takes one with no upstream-marked link on
+  its path before staying on its next hop, or a neighbour behind its own
+  upstream link is reachable by arrival order (decided by the coordinator on
+  2026-11-16 and confirmed by the maintainer's merge pick of
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
+- A claim carries an unavailable bit beside its draining bit. An endpoint or
+  scoped neighbour is told what the node's own reader shows: the closest claim
+  while a route reaches one, and while none does, the claim of the best
+  precedence marked unavailable, withdrawn only when the reader's debounce
+  runs out. A scoped neighbour's adopter announces the claim again with the
+  bit, so its domain keeps the claim and fails requests closed, a request
+  reaching that adopter included, instead of withdrawing and starting it
+  again. The debounce runs from when a reader first showed the claim
+  unavailable, so the domain past a grant lets the claim go about when the
+  near one does, not a debounce later. The route exchange between routing
+  nodes keeps no timer (decided by the coordinator on 2026-11-16 and confirmed by the maintainer's merge pick of
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
+- The unavailable bit counts only as a change to a run the receiver already
+  holds from that sender, a run being the claim's distance and epoch. A sender
+  still tells a new asker what its reader shows, the bit included, but a
+  receiver never takes a run it is first told unavailable, which nothing can
+  serve: that run is not there until it is told available, and then is taken
+  as usual. A sender that moves to such a run no longer gives the one it gave,
+  which the receiver drops as lost. A gateway whose session opens while a
+  claim is unavailable therefore announces nothing and starts no route, a
+  claim that comes back unavailable across a second grant starts none either,
+  and an unreachable newer run never fences an older one another neighbour
+  still serves (decided by the coordinator on 2026-11-16 and confirmed by the maintainer's merge pick of
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901);
+  per run rather than per claim by the implementer, on review).
+- A message names each claim once, and a receiver refuses one that names a
+  claim twice, so no order within a message decides what it says (decided by
+  the implementer on 2026-11-16 and confirmed by the maintainer's merge pick of
+  [moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901)).
 - A node offers a route to itself only once it announces a claim, so a relay
   that has never announced a claim and only forwards or only serves viewers
   has no route on the wire.
@@ -106,6 +141,30 @@ for the wire:
 - Today's rule cost 300,100 route messages when a publisher left two meshes
   joined by two grants; the chain cost none. Keep that shape in the acceptance
   fixtures.
+
+Found 2026-11-16 by [the proof](https://github.com/moq-dev/moq/pull/8904)
+against the prototype, and moved here when
+[moq-dev/moq#8901](https://github.com/moq-dev/moq/pull/8901) finished the
+router quest that listed them:
+
+- Order equal routes by the neighbour's Node ID, or give the proof's binding
+  the key the router orders them by: the proof orders them by the neighbour,
+  the prototype by its simulation's node index, and `route::relay::Router` by
+  its neighbour key.
+- Record the chain as the claim instance's path: the announcing relay first,
+  then each grant's exporter and adopter, so a node refuses a claim naming it
+  in the role it would take. The prototype and the router record only the
+  adopters, so they refuse fewer echoes than the proof assumes.
+- Move the binding to the router before this PR changes it: point
+  `route/tests/algebra.rs` and `route/tests/sticky.rs` at the router's own
+  functions for a node's own route, sending a route on, taking one in,
+  ordering candidates, and listing them, regenerate `Vectors.agda`, and run
+  `just test route-proof`. The claim instance first needs the router's
+  precedence as its leading keys: a claim exactly at its path before a
+  broader one shown there, then the newest epoch, decided over every claim
+  of the Instance at that path whether or not a route reaches it, and only
+  then the route joined with the claim's drain, priority, and cost. Neither
+  the mechanized instance nor its Rust vectors cover precedence yet.
 
 Delete with the old rule:
 
@@ -132,8 +191,10 @@ Delete with the old rule:
   discount that formed pull cycles here, and lets a link cost 0 (line 88),
   which `route::Error::ZeroCost` refuses. The code implements neither, and
   item 10 of the epic makes a moq-transport session an endpoint, which has
-  no path to carry. `cluster.max_hops` then bounds lite-03 to lite-06 only
-  ([config names](/quest/m2/relay-config-names.md)).
+  no path to carry. `cluster.max_hops` then bounds lite-03 to lite-06 only:
+  drop the MoQ Cluster extension from its docs (`cluster::Config::max_hops`,
+  `origin::Config::max_hops`, `doc/bin/relay/cluster.md`, and
+  `doc/bin/relay/config.md`).
 - `rs/moq-net/verify/route/` and the `verify-route` skill, or rewrite the
   skill for the exhaustive search.
 - [Firefox tabs prove their route key](/quest/m5/routes-browser-proof.md),
@@ -209,8 +270,3 @@ Public API: breaking. `origin::RouteKey`, `Config::route_key`, and
 `Consumer::local()` leave the public API. Config and CLI: `cluster.route_key`
 is removed (never released). Wire: lite-07-wip only; the moq-cluster
 extension on moq-transport is no longer sent or read.
-
-## Required
-
-- [The router](/quest/m2/multicast/router.md) - the rule these sessions drive
-- [The route stream](/quest/m2/cluster-routes/route-stream.md) - one announce stream per side, which this builds on

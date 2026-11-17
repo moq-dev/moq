@@ -101,12 +101,12 @@ async def test_track_default_retains_ascending_messages_and_subscription():
     del server
     gc.collect()
     assert consumer.info().max_age is None
-    for sequence, payload in ((1, b"later"), (0, b"first")):
-        group = producer.create_group(sequence)
-        group.write_frame(payload, moq.Timestamp.unscaled(sequence))
+    for start, payload in ((1, b"later"), (0, b"first")):
+        group = producer.create_group(start)
+        group.write_frame(payload, moq.Timestamp.unscaled(start))
         group.finish()
     producer.finish()
-    assert [(group.sequence, [frame.payload async for frame in group]) async for group in consumer] == [
+    assert [(group.start, [frame.payload async for frame in group]) async for group in consumer] == [
         (0, [b"first"]),
         (1, [b"later"]),
     ]

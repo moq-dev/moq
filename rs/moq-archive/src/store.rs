@@ -34,8 +34,7 @@ impl<T: ObjectStore> Store<T> {
 
 	/// Create a track's `.info`, or accept an existing object with the same parsed properties.
 	///
-	/// An existing recording in an older format is refused with [`Error::Version`]: a
-	/// [`Consumer`](crate::Consumer) still reads it, but nothing appends to it.
+	/// An existing `.info` in another format version is refused with [`Error::Version`].
 	pub(crate) async fn put_info(&self, track: &str, info: &Info) -> Result<()> {
 		let path = self.info_path(track)?;
 		let bytes = info.encode()?;
@@ -47,9 +46,6 @@ impl<T: ObjectStore> Store<T> {
 			Ok(_) => Ok(()),
 			Err(object_store::Error::AlreadyExists { .. }) => {
 				let existing = Info::decode(&self.get_bytes(&path).await?)?;
-				if existing.version != info.version {
-					return Err(Error::Version(existing.version));
-				}
 				if existing.priority != info.priority {
 					return Err(Error::Priority {
 						existing: existing.priority,
@@ -105,7 +101,7 @@ mod tests {
 			.inner()
 			.put(
 				&path,
-				br#"{ "timescale": 1000, "priority": 1, "version": 4 }"#.as_ref().into(),
+				br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#.as_ref().into(),
 			)
 			.await
 			.unwrap();
@@ -116,7 +112,7 @@ mod tests {
 			.bytes()
 			.await
 			.unwrap();
-		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 4 }"#);
+		assert_eq!(&kept[..], br#"{ "timescale": 1000, "priority": 1, "version": 2 }"#);
 	}
 
 	#[tokio::test]
@@ -129,11 +125,11 @@ mod tests {
 				&br#"{"version":1,"priority":0,"timescale":1000}"#[..],
 				(|err| matches!(err, Error::Version(1))) as fn(&Error) -> bool,
 			),
-			("v2", br#"{"version":2,"priority":128,"timescale":1000}"#, |err| {
-				matches!(err, Error::Version(2))
+			("v4", br#"{"version":4,"priority":0,"timescale":1000}"#, |err| {
+				matches!(err, Error::Version(4))
 			}),
 			("junk", b"not json", |err| matches!(err, Error::Json(_))),
-			("zero", br#"{"version":4,"priority":0,"timescale":0}"#, |err| {
+			("zero", br#"{"version":2,"priority":0,"timescale":0}"#, |err| {
 				matches!(err, Error::Timescale(0))
 			}),
 		] {

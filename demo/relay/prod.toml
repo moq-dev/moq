@@ -6,7 +6,7 @@
 # This is the default port for WebTransport
 bind = "[::]:443"
 
-# Every version, plus the opt-in moq-lite-07-wip that sockets (such as MoQ Boy's) need.
+# Every version, plus the opt-in moq-lite-07-wip that CARLA's sockets need.
 version = [
     "moq-lite-07-wip",
     "moq-lite-06",
@@ -46,16 +46,16 @@ key = "key.pem"
 #   moq auth serve --listen 127.0.0.1:4440 --key root.jwk \
 #     --public-subscribe 'anon/**' --public-subscribe 'demo/**' \
 #     --public-publish 'anon/**' --public-publish 'demo/viewer/**' \
-#     --public-publish 'demo/boy/.client/*' \
 #     --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer
 #
-# Anonymous CARLA drivers share `demo/viewer/**`, under which each one publishes its
-# controls: a truck's broadcasts stay under `demo/carla/`, its worker's, which signs in
-# with a token. Anonymous MoQ Boy viewers get one shared grant covering only client
-# socket endpoints: a game's server endpoint, `.server/<name>`, stays the emulator's.
-# `demo/**` lets viewers dial those servers, and also read another viewer's client
-# endpoint, which yields nothing without a session's secret id. Each viewer's id is 128
-# random bits, so no viewer can guess another's.
+# Anonymous MoQ Boy viewers publish their commands under `demo/viewer/`, while only the
+# emulator, which signs in with a token, publishes games under `demo/boy/`. Anyone may
+# publish under another viewer's id; the emulator trusts nothing in a command beyond a
+# button state.
+#
+# Anonymous CARLA drivers share the same `demo/viewer/**`, under which each one publishes
+# its controls: a truck's broadcasts stay under `demo/carla/`, its worker's, which signs in
+# with a token.
 #
 # For multiple keys with rotation, give it `--key-dir /path/to/keys/` instead:
 # keys are named {kid}.jwk and resolved by the kid in the JWT header.

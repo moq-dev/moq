@@ -48,7 +48,7 @@ moq.Error = MoqError
 moq.Subscription = lambda **kwargs: SimpleNamespace(**kwargs)
 moq.Delay = lambda **kwargs: SimpleNamespace(**kwargs)
 moq.Order = SimpleNamespace(ASCENDING="ascending")
-moq.Compression = SimpleNamespace(DEFLATE="deflate")
+moq.Compression = SimpleNamespace(deflate=lambda: "deflate")
 # The stub has no shutdown errors: every `MoqError` it raises is a failure.
 moq.is_shutdown = lambda err: False
 moq.AnnounceEventPresent = AnnounceEventPresent

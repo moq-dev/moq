@@ -124,7 +124,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	for payload in HEAD {
 		head.write_frame(head.at_start(), payload).unwrap();
 	}
-	head.close().unwrap();
+	head.finish().unwrap();
 	kio::clock::timeout(TIMEOUT, drained_rx)
 		.await
 		.expect("the head group never arrived")
@@ -141,7 +141,7 @@ async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	// The rest of the group, its clean end, and the disconnect happen with no await in
 	// between, so the session has sent none of it when it closes.
 	tail.write_frame(tail.at_start(), TAIL[1]).unwrap();
-	tail.close().unwrap();
+	tail.finish().unwrap();
 	drop(track);
 	let server = if drop_session {
 		drop(server);

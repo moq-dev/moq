@@ -53,6 +53,8 @@ for pinned in "$pubspec_version:moq_ffi/pubspec.yaml" "$hook_version:moq_ffi/hoo
     fi
 done
 
+# The bindings are not committed: generate them into the package, where its
+# tests and the publish copy below find them.
 generated=$(mktemp -d)
 trap 'rm -rf "$generated"' EXIT
 
@@ -80,17 +82,10 @@ EOF
 export PATH="$generated/bin:$PATH"
 
 record_cargo generate ""
-MOQ_FFI_PROFILE=debug "$DART_DIR/../sh/dart/generate.sh" "$generated"
+MOQ_FFI_PROFILE=debug "$DART_DIR/../sh/dart/generate.sh"
 touch "$generated/built"
 # Verbose, so Cargo says why it rebuilt anything.
 record_cargo hook --verbose
-
-for file in moq.dart uniffi_runtime.dart; do
-    if ! diff -u -B "$DART_DIR/moq_ffi/lib/src/$file" "$generated/$file"; then
-        echo "error: Dart bindings are stale; run 'just dart generate'" >&2
-        exit 1
-    fi
-done
 
 # Analyze samples alongside the wrapper tests so package imports resolve to
 # this checkout. These functions only type-check; tests never execute them.
@@ -145,6 +140,15 @@ for package in moq_ffi moq; do
     (
         cd "$publish_dir/$package"
         dart pub get --enforce-lockfile
-        dart pub publish --dry-run
+        dart pub publish --dry-run 2>&1 | tee "$generated/$package.publish"
     )
+done
+
+# Publishing skips what .gitignore names, and the generated bindings are
+# ignored in the checkout. A consumer installing moq_ffi has no generator.
+for file in moq.dart uniffi_runtime.dart; do
+    if ! grep -q -- "── $file (" "$generated/moq_ffi.publish"; then
+        echo "error: the moq_ffi archive lacks lib/src/$file" >&2
+        exit 1
+    fi
 done

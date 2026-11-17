@@ -98,7 +98,7 @@ fn client(bind: SocketAddr) -> Client {
 	config.tls.insecure = Some(true);
 	config.timeout = Some(DIAL.into());
 	config.backoff.initial = Some(Duration::ZERO.into());
-	config.backoff.timeout = Some(Duration::ZERO.into());
+	config.backoff.timeout = Some(moq_tokio::cli::Bound::NONE);
 	config.websocket.enabled = Some(false);
 	config.init(Default::default()).unwrap()
 }
@@ -109,9 +109,11 @@ fn connect(client: &Client, addr: SocketAddr) -> Connection {
 
 /// Black-hole `source` and end the session it carried, waiting until `connection` sees it go.
 ///
-/// A first dial that fails ends the loop rather than retrying, so a test of how the loop
-/// redials starts from an established session and drops its flow with this.
+/// Until a session has been healthy, a failure ends the loop rather than retrying, so a test
+/// of how the loop redials holds a session past the default healthy bar and drops its flow
+/// with this.
 async fn drop_flow(proxy: &Proxy, source: SocketAddr, session: moq_net::Session, connection: &Connection) {
+	tokio::time::advance(Duration::from_secs(1)).await;
 	proxy.blocked.lock().unwrap().insert(source);
 	let monitor = connection.monitor();
 	let revision = monitor.state().revision;

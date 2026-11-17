@@ -118,7 +118,7 @@ impl Fixture {
 		let expected = grant(if self.alternate { "changed" } else { "restored" });
 		self.producers[self.selected].update(expected.clone());
 		let actual = self.watch.changed().await.unwrap().unwrap();
-		assert_eq!(actual.publish, expected.publish);
+		assert_eq!(actual.publish, expected.publish.path);
 	}
 }
 

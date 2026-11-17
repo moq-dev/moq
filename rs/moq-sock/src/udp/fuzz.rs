@@ -16,12 +16,12 @@
 use std::{
 	ffi::c_int,
 	mem::{self, MaybeUninit},
-	net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+	net::{IpAddr, Ipv4Addr, Ipv6Addr},
 	ptr,
 	time::Duration,
 };
 
-use super::{EcnCodepoint, RecvMeta, TransportError, cmsg, imp::decode_recv, linux::LinuxError};
+use super::{EcnCodepoint, RecvMeta, imp::decode_recv};
 
 /// One fuzz target body.
 pub type Target = fn(&[u8]);
@@ -38,8 +38,6 @@ const KINDS: &[(c_int, c_int)] = &[
 	(libc::IPPROTO_IP, libc::IP_PKTINFO),
 	(libc::IPPROTO_IPV6, libc::IPV6_TCLASS),
 	(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO),
-	(libc::IPPROTO_IP, libc::IP_RECVERR),
-	(libc::IPPROTO_IPV6, libc::IPV6_RECVERR),
 ];
 
 /// The input's opcodes after the indexed kinds.
@@ -179,8 +177,8 @@ impl Control {
 		out
 	}
 
-	/// Inputs for every target that walks a control buffer: the receive sets a socket enables,
-	/// the error queue's entries, and payloads one byte short, each followed by every [`End`].
+	/// Inputs for every target that walks a control buffer: the receive sets a socket enables and
+	/// payloads one byte short, each followed by every [`End`].
 	pub fn seeds() -> Vec<Vec<u8>> {
 		let gro = Message::new::<c_int>(libc::SOL_UDP, libc::UDP_GRO, 1200);
 		let stamp = Message::new(
@@ -216,26 +214,6 @@ impl Control {
 		};
 		let tos = Message::new(libc::IPPROTO_IP, libc::IP_TOS, 0b10u8);
 		let tclass = Message::new::<c_int>(libc::IPPROTO_IPV6, libc::IPV6_TCLASS, 0b11);
-		let error = |kind, origin, offender: &[u8]| {
-			let mut message = Message::new(
-				libc::IPPROTO_IP,
-				kind,
-				libc::sock_extended_err {
-					ee_errno: libc::EMSGSIZE as u32,
-					ee_origin: origin,
-					ee_type: 3,
-					ee_code: 4,
-					ee_pad: 0,
-					ee_info: 1400,
-					ee_data: 0,
-				},
-			);
-			message.payload.extend_from_slice(offender);
-			message
-		};
-		let sin = sockaddr(SocketAddr::from(([198, 51, 100, 7], 4443)));
-		let sin6 = sockaddr(SocketAddr::from((Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 7), 4443)));
-		let unspec = (libc::AF_UNSPEC as libc::sa_family_t).to_ne_bytes();
 		let short = |message: &Message| Message {
 			payload: message.payload[..message.payload.len() - 1].to_vec(),
 			..message.clone()
@@ -250,9 +228,6 @@ impl Control {
 				tclass.clone(),
 			],
 			vec![v6(Ipv4Addr::new(192, 0, 2, 2).to_ipv6_mapped()), tos.clone()],
-			vec![error(libc::IP_RECVERR, libc::SO_EE_ORIGIN_ICMP, &sin)],
-			vec![error(libc::IPV6_RECVERR, libc::SO_EE_ORIGIN_ICMP6, &sin6)],
-			vec![error(libc::IP_RECVERR, libc::SO_EE_ORIGIN_LOCAL, &unspec)],
 			[&gro, &stamp, &v4, &tclass].map(short).to_vec(),
 		];
 		let ends = [
@@ -327,29 +302,6 @@ fn layout(message: &Message, out: &mut Vec<u8>) {
 	out.resize(start + space, 0);
 }
 
-/// A socket address's kernel bytes.
-fn sockaddr(addr: SocketAddr) -> Vec<u8> {
-	match addr {
-		SocketAddr::V4(v4) => raw(libc::sockaddr_in {
-			sin_family: libc::AF_INET as libc::sa_family_t,
-			sin_port: v4.port().to_be(),
-			sin_addr: libc::in_addr {
-				s_addr: u32::from_ne_bytes(v4.ip().octets()),
-			},
-			sin_zero: [0; 8],
-		}),
-		SocketAddr::V6(v6) => raw(libc::sockaddr_in6 {
-			sin6_family: libc::AF_INET6 as libc::sa_family_t,
-			sin6_port: v6.port().to_be(),
-			sin6_flowinfo: v6.flowinfo(),
-			sin6_addr: libc::in6_addr {
-				s6_addr: v6.ip().octets(),
-			},
-			sin6_scope_id: v6.scope_id(),
-		}),
-	}
-}
-
 /// A plain C value's bytes.
 ///
 /// Only for the padding-free structs and integers the kernel writes into control messages:
@@ -380,7 +332,7 @@ pub fn sock_cmsg(data: &[u8]) {
 	}
 }
 
-/// What a receive and an error-queue read report.
+/// What a receive reports.
 #[derive(Debug, PartialEq)]
 struct Expected {
 	ecn: Option<EcnCodepoint>,
@@ -388,12 +340,10 @@ struct Expected {
 	interface_index: Option<u32>,
 	stride: usize,
 	timestamp: Option<Duration>,
-	/// The first error-queue entry: its offender and errno.
-	error: Option<(Option<SocketAddr>, i32)>,
 }
 
 impl Expected {
-	/// Walk `control` as a receive and as an error-queue read.
+	/// Walk `control` as a receive.
 	fn walk(control: &[u8]) -> Self {
 		// The kernel's buffer is aligned for `cmsghdr`; a `u64` array is too.
 		let mut buffer = vec![0u64; control.len().div_ceil(8)];
@@ -416,19 +366,12 @@ impl Expected {
 		};
 		let meta: RecvMeta = decode_recv(&name, &hdr, 0, DATAGRAM).expect("the name is an IPv4 address");
 
-		// SAFETY: `hdr` points at `buffer`, aligned and initialized for its whole length.
-		let error = unsafe { cmsg::Iter::new(&hdr) }
-			.find_map(LinuxError::decode)
-			.map(TransportError::from)
-			.map(|error| (error.addr, error.raw_errno));
-
 		Self {
 			ecn: meta.ecn,
 			dst_ip: meta.dst_ip,
 			interface_index: meta.interface_index,
 			stride: meta.stride,
 			timestamp: meta.timestamp,
-			error,
 		}
 	}
 
@@ -441,7 +384,6 @@ impl Expected {
 			interface_index: None,
 			stride: DATAGRAM,
 			timestamp: None,
-			error: None,
 		};
 		for Message { level, kind, payload } in messages {
 			let p = payload.as_slice();
@@ -475,39 +417,9 @@ impl Expected {
 				}
 				_ => {}
 			}
-			if expected.error.is_none() {
-				expected.error = error(*level, *kind, p);
-			}
 		}
 		expected
 	}
-}
-
-/// An error-queue entry: a 16-byte `sock_extended_err`, then the offender's address.
-fn error(level: c_int, kind: c_int, p: &[u8]) -> Option<(Option<SocketAddr>, i32)> {
-	if !matches!(level, libc::IPPROTO_IP | libc::IPPROTO_IPV6) || !matches!(kind, libc::IP_RECVERR | libc::IPV6_RECVERR)
-	{
-		return None;
-	}
-	if p.len() < 18 {
-		return None;
-	}
-	let errno = u32::from_ne_bytes(bytes(p, 0)) as i32;
-	let offender = match c_int::from(u16::from_ne_bytes(bytes(p, 16))) {
-		libc::AF_UNSPEC => None,
-		libc::AF_INET if p.len() >= 16 + 16 => Some(SocketAddr::V4(SocketAddrV4::new(
-			Ipv4Addr::from(bytes::<4>(p, 20)),
-			u16::from_be_bytes(bytes(p, 18)),
-		))),
-		libc::AF_INET6 if p.len() >= 16 + 28 => Some(SocketAddr::V6(SocketAddrV6::new(
-			Ipv6Addr::from(bytes::<16>(p, 24)),
-			u16::from_be_bytes(bytes(p, 18)),
-			u32::from_ne_bytes(bytes(p, 20)),
-			u32::from_ne_bytes(bytes(p, 40)),
-		))),
-		_ => return None,
-	};
-	Some((offender, errno))
 }
 
 /// `N` bytes of `p` from `at`.
