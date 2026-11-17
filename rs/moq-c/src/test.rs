@@ -2674,6 +2674,10 @@ fn raw_track_and_group_abort_consume_their_handles() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 }
 
+/// The subscription's ranges filter the read, and an update replaces them on the live read.
+///
+/// No delivery budget runs on the wall clock (the track keeps its groups and the read waits
+/// on them), so a slow suite cannot age group `one` out before the read reaches it.
 #[test]
 fn raw_track_subscription_options_and_update() {
 	let origin = id(moq_origin_create());
@@ -2683,8 +2687,8 @@ fn raw_track_subscription_options_and_update() {
 	let track_name = b"data";
 	let info = moq_track_info {
 		priority: 3,
-		max_age_us: 1_000_000,
-		max_age_unlimited: false,
+		max_age_us: 0,
+		max_age_unlimited: true,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2694,52 +2698,43 @@ fn raw_track_subscription_options_and_update() {
 	let track =
 		id(unsafe { moq_publish_track(broadcast, track_name.as_ptr() as *const c_char, track_name.len(), &info) });
 
-	let payloads: [&[u8]; 3] = [b"zero", b"one", b"two"];
-	for (i, payload) in payloads.into_iter().enumerate() {
+	let publish = |payload: &[u8], at: u64| {
 		assert_eq!(
-			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(i as u64 * 20_000)) },
+			unsafe { moq_publish_track_frame(track, payload.as_ptr(), payload.len(), &micros(at)) },
 			0
 		);
-	}
+	};
+	publish(b"zero", 0);
+	publish(b"one", 20_000);
+	publish(b"two", 40_000);
 
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	// An absolute anchor is a group's start, in the track's microseconds. A read whose ranges
-	// all end ends once it read them, so an open range far ahead keeps this one open for the
-	// update.
+	let absolute = |group| moq_anchor {
+		kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+		group,
+		timestamp: moq_timestamp::default(),
+	};
+	// An absolute anchor is a group's start, in the track's microseconds, and an absolute end
+	// is exclusive. The open range starts at the group containing 100 s, the newest one held:
+	// `two`, and every group after it.
 	let ranges = [
 		moq_range {
-			start: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 20_000,
-				timestamp: moq_timestamp::default(),
-			},
-			end: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 20_001,
-				timestamp: moq_timestamp::default(),
-			},
+			start: absolute(20_000),
+			end: absolute(20_001),
 			end_present: true,
 		},
 		moq_range {
-			start: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 100_000_000,
-				timestamp: moq_timestamp::default(),
-			},
-			end: moq_anchor {
-				kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-				group: 0,
-				timestamp: moq_timestamp::default(),
-			},
+			start: absolute(100_000_000),
+			end: absolute(0),
 			end_present: false,
 		},
 	];
 	let subscription = moq_subscription {
 		priority: 5,
 		delay: moq_delay {
-			max_us: 25_000,
+			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: ranges.as_ptr(),
@@ -2757,52 +2752,42 @@ fn raw_track_subscription_options_and_update() {
 		)
 	});
 
-	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_frame {
-		payload: std::ptr::null(),
-		payload_size: 0,
-		timestamp: std::ptr::null(),
-		keyframe: false,
+	let expect = |payload: &[u8], at: u64| {
+		let frame_id = id(frame_cb.recv());
+		let mut frame = moq_frame {
+			payload: std::ptr::null(),
+			payload_size: 0,
+			timestamp: std::ptr::null(),
+			keyframe: false,
+		};
+		assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
+		let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
+		assert_eq!(received, payload);
+		assert_eq!(read_timestamp(frame.timestamp), micros(at));
+		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
-	assert_eq!(received, b"one");
-	assert_eq!(read_timestamp(frame.timestamp), micros(20_000));
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	expect(b"one", 20_000);
+	expect(b"two", 40_000);
 
-	// Widen the bounded range but keep the open one, so the read stays open for the cancel.
-	let widened = [
-		moq_range {
-			end: moq_anchor {
-				group: 40_001,
-				..ranges[0].end
-			},
-			..ranges[0]
-		},
-		ranges[1],
-	];
+	// Replace both ranges with one that ends at `three`, so the read ends once it reads it
+	// and never sees `four`.
+	let bounded = [moq_range {
+		end: absolute(60_001),
+		..ranges[0]
+	}];
 	let update = moq_subscription {
-		ranges: widened.as_ptr(),
-		ranges_len: widened.len(),
+		ranges: bounded.as_ptr(),
+		ranges_len: bounded.len(),
 		..subscription
 	};
 	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);
 
-	let frame_id = id(frame_cb.recv());
-	let mut frame = moq_frame {
-		payload: std::ptr::null(),
-		payload_size: 0,
-		timestamp: std::ptr::null(),
-		keyframe: false,
-	};
-	assert_eq!(unsafe { moq_consume_track_frame(frame_id, &mut frame) }, 0);
-	let received = unsafe { std::slice::from_raw_parts(frame.payload, frame.payload_size) };
-	assert_eq!(received, b"two");
-	assert_eq!(read_timestamp(frame.timestamp), micros(40_000));
-	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
+	publish(b"three", 60_000);
+	publish(b"four", 80_000);
+	expect(b"three", 60_000);
+	assert_eq!(frame_cb.recv_terminal(), 0, "the read ends with its ranges");
+	assert!(moq_consume_track_cancel(consumer) < 0, "the ended read is gone");
 
-	assert_eq!(moq_consume_track_cancel(consumer), 0);
-	assert_eq!(frame_cb.recv_terminal(), 0);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
@@ -2810,7 +2795,7 @@ fn raw_track_subscription_options_and_update() {
 }
 
 /// A time anchor starts at the group containing that presentation time, given unscaled in the
-/// track's timescale.
+/// track's timescale. No budget runs on the wall clock, so a slow suite can't age `one` out.
 #[test]
 fn raw_track_time_anchor() {
 	let origin = id(moq_origin_create());
@@ -2820,8 +2805,8 @@ fn raw_track_time_anchor() {
 	let track_name = b"data";
 	let info = moq_track_info {
 		priority: 3,
-		max_age_us: 1_000_000,
-		max_age_unlimited: false,
+		max_age_us: 0,
+		max_age_unlimited: true,
 		timescale: 1_000_000,
 		timescale_present: true,
 		refresh: 0,
@@ -2862,7 +2847,7 @@ fn raw_track_time_anchor() {
 	let subscription = moq_subscription {
 		priority: 5,
 		delay: moq_delay {
-			max_us: 1_000_000,
+			max_unlimited: true,
 			..moq_delay::default()
 		},
 		ranges: ranges.as_ptr(),
@@ -3882,7 +3867,7 @@ fn double_close_all_resource_types() {
 
 /// Audio has no keyframes, so `moq_publish_media_cut` is the only thing that gives it group
 /// boundaries: without it every packet lands in one group that never closes. Cutting per packet is
-/// what a live publisher does, and `_seek` does the same with a chosen sequence number.
+/// what a live publisher does, and `_seek` does the same with a chosen start.
 #[test]
 fn media_cut_bounds_audio_groups() {
 	let origin = id(moq_origin_create());
@@ -4865,7 +4850,7 @@ fn track_request_accepted_after_the_broadcast_closes_is_refused() {
 fn fetch_group(
 	broadcast: u32,
 	name: &str,
-	sequence: u64,
+	start: u64,
 	priority: i8,
 ) -> mpsc::Receiver<Result<(u64, Vec<u8>), moq_net::Error>> {
 	let consumer = State::lock()
@@ -4879,7 +4864,7 @@ fn fetch_group(
 		let res = async {
 			let track = consumer.track(&name)?;
 			let options = moq_net::group::Fetch::default().with_priority(priority);
-			let mut group = track.fetch_group(sequence, options).await?;
+			let mut group = track.fetch_group(start, options).await?;
 			let index = group.index();
 			let frame = group.read_frame().await?.expect("expected a fetched frame");
 			Ok((index, frame.payload.to_vec()))
@@ -4903,13 +4888,13 @@ fn track_dynamic_serves_a_fetch_miss() {
 
 	let fetch = fetch_group(broadcast, "data", 5, 11);
 	let request = id(group_cb.recv());
-	let mut sequence = 0u64;
+	let mut start = 0u64;
 	let mut priority = 0i8;
 	let mut frame_start = 1u64;
-	assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
+	assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
 	assert_eq!(unsafe { moq_group_request_priority(request, &mut priority) }, 0);
 	assert_eq!(unsafe { moq_group_request_frame_start(request, &mut frame_start) }, 0);
-	assert_eq!(sequence, 5);
+	assert_eq!(start, 5);
 	assert_eq!(priority, 11);
 	assert_eq!(frame_start, 0);
 
@@ -4984,15 +4969,15 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		reader
 	};
 	let first = id(group_cb.recv_reading(&mut reader));
-	let mut sequence = 0u64;
-	assert_eq!(unsafe { moq_group_request_sequence(first, &mut sequence) }, 0);
-	assert_eq!(sequence, 7);
+	let mut start = 0u64;
+	assert_eq!(unsafe { moq_group_request_start(first, &mut start) }, 0);
+	assert_eq!(start, 7);
 
 	// Reading only 8, so the fill owes nothing once 8 is let go.
 	reader.update(ascending(8, Some(8))).unwrap();
 	let next = id(group_cb.recv_reading(&mut reader));
-	assert_eq!(unsafe { moq_group_request_sequence(next, &mut sequence) }, 0);
-	assert_eq!(sequence, 8, "group 7, which nobody reads, held the fill back");
+	assert_eq!(unsafe { moq_group_request_start(next, &mut start) }, 0);
+	assert_eq!(start, 8, "group 7, which nobody reads, held the fill back");
 	assert!(moq_group_request_accept(first) < 0, "the withdrawn request");
 
 	assert_eq!(moq_group_request_free(next), 0);
@@ -5041,15 +5026,15 @@ fn a_rejected_group_request_binds_only_its_readers() {
 	};
 	let waiter = kio::Waiter::noop();
 
-	let mut sequence = 0u64;
+	let mut start = 0u64;
 	for reject in [
 		|request| moq_group_request_abort(request, 9),
 		|request| moq_group_request_free(request),
 	] {
 		let mut reader = subscribe();
 		let request = id(group_cb.recv_reading(&mut reader));
-		assert_eq!(unsafe { moq_group_request_sequence(request, &mut sequence) }, 0);
-		assert_eq!(sequence, 6);
+		assert_eq!(unsafe { moq_group_request_start(request, &mut start) }, 0);
+		assert_eq!(start, 6);
 		assert_eq!(reject(request), 0);
 	}
 
@@ -5090,9 +5075,9 @@ fn track_request_dynamic_survives_accept() {
 	let track = id(unsafe { moq_track_request_accept(request, std::ptr::null()) });
 
 	let group_request = id(group_cb.recv());
-	let mut sequence = 0u64;
-	assert_eq!(unsafe { moq_group_request_sequence(group_request, &mut sequence) }, 0);
-	assert_eq!(sequence, 9);
+	let mut start = 0u64;
+	assert_eq!(unsafe { moq_group_request_start(group_request, &mut start) }, 0);
+	assert_eq!(start, 9);
 	let group = id(moq_group_request_accept(group_request));
 	let payload = b"archive";
 	assert_eq!(
@@ -8975,7 +8960,7 @@ fn join_hint_declares_the_join_interval() {
 	for i in 0..60u64 {
 		if i == 50 {
 			assert_eq!(
-				published_catalog(broadcast).media.join,
+				published_catalog(broadcast).sync.interval,
 				None,
 				"no window has closed yet"
 			);
@@ -8989,7 +8974,7 @@ fn join_hint_declares_the_join_interval() {
 		}
 	}
 	assert_eq!(
-		published_catalog(broadcast).media.interval(),
+		published_catalog(broadcast).sync.interval,
 		Some(std::time::Duration::from_millis(500)),
 		"the hint, not the 100 ms groups measured"
 	);
@@ -9115,7 +9100,7 @@ fn base_moqt_server(version: &str, sink: u32) -> (String, mpsc::Receiver<TokenSe
 	let mut config = moq_tokio::listen::Config::default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 	config.version = vec![version];
-	config.extensions.solicit = false;
+	config.decline_solicit = true;
 	let mut listener = crate::ffi::RUNTIME
 		.block_on(async { config.init(Default::default()).unwrap().listen().await })
 		.unwrap();

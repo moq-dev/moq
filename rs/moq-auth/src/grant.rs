@@ -1,9 +1,10 @@
-use crate::Rate;
 use kio::clock::Wall;
 use moq_pattern::Patterns;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
+
+use crate::Access;
 
 /// What a session may do, as the auth server answered.
 ///
@@ -12,23 +13,19 @@ use std::time::Duration;
 /// expires, so an outage always has a bound the server chose. [`validate`](Self::validate)
 /// checks these once at the boundary.
 ///
-/// A role with a cap is written `{"path": [...], "rate": bps}`, which every older
-/// reader refuses rather than drop the cap.
+/// A field this reader does not know is refused, as an unknown claim is: a field added
+/// later may narrow the grant, and reading past it would widen the session. A server
+/// tells which fields a relay reads from [`Request::relay`](crate::Request::relay).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(from = "crate::wire::Grant", into = "crate::wire::Grant")]
+#[serde(try_from = "crate::wire::Object<crate::wire::Grant>", into = "crate::wire::Grant")]
 #[non_exhaustive]
 pub struct Grant {
-	/// Patterns the session may publish, relative to the root.
-	pub publish: Patterns,
+	/// What the session may publish, relative to the root.
+	pub publish: Access,
 
-	/// The most the session may publish, or no cap when absent.
-	pub publish_rate: Option<Rate>,
-
-	/// Patterns the session may subscribe to, relative to the root.
-	pub subscribe: Patterns,
-
-	/// The most the session may receive from its subscriptions, or no cap when absent.
-	pub subscribe_rate: Option<Rate>,
+	/// What the session may subscribe to, relative to the root. A cap bounds what it
+	/// receives from its subscriptions.
+	pub subscribe: Access,
 
 	/// The path the patterns are relative to, replacing the dialed one. This is how a
 	/// server aliases a slug to a canonical id. Absent means the dialed path.
@@ -52,23 +49,75 @@ pub struct Grant {
 	/// The literal path this session's stats record under, independent of its root. Absent records under the empty label.
 	pub label: Option<String>,
 
-	/// The session is a cluster peer (another relay): what it announces entered
-	/// the cluster elsewhere, not here, and it discovers hidden routes without
-	/// asking, for peers that predate the opt-in. A client certificate alone is not.
-	pub peer: bool,
+	/// How the session, another relay, links into the cluster; absent for a client. A
+	/// client certificate alone is not a link.
+	///
+	/// Written beside `peer: true`, which a relay before 0.22 reads in its place, as a plain peer
+	/// even for an upstream: refuse a request with no [`Request::relay`](crate::Request::relay)
+	/// when that matters. A grant that names a link while its `peer` is false is refused.
+	pub link: Option<Link>,
+}
 
-	/// The cluster peer is upstream: the relay never offers it a route learned
-	/// from another upstream peer, so it never carries traffic between two.
-	/// Requires `peer`.
-	pub upstream: bool,
+/// How a cluster peer (another relay) links to this one.
+///
+/// Exhaustive on purpose: a new kind of link changes what a relay offers it, so every
+/// reader must decide how to treat it rather than fall through to a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Link {
+	/// A cluster peer: what it announces entered the cluster elsewhere, not here, and it
+	/// discovers hidden routes without asking, for peers that predate the opt-in.
+	Peer,
+	/// A peer that is upstream: the relay never offers it a route learned from another
+	/// upstream peer, so it never carries traffic between two.
+	Upstream,
+}
+
+impl Link {
+	/// The lowercase name the wire carries.
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::Peer => "peer",
+			Self::Upstream => "upstream",
+		}
+	}
+}
+
+impl std::str::FromStr for Link {
+	type Err = &'static str;
+	fn from_str(value: &str) -> Result<Self, Self::Err> {
+		match value {
+			"peer" => Ok(Self::Peer),
+			"upstream" => Ok(Self::Upstream),
+			_ => Err("expected peer or upstream"),
+		}
+	}
+}
+
+impl std::fmt::Display for Link {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.write_str(self.as_str())
+	}
+}
+
+impl Serialize for Link {
+	fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str(self.as_str())
+	}
+}
+
+impl<'de> Deserialize<'de> for Link {
+	fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let text = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+		text.parse().map_err(serde::de::Error::custom)
+	}
 }
 
 impl Grant {
-	/// A grant of these patterns, with no other restrictions.
+	/// A grant of these patterns, uncapped, with no other restrictions.
 	pub fn new(publish: impl Into<Patterns>, subscribe: impl Into<Patterns>) -> Self {
 		Self {
-			publish: publish.into(),
-			subscribe: subscribe.into(),
+			publish: Access::new(publish),
+			subscribe: Access::new(subscribe),
 			..Default::default()
 		}
 	}
@@ -84,15 +133,11 @@ impl Grant {
 		start.checked_add(remaining)
 	}
 
-	/// Refuse a grant that admits nothing, marks a non-peer upstream, asks to be
-	/// revalidated without a bound or at no interval, names an invalid stats tier or
-	/// label, or has already expired.
+	/// Refuse a grant that admits nothing, asks to be revalidated without a bound or at
+	/// no interval, names an invalid stats tier or label, or has already expired.
 	pub fn validate(&self) -> crate::Result<()> {
-		if self.publish.is_empty() && self.subscribe.is_empty() {
+		if self.publish.path.is_empty() && self.subscribe.path.is_empty() {
 			return Err(crate::Error::UselessGrant);
-		}
-		if self.upstream && !self.peer {
-			return Err(crate::Error::UpstreamWithoutPeer);
 		}
 		if self.revalidate.is_some() && self.expires.is_none() {
 			return Err(crate::Error::UnboundedRevalidate);
@@ -122,28 +167,32 @@ mod tests {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
-	#[test]
-	fn round_trips_in_seconds() {
-		let grant = Grant {
-			publish_rate: None,
-			subscribe_rate: None,
-			publish: patterns(&["alice/**"]),
-			subscribe: patterns(&["**"]),
+	fn full() -> Grant {
+		Grant {
+			publish: Access::new(patterns(&["alice/**"])).with_rate(crate::Rate::from_bps(8_000_000).unwrap()),
+			subscribe: Access::new(patterns(&["**"])),
 			root: Some("pid/room".into()),
 			mounts: BTreeMap::new(),
 			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
 			revalidate: Some(Duration::from_secs(60)),
 			tier: Some("websocket".into()),
 			label: Some("project/key/123".into()),
-			peer: true,
-			upstream: true,
-		};
+			link: Some(Link::Upstream),
+		}
+	}
+
+	#[test]
+	fn round_trips_in_seconds() {
+		let grant = full();
 		let json = serde_json::to_value(&grant).unwrap();
 		assert_eq!(json["expires"], 4_102_444_800_i64);
 		assert_eq!(json["revalidate"], 60);
-		assert_eq!(json["publish"], serde_json::json!(["alice/**"]));
-		assert_eq!(json["peer"], true);
-		assert_eq!(json["upstream"], true);
+		assert_eq!(
+			json["publish"],
+			serde_json::json!({"path": ["alice/**"], "rate": 8_000_000})
+		);
+		assert_eq!(json["subscribe"], serde_json::json!(["**"]));
+		assert_eq!(json["link"], "upstream");
 		assert_eq!(serde_json::from_value::<Grant>(json).unwrap(), grant);
 	}
 
@@ -151,23 +200,46 @@ mod tests {
 	/// one wire shape.
 	#[test]
 	fn serializes_to_the_cross_language_vector() {
-		let grant = Grant {
-			publish_rate: None,
-			subscribe_rate: None,
-			publish: patterns(&["alice/**"]),
-			subscribe: patterns(&["**"]),
-			root: Some("pid/room".into()),
-			mounts: BTreeMap::new(),
-			expires: Some(Wall::UNIX_EPOCH + Duration::from_secs(4_102_444_800)),
-			revalidate: Some(Duration::from_secs(60)),
-			tier: Some("websocket".into()),
-			label: Some("project/key/123".into()),
-			peer: true,
-			upstream: true,
-		};
+		assert_eq!(
+			serde_json::to_string(&full()).unwrap(),
+			r#"{"publish":{"path":["alice/**"],"rate":8000000},"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","link":"upstream","peer":true}"#
+		);
+	}
+
+	/// A field this reader does not know may narrow the grant, so it refuses the whole
+	/// grant rather than widen the session past it.
+	#[test]
+	fn an_unknown_field_is_refused() {
+		for json in [
+			r#"{"publish":["**"],"publish_rate":8000}"#,
+			r#"{"publish":["**"],"upstream":true}"#,
+			r#"{"publish":["**"],"future":{}}"#,
+			r#"{"publish":["**"],"link":"downstream"}"#,
+		] {
+			assert!(serde_json::from_str::<Grant>(json).is_err(), "{json}");
+		}
+	}
+
+	/// TEMPORARY(0.22): `peer` is read as the link a relay before 0.22 knows, and a
+	/// grant whose two fields disagree is refused.
+	#[test]
+	fn peer_is_an_alias_for_a_link() {
+		let read = |json: &str| serde_json::from_str::<Grant>(json).map(|grant| grant.link);
+		assert_eq!(read(r#"{"publish":["**"],"peer":true}"#).unwrap(), Some(Link::Peer));
+		assert_eq!(read(r#"{"publish":["**"],"peer":false}"#).unwrap(), None);
+		assert_eq!(read(r#"{"publish":["**"],"link":"peer"}"#).unwrap(), Some(Link::Peer));
+		assert_eq!(
+			read(r#"{"publish":["**"],"link":"upstream","peer":true}"#).unwrap(),
+			Some(Link::Upstream)
+		);
+		assert!(read(r#"{"publish":["**"],"link":"upstream","peer":false}"#).is_err());
+		assert!(read(r#"{"publish":["**"],"link":null}"#).is_err());
+
+		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
+		grant.link = Some(Link::Peer);
 		assert_eq!(
 			serde_json::to_string(&grant).unwrap(),
-			r#"{"publish":["alice/**"],"subscribe":["**"],"root":"pid/room","expires":4102444800,"revalidate":60,"tier":"websocket","label":"project/key/123","peer":true,"upstream":true}"#
+			r#"{"publish":["**"],"link":"peer","peer":true}"#
 		);
 	}
 
@@ -190,6 +262,12 @@ mod tests {
 	#[kio::test]
 	async fn validate_refuses_nothing_unbounded_and_expired() {
 		assert!(matches!(Grant::default().validate(), Err(crate::Error::UselessGrant)));
+		let mut capped = Grant::default();
+		capped.publish.rate = crate::Rate::from_bps(8000).ok();
+		assert!(
+			matches!(capped.validate(), Err(crate::Error::UselessGrant)),
+			"a cap on no paths admits nothing"
+		);
 
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		grant.validate().unwrap();
@@ -216,15 +294,6 @@ mod tests {
 		grant.expires = Some(now + Duration::from_secs(120));
 		grant.revalidate = Some(Duration::ZERO);
 		assert!(matches!(grant.validate(), Err(crate::Error::ZeroRevalidate)));
-	}
-
-	#[test]
-	fn validate_refuses_an_upstream_that_is_not_a_peer() {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
-		grant.upstream = true;
-		assert!(matches!(grant.validate(), Err(crate::Error::UpstreamWithoutPeer)));
-		grant.peer = true;
-		grant.validate().unwrap();
 	}
 
 	#[test]

@@ -43,5 +43,5 @@ export * as Time from "./time.ts";
 export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";
-/** Varint encoding and decoding, in QUIC's format and moq-transport's leading-ones format. */
+/** QUIC varint encoding and decoding (RFC 9000 Section 16). */
 export * as Varint from "./varint.ts";

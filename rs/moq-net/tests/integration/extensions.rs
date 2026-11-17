@@ -1,7 +1,7 @@
 #![cfg(feature = "async")]
 
-//! A side may decline a moq-transport extension with `setup::Extensions`, and then
-//! connects as a peer that does not speak it.
+//! A test side may decline a moq-transport extension through moq-net's hidden doors, and
+//! then connects as a peer that does not speak it.
 //!
 //! Deterministic: paused time over the mock transport.
 
@@ -9,8 +9,8 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Version, origin, setup::Extensions};
-use support::harness::{MockConnectOptions, MockPair, connect_mock};
+use moq_net::{Version, origin};
+use support::harness::{Extensions, MockConnectOptions, MockPair, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
 const SETTLE: Duration = Duration::from_secs(1);

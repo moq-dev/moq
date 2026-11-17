@@ -9289,7 +9289,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	let (broadcast, mut catalog) = publish_live::<()>(&origin, route.clone());
 	let mut track = aac_rendition(&mut broadcast.broadcast().clone(), &mut catalog, "a.aac");
 	let mut groups = track.consume();
-	let clock = catalog.snapshot().media.clock;
+	let clock = catalog.snapshot().sync.clock;
 	let source = crate::source::resolved(&origin, "live").await;
 	let old = source.broadcast();
 	let mut export = open_export(source, RECORDING_MAX_AGE).await.unwrap().with_replay();
@@ -9307,7 +9307,7 @@ async fn a_return_keeps_catalog_and_group_history() {
 	crate::clock::fake_host_wall(wall + start.elapsed());
 	broadcast.announce().unwrap();
 	assert_eq!(
-		catalog.snapshot().media.clock,
+		catalog.snapshot().sync.clock,
 		clock,
 		"a return must keep the catalog clock"
 	);

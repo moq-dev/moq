@@ -26,11 +26,12 @@ pub struct Args {
 	#[usage(name = "webrtc-listen", long = "listen", value_name = "ADDR", group = "webrtc-mode")]
 	pub listen: Option<SocketAddr>,
 
-	/// Shared UDP socket for ICE/media (one port for all sessions).
+	/// Shared UDP socket for ICE/media (one port for all sessions), bound at startup.
 	#[usage(long, requires = "--listen", default = "[::]:0")]
 	pub udp_bind: SocketAddr,
 
-	/// Public UDP address(es) advertised as ICE host candidates (repeatable).
+	/// Public UDP address(es) advertised as ICE host candidates, as given (repeatable).
+	/// Port 0 advertises the `--udp-bind` port.
 	#[usage(long, requires = "--listen")]
 	pub public_addr: Vec<SocketAddr>,
 
@@ -57,7 +58,7 @@ pub struct Listen {
 /// WHIP server: accept incoming WebRTC publishes into the Origin as `target.name` (import).
 pub async fn listen_import(target: ImportTarget, listen: Listen) -> anyhow::Result<()> {
 	let publisher = scope_producer(&target.origin, &target.name)?;
-	let server = moq_webrtc::Server::new(server_config(&listen));
+	let server = bind(&listen).await?;
 	serve(server.publish_router(publisher, target.ingest), "WHIP", listen).await
 }
 
@@ -69,7 +70,7 @@ pub async fn listen_export(origin: moq_net::origin::Consumer, name: String, list
 	let subscriber = origin
 		.scope("", &scope)
 		.with_context(|| format!("failed to scope origin to broadcast `{name}`"))?;
-	let server = moq_webrtc::Server::new(server_config(&listen));
+	let server = bind(&listen).await?;
 	serve(server.subscribe_router(subscriber), "WHEP", listen).await
 }
 
@@ -127,11 +128,13 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	Ok(())
 }
 
-fn server_config(listen: &Listen) -> moq_webrtc::server::Config {
+/// Bind the shared media socket, so a bad `--udp-bind` fails startup.
+async fn bind(listen: &Listen) -> anyhow::Result<moq_webrtc::Server> {
 	let mut config = moq_webrtc::server::Config::default();
-	config.socket = moq_webrtc::server::Socket::Bind(listen.udp_bind);
 	config.ice_candidates.clone_from(&listen.public_addr);
-	config
+	moq_webrtc::Server::bind(listen.udp_bind, config)
+		.await
+		.with_context(|| format!("failed to bind --udp-bind {}", listen.udp_bind))
 }
 
 async fn serve(router: axum::Router, role: &str, listen: Listen) -> anyhow::Result<()> {

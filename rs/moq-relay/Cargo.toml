@@ -39,7 +39,7 @@ doc = false
 # `cluster::Options::network`, which routes peer dials over in-memory links, the `sim`
 # network of named relays those links join, and `cluster::Options::sim`, which binds
 # them on a simulated QUIC host.
-test-support = ["kio/sim", "moq-tokio/sim"]
+test-support = ["kio/sim", "moq-tokio/test-support"]
 jemalloc = ["moq-tokio/jemalloc"]
 
 [dependencies]
@@ -64,7 +64,8 @@ moq-net = { workspace = true }
 # The flow-control limits both QUIC runtimes take, for widening a peer's connection.
 moq-quic = { workspace = true }
 moq-stats = { workspace = true, features = ["async"] }
-moq-tokio = { workspace = true }
+# `relay` offers the lite-07 `ietf` extension on the relay's own links.
+moq-tokio = { workspace = true, features = ["relay"] }
 # The /metrics text encoder; the protobuf features stay off.
 prometheus-client = "0.25.2"
 qmux = { workspace = true }
@@ -109,9 +110,12 @@ h2 = { workspace = true }
 kio = { path = "../kio", features = ["manual", "sim"] }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-congestion = { path = "../moq-congestion" }
-# The shared session bench fills FETCH runs through the `fuzz` module.
-moq-net = { path = "../moq-net", features = ["fuzz"] }
+# The shared session bench fills FETCH runs through the `fuzz` module and sets the
+# extensions each side offers.
+moq-net = { path = "../moq-net", features = ["fuzz", "relay", "test-support"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
+# The tests dial and serve bare QUIC and WebTransport through moq-tokio's driver.
+moq-tokio = { path = "../moq-tokio", features = ["test-support"] }
 pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem"] }
 rind-rcgen = { workspace = true }

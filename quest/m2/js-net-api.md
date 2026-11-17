@@ -83,4 +83,3 @@ compatible with code that awaits them. Wire: none.
 ## Related
 
 - [@moq/net addresses groups by start](/quest/m2/time-addressing/js.md) - the other `@moq/net` rename before the cut
-- [Unused @moq/net exports](/quest/m2/unused-api/js.md) - the removals that land beside these

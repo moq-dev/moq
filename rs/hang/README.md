@@ -9,7 +9,7 @@ A media library built on top of `moq-lite` for streaming audio and video.
 
 - **Broadcast**: A discoverable collection of tracks, documented using a catalog.
 - **Catalog**: Metadata describing the available tracks, codec information, etc. This is a live track itself and is updated as tracks are added/removed/changed.
-- **Media**: The catalog's `media` section: the broadcast's clock and the join interval, the longest group of any track, which an HLS edge numbers segments on.
+- **Sync**: The catalog's `sync` section: the broadcast's clock and the join interval, the longest group of any track, which an HLS edge numbers segments on.
 - **Track**: Audio/video streams, as well as other types of data.
 - **Group**: A group of pictures (video) or collection of samples (audio). Each group is independently decodable.
 - **Frame**: A timestamp and a codec payload pair.

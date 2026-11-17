@@ -97,6 +97,39 @@ pub(crate) fn scales(ctx: &Arc<CudaContext>) -> bool {
 	kernels(ctx).is_ok()
 }
 
+/// The CUDA ordinal of the device behind `device`'s render node, matched by PCI
+/// address, or `None` when it names no render node.
+///
+/// Fails when no CUDA device sits at the node's address, which a node another
+/// driver runs, or one `CUDA_VISIBLE_DEVICES` hides, cannot satisfy.
+pub(crate) fn ordinal(device: &crate::Device) -> Result<Option<usize>, Error> {
+	let Some(node) = device.render() else {
+		return Ok(None);
+	};
+	let pci = crate::device::Pci::of(node)?;
+	let cuda = |e: result::DriverError| Error::codec(anyhow::anyhow!("CUDA enumerate: {e:?}"));
+	let count = CudaContext::device_count().map_err(cuda)?;
+	let mut devices = Vec::new();
+	for ordinal in 0..count {
+		let physical = result::device::get(ordinal).map_err(cuda)?;
+		let attribute = |attribute| {
+			// SAFETY: `physical` came from `device::get` just above.
+			let value = unsafe { result::device::get_attribute(physical, attribute) }.map_err(cuda)?;
+			u32::try_from(value).map_err(|_| Error::codec(anyhow::anyhow!("CUDA device {ordinal}: negative PCI field")))
+		};
+		use cudarc::driver::sys::CUdevice_attribute as A;
+		let address = crate::device::Pci {
+			domain: attribute(A::CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID)?,
+			bus: attribute(A::CU_DEVICE_ATTRIBUTE_PCI_BUS_ID)?,
+			device: attribute(A::CU_DEVICE_ATTRIBUTE_PCI_DEVICE_ID)?,
+		};
+		devices.push((ordinal as usize, address));
+	}
+	pci.find(devices)
+		.map(Some)
+		.ok_or_else(|| Error::Unsupported(format!("no CUDA device is {device}")))
+}
+
 /// An owned device allocation. Plain `cuMemAlloc` on purpose: NVENC's
 /// resource registration rejects stream-ordered pool memory
 /// (`cuMemAllocAsync`), which is what cudarc's `CudaSlice` uses on any GPU

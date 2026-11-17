@@ -7,9 +7,13 @@
 //! capture future cancels it promptly, which is what makes capture cancel-safe:
 //! the [`Stream`](super::Stream) drops, the device is released, and no
 //! blocking thread is left pinned.
+//!
+//! A screen delivers only when its picture changes, so its channel
+//! [repeats](FrameChannel::repeating) the last frame while the screen is still.
 
 use kio::clock::Instant;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::Notify;
 
@@ -17,15 +21,42 @@ use crate::Error;
 use crate::frame::{Frame, Surface};
 use moq_net::Timestamp;
 
+/// The longest a still screen goes without a frame. A player shows a stall after
+/// 500 ms without one, and a viewer joining mid-stillness waits for the next
+/// frame to open its group. An unchanged picture encodes as a skip frame of a
+/// few dozen bytes, so this costs next to nothing.
+#[cfg(any(
+	all(target_os = "linux", feature = "pipewire"),
+	target_os = "macos",
+	target_os = "windows",
+	test
+))]
+const REPEAT: Duration = Duration::from_millis(250);
+
 /// The producer/consumer rendezvous for a single capture session.
 pub(super) struct FrameChannel {
 	state: Mutex<State>,
 	notify: Notify,
 	epoch: Instant,
+	/// How long [`recv`](Self::recv) waits for a new frame before repeating the
+	/// last one, or `None` for a source that delivers on its own cadence.
+	repeat: Option<Duration>,
+}
+
+/// The last frame [`recv`](FrameChannel::recv) returned, kept to repeat.
+struct Held {
+	/// `None` once [forgotten](FrameChannel::forget).
+	surface: Option<Surface>,
+	/// The latest timestamp returned, which the next frame must exceed.
+	timestamp: Timestamp,
+	/// When it was returned, which the next repeat waits from.
+	at: Instant,
 }
 
 struct State {
 	frame: Option<Frame>,
+	/// Only a repeating channel holds one.
+	held: Option<Held>,
 	#[cfg(any(target_os = "linux", target_os = "windows", test))]
 	native: Option<Native>,
 	closed: bool,
@@ -58,9 +89,27 @@ struct Native {
 
 impl FrameChannel {
 	pub(super) fn new() -> Arc<Self> {
+		Self::build(None)
+	}
+
+	/// A channel for a source that delivers only when its picture changes:
+	/// [`recv`](Self::recv) repeats the last frame once 250 ms, or `interval` if
+	/// longer, pass without a new one.
+	#[cfg(any(
+		all(target_os = "linux", feature = "pipewire"),
+		target_os = "macos",
+		target_os = "windows",
+		test
+	))]
+	pub(super) fn repeating(interval: Duration) -> Arc<Self> {
+		Self::build(Some(interval.max(REPEAT)))
+	}
+
+	fn build(repeat: Option<Duration>) -> Arc<Self> {
 		Arc::new(Self {
 			state: Mutex::new(State {
 				frame: None,
+				held: None,
 				#[cfg(any(target_os = "linux", target_os = "windows", test))]
 				native: None,
 				closed: false,
@@ -69,6 +118,7 @@ impl FrameChannel {
 			}),
 			notify: Notify::new(),
 			epoch: Instant::now(),
+			repeat,
 		})
 	}
 
@@ -155,6 +205,24 @@ impl FrameChannel {
 		self.state.lock().unwrap().skipped
 	}
 
+	/// Stop repeating until the next frame, because the last picture no longer
+	/// stands: the source resized, minimized, or blanked, or freed the buffer it
+	/// lives in. A frame the consumer has not reached yet is the same stale
+	/// picture, so it goes too.
+	#[cfg(any(
+		all(target_os = "linux", feature = "pipewire"),
+		target_os = "macos",
+		target_os = "windows",
+		test
+	))]
+	pub(super) fn forget(&self) {
+		let mut state = self.state.lock().unwrap();
+		state.frame = None;
+		if let Some(held) = &mut state.held {
+			held.surface = None;
+		}
+	}
+
 	/// Mark the source ended, so a parked [`recv`](Self::recv) returns `None`.
 	pub(super) fn close(&self) {
 		let mut state = self.state.lock().unwrap();
@@ -188,25 +256,73 @@ impl FrameChannel {
 	}
 
 	/// Await the latest frame, the terminal backend error, or `None` once closed.
+	/// A repeating channel returns its last frame again, stamped now, once its
+	/// interval passes without a new one.
 	pub(super) async fn recv(&self) -> Result<Option<Frame>, Error> {
 		loop {
 			// Register for a wakeup before checking, so a `push` that races the
 			// check still wakes this future (tokio's documented Notify pattern).
 			let notified = self.notify.notified();
-			{
+			let due = {
 				let mut state = self.state.lock().unwrap();
 				if let Some(error) = state.error.take() {
 					return Err(error);
 				}
 				if let Some(frame) = state.frame.take() {
-					return Ok(Some(frame));
+					return Ok(Some(self.hold(&mut state, frame)?));
 				}
 				if state.closed {
 					return Ok(None);
 				}
+				match (self.repeat, &mut state.held) {
+					(
+						Some(repeat),
+						Some(Held {
+							surface: Some(surface),
+							timestamp,
+							at,
+						}),
+					) => {
+						let due = at.saturating_add(repeat);
+						let now = Instant::now();
+						if now >= due {
+							// Stamped now rather than its capture time plus the interval, so
+							// a repeat a slow consumer reached late is not delivered late.
+							*timestamp = past(self.at(now), *timestamp)?;
+							*at = now;
+							return Ok(Some(Frame::new(
+								surface.retain().expect("only a retained surface is held"),
+								*timestamp,
+							)));
+						}
+						Some(due)
+					}
+					_ => None,
+				}
+			};
+			match due {
+				Some(due) => drop(kio::clock::timeout_at(due, notified).await),
+				None => notified.await,
 			}
-			notified.await;
 		}
+	}
+
+	/// Keep a copy of `frame` to repeat, if this channel repeats.
+	fn hold(&self, state: &mut State, mut frame: Frame) -> Result<Frame, Error> {
+		if self.repeat.is_none() {
+			return Ok(frame);
+		}
+		// A frame captured before a repeat was stamped, but pushed after it, would
+		// rewind the stream, so it goes just past the repeat instead.
+		if let Some(held) = &state.held {
+			frame.timestamp = past(frame.timestamp, held.timestamp)?;
+		}
+		state.held = Some(Held {
+			surface: frame.surface.retain(),
+			timestamp: frame.timestamp,
+			at: Instant::now(),
+		});
+		Ok(frame)
 	}
 
 	pub(super) fn now(&self) -> Timestamp {
@@ -219,6 +335,14 @@ impl FrameChannel {
 		let micros = u64::try_from(micros).unwrap_or(u64::MAX);
 		Timestamp::from_micros(micros).expect("capture timestamp fits")
 	}
+}
+
+/// `timestamp`, or just past `floor` if it is not already later.
+fn past(timestamp: Timestamp, floor: Timestamp) -> Result<Timestamp, Error> {
+	if timestamp > floor {
+		return Ok(timestamp);
+	}
+	Ok(floor.checked_add(Timestamp::from_micros(1).unwrap())?)
 }
 
 #[cfg(test)]
@@ -414,5 +538,169 @@ mod tests {
 		let second = chan.recv().await.unwrap().unwrap().timestamp;
 		assert!(second > first, "a stalled device clock repeated {first:?}");
 		assert_eq!(second.as_micros().unwrap(), 5_000);
+	}
+
+	/// The frame `recv` returns, as (id, timestamp in milliseconds).
+	async fn next(chan: &FrameChannel) -> (u32, u128) {
+		let frame = chan.recv().await.unwrap().unwrap();
+		(frame.surface.width(), frame.timestamp.as_micros().unwrap() / 1_000)
+	}
+
+	/// Whether `recv` returns anything within `wait`.
+	async fn quiet(chan: &FrameChannel, wait: std::time::Duration) -> bool {
+		kio::clock::timeout(wait, chan.recv()).await.is_err()
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_still_source_repeats_at_the_floor_not_its_frame_rate() {
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(16));
+		chan.push(frame(1));
+		assert_eq!(next(&chan).await, (1, 0));
+		for repeat in 1..=4 {
+			assert_eq!(next(&chan).await, (1, repeat * 250));
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn changes_keep_their_cadence_and_postpone_the_repeat() {
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(33));
+		for step in 0..10 {
+			chan.push(frame(step));
+			assert_eq!(next(&chan).await, (step, u128::from(step) * 33));
+			tokio::time::advance(std::time::Duration::from_millis(33)).await;
+		}
+		// The last change was at 297 ms, so its repeat waits until 547 ms.
+		assert_eq!(next(&chan).await, (9, 547));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_source_slower_than_the_floor_repeats_at_its_own_interval() {
+		let chan = FrameChannel::repeating(std::time::Duration::from_secs(1));
+		chan.push(frame(1));
+		next(&chan).await;
+		assert_eq!(next(&chan).await, (1, 1_000));
+	}
+
+	/// The encode loop cancels `recv` whenever demand or the bitrate target moves,
+	/// which must not push the repeat back.
+	#[tokio::test(start_paused = true)]
+	async fn a_cancelled_recv_keeps_the_repeat_due() {
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(33));
+		chan.push(frame(1));
+		next(&chan).await;
+		for _ in 0..4 {
+			assert!(quiet(&chan, std::time::Duration::from_millis(60)).await);
+		}
+		assert_eq!(next(&chan).await, (1, 250));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_forgotten_picture_waits_for_the_next_change() {
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(33));
+		chan.push(frame(1));
+		next(&chan).await;
+		assert_eq!(next(&chan).await, (1, 250));
+		// Pushed but not yet read when the source invalidated it.
+		chan.push(frame(9));
+		chan.forget();
+		assert!(quiet(&chan, std::time::Duration::from_secs(5)).await);
+		chan.push(frame(2));
+		assert_eq!(next(&chan).await, (2, 5_250));
+		assert_eq!(next(&chan).await, (2, 5_500));
+	}
+
+	/// A frame captured just before a repeat was stamped, but pushed after it.
+	#[tokio::test(start_paused = true)]
+	async fn a_frame_captured_before_a_repeat_goes_after_it() {
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(33));
+		chan.push(frame(1));
+		next(&chan).await;
+		assert_eq!(next(&chan).await, (1, 250));
+		chan.push_at(
+			frame(2),
+			chan.epoch.saturating_add(std::time::Duration::from_millis(240)),
+		);
+		let late = chan.recv().await.unwrap().unwrap();
+		assert_eq!(late.timestamp.as_micros().unwrap(), 250_001);
+		// A forgotten picture still keeps the stream from rewinding.
+		chan.forget();
+		chan.push_at(
+			frame(3),
+			chan.epoch.saturating_add(std::time::Duration::from_millis(245)),
+		);
+		assert_eq!(
+			chan.recv().await.unwrap().unwrap().timestamp.as_micros().unwrap(),
+			250_002
+		);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_repeating_channel_still_ends() {
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(33));
+		chan.push(frame(1));
+		next(&chan).await;
+		chan.close();
+		assert!(chan.recv().await.unwrap().is_none());
+
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(33));
+		chan.push(frame(1));
+		next(&chan).await;
+		chan.fail(Error::SourceUnavailable("window closed".to_string()));
+		assert!(chan.recv().await.is_err());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_camera_channel_never_repeats() {
+		let chan = FrameChannel::new();
+		chan.push(frame(1));
+		next(&chan).await;
+		assert!(quiet(&chan, std::time::Duration::from_secs(5)).await);
+	}
+
+	/// A repeat is the same picture again, which the encoder must still emit as a
+	/// frame for the player to see the screen as live. Keyframes still come on the
+	/// join interval, which is measured in time rather than frames.
+	#[tokio::test(start_paused = true)]
+	#[cfg(feature = "openh264")]
+	async fn repeats_reach_an_active_subscriber() {
+		use crate::encode::{Config, Encoder, Kind, Producer};
+
+		let chan = FrameChannel::repeating(std::time::Duration::from_millis(20));
+		chan.push(Surface::I420(I420 {
+			width: 320,
+			height: 240,
+			data: vec![0x80; 320 * 240 * 3 / 2],
+			color: None,
+		}));
+		let mut config = Config::new(320, 240, crate::FrameRate::integer(50));
+		config.kind = Kind::Software;
+		let mut encoder = Encoder::new(&config).unwrap();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let track = broadcast
+			.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = track.subscribe(None);
+		let rendition = config.probe().await.unwrap();
+		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
+		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
+		let reserved = catalog.reserve().with_interval(config.effective_join());
+		let mut producer = Producer::new(track, reserved, rendition).unwrap();
+		assert!(producer.demand().wanted().is_some());
+
+		for step in 0..10u128 {
+			let frame = chan.recv().await.unwrap().unwrap();
+			for encoded in encoder.encode_all(&frame).unwrap() {
+				producer.publish(&encoded).unwrap();
+			}
+			let received = loop {
+				if let moq_mux::container::Read::Frame { frame, .. } = subscriber.read().await.unwrap().unwrap() {
+					break frame;
+				}
+			};
+			assert_eq!(received.timestamp.as_micros().unwrap(), step * 250_000);
+			// The default join is 2 s, eight repeats.
+			assert_eq!(received.keyframe, step % 8 == 0, "frame {step}");
+		}
 	}
 }

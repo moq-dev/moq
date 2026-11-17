@@ -685,19 +685,18 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Result<Rtc> {
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own
-/// [`crate::ice::reader`], with the ICE candidates to advertise.
+/// [`crate::ice::reader`], advertising the bound address (loopback when it is
+/// unspecified).
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the
-/// server paths share one socket via `crate::server::mux` instead. `advertise`
-/// IPs are used verbatim (reusing the bound port); empty falls back to the
-/// bound address, substituting loopback when that address is unspecified.
-pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<crate::ice::Socket> {
+/// server paths share one socket via `crate::server::mux` instead.
+pub async fn bind_udp() -> Result<crate::ice::Socket> {
 	let udp = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
-	let locals = advertised_candidates(advertise, udp.local_addr()?)?;
+	let locals = advertised_candidates(&[], udp.local_addr()?)?;
 	Ok(crate::ice::Socket::new(udp.clone(), locals, crate::ice::reader(udp))?)
 }
 
-/// Pair configured ICE candidates with the bound UDP port and validate them.
+/// The ICE host candidates to advertise for a socket bound at `local`, validated.
 pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr) -> Result<Vec<SocketAddr>> {
 	let port = local.port();
 	let candidates = if advertise.is_empty() {
@@ -713,9 +712,15 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 		}
 		vec![candidate]
 	} else {
-		// Reuse the bound port across each advertised IP, since str0m's ICE agent
-		// picks the destination port from the candidate it's pairing against.
-		advertise.iter().map(|addr| SocketAddr::new(addr.ip(), port)).collect()
+		// Sent as given: a NAT or load balancer may forward another public port to
+		// the bound one. Port 0 asks for the bound port.
+		advertise
+			.iter()
+			.map(|addr| match addr.port() {
+				0 => SocketAddr::new(addr.ip(), port),
+				_ => *addr,
+			})
+			.collect()
 	};
 
 	for addr in &candidates {
@@ -800,17 +805,6 @@ mod tests {
 	fn advertised_candidates_keep_bound_address_when_specific() {
 		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
 		assert_eq!(advertised_candidates(&[], local).unwrap(), vec![local]);
-	}
-
-	#[test]
-	fn advertised_candidates_reuse_bound_port_for_configured_addresses() {
-		let local: SocketAddr = "0.0.0.0:4444".parse().unwrap();
-		let advertised = vec!["127.0.0.1:1000".parse().unwrap(), "[::1]:2000".parse().unwrap()];
-
-		assert_eq!(
-			advertised_candidates(&advertised, local).unwrap(),
-			vec!["127.0.0.1:4444".parse().unwrap(), "[::1]:4444".parse().unwrap()]
-		);
 	}
 
 	#[test]

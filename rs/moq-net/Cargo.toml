@@ -28,6 +28,14 @@ async = ["dep:futures", "kio/async", "kio/runtime"]
 # `fuzz` module. Its session targets run on kio's simulated clock. Off by default.
 fuzz = ["async", "kio/sim"]
 
+# `Client::with_ietf` and `Server::with_ietf`, which offer the lite-07 `ietf` extension:
+# moq-relay's door for its own links, not an API. Off by default and left out of docs.rs.
+relay = []
+
+# `Client::with_solicit` and `Server::with_solicit`, which let a test act as a moq-transport
+# peer without MoQ Solicit. Meant for dev-dependencies. Off by default and left out of docs.rs.
+test-support = []
+
 [dependencies]
 arrayvec = "0.7"
 bytes = { workspace = true }
@@ -57,6 +65,8 @@ crossbeam-epoch = "0.9.21"
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 kio = { path = "../kio", features = ["runtime", "sim"] }
+# This crate's own doors, for its integration tests and benches.
+moq-net = { path = ".", features = ["relay", "test-support"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 # The benches run on tokio, the session fanout bench across worker threads. test-util

@@ -80,7 +80,3 @@ enums) and a new binding selector; breaking for `@moq/qmux`
 (`maxStreamsBidi` and `maxStreamsUni` become `maxStreams`). Behaviour: the
 transport string for `tls://` changes from `tcp` to `tls` in auth requests
 and logs. Wire: none.
-
-## Related
-
-- [The unused transport API](/quest/m2/unused-api/transport.md) - removes `Transport::WebRtc` from the same enum

@@ -25,7 +25,7 @@ import { DEFAULT_HANDOVER, dialed, type Goaway, type Handover, handover, pinnedT
 import type { Session } from "./session.ts";
 import { estimates, type Probe } from "./stats.ts";
 import { tick } from "./ticker.ts";
-import { heldOf } from "./tokens.ts";
+import { heldOf, Verdict } from "./tokens.ts";
 
 /**
  * The wait before a session on the WebSocket fallback first probes WebTransport, before jitter.
@@ -93,13 +93,13 @@ export type ReloadDelay = {
  * {@link ConnectProps.transport} is excluded: a supplied session is good for exactly one
  * connection, so the reconnect loop has nothing to reuse once that session drops. Call
  * {@link connect} directly when you have a session to hand over. Every attempt advertises
- * the default {@link ConnectProps.implementation} and {@link ConnectProps.extensions}.
+ * the default {@link ConnectProps.implementation}.
  *
  * @internal
  */
 export type ReloadProps = Omit<
 	ConnectProps,
-	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens" | "viewers"
+	"url" | "signal" | "transport" | "implementation" | "tokens" | "viewers"
 > & {
 	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
 	tokens?: readonly string[] | Signal<readonly string[]>;
@@ -247,7 +247,7 @@ export class Reload {
 	 * its rate rather than encode at zero. It is sampled from the transport only
 	 * while a reservation reads it, so the first reservation after none waits one
 	 * snapshot for its slice. It stays `undefined` on a transport that cannot
-	 * report one: the WebSocket fallback, WebRTC, WebTransport without
+	 * report one: the WebSocket fallback, WebTransport without
 	 * `getStats()`, or Safari's stub, which reads as none.
 	 */
 	readonly allocator: Allocator;
@@ -271,6 +271,9 @@ export class Reload {
 	 * abort's error.
 	 */
 	readonly auth = new AuthHandle();
+
+	// The peer's verdict on the latest tokens, across reconnects.
+	readonly #verdict: Verdict;
 
 	/** Protocol versions to offer, most preferred first, kept across retries and redirects. */
 	readonly versions?: readonly string[];
@@ -392,6 +395,7 @@ export class Reload {
 		this.url = Signal.from(props?.url);
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.tokens = Signal.from(props?.tokens ?? []);
+		this.#verdict = new Verdict(this.tokens, this.auth);
 		this.delay = props?.delay ?? {};
 		// Validated here, like the timeout, rather than by every retry.
 		pacing(this.delay);
@@ -488,6 +492,8 @@ export class Reload {
 		// The live session holds the current tokens on AUTH; a dial picks them up itself.
 		this.#signals.run((effect) => {
 			const tokens = effect.get(this.tokens);
+			// Before the held tokens change, so a token the set kept is judged by what it was.
+			this.#verdict.refresh();
 			const connection = effect.get(this.established);
 			if (connection) heldOf(connection)?.update(tokens);
 		});
@@ -578,6 +584,7 @@ export class Reload {
 					this.#deadline ??= this.#window(now());
 
 					this.#setDialing(true);
+					this.#verdict.dialing();
 					const tokens = reached?.tokens ?? this.tokens.peek();
 					let connection: Session;
 					const reusing = reached;
@@ -615,6 +622,7 @@ export class Reload {
 						return;
 					}
 					current = connection;
+					this.#verdict.connected(connection);
 
 					// The replacement serves now; a predecessor keeps draining its groups in flight.
 					this.#serve(connection);
@@ -1001,6 +1009,7 @@ export class Reload {
 	}
 
 	#giveUp(cause: Error): void {
+		this.#verdict.gaveUp(cause);
 		this.#error.set(cause);
 		this.#givenUpHref = this.#sequenceHref;
 		this.#resetSequence();
@@ -1012,6 +1021,21 @@ export class Reload {
 		this.#sequenceHref = undefined;
 		this.#redirects.reset();
 		this.#retire();
+	}
+
+	/**
+	 * Resolve once the peer first answers the latest {@link tokens}, like Rust's `Tokens::poll_answered`.
+	 *
+	 * It covers the tokens the latest set newly presented, or the initial ones before any set:
+	 * each is granted in band, or is the connection credential a dial carried and the peer
+	 * accepted. A token the set kept, the connection credential included, counts only once the
+	 * peer refuses it, and nothing is re-checked after the answer. Rejects with the peer's refusal,
+	 * `Unsupported` when a session cannot carry a token in band, the loop's end, or the failure that
+	 * stopped it retrying its URL while no session answered, such as a refused first dial. A set replaced
+	 * before its answer moves the wait to the new one.
+	 */
+	answered(): Promise<void> {
+		return this.#verdict.answered();
 	}
 
 	/** Stop reconnecting, drain and close the current connection, and settle {@link Reload.closed}. Idempotent. */

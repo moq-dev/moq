@@ -31,8 +31,12 @@ function normalizeRotation(rotation = 0): Rotation {
 	return ((Math.round(normalized / 90) % 4) * 90) as Rotation;
 }
 
-/** Return dimensions after applying a clockwise quarter-turn. */
-export function rotateVideoDimensions(dimensions: Dimensions, rotation = 0): Dimensions {
+// The shape is spelled out, like `RendererInput.display`, keeping `Dimensions` off the public API.
+/** Swap a width and height when a clockwise rotation, rounded to a quarter-turn, turns them sideways. */
+export function rotateDimensions(
+	dimensions: { width: number; height: number },
+	rotation = 0,
+): { width: number; height: number } {
 	const normalized = normalizeRotation(rotation);
 	return normalized === 90 || normalized === 270
 		? { width: dimensions.height, height: dimensions.width }
@@ -58,7 +62,7 @@ export function canvasPresentationTransform(
 	presentation?: Presentation,
 ): CanvasPresentationTransform {
 	const rotation = normalizeRotation(presentation?.rotation);
-	const source = rotateVideoDimensions(output, rotation);
+	const source = rotateDimensions(output, rotation);
 
 	let matrix: Matrix;
 	switch (rotation) {

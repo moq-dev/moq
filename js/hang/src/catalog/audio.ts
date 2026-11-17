@@ -1,10 +1,10 @@
 import * as z from "zod/mini";
-import { compareName, compareNumber } from "./compare";
-import { ContainerSchema } from "./container";
-import { hexSchema } from "./hex";
-import { u53Schema } from "./integers";
-import { InstanceSchema, RelativeBroadcastSchema } from "./path";
-import { codecNumber, countSchema, renditions } from "./section";
+import { compareName, compareNumber } from "./compare.ts";
+import { ContainerSchema } from "./container.ts";
+import { hexSchema } from "./hex.ts";
+import { u53Schema } from "./integers.ts";
+import { InstanceSchema, RelativeBroadcastSchema } from "./path.ts";
+import { codecNumber, countSchema, renditions } from "./section.ts";
 
 /**
  * Whether `codec` parses: an AAC string names its object type, while any other string is carried

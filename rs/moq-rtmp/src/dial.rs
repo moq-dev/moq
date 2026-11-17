@@ -1274,6 +1274,7 @@ mod tests {
 			.await
 			.expect("catalog read timed out")
 			.expect("catalog read")
+			.and_then(moq_net::track::Item::group)
 			.expect("a catalog group");
 		let frame = group
 			.read_frame()
