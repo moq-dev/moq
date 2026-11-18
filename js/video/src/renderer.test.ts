@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import { type Backend, Renderer } from "./renderer";
+import { type Backend, Renderer } from "./renderer.ts";
 
 // Let the probe's promise chain and the effects it wakes run to completion.
 async function settle(): Promise<void> {

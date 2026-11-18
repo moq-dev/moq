@@ -4,7 +4,7 @@ import {
 	type Presentation,
 	rotateDimensions,
 	texturePresentationTransform,
-} from "./presentation";
+} from "./presentation.ts";
 
 const output = { width: 640, height: 360 };
 type Matrix = [number, number, number, number, number, number];
