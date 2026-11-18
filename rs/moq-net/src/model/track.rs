@@ -23385,7 +23385,11 @@ mod test {
 
 		let consumer = producer.consume();
 		assert!(consumer.peek_group(0).is_none(), "the ballooned group is evicted");
-		assert!(pool.used() <= 3_000, "growth is reclaimed: {}", pool.used());
+		assert!(
+			pool.used() <= 2 * cache::ENTRY_OVERHEAD,
+			"growth is reclaimed, leaving the two empty groups: {}",
+			pool.used()
+		);
 	}
 
 	/// A stale arrival entry whose key was later re-served by fetched backfill must
