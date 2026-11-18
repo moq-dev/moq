@@ -67,6 +67,33 @@ impl Nesting {
 	}
 }
 
+/// The deepest nesting in a fragment of JSON text.
+fn depth(fragment: &[u8]) -> usize {
+	let (mut depth, mut deepest) = (0usize, 0);
+	let mut bytes = fragment.iter();
+	while let Some(byte) = bytes.next() {
+		match byte {
+			b'"' => {
+				// Skip to the closing quote, stepping over each escaped byte.
+				while let Some(byte) = bytes.next() {
+					match byte {
+						b'"' => break,
+						b'\\' => _ = bytes.next(),
+						_ => {}
+					}
+				}
+			}
+			b'[' | b'{' => {
+				depth += 1;
+				deepest = deepest.max(depth);
+			}
+			b']' | b'}' => depth = depth.saturating_sub(1),
+			_ => {}
+		}
+	}
+	deepest
+}
+
 impl serde_json::ser::Formatter for Nesting {
 	fn begin_array<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
 		self.enter()?;
@@ -86,6 +113,18 @@ impl serde_json::ser::Formatter for Nesting {
 	fn end_object<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
 		self.depth -= 1;
 		writer.write_all(b"}")
+	}
+
+	/// A `RawValue` skips the container hooks, so its own nesting is counted here.
+	fn write_raw_fragment<W: ?Sized + std::io::Write>(
+		&mut self,
+		writer: &mut W,
+		fragment: &str,
+	) -> std::io::Result<()> {
+		if self.depth + depth(fragment.as_bytes()) > self.limit {
+			return Err(std::io::Error::other("JSON nested too deeply"));
+		}
+		writer.write_all(fragment.as_bytes())
 	}
 }
 
@@ -311,6 +350,19 @@ pub(crate) mod test {
 		op.commit();
 		let restated = encoder.snapshot().unwrap();
 		decoder.group().decode(&restated.payload).unwrap();
+
+		// A raw record's nesting counts too, though it skips the formatter's container hooks.
+		let raw = |levels: usize| serde_json::value::RawValue::from_string(nest(levels).to_string()).unwrap();
+		let mut encoder = crate::window::Encoder::<Box<serde_json::value::RawValue>>::new(Default::default());
+		assert!(matches!(encoder.push(&raw(126)), Err(Error::Json(_))));
+		let header = encoder.push(&raw(125)).unwrap();
+		crate::window::Decoder::<Value>::new(Default::default())
+			.group()
+			.decode(&header.payload)
+			.unwrap();
+		let mut encoder = crate::stream::Encoder::<Vec<Box<serde_json::value::RawValue>>>::new(Default::default());
+		assert!(matches!(encoder.encode(&vec![raw(127)]), Err(Error::Json(_))));
+		assert!(encoder.encode(&vec![raw(126)]).is_ok());
 	}
 
 	/// Nesting past serde_json's limit and numbers outside the double range, shared with the TypeScript suite.
