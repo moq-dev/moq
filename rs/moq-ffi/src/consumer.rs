@@ -27,7 +27,8 @@ pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, where
 	/// a cold join starts, and how long a media consumer waits for a missing group, or null to
 	/// leave it unstated. A media consumer starts an unstated minimum as zero and waits a
-	/// missing group for `max` instead, while the subscription keeps it unstated, so it never
+	/// missing group for `max` instead (an audio decoder plays it as zero and waits only its
+	/// playout estimate), while the subscription keeps it unstated, so it never
 	/// pulls the aggregate across subscribers to zero. moq-lite-07 sends it upstream. A `min`
 	/// past `max` starts and waits at `max`, since the publisher serves nothing older.
 	pub min: Option<Duration>,

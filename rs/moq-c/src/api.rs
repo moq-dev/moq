@@ -812,7 +812,8 @@ pub struct moq_delay {
 	/// No subscriber max: wait on a stalled group as long as the publisher's max age allows.
 	pub max_unlimited: bool,
 	/// Leave the minimum unstated. A media consumer starts it as zero and waits a missing group
-	/// for the max instead, while the subscription keeps it unstated, so it never pulls the
+	/// for the max instead (an audio decoder plays it as zero and waits only its playout
+	/// estimate), while the subscription keeps it unstated, so it never pulls the
 	/// aggregate across subscribers to zero.
 	pub min_unstated: bool,
 }
