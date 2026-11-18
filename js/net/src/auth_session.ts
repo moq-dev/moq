@@ -665,6 +665,7 @@ export class AuthSession {
 	#credential = new Signal<Error | null | undefined>(undefined);
 	// Whether the peer said it accepts the connection credential, which a silent version never does.
 	#accepted = new Signal(false);
+	#silent: boolean;
 	#closed = false;
 
 	// Whoever answers the peer's tokens is decided once, after the task that established
@@ -680,6 +681,7 @@ export class AuthSession {
 		this.#requests = requests ?? false;
 		this.#peerGrant = peerGrant;
 		this.#draining = draining ?? (() => false);
+		this.#silent = silent ?? false;
 		this.#state.attach(this);
 		// A session without AUTH has the peer's acceptance with its handshake, unless it awaits its SETUP.
 		if (!wire && !awaiting) {
@@ -714,6 +716,14 @@ export class AuthSession {
 	 */
 	get accepted(): Getter<boolean> {
 		return this.#accepted;
+	}
+
+	/**
+	 * Whether the version never answers the connection credential (a moq-lite-03/04 client), so
+	 * only uptime suggests the peer took it.
+	 */
+	get silent(): boolean {
+		return this.#silent;
 	}
 
 	/** The peer's SETUP arrived, so it accepted the connection credential a session without AUTH presented. */

@@ -447,6 +447,8 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
  */
 function refusing(refused: string, release: Promise<void>) {
 	const dialed = new Signal<readonly (string | null)[]>([]);
+	// The server sides of the sessions it accepted.
+	const served: MockTransport[] = [];
 	const stub = function StubWebTransport(target: string | URL) {
 		const jwt = new URL(target).searchParams.get("jwt");
 		dialed.update((jwts) => [...jwts, jwt]);
@@ -454,11 +456,12 @@ function refusing(refused: string, release: Promise<void>) {
 		if (jwt === refused) {
 			void release.then(() => pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" }));
 		} else {
+			served.push(pair.server);
 			void accept(pair.server, new URL(target));
 		}
 		return pair.client;
 	};
-	return { dialed, stub: stub as unknown as typeof WebTransport };
+	return { dialed, served, stub: stub as unknown as typeof WebTransport };
 }
 
 test("a first session refused before its credential is accepted stops the URL, even for replaced tokens", async () => {
@@ -539,10 +542,10 @@ test("a refused credential keeps redialing until the tokens change", async () =>
 	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
-	const { dialed, stub } = refusing("old", release);
+	const { dialed, served, stub } = refusing("old", release);
 	globalThis.WebTransport = stub;
 
-	const tokens = new Signal<readonly string[]>(["old"]);
+	const tokens = new Signal<readonly string[]>(["ok"]);
 	const reload = new Reload({
 		url: new URL("https://example.com/"),
 		versions: ["moq-lite-06"],
@@ -551,13 +554,19 @@ test("a refused credential keeps redialing until the tokens change", async () =>
 		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	try {
-		// Refused only once a session was healthy, though never accepted: until then, a refusal
-		// stops the URL.
+		// The server's SETUP accepts the first credential, which establishes the URL: until
+		// then, a refusal stops it.
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
-		await clock.advance(Duration.millis(1000));
+		tokens.set(["old"]);
+		served[0]?.close({ closeCode: 0, reason: "restart" });
 		resolve();
-		await clock.drive(waitFor(dialed, (jwts) => jwts.length >= 3));
-		expect(dialed.peek().every((jwt) => jwt === "old")).toBe(true);
+		await clock.drive(waitFor(dialed, (jwts) => jwts.length >= 4));
+		expect(
+			dialed
+				.peek()
+				.slice(1)
+				.every((jwt) => jwt === "old"),
+		).toBe(true);
 		expect(reload.error.peek()).toBeUndefined();
 		tokens.set(["new"]);
 		await clock.drive(waitFor(dialed, (jwts) => jwts.includes("new")));

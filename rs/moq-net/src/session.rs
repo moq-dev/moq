@@ -487,6 +487,12 @@ impl Session {
 		self.link.poll_accepted(waiter)
 	}
 
+	/// Whether the peer never answers the connection credential, as on moq-lite 03/04, so
+	/// only uptime suggests it took the credential.
+	pub(crate) fn is_silent(&self) -> bool {
+		self.link.is_silent()
+	}
+
 	/// This session's side of its [`auth`](Self::auth) handle.
 	pub(crate) fn link(&self) -> &auth::Link {
 		&self.link

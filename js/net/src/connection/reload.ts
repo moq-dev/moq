@@ -42,9 +42,10 @@ const PROBE_MAX = Duration.secs(300);
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
  * lockstep. Nothing retries until a session to the current URL has been established: the peer
  * accepts the connection credential (its SETUP, or on moq-lite-07-wip the AUTH_OK to the
- * connection's own credential), drains the session with a GOAWAY, which no refusal sends, or
- * the session stays up past {@link Backoff.healthy}, the only bar on moq-lite 03/04, which
- * answer the credential with nothing. An attempt failing, or a session closing sooner, stops that
+ * connection's own credential) or drains the session with a GOAWAY, which no refusal sends. On
+ * moq-lite 03/04, which answer the credential with nothing, staying up past
+ * {@link Backoff.healthy} establishes it too; a version with an answer waits for it however long
+ * the session stays up. An attempt failing, or a session closing sooner, stops that
  * URL with its error. That covers a relay refusing a live session, as it does a rejected token
  * on moq-lite 03 or later. After that, every failure is retried,
  * including an attempt that outlives {@link ConnectProps.timeout}, until
@@ -73,9 +74,9 @@ export type Backoff = {
 	/**
 	 * How long a session must stay up to count as healthy (default: 1000ms; must be positive).
 	 *
-	 * The first healthy session establishes the URL, though only a peer that never answers the
-	 * connection credential, as on moq-lite 03/04, waits for this: an accepting peer
-	 * establishes it sooner.
+	 * Where the peer never answers the connection credential, as on moq-lite 03/04, the first
+	 * healthy session establishes the URL. Elsewhere only the peer's answer or a GOAWAY does,
+	 * however long a session stays up.
 	 * A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	 * failed attempt, so a peer that accepts and then drops every session still escalates the
 	 * delay and exhausts the timeout.
@@ -383,8 +384,8 @@ export class Reload {
 	// loop is disabled.
 	#givenUpHref: string | undefined;
 
-	// The configured href a session's peer accepted the credential of, a session stayed up past
-	// the healthy bar for, or the peer drained with a GOAWAY. Until it matches, a failed
+	// The configured href a session's peer accepted the credential of or drained with a GOAWAY,
+	// or a moq-lite-03/04 session stayed up past the healthy bar for. Until it matches, a failed
 	// attempt or a closed session gives up rather than retrying. Kept across a page hide/show and a disable/re-enable, which
 	// resume a URL that worked.
 	#establishedHref: string | undefined;
@@ -635,24 +636,25 @@ export class Reload {
 					this.#verdict.connected(connection);
 					connected = now();
 
-					// Serve only once the session is established: the peer accepted its credential,
-					// drained it with a GOAWAY, or it stayed up past the healthy bar, the only sign
-					// on a version that never answers (moq-lite-03/04). Until then it may still be a
-					// refusal, which never reads as connected. A close first is handled below.
+					// Serve only once the session is established: the peer accepted its credential or
+					// drained it with a GOAWAY. On a version that never answers (moq-lite-03/04),
+					// staying up past the healthy bar is the only sign, so it counts there alone.
+					// Until then it may still be a refusal, which never reads as connected. A close
+					// first is handled below.
+					const auth = wireOf(connection).auth;
 					const bar = this.#pacing().healthy;
-					const acceptance = wireOf(connection).auth.accepted;
+					const acceptance = auth.accepted;
 					if (!acceptance.peek()) {
 						const waiting = new AbortController();
-						const uptime = sleep(bar, { signal: waiting.signal }).catch(() => {});
-						await effect
-							.race(Signal.race(acceptance), uptime, connection.closed, connection.draining)
-							.finally(() => waiting.abort());
+						const waits: unknown[] = [Signal.race(acceptance), connection.closed, connection.draining];
+						if (auth.silent) waits.push(sleep(bar, { signal: waiting.signal }).catch(() => {}));
+						await effect.race(...waits).finally(() => waiting.abort());
 						if (signal.aborted) return;
 					}
 					if (
 						acceptance.peek() ||
 						connection.draining.peek() !== undefined ||
-						now().since(connected).ge(bar)
+						(auth.silent && now().since(connected).ge(bar))
 					) {
 						// The replacement serves now; a predecessor keeps draining its groups in flight.
 						this.#serve(connection);
@@ -952,12 +954,12 @@ export class Reload {
 		if (draining) this.#end(draining);
 	}
 
-	// Mark `href` established once the session connected at `connected` stayed up past the healthy bar.
 	// A session establishes its URL once the peer accepted its credential, which a closed
-	// session still reports, or once it stayed up past the healthy bar, the only bar on a
-	// version that never answers the credential (moq-lite-03/04).
+	// session still reports, or, on a version that never answers the credential
+	// (moq-lite-03/04), once it stayed up past the healthy bar.
 	#settle(href: string, session: Session, connected: Instant): void {
-		if (wireOf(session).auth.accepted.peek() || now().since(connected).ge(this.#pacing().healthy)) {
+		const auth = wireOf(session).auth;
+		if (auth.accepted.peek() || (auth.silent && now().since(connected).ge(this.#pacing().healthy))) {
 			this.#establishedHref = href;
 		}
 	}

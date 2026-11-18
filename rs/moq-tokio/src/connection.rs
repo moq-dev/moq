@@ -903,7 +903,8 @@ pub struct Snapshot {
 /// The task connects, waits for the session to end, then (unless reconnecting is
 /// disabled, see [`crate::Client::with_reconnect`])
 /// redials with exponential backoff. Until the peer has accepted a session's credential or
-/// drained a session with a GOAWAY, nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
+/// drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
 /// credential does, stops the loop with its error, so a setup mistake surfaces at once. The read surface
 /// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
@@ -2364,15 +2365,19 @@ mod tests {
 			let mut request = kio::clock::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
 			let mut requests = request.requests();
 			let session = request.ok().await.unwrap();
-			loop {
+			// Both, in either order: the connection's own credential, whose AUTH_OK establishes
+			// the session, and the token.
+			let (mut credential, mut presented) = (false, false);
+			while !(credential && presented) {
 				let request = kio::clock::timeout(WAIT, requests.next()).await.unwrap().unwrap();
 				if request.token().is_empty() {
 					issued.push(request.accept(moq_net::auth::Grant::default()));
+					credential = true;
 					continue;
 				}
 				assert_eq!(request.token().as_ref(), b"token", "round {round}");
 				issued.push(request.accept(moq_net::auth::Grant::all()));
-				break;
+				presented = true;
 			}
 			if let Some(added) = added.take() {
 				token = Some(added.await.unwrap().expect("granted"));

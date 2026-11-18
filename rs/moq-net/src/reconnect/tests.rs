@@ -487,10 +487,11 @@ async fn an_early_goaway_establishes_the_session_it_drains() {
 	drop(server);
 }
 
-/// A session that stayed up past the healthy bar establishes the policy even when the peer
-/// never answered the credential: its close, and the failed walk after it, retry.
+/// On a version that answers the connection credential (moq-lite-07-wip), uptime is no
+/// answer: a session up well past the healthy bar without its AUTH_OK is never established,
+/// and its close ends the policy as a refusal.
 #[kio::test]
-async fn a_healthy_session_establishes_the_policy() {
+async fn an_unanswered_session_is_not_established_by_uptime() {
 	let peer = url("tcp://peer:1/");
 	let mut machine = Reconnect::new(config(INITIAL, None), vec![peer.clone()], kio::clock::now()).unwrap();
 	let mut run = Run::default();
@@ -499,14 +500,17 @@ async fn a_healthy_session_establishes_the_policy() {
 	})
 	.await;
 
-	kio::clock::sleep(Config::default().backoff.healthy).await;
+	kio::clock::sleep(Config::default().backoff.healthy * 10).await;
+	let action = machine.poll(kio::clock::now(), &kio::Waiter::noop());
+	assert!(matches!(action, Action::Wait(None)), "{action:?}");
 	run.servers.remove(0).abort(Error::Unauthorized);
-	let ended = drive(&mut machine, &[(peer, Peer::Fail(Verdict::Retry))], &mut run, |run| {
-		run.dials.len() == 3
-	})
-	.await;
-	assert!(ended.is_none(), "an established policy gave up");
-	assert_eq!(run.events, ["established", "offline", "retrying"]);
+	let ended = drive(&mut machine, &[(peer, Peer::Serve)], &mut run, |_| false).await;
+	assert!(
+		matches!(ended, Some(Err(TestError::Net(_)))),
+		"the unanswered session was retried: {ended:?}"
+	);
+	assert_eq!(run.dials.len(), 1, "redialed after the refusal");
+	assert!(run.events.is_empty(), "established or retried: {:?}", run.events);
 }
 
 /// A GOAWAY establishes the policy however soon it comes, since a refusal never drains a
@@ -900,7 +904,7 @@ async fn a_healthy_goaway_hands_over_to_the_redirect() {
 
 /// A replacement the peer has not yet accepted does not serve: a predecessor that retires
 /// meanwhile leaves the connection offline, and the replacement reports
-/// [`Action::Established`] only once it passes the healthy bar unanswered.
+/// [`Action::Established`] only once the peer answers, however long that takes.
 #[kio::test]
 async fn an_unanswered_replacement_does_not_serve() {
 	const HANDOVER: Duration = Duration::from_millis(500);
@@ -930,8 +934,19 @@ async fn an_unanswered_replacement_does_not_serve() {
 		HANDOVER,
 		"the idle predecessor closed early"
 	);
+	kio::clock::sleep(healthy * 10).await;
+	let action = machine.poll(kio::clock::now(), &kio::Waiter::noop());
+	assert!(
+		matches!(action, Action::Wait(None)),
+		"established by uptime: {action:?}"
+	);
+
+	let mut requests = run.withheld.remove(0);
+	let request = kio::wait(|waiter| requests.poll_next(waiter))
+		.await
+		.expect("the credential");
+	let _issued = request.accept(auth::Grant::all());
 	assert!(matches!(next_any(&mut machine).await, Action::Established(_)));
-	assert_eq!(kio::clock::now() - connected, healthy);
 }
 
 /// Our handover window caps the peer's GOAWAY deadline, and a predecessor retiring while
@@ -1245,41 +1260,6 @@ async fn a_redirect_after_a_probe_got_through_is_followed() {
 	};
 	assert_eq!(attempt.target(), &elsewhere);
 	assert!(machine.predecessor().is_some(), "the redirected session still drains");
-}
-
-/// The draining fallback's peer accepted that session and asked us to move, which no refusal
-/// does, so its redirect establishes the policy however young the session was: the redirected
-/// dial failing retries rather than ending it.
-#[kio::test]
-async fn a_fallback_peer_redirect_establishes_the_policy() {
-	let mut config = Config::default();
-	// Longer than the probe takes, so the fallback session is never healthy.
-	config.backoff.healthy = Duration::from_secs(3600);
-	// Nor accepted: its peer never answers the credential.
-	let peer = url("https://peer:1/");
-	let mut machine = Reconnect::new(config, vec![peer.clone()], kio::clock::now()).unwrap();
-	let mut run = Run::default();
-	drive(&mut machine, &[(peer, Peer::Withhold)], &mut run, |run| {
-		!run.accepts.is_empty()
-	})
-	.await;
-	machine.fallback(kio::clock::now());
-	let fallback_server = run.servers.remove(0);
-	probe(&mut machine).await;
-	assert!(machine.probed(kio::clock::now(), Ok(())));
-	assert!(matches!(next(&mut machine).await, Action::Migrating));
-
-	fallback_server
-		.goaway(goaway::Goaway::redirect(url("https://peer:2/").to_string()))
-		.expect("the fallback peer sends a GOAWAY");
-	assert!(matches!(next(&mut machine).await, Action::Abandon));
-	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
-	machine.failed(kio::clock::now(), TestError::Dial, Verdict::Retry);
-	let action = next(&mut machine).await;
-	assert!(
-		!matches!(action, Action::Done(_)),
-		"the redirected dial's failure ended the policy"
-	);
 }
 
 /// A redirect from the draining fallback's peer during the backoff after a failed

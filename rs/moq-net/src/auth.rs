@@ -1440,6 +1440,12 @@ impl Link {
 		self.with(|link| link.acceptance = Acceptance::Silent);
 	}
 
+	/// Whether the version never answers the connection credential, so only uptime can
+	/// suggest the peer took it.
+	pub(crate) fn is_silent(&self) -> bool {
+		self.read(|link, _| link.acceptance == Acceptance::Silent)
+	}
+
 	/// The peer's SETUP arrived, so it accepted the connection credential.
 	pub(crate) fn accepted(&self) {
 		self.with_state(|state, link| {

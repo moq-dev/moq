@@ -61,7 +61,8 @@ final class ConnectOptions {
   final WebSocketConfig? websocket;
 
   /// Set true for a one-shot dial. By default a session whose credential the peer accepted,
-  /// or that the peer drained with a GOAWAY, redials with backoff whenever the transport
+  /// or that the peer drained with a GOAWAY (or, on moq-lite 03/04, which never answer it,
+  /// that stayed up 1s), redials with backoff whenever the transport
   /// drops; before then, a failed dial or a closed session, such as a refused
   /// credential, ends it with that error instead.
   final bool once;

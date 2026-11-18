@@ -1791,7 +1791,8 @@ unsafe fn connect_session(
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// Once connected, the session reconnects automatically with exponential backoff if the
-/// connection drops. Until the peer has accepted a session's credential or drained a session with a GOAWAY, a
+/// connection drops. Until the peer has accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a
 /// failed dial or a closed session, such as a refused credential, ends it instead, with that error as the terminal
 /// snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on
 /// each reconnect, since the origins outlive the underlying connection.
