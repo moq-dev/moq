@@ -944,8 +944,8 @@ impl Finished {
 		self.track.demand()
 	}
 
-	/// Abort the track with `err`, so subscribers that have not drained it see the real cause; see
-	/// [`Producer::abort`].
+	/// Abort the track with `err`; see [`Producer::abort`]. Readers still draining get the clean end
+	/// instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.track.abort(err);
 	}
