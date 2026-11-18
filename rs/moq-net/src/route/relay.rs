@@ -2688,6 +2688,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		!self.out.is_empty() || !self.stale.is_empty() || !self.fresh.is_empty()
 	}
 
+	/// The forwarding nodes some neighbour offers this node a route to.
+	pub fn heard(&self) -> Vec<NodeId> {
+		self.heard.keys().copied().collect()
+	}
+
 	/// The forwarding nodes this node routes to.
 	pub fn routes(&self) -> Vec<NodeId> {
 		self.best.keys().copied().collect()

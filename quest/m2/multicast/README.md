@@ -37,7 +37,6 @@ last child, [the uncovered cases](/quest/m2/multicast/accept.md), and on
 the lite-06 mitigations. After the cut come warmth's wire
 ([cache-aware routing](/quest/m3/cache-routing/README.md)),
 [route benches](/quest/m3/route-benches.md),
-[the proof binding](/quest/m3/route-proof-binding.md),
 [route health](/quest/m3/route-health/README.md), and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 
