@@ -96,10 +96,7 @@ impl Background {
 
 	/// Spawn an owned operation on a thread of its own, for one that blocks, such as on a
 	/// codec, which would stall every session sharing the runtime thread.
-	pub fn thread(
-		name: &str,
-		future: impl std::future::Future<Output = Result<(), Error>> + Send + 'static,
-	) -> Self {
+	pub fn thread(name: &str, future: impl std::future::Future<Output = Result<(), Error>> + Send + 'static) -> Self {
 		let result = kio::Producer::new(None);
 		let receiver = result.consume();
 		std::thread::Builder::new()
