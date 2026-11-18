@@ -4886,7 +4886,7 @@ impl TrackRun {
 			.wanted_group
 			.is_some_and(|wanted| self.track.peek_largest().is_none_or(|largest| wanted > largest.group))
 		{
-			self.track.refresh();
+			self.track.ask(crate::model::track::Ask::Refresh);
 		}
 		// The steer wakes every in-flight group, so an update that keeps it wakes none.
 		let steer = Steer {

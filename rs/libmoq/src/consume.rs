@@ -204,10 +204,12 @@ pub(crate) async fn resolve(
 		.await
 }
 
-/// A raw track task also accepts subscription updates while it is running.
+/// A raw track task also accepts subscription updates and refreshes while it is running.
 struct RawTaskEntry {
 	task: Task,
 	control: RawControl,
+	/// Dropped with the entry once the task ends, which ends its refresh waits.
+	alive: kio::Producer<()>,
 }
 
 /// Where a raw track's subscription updates go.
@@ -305,6 +307,10 @@ pub struct Consume {
 
 	/// Buffered raw frames ready for consumption.
 	raw_frame: NonZeroSlab<Timed<bytes::Bytes>>,
+
+	/// Raw track refresh waits. Close withdraws the request; the task delivers one callback,
+	/// then removes itself.
+	raw_refresh: NonZeroSlab<Task>,
 
 	/// Live datagram consumer tasks, independent of stream-track readers.
 	datagram_task: NonZeroSlab<DatagramTaskEntry>,
@@ -818,7 +824,11 @@ impl Consume {
 
 		let (task, mut close) = Task::new(on_frame);
 		let control = RawControl::Pending(None);
-		let id = self.raw_task.insert(RawTaskEntry { task, control })?;
+		let id = self.raw_task.insert(RawTaskEntry {
+			task,
+			control,
+			alive: kio::Producer::new(()),
+		})?;
 
 		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		tokio::spawn(async move {
@@ -958,6 +968,58 @@ impl Consume {
 			RawControl::Live(control) => Self::update_raw(control, subscription)?,
 		}
 		Ok(())
+	}
+
+	/// Ask a raw track's publisher for a new group, calling `on_refresh` once:
+	/// [`crate::moq_refresh::MOQ_REFRESH_SENT`] once the request is sent or needs no sending,
+	/// `0` once cancelled or the subscription ended first, or negative once the track aborted.
+	///
+	/// A subscription still waiting on SUBSCRIBE_OK has nothing to send: its first group is
+	/// already asked for.
+	pub fn raw_track_refresh(&mut self, track: Id, on_refresh: OnStatus) -> Result<Id, Error> {
+		let entry = self.raw_task.get(track).ok_or(Error::TrackNotFound)?;
+		let refreshing = match &entry.control {
+			RawControl::Live(control) => Some(control.refresh()),
+			RawControl::Pending(_) => None,
+		};
+		let alive = entry.alive.consume();
+		let (task, close) = Task::new(on_refresh);
+		let id = self.raw_refresh.insert(task)?;
+		tokio::spawn(async move {
+			let sent = crate::moq_refresh::MOQ_REFRESH_SENT as i32;
+			let res = crate::ffi::run(async move {
+				let Some(refreshing) = refreshing else {
+					return Ok(sent);
+				};
+				tokio::select! {
+					biased;
+					// Dropping `refreshing` withdraws a request not yet sent.
+					_ = close => Ok(0),
+					_ = alive.closed() => Ok(0),
+					res = refreshing => match res {
+						Ok(()) => Ok(sent),
+						// The track ended without an abort.
+						Err(moq_net::Error::Dropped) => Ok(0),
+						Err(err) => Err(err.into()),
+					},
+				}
+			})
+			.await;
+			// Pull the entry out from under the lock so the callback never runs while held.
+			let entry = State::lock().consume.raw_refresh.remove(id);
+			if let Some(entry) = entry {
+				entry.callback.call(res);
+			}
+		});
+		Ok(id)
+	}
+
+	/// Withdraw a raw track refresh not yet sent. Its task still delivers its callback.
+	pub fn raw_track_refresh_close(&mut self, refresh: Id) -> Result<(), Error> {
+		self.raw_refresh
+			.get_mut(refresh)
+			.ok_or(Error::NotFound)?
+			.close(Error::NotFound)
 	}
 
 	pub fn raw_track_close(&mut self, track: Id) -> Result<(), Error> {

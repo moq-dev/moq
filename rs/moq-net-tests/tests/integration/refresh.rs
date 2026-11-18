@@ -285,14 +285,22 @@ async fn interval_caps_refreshes_across_two_relays() {
 	let first = readers[0].recv_group().await.unwrap().unwrap();
 	assert_eq!(first.start, 0, "the first reader asks for the first group at once");
 
-	// Every reader asks every 100ms for 30 seconds.
+	// A refresh resolves once relay b sends it upstream, which waits out the interval, and
+	// the group it asked for follows.
+	let asked = kio::clock::now();
+	readers[0].refresh().await.unwrap();
+	assert!(kio::clock::now() > asked, "sent only once the interval passed");
+	let second = readers[0].recv_group().await.unwrap().unwrap();
+	assert_eq!(second.start, 1, "the request reached the publisher");
+
+	// Every reader asks every 100ms for 30 seconds, each new request replacing its last.
 	let began = kio::clock::now();
+	let mut held = Vec::new();
 	while kio::clock::now() < began.checked_add(Duration::from_secs(30)).unwrap() {
-		for reader in &readers {
-			reader.refresh();
-		}
+		held = readers.iter().map(|reader| reader.refresh()).collect();
 		kio::clock::sleep(Duration::from_millis(100)).await;
 	}
+	drop(held);
 	let made = made.borrow().clone();
 	assert!(made.len() >= 6, "each interval answers the readers: {made:?}");
 	for pair in made.windows(2) {
@@ -307,5 +315,5 @@ async fn interval_caps_refreshes_across_two_relays() {
 		last = Some(group.start);
 	}
 	assert_eq!(last, Some(newest), "the readers receive the fresh groups");
-	drop((readers, first, links, producer));
+	drop((readers, first, second, links, producer));
 }

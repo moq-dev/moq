@@ -6854,7 +6854,7 @@ impl TrackServe {
 		if value != 0 && self.track.latest_key().is_some_and(|latest| value <= latest) {
 			return;
 		}
-		self.track.refresh();
+		self.track.ask(crate::model::track::Ask::Refresh);
 	}
 
 	/// Group streams opened so far.

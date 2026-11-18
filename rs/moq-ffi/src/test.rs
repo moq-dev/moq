@@ -1900,6 +1900,48 @@ async fn demand_refresh_asks_for_a_group() {
 	assert!(matches!(err, Err(MoqError::Closed)), "{err:?}");
 }
 
+/// A subscriber's refresh returns once the publisher reads the request, and cancelling it
+/// before then withdraws the request.
+#[tokio::test]
+async fn subscriber_refresh_returns_once_sent() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let info = MoqTrackInfo {
+		refresh: MoqTrackRefresh {
+			ratio: Some(0),
+			interval: None,
+		},
+		..timed_info()
+	};
+	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
+	let demand = track.demand().unwrap();
+	let consumer = track.consume(None).unwrap();
+	let group = track.append_group(us(0)).unwrap();
+	for (at, payload) in [(0, &b"key"[..]), (1, b"delta")] {
+		group
+			.write_frame(MoqFrame {
+				payload: payload.to_vec(),
+				timestamp: us(at),
+			})
+			.unwrap();
+	}
+	let noop = || std::task::Context::from_waker(std::task::Waker::noop());
+
+	let mut withdrawn = Box::pin(consumer.refresh());
+	assert!(withdrawn.as_mut().poll(&mut noop()).is_pending(), "not read yet");
+	drop(withdrawn);
+	assert!(
+		Box::pin(demand.refresh()).as_mut().poll(&mut noop()).is_pending(),
+		"the cancelled call withdrew its request"
+	);
+
+	let (sent, asked) = tokio::join!(
+		kio::clock::timeout(TIMEOUT, consumer.refresh()),
+		kio::clock::timeout(TIMEOUT, demand.refresh())
+	);
+	asked.expect("timed out waiting for the request").unwrap();
+	sent.expect("timed out waiting for the send").unwrap();
+}
+
 #[tokio::test]
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();

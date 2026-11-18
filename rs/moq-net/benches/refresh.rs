@@ -89,18 +89,18 @@ fn refresh(c: &mut Criterion) {
 			let demand = track.demand();
 			refreshable(track, 0);
 			let mut latest = 0;
+			let mut held = Vec::with_capacity(subscribers);
 			group.bench_function(BenchmarkId::new(format!("{tracks}x"), subscribers), |b| {
 				b.iter_custom(|iterations| {
 					let mut elapsed = Duration::ZERO;
 					for _ in 0..iterations {
 						let start = Instant::now();
 						// Every reader asks; all but the first coalesce.
-						for reader in asking {
-							reader.refresh();
-						}
+						held.extend(asking.iter().map(|reader| reader.refresh()));
 						let asked = demand.poll_refresh(&kio::Waiter::noop()).is_ready();
 						elapsed += start.elapsed();
 						assert!(asked);
+						held.clear();
 						latest += 1;
 						refreshable(track, latest);
 					}

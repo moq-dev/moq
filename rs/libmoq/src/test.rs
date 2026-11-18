@@ -4702,6 +4702,65 @@ fn track_demand_reports_wanted_and_refresh() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A raw track's refresh fires once the publisher reads the request, and a cancelled one fires
+/// `0` instead.
+#[test]
+fn track_refresh_fires_once_sent() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-refresh");
+	let name = b"data";
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: true,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
+		compression: 0,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
+	let demand_cb = Callback::new();
+	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+
+	// A delta after the first frame puts the group past a `refresh` of 0. Reading both frames
+	// shows the subscription is live.
+	let consume = consume_local(broadcast);
+	let track_cb = Callback::new();
+	let consumer = consume_track(consume, name, &track_cb);
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	for timestamp_us in [0, 1_000] {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(timestamp_us)) },
+			0
+		);
+		assert_eq!(moq_consume_track_frame_free(id(track_cb.recv())), 0);
+	}
+
+	// Nothing reads the demand yet, so a cancelled request is never sent.
+	let refresh_cb = Callback::new();
+	let refresh = id(unsafe { moq_consume_track_refresh(consumer, Some(channel_callback), refresh_cb.ptr) });
+	assert_eq!(moq_consume_track_refresh_cancel(refresh), 0);
+	assert_eq!(refresh_cb.recv(), 0);
+	assert!(moq_consume_track_refresh_cancel(refresh) < 0, "the wait is gone");
+
+	// The publisher reading the request sends it.
+	id(unsafe { moq_consume_track_refresh(consumer, Some(channel_callback), refresh_cb.ptr) });
+	let asked_cb = Callback::new();
+	demand_refresh(watcher, &asked_cb);
+	assert_eq!(asked_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
+	assert_eq!(refresh_cb.recv(), moq_refresh::MOQ_REFRESH_SENT as i32);
+
+	cancel_track(consumer, &track_cb);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	while demand_cb.recv() > 0 {}
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A watcher closed before its task is first polled still reports the current state before
 /// its terminal. The C surface cannot order the close against the runtime thread, so this
 /// drives the watcher's loop directly with the close already pending.

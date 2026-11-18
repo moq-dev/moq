@@ -1250,12 +1250,35 @@ impl TrackState {
 	/// Takes the read guard to release it before locking the demand, so the two locks
 	/// never nest.
 	pub(crate) fn ask(state: kio::Ref<'_, TrackState>, ask: Ask) {
-		let Some(refresh) = state.info.as_ref().map(|info| info.refresh).filter(Refresh::enabled) else {
+		let Some((at, subscriptions)) = Self::admit(state, ask) else {
 			return;
 		};
-		let Some(latest) = state.latest_group else {
-			return;
+		let mut wakes = subscriptions.lock().refresh(at);
+		wakes.wake();
+	}
+
+	/// [`Self::ask`] for a [`Subscriber::refresh`] caller, who waits for the request to be
+	/// sent and withdraws it by dropping the [`Refreshing`].
+	fn request(state: &kio::ConsumerWeak<TrackState>) -> Refreshing {
+		let Some((at, subscriptions)) = Self::admit(state.read(), Ask::Refresh) else {
+			return Refreshing::done();
 		};
+		let (requested, mut wakes) = subscriptions.lock().request(at);
+		wakes.wake();
+		match requested {
+			demand::Requested::Done => Refreshing::done(),
+			demand::Requested::Waiting(epoch) => Refreshing::waiting(Ticket {
+				state: state.clone(),
+				subscriptions,
+				epoch,
+			}),
+		}
+	}
+
+	/// When a request as `ask` takes effect, if the track's [`Refresh`] lets it ask at all.
+	fn admit(state: kio::Ref<'_, TrackState>, ask: Ask) -> Option<(crate::time::Instant, kio::Lock<Subscriptions>)> {
+		let refresh = state.info.as_ref().map(|info| info.refresh).filter(Refresh::enabled)?;
+		let latest = state.latest_group?;
 		let slot = state.lookup.get(&latest);
 		let ratio = match ask {
 			Ask::Join => refresh.ratio,
@@ -1266,21 +1289,15 @@ impl TrackState {
 		if let Some(ratio) = ratio
 			&& !slot.is_some_and(|slot| slot.serving().over_refresh(ratio))
 		{
-			return;
+			return None;
 		}
 		let now = state.cache.pool().now_wall();
 		let at = match (refresh.interval, slot) {
-			(Some(interval), Some(slot)) => match slot.arrived.checked_add(interval) {
-				Some(at) => at.max(now),
-				// No instant reaches it.
-				None => return,
-			},
+			// `None` when no instant reaches it.
+			(Some(interval), Some(slot)) => slot.arrived.checked_add(interval)?.max(now),
 			_ => now,
 		};
-		let subscriptions = state.subscriptions.clone();
-		drop(state);
-		let mut wakes = subscriptions.lock().refresh(at);
-		wakes.wake();
+		Some((at, state.subscriptions.clone()))
 	}
 
 	/// A reader of group `key` reached a frame its copy shed: ask for a new group if it is
@@ -2822,9 +2839,7 @@ impl TrackState {
 		}
 		self.cache.advance_largest(Position::group(key));
 		let wakes = self.subscriptions.lock().wrote(key, answers);
-		if !wakes.is_empty() {
-			self.deferred.push(wakes);
-		}
+		self.deferred.extend(wakes.into_iter().filter(|wakes| !wakes.is_empty()));
 	}
 
 	/// Take the wakes [`Self::advance`] deferred, to fire once the state guard is released.
@@ -6022,7 +6037,11 @@ impl Demand {
 		drop(state);
 		let mut subs = subscriptions.lock();
 		if subs.asking(now) {
-			return Some(subs.wanted(now));
+			let wanted = subs.wanted(now);
+			let mut wakes = subs.sent(now);
+			drop(subs);
+			wakes.wake();
+			return Some(wanted);
 		}
 		let waiter = waiter?;
 		subs.watch(waiter);
@@ -6639,6 +6658,7 @@ impl Consumer {
 	}
 
 	/// Ask the instance this handle reads for a new group; see [`Subscriber::ask`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn ask(&self, ask: Ask) {
 		if let Some(serving) = self.serving() {
 			return serving.ask(ask);
@@ -6648,6 +6668,14 @@ impl Consumer {
 				TrackState::ask(state.read(), ask);
 			}
 		});
+	}
+
+	/// Request a new group from the instance this handle reads; see [`Subscriber::refresh`].
+	fn request(&self) -> Refreshing {
+		if let Some(serving) = self.serving() {
+			return serving.request();
+		}
+		self.with_state(|state| state.map_or_else(Refreshing::done, TrackState::request))
 	}
 
 	/// Whether the cache is fed live, so the newest object it holds is the track's largest.
@@ -9860,6 +9888,30 @@ pub struct Control {
 	republish: Option<Republish>,
 	/// A reader that follows a route, whose copies take the new preferences at once.
 	mirror: Option<super::resume::Mirror>,
+	/// What [`Self::refresh`] asks.
+	target: Target,
+}
+
+/// The track a reader's refresh asks: its own, or for a front's reader, the copy serving it.
+#[derive(Clone)]
+enum Target {
+	Plain(kio::ConsumerWeak<TrackState>),
+	Front(kio::ConsumerWeak<TrackState>),
+}
+
+impl Target {
+	fn request(&self) -> Refreshing {
+		match self {
+			Self::Plain(state) => TrackState::request(state),
+			Self::Front(logical) => {
+				let routes = logical.read().routes.clone();
+				match routes.and_then(|routes| routes.serving()) {
+					Some(copy) => copy.request(),
+					None => Refreshing::done(),
+				}
+			}
+		}
+	}
 }
 
 /// What a [`Control`] needs to republish a plain cursor's [`Published`] window.
@@ -9917,6 +9969,11 @@ impl Control {
 			mirror.sync();
 		}
 		Ok(())
+	}
+
+	/// Ask for a group newer than the newest held, as [`Subscriber::refresh`] does.
+	pub fn refresh(&self) -> Refreshing {
+		self.target.request()
 	}
 }
 
@@ -9985,12 +10042,21 @@ impl Subscriber {
 					published: cursor.published.weak(),
 				}),
 				mirror: None,
+				target: self.target(),
 			},
 			Inner::Resume(resume, _) => Control {
 				subscription: resume.subscription().clone(),
 				republish: None,
 				mirror: Some(resume.mirror()),
+				target: self.target(),
 			},
+		}
+	}
+
+	fn target(&self) -> Target {
+		match &self.inner {
+			Inner::Plain(cursor) => Target::Plain(cursor.state.weak()),
+			Inner::Resume(_, logical) => Target::Front(logical.state.weak()),
 		}
 	}
 
@@ -10977,19 +11043,29 @@ impl Subscriber {
 	}
 
 	/// Ask the publisher for a group starting after the newest one this node holds, judged
-	/// by the track's [`Refresh`]: at once, once the newest group is old enough, or never on
-	/// a track that does not refresh.
+	/// by the track's [`Refresh`], resolving once the request is sent.
+	///
+	/// The request is made now. It is sent once the newest group is old enough, when
+	/// whatever serves this node's copy reads it: the session forwarding it upstream, or a
+	/// local publisher waiting in [`Demand::refresh`]. Concurrent requests coalesce into one,
+	/// and all of them resolve when it is sent. Dropping the future before then withdraws
+	/// this caller's request; one already sent stays sent. It resolves at once when there is
+	/// nothing to send: a track that does not refresh, a ratio the newest group is under, a
+	/// track with no group yet (whose first is already asked for), or a request already
+	/// sent. It also resolves when a newer group lands first, which answers it. It errors
+	/// if the track closes before then.
 	///
 	/// The answer arrives like any other group: the first group this subscriber receives
 	/// that starts after the newest held when it was called. A group already on its way when
 	/// the request reached the publisher answers it, so across hops "made after this call"
-	/// is best effort; a reader that needs that puts its own marker in the frame. Requests
-	/// coalesce, so calling it again before the answer asks nothing more.
-	pub fn refresh(&self) {
-		self.ask(Ask::Refresh);
+	/// is best effort; a reader that needs that puts its own marker in the frame.
+	pub fn refresh(&self) -> Refreshing {
+		self.target().request()
 	}
 
-	/// Ask for a new group as `ask`; a front's reader asks the copy serving it.
+	/// Ask for a new group as `ask`, a request nobody withdraws; a front's reader asks the
+	/// copy serving it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn ask(&self, ask: Ask) {
 		match &self.inner {
 			Inner::Plain(cursor) => TrackState::ask(cursor.state.read(), ask),
@@ -10999,6 +11075,81 @@ impl Subscriber {
 					copy.ask(ask);
 				}
 			}
+		}
+	}
+}
+
+/// A [`Subscriber::refresh`] request, resolving once it is sent. Dropping it before then
+/// withdraws the request.
+///
+/// Owns its handles, so it borrows no subscriber: a reader keeps reading groups while it waits.
+#[must_use = "dropping it withdraws the request"]
+pub struct Refreshing {
+	ticket: Option<Ticket>,
+	park: kio::Park,
+}
+
+/// A caller's claim on a pending request: [`Refreshing`] without the parked waiter.
+struct Ticket {
+	state: kio::ConsumerWeak<TrackState>,
+	subscriptions: kio::Lock<Subscriptions>,
+	epoch: u64,
+}
+
+impl Refreshing {
+	fn done() -> Self {
+		Self {
+			ticket: None,
+			park: kio::Park::default(),
+		}
+	}
+
+	fn waiting(ticket: Ticket) -> Self {
+		Self {
+			ticket: Some(ticket),
+			park: kio::Park::default(),
+		}
+	}
+
+	/// Ready once the request is sent, or ended without needing to be: answered by a newer
+	/// group. Errors if the track closes first.
+	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		Self::poll_ticket(&mut self.ticket, waiter)
+	}
+
+	fn poll_ticket(slot: &mut Option<Ticket>, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		let Some(ticket) = slot else {
+			return Poll::Ready(Ok(()));
+		};
+		if ticket.subscriptions.lock().requested(ticket.epoch, waiter) {
+			*slot = None;
+			return Poll::Ready(Ok(()));
+		}
+		if ticket.state.poll_closed(waiter).is_ready() {
+			let err = ticket.state.read().outcome.aborted().cloned().unwrap_or(Error::Dropped);
+			// The request can no longer be sent, so dropping the ticket withdraws it.
+			*slot = None;
+			return Poll::Ready(Err(err));
+		}
+		Poll::Pending
+	}
+}
+
+impl Future for Refreshing {
+	type Output = Result<()>;
+
+	fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+		let this = self.get_mut();
+		let waiter = this.park.hold(cx);
+		Refreshing::poll_ticket(&mut this.ticket, waiter)
+	}
+}
+
+impl Drop for Ticket {
+	fn drop(&mut self) {
+		let wakes = self.subscriptions.lock().withdraw(self.epoch);
+		for mut wakes in wakes {
+			wakes.wake();
 		}
 	}
 }
@@ -11330,8 +11481,8 @@ impl Ordered {
 	}
 
 	/// Ask for a group newer than the newest held; see [`Subscriber::refresh`].
-	pub fn refresh(&self) {
-		self.inner.refresh();
+	pub fn refresh(&self) -> Refreshing {
+		self.inner.refresh()
 	}
 
 	/// This subscriber's current preferences.
@@ -23833,10 +23984,10 @@ mod test {
 		let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1)));
 		let subscriber = producer.subscribe(None);
 		refresh_group(&producer, 3);
-		subscriber.refresh();
+		assert!(sent(&mut subscriber.refresh()), "nothing to send");
 		assert_eq!(producer.demand().asked(), None);
 		refresh_group(&producer, 4);
-		subscriber.refresh();
+		let _refresh = subscriber.refresh();
 		assert_eq!(producer.demand().asked(), Some(2));
 	}
 
@@ -23846,7 +23997,7 @@ mod test {
 		let producer = track_producer("test", Info::default());
 		let subscriber = producer.subscribe(None);
 		refresh_group(&producer, 0);
-		subscriber.refresh();
+		assert!(sent(&mut subscriber.refresh()), "nothing to send");
 		elapse(&producer, Duration::from_secs(3600));
 		assert!(!refreshing(&producer.demand()));
 	}
@@ -23867,7 +24018,7 @@ mod test {
 		assert!(!refreshing(&demand));
 
 		elapse(&producer, Duration::from_secs(2));
-		subscriber.refresh();
+		let _refresh = subscriber.refresh();
 		let late = producer.subscribe(None);
 		assert!(!refreshing(&demand), "deferred, not dropped");
 		elapse(&producer, Duration::from_secs(2));
@@ -23880,12 +24031,12 @@ mod test {
 
 		// A request made long after the newest group asks at once.
 		elapse(&producer, Duration::from_secs(60));
-		late.refresh();
+		let _late = late.refresh();
 		assert!(refreshing(&demand));
 		refresh_group(&producer, 0);
 
 		// A group landing while a request waits answers it.
-		subscriber.refresh();
+		let _refresh = subscriber.refresh();
 		refresh_group(&producer, 0);
 		elapse(&producer, interval);
 		assert!(!refreshing(&demand), "the landed group answered it");
@@ -23901,7 +24052,7 @@ mod test {
 		let subscriber = producer.subscribe(None);
 		elapse(&producer, Duration::ZERO);
 		refresh_group(&producer, 0);
-		subscriber.refresh();
+		let _refresh = subscriber.refresh();
 
 		struct Count(std::sync::atomic::AtomicUsize);
 		impl std::task::Wake for Count {
@@ -23934,8 +24085,111 @@ mod test {
 		elapse(&producer, Duration::from_secs(1));
 		let _join = producer.subscribe(None);
 		assert!(!refreshing(&demand), "a join under the ratio asks nothing");
-		subscriber.refresh();
+		let _refresh = subscriber.refresh();
 		assert!(refreshing(&demand), "a refresh asks");
+	}
+
+	/// Whether `refresh` resolved, without waiting.
+	fn sent(refresh: &mut Refreshing) -> bool {
+		match refresh.poll(&kio::Waiter::noop()) {
+			Poll::Ready(res) => {
+				res.unwrap();
+				true
+			}
+			Poll::Pending => false,
+		}
+	}
+
+	/// A one-frame track whose refresh interval is 5s, with a subscriber, and a group made at
+	/// time zero.
+	fn interval_track() -> (Producer, Subscriber) {
+		let info = Info::default().with_refresh(Refresh::default().with_interval(Duration::from_secs(5)));
+		let producer = track_producer("test", info);
+		let subscriber = producer.subscribe(None);
+		elapse(&producer, Duration::ZERO);
+		refresh_group(&producer, 0);
+		(producer, subscriber)
+	}
+
+	/// A refresh resolves once it is sent: after the interval, when the publisher reads it.
+	/// Every caller in one interval window shares the one request and resolves with it.
+	#[test]
+	fn concurrent_refreshes_resolve_once_the_request_is_sent() {
+		let (producer, subscriber) = interval_track();
+		let demand = producer.demand();
+		let mut first = subscriber.refresh();
+		elapse(&producer, Duration::from_secs(2));
+		let mut second = subscriber.refresh();
+		let other = producer.subscribe(None);
+		let mut third = other.ordered().control().refresh();
+		assert!(!sent(&mut first) && !sent(&mut second) && !sent(&mut third), "deferred");
+
+		elapse(&producer, Duration::from_secs(3));
+		assert!(!sent(&mut first), "due, but nothing has read it");
+		assert!(refreshing(&demand), "the publisher reads it");
+		assert!(sent(&mut first) && sent(&mut second) && sent(&mut third), "one send resolves all");
+		assert!(sent(&mut subscriber.refresh()), "a later caller joins the request already sent");
+		assert_eq!(demand.asked(), Some(1), "one group answers them all");
+	}
+
+	/// A resolved refresh wakes its caller.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_sent_refresh_wakes_its_caller() {
+		let (producer, subscriber) = interval_track();
+		let refresh = subscriber.refresh();
+		let mut task = std::pin::pin!(refresh);
+		let waker = std::task::Waker::noop();
+		let mut cx = std::task::Context::from_waker(waker);
+		assert!(task.as_mut().poll(&mut cx).is_pending());
+		elapse(&producer, Duration::from_secs(5));
+		assert!(refreshing(&producer.demand()));
+		assert!(matches!(task.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+	}
+
+	/// Dropping the last caller's refresh before it is sent withdraws the request, but not
+	/// one another caller still waits on, one a join also made, or one already sent.
+	#[test]
+	fn dropping_a_refresh_withdraws_an_unsent_request() {
+		let (producer, subscriber) = interval_track();
+		let demand = producer.demand();
+		drop(subscriber.refresh());
+		elapse(&producer, Duration::from_secs(5));
+		assert!(!refreshing(&demand), "withdrawn while deferred");
+
+		// Due, but not yet read.
+		drop(subscriber.refresh());
+		assert!(!refreshing(&demand), "withdrawn while due");
+
+		let kept = subscriber.refresh();
+		drop(subscriber.refresh());
+		assert!(refreshing(&demand), "another caller keeps it");
+		drop(kept);
+		assert!(refreshing(&demand), "sent, so it stays sent");
+		refresh_group(&producer, 0);
+
+		let refresh = subscriber.refresh();
+		let _join = producer.subscribe(None);
+		drop(refresh);
+		elapse(&producer, Duration::from_secs(5));
+		assert!(refreshing(&demand), "the join's request stays");
+	}
+
+	/// A refresh resolves without sending anything when a group answers it first, and
+	/// errors when the track closes first.
+	#[test]
+	fn a_refresh_ends_with_the_group_or_the_track() {
+		let (producer, subscriber) = interval_track();
+		let mut refresh = subscriber.refresh();
+		refresh_group(&producer, 0);
+		assert!(sent(&mut refresh), "the landed group answered it");
+
+		let mut refresh = subscriber.refresh();
+		producer.abort(Error::Cancel).unwrap();
+		assert!(matches!(
+			refresh.poll(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Cancel))
+		));
 	}
 
 	#[test]

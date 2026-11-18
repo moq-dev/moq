@@ -807,6 +807,16 @@ pub enum moq_demand {
 	MOQ_DEMAND_REFRESH = 3,
 }
 
+/// What a [moq_consume_track_refresh] callback receives besides the terminal statuses every
+/// callback shares.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_refresh {
+	/// The request was sent, or there was nothing to send.
+	MOQ_REFRESH_SENT = 1,
+}
+
 /// How far behind the live edge a subscriber or media consumer plays: where it starts, and how
 /// late it may fall.
 ///
@@ -5084,6 +5094,50 @@ pub extern "C" fn moq_consume_track_frame_free(frame: u32) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
 		State::lock().consume.raw_frame_close(frame)
+	})
+}
+
+/// Ask a raw track's publisher for a group starting after the newest one held, judged by the
+/// track's [moq_track_info] `refresh` fields. The new group arrives through the
+/// [moq_consume_track] callback like any other.
+///
+/// The request is sent once the newest group is old enough, when whatever serves the track
+/// reads it: the session forwarding it upstream, or a local publisher waiting in
+/// [moq_publish_demand_refresh]. Concurrent calls share one request.
+///
+/// `on_refresh` fires exactly once: `MOQ_REFRESH_SENT` once the request is sent, or at once
+/// when there is nothing to send (a track that does not refresh, a ratio the newest group is
+/// under, a subscription with no group yet, or a request already sent), or when a newer group
+/// lands first; `0` once [moq_consume_track_refresh_cancel] withdrew it or the subscription
+/// ended first; or a negative code when the track aborted.
+///
+/// Returns a non-zero handle to the wait, or a negative code, in which case `on_refresh` never
+/// fires.
+///
+/// # Safety
+/// - `on_refresh` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_track_refresh(
+	track: u32,
+	on_refresh: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let on_refresh = unsafe { ffi::OnStatus::new(user_data, on_refresh)? };
+		State::lock().consume.raw_track_refresh(track, on_refresh)
+	})
+}
+
+/// Withdraw a [moq_consume_track_refresh] request not yet sent. One already sent stays sent.
+///
+/// Returns zero on success, or a negative code if the wait already ended. Its `on_refresh`
+/// still fires once, with `0` unless the request was sent first.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_track_refresh_cancel(refresh: u32) -> i32 {
+	ffi::enter(move || {
+		let refresh = ffi::parse_id(refresh)?;
+		State::lock().consume.raw_track_refresh_close(refresh)
 	})
 }
 
