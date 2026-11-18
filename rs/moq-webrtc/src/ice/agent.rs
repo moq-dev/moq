@@ -21,9 +21,10 @@ use super::{Inbound, Socket};
 const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How many of its latest binding requests an establishing agent remembers the
-/// destination of. str0m paces a new check every 50 ms, so this spans the last few
-/// seconds of checks and their retransmits; a response to an older one only fails to
-/// confirm, and the address then waits for its holder to end.
+/// destination of, and how many addresses that answered one. str0m paces a new check
+/// every 50 ms, so this spans the last few seconds of checks and their retransmits; an
+/// answer to an older one only fails to confirm, and the address then waits for its
+/// holder to end.
 const CHECKS: usize = 64;
 
 /// Why an [`Agent`] stopped.
@@ -56,6 +57,8 @@ enum Phase {
 		started: Instant,
 		/// Where each recent binding request went, newest last, at most [`CHECKS`].
 		checks: VecDeque<(TransId, SocketAddr)>,
+		/// The addresses that answered one of `checks` themselves, at most [`CHECKS`].
+		answered: Vec<SocketAddr>,
 	},
 	Connected,
 	/// The connection ended, for this reason: every later [`Agent::next`] reports it.
@@ -107,6 +110,7 @@ impl Agent {
 			phase: Phase::Establishing {
 				started: now,
 				checks: VecDeque::new(),
+				answered: Vec::new(),
 			},
 			closing: false,
 		};
@@ -303,17 +307,22 @@ impl Agent {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
-		let symmetric = match &self.phase {
-			Phase::Establishing { checks, .. } if self.inbound.route.is_some() => is_symmetric(checks, data, src),
-			_ => false,
-		};
+		let mut proven = false;
+		if self.inbound.route.is_some()
+			&& let Phase::Establishing { checks, answered, .. } = &mut self.phase
+		{
+			if answers_check(checks, data, src) && !answered.contains(&src) && answered.len() < CHECKS {
+				answered.push(src);
+			}
+			proven = answered.contains(&src);
+		}
 		let result = self
 			.rtc_mut()
 			.handle_input(Input::Receive(Instant::now().into_std(), receive));
 		if let Err(err) = result {
 			self.fail(Error::rtc(err));
 		}
-		if symmetric
+		if proven
 			&& matches!(self.phase, Phase::Connected)
 			&& let Some(route) = &self.inbound.route
 		{
@@ -322,21 +331,18 @@ impl Agent {
 	}
 }
 
-/// Whether a datagram that connects ICE proves the peer is at `src`, the check RFC 8445
-/// §7.2.5.2.1 asks for and str0m skips: it pairs a response with its check by transaction
+/// Whether a datagram from `src` answers a check this agent sent to `src`, which proves
+/// the peer is there: only `src` saw that check's transaction ID. That is the check RFC 8445
+/// §7.2.5.2.1 asks for and str0m skips, pairing a response with its check by transaction
 /// ID alone, so a peer could answer its own check from a spoofed source.
 ///
-/// A success response proves it when its check went to `src`, since only `src` saw that
-/// transaction ID. A request does too: a controlling agent connects only on a response, and
-/// a controlled one on a request only for that request's own pair, which is valid once a
-/// check sent to `src` was answered.
-fn is_symmetric(checks: &VecDeque<(TransId, SocketAddr)>, data: &[u8], src: SocketAddr) -> bool {
+/// Only an answered address is confirmed. The datagram that connects ICE proves nothing by
+/// itself: once any pair is valid, str0m may report the connection while handling another
+/// datagram, such as a spoofed request after one switched its role to controlling.
+fn answers_check(checks: &VecDeque<(TransId, SocketAddr)>, data: &[u8], src: SocketAddr) -> bool {
 	let Some(message) = stun(data) else {
 		return false;
 	};
-	if message.is_binding_request() {
-		return true;
-	}
 	let id = message.trans_id();
 	message.is_successful_binding_response() && checks.iter().any(|check| *check == (id, src))
 }
@@ -469,6 +475,7 @@ mod tests {
 		agent.phase = Phase::Establishing {
 			started: held,
 			checks: VecDeque::new(),
+			answered: Vec::new(),
 		};
 
 		let err = loop {

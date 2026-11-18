@@ -117,7 +117,7 @@ pub(crate) struct Route {
 
 impl Route {
 	/// Take `src` if this session claimed it: its ICE connected on a datagram that proves
-	/// the peer is at `src` (see `ice::agent::is_symmetric`).
+	/// the peer is at `src`, as the answer to a check sent there (see `ice::agent::answers_check`).
 	pub(crate) fn confirm(&self, src: SocketAddr) {
 		let mut registry = self.registry.lock().unwrap();
 		if registry.claims.get(&src).is_some_and(|claim| claim.ufrag == self.ufrag) {
@@ -453,21 +453,42 @@ mod tests {
 		);
 	}
 
-	/// A session that answers its own check from a victim's address, while the check went to
-	/// the attacker's real one, connects but never takes the victim's address. The same answer
-	/// from the address the check went to, as a peer re-offering from it sends, takes it.
+	/// A session whose peer can send from a victim's address, but receives only at its own,
+	/// connects yet never takes the victim's address. Only a peer at that address, as one
+	/// re-offering from it is, takes it.
 	#[tokio::test]
-	async fn only_an_answer_from_where_the_check_went_moves_an_address() {
-		assert!(!take_over(true).await, "a spoofed answer moved the victim's address");
-		assert!(take_over(false).await, "a genuine re-offer stayed with the old session");
+	async fn only_an_address_that_answered_a_check_moves() {
+		assert!(
+			take_over(Attack::None).await,
+			"a genuine re-offer stayed with the old session"
+		);
+		assert!(
+			!take_over(Attack::SpoofedAnswer).await,
+			"a spoofed answer moved the victim's address"
+		);
+		assert!(
+			!take_over(Attack::RoleSwitch).await,
+			"a spoofed request moved the victim's address"
+		);
+	}
+
+	/// What the peer in [`take_over`] does.
+	#[derive(PartialEq)]
+	enum Attack {
+		/// Lives at the held address, as a peer re-offering from it does.
+		None,
+		/// Lives elsewhere, and answers the session's checks from the held address once it
+		/// nominated, so ICE connects on a spoofed answer.
+		SpoofedAnswer,
+		/// Lives elsewhere and never nominates. Once the session's check is answered, two
+		/// spoofed requests from the held address switch it to controlling, so it nominates
+		/// the valid pair on the first and reports the connection on the second.
+		RoleSwitch,
 	}
 
 	/// Connect a str0m offerer to a new session on a mux where another session holds an
-	/// address, and report whether the new session took it. The offerer's answers to the
-	/// session's checks wait until it nominates, so the session's ICE connects on one of
-	/// them. With `spoof`, the offerer lives elsewhere and sends those answers, and one
-	/// signed request, from the held address; without, it lives at the held address.
-	async fn take_over(spoof: bool) -> bool {
+	/// address, as `attack` says, and report whether the new session took that address.
+	async fn take_over(attack: Attack) -> bool {
 		use crate::ice::{Agent, Socket};
 		use kio::clock::Instant;
 		use str0m::net::{Protocol, Receive};
@@ -479,10 +500,9 @@ mod tests {
 		let real_addr = real.local_addr().unwrap();
 		// Kept open so checks sent to the victim land somewhere.
 		let victim_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-		let held = if spoof {
-			victim_socket.local_addr().unwrap()
-		} else {
-			real_addr
+		let held = match attack {
+			Attack::None => real_addr,
+			_ => victim_socket.local_addr().unwrap(),
 		};
 
 		let (victim, _victim_inbound, _victim_registration) = mux.register();
@@ -496,7 +516,7 @@ mod tests {
 
 		let now = Instant::now().into_std();
 		let (creds, inbound, _registration) = mux.register();
-		let ufrag = creds.ufrag.clone();
+		let session = creds.clone();
 		let mut answerer = crate::session::rtc_config()
 			.unwrap()
 			.set_local_ice_credentials(creds)
@@ -517,8 +537,22 @@ mod tests {
 		offerer.sdp_api().accept_answer(pending, answer).unwrap();
 		let mut agent = Agent::new(answerer, Socket::new(mux.socket(), vec![local], inbound).unwrap()).unwrap();
 
-		let mut claimed = !spoof;
+		// A request the session accepts from `held`, which claims it. With `switch`, it also
+		// tells the session to control, as a peer with a larger tie-breaker does.
+		let spoofed_request = |username: &str, switch: bool| {
+			let request = StunMessage::binding_request(username, TransId::new(), !switch, u64::MAX, 1, false);
+			let mut buf = vec![0u8; 1024];
+			let len = request
+				.to_bytes(Some(session.pass.as_bytes()), &mut buf, sha1_hmac)
+				.unwrap();
+			buf.truncate(len);
+			buf
+		};
+
+		let mut claimed = attack == Attack::None;
 		let mut nominated = false;
+		let mut switched = false;
+		let mut username = String::new();
 		let mut answers: Vec<Vec<u8>> = Vec::new();
 		let mut buf = vec![0u8; 2048];
 		let connect = async {
@@ -533,9 +567,13 @@ mod tests {
 								continue;
 							};
 							if message.is_binding_request() {
+								username = message.username().unwrap().to_string();
 								if !claimed {
-									deliver(&data, held);
+									deliver(&spoofed_request(&username, false), held);
 									claimed = true;
+								}
+								if message.use_candidate() && attack == Attack::RoleSwitch {
+									continue;
 								}
 								nominated |= message.use_candidate();
 								deliver(&data, real_addr);
@@ -543,6 +581,13 @@ mod tests {
 									for answer in answers.drain(..) {
 										deliver(&answer, held);
 									}
+								}
+							} else if attack == Attack::RoleSwitch {
+								deliver(&data, real_addr);
+								if !switched {
+									deliver(&spoofed_request(&username, true), held);
+									deliver(&spoofed_request(&username, true), held);
+									switched = true;
 								}
 							} else if nominated {
 								deliver(&data, held);
@@ -576,10 +621,16 @@ mod tests {
 		kio::clock::timeout(Duration::from_secs(10), connect)
 			.await
 			.expect("the session's ICE connects");
-		assert!(nominated, "ICE connected before the offerer nominated");
+		match attack {
+			Attack::RoleSwitch => assert!(!nominated && switched, "the offerer nominated"),
+			_ => assert!(nominated, "ICE connected before the offerer nominated"),
+		}
 
 		let registry = mux.registry.lock().unwrap();
-		registry.by_addr.get(&held).is_some_and(|entry| entry.ufrag == ufrag)
+		registry
+			.by_addr
+			.get(&held)
+			.is_some_and(|entry| entry.ufrag == session.ufrag)
 	}
 
 	/// A claimant takes the address once its holder ends, confirmed or not.
