@@ -659,7 +659,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
-			crate::container::Input::Open | crate::container::Input::Refused(_) => {}
+			crate::container::Input::Open
+			| crate::container::Input::Refused(_)
+			| crate::container::Input::Rewound(_) => {}
 		}
 		// No input follows, so the buffer that waited for the rest of a tag is done.
 		self.buffer = BytesMut::new();
@@ -674,7 +676,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		match &result {
 			// A refusal keeps refusing input with its own cause.
-			Ok(()) if matches!(self.input, crate::container::Input::Refused(_)) => {}
+			Ok(())
+				if matches!(
+					self.input,
+					crate::container::Input::Refused(_) | crate::container::Input::Rewound(_)
+				) => {}
 			Ok(()) => self.input = crate::container::Input::Finished,
 			Err(err) => self.input = crate::container::Input::Failed(err.clone()),
 		}

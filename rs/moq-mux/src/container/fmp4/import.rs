@@ -4,7 +4,7 @@ use moq_net::Timestamp;
 use mp4_atom::{Atom, DecodeMaybe, Encode, Moof, Moov, Trak};
 use std::collections::{HashMap, HashSet};
 
-use super::{Error, Kind, Rewind, edit::Edit, sample};
+use super::{Error, Kind, Refusal, Refused, edit::Edit, sample};
 use crate::Result;
 use crate::catalog::Estimator;
 use crate::container::producer::Streamed;
@@ -81,9 +81,6 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	// Whether input is still accepted. A refused chunk may contain unread bytes, so no later chunk
 	// can resume its framing.
 	input: crate::container::Input,
-
-	// Whether the refused input went back on a track's timeline: see `rewound`.
-	rewound: bool,
 
 	// A segment boundary (a styp or an explicit `cut()`) waiting to land on the next fragment.
 	pending_cut: bool,
@@ -292,7 +289,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			buffer: BytesMut::new(),
 			body: None,
 			input: crate::container::Input::Open,
-			rewound: false,
 			pending_cut: false,
 			segment: 0,
 			dropped_metadata: 0,
@@ -373,17 +369,21 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// importer to resume. [`finish`](Self::finish) still ends the tracks with what was accepted.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
 		self.input.check()?;
-		let result = self.drain(data);
-		if let Err(err) = &result {
-			if let Some(Body::Media(mut mdat)) = self.body.take() {
-				mdat.abort(moq_net::Error::MalformedTrack);
-			}
-			self.buffer = BytesMut::new();
-			self.moof = None;
-			self.deferred = Deferred::default();
-			self.input = crate::container::Input::Refused(err.clone());
+		let Err(refusal) = self.drain(data) else {
+			return Ok(());
+		};
+		if let Some(Body::Media(mut mdat)) = self.body.take() {
+			mdat.abort(moq_net::Error::MalformedTrack);
 		}
-		result
+		self.buffer = BytesMut::new();
+		self.moof = None;
+		self.deferred = Deferred::default();
+		let (input, err) = match refusal {
+			Refusal::Rewind(err) => (crate::container::Input::Rewound(err.clone()), err),
+			Refusal::Error(err) => (crate::container::Input::Refused(err.clone()), err),
+		};
+		self.input = input;
+		Err(err)
 	}
 
 	/// Whether [`decode`](Self::decode) refused input that goes back on a track's timeline: a
@@ -392,10 +392,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A source that rewinds restarted, so no later input to this importer, or to one replacing it
 	/// on the same tracks, imports it.
 	pub fn rewound(&self) -> bool {
-		self.rewound
+		matches!(self.input, crate::container::Input::Rewound(_))
 	}
 
-	fn drain(&mut self, mut data: &[u8]) -> Result<()> {
+	fn drain(&mut self, mut data: &[u8]) -> Refused<()> {
 		loop {
 			let Some(body) = self.body.take() else {
 				let needed = if self.buffer.len() >= 4 && self.buffer[..4] == [0, 0, 0, 1] {
@@ -423,7 +423,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						.ok_or(Error::InvalidDataOffset)?;
 				}
 				let body = match header.kind.as_ref() {
-					b"moov" | b"moof" => self.begin_metadata(header.kind, header.size, header_size),
+					b"moov" | b"moof" => self
+						.begin_metadata(header.kind, header.size, header_size)
+						.map_err(Refusal::from),
 					b"mdat" => self.begin_mdat(header.size).map(Body::Media),
 					kind => {
 						if kind == b"styp" {
@@ -1113,7 +1115,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	// Publish the samples an mdat carries for each traf of the preceding moof.
-	fn begin_mdat(&mut self, len: Option<usize>) -> Result<Mdat> {
+	fn begin_mdat(&mut self, len: Option<usize>) -> Refused<Mdat> {
 		let moof = self.moof.take().ok_or(Error::NoMoof)?;
 		if self.moov.is_none() {
 			return Err(Error::NoMoov.into());
@@ -1162,13 +1164,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				None => return Err(Error::UnknownTrack(id).into()),
 			};
 			// A fragment wholly before the edit or the first sync sample publishes nothing.
-			let run = match track.run(traf, &mut resolver)? {
-				Ok(Some(run)) => run,
-				Ok(None) => continue,
-				Err(Rewind(err)) => {
-					self.rewound = true;
-					return Err(err);
-				}
+			let Some(run) = track.run(traf, &mut resolver)? else {
+				continue;
 			};
 			// The moov declared every track, so any track's anchored fragment releases the catalog.
 			let offset = self.timebase.anchor(run.earliest)?;
@@ -1209,7 +1206,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(mdat)
 	}
 
-	fn write_mdat(&mut self, mdat: &mut Mdat, mut data: &[u8]) -> Result<()> {
+	fn write_mdat(&mut self, mdat: &mut Mdat, mut data: &[u8]) -> Refused<()> {
 		while !data.is_empty() {
 			let Some(chunk) = mdat.chunks.front_mut() else {
 				mdat.position = mdat.position.checked_add(data.len()).ok_or(Error::InvalidDataOffset)?;
@@ -1230,10 +1227,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						let (id, sample) = &mdat.text[*index];
 						let staged = std::mem::take(&mut mdat.staged);
 						let text = self.text.get_mut(id).expect("planned text track");
-						if let Err(Rewind(err)) = text.write(sample, &staged)? {
-							self.rewound = true;
-							return Err(err);
-						}
+						text.write(sample, &staged)?;
 					}
 				}
 				ChunkOutput::Media {
@@ -1249,21 +1243,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						let (writer, opened) = match &mut track.output {
 							Output::Passthrough(output) => {
 								let prefix = pending.prefix.take().expect("one prefix per fragment");
-								match output.start(prefix, &pending.run, track.kind, pending.placement)? {
-									Ok((writer, opened)) => (Writer::Fragment(writer), opened),
-									Err(Rewind(err)) => {
-										self.rewound = true;
-										return Err(err);
-									}
-								}
+								let (writer, opened) =
+									output.start(prefix, &pending.run, track.kind, pending.placement)?;
+								(Writer::Fragment(writer), opened)
 							}
-							output => match open_sample(output, pending, *sample_index, track.timescale)? {
-								Ok((sample, opened)) => (Writer::Sample(sample), opened),
-								Err(Rewind(err)) => {
-									self.rewound = true;
-									return Err(err);
-								}
-							},
+							output => {
+								let (sample, opened) = open_sample(output, pending, *sample_index, track.timescale)?;
+								(Writer::Sample(sample), opened)
+							}
 						};
 						pending.writer = Some(writer);
 						if opened {
@@ -1407,11 +1394,7 @@ impl Placement {
 
 impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 	/// Apply this track's edit list to the resolved samples, or return `None` if none remain.
-	fn run(
-		&mut self,
-		traf: &mp4_atom::Traf,
-		resolver: &mut sample::Resolver,
-	) -> Result<std::result::Result<Option<Run>, Rewind>> {
+	fn run(&mut self, traf: &mp4_atom::Traf, resolver: &mut sample::Resolver) -> Refused<Option<Run>> {
 		let tfdt = traf.tfdt.as_ref().ok_or(Error::MissingTfdt)?;
 		let timescale = self.timescale;
 		let mut dts = tfdt.base_media_decode_time;
@@ -1421,14 +1404,14 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 		if let Some(previous) = self.last_decode_time
 			&& dts <= previous
 		{
-			return Ok(Err(Rewind(
+			return Err(Refusal::Rewind(
 				Error::NonMonotonicDecodeTime {
 					track: traf.tfhd.track_id,
 					decode_time: Timestamp::new(dts, timescale)?,
 					previous: Timestamp::new(previous, timescale)?,
 				}
 				.into(),
-			)));
+			));
 		}
 
 		self.last_decode_time = Some(dts);
@@ -1486,16 +1469,16 @@ impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
 
 		let (Some(earliest), Some(end)) = (earliest, end) else {
 			return match dropped {
-				true => Ok(Ok(None)),
+				true => Ok(None),
 				false => Err(Error::MissingTrun.into()),
 			};
 		};
-		Ok(Ok(Some(Run {
+		Ok(Some(Run {
 			samples,
 			earliest,
 			end,
 			dropped,
-		})))
+		}))
 	}
 }
 
@@ -1620,7 +1603,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		run: &Run,
 		kind: Kind,
 		placement: Placement,
-	) -> Result<std::result::Result<(moq_net::frame::Producer, bool), Rewind>> {
+	) -> Refused<(moq_net::frame::Producer, bool)> {
 		// Carry the fragment's earliest presentation time as the frame timestamp, in the
 		// track's native timescale and shifted onto the catalog clock. Consumers present the
 		// fragment at it; `tfdt` only places the samples relative to each other.
@@ -1636,9 +1619,9 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			&& let Some(floor) = self.start
 			&& timestamp < floor
 		{
-			return Ok(Err(Rewind(
+			return Err(Refusal::Rewind(
 				crate::container::TimestampRewind { timestamp, floor }.into(),
-			)));
+			));
 		}
 		// A group is keyed by its first fragment's timestamp, which has to start after every group
 		// the track holds. A segment that doesn't continues the open group instead; with none open
@@ -1650,7 +1633,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 					start_group = false;
 					None
 				}
-				(Err(rewind), None) => return Ok(Err(Rewind(rewind.into()))),
+				(Err(rewind), None) => return Err(Refusal::Rewind(rewind.into())),
 			},
 			false => None,
 		};
@@ -1684,7 +1667,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		if start_group {
 			self.start = Some(timestamp);
 		}
-		Ok(Ok((writer, start_group)))
+		Ok((writer, start_group))
 	}
 
 	fn complete(&mut self, writer: moq_net::frame::Producer, pending: &PendingTrack, kind: Kind) -> Result<()> {
@@ -1716,7 +1699,7 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 	pending: &PendingTrack,
 	index: usize,
 	timescale: moq_net::Timescale,
-) -> Result<std::result::Result<(Streamed, bool), Rewind>> {
+) -> Refused<(Streamed, bool)> {
 	let kind = if matches!(output, Output::Video(_)) {
 		Kind::Video
 	} else {
@@ -1736,10 +1719,10 @@ fn open_sample<E: crate::catalog::hang::CatalogExt>(
 		let timestamp = placement.offset.apply(sample.timestamp)?;
 		let duration = sample.duration.map(|duration| Timestamp::new(duration as u64, timescale)).transpose()?;
 		if let Some(rewind) = producer.rewind(timestamp, keyframe)? {
-			return Ok(Err(Rewind(rewind.into())));
+			return Err(Refusal::Rewind(rewind.into()));
 		}
 		let streamed = producer.open(timestamp, keyframe, duration, sample.range.len())?;
-		Ok(Ok((streamed, keyframe)))
+		Ok((streamed, keyframe))
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }
 
@@ -1760,7 +1743,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
-			crate::container::Input::Open | crate::container::Input::Refused(_) => {}
+			crate::container::Input::Open
+			| crate::container::Input::Refused(_)
+			| crate::container::Input::Rewound(_) => {}
 		}
 		// No input follows, so the buffer that waited for the rest of an atom is done.
 		self.buffer = BytesMut::new();
@@ -1790,7 +1775,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		match &result {
 			// A refusal keeps refusing input with its own cause.
-			Ok(()) if matches!(self.input, crate::container::Input::Refused(_)) => {}
+			Ok(())
+				if matches!(
+					self.input,
+					crate::container::Input::Refused(_) | crate::container::Input::Rewound(_)
+				) => {}
 			Ok(()) => self.input = crate::container::Input::Finished,
 			Err(err) => self.input = crate::container::Input::Failed(err.clone()),
 		}

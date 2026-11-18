@@ -6,6 +6,7 @@ import { hooks } from "../../../net/src/internal.ts";
 import { key, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Encoder } from "./encoder.ts";
+import { pending } from "./pending.test-util.ts";
 import { Producer } from "./producer.ts";
 
 beforeEach(resetKeys);
@@ -691,10 +692,10 @@ test("a delta that would push the snapshot out of the group's tail rolls a new g
 	const encoder = new Encoder<Value>();
 	// Charged about twice its size, for the compressed slice a track may keep beside it.
 	const big = "x".repeat(16 * 1024 * 1024);
-	let frame = encoder.update({ v: big, n: 0 });
+	let frame = pending(encoder.update({ v: big, n: 0 }));
 	expect(frame?.keyframe).toBeTrue();
 	frame?.commit();
-	frame = encoder.update({ v: big, n: 1 });
+	frame = pending(encoder.update({ v: big, n: 1 }));
 	expect(frame?.keyframe).toBeTrue();
 	frame?.commit();
 });
@@ -702,7 +703,7 @@ test("a delta that would push the snapshot out of the group's tail rolls a new g
 test("a snapshot past the budget is refused", () => {
 	for (const deltas of [false, true]) {
 		const encoder = new Encoder<Value>({ deltas, maxGroupBytes: 100 });
-		expect(() => encoder.update({ v: "x".repeat(1000) })).toThrow(NetError.FrameTooLarge);
+		expect(encoder.update({ v: "x".repeat(1000) })).toEqual({ kind: "tooLarge" });
 		expect(encoder.value).toBeUndefined();
 	}
 });

@@ -72,11 +72,23 @@ use moq_net::Timestamp;
 
 use crate::container::{Container, Frame};
 
-/// Input refused because it goes back on a track's timeline, carrying the error that reports it.
-///
-/// Returned beside the import's errors rather than as one, so the importer learns of a rewind
-/// where it is found instead of by inspecting an error.
-struct Rewind(crate::Error);
+/// Why the fMP4 import refused input, classified where it is found rather than by inspecting the
+/// error afterwards.
+enum Refusal {
+	/// The input goes back on a track's timeline.
+	Rewind(crate::Error),
+	/// Anything else.
+	Error(crate::Error),
+}
+
+/// A result whose failure is a classified [`Refusal`].
+type Refused<T> = std::result::Result<T, Refusal>;
+
+impl<E: Into<crate::Error>> From<E> for Refusal {
+	fn from(err: E) -> Self {
+		Self::Error(err.into())
+	}
+}
 
 /// Fragmented MP4 parsing, muxing, and transport errors.
 #[derive(Debug, Clone, thiserror::Error)]

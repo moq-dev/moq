@@ -72,8 +72,10 @@ export class Producer<T> {
 			this.#deferred = true;
 			return;
 		}
-		const frame = this.#encoder.snapshot();
-		if (!frame) return;
+		const update = this.#encoder.snapshot();
+		if (update.kind === "unchanged") return;
+		if (update.kind === "tooLarge") throw new Moq.Error.FrameTooLarge();
+		const frame = update.frame;
 
 		// Nobody awaits a refresh, so a failed write has no caller to report to. Abort the track rather
 		// than leave its newest group without the value, where a latest-value subscriber would wait.
@@ -116,8 +118,10 @@ export class Producer<T> {
 	 * which must pass every group the track holds, and a delta carries the open group's key.
 	 */
 	update(value: T, at: Time.Timestamp): void {
-		const frame = this.#encoder.update(value);
-		if (!frame) return;
+		const update = this.#encoder.update(value);
+		if (update.kind === "unchanged") return;
+		if (update.kind === "tooLarge") throw new Moq.Error.FrameTooLarge();
+		const frame = update.frame;
 
 		// A throw here leaves the frame uncommitted, so the next update resynchronizes with a fresh
 		// snapshot. A delta against a snapshot no consumer ever saw would be unreadable. The value

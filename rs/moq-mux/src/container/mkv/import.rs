@@ -917,7 +917,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let mut result = match &self.input {
 			crate::container::Input::Finished => return Ok(()),
 			crate::container::Input::Failed(err) => return Err(err.clone()),
-			crate::container::Input::Refused(err) => {
+			crate::container::Input::Refused(err) | crate::container::Input::Rewound(err) => {
 				// A frame the refusal cut short fails its group with the reason.
 				self.abort_block(err.reason());
 				Ok(())
@@ -937,7 +937,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		match &result {
 			// A refusal keeps refusing input with its own cause.
-			Ok(()) if matches!(self.input, crate::container::Input::Refused(_)) => {}
+			Ok(())
+				if matches!(
+					self.input,
+					crate::container::Input::Refused(_) | crate::container::Input::Rewound(_)
+				) => {}
 			Ok(()) => self.input = crate::container::Input::Finished,
 			Err(err) => self.input = crate::container::Input::Failed(err.clone()),
 		}

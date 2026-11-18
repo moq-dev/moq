@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import fc from "fast-check";
 import { Decoder } from "./decoder.ts";
 import { Encoder } from "./encoder.ts";
+import { pending } from "./pending.test-util.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type Step = { value: Json; reset: boolean; restate: boolean };
@@ -64,7 +65,7 @@ test("snapshot codec property reconstructs each JSON value", () => {
 				if (reset) encoder.reset();
 				if (restate) {
 					const before = decoder.decode();
-					const frame = encoder.snapshot();
+					const frame = pending(encoder.snapshot());
 					expect(frame === undefined).toBe(before === undefined);
 					if (frame) {
 						expect(frame.keyframe).toBe(true);
@@ -73,7 +74,7 @@ test("snapshot codec property reconstructs each JSON value", () => {
 						expect(decoder.decode()).toEqual(before);
 					}
 				}
-				const frame = encoder.update(value);
+				const frame = pending(encoder.update(value));
 				if (frame) {
 					if (frame.keyframe) decoder.snapshot(frame.payload);
 					else decoder.delta(frame.payload);

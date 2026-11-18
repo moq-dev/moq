@@ -55,8 +55,8 @@ export namespace Snapshot {
 	export class Encoder<T> {
 		constructor(config?: Snapshot.Config<T>);
 		reset(): void;
-		snapshot(): Snapshot.Pending | undefined;
-		update(value: T): Snapshot.Pending | undefined;
+		snapshot(): Snapshot.Update;
+		update(value: T): Snapshot.Update;
 		get value(): T | undefined;
 	}
 	export interface Finished {}
@@ -76,6 +76,14 @@ export namespace Snapshot {
 		mutate(fn: (value: T) => void, at: Time.Timestamp): void;
 		update(value: T, at: Time.Timestamp): void;
 	}
+	export type Update = {
+		kind: "unchanged";
+	} | {
+		frame: Snapshot.Pending;
+		kind: "frame";
+	} | {
+		kind: "tooLarge";
+	};
 }
 
 export namespace Stream {

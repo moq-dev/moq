@@ -1879,7 +1879,9 @@ impl<E: catalog::Catalog> Import<E> {
 		match &self.input {
 			crate::container::Input::Open => {}
 			crate::container::Input::Finished => return Ok(()),
-			crate::container::Input::Refused(err) | crate::container::Input::Failed(err) => {
+			crate::container::Input::Refused(err)
+			| crate::container::Input::Rewound(err)
+			| crate::container::Input::Failed(err) => {
 				return Err(err.clone().into());
 			}
 		}
