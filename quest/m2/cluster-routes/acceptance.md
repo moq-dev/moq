@@ -10,6 +10,14 @@ same-clock queue dedup, and the 300 ms update hold, all marked `lite06_churn` in
 
 ## Plan
 
+Before the lite-07 freeze, exercise a scoped subscriber whose permitted, disjoint prefixes
+cannot fit one ANNOUNCE_REQUEST and cannot be widened within the grant. In
+`lite/subscriber/routed.rs`, `asks` can discard a prefix while `release` treats an
+empty set of matching replies as synchronized. Publish inside the last permitted region
+and verify either complete discovery or a surfaced inability to answer. An empty,
+synchronized snapshot for an unasked region is incorrect. The audit traced these branches
+in [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987); confirm the behavior on real sessions and fix it if reproduced.
+
 Decided 2026-11-14 (maintainer, /quest-complete on
 [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768)): ✅ stays in
 m2 and gates the cut, per lite07-finalize's 2026-10-13 rule that routes'

@@ -12,8 +12,11 @@ use crate::Error;
 #[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct H264 {
-	/// If true, SPS/PPS are inline in the bitstream (avc3).
-	/// If false, they must be in the description (avc1).
+	/// If true (avc3), SPS/PPS may also ride in the bitstream, beside any description.
+	/// If false (avc1), they live only in the description.
+	///
+	/// Says nothing about the NAL framing, which the description decides: with one the
+	/// NAL units are length-prefixed, without one they are Annex-B.
 	#[serde(default)]
 	pub inline: bool,
 	/// The H.264 profile (e.g., 0x42 for Baseline, 0x4D for Main, 0x64 for High)

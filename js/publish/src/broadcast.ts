@@ -11,9 +11,9 @@ import { type Identity, identity, type Listing, Publication, type Slot } from ".
 import type { Kind, Rendition } from "./rendition";
 import { makeRendition } from "./rendition-internal";
 
-// The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
-// outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
-const VIDEO_REFRESH = 2;
+// The refresh video tracks advertise: a joiner forces a keyframe once a group's deltas outweigh
+// twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
+const VIDEO_REFRESH = { ratio: 2 };
 
 // The stats track, named in the catalog's `stats` section while stats are on. Matches moq-cli's.
 const STATS_TRACK = "stats.json";
@@ -211,7 +211,7 @@ export class Broadcast {
 	 * Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken.
 	 *
 	 * Its track advertises a refresh ratio, so its producer opens a group with a keyframe whenever
-	 * `track.demand().wanted` passes the largest group, as the video `Encoder` does.
+	 * `track.demand().refresh` asks for one, as the video `Encoder` does.
 	 */
 	video(name: string): Rendition<Catalog.VideoConfig> {
 		return this.#register<Catalog.VideoConfig>(name, "video");
@@ -401,7 +401,7 @@ export class Broadcast {
 		);
 
 		// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
-		const watched = effect.computed((demand) => demand.get(writer.track.demand().wanted) !== undefined);
+		const watched = writer.track.demand().wanted;
 		effect.run((demand) => {
 			if (demand.get(watched)) demand.get(this.in.probe);
 		});
@@ -582,7 +582,7 @@ export class Broadcast {
 					const idle =
 						rendition.kind !== "audio" &&
 						gate.get(this.in.onDemand) === "all" &&
-						gate.get(served.demand().wanted) === undefined;
+						!gate.get(served.demand().wanted);
 					handle.track.set(idle ? undefined : served);
 				});
 			}

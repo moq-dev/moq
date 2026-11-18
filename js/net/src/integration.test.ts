@@ -699,7 +699,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 				producer = request.accept({ timescale: Timescale.MILLI });
 				const wanted = producer.demand().wanted;
 				const edge = () => {
-					const now = wanted.peek() !== undefined;
+					const now = wanted.peek();
 					if (edges.at(-1) !== now) edges.push(now);
 				};
 				edge();
@@ -1437,12 +1437,12 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 	expect(await sub.readString()).toBe("hello");
 
 	// The publisher now has a live downstream reader for the track.
-	await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted);
 
 	// Closing the only subscriber must tear the wire subscription down, so demand drops on the
 	// publisher rather than the relay serving groups to nobody.
 	sub.close();
-	await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
+	await waitFor(video.demand().wanted, (wanted) => !wanted);
 
 	broadcast.close();
 	remote.close();
@@ -1517,17 +1517,17 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	const b = remote.track("video").subscribe().ordered();
 	expect(await a.readString()).toBe("hello");
 	expect(await b.readString()).toBe("hello");
-	await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
+	await waitFor(video.demand().wanted, (wanted) => wanted);
 
 	// Closing one leaves the shared upstream serving the other.
 	a.close();
 	video.writeFrame(textFrame("more", Timestamp.fromMillis(1)));
 	expect(await b.readString()).toBe("more");
-	expect(video.demand().wanted.peek()).toBeDefined();
+	expect(video.demand().wanted.peek()).toBe(true);
 
 	// The last close tears it down.
 	b.close();
-	await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
+	await waitFor(video.demand().wanted, (wanted) => !wanted);
 
 	broadcast.close();
 	remote.close();
@@ -1554,10 +1554,10 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 		video.writeFrame(textFrame(`hello-${i}`, Timestamp.fromMillis(i)));
 		const sub = remote.track("video").subscribe().ordered();
 		expect(await sub.readString()).toBe(`hello-${i}`);
-		await waitFor(video.demand().wanted, (wanted) => wanted !== undefined);
+		await waitFor(video.demand().wanted, (wanted) => wanted);
 
 		sub.close();
-		await waitFor(video.demand().wanted, (wanted) => wanted === undefined);
+		await waitFor(video.demand().wanted, (wanted) => !wanted);
 	}
 
 	broadcast.close();

@@ -13,8 +13,9 @@
  *
  * Counts come from weak references after full collections, so they are exact only under a precise
  * collector: run it in Chromium with `bench/browser/micro.ts --bench resume-history`, which
- * exposes `gc` and fails once a retired route stays reachable. Bun scans its stack conservatively,
- * so a dead reference there can survive a collection.
+ * exposes `gc`, compiles on the main thread so no queued optimization job pins a closure's context,
+ * and fails once a retired route stays reachable. Bun scans its stack conservatively, so a dead
+ * reference there can survive a collection.
  */
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";

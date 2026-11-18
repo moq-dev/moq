@@ -405,6 +405,8 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 		let interval = self.member.as_ref().and_then(|member| member.interval());
 		let mut next = rendition.fresh(container, self.inner.info().clone(), interval)?;
 		next.buffer_duration = self.buffer_duration;
+		// A seek keys the next group, which the successor opens.
+		next.pending_start = self.pending_start;
 		next.set(config)?;
 		self.end_with(None)?;
 		*self = next;
@@ -1904,6 +1906,23 @@ mod tests {
 		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_starts(consumer).await, vec![0, 42]);
+	}
+
+	/// A seek made before a decoder identity change keys the successor's first group.
+	#[tokio::test]
+	async fn a_seek_carries_across_a_new_identity() {
+		let (_broadcast, _catalog, mut tracks) = renditions(&["v"]);
+		let track = &mut tracks[0];
+		track.seek(42).unwrap();
+		let config = hang::catalog::VideoConfig::new("avc3.42c01e".parse::<hang::catalog::VideoCodec>().unwrap());
+		track.reconfigure(config).unwrap();
+		assert_ne!(track.name(), "v", "a new identity mints a new track");
+		let consumer = track.inner.subscribe(replay());
+		track.write(frame(10_000, true)).unwrap();
+		track.cut(None).unwrap();
+		drop(track.inner.clone().finish().unwrap());
+
+		assert_eq!(collect_starts(consumer).await, vec![42]);
 	}
 
 	/// `seek` is consumed on the next group creation; subsequent groups start at their keyframes.

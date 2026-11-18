@@ -803,7 +803,7 @@ export class Subscriber {
 			return;
 		}
 
-		if (!known && (bounded(request.subscription.ranges ?? [{}]) || request.demand().wanted.peek() === undefined)) {
+		if (!known && (bounded(request.subscription.ranges ?? [{}]) || !request.demand().wanted.peek())) {
 			await this.#runHistory(broadcast, request, valid);
 			return;
 		}
@@ -862,7 +862,7 @@ export class Subscriber {
 					priority = result.priority;
 					break;
 				}
-				if (hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek() !== undefined) continue;
+				if (hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek()) continue;
 				throw abandoned;
 			}
 			console.debug(`subscribe ok: id=${requestId} broadcast=${broadcast} track=${request.name}`);
@@ -970,11 +970,7 @@ export class Subscriber {
 			const demand = producer.demand();
 			for (;;) {
 				const reason = await race([done, unwanted(demand).then(() => idle), historical]);
-				if (
-					reason === idle &&
-					hooks.demandReleased(demand).peek() === undefined &&
-					demand.wanted.peek() !== undefined
-				)
+				if (reason === idle && hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek())
 					continue;
 				terminal = reason;
 				break;

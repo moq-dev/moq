@@ -749,7 +749,10 @@ It sweeps fronts, names read per route, and route count, with `stable` names
 route), each read by info lookup, fetch, or subscription and then closed. Once a
 manual clock ages out every cache, asynchronous major collections from Chromium's
 exposed `gc` run without stack heap pointers, so dead stack slots cannot pin a route
-even under tracing. Weak references count the retired routes' sessions, transports,
+even under tracing. Chromium compiles on the main thread here
+(`--no-concurrent-recompilation`): a queued background optimization job holds its
+closure's context strongly, so a cold run would otherwise keep a route a hot closure
+captured until the job landed. Weak references count the retired routes' sessions, transports,
 broadcast handles, and delivered payload buffers still reachable. These counts are exact,
 so any nonzero one in a timed or traced pass fails the run once every sample is
 written, leaving a retaining `before` revision's counts in the JSON. A concluded control must release everything,

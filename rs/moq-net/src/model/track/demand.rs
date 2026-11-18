@@ -26,16 +26,40 @@ pub(super) struct Subscriptions {
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
-	/// The lowest group consumers want while no refresh is pending, never lowered. See
-	/// [`super::Demand::wanted`].
+	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
-	/// A join over the track's refresh ratio asked for a group past every key written,
-	/// and no such group has landed yet. Read against `next` rather than stored as a number,
-	/// so a key written without answering it can never leave the ask behind.
-	refresh: bool,
+	/// A request for a group past every key written, until a group answers it or its
+	/// callers withdraw it. Read against `next` rather than stored as a number, so a key
+	/// written without answering it can never leave the ask behind.
+	refresh: Option<Pending>,
+	/// Bumped whenever a pending refresh ends, so a caller can tell its own from a later one.
+	epoch: u64,
 	/// One past the highest key written, which a pending refresh asks for.
 	next: u64,
 	waiters: kio::WaiterList,
+	/// [`super::Refreshing`] callers, woken when their request is sent or ends.
+	callers: kio::WaiterList,
+}
+
+/// A pending request for a group past every key written.
+struct Pending {
+	/// When it takes effect: at once, or once the track's refresh interval has passed.
+	at: crate::time::Instant,
+	/// [`super::Refreshing`] callers waiting for it to be sent. The last to drop before then
+	/// withdraws it, unless it is `kept`.
+	callers: usize,
+	/// A join, a shed read, or a peer asked too, and none of those withdraws.
+	kept: bool,
+	/// Whatever serves the track (an upstream session or the local publisher) read it.
+	sent: bool,
+}
+
+/// Where a [`super::Refreshing`] caller stands; see [`Subscriptions::request`].
+pub(super) enum Requested {
+	/// Nothing is left to wait for.
+	Done,
+	/// Waiting on the pending request of this epoch.
+	Waiting(u64),
 }
 
 /// Everything the aggregate holds besides its ranges.
@@ -95,44 +119,127 @@ impl Subscriptions {
 		}
 	}
 
-	/// The lowest group consumers want, whether or not anyone consumes now: the next free
-	/// key while a refresh is pending.
-	pub(super) fn wanted(&self) -> u64 {
-		match self.refresh {
+	/// The lowest group start consumers want at `now`, whether or not anyone consumes: the
+	/// next free key while a due refresh is pending.
+	pub(super) fn wanted(&self, now: crate::time::Instant) -> u64 {
+		match self.refresh.as_ref().is_some_and(|pending| pending.at <= now) {
 			true => self.next.max(self.wanted),
 			false => self.wanted,
 		}
 	}
 
-	/// [`Self::wanted`], arming `waiter` for its next change.
-	pub(super) fn poll_wanted(&mut self, waiter: &kio::Waiter) -> u64 {
-		waiter.register(&mut self.waiters);
-		self.wanted()
+	/// Whether consumers want a group past every key written at `now`: the first group of
+	/// a track, or a due refresh.
+	pub(super) fn asking(&self, now: crate::time::Instant) -> bool {
+		self.wanted(now) >= self.next
 	}
 
-	/// A join over the refresh ratio: ask for a group past every key written. Joins
-	/// while one is pending coalesce into it.
-	pub(super) fn refresh(&mut self) -> kio::WaiterList {
-		if std::mem::replace(&mut self.refresh, true) {
+	/// When a deferred refresh takes effect, if one is pending and not due at `now`.
+	pub(super) fn deferred(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
+		self.refresh.as_ref().map(|pending| pending.at).filter(|at| *at > now)
+	}
+
+	/// What serves the track read the group asked for at `now`: a due refresh is sent,
+	/// waking its callers.
+	pub(super) fn sent(&mut self, now: crate::time::Instant) -> kio::WaiterList {
+		match &mut self.refresh {
+			Some(pending) if pending.at <= now && !pending.sent => {
+				pending.sent = true;
+				self.callers.take()
+			}
+			_ => Default::default(),
+		}
+	}
+
+	/// Arm `waiter` for the next change to what [`Self::wanted`] reports, except a deferred
+	/// refresh coming due, which the caller arms.
+	pub(super) fn watch(&mut self, waiter: &kio::Waiter) {
+		waiter.register(&mut self.waiters);
+	}
+
+	/// Ask for a group past every key written, taking effect at `at`, as a request nobody
+	/// withdraws. Requests while one is pending coalesce into it, the earliest taking effect.
+	pub(super) fn refresh(&mut self, at: crate::time::Instant) -> kio::WaiterList {
+		self.pend(at, true)
+	}
+
+	/// [`Self::refresh`] for a caller that waits for it to be sent and may withdraw it,
+	/// returning where the caller stands. One joining a request already sent is done.
+	pub(super) fn request(&mut self, at: crate::time::Instant) -> (Requested, kio::WaiterList) {
+		if self.refresh.as_ref().is_some_and(|pending| pending.sent) {
+			return (Requested::Done, Default::default());
+		}
+		let wakes = self.pend(at, false);
+		(Requested::Waiting(self.epoch), wakes)
+	}
+
+	fn pend(&mut self, at: crate::time::Instant, kept: bool) -> kio::WaiterList {
+		let fresh = self.refresh.is_none();
+		let pending = self.refresh.get_or_insert(Pending {
+			at,
+			callers: 0,
+			kept: false,
+			sent: false,
+		});
+		pending.kept |= kept;
+		pending.callers += usize::from(!kept);
+		// Only a new request, or an earlier one, changes what is asked for.
+		if !fresh && pending.at <= at {
 			return Default::default();
 		}
+		pending.at = at;
 		self.waiters.take()
+	}
+
+	/// Whether the caller waiting on `epoch` is done: its request was sent or ended.
+	pub(super) fn requested(&mut self, epoch: u64, waiter: &kio::Waiter) -> bool {
+		let done = self.epoch != epoch || self.refresh.as_ref().is_none_or(|pending| pending.sent);
+		if !done {
+			waiter.register(&mut self.callers);
+		}
+		done
+	}
+
+	/// The caller waiting on `epoch` gave up: the last caller withdraws a request not yet
+	/// sent, unless something else that never withdraws asked too.
+	pub(super) fn withdraw(&mut self, epoch: u64) -> [kio::WaiterList; 2] {
+		if self.epoch != epoch {
+			return Default::default();
+		}
+		let Some(pending) = self.refresh.as_mut().filter(|pending| !pending.sent) else {
+			return Default::default();
+		};
+		pending.callers -= 1;
+		if pending.callers > 0 || pending.kept {
+			return Default::default();
+		}
+		[self.end_refresh(), self.waiters.take()]
+	}
+
+	/// The pending refresh ended, answered or withdrawn: its callers are done.
+	fn end_refresh(&mut self) -> kio::WaiterList {
+		self.refresh = None;
+		self.epoch += 1;
+		self.callers.take()
 	}
 
 	/// Key `key` was written. One at or past the next free key moves it: a
 	/// group subscribers receive answers a pending refresh, and anything else moves the
 	/// key it asks for.
-	pub(super) fn wrote(&mut self, key: u64, answers: bool) -> kio::WaiterList {
+	pub(super) fn wrote(&mut self, key: u64, answers: bool) -> [kio::WaiterList; 2] {
 		let next = self.next;
 		self.next = next.max(key.saturating_add(1));
-		if !self.refresh || key < next {
+		if self.refresh.is_none() || key < next {
 			return Default::default();
 		}
-		if answers {
-			self.refresh = false;
-			self.wanted = self.wanted.max(key);
-		}
-		self.waiters.take()
+		let callers = match answers {
+			true => {
+				self.wanted = self.wanted.max(key);
+				self.end_refresh()
+			}
+			false => Default::default(),
+		};
+		[callers, self.waiters.take()]
 	}
 
 	/// Mutate counts under one lock, taking wakes only when the aggregate changes.

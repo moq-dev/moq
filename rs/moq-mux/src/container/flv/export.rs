@@ -134,9 +134,9 @@ impl Flavor {
 /// tag for one media frame. Returns `None` when the broadcast ends. Narrow the
 /// renditions first with [`Stream::select`](crate::catalog::Stream::select).
 ///
-/// ## Avc3 sources
+/// ## Annex-B sources
 ///
-/// Annex-B H.264 (`H264 { inline: true }`, empty `description`) is accepted: an
+/// Annex-B H.264 (an empty `description`, whatever the codec string) is accepted: an
 /// [`Avc1`](crate::codec::h264::Avc1) transform caches the inline SPS/PPS, builds
 /// the avcC for the sequence-header tag, and length-prefixes each sample. The
 /// header is deferred until that codec config is available (typically the first

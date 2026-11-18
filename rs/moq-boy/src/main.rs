@@ -196,7 +196,7 @@ enum Kind {
 /// Wait until some viewer wants the track, or none does.
 async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
 	let mut demand = demand.clone();
-	while demand.wanted_changed().await?.is_some() != wanted {}
+	while demand.wanted_changed().await? != wanted {}
 	Ok(())
 }
 

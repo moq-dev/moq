@@ -12,7 +12,7 @@ export interface Config {
 	 * Encode edits as ops appended to the group's header. `false` restates the window in a new
 	 * single-frame group for every edit.
 	 *
-	 * A group of ops runs until a joiner wants a fresh one, judged by the track's `refresh` ratio
+	 * A group of ops runs until a reader asks for a fresh one, judged by the track's `refresh`
 	 * (see {@link Encoder.snapshot}), or until it reaches the frame or byte cap. The window's
 	 * counterpart to Snapshot's `deltas`. Defaults to `true`.
 	 */
@@ -179,9 +179,8 @@ export class Encoder<T> {
 	/**
 	 * Restate the retained window in a header, which must open a new group.
 	 *
-	 * For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
-	 * the track's `demand().wanted` passes the largest group written, so the joiner reads the window
-	 * without the ops before it. The frame is a {@link Pending} like any other.
+	 * For a caller that opens groups itself: call it when a reader asks for a fresh group, which the
+	 * track's `demand().refresh` reports, so the reader gets the window without the ops before it. The frame is a {@link Pending} like any other.
 	 */
 	snapshot(): Pending {
 		return this.#emitHeader(this.#offset, this.#start, this.#window, { restate: true });

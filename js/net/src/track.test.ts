@@ -290,21 +290,21 @@ test("wanted reflects subscriber demand and clears when the last one leaves", as
 	const producer = new TrackProducer("test");
 
 	// No subscribers: no demand.
-	expect(producer.demand().wanted.peek()).toBeUndefined();
+	expect(producer.demand().wanted.peek()).toBe(false);
 
 	const a = producer.subscribe();
 	const b = producer.subscribe().ordered();
-	expect(producer.demand().wanted.peek()).toBeDefined();
+	expect(producer.demand().wanted.peek()).toBe(true);
 
 	// Closing one of two keeps demand.
 	a.close();
-	expect(producer.demand().wanted.peek()).toBeDefined();
+	expect(producer.demand().wanted.peek()).toBe(true);
 
 	// Closing the last subscriber drops demand. The consumer wire awaits this
 	// to tear an idle upstream down.
 	b.close();
 	await unwanted(producer.demand());
-	expect(producer.demand().wanted.peek()).toBeUndefined();
+	expect(producer.demand().wanted.peek()).toBe(false);
 });
 
 test("a producer never self-closes on zero demand: a publisher keeps serving new subscribers", async () => {
@@ -323,14 +323,14 @@ test("a producer never self-closes on zero demand: a publisher keeps serving new
 	producer.writeFrame(textFrame("still here", Timestamp.unscaled(0n)));
 	const b = producer.subscribe().ordered();
 	expect(await b.readString()).toBe("still here");
-	expect(producer.demand().wanted.peek()).toBeDefined();
+	expect(producer.demand().wanted.peek()).toBe(true);
 });
 
 test("unwanted resolves immediately when there was never any demand", async () => {
 	const producer = new TrackProducer("video");
 	// No subscriber was ever attached; the wait must not hang.
 	await unwanted(producer.demand());
-	expect(producer.demand().wanted.peek()).toBeUndefined();
+	expect(producer.demand().wanted.peek()).toBe(false);
 });
 
 test("wanted stays set across churn while at least one subscriber remains", async () => {
@@ -341,12 +341,12 @@ test("wanted stays set across churn while at least one subscriber remains", asyn
 	for (let i = 0; i < 20; i++) {
 		const t = producer.subscribe();
 		t.close();
-		expect(producer.demand().wanted.peek()).toBeDefined();
+		expect(producer.demand().wanted.peek()).toBe(true);
 	}
 
 	a.close();
 	await unwanted(producer.demand());
-	expect(producer.demand().wanted.peek()).toBeUndefined();
+	expect(producer.demand().wanted.peek()).toBe(false);
 });
 
 // Append a group of a 3 byte first frame and a `delta` byte delta to an untimed track.
@@ -357,44 +357,67 @@ function refreshGroup(producer: TrackProducer, delta: number): void {
 	group.finish();
 }
 
-test("the first subscriber of a track with no group wants group 0", () => {
-	const producer = new TrackProducer("test").accept({ refresh: 1 });
-	expect(producer.demand().wanted.peek()).toBeUndefined();
+// The group start the producer's readers ask for while it is past every key written.
+function asked(producer: TrackProducer): bigint | undefined {
+	return hooks.demandAsked(producer.demand()).peek();
+}
+
+// Whether the producer's readers ask for a new group now.
+function refreshing(producer: TrackProducer): boolean {
+	return producer.demand().refresh.peek();
+}
+
+test("wanted follows the first consumer", async () => {
+	const producer = new TrackProducer("test").accept({ refresh: { ratio: 1 } });
+	expect(producer.demand().wanted.peek()).toBe(false);
+	expect(refreshing(producer)).toBe(false);
+
 	const subscriber = producer.subscribe();
-	expect(producer.demand().wanted.peek()).toBe(0n);
+	expect(producer.demand().wanted.peek()).toBe(true);
+	expect(refreshing(producer)).toBe(true);
+	refreshGroup(producer, 0);
+	expect(refreshing(producer)).toBe(false);
+
 	subscriber.close();
+	await unwanted(producer.demand());
+	expect(producer.demand().wanted.peek()).toBe(false);
 });
 
 // The cached group is served either way: refresh is a request, not a hold.
 test("a join over the refresh ratio wants the group after the newest", async () => {
 	for (const [delta, wanted] of [
-		[0, 0n],
-		[3, 0n],
+		[0, undefined],
+		[3, undefined],
 		[4, 1n],
 	] as const) {
-		const producer = new TrackProducer("test").accept({ refresh: 1 });
+		const producer = new TrackProducer("test").accept({ refresh: { ratio: 1 } });
 		refreshGroup(producer, delta);
 		const subscriber = producer.subscribe();
-		expect(producer.demand().wanted.peek()).toBe(wanted);
+		expect(asked(producer)).toBe(wanted);
+		expect(refreshing(producer)).toBe(wanted !== undefined);
 		expect((await subscriber.recvGroup())?.start).toBe(0n);
 		subscriber.close();
 	}
 });
 
-test("joins coalesce until the wanted group lands", () => {
-	const producer = new TrackProducer("test").accept({ refresh: 1 });
+test("joins coalesce until the group lands", () => {
+	const producer = new TrackProducer("test").accept({ refresh: { ratio: 1 } });
 	refreshGroup(producer, 4);
-	const subscribers = [producer.subscribe(), producer.subscribe()];
-	expect(producer.demand().wanted.peek()).toBe(1n);
+	const subscribers = [producer.subscribe()];
+	expect(asked(producer)).toBe(1n);
+	subscribers.push(producer.subscribe());
+	expect(asked(producer)).toBe(1n);
 
 	// Group 1 answers it, and a join under its ratio asks nothing more.
 	refreshGroup(producer, 0);
+	expect(asked(producer)).toBeUndefined();
 	subscribers.push(producer.subscribe());
-	expect(producer.demand().wanted.peek()).toBe(1n);
+	expect(asked(producer)).toBeUndefined();
 
 	refreshGroup(producer, 4);
 	subscribers.push(producer.subscribe());
-	expect(producer.demand().wanted.peek()).toBe(3n);
+	expect(asked(producer)).toBe(3n);
+	expect(refreshing(producer)).toBe(true);
 	for (const subscriber of subscribers) subscriber.close();
 });
 
@@ -402,23 +425,321 @@ test("joins without refresh ask for no group", () => {
 	const producer = new TrackProducer("test").accept({});
 	refreshGroup(producer, 1000);
 	const subscriber = producer.subscribe();
-	expect(producer.demand().wanted.peek()).toBe(0n);
+	expect(asked(producer)).toBeUndefined();
 	subscriber.close();
 });
 
 test("a fixed start is no join", () => {
-	const producer = new TrackProducer("test").accept({ refresh: 1 });
+	const producer = new TrackProducer("test").accept({ refresh: { ratio: 1 } });
 	refreshGroup(producer, 4);
 	const subscriber = producer.subscribe({ ranges: [{ start: { time: 0n } }] });
-	expect(producer.demand().wanted.peek()).toBe(0n);
+	expect(asked(producer)).toBeUndefined();
 	subscriber.close();
 });
 
-test("refresh must be a u32 ratio", () => {
-	expect(() => authoredInfo({ refresh: -1 })).toThrow(RangeError);
-	expect(() => authoredInfo({ refresh: 0.5 })).toThrow(RangeError);
-	expect(() => authoredInfo({ refresh: 2 ** 32 })).toThrow(RangeError);
-	expect(authoredInfo({ refresh: 0 }).refresh).toBe(0);
+test("a refresh without an interval is judged by the ratio", () => {
+	const producer = new TrackProducer("test").accept({ refresh: { ratio: 1 } });
+	const subscriber = producer.subscribe();
+	refreshGroup(producer, 3);
+	void subscriber.refresh();
+	expect(asked(producer)).toBeUndefined();
+	refreshGroup(producer, 4);
+	void subscriber.refresh();
+	expect(asked(producer)).toBe(2n);
+	subscriber.close();
+});
+
+test("a refresh without opting in asks nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const producer = new TrackProducer("test").accept({});
+		const subscriber = producer.subscribe();
+		refreshGroup(producer, 0);
+		void subscriber.refresh();
+		await clock.advance(Duration.secs(3600));
+		expect(refreshing(producer)).toBe(false);
+		subscriber.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// The interval caps how often a one-frame track makes groups: a request asks at once when the
+// newest group is old enough, and otherwise waits until it is, then asks once however many
+// readers asked meanwhile. A group landing first answers it.
+test("an interval defers a refresh until the newest group is old enough", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const interval = Duration.secs(5);
+		const producer = new TrackProducer("test").accept({ refresh: { interval } });
+		const subscriber = producer.subscribe();
+		expect(refreshing(producer)).toBe(true);
+		refreshGroup(producer, 0);
+		expect(refreshing(producer)).toBe(false);
+
+		await clock.advance(Duration.secs(2));
+		void subscriber.refresh();
+		const late = producer.subscribe();
+		expect(refreshing(producer)).toBe(false);
+		await clock.advance(Duration.secs(2));
+		expect(refreshing(producer)).toBe(false);
+		await clock.advance(Duration.secs(1));
+		expect(refreshing(producer)).toBe(true);
+		expect(asked(producer)).toBe(1n);
+		refreshGroup(producer, 0);
+		expect(refreshing(producer)).toBe(false);
+
+		// A request made long after the newest group asks at once.
+		await clock.advance(Duration.secs(60));
+		void late.refresh();
+		expect(refreshing(producer)).toBe(true);
+		refreshGroup(producer, 0);
+
+		// A group landing while a request waits answers it.
+		void subscriber.refresh();
+		refreshGroup(producer, 0);
+		await clock.advance(interval);
+		expect(refreshing(producer)).toBe(false);
+
+		late.close();
+		subscriber.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("a deferred refresh wakes the publisher", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const producer = new TrackProducer("test").accept({ refresh: { interval: Duration.secs(5) } });
+		const subscriber = producer.subscribe();
+		refreshGroup(producer, 0);
+		void subscriber.refresh();
+
+		let woken = 0;
+		const dispose = producer.demand().refresh.subscribe((refresh) => {
+			if (refresh) woken++;
+		});
+		await clock.advance(Duration.secs(4));
+		expect(woken).toBe(0);
+		await clock.advance(Duration.secs(1));
+		expect(woken).toBe(1);
+		expect(refreshing(producer)).toBe(true);
+
+		dispose();
+		subscriber.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// With both, a join must outweigh the ratio, while a refresh needs only the interval.
+test("a refresh skips the ratio when an interval is declared", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const producer = new TrackProducer("test").accept({ refresh: { ratio: 1, interval: Duration.secs(1) } });
+		const subscriber = producer.subscribe();
+		refreshGroup(producer, 0);
+		await clock.advance(Duration.secs(1));
+		const join = producer.subscribe();
+		expect(refreshing(producer)).toBe(false);
+		void subscriber.refresh();
+		expect(refreshing(producer)).toBe(true);
+
+		join.close();
+		subscriber.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// How a refresh promise settled so far, without waiting on it.
+function watch(promise: Promise<void>): { readonly done: boolean; readonly error: unknown } {
+	const state: { done: boolean; error: unknown } = { done: false, error: undefined };
+	promise.then(
+		() => {
+			state.done = true;
+		},
+		(error: unknown) => {
+			state.done = true;
+			state.error = error;
+		},
+	);
+	return state;
+}
+
+// Let settled promises run their reactions.
+async function flush(): Promise<void> {
+	for (let i = 0; i < 3; i++) await Promise.resolve();
+}
+
+// A one-frame track whose refresh interval is 5s, with a subscriber, and a group made at time zero.
+function intervalTrack(): { producer: TrackProducer; subscriber: ReturnType<TrackProducer["subscribe"]> } {
+	const producer = new TrackProducer("test").accept({ refresh: { interval: Duration.secs(5) } });
+	const subscriber = producer.subscribe();
+	refreshGroup(producer, 0);
+	return { producer, subscriber };
+}
+
+// A refresh resolves once it is sent: after the interval, when the publisher reads it. Every
+// caller in one interval window shares the one request and resolves with it.
+test("concurrent refreshes resolve once the request is sent", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { producer, subscriber } = intervalTrack();
+		const first = watch(subscriber.refresh());
+		await clock.advance(Duration.secs(2));
+		const second = watch(subscriber.refresh());
+		const other = producer.subscribe().ordered();
+		const third = watch(other.refresh());
+		await flush();
+		expect([first.done, second.done, third.done]).toEqual([false, false, false]);
+
+		await clock.advance(Duration.secs(3));
+		await flush();
+		expect(first.done).toBe(false);
+		expect(refreshing(producer)).toBe(true);
+		await flush();
+		expect([first.done, second.done, third.done]).toEqual([true, true, true]);
+		const later = watch(subscriber.refresh());
+		await flush();
+		expect(later.done).toBe(true);
+		expect(asked(producer)).toBe(1n);
+
+		other.close();
+		subscriber.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// A publisher that answers each request as it reads it, within the same batch, still sees the next
+// request a caller makes as soon as the first resolves.
+test("a refresh made right after one is answered still reaches the publisher", async () => {
+	const producer = new TrackProducer("test").accept({ refresh: { interval: Duration.secs(0) } });
+	const subscriber = producer.subscribe();
+	refreshGroup(producer, 0);
+	let answered = 0;
+	const dispose = producer.demand().refresh.subscribe((asking) => {
+		if (!asking) return;
+		answered++;
+		refreshGroup(producer, 0);
+	});
+	try {
+		await subscriber.refresh();
+		const second = watch(subscriber.refresh());
+		for (let i = 0; i < 4 && !second.done; i++) await flush();
+		expect(second).toEqual({ done: true, error: undefined });
+		expect(answered).toBe(2);
+	} finally {
+		dispose();
+		subscriber.close();
+	}
+});
+
+// Aborting the last caller's refresh before it is sent withdraws the request, but not one another
+// caller still waits on, one a join also made, or one already sent.
+test("aborting a refresh withdraws an unsent request", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const { producer, subscriber } = intervalTrack();
+		const deferred = new AbortController();
+		const withdrawn = watch(subscriber.refresh({ signal: deferred.signal }));
+		deferred.abort(new Error("gave up"));
+		await flush();
+		expect(withdrawn.error).toEqual(new Error("gave up"));
+		await clock.advance(Duration.secs(5));
+		expect(refreshing(producer)).toBe(false);
+
+		// Due, but not yet read.
+		const due = new AbortController();
+		const dueWithdrawn = watch(subscriber.refresh({ signal: due.signal }));
+		due.abort();
+		await flush();
+		expect(dueWithdrawn.done).toBe(true);
+		expect(refreshing(producer)).toBe(false);
+
+		const kept = new AbortController();
+		const keptRefresh = watch(subscriber.refresh({ signal: kept.signal }));
+		const dropped = new AbortController();
+		void subscriber.refresh({ signal: dropped.signal }).catch(() => {});
+		dropped.abort();
+		expect(refreshing(producer)).toBe(true);
+		await flush();
+		expect(keptRefresh.done).toBe(true);
+		kept.abort();
+		expect(refreshing(producer)).toBe(true);
+		refreshGroup(producer, 0);
+
+		const join = new AbortController();
+		void subscriber.refresh({ signal: join.signal }).catch(() => {});
+		const joiner = producer.subscribe();
+		join.abort();
+		await clock.advance(Duration.secs(5));
+		expect(refreshing(producer)).toBe(true);
+
+		const aborted = new AbortController();
+		aborted.abort(new Error("before"));
+		await expect(subscriber.refresh({ signal: aborted.signal })).rejects.toThrow("before");
+
+		joiner.close();
+		subscriber.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// A refresh resolves without sending anything when there is nothing to send or a group answers it
+// first, and rejects when the track closes first.
+test("a refresh ends with the group or the track", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const plain = new TrackProducer("plain").accept({});
+		const reader = plain.subscribe();
+		refreshGroup(plain, 0);
+		await reader.refresh();
+		reader.close();
+
+		const { producer, subscriber } = intervalTrack();
+		const answered = watch(subscriber.refresh());
+		refreshGroup(producer, 0);
+		await flush();
+		expect(answered).toEqual({ done: true, error: undefined });
+
+		const closed = watch(subscriber.refresh());
+		producer.abort(new Error("gone"));
+		await flush();
+		expect(closed.error).toEqual(new Error("gone"));
+		// A refresh asked after the close rejects too rather than waiting forever.
+		await expect(subscriber.refresh()).rejects.toThrow("gone");
+		const finished = intervalTrack();
+		finished.producer.finish();
+		finished.producer.close();
+		await expect(finished.subscriber.refresh()).rejects.toThrow("closed before the refresh was sent");
+		finished.subscriber.close();
+		subscriber.close();
+	} finally {
+		installed.close();
+	}
+});
+
+test("refresh validates its ratio and rounds its interval up to a millisecond", () => {
+	expect(() => authoredInfo({ refresh: { ratio: -1 } })).toThrow(RangeError);
+	expect(() => authoredInfo({ refresh: { ratio: 0.5 } })).toThrow(RangeError);
+	expect(() => authoredInfo({ refresh: { ratio: 2 ** 32 } })).toThrow(RangeError);
+	expect(() => authoredInfo({ refresh: { interval: Duration.millis(Number.MAX_SAFE_INTEGER + 1) } })).toThrow(
+		RangeError,
+	);
+	expect(authoredInfo({ refresh: { ratio: 0 } }).refresh).toEqual({ ratio: 0, interval: null });
+	expect(authoredInfo().refresh).toEqual({ ratio: null, interval: null });
+	expect(authoredInfo({ refresh: { interval: Duration.micros(1500) } }).refresh.interval?.asMillis()).toBe(2);
 });
 
 test("rescale matches the track's timeline, rounded down as Rust's convert does", () => {
@@ -4962,9 +5283,9 @@ test("a partial maxDelay widening keeps the older skip owed", () => {
 	producer.close();
 });
 
-for (const refresh of [undefined, 0]) {
-	test(`reading a shed front requests refresh only when opted in (${refresh})`, async () => {
-		const producer = new TrackProducer("test").accept({ refresh });
+for (const ratio of [undefined, 0]) {
+	test(`reading a shed front requests refresh only when opted in (${ratio})`, async () => {
+		const producer = new TrackProducer("test").accept({ refresh: { ratio } });
 		const subscriber = producer.subscribe();
 		const ordered = subscriber.ordered();
 		const group = hooks.appendNext(producer);
@@ -4973,9 +5294,9 @@ for (const refresh of [undefined, 0]) {
 		for (let index = 0; index < 40; index++)
 			group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.unscaled(group.start) });
 		await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
-		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0n : 1n);
+		expect(asked(producer)).toBe(ratio === undefined ? undefined : 1n);
 		const joiner = producer.subscribe();
-		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0n : 1n);
+		expect(asked(producer)).toBe(ratio === undefined ? undefined : 1n);
 
 		joiner.close();
 		subscriber.close();
@@ -4986,7 +5307,7 @@ for (const refresh of [undefined, 0]) {
 
 // A first frame written in chunks sheds its own head without advancing the group's start.
 test("reading a shed frame head requests refresh", async () => {
-	const producer = new TrackProducer("test").accept({ refresh: 0 });
+	const producer = new TrackProducer("test").accept({ refresh: { ratio: 0 } });
 	const subscriber = producer.subscribe();
 	const ordered = subscriber.ordered();
 	const group = hooks.appendNext(producer);
@@ -4997,7 +5318,7 @@ test("reading a shed frame head requests refresh", async () => {
 	for (let index = 0; index < 40; index++) frame.write(new Uint8Array(MiB));
 	frame.finish();
 	await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
-	expect(producer.demand().wanted.peek()).toBe(1n);
+	expect(asked(producer)).toBe(1n);
 	subscriber.close();
 	producer.finish();
 	producer.close();

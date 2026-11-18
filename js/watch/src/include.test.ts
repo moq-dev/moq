@@ -33,7 +33,7 @@ async function quietly<T>(fn: () => Promise<T>): Promise<T> {
 // Resolves once nobody subscribes to the track.
 async function unwanted(track: Track.Producer): Promise<void> {
 	const { wanted } = track.demand();
-	while (wanted.peek() !== undefined) await wanted.changed();
+	while (wanted.peek()) await wanted.changed();
 }
 
 const video = (codec: string) => ({ codec, container: { kind: "legacy" as const } });
@@ -71,8 +71,8 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 		await settle();
 		expect(source.out.catalog.peek()?.include).toEqual(root.include);
 		// The root selects every include it lists: it reads the catalog, but subscribes no media.
-		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
-		expect(includeVideo.demand().wanted.peek()).toBeUndefined();
+		expect(includeCatalog.demand().wanted.peek()).toBe(true);
+		expect(includeVideo.demand().wanted.peek()).toBe(false);
 		// Listed under its include's ID, so it never shadows the root's own "video".
 		expect(source.out.catalog.peek()?.video?.renditions).toEqual({
 			video: video("avc1.42001f"),
@@ -107,7 +107,7 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 		// Dropping the selection releases the media; closing the root releases the catalog.
 		selection.close();
 		await unwanted(includeVideo);
-		expect(includeCatalog.demand().wanted.peek()).toBeDefined();
+		expect(includeCatalog.demand().wanted.peek()).toBe(true);
 		source.close();
 		await unwanted(includeCatalog);
 	} finally {
@@ -202,11 +202,11 @@ it("tracks the include entry without reopening it on unrelated catalog updates",
 		expect(active?.path).toBe(Path.from("room/first.hang"));
 
 		// An update that leaves the entry alone keeps the same request.
-		expect(firstCatalog.demand().wanted.peek()).toBeDefined();
+		expect(firstCatalog.demand().wanted.peek()).toBe(true);
 		let withdrawals = 0;
 		owner.cleanup(
 			firstCatalog.demand().wanted.subscribe((wanted) => {
-				if (wanted === undefined) withdrawals += 1;
+				if (!wanted) withdrawals += 1;
 			}),
 		);
 		catalog.set(
@@ -342,7 +342,7 @@ it("never reads an include of another instance, but reads a minted one", async (
 		expect(refused.out.active.peek()).toBeUndefined();
 		expect(refused.out.error.peek()).toBeUndefined();
 		expect(track.closed.peek()).toBeUndefined();
-		expect(track.demand().wanted.peek()).toBeUndefined();
+		expect(track.demand().wanted.peek()).toBe(false);
 		// A minted instance cannot prove the stream, so the named instance cannot refuse it.
 		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
 
@@ -393,11 +393,11 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 		expect(empty.in.name.peek()).toBe(Path.from("room/main.hang"));
 		expect(empty.in.enabled.peek()).toBe(true);
 
-		expect(extraCatalog.demand().wanted.peek()).toBeDefined();
+		expect(extraCatalog.demand().wanted.peek()).toBe(true);
 		let withdrawals = 0;
 		owner.cleanup(
 			extraCatalog.demand().wanted.subscribe((wanted) => {
-				if (wanted === undefined) withdrawals += 1;
+				if (!wanted) withdrawals += 1;
 			}),
 		);
 
@@ -493,10 +493,9 @@ it("offers every include's renditions to selection, subscribing only the selecte
 			"ladder/alt": { ...sized(426, 240, 300_000), ...ref, track: "alt" },
 		});
 		expect(Object.keys(broadcast.out.catalog.peek()?.audio?.renditions ?? {})).toEqual(["ladder/aac"]);
-		expect(nested.demand().wanted.peek()).toBeUndefined();
+		expect(nested.demand().wanted.peek()).toBe(false);
 		// Listing a rendition subscribes none of its media.
-		for (const track of [parentHd, high, low, ladderHd, remote])
-			expect(track.demand().wanted.peek()).toBeUndefined();
+		for (const track of [parentHd, high, low, ladderHd, remote]) expect(track.demand().wanted.peek()).toBe(false);
 
 		// One selection spans the root and its include, and the config says where the media lives.
 		expect(source.out.track.peek()).toBe("ladder/360p");
@@ -517,7 +516,7 @@ it("offers every include's renditions to selection, subscribing only the selecte
 			.ordered();
 		try {
 			expect(await frames?.readString()).toBe("720p");
-			for (const track of [parentHd, low, ladderHd, remote]) expect(track.demand().wanted.peek()).toBeUndefined();
+			for (const track of [parentHd, low, ladderHd, remote]) expect(track.demand().wanted.peek()).toBe(false);
 		} finally {
 			frames?.close();
 		}

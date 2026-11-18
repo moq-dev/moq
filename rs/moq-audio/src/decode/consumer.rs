@@ -1362,7 +1362,7 @@ mod tests {
 			}
 		}
 		// The relay cancels the unread upstream subscription; its copy keeps the groups.
-		while demand.wanted_changed().await.unwrap().is_some() {}
+		while demand.wanted_changed().await.unwrap() {}
 		write(4);
 
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);

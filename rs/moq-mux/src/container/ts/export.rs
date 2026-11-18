@@ -16,9 +16,9 @@
 //! arrival skew between them, and the output keeps the source's pace.
 //!
 //! Video flows through `ExportSource`, which normalizes every H.264/H.265
-//! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
-//! avc3/hev1 parameter sets out of the bitstream, or taking the catalog
-//! `description` for out-of-band avc1/hvc1). The muxer then does one
+//! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing the
+//! parameter sets out of an Annex-B bitstream, or taking the catalog
+//! `description` for a length-prefixed one). The muxer then does one
 //! length-prefixed -> Annex-B conversion, re-injecting the parameter sets as
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
@@ -2357,7 +2357,7 @@ where
 	/// and slices that arrive before their codec config resolves are dropped: a receiver
 	/// joining mid-GOP can't use them, and parking them would stop us polling for the
 	/// keyframe that carries the parameter sets. [`ExportSource`] has already transformed
-	/// Annex-B avc3/hev1 into length-prefixed form and resolved the avcC/hvcC.
+	/// Annex-B input into length-prefixed form and resolved the avcC/hvcC.
 	fn fill(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
 		let mut input = Input {
 			waiting_for_header: self.program.psi.is_none(),

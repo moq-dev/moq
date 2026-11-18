@@ -394,6 +394,7 @@ impl<T> Inner<T> {
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.track.inner.clone().abort(reason);
 		self.state.abort(err);
+		self.refresh.ended();
 	}
 
 	/// Close the open group, leaving the next update to open a replacement with a full snapshot.
@@ -480,6 +481,7 @@ impl<T: Serialize> Inner<T> {
 			return Err(err);
 		}
 		self.state = crate::state::State::Finished;
+		self.refresh.ended();
 		Ok(())
 	}
 }

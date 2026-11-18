@@ -2008,6 +2008,8 @@ fn publish_track_invalid_broadcast() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	assert!(unsafe { moq_publish_track(0, name.as_ptr() as *const c_char, name.len(), &info) } < 0);
@@ -2043,6 +2045,8 @@ fn publish_track_with_info_rejects_invalid_timescale() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 
@@ -2062,6 +2066,8 @@ fn track_info_max_age() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let max_age = |info: moq_track_info| moq_net::track::Info::try_from(&info).unwrap().max_age;
@@ -2700,6 +2706,8 @@ fn raw_track_subscription_options_and_update() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track =
@@ -2818,6 +2826,8 @@ fn raw_track_time_anchor() {
 		timescale_present: true,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track =
@@ -3792,6 +3802,8 @@ fn publish_finish_serves_finished_tracks_until_closed() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
@@ -4587,15 +4599,19 @@ fn track_demand_follows_subscribers() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Read a demand watcher's wanted group, or `None` while nobody subscribes.
-fn demand_wanted(watcher: u32) -> Option<u64> {
-	let mut group = u64::MAX;
-	let mut present = true;
+/// Read whether anyone consumes a demand watcher's track.
+fn demand_wanted(watcher: u32) -> bool {
+	let mut wanted = false;
+	assert_eq!(unsafe { moq_publish_demand_wanted(watcher, &mut wanted) }, 0);
+	wanted
+}
+
+/// Start waiting for a demand watcher's track to be asked for a new group.
+fn demand_refresh(watcher: u32, cb: &Callback) {
 	assert_eq!(
-		unsafe { moq_publish_demand_wanted(watcher, &mut group, &mut present) },
+		unsafe { moq_publish_demand_refresh(watcher, Some(channel_callback), cb.ptr) },
 		0
 	);
-	present.then_some(group)
 }
 
 /// Cancel a raw track subscription, freeing the frames delivered before its terminal.
@@ -4612,7 +4628,7 @@ fn cancel_track(consumer: u32, cb: &Callback) {
 }
 
 #[test]
-fn track_demand_reports_the_wanted_group() {
+fn track_demand_reports_wanted_and_refresh() {
 	let origin = id(moq_origin_create());
 	let broadcast = publish_broadcast(origin, b"track-demand-wanted");
 	let name = b"data";
@@ -4624,6 +4640,8 @@ fn track_demand_reports_the_wanted_group() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: true,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
@@ -4631,14 +4649,17 @@ fn track_demand_reports_the_wanted_group() {
 	let demand_cb = Callback::new();
 	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert_eq!(demand_wanted(watcher), None);
+	assert!(!demand_wanted(watcher));
 
-	// The first subscriber of a track with no group wants group 0.
+	// Nobody asks for a group until the first subscriber of a track with none does.
+	let refresh_cb = Callback::new();
+	demand_refresh(watcher, &refresh_cb);
 	let consume = consume_local(broadcast);
 	let first_cb = Callback::new();
 	let first = consume_track(consume, name, &first_cb);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
-	assert_eq!(demand_wanted(watcher), Some(0));
+	assert!(demand_wanted(watcher));
+	assert_eq!(refresh_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
 
 	// A delta after the first frame puts the group past a `refresh` of 0.
 	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
@@ -4649,26 +4670,93 @@ fn track_demand_reports_the_wanted_group() {
 		);
 	}
 
-	// A joiner asks for the next group, and the callback repeats USED to say so.
+	// The group answered the first request, so the next wait lasts until a joiner asks.
+	demand_refresh(watcher, &refresh_cb);
 	let second_cb = Callback::new();
 	let second = consume_track(consume, name, &second_cb);
-	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_WANTED as i32);
-	assert_eq!(demand_wanted(watcher), Some(1));
+	assert_eq!(refresh_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
 
+	// The joiner left the track wanted, so the watcher's next report is the last one leaving.
 	cancel_track(first, &first_cb);
 	cancel_track(second, &second_cb);
 	assert_eq!(demand_cb.recv(), moq_demand::MOQ_DEMAND_UNWANTED as i32);
-	assert_eq!(demand_wanted(watcher), None);
+	assert!(!demand_wanted(watcher));
 
+	// A wait still pending when the track ends reports the watcher's end.
+	demand_refresh(watcher, &refresh_cb);
 	assert_eq!(moq_publish_track_finish(track), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(demand_cb.recv_terminal(), 0);
-	let (mut group, mut present) = (0, false);
+	assert_eq!(refresh_cb.recv_terminal(), 0);
+	let mut wanted = false;
 	assert!(
-		unsafe { moq_publish_demand_wanted(watcher, &mut group, &mut present) } < 0,
+		unsafe { moq_publish_demand_wanted(watcher, &mut wanted) } < 0,
 		"the watcher is gone after its terminal"
 	);
+	assert!(
+		unsafe { moq_publish_demand_refresh(watcher, Some(channel_callback), refresh_cb.ptr) } < 0,
+		"no wait starts on a finished watcher"
+	);
 
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A raw track's refresh fires once the publisher reads the request, and a cancelled one fires
+/// `0` instead.
+#[test]
+fn track_refresh_fires_once_sent() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"track-refresh");
+	let name = b"data";
+	let info = moq_track_info {
+		priority: 0,
+		max_age_us: 0,
+		max_age_unlimited: false,
+		timescale: 0,
+		timescale_present: false,
+		refresh: 0,
+		refresh_present: true,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
+		compression: 0,
+	};
+	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
+	let demand_cb = Callback::new();
+	let watcher = id(unsafe { moq_publish_track_demand(track, Some(channel_callback), demand_cb.ptr) });
+
+	// A delta after the first frame puts the group past a `refresh` of 0. Reading both frames
+	// shows the subscription is live.
+	let consume = consume_local(broadcast);
+	let track_cb = Callback::new();
+	let consumer = consume_track(consume, name, &track_cb);
+	let group = id(unsafe { moq_publish_track_group(track, &micros(0)) });
+	for timestamp_us in [0, 1_000] {
+		assert_eq!(
+			unsafe { moq_publish_group_frame(group, name.as_ptr(), name.len(), &micros(timestamp_us)) },
+			0
+		);
+		assert_eq!(moq_consume_track_frame_free(id(track_cb.recv())), 0);
+	}
+
+	// Nothing reads the demand yet, so a cancelled request is never sent.
+	let refresh_cb = Callback::new();
+	let refresh = id(unsafe { moq_consume_track_refresh(consumer, Some(channel_callback), refresh_cb.ptr) });
+	assert_eq!(moq_consume_track_refresh_cancel(refresh), 0);
+	assert_eq!(refresh_cb.recv(), 0);
+	assert!(moq_consume_track_refresh_cancel(refresh) < 0, "the wait is gone");
+
+	// The publisher reading the request sends it.
+	id(unsafe { moq_consume_track_refresh(consumer, Some(channel_callback), refresh_cb.ptr) });
+	let asked_cb = Callback::new();
+	demand_refresh(watcher, &asked_cb);
+	assert_eq!(asked_cb.recv(), moq_demand::MOQ_DEMAND_REFRESH as i32);
+	assert_eq!(refresh_cb.recv(), moq_refresh::MOQ_REFRESH_SENT as i32);
+
+	cancel_track(consumer, &track_cb);
+	assert_eq!(moq_publish_track_finish(track), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	while demand_cb.recv() > 0 {}
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
@@ -5271,6 +5359,8 @@ fn a_group_request_nobody_reads_is_withdrawn() {
 		timescale_present: false,
 		refresh: 0,
 		refresh_present: false,
+		refresh_interval_us: 0,
+		refresh_interval_present: false,
 		compression: 0,
 	};
 	let track = id(unsafe { moq_publish_track(broadcast, name.as_ptr() as *const c_char, name.len(), &info) });
@@ -8524,8 +8614,7 @@ fn announce_route_crosses_a_relay_session() {
 
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	// Each client first: closed by its peer before it was healthy, it would end on its own.
-	// Its peer gone, the accepted session ends too.
+	// Each client's close ends its accepted session too.
 	for (client, client_cb, accepted, accepted_cb) in [
 		(downstream_client, &downstream_client_cb, downstream, &downstream_cb),
 		(upstream_client, &upstream_client_cb, upstream, &upstream_cb),
@@ -8641,7 +8730,6 @@ fn a_minted_instance_pins_request_and_follow() {
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	// The client first: closed by its peer before it was healthy, it would end on its own.
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 	// Its peer gone, the accepted session ends too, which releases its handle.
@@ -8758,6 +8846,8 @@ fn server_accepts_a_session() {
 	assert_eq!((terminal.failure, terminal.connects), (0, 1));
 	assert!(moq_consume_track_cancel(consumer) < 0, "the consumer ended");
 	assert_eq!(moq_consume_close(consumed), 0);
+	// The server answered the client's credential, so its close leaves the client redialing
+	// rather than ended, and the handle is still there to close.
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 
@@ -8793,9 +8883,9 @@ fn server_rejects_a_session() {
 	assert_eq!(moq_session_request_reject(request, 403), 0);
 	assert!(moq_session_request_free(request) < 0, "reject consumes the request");
 
-	// The rejection closes a session the transport already established, so the client
-	// sees it connect first. Refused before it was healthy, the session then ends with the
-	// rejection rather than redialing, as a refused first dial does.
+	// The rejection closes a session the transport already established. Closed before the
+	// server answered its credential, the session ends with the rejection rather than
+	// redialing, as a refused first dial does.
 	let terminal = client_cb.recv_terminal();
 	let protocol = terminal.protocol.expect("the terminal snapshot names the rejection");
 	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);

@@ -128,7 +128,7 @@ let replacement: Awaited<typeof second.accepted> | undefined;
 try {
 	initial = await first.accepted;
 	const demand = video.demand();
-	while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+	while (!demand.wanted.peek()) await demand.wanted.changed();
 	const group = appendNext(video);
 	group.writeFrame({ payload: new Uint8Array(32), timestamp: Moq.Time.Timestamp.unscaled(group.start) });
 	group.finish();

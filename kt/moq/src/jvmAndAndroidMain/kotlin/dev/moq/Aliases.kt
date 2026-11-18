@@ -267,8 +267,16 @@ typealias Position = uniffi.moq.MoqPosition
 /** Options for fetching one past group by start. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 
-/** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
+/** Delivery settings for a raw track: priority, max age, refresh, timescale, and compression. */
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
+
+/**
+ * When a subscriber asks a track's publisher for a new group, which [TrackDemand.refresh] reports:
+ * a join once the newest group outweighs `ratio` times its first frame (any join when `null`),
+ * waiting out `interval` (`null` for no wait), which caps how often the publisher makes groups
+ * however many subscribers ask. A bare `TrackRefresh()` asks for nothing.
+ */
+typealias TrackRefresh = uniffi.moq.MoqTrackRefresh
 
 /**
  * How a track's frames are compressed on the wire: `Compression.deflate()`, or `null` in
