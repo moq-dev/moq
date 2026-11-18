@@ -147,6 +147,9 @@ its counters run from its start, and its first publish carries them. A reader
 treats each instance as its own set of counters. The instance rides moq-lite 07
 announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.
+A minted instance also changes on every reconnect, so it cannot tell a restart from a
+redial: an aggregating reader treats a minted instance following a minted one as the
+same node and takes a counter going down as the restart.
 An aggregating reader pins each node's subscription to its instance.
 
 Every bucket shares the node's broadcast, so a token scoped to the stats prefix
