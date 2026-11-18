@@ -426,6 +426,18 @@ impl Reader {
 	}
 }
 
+/// Pinned, not endorsed, until [the detour fix](/quest/m2/multicast/detour-resume.md): a relay
+/// whose serving session closes before the detour to the same Instance reaches it, one
+/// round trip later, ends its front. Its reader restarts cleanly onto another Instance
+/// when one serves the path (`other`), and otherwise reads nothing more. The fix makes
+/// each such reader seamless, and each case calling this changes with it.
+pub(super) fn detour_lost(report: &Report, other: bool) -> bool {
+	match other {
+		true => report.clean() && report.runs.len() == 2,
+		false => report.after == 0,
+	}
+}
+
 /// What a reader saw across a failure.
 #[derive(Clone, Debug, Default)]
 pub(super) struct Report {
@@ -554,6 +566,15 @@ pub(super) async fn bloat(pair: &MockPair, peak: Duration) {
 		kio::clock::sleep(peak / STEPS).await;
 	}
 	cut(pair);
+}
+
+/// Each reader's [`Report`] from `since` on, all printed under `case` before any is judged.
+pub(super) fn reports(readers: &mut [Reader], since: kio::clock::Instant, case: &str) -> Vec<Report> {
+	let reports: Vec<_> = readers.iter_mut().map(|reader| reader.report(since)).collect();
+	for (i, report) in reports.iter().enumerate() {
+		measured(&format!("{case}, reader R{i}"), report);
+	}
+	reports
 }
 
 /// Print a case's measurements, which the PR reports.

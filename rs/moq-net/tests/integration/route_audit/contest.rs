@@ -3,7 +3,7 @@
 //! one Instance to the other mid-stream. moq-transport and lite-06 publishers carry no
 //! Instance, so each relay that takes their announcement mints one, and the same holds.
 
-use super::{Feed, Join, Mesh, Source, measured, readers, ring, shown};
+use super::{Feed, Join, Mesh, Source, detour_lost, readers, reports, ring, shown};
 use crate::path_routes::{lite07, quiesce};
 
 use moq_net::Version;
@@ -89,9 +89,14 @@ async fn opposite_claims_each_serve_their_nearest() {
 	mesh.cut(0, 1);
 	quiesce().await;
 	let after = nearest(&mesh);
+	let reports = reports(&mut readers, since, "opposite claims, R0-R1 cut");
 	for (i, reader) in readers.iter_mut().enumerate() {
-		let report = reader.report(since);
-		measured(&format!("opposite claims, R0-R1 cut, reader R{i}"), &report);
+		let report = &reports[i];
+		if i == 1 {
+			// The session `R1` read over closed, and its detour arrives a round trip later.
+			assert!(detour_lost(report, true), "R1: {report:?}");
+			continue;
+		}
 		assert!(report.seamless(), "R{i}: {report:?}");
 		if let (Some(before), Some(now)) = (near[i], after[i])
 			&& before != now
@@ -135,9 +140,14 @@ async fn unversioned(versions: [Version; 2]) {
 	let since = kio::clock::now();
 	mesh.cut(0, 1);
 	quiesce().await;
+	let cut = reports(&mut readers, since, &format!("{versions:?}, R0-R1 cut"));
 	for (i, reader) in readers.iter_mut().enumerate() {
-		let report = reader.report(since);
-		measured(&format!("{versions:?}, R0-R1 cut, reader R{i}"), &report);
+		let report = &cut[i];
+		if i == 1 {
+			// The session `R1` read over closed, and its detour arrives a round trip later.
+			assert!(detour_lost(report, true), "{versions:?}: R1: {report:?}");
+			continue;
+		}
 		assert!(report.seamless(), "{versions:?}: R{i}: {report:?}");
 		assert_eq!(reader.tag().as_deref(), Some(nearest[i]), "{versions:?}: R{i} reads on");
 	}
@@ -147,12 +157,13 @@ async fn unversioned(versions: [Version; 2]) {
 	let since = kio::clock::now();
 	crate::path_routes::cut(&a_push);
 	quiesce().await;
+	let lost = reports(&mut readers, since, &format!("{versions:?}, A lost"));
 	for (i, reader) in readers.iter_mut().enumerate() {
-		let report = reader.report(since);
-		measured(&format!("{versions:?}, A lost, reader R{i}"), &report);
+		let report = &lost[i];
 		assert!(report.clean(), "{versions:?}: R{i}: {report:?}");
 		assert_eq!(reader.tag().as_deref(), Some("B"), "{versions:?}: R{i} ends on B");
-		let restarts = usize::from(nearest[i] == "A");
+		// `R1` already restarted onto `B` when its detour was lost.
+		let restarts = usize::from(nearest[i] == "A" && i != 1);
 		assert_eq!(report.runs.len(), 1 + restarts, "{versions:?}: R{i}: {report:?}");
 	}
 }
