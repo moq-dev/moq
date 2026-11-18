@@ -203,7 +203,7 @@ pub(crate) struct TrackState {
 	datagrams: VecDeque<Datagram>,
 
 	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
-	// cursor to an index into `datagrams` (mirrors `offset` for groups).
+	// cursor to an index into `datagrams`.
 	datagram_offset: usize,
 
 	// The position the next entry of `arrival` takes: positions only grow, so a reader's
