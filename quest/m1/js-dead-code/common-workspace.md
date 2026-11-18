@@ -27,6 +27,17 @@ only existed for the plugin. Package scripts can keep `bun ../common/*.ts`
 paths, since a script path is no import. About 70 references name
 `js/common` or `../common`; change only the imports.
 
+The manifest: `"name": "@moq/common"`, `"private": true`, `"type":
+"module"`, an `exports` map with `./vite-plugin-worklet` and
+`./vite-plugin-libav` pointing at the `.ts` files, and `dependencies` for
+what its files import (`vite`, `rolldown`, `typedoc`, `publint`,
+`@babel/parser`). It gets no `test` script: `sh/js/workspace.py` already runs its five
+`*.test.ts` files on every JS test, since they guard the tooling every
+package uses, and a script would run them twice. `sh/js/workspace.py` keeps
+calling `bun js/common/api.ts` and `bun js/common/deps.ts` by path, so the
+files stay where they are. Adding `js/common` to the root `workspaces` makes
+`selection()` require its `package.json`, which this provides.
+
 ## Related
 
 - [Dead export and manifest sweep](/quest/m1/js-dead-code/sweep.md) - the rest of the manifest fixes

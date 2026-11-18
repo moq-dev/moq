@@ -32,9 +32,12 @@ and `.direnv/`.
 
 Pick by false positives on the configured tree first, then by run time, then
 by config size; the PR body shows the comparison with each tool's version and
-time. Wire it into `just check` scoped as the other JS checks are, so it
-covers only what the branch changed where the tool supports that, and fix
-whatever it finds that the sweep did not.
+time. Wire it into `just check` so it runs whenever the branch changes any
+JS, but always over the whole workspace, not only the selected packages:
+removing the last use of an export in one package leaves it dead in the
+package that defines it, which a branch-scoped run never analyzes. If the
+winner is too slow for that, the PR body says what it adds to `just check`.
+Fix whatever it finds that the sweep did not.
 
 ## Required
 

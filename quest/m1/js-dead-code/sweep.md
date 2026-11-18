@@ -46,7 +46,9 @@ Exports and types nothing outside their file imports (skif 0.9.0, 2026-11-17):
 
 Manifests:
 
-- Unused: `@moq/clock` in `test/stream-credit`, `zod` in
+- Unused: `@moq/clock` and `playwright` in `test/stream-credit` (its
+  `driver.ts` reaches Playwright only through
+  `test/interop/clients/js/harness.ts`, which declares it), `zod` in
   `test/interop/clients/js-native`.
 - Undeclared: `vue` in `doc` (`.vitepress/theme`), `playwright` in js/net,
   js/publish, and js/watch (their benches import it; pin the exact version
@@ -55,10 +57,12 @@ Manifests:
   `bench/browser`, `test/audio-quality/clients/js`,
   `test/interop/clients/js`, `test/interop/clients/js-native`, and
   `test/receive-credit`, whose `check` runs `tsc`.
-- Drift: `demo/vr` takes `vite` `^8.3.6` and `rolldown` `^1.3.0`, as every
-  other workspace does. It was created after the last dependabot group bump.
-  `test/worklet`'s exact `vite` pin is deliberate (its manifest says why),
-  so it stays.
+- Drift: bring `demo/vr` from `vite` `^8.3.5` and `rolldown` `^1.2.16` to
+  `^8.3.6` and `^1.3.0`, as the other workspaces take. It was created after
+  the last dependabot group bump. `test/worklet`'s exact `vite` pin is
+  deliberate (its manifest says why), so it stays. `test/smoke/clients/js`
+  (`vite` `^8.1.5`) is outside the bun workspace and tests the published
+  packages on its own pins, so it is no drift here.
 - Sort the dependency blocks of `demo/web`, `doc/.vitepress/api`,
   `js/watch`, and `test/video`.
 
