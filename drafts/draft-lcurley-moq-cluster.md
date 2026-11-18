@@ -222,12 +222,13 @@ NAMESPACE has no REQUEST_UPDATE, so an endpoint updates one by re-sending it wit
 A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 
 An advertisement lives as long as its stream, so an update on a new stream would leave two streams claiming one namespace.
-An endpoint MUST NOT open a second stream for an advertisement it already maintains on the session.
+An endpoint MUST NOT open a second stream for an advertisement it still maintains on the session; it opens one only after cancelling the first, as below.
 
 An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
 
 An update MUST NOT change the first HOP_PATH entry, the original publisher.
 An endpoint whose best path now starts at another publisher withdraws the advertisement and advertises the new path: it cancels the PUBLISH_NAMESPACE's request stream and sends a new PUBLISH_NAMESPACE on a new one, or sends NAMESPACE_DONE and a new NAMESPACE on the same SUBSCRIBE_NAMESPACE stream.
+The two request streams are not ordered, so a receiver can read the new PUBLISH_NAMESPACE before the old stream's cancellation: it MUST accept the new request rather than treat it as a duplicate, and the old stream's cancellation then withdraws only the old request.
 A receiver MAY close the session with a PROTOCOL_VIOLATION on an update that changes the first entry, or apply it as an ordinary update.
 
 An update is sent whenever the path an endpoint advertises changes: a different best path, or a different cost along it.
@@ -340,7 +341,7 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 - The extension is negotiated when both endpoints declare HOP_ID, and a receiver accepts a RELAY_COST of 0.
 - Removed the warm discount: ROUTE_COST describes the path, and a relay does not lower it for a namespace it carries. Removed the re-parenting tie-break it needed, and the standby seed bounds, which nothing enforced.
 - A namespace names one broadcast whichever publisher serves it, and a publisher MUST NOT reuse one for different content. A receiver MAY fail a subscription over between any of its advertisements, continuing from the first object the subscriber lacks instead of at a group boundary. Replaces the first-Hop-ID publisher identity.
-- An update still never changes the original publisher: the advertisement is withdrawn and made again, and a receiver MAY close the session over an update that changes it.
+- An update still never changes the original publisher: the advertisement is withdrawn and made again, a receiver accepts the new PUBLISH_NAMESPACE even when it overtakes the old stream's cancellation, and a receiver MAY close the session over an update that changes the first entry.
 - Defined request resolution against the longest covering prefix; every refusal is terminal, including between several publishers of one namespace, and capacity is signaled only by withdrawing or re-pricing the advertisement.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
 - Path selection ranks a session that sent GOAWAY last and breaks ties by a hash of the namespace and path before recency.
