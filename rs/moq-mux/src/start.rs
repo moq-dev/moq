@@ -62,16 +62,19 @@ pub(crate) fn opens(track: &moq_net::track::Producer, timestamp: moq_net::Timest
 		.then_some(start.value()))
 }
 
-/// [`opens`], refusing a start that doesn't pass the newest with
-/// [`TimestampRewind`](crate::container::TimestampRewind).
-pub(crate) fn after(track: &moq_net::track::Producer, timestamp: moq_net::Timestamp) -> crate::Result<u64> {
-	match of(track, timestamp)? {
+/// The rewind refusing a group at `timestamp` on `track`, when that doesn't pass the newest
+/// start: [`opens`] returned `None` and no open group can take the frame instead.
+pub(crate) fn rewind(
+	track: &moq_net::track::Producer,
+	timestamp: moq_net::Timestamp,
+) -> crate::Result<Option<crate::container::TimestampRewind>> {
+	Ok(match of(track, timestamp)? {
 		(start, scale, Some(newest)) if start.value() <= newest => {
 			let floor = moq_net::Timestamp::new(newest, scale).unwrap_or(start);
-			Err(crate::container::TimestampRewind { timestamp, floor }.into())
+			Some(crate::container::TimestampRewind { timestamp, floor })
 		}
-		(start, _, _) => Ok(start.value()),
-	}
+		_ => None,
+	})
 }
 
 /// Where a group ends whole on `track` when its content stops at `timestamp`: `timestamp` in the

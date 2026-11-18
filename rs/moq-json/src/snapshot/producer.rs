@@ -416,8 +416,10 @@ impl<T: Serialize> Inner<T> {
 		// Split the borrow so `frame` can hold the encoder while `track` is written through.
 		let Inner { track, encoder, .. } = self;
 
-		let Some(frame) = encoder.update(value)? else {
-			return Ok(None);
+		let frame = match encoder.update(value)? {
+			super::Update::Frame(frame) => frame,
+			super::Update::Unchanged => return Ok(None),
+			super::Update::TooLarge => return Err(moq_net::Error::FrameTooLarge.into()),
 		};
 
 		// A failed write drops `frame` uncommitted, which resets the encoder so the next update
@@ -456,8 +458,10 @@ impl<T: Serialize> Inner<T> {
 			return refresh.park(waiter);
 		}
 		// A group was written, so a value was encoded and there is one to restate.
-		let Some(frame) = encoder.snapshot()? else {
-			return std::task::Poll::Pending;
+		let frame = match encoder.snapshot()? {
+			super::Update::Frame(frame) => frame,
+			super::Update::Unchanged => return std::task::Poll::Pending,
+			super::Update::TooLarge => return std::task::Poll::Ready(Err(moq_net::Error::FrameTooLarge.into())),
 		};
 		track.write(at, &frame)?;
 		frame.commit();

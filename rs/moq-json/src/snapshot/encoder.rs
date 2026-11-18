@@ -68,8 +68,9 @@ pub struct Config {
 
 	/// The most bytes a group may hold, snapshot and deltas together.
 	///
-	/// A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it is refused
-	/// with [`FrameTooLarge`](moq_net::Error::FrameTooLarge). Lowering it lets a test reach the limit
+	/// A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it is refused:
+	/// [`Update::TooLarge`] from the [`Encoder`], [`FrameTooLarge`](moq_net::Error::FrameTooLarge)
+	/// from the [`Producer`](super::Producer). Lowering it lets a test reach the limit
 	/// without megabytes of JSON; a value above 32 MiB, what moq-net's group cache holds, is clamped
 	/// to it.
 	///
@@ -121,9 +122,33 @@ pub struct Encoded {
 	pub keyframe: bool,
 }
 
+/// What [`Encoder::update`] or [`Encoder::snapshot`] made of a value.
+#[must_use = "a frame must be written and committed, and a refused value handled"]
+pub enum Update<'a, T> {
+	/// Nothing to write: the value is unchanged, or there is no value yet to restate.
+	Unchanged,
+	/// A frame to write, then [`commit`](Pending::commit).
+	Frame(Pending<'a, T>),
+	/// The value's snapshot is past [`Config::max_group_bytes`]. Refused before anything changed,
+	/// so the encoder still holds the previous value, and nothing was published to supersede it.
+	TooLarge,
+}
+
+#[cfg(test)]
+impl<'a, T> Update<'a, T> {
+	/// The frame, or `None` when unchanged: for tests whose values always fit the budget.
+	pub(crate) fn pending(self) -> Option<Pending<'a, T>> {
+		match self {
+			Self::Unchanged => None,
+			Self::Frame(frame) => Some(frame),
+			Self::TooLarge => panic!("the value is past the group budget"),
+		}
+	}
+}
+
 /// An encoded frame the caller has not yet acknowledged writing.
 ///
-/// Returned by [`Encoder::update`]. Read [`payload`](Encoded::payload) and
+/// Returned in [`Update::Frame`]. Read [`payload`](Encoded::payload) and
 /// [`keyframe`](Encoded::keyframe) through the [`Deref`](std::ops::Deref) to [`Encoded`], write the
 /// frame, then [`commit`](Self::commit).
 ///
@@ -139,6 +164,13 @@ pub struct Pending<'a, T> {
 	encoder: &'a mut Encoder<T>,
 	encoded: Encoded,
 	edit: Option<Edit>,
+}
+
+/// What [`Encoder::encode`] staged: [`Update`] before it borrows the encoder for a [`Pending`].
+enum Staged {
+	Unchanged,
+	Frame(Encoded, Edit),
+	TooLarge,
 }
 
 /// The baseline change staged behind a [`Pending`] frame.
@@ -283,19 +315,22 @@ impl<T> Encoder<T> {
 	/// For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
 	/// [`Demand::wanted`](moq_net::track::Demand::wanted) passes the largest group written. The new
 	/// group restates the value without the deltas before it, though that joiner still reads the
-	/// cached group first. Returns `None` before the first value,
-	/// when there is nothing to restate. The frame is a [`Pending`] like any other.
-	pub fn snapshot(&mut self) -> Result<Option<Pending<'_, T>>> {
+	/// cached group first. [`Unchanged`](Update::Unchanged) before the first value, when there is
+	/// nothing to restate, and [`TooLarge`](Update::TooLarge) when deltas grew the value past the
+	/// group budget. The frame is a [`Pending`] like any other.
+	pub fn snapshot(&mut self) -> Result<Update<'_, T>> {
 		let bytes = match &self.last {
-			None => return Ok(None),
+			None => return Ok(Update::Unchanged),
 			// A delta-free baseline is the emitted bytes already.
 			Some(Baseline::Encoded { bytes, .. }) => bytes.clone(),
 			Some(Baseline::Parsed(value)) => Bytes::from(serde_json::to_vec(value)?),
 		};
 		// A baseline built by patches was never held to the budget as one snapshot.
-		self.check_snapshot(&bytes)?;
+		if !self.fits(&bytes) {
+			return Ok(Update::TooLarge);
+		}
 		let encoded = self.snapshot_encoded(bytes);
-		Ok(Some(Pending {
+		Ok(Update::Frame(Pending {
 			encoder: self,
 			encoded,
 			edit: Some(Edit::Restate),
@@ -325,7 +360,7 @@ impl<T> Encoder<T> {
 	}
 
 	/// Encode an already-serialized value as a full snapshot, staging it as the new baseline.
-	fn snapshot_staged(&mut self, snapshot: Bytes) -> Result<(Encoded, Edit)> {
+	fn snapshot_staged(&mut self, snapshot: Bytes) -> Result<Staged> {
 		// With deltas possible, read the baseline back out of those same bytes rather than
 		// serializing `value` a second time, so the baseline IS the emitted snapshot by
 		// construction. A `Serialize` impl reading a clock or interior mutable state would otherwise
@@ -340,7 +375,9 @@ impl<T> Encoder<T> {
 		// Every fallible step runs before any state changes, so a failure leaves the encoder exactly
 		// as it was rather than half-advanced with no frame to show for it. The size check runs
 		// first, so a value no reader could hold costs no parse.
-		self.check_snapshot(&snapshot)?;
+		if !self.fits(&snapshot) {
+			return Ok(Staged::TooLarge);
+		}
 		let last = if self.config.deltas {
 			Baseline::Parsed(serde_json::from_slice(&snapshot)?)
 		} else {
@@ -353,16 +390,14 @@ impl<T> Encoder<T> {
 		};
 
 		let encoded = self.snapshot_encoded(snapshot);
-		Ok((encoded, Edit::Snapshot(last)))
+		Ok(Staged::Frame(encoded, Edit::Snapshot(last)))
 	}
 
-	/// Refuse a snapshot past the group budget before anything is published, so the previous value
-	/// stays readable rather than superseded by a frame moq-net would refuse on write.
-	fn check_snapshot(&self, snapshot: &[u8]) -> Result<()> {
-		match snapshot.len() as u64 > self.max_group_bytes {
-			true => Err(moq_net::Error::FrameTooLarge.into()),
-			false => Ok(()),
-		}
+	/// Whether a snapshot fits the group budget. One that doesn't is refused before anything is
+	/// published, so the previous value stays readable rather than superseded by a frame moq-net
+	/// would refuse on write.
+	fn fits(&self, snapshot: &[u8]) -> bool {
+		snapshot.len() as u64 <= self.max_group_bytes
 	}
 
 	/// Encode an already-serialized value as a full snapshot, opening a new group.
@@ -381,27 +416,34 @@ impl<T> Encoder<T> {
 impl<T: Serialize> Encoder<T> {
 	/// Encode a new value, as a snapshot or a delta.
 	///
-	/// Returns `None` when the value is unchanged from the last one committed, so nothing needs to be
-	/// written. Otherwise the frame comes back as a [`Pending`] the caller writes and then
+	/// [`Unchanged`](Update::Unchanged) when the value matches the last one committed, so nothing
+	/// needs to be written, and [`TooLarge`](Update::TooLarge) when its snapshot is past the group
+	/// budget. Otherwise the frame comes back as a [`Pending`] the caller writes and then
 	/// [`commit`](Pending::commit)s; dropping it uncommitted resynchronizes the encoder.
-	pub fn update(&mut self, value: &T) -> Result<Option<Pending<'_, T>>> {
-		Ok(self.encode(value)?.map(|(encoded, edit)| Pending {
-			encoder: self,
-			encoded,
-			edit: Some(edit),
-		}))
+	///
+	/// Errors only when the value can't be serialized, or repeats a key within an object.
+	pub fn update(&mut self, value: &T) -> Result<Update<'_, T>> {
+		Ok(match self.encode(value)? {
+			Staged::Unchanged => Update::Unchanged,
+			Staged::Frame(encoded, edit) => Update::Frame(Pending {
+				encoder: self,
+				encoded,
+				edit: Some(edit),
+			}),
+			Staged::TooLarge => Update::TooLarge,
+		})
 	}
 
 	/// Encode a new value into a bare frame and the baseline change it stages, advancing the group.
 	///
 	/// The state change is what [`Pending`] guards, so this stays private: every caller goes through
 	/// [`update`](Self::update) and has to say whether the frame reached the wire.
-	fn encode(&mut self, value: &T) -> Result<Option<(Encoded, Edit)>> {
+	fn encode(&mut self, value: &T) -> Result<Staged> {
 		// A lost frame, or a group the caller cut, leaves the consumer's state unknown. Re-seed with a
 		// full snapshot even when the value is unchanged, since the frame that carried it may never
 		// have landed.
 		if self.resync {
-			return self.encode_snapshot(value).map(Some);
+			return self.encode_snapshot(value);
 		}
 
 		// With deltas disabled there is nothing to diff, so the only question is whether the value
@@ -412,14 +454,14 @@ impl<T: Serialize> Encoder<T> {
 			let bytes = bytes.clone();
 			let next = serde_json::to_vec(value)?;
 			if next.as_slice() == bytes.as_ref() {
-				return Ok(None);
+				return Ok(Staged::Unchanged);
 			}
-			return self.snapshot_staged(Bytes::from(next)).map(Some);
+			return self.snapshot_staged(Bytes::from(next));
 		}
 
 		// The first update has no baseline to diff against, so it seeds the stream with a snapshot.
 		let Some(Baseline::Parsed(last)) = self.last.as_ref() else {
-			return self.encode_snapshot(value).map(Some);
+			return self.encode_snapshot(value);
 		};
 
 		// Diff without building a full `Value` for the new value first. `T` is written with the same
@@ -432,13 +474,13 @@ impl<T: Serialize> Encoder<T> {
 		// An empty object patch with no forced null means the value is unchanged: encode nothing.
 		if !forced_snapshot && patch.is_empty() {
 			self.scratch.get_mut().commit_memo();
-			return Ok(None);
+			return Ok(Staged::Unchanged);
 		}
 
 		// A forced snapshot (a genuine null, or a non-object root) or a full group starts a
 		// new group; otherwise the change rides as a delta in the open one.
 		if forced_snapshot || !self.delta_allowed() {
-			return self.encode_snapshot(value).map(Some);
+			return self.encode_snapshot(value);
 		}
 
 		// A delta is only readable while the group still holds the snapshot it applies to.
@@ -449,7 +491,7 @@ impl<T: Serialize> Encoder<T> {
 		let charge = payload.len() as u64;
 		if self.group_bytes + charge > self.max_group_bytes {
 			self.reset();
-			return self.encode_snapshot(value).map(Some);
+			return self.encode_snapshot(value);
 		}
 
 		self.group_bytes += charge;
@@ -461,7 +503,7 @@ impl<T: Serialize> Encoder<T> {
 			payload: payload.clone(),
 			keyframe: false,
 		};
-		Ok(Some((encoded, Edit::Delta(payload))))
+		Ok(Staged::Frame(encoded, Edit::Delta(payload)))
 	}
 
 	/// Whether the current change may ride as a delta in the open group: deltas are on and the group
@@ -471,7 +513,7 @@ impl<T: Serialize> Encoder<T> {
 	}
 
 	/// Encode a full snapshot of `value`, opening a new group and staging it as the baseline.
-	fn encode_snapshot(&mut self, value: &T) -> Result<(Encoded, Edit)> {
+	fn encode_snapshot(&mut self, value: &T) -> Result<Staged> {
 		// Serialize directly from `value` so the snapshot frame preserves the type's own field order,
 		// keeping the wire bytes identical to serializing `T` straight to a frame.
 		let snapshot = serde_json::to_vec(value)?;
@@ -599,7 +641,7 @@ mod test {
 					}
 					if step.restate {
 						let previous = decoder.decode().unwrap();
-						match encoder.snapshot().unwrap() {
+						match encoder.snapshot().unwrap().pending() {
 							Some(frame) => {
 								prop_assert!(frame.keyframe);
 								decoder.snapshot(&frame.payload).unwrap();
@@ -609,7 +651,7 @@ mod test {
 						}
 						prop_assert_eq!(decoder.decode().unwrap(), previous, "restate before step {}", index);
 					}
-					if let Some(frame) = encoder.update(&step.value).unwrap() {
+					if let Some(frame) = encoder.update(&step.value).unwrap().pending() {
 						if frame.keyframe {
 							decoder.snapshot(&frame.payload).unwrap();
 						} else {
@@ -645,6 +687,7 @@ mod test {
 		encoder
 			.update(&Duplicate { duplicate: false })
 			.unwrap()
+			.pending()
 			.unwrap()
 			.commit();
 		let err = encoder.update(&Duplicate { duplicate: true }).err().expect("refused");
@@ -657,7 +700,7 @@ mod test {
 		let mut encoder = Encoder::<Value>::new(config);
 		let mut out = Vec::new();
 		for value in values {
-			if let Some(frame) = encoder.update(value).unwrap() {
+			if let Some(frame) = encoder.update(value).unwrap().pending() {
 				out.push((frame.keyframe, frame.payload.len()));
 				frame.commit();
 			}
@@ -667,7 +710,7 @@ mod test {
 
 	/// Encode one value and commit it, returning the frame.
 	fn commit(encoder: &mut Encoder<Value>, value: &Value) -> Option<Encoded> {
-		let frame = encoder.update(value).unwrap()?;
+		let frame = encoder.update(value).unwrap().pending()?;
 		let encoded = Encoded {
 			payload: frame.payload.clone(),
 			keyframe: frame.keyframe,
@@ -718,12 +761,15 @@ mod test {
 	fn snapshot_restates_the_retained_value() {
 		for deltas in [true, false] {
 			let mut encoder = Encoder::<Value>::new(Config::default().with_deltas(deltas));
-			assert!(encoder.snapshot().unwrap().is_none(), "nothing to restate yet");
+			assert!(
+				encoder.snapshot().unwrap().pending().is_none(),
+				"nothing to restate yet"
+			);
 
 			commit(&mut encoder, &json!({ "a": 1 })).unwrap();
 			commit(&mut encoder, &json!({ "a": 2 })).unwrap();
 
-			let frame = encoder.snapshot().unwrap().unwrap();
+			let frame = encoder.snapshot().unwrap().pending().unwrap();
 			assert!(frame.keyframe);
 			let mut decoder = super::super::Decoder::<Value>::new(super::super::consumer::Config::default());
 			decoder.snapshot(&frame.payload).unwrap();
@@ -745,7 +791,7 @@ mod test {
 	fn an_uncommitted_snapshot_resynchronizes() {
 		let mut encoder = Encoder::<Value>::new(Config::default());
 		commit(&mut encoder, &json!({ "a": 1 })).unwrap();
-		drop(encoder.snapshot().unwrap().unwrap());
+		drop(encoder.snapshot().unwrap().pending().unwrap());
 		assert!(commit(&mut encoder, &json!({ "a": 2 })).unwrap().keyframe);
 	}
 
@@ -853,7 +899,7 @@ mod test {
 		commit(&mut encoder, &json!({ "a": 2 })).unwrap();
 
 		// This one fails to write, so the caller drops it without committing.
-		drop(encoder.update(&json!({ "a": 3 })).unwrap().expect("a delta"));
+		drop(encoder.update(&json!({ "a": 3 })).unwrap().pending().expect("a delta"));
 
 		// The next value opens a new group with a full snapshot rather than patching a state the
 		// consumer never reached.
@@ -871,7 +917,13 @@ mod test {
 	#[test]
 	fn an_uncommitted_first_frame_is_reencoded() {
 		let mut encoder = Encoder::<Value>::new(Config::default());
-		drop(encoder.update(&json!({ "a": 1 })).unwrap().expect("a snapshot"));
+		drop(
+			encoder
+				.update(&json!({ "a": 1 }))
+				.unwrap()
+				.pending()
+				.expect("a snapshot"),
+		);
 
 		let retried = commit(&mut encoder, &json!({ "a": 1 })).expect("the same value, re-encoded");
 		assert!(retried.keyframe);
@@ -925,10 +977,7 @@ mod test {
 			let config = Config::default().with_deltas(deltas).with_max_group_bytes(100);
 			let mut encoder = Encoder::<Value>::new(config);
 			assert!(
-				matches!(
-					encoder.update(&json!({ "v": "x".repeat(1000) })),
-					Err(crate::Error::Net(moq_net::Error::FrameTooLarge))
-				),
+				matches!(encoder.update(&json!({ "v": "x".repeat(1000) })), Ok(Update::TooLarge)),
 				"deltas {deltas}"
 			);
 			assert!(
@@ -970,7 +1019,7 @@ mod test {
 		let value = Ticking(std::cell::Cell::new(0));
 		let mut encoder = Encoder::<Ticking>::new(Config::default());
 		let payload = {
-			let frame = encoder.update(&value).unwrap().expect("a snapshot");
+			let frame = encoder.update(&value).unwrap().pending().expect("a snapshot");
 			let payload = frame.payload.clone();
 			frame.commit();
 			payload
@@ -990,9 +1039,9 @@ mod test {
 	fn a_delta_serializes_each_entry_once() {
 		let value = std::collections::BTreeMap::from([("row", Ticking(std::cell::Cell::new(0)))]);
 		let mut encoder = Encoder::new(Config::default().with_deltas(true));
-		encoder.update(&value).unwrap().expect("a snapshot").commit();
+		encoder.update(&value).unwrap().pending().expect("a snapshot").commit();
 
-		let frame = encoder.update(&value).unwrap().expect("a delta");
+		let frame = encoder.update(&value).unwrap().pending().expect("a delta");
 		assert!(!frame.keyframe);
 		let emitted: Value = serde_json::from_slice(&frame.payload).unwrap();
 		frame.commit();
@@ -1051,14 +1100,17 @@ mod test {
 
 		// A new entry: the first diff after a snapshot has nothing memoized yet.
 		let mut encoder = Encoder::<Doc>::new(config.clone());
-		encoder.update(&plain).unwrap().expect("a snapshot").commit();
+		encoder.update(&plain).unwrap().pending().expect("a snapshot").commit();
 		let err = encoder.update(&repeat).err().expect("refused");
 		assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
 
 		// A memoized entry whose scalar becomes an object.
 		let mut encoder = Encoder::<Doc>::new(config);
-		encoder.update(&plain).unwrap().expect("a snapshot").commit();
-		assert!(encoder.update(&plain).unwrap().is_none(), "unchanged, now memoized");
+		encoder.update(&plain).unwrap().pending().expect("a snapshot").commit();
+		assert!(
+			encoder.update(&plain).unwrap().pending().is_none(),
+			"unchanged, now memoized"
+		);
 		let err = encoder.update(&repeat).err().expect("refused");
 		assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
 	}
@@ -1170,12 +1222,12 @@ mod test {
 				}
 
 				let value = Rows(rows.clone());
-				let want = plain.update(&value).unwrap().map(|frame| {
+				let want = plain.update(&value).unwrap().pending().map(|frame| {
 					let encoded = (*frame).clone();
 					frame.commit();
 					encoded
 				});
-				let got = memoized.update(&value).unwrap().map(|frame| {
+				let got = memoized.update(&value).unwrap().pending().map(|frame| {
 					let encoded = (*frame).clone();
 					frame.commit();
 					encoded
@@ -1216,7 +1268,7 @@ mod test {
 		assert_eq!(encoder.value(), Some(&json!({ "a": 1, "b": 2 })));
 
 		// A frame that never reached the wire leaves the value at the last one that did.
-		drop(encoder.update(&json!({ "a": 1, "b": 3 })).unwrap());
+		drop(encoder.update(&json!({ "a": 1, "b": 3 })).unwrap().pending());
 		assert_eq!(encoder.value(), Some(&json!({ "a": 1, "b": 2 })));
 	}
 }

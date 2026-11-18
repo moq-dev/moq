@@ -172,7 +172,7 @@ mod test {
 
 		let mut out = Vec::new();
 		for value in values {
-			let Some(frame) = encoder.update(value).unwrap() else {
+			let Some(frame) = encoder.update(value).unwrap().pending() else {
 				continue;
 			};
 			match frame.keyframe {
@@ -267,10 +267,10 @@ mod test {
 		for n in 0..=2 * MAX_DELTA_FRAMES {
 			let value = json!({ "n": n });
 			let frame = if n == restate {
-				encoder.update(&value).unwrap().unwrap().commit();
-				encoder.snapshot().unwrap().unwrap()
+				encoder.update(&value).unwrap().pending().unwrap().commit();
+				encoder.snapshot().unwrap().pending().unwrap()
 			} else {
-				encoder.update(&value).unwrap().unwrap()
+				encoder.update(&value).unwrap().pending().unwrap()
 			};
 			if frame.keyframe {
 				keyframes += 1;
@@ -311,7 +311,7 @@ mod test {
 		let mut decoder = Decoder::<Value>::new(ConsumerConfig::default());
 
 		for n in 0..=20 {
-			let frame = encoder.update(&json!({ "n": n })).unwrap().unwrap();
+			let frame = encoder.update(&json!({ "n": n })).unwrap().pending().unwrap();
 			match frame.keyframe {
 				true => decoder.snapshot(&frame.payload).unwrap(),
 				false => decoder.delta(&frame.payload).unwrap(),

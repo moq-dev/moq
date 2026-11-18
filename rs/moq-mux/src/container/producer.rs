@@ -639,8 +639,17 @@ where
 		Ok(())
 	}
 
-	/// Check `timestamp` against the group starts, and open a group for a keyframe.
-	fn prepare(&mut self, timestamp: moq_net::Timestamp, keyframe: bool) -> crate::Result<()> {
+	/// The [`TimestampRewind`](super::TimestampRewind) a frame at `timestamp` would be refused
+	/// with, or `None` when [`write`](Self::write) or [`open`](Self::open) takes it.
+	///
+	/// Group starts never go backwards: a keyframe below the start of the previous group, or any
+	/// frame below the start of the group before its own, rewinds. So does a keyframe that doesn't
+	/// start after every group the track holds while no group is open to continue.
+	pub(crate) fn rewind(
+		&self,
+		timestamp: moq_net::Timestamp,
+		keyframe: bool,
+	) -> crate::Result<Option<super::TimestampRewind>> {
 		let floor = match keyframe {
 			true => self.start,
 			false => self.floor,
@@ -648,18 +657,29 @@ where
 		if let Some(floor) = floor
 			&& timestamp_lt(timestamp, floor)
 		{
-			return Err(super::TimestampRewind { timestamp, floor }.into());
+			return Ok(Some(super::TimestampRewind { timestamp, floor }));
+		}
+		match keyframe && self.pending_start.is_none() && self.group.is_none() {
+			true => crate::start::rewind(&self.inner, timestamp),
+			false => Ok(None),
+		}
+	}
+
+	/// Check `timestamp` against the group starts, and open a group for a keyframe.
+	fn prepare(&mut self, timestamp: moq_net::Timestamp, keyframe: bool) -> crate::Result<()> {
+		if let Some(rewind) = self.rewind(timestamp, keyframe)? {
+			return Err(rewind.into());
 		}
 
 		// A keyframe opens a group keyed by its timestamp, which has to start after every group the
 		// track holds. One that doesn't, such as parameter sets and the picture they precede written
-		// as two keyframes at one timestamp, continues the open group instead. With none open it is
-		// refused, before anything changes.
+		// as two keyframes at one timestamp, continues the open group instead. With none open it
+		// rewound, refused above before anything changes.
 		let start = match keyframe && self.pending_start.is_none() {
 			true => match (crate::start::opens(&self.inner, timestamp)?, &self.group) {
 				(Some(start), _) => Some(start),
 				(None, Some(_)) => return Ok(()),
-				(None, None) => Some(crate::start::after(&self.inner, timestamp)?),
+				(None, None) => unreachable!("a start that doesn't pass the newest rewinds"),
 			},
 			false => None,
 		};

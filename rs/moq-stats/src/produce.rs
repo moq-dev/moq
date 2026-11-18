@@ -528,11 +528,11 @@ impl<T: Serialize> Snapshot<T> {
 		{
 			self.encoder.reset();
 		}
-		let frame = match self.encoder.update(value) {
-			Ok(Some(frame)) => frame,
-			Ok(None) => return Ok(None),
+		let frame = match self.encoder.update(value)? {
+			moq_json::snapshot::Update::Frame(frame) => frame,
+			moq_json::snapshot::Update::Unchanged => return Ok(None),
 			// The encoder refuses a frame past the group budget before anything is written.
-			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
+			moq_json::snapshot::Update::TooLarge => {
 				let err = moq_net::Error::FrameTooLarge;
 				if let Some(group) = self.group.take() {
 					let _ = group.abort(err.clone());
@@ -540,7 +540,6 @@ impl<T: Serialize> Snapshot<T> {
 				let _ = self.track.clone().abort(err.clone());
 				return Err(err.into());
 			}
-			Err(err) => return Err(err),
 		};
 		let len = frame.payload.len();
 		let timestamp = stamp.timestamp;

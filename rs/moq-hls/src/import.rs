@@ -745,18 +745,17 @@ impl TrackState {
 			};
 			evict = true;
 			if let Err(err) = importer.decode(&chunk) {
-				break Err(match err {
-					// Timestamp resets are unsupported: the published tracks never rewind, and no
-					// later pass can import this segment, so it is refused rather than retried.
-					moq_mux::Error::TimestampRewind(_)
-					| moq_mux::Error::Cmaf(moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }) => {
+				// Timestamp resets are unsupported: the published tracks never rewind, and no later
+				// pass can import this segment, so it is refused rather than retried.
+				break Err(match importer.rewound() {
+					true => {
 						evict = false;
 						Error::Rewind {
 							rendition: self.label.clone(),
 							source: err,
 						}
 					}
-					err => err.into(),
+					false => err.into(),
 				});
 			}
 		};
