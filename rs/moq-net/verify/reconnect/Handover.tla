@@ -20,8 +20,9 @@
 (* one it refuses, no retry window, no tokens, not connecting once, and no *)
 (* redirect-loop scoring. A session's age stands in for its tenure: 1 is   *)
 (* past `Backoff::healthy`. Until a session has been established, which   *)
-(* takes one past that bar or a GOAWAY, a failed dial or a closed session *)
-(* ends the policy (`Reconnect::established`).                             *)
+(* takes the peer accepting its credential or a GOAWAY, or on a silent     *)
+(* version (moq-lite 03/04, no answer) one past that bar, a failed dial or *)
+(* a closed session ends the policy (`Reconnect::established`).            *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -59,7 +60,7 @@ VARIABLES
     started,   \* `Presence::sessions_started`
     ended,     \* `Presence::sessions_ended`
     misdials,  \* 1 once a dial went elsewhere than an unheeded redirect named
-    established \* `Reconnect::established`: a session stayed up past the healthy bar or got a GOAWAY
+    established \* `Reconnect::established`: a session was reported established
 
 policyVars == <<phase, live, watch, probe, pred, target, queue, sess, used, timer,
                 dial, dialTo, misdials>>
@@ -71,11 +72,16 @@ vars == <<policyVars, callerVars, lifeVars>>
 \* "abort" for `Session::abort`, "drain" for a `start_close` that finished),
 \* whether a `start_close` began, the GOAWAY it got, its age, whether it
 \* carries no subscription or fetch, whether the policy acted on its GOAWAY,
-\* whether we sent our own, and whether the policy watches its GOAWAY as the
-\* predecessor (`Predecessor::redirect`, set when a probe moved us off it).
+\* whether we sent our own, whether the policy watches its GOAWAY as the
+\* predecessor (`Predecessor::redirect`, set when a probe moved us off it),
+\* whether the peer accepted its credential (`Session::poll_accepted`), which a
+\* close leaves as it was, whether its version never answers the credential
+\* (`Session::is_silent`), and whether the policy reported it established
+\* (`Live::established`), the only point a caller serves it from.
 Fresh(e) == [ep |-> e, open |-> TRUE, by |-> "", closing |-> FALSE,
              goaway |-> NoGoaway, age |-> 0, idle |-> FALSE, heeded |-> FALSE,
-             sent |-> FALSE, watched |-> FALSE]
+             sent |-> FALSE, watched |-> FALSE, accepted |-> FALSE, silent |-> FALSE,
+             served |-> FALSE]
 Unused == [Fresh(Start) EXCEPT !.open = FALSE]
 
 Timers == {"dial", "backoff", "probe", "handover"}
@@ -112,6 +118,16 @@ Abort(sx, s) == IF s # None /\ sx[s].open
 (* The caller's side: what `run` does with each action. `p` is the policy's *)
 (* predecessor once the pass ends, which `Reconnect::predecessor` reads.    *)
 (***************************************************************************)
+
+\* `Action::Established`: `Shared::connected` with the live session `s`.
+OnEstablished(s) ==
+    /\ ended' = IF lc = "live" THEN ended + 1 ELSE ended
+    /\ spred' = IF lc \in {"live", "offline"} THEN spred ELSE None
+    /\ started' = started + 1
+    /\ lc' = "live"
+    /\ lcSess' = s
+    /\ migrating' = FALSE
+    /\ UNCHANGED probing
 
 \* `Shared::predecessor`.
 Mirror(p) == spred' = IF lc \in {"live", "offline"} THEN p ELSE spred
@@ -155,8 +171,11 @@ OnDone ==
     /\ probing' = FALSE
     /\ UNCHANGED started
 
+\* `p` is the predecessor, or for `Established` the session the action carries,
+\* which a GOAWAY in the same pass already moved out of the live slot.
 Apply(a, p) ==
-    CASE a = "Migrating" -> OnMigrating(p)
+    CASE a = "Established" -> OnEstablished(p)
+      [] a = "Migrating" -> OnMigrating(p)
       [] a = "Retired" -> OnRetired
       [] a = "Offline" -> OnOffline
       [] a = "Done" -> OnDone
@@ -186,6 +205,15 @@ Pop ==
                    dial, dialTo, misdials>>
     /\ UNCHANGED lifeVars
 
+\* A replacement serves only once established: until then it may be a refusal.
+Serving == phase = "live" /\ sess[live].served
+
+\* The live session is due its `Action::Established`, which `poll` returns
+\* before reading its GOAWAY or close.
+\* Uptime stands in for the peer's answer only on a version that has none.
+Healthy(s) == sess[s].silent /\ sess[s].age >= 1
+EstablishDue == phase = "live" /\ ~sess[live].served /\ (sess[live].accepted \/ Healthy(live))
+
 \* The predecessor closed or overstayed its handover: `Predecessor::poll`.
 PredDue == pred # None /\ (~sess[pred].open \/ timer["handover"])
 
@@ -194,7 +222,7 @@ Retire ==
     /\ PredDue
     /\ sess' = Abort(sess, pred)
     /\ pred' = None
-    /\ Emit(IF phase = "live" THEN <<"Retired">> ELSE <<"Retired", "Offline">>, None)
+    /\ Emit(IF Serving THEN <<"Retired">> ELSE <<"Retired", "Offline">>, None)
     /\ UNCHANGED <<phase, live, watch, probe, target, used, timer, dial, dialTo,
                    misdials>>
     /\ UNCHANGED lifeVars
@@ -205,7 +233,7 @@ Retire ==
 IdleClose ==
     /\ queue = <<>>
     /\ ~PredDue
-    /\ phase = "live"
+    /\ Serving
     /\ pred # None
     /\ sess[pred].idle
     /\ ~sess[pred].closing
@@ -252,8 +280,8 @@ FollowPred ==
             /\ UNCHANGED <<phase, target, timer, dial, probing>>
     /\ UNCHANGED <<live, watch, probe, pred, queue, used, dialTo, misdials,
                    lc, lcSess, migrating, spred, started, ended>>
-    \* Its GOAWAY establishes the policy, as one off the live session does.
-    /\ established' = TRUE
+    \* Only an established session is probed, so the policy already is.
+    /\ UNCHANGED established
 
 \* `Phase::Next`: ask for a dial.
 Dial ==
@@ -309,35 +337,40 @@ BackoffEnds ==
 \* `Reconnect::end` for a GOAWAY naming `uri` off the live session `s`. The
 \* GOAWAY establishes the policy however soon it came, as `Reconnect::poll` does
 \* on its receipt: the peer accepted the session, which a refusal never does.
+\* A session not yet reported established is, first.
 EndGoaway(s, uri) ==
+    LET first == IF sess[s].served THEN <<>> ELSE <<"Established">> IN
     IF uri = Refused
     THEN \* A refused redirect is terminal.
          /\ Done
-         /\ Emit(<<"Done">>, None)
+         /\ Emit(first \o <<"Done">>, s)
          /\ established' = TRUE
-         /\ UNCHANGED <<sess, watch, probe, target, timer>>
+         /\ sess' = [sess EXCEPT ![s].served = TRUE]
+         /\ UNCHANGED <<watch, probe, target, timer>>
     ELSE /\ established' = TRUE
          /\ target' = IF uri = "" THEN target ELSE uri
          \* An older predecessor is retired outright, with no `Retired`.
-         /\ sess' = [Abort(sess, pred) EXCEPT ![s].heeded = TRUE]
+         /\ sess' = [Abort(sess, pred) EXCEPT ![s].heeded = TRUE, ![s].served = TRUE]
          /\ pred' = s
          /\ live' = None
          \* A healthy session hands over at once; one that drained too soon backs off.
          /\ phase' = IF sess[s].age >= 1 THEN "start" ELSE "backoff"
          /\ timer' = [timer EXCEPT !["handover"] = FALSE, !["backoff"] = FALSE]
          /\ probe' = "none"
-         /\ Emit(<<"Migrating">>, s)
+         /\ Emit(first \o <<"Migrating">>, s)
          /\ UNCHANGED watch
 
 \* `Reconnect::closed`. Until a session has been established, a close ends the
-\* policy as a failed dial does: it is how a peer refuses a session it already
-\* accepted. After that, every close retries, whatever its error. A predecessor
+\* policy as a failed dial does: it is how a peer refuses a live session before
+\* accepting its credential. `poll` reads the acceptance and the healthy bar
+\* before the close, so a session either establishes would already have. After
+\* that, every close retries, whatever its error. A predecessor
 \* that is not closing gracefully serves again, so the policy migrates back
 \* onto it; the `Retrying` that follows changes no status, so it is left out.
 EndClosed ==
-    /\ established' = (established \/ sess[live].age >= 1)
+    /\ UNCHANGED established
     /\ probe' = "none"
-    /\ IF established'
+    /\ IF established
        THEN /\ live' = None
             /\ phase' = "backoff"
             /\ timer' = [timer EXCEPT !["backoff"] = FALSE]
@@ -358,17 +391,34 @@ WaitOut(s) ==
     /\ Restart = "handoff"
     /\ sess[s].age = 0
 
+\* `Action::Established`, from the peer's acceptance, or the healthy bar on a
+\* silent version.
+Establish ==
+    /\ queue = <<>>
+    /\ ~PredDue
+    /\ EstablishDue
+    /\ sess' = [sess EXCEPT ![live].served = TRUE]
+    /\ established' = TRUE
+    /\ Emit(<<"Established">>, live)
+    /\ UNCHANGED <<phase, live, watch, probe, pred, target, used, timer, dial,
+                   dialTo, misdials>>
+
 LiveEnds ==
     /\ queue = <<>>
     /\ ~PredDue
     /\ phase = "live"
+    /\ ~EstablishDue
     /\ \/ /\ Goaway(live)
           /\ WaitOut(live)
           \* Drop the latch and serve until the peer closes. The GOAWAY establishes
           \* the policy here too, so that close retries.
           /\ watch' = FALSE
-          /\ UNCHANGED <<phase, live, probe, pred, target, queue, sess, timer>>
-          /\ CallerSame
+          /\ UNCHANGED <<phase, live, probe, pred, target, timer>>
+          /\ IF sess[live].served
+             THEN /\ UNCHANGED <<queue, sess>>
+                  /\ CallerSame
+             ELSE /\ sess' = [sess EXCEPT ![live].served = TRUE]
+                  /\ Emit(<<"Established">>, live)
           /\ established' = TRUE
        \/ /\ Goaway(live)
           /\ ~WaitOut(live)
@@ -378,11 +428,12 @@ LiveEnds ==
           /\ EndClosed
     /\ UNCHANGED <<used, dial, dialTo, misdials>>
 
-\* `Reconnect::probe`: ask for a probe of the preferred transport.
+\* `Reconnect::probe`: ask for a probe of the preferred transport, only off an
+\* established session.
 ProbeAsk ==
     /\ queue = <<>>
     /\ ~PredDue
-    /\ phase = "live"
+    /\ Serving
     /\ ~Goaway(live)
     /\ sess[live].open
     /\ probe = "due"
@@ -410,35 +461,32 @@ ProbeAbandon ==
     /\ UNCHANGED lifeVars
 
 Policy == Pop \/ Retire \/ IdleClose \/ FollowPred \/ Dial \/ Abandon \/ BackoffEnds
-          \/ LiveEnds \/ ProbeAsk \/ ProbeAbandon
+          \/ Establish \/ LiveEnds \/ ProbeAsk \/ ProbeAbandon
 
 (***************************************************************************)
 (* What `run` reports back to the policy.                                   *)
 (***************************************************************************)
 
-\* A dial connected: `Shared::connected`, then `Reconnect::connected`, and
-\* `Reconnect::fallback` when it landed on the fallback transport.
+\* A dial connected: `Reconnect::connected`, and `Reconnect::fallback` when it
+\* landed on the fallback transport. Nothing is published until the policy
+\* reports the session established.
 Connected ==
     /\ dial # "none"
     /\ used < MaxSessions
     /\ LET s == used + 1 IN
        /\ used' = s
        /\ dial' = "none"
-       /\ sess' = [sess EXCEPT ![s] = Fresh(dialTo)]
-       \* `Shared::connected`
-       /\ ended' = IF lc = "live" THEN ended + 1 ELSE ended
-       /\ spred' = IF lc \in {"live", "offline"} THEN spred ELSE None
-       /\ started' = started + 1
-       /\ lc' = "live"
-       /\ lcSess' = s
-       /\ migrating' = FALSE
-       \* `Reconnect::connected`, ignored unless a dial is in flight. It drops
-       \* the `Offline` a predecessor that retired mid-dial left queued.
+       \* Any version: one that answers the credential, or a silent one.
+       /\ \E silent \in BOOLEAN : sess' = [sess EXCEPT ![s] = [Fresh(dialTo) EXCEPT !.silent = silent]]
+       /\ UNCHANGED <<lc, lcSess, migrating, spred, started, ended>>
+       \* `Reconnect::connected`, ignored unless a dial is in flight. An `Offline`
+       \* a predecessor that retired mid-dial left queued stands: nothing serves
+       \* until the session is established.
        /\ IF phase = "dialing"
           THEN /\ phase' = "live"
                /\ live' = s
                /\ watch' = TRUE
-               /\ queue' = SelectSeq(queue, LAMBDA a : a # "Offline")
+               /\ UNCHANGED queue
                /\ \E fallback \in BOOLEAN :
                     probe' = IF fallback THEN "wait" ELSE "none"
           ELSE UNCHANGED <<phase, live, watch, queue, probe>>
@@ -499,9 +547,8 @@ ProbeGetsThrough ==
           /\ dial' = "handshake"
           /\ dialTo' = sess[live].ep
           /\ Emit(Append(queue, "Migrating"), live)
-          \* The fallback served all along, so a long one establishes the policy.
-          /\ established' = (established \/ sess[live].age >= 1)
-    /\ UNCHANGED <<watch, target, used, misdials>>
+          \* Only an established session is probed, so the policy already is.
+    /\ UNCHANGED <<watch, target, used, misdials, established>>
 
 Caller == Connected \/ Failed \/ ProbeFails \/ ProbeGetsThrough
 
@@ -522,11 +569,14 @@ PeerClose ==
         /\ sess' = [sess EXCEPT ![s].open = FALSE,
                                 ![s].by = IF sess[s].closing THEN "drain" ELSE "peer"]
 
-\* The live session passes the healthy bar, or the predecessor stops carrying
-\* a subscription or fetch. Only the policy reads either, and only there.
+\* The live session passes the healthy bar, its peer accepts its credential, or
+\* the predecessor stops carrying a subscription or fetch. Only the policy reads
+\* any of them, and only there.
 Ages ==
     \/ /\ Open(live) /\ sess[live].age = 0
        /\ sess' = [sess EXCEPT ![live].age = 1]
+    \/ /\ Open(live) /\ ~sess[live].accepted
+       /\ sess' = [sess EXCEPT ![live].accepted = TRUE]
     \/ /\ Open(pred) /\ ~sess[pred].idle
        /\ sess' = [sess EXCEPT ![pred].idle = TRUE]
 
@@ -579,7 +629,8 @@ Spec == Init /\ [][Next]_vars
 \* field after it closes: `LiveEnds` still reads its GOAWAY and age.
 Seen(s) ==
     IF sess[s].open \/ s = live THEN sess[s]
-    ELSE [Unused EXCEPT !.by = sess[s].by, !.closing = sess[s].closing]
+    ELSE [Unused EXCEPT !.by = sess[s].by, !.closing = sess[s].closing,
+                        !.served = sess[s].served]
 Due(t) ==
     CASE t = "dial" -> timer[t] /\ phase = "dialing"
       [] t = "backoff" -> timer[t] /\ phase = "backoff"
@@ -610,10 +661,19 @@ NoStaleSession ==
 StatusTruthful ==
     Parked =>
         /\ lc = "live" /\ ~migrating => live = lcSess
-        /\ lc = "live" /\ migrating => pred = lcSess /\ phase # "live"
-        /\ phase = "live" => lc = "live" /\ lcSess = live /\ ~migrating
+        /\ lc = "live" /\ migrating => pred = lcSess /\ ~Serving
+        /\ Serving => lc = "live" /\ lcSess = live /\ ~migrating
         /\ (lc = "closed") = (phase = "done")
         /\ lc # "closed" => spred = pred
+
+\* A session reads as connected only once established: the peer accepted its
+\* credential or drained it with a GOAWAY, or on a silent version it stayed up
+\* past the healthy bar. A refusal never does, nor does uptime alone on a
+\* version that answers.
+ConnectedMeansEstablished ==
+    /\ Parked /\ lc = "live" => sess[lcSess].served
+    /\ \A s \in 1..used :
+        sess[s].served => sess[s].accepted \/ Healthy(s) \/ sess[s].goaway # NoGoaway
 
 \* `Action::Offline`: nothing serves anymore. A predecessor closing gracefully
 \* already carries nothing and takes no new work.
@@ -633,7 +693,10 @@ PresenceBalanced ==
 \* The policy fails fast: no failed dial or closed session backs off before a
 \* session has been established, so a setup mistake or a refusal ends the
 \* policy instead of looping. A GOAWAY establishes it: no refusal sends one.
-FirstWalkFailsFast == phase = "backoff" => established
+\* Only a session reported established establishes the policy.
+FirstWalkFailsFast ==
+    /\ phase = "backoff" => established
+    /\ established => \E s \in 1..used : sess[s].served
 
 \* A dial never goes elsewhere than where a session the policy still holds
 \* was redirected and the policy never acted on it: the peer is leaving, and

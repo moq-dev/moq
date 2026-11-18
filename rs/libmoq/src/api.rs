@@ -1190,7 +1190,8 @@ pub struct moq_announce_event {
 pub enum moq_connection_phase {
 	/// No connection has been established yet.
 	MOQ_CONNECTION_PHASE_CONNECTING = 0,
-	/// A connection is serving.
+	/// A connection is serving: its peer accepted the credential, or on moq-lite 03/04, which
+	/// never answer it, the session stayed up 1s. A refused session never reaches this phase.
 	MOQ_CONNECTION_PHASE_CONNECTED = 1,
 	/// No connection is serving while the session redials.
 	MOQ_CONNECTION_PHASE_DISCONNECTED = 2,
@@ -1793,7 +1794,8 @@ unsafe fn connect_session(
 /// You should call [moq_session_close], even on error, to free up resources.
 ///
 /// Once connected, the session reconnects automatically with exponential backoff if the
-/// connection drops. Until a session has stayed up past 1s or been drained by a GOAWAY, a
+/// connection drops. Until the peer has accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a
 /// failed dial or a closed session, such as a refused credential, ends it instead, with that error as the terminal
 /// snapshot's failure. Published broadcasts are re-announced and consumers re-subscribed on
 /// each reconnect, since the origins outlive the underlying connection.
