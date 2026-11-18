@@ -85,6 +85,14 @@ Left by the switch, for the implementer to decide and list in the PR:
   again the claims both cover; a relay whose only route closes ends its
   subscriptions while the claim stays shown.
 
+- `poll::Session::export_keying_material` has no caller now that the Route
+  Key proof is gone, and no release ever had it. Remove it from moq-net,
+  moq-quic, moq-tokio, and moq-uring. Recommended before the cut, which
+  would otherwise freeze it; the cut also drops the `## Unreleased` note
+  that describes it and the Route Key (`rs/moq-net/MIGRATE.md` "Origins
+  prove a route key"), since `sh/migrate.sh` refuses a `MIGRATE.md` edit
+  outside a cut.
+
 Found 2026-11-16 by [the proof](https://github.com/moq-dev/moq/pull/8904)
 against the prototype:
 

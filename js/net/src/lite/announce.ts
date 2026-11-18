@@ -48,8 +48,8 @@ const DRAIN = 10;
  * {@link AnnounceHistory}. */
 export type Base = { distance: bigint; keep: number };
 
-/** The most nodes a lite-07 claim's chain may name. */
-export const CHAIN_MAX = 32;
+/** The most nodes a lite-07 claim's chain may name: one that would reach 32 is never taken. */
+export const CHAIN_MAX = 31;
 
 // Claim flags.
 const UNAVAILABLE = 0x1;

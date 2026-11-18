@@ -209,7 +209,7 @@ fn decode_offer(r: &mut Decoder<'_>) -> Result<Offer, DecodeError> {
 
 /// Encode what a claim says after its epoch: cost, above, flags, priority, and chain.
 fn encode_claim(w: &mut Encoder<'_>, claim: &Claim) -> Result<(), EncodeError> {
-	if claim.chain.len() > route::MAX_HOPS || claim.chain.contains(&0) {
+	if claim.chain.len() >= route::MAX_HOPS || claim.chain.contains(&0) {
 		return Err(EncodeError::InvalidState);
 	}
 	w.varint(claim.cost)?;
@@ -230,7 +230,7 @@ fn encode_claim(w: &mut Encoder<'_>, claim: &Claim) -> Result<(), EncodeError> {
 	Ok(())
 }
 
-/// Decode a claim of `epoch`. A chain past the hop limit, or naming Node ID 0, and a
+/// Decode a claim of `epoch`. A chain at the hop limit, or naming Node ID 0, and a
 /// flag this version does not define fail the stream: no sender builds one.
 fn decode_claim(r: &mut Decoder<'_>, epoch: u64) -> Result<Claim, DecodeError> {
 	let cost = r.varint()?;
@@ -241,7 +241,9 @@ fn decode_claim(r: &mut Decoder<'_>, epoch: u64) -> Result<Claim, DecodeError> {
 	}
 	let priority = super::priority::from_wire(r.u8()?);
 	let count = r.varint()?;
-	if count > route::MAX_HOPS as u64 {
+	// A chain reaches the hop limit only with the Relay of a node that then does not take
+	// the claim, so none that long is sent.
+	if count >= route::MAX_HOPS as u64 {
 		return Err(DecodeError::TooMany);
 	}
 	let mut chain = Vec::with_capacity(count as usize);
@@ -888,5 +890,41 @@ impl<'a> Message<'a> for AnnounceOk {
 
 		self.origin.encode(w, version)?;
 		w.varint(self.active)
+	}
+}
+
+#[cfg(all(test, feature = "async"))]
+mod chain_tests {
+	use super::*;
+
+	/// A claim's chain names at most 31 relays: one more would be the Relay of a node that
+	/// does not take the claim, so the codec refuses it in both directions.
+	#[test]
+	fn a_claim_chain_at_the_hop_limit_is_refused() {
+		let form = Version::Lite07.into();
+		let claim = |relays: u64| Claim {
+			item: route::node::Attr { epoch: 0, above: 0 },
+			cost: 0,
+			priority: i8::MAX,
+			draining: false,
+			unavailable: false,
+			chain: (1..=relays).collect(),
+		};
+		let encode = |relays: u64| {
+			let mut buf = Vec::new();
+			encode_claim(&mut Encoder::new(&mut buf, form), &claim(relays)).map(|()| buf)
+		};
+		let longest = route::MAX_HOPS as u64 - 1;
+
+		let buf = encode(longest).expect("the longest chain");
+		let decoded = decode_claim(&mut Decoder::new(&buf, form), 0).expect("the longest chain");
+		assert_eq!(decoded.chain.len() as u64, longest);
+		assert!(encode(longest + 1).is_err());
+
+		// One relay more, as only a peer outside the rule sends: every field is one byte.
+		let mut buf = vec![0, 0, 0, 0, route::MAX_HOPS as u8];
+		buf.extend(1..=route::MAX_HOPS as u8);
+		let refused = decode_claim(&mut Decoder::new(&buf, form), 0);
+		assert!(matches!(refused, Err(DecodeError::TooMany)), "{refused:?}");
 	}
 }

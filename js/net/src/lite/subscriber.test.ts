@@ -442,6 +442,45 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 	subscriber.close();
 });
 
+// A claim whose path cannot be resolved lies in a prefix this side cannot name, so removing
+// another prefix leaves it for the peer to end by its id.
+test("a lite-07 unresolved claim outlives another prefix's removal", async () => {
+	const v = Version.DRAFT_07;
+	const { subscriber, send, ok, settle, sessionEnded } = announceHarness(v);
+	const a = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
+	await settle();
+	await ok();
+	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
+	await settle();
+	await ok();
+
+	// A base and a rest that each fit a path, and together do not.
+	const long = "x".repeat(Path.MAX_BYTES - 8);
+	const start = (suffix: Path.Valid, pathBase?: { distance: bigint; keep: number }) =>
+		send((w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{ status: "start", suffix, pathBase, instance: Instance.random(), claim: ownClaim(0n) },
+				v,
+			),
+		);
+	await start(Path.from(`a/${long}`));
+	await start(Path.from(long), { distance: 1n, keep: 2 });
+
+	b.close();
+	await settle();
+	await ok();
+	const end = () => send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 1n, lost: false }, v));
+	await end();
+	expect(a.closed.peek()).toBeUndefined();
+	// That retired the id, so naming it again is the violation.
+	await end();
+	expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
+
+	a.close();
+	subscriber.close();
+});
+
 // A replaced prefix served everything consumed beneath it, so those paths subscribe fresh too,
 // whether the replacement arrives as a lite-07 restart or as an end then a start.
 test.each([

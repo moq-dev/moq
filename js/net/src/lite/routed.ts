@@ -407,6 +407,8 @@ export class Routed {
 			if (asked) removed.push(asked.path);
 			this.#asked.delete(id);
 		}
+		// Whether a prefix in effect before the edit survives it: the peer's claims within one stay.
+		const survives = [...this.#asked.values()].some((asked) => asked.live);
 		for (const id of editing.add) {
 			const asked = this.#asked.get(id);
 			if (!asked) throw new Error("an added prefix");
@@ -415,8 +417,12 @@ export class Routed {
 		if (removed.length > 0) {
 			for (const [id, live] of [...this.#claims]) {
 				const { path } = live;
+				// A claim whose path could not be resolved lies in a prefix this side cannot name.
+				// The peer may still hold it, and ends it by its id, so it goes only when no earlier
+				// prefix is left for it to lie in.
+				const within = path === undefined ? !survives : removed.some((prefix) => Path.hasPrefix(prefix, path));
 				// The peer never ended it: it only stopped telling this session.
-				if (path === undefined || removed.some((prefix) => Path.hasPrefix(prefix, path))) this.#end(id, true);
+				if (within) this.#end(id, true);
 			}
 		}
 		// What the readers want may have moved while the peer answered.

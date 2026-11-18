@@ -417,6 +417,8 @@ An endpoint MUST close the session with a PROTOCOL_VIOLATION if it receives:
 - a message referencing a Prefix ID, Route ID, or Announce ID that was never assigned or already retired;
 - any other message between the ANNOUNCE_REQUESTs of one edit, or an edit that leaves a prefix of the set at or below another or the set past the limit;
 - an ANNOUNCE_OK with no edit unanswered, or an ANNOUNCE_REQUEST starting an edit while one is;
+- an edit from a routing neighbour that leaves its set anything but empty or the empty prefix alone;
+- any message but ANNOUNCE_OK and ANNOUNCE_REQUEST before the first ANNOUNCE_OK on the stream, which answers nothing yet;
 - a second SYNCED for a prefix, or one before the ANNOUNCE_OK answering the edit that added it;
 - a ROUTE, ROUTE_END, DEAD, DRAIN, or ANNOUNCE_FLOOR on a session that does not exchange routes; or
 - a message that does not decode within its Message Length, a flag this version does not define, or a Node ID of 0.
@@ -435,7 +437,10 @@ Until then the publisher's messages answer the set before it, so they may still 
 
 At the ANNOUNCE_OK both endpoints drop every claim on the stream whose path lies within a prefix the edit removes, retiring its Announce ID, with no ANNOUNCE_END.
 The publisher then sends what the added prefixes cover, a claim the removed prefixes also covered included, and a SYNCED for each.
-Routes are not requested by prefix, so an edit leaves them in place.
+A receiver that could not resolve a claim's path (see [ANNOUNCE_START](#announce-start)) cannot tell whether a removed prefix held it: it keeps the claim's Announce ID valid until the publisher ends it, or until the edit leaves no prefix that was in effect before it, when every earlier claim is dropped.
+
+Routes are not requested by prefix: a publisher sends a routing neighbour routes exactly while the neighbour's set is the empty prefix.
+An edit that empties the set drops every route on the stream, and every claim under one, at the ANNOUNCE_OK, retiring their ids with no ROUTE_END; asking for the empty prefix again starts them anew.
 
 ### Claims {#claims}
 On a session that does not exchange routes, a publisher sends the claims its own requests would resolve, and nothing of how it reaches them.
@@ -457,7 +462,7 @@ Between routing nodes a stream carries a route's claims in batches: the ANNOUNCE
 A batch names each claim at most once, and its floor carries a Revision higher than the last the publisher sent for the route; a receiver MUST close the session with a PROTOCOL_VIOLATION otherwise.
 
 A floor certifies that the publisher's copy of that node's claims, with the batch applied, is complete as of the Revision.
-A publisher therefore sends a routing neighbour every claim under a route, whatever the prefixes it asked for, and the neighbour asks for the empty prefix.
+A publisher therefore sends a routing neighbour every claim under a route, and the neighbour asks for the empty prefix or for nothing: it MUST NOT ask for part of the tree.
 A receiver keeps each neighbour's copy, and its own view of the node's claims follows the copy with the highest Revision: a batch at or below the Revision of its view changes only the sender's copy, so an older copy never revives a claim whose withdrawal a newer one delivered.
 A claim a newer copy lacks is lost, unless the batch says its publisher ended it (see [ANNOUNCE_END](#announce-end)).
 
@@ -533,6 +538,7 @@ Every route through a draining node ranks as draining, and stays usable.
 A receiver MUST close the session with a PROTOCOL_VIOLATION on a DEAD or DRAIN naming a hop or node on no live route that peer sent it, or a DEAD whose far node is not the one before the hop on those routes.
 
 A node closes the session when its Announce Stream has made no progress for 10 seconds with messages left to send, so a peer that stops reading never holds a route.
+It MAY close one whose peer reads more slowly than what it is sent changes, once the messages left to send pass a bound of the node's choosing.
 
 ### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request naming no routing node names a path, and the receiver resolves it against the claims covering that path.
@@ -1348,7 +1354,7 @@ The lowest local priority of a session on the way to the claim's publisher, as a
 
 **Chain Count** and **Relay**:
 The claim's chain: the Relay (see [Node ID Parameter](#node-id-parameter)) of each routing node that announced the claim again across a scoped grant or from an earlier version (see [Claims](#claims)), oldest first, and none for a claim nothing announced again.
-More than 32, or a Relay of 0, is a PROTOCOL_VIOLATION.
+More than 31, or a Relay of 0, is a PROTOCOL_VIOLATION: a chain that would reach 32 is never taken (see [Claims](#claims)), so none is sent.
 
 
 ## ANNOUNCE_END {#announce-end}

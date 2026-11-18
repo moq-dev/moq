@@ -473,14 +473,21 @@ impl Routed {
 				removed.push(asked.relative);
 			}
 		}
+		// Whether a prefix in effect before the edit survives it: the peer's claims within
+		// one stay.
+		let survives = self.asked.values().any(|asked| asked.live);
 		for id in &editing.add {
 			if let Some(asked) = self.asked.get_mut(id) {
 				asked.live = true;
 			}
 		}
 		if !removed.is_empty() {
-			let within = |claim: &WireClaim| {
-				(claim.relative.as_ref()).is_none_or(|path| removed.iter().any(|prefix| route::within(path, prefix)))
+			// A claim whose path this node could not resolve lies in a prefix it cannot
+			// name. The peer may still hold it, and ends it by its id, so it goes only when
+			// no earlier prefix is left for it to lie in.
+			let within = |claim: &WireClaim| match &claim.relative {
+				Some(path) => removed.iter().any(|prefix| route::within(path, prefix)),
+				None => !survives,
 			};
 			let gone: Vec<u64> = (self.claims.iter())
 				.filter(|(_, claim)| within(claim))

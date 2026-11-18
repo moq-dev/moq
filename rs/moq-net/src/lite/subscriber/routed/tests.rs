@@ -469,3 +469,46 @@ fn a_set_past_one_request_is_asked_for_more_coarsely() {
 	);
 	assert_eq!(asked.len(), 17);
 }
+
+/// A claim whose path this node cannot resolve lies in a prefix it cannot name, so
+/// removing another prefix leaves it for the peer to end by its id.
+#[kio::test]
+async fn an_unresolved_claim_outlives_another_prefixs_removal() {
+	let (subscriber, _consumer) = subscriber();
+	let mut routed = Routed::new(&subscriber, 1, &Permit::default(), None, None).unwrap();
+	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
+	routed.want(Path::from_static("b"), subscriber.origin.snapshot("b"));
+	pump(&mut routed, &subscriber);
+
+	// A base and a rest that each fit a path, and together do not.
+	let long = "x".repeat(Path::MAX_BYTES - 8);
+	let literal = Wire::Start {
+		suffix: PathRef::literal(Path::new(&format!("a/{long}")).unwrap()),
+		instance: Instance::random(),
+		claim: claim(0),
+	};
+	let unresolved = || Wire::Start {
+		suffix: PathRef {
+			base: 1,
+			keep: 2,
+			rest: Path::new(&long).unwrap(),
+		},
+		instance: Instance::random(),
+		claim: claim(0),
+	};
+	routed.receive(literal).unwrap();
+	routed.receive(unresolved()).unwrap();
+	routed.receive(unresolved()).unwrap();
+	assert!(routed.claims[&1].relative.is_none() && routed.claims[&2].relative.is_none());
+
+	routed.unwant(&Path::from_static("b"));
+	pump(&mut routed, &subscriber);
+	routed.receive(Wire::End { id: 1, lost: false }).unwrap();
+
+	// Once no earlier prefix is left for it to lie in, it goes with the rest.
+	routed.unwant(&Path::from_static("a"));
+	pump(&mut routed, &subscriber);
+	assert!(routed.claims.is_empty());
+	let ended = routed.receive(Wire::End { id: 2, lost: false });
+	assert!(matches!(ended, Err(Error::ProtocolViolation)), "{ended:?}");
+}
