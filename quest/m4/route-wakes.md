@@ -1,4 +1,4 @@
-# [M] A route change wakes only the fronts it affects
+# [L] A route change writes once and wakes only the fronts it affects
 
 ## Goal
 
@@ -37,9 +37,16 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   exactly the path skips both hashes. A join moves only paths the newcomer
   wins, a leave only paths the leaver was winning.
 - On lite-07 the route layer writes into this table through `route::node`,
-  one write per broadcast whose way changed; a change to one route rewrites
-  every broadcast behind it, which [route benches](/quest/m3/route-benches.md)
-  owns. This quest is the fronts' half: what each write wakes.
+  one write per broadcast whose way changed; a change to one route's cost
+  rewrites every broadcast behind it (`route::node` `State::flush` relanes
+  each, and `Served` carries the cost). This quest owns both halves: one
+  shared record per route in the origin that its broadcasts refer to, so a
+  re-price is one write, and what each write wakes. `routes/reopen/spare`
+  measures the route side (moq-dev/moq#9114): an upstream reopening twice
+  in a row costs 8 origin writes per broadcast behind it, 2.3 s at 16
+  routes of 4,096 broadcasts, linear in each axis; `routes/drain` costs 2
+  per broadcast, 480 ms at the same shape. A route that moves at the same
+  rank already rewrites nothing.
 
 Decisions:
 
@@ -79,10 +86,9 @@ Decisions:
 
 Decided 2026-10-13: coordinate the index with the route model and per-track
 active/standby selection. Do not build a second route table per track or
-turn one route's cost change into per-broadcast mutations. Whichever
-implementation lands first, this or the origin record in
-[route benches](/quest/m3/route-benches.md), preserves these operation-count
-tests for the next.
+turn one route's cost change into per-broadcast mutations. The origin
+record and the index land together here, keeping these operation-count
+tests.
 
 Verification: `origin/pool_churn` leaves flat in served paths at every pool
 width it already sweeps, and a unit test that counts `select` calls per
@@ -95,7 +101,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - adds the warm pick to how a relay chooses its source, so the index is built once on the final selection
-
-## Related
-
-- [Route benches](/quest/m3/route-benches.md) - the route layer's side: one origin record per route instead of a write per broadcast
