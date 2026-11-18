@@ -292,6 +292,40 @@ describe("Signal", () => {
 		expect(seen).toEqual([]);
 	});
 
+	test("a value set back reaches a listener that saw the middle value", async () => {
+		const signal = new Signal(0);
+		const before: number[] = [];
+		const old = signal.subscribe((v) => before.push(v));
+		signal.set(1);
+
+		// Both register while 1 stands, so the return to 0 is a change for them.
+		const during: number[] = [];
+		const sub = signal.subscribe((v) => during.push(v));
+		const waited = signal.changed();
+		signal.set(0);
+
+		await settle();
+		expect(before).toEqual([]); // it saw 0, which never changed
+		expect(during).toEqual([0]);
+		expect(await waited).toBe(0);
+		old();
+		sub();
+	});
+
+	test("a listener already registered keeps the value it saw before the batch", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const fn = (v: number) => seen.push(v);
+		const dispose = signal.subscribe(fn);
+		signal.set(1);
+		signal.subscribe(fn); // re-adding changes nothing: it saw 0
+		signal.set(0);
+
+		await settle();
+		expect(seen).toEqual([]);
+		dispose();
+	});
+
 	test("any number of subscribers is legitimate", async () => {
 		const signal = new Signal(0);
 		let notified = 0;
@@ -328,6 +362,29 @@ describe("Effect", () => {
 		name.set("signals");
 		await settle();
 		expect(seen).toEqual(["world", "signals"]);
+		effect.close();
+	});
+
+	test("reruns when a signal flips back after the effect read the middle value", async () => {
+		const t = new Signal(0);
+		const s = new Signal(0);
+		const seen: [number, number][] = [];
+		const effect = new Effect((e) => {
+			seen.push([e.get(t), e.get(s)]);
+		});
+		await settle();
+
+		// Microtasks run: t's flush, s.set(1), the effect's rerun reading s = 1, s.set(0), and
+		// then s's flush, whose net change is zero though the rerun saw 1.
+		t.set(1);
+		queueMicrotask(() => {
+			queueMicrotask(() => s.set(0));
+			s.set(1);
+		});
+		await settle(10);
+
+		expect(s.peek()).toBe(0);
+		expect(seen.at(-1)).toEqual([1, 0]);
 		effect.close();
 	});
 

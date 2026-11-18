@@ -70,6 +70,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#initial: Set<Subscriber<T>> = new Set();
 	#oldValue: T | undefined;
 	#hasCapturedOldValue = false;
+	// The value each listener added after the capture saw, which may differ from #oldValue.
+	#seen: Map<Subscriber<T>, T> = new Map();
 	#forceNotify = false;
 
 	/** Marks this as a Signal across package instances. */
@@ -118,6 +120,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 			this.#hasCapturedOldValue = false;
 			this.#oldValue = undefined;
 			this.#forceNotify = false;
+			this.#seen.clear();
 			return;
 		}
 
@@ -133,57 +136,58 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		const value = this.#value;
 
 		// Watchers added during this flush wait for the flush their watch() queued.
-		let initial: Set<Subscriber<T>> | undefined;
-		if (this.#initial.size > 0) {
-			initial = this.#initial;
-			this.#initial = new Set();
+		const initial = this.#initial;
+		if (initial.size > 0) this.#initial = new Set();
+
+		// Listeners that registered mid-batch and the value each saw. Only a captured write records
+		// them, and dropping the capture clears them.
+		let seen: Map<Subscriber<T>, T> | undefined;
+		if (this.#seen.size > 0) {
+			seen = this.#seen;
+			this.#seen = new Map();
 		}
 
 		// A write while nobody listened dropped the capture, so any listener since then saw the
 		// current value when it subscribed and there is no change to deliver.
+		let changed = false;
 		if (this.#hasCapturedOldValue) {
 			this.#hasCapturedOldValue = false;
-			const old = this.#oldValue;
+			changed = this.#forceNotify || !isEqual(this.#oldValue as T, value);
 			this.#oldValue = undefined;
-
-			const force = this.#forceNotify;
 			this.#forceNotify = false;
-
-			// Deliver unless the net change is zero (value returned to what it was before).
-			if (force || !isEqual(old as T, value)) {
-				const changed = this.#changed;
-				this.#changed = new Set();
-
-				for (const fn of this.#subscribers) {
-					if (this.#initial.size > 0 && this.#initial.has(fn)) continue;
-					try {
-						fn(value);
-					} catch (error) {
-						console.error("signal subscriber error", error);
-					}
-				}
-
-				for (const fn of changed) {
-					try {
-						fn(value);
-					} catch (error) {
-						console.error("signal changed error", error);
-					}
-				}
-
-				// Pending watchers are subscribers, so the loop above was their first value.
-				return;
-			}
 		}
 
-		if (!initial) return;
-		for (const fn of initial) {
-			// Disposed during this flush.
-			if (!this.#subscribers.has(fn)) continue;
+		if (!changed && !seen && initial.size === 0) return;
+
+		// Every listener gets the batch's net change. One that registered mid-batch also gets a
+		// value set back to the old one, since it saw the middle value.
+		const deliver = (fn: Subscriber<T>) =>
+			changed || (seen?.has(fn) === true && !isEqual(seen.get(fn) as T, value));
+
+		for (const fn of this.#subscribers) {
+			if (this.#initial.has(fn)) continue;
+			// A pending watcher is owed its first value whether or not this flush is a change.
+			if (!initial.has(fn) && !deliver(fn)) continue;
 			try {
 				fn(value);
 			} catch (error) {
-				console.error("signal watch error", error);
+				console.error("signal subscriber error", error);
+			}
+		}
+
+		if (!changed && !seen) return;
+		const waiters = this.#changed;
+		this.#changed = new Set();
+		for (const fn of waiters) {
+			// Saw the final value, so it keeps waiting.
+			if (!deliver(fn)) {
+				this.#changed.add(fn);
+				continue;
+			}
+			try {
+				fn(value);
+			} catch (error) {
+				console.error("signal changed error", error);
 			}
 		}
 	}
@@ -208,8 +212,15 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	/** Calls `fn` every time the value changes. Returns a function to unsubscribe. */
 	subscribe(fn: Subscriber<T>): Dispose {
+		this.#see(fn, this.#subscribers);
 		this.#subscribers.add(fn);
 		return () => this.#subscribers.delete(fn);
+	}
+
+	// Records what a listener added mid-batch saw, so the flush can compare against it.
+	// One already in `set` was there before and saw the captured old value.
+	#see(fn: Subscriber<T>, set: Set<Subscriber<T>>): void {
+		if (this.#hasCapturedOldValue && !set.has(fn) && !this.#seen.has(fn)) this.#seen.set(fn, this.#value);
 	}
 
 	/** Resolves with the value the next time it changes. */
@@ -218,10 +229,12 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	changed(fn: Subscriber<T>): Dispose;
 	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
 		if (fn) {
+			this.#see(fn, this.#changed);
 			this.#changed.add(fn);
 			return () => this.#changed.delete(fn);
 		}
 		return new Promise<T>((resolve) => {
+			this.#see(resolve, this.#changed);
 			this.#changed.add(resolve);
 		});
 	}
