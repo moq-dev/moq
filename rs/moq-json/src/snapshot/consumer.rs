@@ -31,7 +31,7 @@ pub struct Config {
 	///
 	/// Zero (the default) skips a snapshot the moment a newer one arrives. A reader that holds each
 	/// snapshot until media reaches its timestamp sets its delay, so a superseded snapshot it may
-	/// still need stays deliverable that long and [`Consumer::next`] yields it.
+	/// still need stays deliverable that long and [`Consumer::poll_next`] yields it.
 	pub delay: std::time::Duration,
 }
 
