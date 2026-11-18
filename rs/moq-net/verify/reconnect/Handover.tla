@@ -20,8 +20,9 @@
 (* one it refuses, no retry window, no tokens, not connecting once, and no *)
 (* redirect-loop scoring. A session's age stands in for its tenure: 1 is   *)
 (* past `Backoff::healthy`. Until a session has been established, which   *)
-(* takes one past that bar or a GOAWAY, a failed dial or a closed session *)
-(* ends the policy (`Reconnect::established`).                             *)
+(* takes the peer accepting its credential, one past that bar, or a       *)
+(* GOAWAY, a failed dial or a closed session ends the policy              *)
+(* (`Reconnect::established`).                                             *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets
 
@@ -59,7 +60,7 @@ VARIABLES
     started,   \* `Presence::sessions_started`
     ended,     \* `Presence::sessions_ended`
     misdials,  \* 1 once a dial went elsewhere than an unheeded redirect named
-    established \* `Reconnect::established`: a session stayed up past the healthy bar or got a GOAWAY
+    established \* `Reconnect::established`: a session's peer accepted its credential, or one stayed up past the healthy bar or got a GOAWAY
 
 policyVars == <<phase, live, watch, probe, pred, target, queue, sess, used, timer,
                 dial, dialTo, misdials>>
@@ -71,11 +72,13 @@ vars == <<policyVars, callerVars, lifeVars>>
 \* "abort" for `Session::abort`, "drain" for a `start_close` that finished),
 \* whether a `start_close` began, the GOAWAY it got, its age, whether it
 \* carries no subscription or fetch, whether the policy acted on its GOAWAY,
-\* whether we sent our own, and whether the policy watches its GOAWAY as the
-\* predecessor (`Predecessor::redirect`, set when a probe moved us off it).
+\* whether we sent our own, whether the policy watches its GOAWAY as the
+\* predecessor (`Predecessor::redirect`, set when a probe moved us off it), and
+\* whether the peer accepted its credential (`Session::poll_accepted`), which a
+\* close leaves as it was.
 Fresh(e) == [ep |-> e, open |-> TRUE, by |-> "", closing |-> FALSE,
              goaway |-> NoGoaway, age |-> 0, idle |-> FALSE, heeded |-> FALSE,
-             sent |-> FALSE, watched |-> FALSE]
+             sent |-> FALSE, watched |-> FALSE, accepted |-> FALSE]
 Unused == [Fresh(Start) EXCEPT !.open = FALSE]
 
 Timers == {"dial", "backoff", "probe", "handover"}
@@ -330,12 +333,12 @@ EndGoaway(s, uri) ==
          /\ UNCHANGED watch
 
 \* `Reconnect::closed`. Until a session has been established, a close ends the
-\* policy as a failed dial does: it is how a peer refuses a session it already
-\* accepted. After that, every close retries, whatever its error. A predecessor
+\* policy as a failed dial does: it is how a peer refuses a live session before
+\* accepting its credential. `poll` reads the acceptance before the close. After that, every close retries, whatever its error. A predecessor
 \* that is not closing gracefully serves again, so the policy migrates back
 \* onto it; the `Retrying` that follows changes no status, so it is left out.
 EndClosed ==
-    /\ established' = (established \/ sess[live].age >= 1)
+    /\ established' = (established \/ sess[live].age >= 1 \/ sess[live].accepted)
     /\ probe' = "none"
     /\ IF established'
        THEN /\ live' = None
@@ -499,8 +502,8 @@ ProbeGetsThrough ==
           /\ dial' = "handshake"
           /\ dialTo' = sess[live].ep
           /\ Emit(Append(queue, "Migrating"), live)
-          \* The fallback served all along, so a long one establishes the policy.
-          /\ established' = (established \/ sess[live].age >= 1)
+          \* The fallback served all along, so a long or accepted one establishes the policy.
+          /\ established' = (established \/ sess[live].age >= 1 \/ sess[live].accepted)
     /\ UNCHANGED <<watch, target, used, misdials>>
 
 Caller == Connected \/ Failed \/ ProbeFails \/ ProbeGetsThrough
@@ -522,11 +525,14 @@ PeerClose ==
         /\ sess' = [sess EXCEPT ![s].open = FALSE,
                                 ![s].by = IF sess[s].closing THEN "drain" ELSE "peer"]
 
-\* The live session passes the healthy bar, or the predecessor stops carrying
-\* a subscription or fetch. Only the policy reads either, and only there.
+\* The live session passes the healthy bar, its peer accepts its credential, or
+\* the predecessor stops carrying a subscription or fetch. Only the policy reads
+\* any of them, and only there.
 Ages ==
     \/ /\ Open(live) /\ sess[live].age = 0
        /\ sess' = [sess EXCEPT ![live].age = 1]
+    \/ /\ Open(live) /\ ~sess[live].accepted
+       /\ sess' = [sess EXCEPT ![live].accepted = TRUE]
     \/ /\ Open(pred) /\ ~sess[pred].idle
        /\ sess' = [sess EXCEPT ![pred].idle = TRUE]
 

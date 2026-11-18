@@ -202,7 +202,7 @@ pub struct MoqWebSocketConfig {
 
 /// Retry pacing for the automatic reconnect.
 ///
-/// Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a
+/// Until the peer has accepted a session's credential or drained a session with a GOAWAY, a failed dial or a
 /// closed session, such as a refused credential, ends the connection with its error rather
 /// than retrying. The delay starts at `initial`, multiplies by `multiplier` after each
 /// failed attempt, and caps at `max`.
@@ -615,8 +615,8 @@ impl MoqClient {
 	///
 	/// Once a session has been established, it automatically reconnects with backoff when
 	/// the transport drops (unless [`MoqClientConfig::once`] is set), and broadcasts
-	/// consumed through it ride out the gap. Until a session has stayed up past 1s or been
-	/// drained by a GOAWAY it fails fast instead: if none of the peer's addresses yields a session, or the peer closes the
+	/// consumed through it ride out the gap. Until the peer has accepted a session's credential or drained
+	/// a session with a GOAWAY it fails fast instead: if none of the peer's addresses yields a session, or the peer closes the
 	/// one it accepted, as a relay refusing a credential does, [`MoqSession::closed`] resolves
 	/// with that error, so an app started before its relay is reachable must start the session
 	/// again.

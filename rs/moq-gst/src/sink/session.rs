@@ -293,8 +293,8 @@ impl Session {
 		// Publish through a background reconnect loop: connect, wait for close, reconnect with backoff.
 		// `timeout = 0` drops the give-up deadline so an unattended publisher outlives relay/QUIC
 		// outages of any length, which is the trade this element wants: a pipeline nobody is watching
-		// should still be publishing when the relay comes back. The loop still ends when no session
-		// stays up past the healthy bar, such as a relay refusing the token, posting the bus error
+		// should still be publishing when the relay comes back. The loop still ends when the relay
+		// never accepted a session, such as when it refuses the token, posting the bus error
 		// below. During an outage the pad threads keep writing (bounded
 		// by moq-net's per-group eviction) and the relay catches up from a group boundary on
 		// reconnect. A bounded policy is available via `ClientConfig::backoff`.

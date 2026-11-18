@@ -45,8 +45,8 @@ export async function refused(relay: string): Promise<CloseState> {
 /**
  * A WebSocket refusal reaches the reconnecting handle as its session error.
  *
- * The relay closes a session that ALPN already established. It never stayed up past the healthy
- * bar, so the handle stops at once with that close, as after a refused dial, instead of redialing.
+ * The relay closes a session that ALPN already established, never having accepted its credential,
+ * so the handle stops at once with that close, as after a refused dial, instead of redialing.
  */
 export async function refusedWebSocket(relay: string): Promise<CloseState> {
 	const url = new URL(relay);

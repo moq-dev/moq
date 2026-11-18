@@ -345,7 +345,7 @@ def _track_info(info: TrackInfo | None) -> MoqTrackInfo | None:
 class Backoff:
     """Retry pacing for the automatic reconnect.
 
-    Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or
+    Until the peer has accepted a session's credential or drained a session with a GOAWAY, a failed dial or
     a closed session, such as a refused credential, ends the connection with its error
     rather than retrying.
 

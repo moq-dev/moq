@@ -91,7 +91,7 @@ codec config, a pad requested again, or a stream resumed after EOS publishes as
 `url`, `broadcast`, `linger`, `connect-version`, `connect-websocket-enabled`, `tls-disable-verify`, `quic-idle-timeout`, `quic-keylog`,
 `quic-keep-alive`, and read-only `status`, `connected`, `moq-version`, and
 `estimated-send-rate`, `estimated-recv-rate`, `connection-stats`, and
-`sessions`. Once a session has stayed up past a second, the sink reconnects for as long as
+`sessions`. Once the relay has accepted a session, the sink reconnects for as long as
 the pipeline runs, whatever ends each session. Before then it reports `failed` and posts an
 error instead of retrying: a first connect that reaches no relay, or a session the relay
 refuses, such as for a rejected token.
