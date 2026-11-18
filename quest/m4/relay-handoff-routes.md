@@ -14,31 +14,24 @@ relay's drain ends.
 
 ## Plan
 
-Picked by the maintainer on 2026-11-15: ✅ keep this quest in m4 (rejected:
-drop it), and ✅ the relay-restart PR landed without it (rejected: hold that PR
-for this link). Rejected the same day: keep a peer's old session past idle
-until the old relay closes it, which holds the old relay to its drain
-deadline again, the thing handoff removes.
-
-The recommended design, linking the two relays as cluster peers over the
-handoff socket for the overlap, does not survive lite-07's route rule as
-shipped: the two generations share the relay's identity at different
-Starts, and a node never uses a route whose Path names its own relay at any
-Start (the draft's Routing), so each would refuse the other's routes. What
-replaces it is the maintainer's call (Waiting).
+- Recommended: link the two relays for the overlap. The handoff connection
+  between them already exists; the new relay runs a moq-lite session to the
+  old one over a socket it carries, and each treats the other as a cluster
+  peer until the old one exits, so routes cross between generations as they
+  cross between nodes. The two share only the node's stats name
+  (`rs/moq-relay/src/handoff.rs`): each process routes under its own random
+  Relay ID (`origin::Config::default`, which `Cluster::new` uses), so
+  lite-07's rule that a node never uses a route whose Path names its own
+  relay treats them as two routing nodes, and neither refuses the other's
+  routes. A test pins that, so a later change that shares the Relay ID
+  across a handoff fails it.
+- Rejected: keep a peer's old session past idle until the old relay closes it.
+  That holds the old relay to its drain deadline again, which is what handoff
+  removes.
 
 Exercise it with a publisher that ignores GOAWAY on the old relay and a
 subscriber on another node, past `goaway.handover`.
 
-## Waiting
-
-- Maintainer: how the two generations link, now that a routing link between
-  them is refused. Options: (a) recommended, the old relay dials the new one
-  as a plain endpoint over the handoff socket, declaring no Node ID, so the
-  new relay announces the old one's local claims under its own Node ID and
-  serves the old one's subscribers from the cluster, with no wire change;
-  (b) narrow the rule to refuse only a path naming the node's own Start,
-  a wire change that also lets a restarted relay take routes through its
-  dead predecessor until the session floor refuses them; (c) drop the quest,
-  accepting the gap for clients that ignore GOAWAY. Check: this item is
-  replaced by the pick in the Plan.
+Picked by the maintainer on 2026-11-15: ✅ keep this quest in m4 (rejected:
+drop it), and ✅ the relay-restart PR landed without it (rejected: hold that PR
+for this link).
