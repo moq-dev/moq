@@ -12,9 +12,15 @@
 //! requests whose USERNAME is `<our-ufrag>:<their-ufrag>`, so we parse the local
 //! ufrag out of the STUN message and look the session up. A binding request
 //! signed with that session's password caches `addr -> session`, so subsequent
-//! DTLS/RTP/RTCP (which carry no ufrag) route by address. A binding request always
-//! routes by its ufrag, so a peer that re-offers from the same address moves the
-//! address to its new session, while a forged one cannot move another peer's.
+//! DTLS/RTP/RTCP (which carry no ufrag) route by address.
+//!
+//! A binding request always routes by its ufrag, but one for an address another
+//! live session holds only claims it: anyone holding a session can sign a request,
+//! and a spoofed source proves nothing. The claim takes the address once the
+//! claimant's own ICE connects on a datagram from it ([`Route::confirm`]), which
+//! needs the answers to its checks (STUN responses go to both sessions meanwhile),
+//! or once the holder ends. So a peer that re-offers from the same address reaches
+//! its new session, and a forged request moves no one's traffic.
 //!
 //! Backpressure mirrors a UDP socket buffer: each session has a bounded inbox
 //! and a full inbox drops the datagram (WebRTC tolerates loss). A closed inbox
@@ -43,6 +49,9 @@ struct Registry {
 	/// Source address -> session inbox. Cached after first contact so non-STUN
 	/// packets (DTLS/RTP/RTCP, which carry no ufrag) route without parsing.
 	by_addr: HashMap<SocketAddr, Arc<Entry>>,
+	/// Source address -> the session a signed binding request claimed it for while
+	/// another session holds it, until [`Route::confirm`] or the holder's end.
+	claims: HashMap<SocketAddr, Arc<Entry>>,
 }
 
 struct Entry {
@@ -92,32 +101,101 @@ impl Drop for Registration {
 		registry
 			.by_addr
 			.retain(|_, entry| entry.ufrag != self.ufrag && !entry.sender.is_closed());
+		registry
+			.claims
+			.retain(|_, entry| entry.ufrag != self.ufrag && !entry.sender.is_closed());
+	}
+}
+
+/// A session's handle on its routing, which it confirms an address on.
+pub(crate) struct Route {
+	ufrag: String,
+	registry: Arc<Mutex<Registry>>,
+}
+
+impl Route {
+	/// Take `src` if this session claimed it: its ICE connected on a datagram from `src`,
+	/// which str0m accepts only for a path its checks validated.
+	pub(crate) fn confirm(&self, src: SocketAddr) {
+		let mut registry = self.registry.lock().unwrap();
+		if registry.claims.get(&src).is_some_and(|claim| claim.ufrag == self.ufrag) {
+			let claim = registry.claims.remove(&src).expect("the claim was found");
+			registry.by_addr.insert(src, claim);
+		}
 	}
 }
 
 impl Registry {
-	/// The session a datagram from `src` goes to: the one a binding `request` names, or else
-	/// whichever holds `src`. A request signed with that session's password moves `src` to
-	/// it, so a peer re-offering from the same address reaches its new session; a forged one
-	/// still reaches the session it names, which drops it, but leaves `src` where it was.
-	fn route(&mut self, src: SocketAddr, request: Option<&StunMessage>) -> Option<Arc<Entry>> {
-		let named = request.and_then(|request| {
-			let (local, _remote) = request.split_username()?;
-			Some((request, self.by_ufrag.get(local)?.clone()))
-		});
-		if let Some((request, entry)) = named {
-			let hmac = self.hmac;
-			if request.verify(entry.pass.as_bytes(), |key, payloads| hmac.sha1_hmac(key, payloads)) {
-				self.by_addr.insert(src, entry.clone());
+	/// The sessions a datagram from `src` goes to.
+	///
+	/// A binding request goes to the session it names. Signed with that session's password,
+	/// it takes `src` if no live session holds it, or else claims it. A forged one moves
+	/// nothing, and the named session drops it. A STUN answer goes to both the holder and
+	/// the claimant, since either may have sent the check; anything else to the holder.
+	fn route(&mut self, src: SocketAddr, datagram: &Datagram) -> [Option<Arc<Entry>>; 2] {
+		match datagram {
+			Datagram::Request(request) => {
+				let named = (request.split_username())
+					.and_then(|(local, _remote)| self.by_ufrag.get(local))
+					.cloned();
+				let Some(entry) = named else {
+					return [self.holder(src), None];
+				};
+				let hmac = self.hmac;
+				if request.verify(entry.pass.as_bytes(), |key, payloads| hmac.sha1_hmac(key, payloads)) {
+					match self.holder(src) {
+						None => {
+							self.by_addr.insert(src, entry.clone());
+						}
+						Some(holder) if Arc::ptr_eq(&holder, &entry) => {
+							self.claims.remove(&src);
+						}
+						Some(_) => {
+							self.claims.insert(src, entry.clone());
+						}
+					}
+				}
+				[Some(entry), None]
 			}
-			return Some(entry);
+			Datagram::Answer => [self.holder(src), self.claims.get(&src).cloned()],
+			Datagram::Other => [self.holder(src), None],
 		}
-		let entry = self.by_addr.get(&src).cloned()?;
-		if entry.sender.is_closed() {
-			self.by_addr.remove(&src);
-			return None;
+	}
+
+	/// The live session holding `src`: its holder, or once that ends, its claimant.
+	fn holder(&mut self, src: SocketAddr) -> Option<Arc<Entry>> {
+		if let Some(entry) = self.by_addr.get(&src)
+			&& !entry.sender.is_closed()
+		{
+			return Some(entry.clone());
 		}
-		Some(entry)
+		self.by_addr.remove(&src);
+		let claim = self.claims.remove(&src).filter(|claim| !claim.sender.is_closed())?;
+		self.by_addr.insert(src, claim.clone());
+		Some(claim)
+	}
+}
+
+/// What a datagram is, as far as routing it goes.
+enum Datagram<'a> {
+	/// A STUN binding request, which names its session.
+	Request(Box<StunMessage<'a>>),
+	/// Any other STUN message, such as the answer to a check.
+	Answer,
+	/// DTLS, RTP, or RTCP, which carries no session.
+	Other,
+}
+
+impl<'a> Datagram<'a> {
+	fn parse(data: &'a [u8]) -> Self {
+		// Only STUN starts with 0..=3 (RFC 7983), so media skips the parse.
+		if data.first().is_none_or(|first| *first > 3) {
+			return Self::Other;
+		}
+		match StunMessage::parse(data) {
+			Ok(message) if message.is_binding_request() => Self::Request(Box::new(message)),
+			_ => Self::Answer,
+		}
 	}
 }
 
@@ -138,6 +216,7 @@ impl Mux {
 			hmac: crypto.sha1_hmac_provider,
 			by_ufrag: HashMap::new(),
 			by_addr: HashMap::new(),
+			claims: HashMap::new(),
 		}));
 		let demux = tokio::spawn(demux(socket.clone(), registry.clone()));
 
@@ -177,7 +256,15 @@ impl Mux {
 			ufrag: creds.ufrag.clone(),
 			registry: self.registry.clone(),
 		};
-		(creds, Inbound { packets: rx }, registration)
+		let route = Route {
+			ufrag: creds.ufrag.clone(),
+			registry: self.registry.clone(),
+		};
+		let inbound = Inbound {
+			packets: rx,
+			route: Some(route),
+		};
+		(creds, inbound, registration)
 	}
 
 	/// The shared socket, handed to each session for sending.
@@ -211,33 +298,14 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 		let src = crate::ice::canonical(src);
 		let data = &buf[..len];
 
-		let request = parse_binding(data);
-		let entry = registry.lock().unwrap().route(src, request.as_ref());
-		let Some(entry) = entry else {
-			continue;
-		};
-
-		// Bounded like a socket buffer: drop on full (WebRTC tolerates loss),
-		// evict on closed (the session ended).
-		match entry.sender.try_send((data.to_vec(), src)) {
-			Ok(()) => {}
-			Err(mpsc::error::TrySendError::Full(_)) => {}
-			Err(mpsc::error::TrySendError::Closed(_)) => {
-				registry.lock().unwrap().by_addr.remove(&src);
-			}
+		let datagram = Datagram::parse(data);
+		let targets = registry.lock().unwrap().route(src, &datagram);
+		for entry in targets.into_iter().flatten() {
+			// Bounded like a socket buffer: drop on full, as WebRTC tolerates loss. A closed
+			// inbox is evicted on its address's next route.
+			let _ = entry.sender.try_send((data.to_vec(), src));
 		}
 	}
-}
-
-/// `data` as a STUN binding request, if it is one. Its USERNAME is
-/// `<local-ufrag>:<remote-ufrag>`; we route on the local half.
-fn parse_binding(data: &[u8]) -> Option<StunMessage<'_>> {
-	// Only STUN starts with 0..=3 (RFC 7983), so media skips the parse.
-	if *data.first()? > 3 {
-		return None;
-	}
-	let msg = StunMessage::parse(data).ok()?;
-	msg.is_binding_request().then_some(msg)
 }
 
 #[cfg(test)]
@@ -285,28 +353,30 @@ mod tests {
 		let unknown = IceCreds::new();
 		let (request_a, request_b, request_unknown) =
 			(binding_request(&a), binding_request(&b), binding_request(&unknown));
-		fn parse(request: &[u8]) -> StunMessage<'_> {
-			parse_binding(request).expect("a binding request")
+		fn parse(request: &[u8]) -> Datagram<'_> {
+			let datagram = Datagram::parse(request);
+			assert!(matches!(datagram, Datagram::Request(_)), "not a binding request");
+			datagram
 		}
 		let address_a = "127.0.0.1:10001".parse().unwrap();
 		let address_b = "127.0.0.1:10002".parse().unwrap();
 		let mut registry = mux.registry.lock().unwrap();
-		assert!(registry.route(address_a, Some(&parse(&request_unknown))).is_none());
-		registry
-			.route(address_a, Some(&parse(&request_a)))
+		assert!(registry.route(address_a, &parse(&request_unknown))[0].is_none());
+		registry.route(address_a, &parse(&request_a))[0]
+			.clone()
 			.unwrap()
 			.sender
 			.try_send((vec![1], address_a))
 			.unwrap();
 		// A cached address routes without a ufrag.
-		registry
-			.route(address_a, None)
+		registry.route(address_a, &Datagram::Other)[0]
+			.clone()
 			.unwrap()
 			.sender
 			.try_send((vec![2], address_a))
 			.unwrap();
-		registry
-			.route(address_b, Some(&parse(&request_b)))
+		registry.route(address_b, &parse(&request_b))[0]
+			.clone()
 			.unwrap()
 			.sender
 			.try_send((vec![3], address_b))
@@ -320,20 +390,21 @@ mod tests {
 		// keep routing traffic after the peer ends.
 		drop(registration_a);
 		let mut registry = mux.registry.lock().unwrap();
-		assert!(registry.route(address_a, None).is_none());
-		assert!(registry.route(address_a, Some(&parse(&request_a))).is_none());
+		assert!(registry.route(address_a, &Datagram::Other)[0].is_none());
+		assert!(registry.route(address_a, &parse(&request_a))[0].is_none());
 	}
 
-	/// A peer re-offering from the address its old session still holds reaches its new
-	/// session: a binding request routes by the session it names, and one signed with that
-	/// session's password moves the address there.
+	/// A signed binding request for an address another session holds only claims it: the
+	/// claimant gets the answers to its checks, and takes the address once its ICE confirms the
+	/// path, or the holder ends. A forged request claims nothing.
 	#[tokio::test]
-	async fn a_reoffer_from_the_same_address_reaches_its_new_session() {
+	async fn a_claimed_address_moves_once_confirmed() {
 		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
 		let port = mux.local_addr().port();
 		let (old, mut old_inbound, _old_registration) = mux.register();
 		let (new, mut new_inbound, _new_registration) = mux.register();
 		let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let send = async |data: &[u8]| peer.send_to(data, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
 		let recv = async |inbound: &mut Inbound| {
 			kio::clock::timeout(Duration::from_secs(5), inbound.packets.recv())
 				.await
@@ -341,41 +412,65 @@ mod tests {
 				.expect("session inbox stayed open")
 				.0
 		};
+		const DTLS: &[u8] = &[22, 254, 253];
+		const ANSWER: &[u8] = &[1, 1, 0, 0];
 
 		let request = binding_request(&old);
-		peer.send_to(&request, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
+		send(&request).await;
 		assert_eq!(recv(&mut old_inbound).await, request);
 
-		// A request naming another session without its password, as one forged from this
-		// address would, reaches that session but leaves the address where it was.
+		// Forged: it reaches the session it names, which drops it, and claims nothing.
 		let forged = binding_request(&IceCreds {
 			ufrag: new.ufrag.clone(),
 			pass: old.pass.clone(),
 		});
-		peer.send_to(&forged, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
+		send(&forged).await;
 		assert_eq!(recv(&mut new_inbound).await, forged);
-		peer.send_to(&[22, 254, 253], (Ipv4Addr::LOCALHOST, port))
-			.await
-			.unwrap();
-		assert_eq!(
-			recv(&mut old_inbound).await,
-			[22, 254, 253],
-			"a forged request moved the address"
-		);
+		send(ANSWER).await;
+		assert_eq!(recv(&mut old_inbound).await, ANSWER);
 
+		// Signed: a claim, so the new session gets the answers to its checks, while the old one
+		// keeps the address.
 		let request = binding_request(&new);
-		peer.send_to(&request, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
+		send(&request).await;
 		assert_eq!(recv(&mut new_inbound).await, request);
+		send(ANSWER).await;
+		assert_eq!(recv(&mut old_inbound).await, ANSWER);
+		assert_eq!(recv(&mut new_inbound).await, ANSWER);
+		send(DTLS).await;
+		assert_eq!(recv(&mut old_inbound).await, DTLS, "a claim moved the address");
 
-		// What follows, such as DTLS, carries no ufrag and follows the address to its new session.
-		peer.send_to(&[22, 254, 253], (Ipv4Addr::LOCALHOST, port))
-			.await
-			.unwrap();
-		assert_eq!(recv(&mut new_inbound).await, [22, 254, 253]);
+		// Confirmed: the address moves.
+		let peer_addr = peer.local_addr().unwrap();
+		new_inbound.route.as_ref().unwrap().confirm(peer_addr);
+		send(DTLS).await;
+		assert_eq!(recv(&mut new_inbound).await, DTLS);
 		assert!(
 			old_inbound.packets.try_recv().is_err(),
 			"the old session kept the address"
 		);
+	}
+
+	/// A claimant takes the address once its holder ends, confirmed or not.
+	#[tokio::test]
+	async fn a_claim_outlives_its_holder() {
+		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
+		let (old, old_inbound, old_registration) = mux.register();
+		let (new, mut new_inbound, _new_registration) = mux.register();
+		let (request_old, request_new) = (binding_request(&old), binding_request(&new));
+		let address = "127.0.0.1:10001".parse().unwrap();
+		let mut registry = mux.registry.lock().unwrap();
+		registry.route(address, &Datagram::parse(&request_old));
+		registry.route(address, &Datagram::parse(&request_new));
+		drop(registry);
+		drop((old_inbound, old_registration));
+
+		let mut registry = mux.registry.lock().unwrap();
+		let [holder, claimant] = registry.route(address, &Datagram::Other);
+		assert!(claimant.is_none());
+		holder.unwrap().sender.try_send((vec![1], address)).unwrap();
+		drop(registry);
+		assert_eq!(new_inbound.packets.try_recv().unwrap().0, [1]);
 	}
 
 	/// An IPv4 peer reaching a dual-stack (`[::]`) mux must route to its session

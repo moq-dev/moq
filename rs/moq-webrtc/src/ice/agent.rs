@@ -279,11 +279,19 @@ impl Agent {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
+		let connecting = matches!(self.phase, Phase::Establishing { .. });
 		let result = self
 			.rtc_mut()
 			.handle_input(Input::Receive(Instant::now().into_std(), receive));
 		if let Err(err) = result {
 			self.fail(Error::rtc(err));
+		}
+		// str0m connects only on a path its checks validated, so `src` is the peer's.
+		if connecting
+			&& matches!(self.phase, Phase::Connected)
+			&& let Some(route) = &self.inbound.route
+		{
+			route.confirm(src);
 		}
 	}
 }

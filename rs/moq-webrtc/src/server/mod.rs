@@ -24,6 +24,7 @@ use tokio::sync::oneshot;
 
 use crate::Result;
 use mux::Mux;
+pub(crate) use mux::Route;
 
 /// The result of a WHIP/WHEP [`whip::accept`] / [`whep::accept`]: the SDP answer
 /// to return to the client, plus an opaque resource id for the `Location` header
