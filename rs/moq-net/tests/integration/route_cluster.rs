@@ -1006,8 +1006,8 @@ impl Origin {
 /// over its own session. A client lists only `live`. It holds `L`'s route and never `V`'s:
 /// `V` churning costs the client no byte. A request outside that interest still resolves
 /// through the relay. A Rust client's request discovers its own path, so it names `V`'s
-/// node; Node ID 0, the publisher selecting, comes only from other implementations and
-/// is covered at the publisher (`an_answered_track_stream_holds_the_track_until_the_requester_closes`).
+/// node; Node ID 0, the publisher selecting, comes only from other implementations: the
+/// native JS claims lanes of `just test interop` cover a relay answering it.
 #[kio::test]
 async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 	let relay = produce_origin(1);

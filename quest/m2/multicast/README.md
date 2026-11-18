@@ -33,8 +33,8 @@ Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
 wire were retargeted or deleted. The lite-07 cut still waits on this epic's
 last child, [the uncovered cases](/quest/m2/multicast/accept.md), and on
-[route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
-the lite-06 mitigations. After the cut come warmth's wire
+[route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
+scoped subscriber whose grant is too wide to ask for. After the cut come warmth's wire
 ([cache-aware routing](/quest/m3/cache-routing/README.md)),
 [route benches](/quest/m3/route-benches.md),
 [the proof binding](/quest/m3/route-proof-binding.md),
