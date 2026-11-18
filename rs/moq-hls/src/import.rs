@@ -2601,6 +2601,7 @@ mod tests {
 	/// as a group of its own.
 	#[tokio::test]
 	async fn a_declared_gap_is_skipped_and_the_media_after_it_delivered() {
+		kio::clock::host_time(); // real TCP sockets
 		for cmaf in [false, true] {
 			let dir = temp_dir();
 			let muxer = synth(true);
@@ -2677,6 +2678,7 @@ mod tests {
 	/// A segment the playlist does not mark as a gap still fails when its URI answers 404.
 	#[tokio::test]
 	async fn an_unmarked_missing_segment_still_fails() {
+		kio::clock::host_time(); // real TCP sockets
 		let dir = temp_dir();
 		let muxer = synth(true);
 		write_synth(&dir, &muxer, "", &[5_000_000]);
