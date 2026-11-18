@@ -198,6 +198,15 @@ impl Mesh {
 			.sum()
 	}
 
+	/// The frames relay `from` sent relay `to`, over every session between them so far.
+	pub fn frames(&self, from: usize, to: usize) -> u64 {
+		let tier = Self::tier(from, to);
+		(self.registry.snapshot().traffic().into_iter())
+			.filter(|(row, role, _)| *row == tier && *role == Role::Publisher)
+			.map(|(_, _, traffic)| traffic.frames)
+			.sum()
+	}
+
 	/// Every direction of every link that carried more groups than `written`, as
 	/// `(from, to, groups)`: a group crossed it twice.
 	pub fn doubled(&self, written: u64) -> Vec<(usize, usize, u64)> {
@@ -222,14 +231,19 @@ pub(super) struct Source {
 }
 
 impl Source {
-	/// Publish on a fresh origin `hop`, under `instance` at epoch 0 when given, or a minted one.
+	/// Publish [`PATH`] on a fresh origin `hop`, under `instance` at epoch 0 when given, or a
+	/// minted one.
 	pub fn new(hop: u64, instance: Option<&Instance>) -> Self {
-		let origin = produce_origin(hop);
+		Self::on(produce_origin(hop), PATH, instance)
+	}
+
+	/// Publish `path` on `origin`, under `instance` at epoch 0 when given.
+	pub fn on(origin: origin::Producer, path: &str, instance: Option<&Instance>) -> Self {
 		let mut options = origin::RouteOptions::hidden();
 		if let Some(instance) = instance {
 			options = options.with_instance(instance.clone(), 0);
 		}
-		let route = origin.route(PATH, options).unwrap();
+		let route = origin.route(path, options).unwrap();
 		let track = route.broadcast().create_track(TRACK, timed()).unwrap();
 		route.announce().unwrap();
 		Self { origin, route, track }
@@ -458,11 +472,16 @@ pub(super) struct Shown {
 
 /// What `node` shows at [`PATH`] now, or `None` when it shows nothing.
 pub(super) async fn shown(node: &origin::Producer) -> Option<Shown> {
+	shown_at(node, PATH).await
+}
+
+/// What `node` shows at `path` now, or `None` when it shows nothing.
+pub(super) async fn shown_at(node: &origin::Producer, path: &str) -> Option<Shown> {
 	let mut routes = node.consume().routes();
 	land().await;
 	let mut shown = None;
 	while let Some(event) = routes.try_next() {
-		if event.announce.prefix.as_str() != PATH {
+		if event.announce.prefix.as_str() != path {
 			continue;
 		}
 		let route = &event.announce.route;
@@ -484,6 +503,7 @@ pub(super) struct Seen {
 	pub kind: support::Kind,
 	pub available: bool,
 	pub instance: Instance,
+	pub at: kio::clock::Instant,
 }
 
 /// Every change a node shows at [`PATH`] past what it shows now.
@@ -511,6 +531,7 @@ impl Watch {
 					kind,
 					available: event.announce.route.available(),
 					instance: event.announce.route.instance().clone(),
+					at: kio::clock::now(),
 				};
 				if tx.unbounded_send(seen).is_err() {
 					break;
