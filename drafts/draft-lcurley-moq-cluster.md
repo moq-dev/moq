@@ -46,14 +46,13 @@ The same pair of relays can be upstream of each other for different namespaces.
 {{moqt}} is designed to deliver content through a mesh of relays but does not say how to build one, and the base protocol does not carry enough information to do so.
 Relays that simply forward PUBLISH_NAMESPACE to each other break down: advertisements loop forever, and a relay that hears one namespace from two peers has no basis for choosing where to send a SUBSCRIBE.
 
-This extension adds two parameters to PUBLISH_NAMESPACE, PUBLISH, and NAMESPACE.
+This extension adds two parameters to PUBLISH_NAMESPACE and NAMESPACE.
 HOP_PATH lists every endpoint an advertisement has passed through, starting with the original publisher, which breaks loops and lets paths be compared.
 ROUTE_COST is the accumulated price of the path: the publisher seeds it, and each hop adds the RELAY_COST its upstream declared at setup, so an unpriced mesh ranks by hop count.
-A relay that already carries a namespace advertises a lower cost, steering subscribers toward its warm copy.
 
 Each endpoint also declares its own Hop ID at setup, so a peer can leave it out of every path it advertises or serves to it, even across several connections between the same two relays.
 An advertisement is one path, so a relay forwards only the best path it knows per namespace and serves a subscription from one source at a time ({{publishers}}).
-A PUBLISH carries the path of its track the same way ({{tracks}}).
+PUBLISH carries no path, so tracks cross a mesh by subscription to an advertised namespace ({{tracks}}).
 
 
 # Setup Negotiation
@@ -69,8 +68,9 @@ HOP_ID Setup Option {
 }
 ~~~
 
+The extension is negotiated on a session when both endpoints declare HOP_ID.
 Negotiation is per session; a relay MUST NOT assume that because one session negotiated the extension, another did.
-On a session that did, every PUBLISH_NAMESPACE, PUBLISH, and NAMESPACE MUST carry HOP_PATH, NAMESPACE takes the extended form in {{namespace}}, and a receiver MUST close the session with a PROTOCOL_VIOLATION if any of them arrives without HOP_PATH.
+On a session that did, every PUBLISH_NAMESPACE and NAMESPACE MUST carry HOP_PATH, NAMESPACE takes the extended form in {{namespace}}, and a receiver MUST close the session with a PROTOCOL_VIOLATION if either arrives without HOP_PATH.
 
 ## Relay Cost {#relay-cost}
 An endpoint MAY declare what it charges for sending content:
@@ -86,6 +86,8 @@ The value prices the sender's own egress, so each endpoint declares its own and 
 A receiver adds it to the ROUTE_COST of every advertisement that peer forwards ({{accumulating}}).
 Absent means 1, so an unpriced mesh ranks by hop count.
 0 is distinct from absent: it makes the link free, which is how to describe two relays in the same datacenter.
+A receiver MUST accept 0.
+Usually only the endpoint that dialed the session declares a cost, since it chose the peer and knows what the link costs; the accepting endpoint, which cannot tell a sibling from a stranger, declares none.
 
 A declared cost is an assertion, not an instruction: a receiver MAY charge a locally configured value instead, so a peer cannot make itself cheap by saying so.
 
@@ -132,7 +134,7 @@ An anonymous accepted session cannot be correlated with anything, so it SHOULD g
 
 # Namespace Advertisements {#namespace}
 HOP_PATH and ROUTE_COST are Key-Value-Pair parameters ({{moqt}} Section 2.5).
-PUBLISH_NAMESPACE ({{moqt}} Section 10.15) and PUBLISH already carry parameters.
+PUBLISH_NAMESPACE ({{moqt}} Section 10.15) already carries parameters.
 NAMESPACE ({{moqt}} Section 10.16) does not, and a subscriber-driven mesh propagates advertisements as NAMESPACE, so this extension appends a parameter block to it:
 
 ~~~
@@ -168,6 +170,10 @@ HOP_PATH Parameter {
 The list always has at least one entry, the original publisher, 0 if unknown ({{zero}}).
 A receiver MUST close the session with a PROTOCOL_VIOLATION if the list is empty, if the entries do not exactly fill `Length`, or if a non-zero Hop ID appears twice.
 
+A HOP_PATH holds at most 32 entries.
+A receiver MAY close the session with a PROTOCOL_VIOLATION if one holds more, and MAY discard an advertisement whose path exceeds a lower local limit.
+A relay that cannot append its own Hop ID within the bound MUST NOT forward that path, and advertises its next best path instead ({{selection}}).
+
 ## ROUTE_COST Parameter {#route-cost}
 ROUTE_COST is the marginal cost of subscribing through this advertisement: the price of the transfers a new subscription would cause.
 
@@ -182,18 +188,17 @@ It is OPTIONAL and absent means 0.
 Costs still accumulate across a mesh that sends none, because each receiver adds the RELAY_COST of the link it received over ({{accumulating}}).
 
 The original publisher seeds the value with its production cost: 0 for content it already produces, higher for content it would have to start on demand, such as a standby transcoder advertising everything it could serve.
+A standby seed ranks after live paths only while no live path accumulates past it, which is a property of the deployment, not of the number.
 
-A standby seed only ranks last if no live path can accumulate past it, which is a property of the deployment, not of the number.
-A deployment relying on standby ordering within one specificity tier ({{selection}}) MUST bound the charged links on an admitted path by H and each link's cost by C, including the receiving link, and MUST enforce both when admitting paths and links.
-Its live publishers MUST seed 0 and its standby publishers MUST seed above H * C and below saturation; 2^32 is RECOMMENDED where H * C < 2^32.
-Unknown, out-of-budget, and saturated routes are outside the guarantee: a receiver MUST NOT rank them above standby capacity on the guess that they already carry content.
+The value describes the path and nothing else: a relay MUST NOT lower it because it already carries the namespace.
+Such a discount makes two relays that each carry a copy look cheaper to each other than their own sources, so their subscriptions pull from each other instead of settling on a source.
 
 
 # Relay Behavior
-A relay forwarding an advertisement or PUBLISH MUST append its own Hop ID to the HOP_PATH it received, so its ID is always the last entry.
+A relay forwarding an advertisement MUST append its own Hop ID to the HOP_PATH it received, so its ID is always the last entry.
 A received 0 is forwarded unchanged.
 
-A relay MUST discard an advertisement or PUBLISH whose HOP_PATH already contains its own non-zero Hop ID: forwarding it would extend a loop, and subscribing through it would route the relay back to itself.
+A relay MUST discard an advertisement whose HOP_PATH already contains its own non-zero Hop ID: forwarding it would extend a loop, and subscribing through it would route the relay back to itself.
 This check catches loops of any length and is the only loop defense required.
 A conforming sender never sends one ({{selection}}), so a receiver MAY close the session with a PROTOCOL_VIOLATION instead; discarding is what keeps the mesh working when one member does not conform.
 
@@ -204,21 +209,13 @@ The identity a receiver assigned that upstream ({{assigned}}) is local selection
 
 ## Accumulating Cost {#accumulating}
 Before forwarding or acting on an advertisement, a relay MUST add the RELAY_COST the sender declared ({{relay-cost}}) to the ROUTE_COST it received.
+An upstream that did not negotiate the extension sends no ROUTE_COST, so its advertisements cost the link alone.
 The addition MUST saturate rather than wrap, so an absurd value ranks last instead of overflowing to best.
-
-A relay actively carrying the namespace (a live subscription exists for at least one of its tracks) SHOULD advertise 0 instead: its ingress is already paid for, so another subscriber costs only the links below it.
-This is what lets a cluster converge on a warm copy.
-The discount applies only to the path it actually serves from; a standby path keeps its accumulated value, since serving from it means opening a fresh ingest.
-When it stops carrying the namespace it SHOULD restore the accumulated value, optionally after a grace period so brief churn does not flap routing.
-
-Two relays that each begin carrying the same namespace would each see the other's 0 as cheaper than its own source, and if both switched at once the namespace would have no source.
-Before re-parenting onto a 0-cost advertisement from another actively-carrying relay (one whose HOP_PATH has two or more entries), a relay SHOULD apply a deterministic tie-break, such as comparing a hash of the namespace and each Hop ID, so exactly one side moves.
-Equal Hop IDs, including two relays that both declared 0, cannot be ordered, and neither side SHOULD move.
-Cheaper advertisements from anything else carry no such hazard and SHOULD be adopted at once.
+A relay forwards the accumulated value unchanged ({{route-cost}}).
 
 ## Updating an Advertisement {#updating}
 An endpoint updates a PUBLISH_NAMESPACE with REQUEST_UPDATE ({{moqt}} Section 9.5) on its request stream, carrying the HOP_PATH or ROUTE_COST that changed.
-An omitted parameter keeps its value, so a relay that starts carrying a namespace sends an explicit ROUTE_COST of 0.
+An omitted parameter keeps its value, so a cost that drops to 0 is sent as an explicit 0.
 The receiver answers REQUEST_OK, or REQUEST_ERROR and closes the stream, which withdraws the advertisement.
 
 NAMESPACE has no REQUEST_UPDATE, so an endpoint updates one by re-sending it with new parameters on the same SUBSCRIBE_NAMESPACE response stream.
@@ -227,9 +224,13 @@ A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 An advertisement lives as long as its stream, so an update on a new stream would leave two streams claiming one namespace.
 An endpoint MUST NOT open a second stream for an advertisement it already maintains on the session.
 
-An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived, even when the first HOP_PATH entry changed: the namespace still names the same content ({{publishers}}).
+An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
 
-The expected update is a ROUTE_COST change, which is how a relay signals that it started or stopped carrying the namespace.
+An update MUST NOT change the first HOP_PATH entry, the original publisher.
+An endpoint whose best path now starts at another publisher withdraws the advertisement and advertises the new path: PUBLISH_NAMESPACE_DONE and a new PUBLISH_NAMESPACE, or NAMESPACE_DONE and a new NAMESPACE on the same stream.
+A receiver MAY close the session with a PROTOCOL_VIOLATION on an update that changes the first entry, or apply it as an ordinary update.
+
+An update is sent whenever the path an endpoint advertises changes: a different best path, or a different cost along it.
 
 
 # Path Selection {#selection}
@@ -237,8 +238,8 @@ A receiver resolving a SUBSCRIBE, FETCH, or track-status request consults only t
 A refusal never falls through to a less specific tier.
 Nor is it retried at another advertisement of the same prefix.
 
-Within that tier, a receiver SHOULD prefer a HOP_PATH that contains no 0 entry over one that does, then the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH and then toward the most recently received.
-This is advisory: a receiver MAY apply local policy, such as measured RTT, instead.
+Within that tier, a receiver SHOULD rank last a path from a session that sent GOAWAY, then prefer a HOP_PATH that contains no 0 entry over one that does, then the lowest ROUTE_COST, breaking ties toward the shorter HOP_PATH, then by a deterministic hash of the requested namespace and the HOP_PATH, so relays holding the same paths pick the same one, and finally toward the most recently received.
+This is advisory: a receiver MAY apply local policy, such as an operator's preference for one link, measured RTT, or a copy it already holds, before cost.
 
 Every refusal, including an unrecognized code, is terminal.
 A publisher signals capacity through its advertisement alone: it withdraws or re-prices it before it runs out, leaving headroom for requests already in flight, since a withdrawal and a request for the slot it gave away can cross.
@@ -258,28 +259,12 @@ One rule for advertisement and dispatch keeps advertised paths truthful and prev
 
 
 # Track Delivery {#tracks}
-A PUBLISH carries HOP_PATH and ROUTE_COST for its track, and the path it names is the one the track took, so the rules above apply to it as to an advertisement.
-SUBSCRIBE_TRACKS adds no cluster parameters, but a relay MUST send it to a cluster peer with FORWARD set to 0 ({{moqt}} Sections 3.1.1 and 3.6.2), so each PUBLISH it causes arrives paused: metadata only, with no objects.
-Without it, every peer would receive every track's objects.
+PUBLISH ({{moqt}} Section 9.13) carries no cluster parameters, and an endpoint MUST NOT include HOP_PATH or ROUTE_COST in one.
+Without a path, a PUBLISH cannot be checked for loops, so a relay SHOULD NOT forward a PUBLISH to a peer that negotiated this extension: a cycle of relays forwarding one would loop it.
+A track crosses the mesh instead by SUBSCRIBE or FETCH to the namespace's advertisement, which Path Selection routes ({{selection}}).
 
-A relay MUST source a track it sends in a PUBLISH from a path whose HOP_PATH does not contain the subscriber's Hop ID ({{selection}}).
-If no such path exists, it MUST NOT send that PUBLISH to the subscriber.
-
-A receiver MUST discard a PUBLISH whose HOP_PATH contains its own non-zero Hop ID.
-A conforming peer never sends one ({{selection}}).
-
-A SUBSCRIBE_TRACKS names a prefix and is forwarded to every peer that advertises a namespace beneath the prefix or covering it, along a path that does not contain the subscriber's Hop ID, so each such track is published over every one of those paths.
-For example, a peer that advertises `a` and can serve tracks under `a/b` receives a SUBSCRIBE_TRACKS for `a/b` even when it has advertised nothing beneath it.
-A publisher that sends no PUBLISH_NAMESPACE MUST send an unsolicited PUBLISH for each track it produces ({{moqt}} Section 3.1).
-Its edge relay then advertises the covering namespace as it would forward that PUBLISH: it keeps the PUBLISH's HOP_PATH, or a single 0 entry if the publisher's session did not negotiate this extension ({{bridging}}), appends its own Hop ID, and accumulates the PUBLISH's ROUTE_COST ({{accumulating}}).
-SUBSCRIBE_TRACKS reaches it through that advertisement.
-The request stays open ({{moqt}} Section 3.6), so a namespace advertised later is covered when it is advertised.
-
-A receiver identifies a track by its namespace and its name.
-It serves each demand for the track's objects, such as a downstream subscription, from the source Path Selection prefers among those eligible for that demand ({{selection}}), and resumes that source by sending REQUEST_UPDATE with Forward set to 1 on its subscription ({{moqt}} Section 9.5); once a source serves no demand, the receiver pauses it again with REQUEST_UPDATE setting Forward to 0.
-Demands usually share one source, but a downstream peer that the preferred path runs through is served from another, so several sources can be active at once.
-A later PUBLISH for the track that Path Selection prefers takes over the same way, but only where {{publishers}} allows moving a subscription between the two: the receiver resumes it for the demand it now serves and pauses a source left serving none.
-Every other source stays paused as a standby.
+A relay MAY still send SUBSCRIBE_TRACKS ({{moqt}} Section 9.18) to list a peer's tracks; it is plain {{moqt}} and this extension changes nothing about it.
+A relay that does SHOULD send it with FORWARD set to 0, so each PUBLISH it causes arrives paused, and resume a track with REQUEST_UPDATE only while something reads it.
 
 
 # Several Publishers of One Namespace {#publishers}
@@ -290,7 +275,18 @@ A namespace names one broadcast whichever publisher serves it, so several publis
 A publisher MUST NOT reuse a namespace for different content, and publishes a new instance under a new namespace instead.
 
 A refusal never moves to another publisher ({{selection}}).
-A relay that moves to another publisher MUST update its advertisement to the new path ({{updating}}).
+A relay that moves to another publisher withdraws its advertisement and advertises the new path ({{updating}}).
+
+
+# Implementation Status {#implementations}
+This section records known implementations, as {{?RFC7942}} describes, and is to be removed before publication.
+
+- [moq-dev/moq](https://github.com/moq-dev/moq): the Rust relay library `moq-net` sends and accepts this document over moq-transport drafts 18, 20, and 22; its TypeScript counterpart `@moq/net` declares a Hop ID and advertises its own broadcasts, without forwarding.
+- [openmoq/moqx](https://github.com/openmoq/moqx): a C++ relay on moxygen implementing moq-cluster-01 over moq-transport draft 18, negotiated by default.
+- [openmoq/moq5](https://github.com/openmoq/moq5): a C library implementing moq-cluster-01 on its moq-transport draft 22 session engine and relay.
+
+Both openmoq implementations follow moq-cluster-01, so they differ from this document where its changelog says so.
+Two of those differences change what crosses the wire: they lower ROUTE_COST to 0 for a namespace they carry, which a receiver of this document reads as an ordinary cost, and moq5 closes the session over an update that changes the first HOP_PATH entry, which this document forbids sending.
 
 
 # Security Considerations {#security}
@@ -299,7 +295,7 @@ Declaring 0 hides an identity from the mesh; a peer MAY assign one as local sele
 A HOP_PATH does reveal how many hops an advertisement crossed, which hints at the size of a deployment; a relay MAY collapse its internal hops into one entry, or strip HOP_PATH, before forwarding across a trust boundary.
 
 Because a relay only appends to HOP_PATH, it cannot make a competing path look shorter than it is; the worst it can do is under-report its own upstream portion to win an advisory tie-break.
-ROUTE_COST has no such protection: it is a single value the sender chooses, so a relay can advertise 0 for content it is not carrying and attract subscriptions it then has to fetch.
+ROUTE_COST has no such protection: it is a single value the sender chooses, so a relay can advertise 0 for a path that costs more and attract subscriptions it then has to fetch.
 Both cost only a suboptimal path choice, and the latter is self-limiting, since the traffic won this way must then be served.
 
 Implementations SHOULD bound the work started by requests beneath a broad advertisement, withdrawing it before capacity is exhausted.
@@ -324,12 +320,12 @@ This document requests two registrations in the "MOQT Setup Options" registry ({
 ## MOQT Message Parameters
 
 This document requests two registrations in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
-Both are carried in PUBLISH_NAMESPACE, in REQUEST_UPDATE of a PUBLISH_NAMESPACE ({{updating}}), in PUBLISH, and in the extended NAMESPACE message ({{namespace}}).
+Both are carried in PUBLISH_NAMESPACE, in REQUEST_UPDATE of a PUBLISH_NAMESPACE ({{updating}}), and in the extended NAMESPACE message ({{namespace}}).
 
-| Value   | Name        | Carried In                                            | Reference     |
-|:--------|:------------|:------------------------------------------------------|:--------------|
-| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, REQUEST_UPDATE, PUBLISH, NAMESPACE | This Document |
-| 0x40B58 | ROUTE_COST  | PUBLISH_NAMESPACE, REQUEST_UPDATE, PUBLISH, NAMESPACE | This Document |
+| Value   | Name        | Carried In                                   | Reference     |
+|:--------|:------------|:---------------------------------------------|:--------------|
+| 0x40B57 | HOP_PATH    | PUBLISH_NAMESPACE, REQUEST_UPDATE, NAMESPACE | This Document |
+| 0x40B58 | ROUTE_COST  | PUBLISH_NAMESPACE, REQUEST_UPDATE, NAMESPACE | This Document |
 
 The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a length-prefixed byte string, while HOP_ID, RELAY_COST, and ROUTE_COST are even, so their values are bare varints.
 
@@ -340,12 +336,15 @@ The Key-Value-Pair parity is load-bearing: HOP_PATH is odd, so its value is a le
 
 ## moq-cluster-02
 - Hop IDs span 64 bits; a link whose integer encoding cannot carry one sends 0 in its place.
-- Exactly one NAMESPACE parameter block is appended when any extension that uses it is negotiated, holding the parameters of all of them.
+- A HOP_PATH holds at most 32 entries.
+- The extension is negotiated when both endpoints declare HOP_ID, and a receiver accepts a RELAY_COST of 0.
+- Removed the warm discount: ROUTE_COST describes the path, and a relay does not lower it for a namespace it carries. Removed the re-parenting tie-break it needed, and the standby seed bounds, which nothing enforced.
 - A namespace names one broadcast whichever publisher serves it, and a publisher MUST NOT reuse one for different content. A receiver MAY fail a subscription over between any of its advertisements, continuing from the first object the subscriber lacks instead of at a group boundary. Replaces the first-Hop-ID publisher identity.
+- An update still never changes the original publisher: the advertisement is withdrawn and made again, and a receiver MAY close the session over an update that changes it.
 - Defined request resolution against the longest covering prefix; every refusal is terminal, including between several publishers of one namespace, and capacity is signaled only by withdrawing or re-pricing the advertisement.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
-- A change of original publisher is an ordinary update instead of a withdrawal and a new advertisement.
-- PUBLISH carries HOP_PATH and ROUTE_COST, required on a negotiated session, and is sourced only from a path that excludes the subscriber's Hop ID; a receiver discards one whose HOP_PATH contains its own. SUBSCRIBE_TRACKS is forwarded to every source beneath or covering its prefix, with Forward 0; a receiver identifies a track by namespace and name, serves each demand from the preferred source eligible for it, and pauses or resumes sources with REQUEST_UPDATE.
+- Path selection ranks a session that sent GOAWAY last and breaks ties by a hash of the namespace and path before recency.
+- PUBLISH carries no cluster parameters and is not forwarded to cluster peers; tracks cross the mesh by subscription. Added an implementation status section.
 
 ## moq-cluster-01
 - Assigned identities are local selection state and MUST NOT be forwarded.

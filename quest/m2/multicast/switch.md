@@ -48,4 +48,3 @@ Public API: none. Wire: none.
 - [Route benches](/quest/m3/route-benches.md) - the path-rule benches and costs the switch left
 - [Proof binding](/quest/m3/route-proof-binding.md) - binds the route proof to the router
 - [Claim chain](/quest/m2/multicast/claim-chain.md) - the chain change the cut waits on
-- [The moq-cluster draft](/quest/m2/moq-cluster-draft.md) - kept, since third-party relays ship it
