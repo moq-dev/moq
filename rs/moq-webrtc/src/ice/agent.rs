@@ -72,6 +72,8 @@ pub struct Agent {
 	/// Datagrams the socket refused for lack of buffer space, sent first next time.
 	outbox: VecDeque<(Vec<u8>, SocketAddr)>,
 	phase: Phase,
+	/// Close once connected with nothing due, which [`Agent::close`] asked for.
+	closing: bool,
 }
 
 impl Agent {
@@ -94,6 +96,7 @@ impl Agent {
 			timeout: now,
 			outbox: VecDeque::new(),
 			phase: Phase::Establishing { started: now },
+			closing: false,
 		};
 		// str0m's ICE has no clock, and asks for no timeout, until its first one. Without
 		// it a side that hears no checks, such as one facing an ICE-lite peer, would never
@@ -117,6 +120,21 @@ impl Agent {
 		RtcMut(self)
 	}
 
+	/// An event str0m already surfaced, without driving the connection.
+	pub fn queued(&mut self) -> Option<Event> {
+		self.events.pop_front()
+	}
+
+	/// Close the connection with an RTCP BYE and a DTLS close_notify once it has sent
+	/// everything written to it, after which [`Agent::next`] reports [`Error::Closed`].
+	///
+	/// str0m packetizes a written frame only on a timeout, and holds media until DTLS and
+	/// SRTP are up, so the close waits for a connection with nothing due. A peer that never
+	/// connects still ends with [`Error::Timeout`].
+	pub fn close(&mut self) {
+		self.closing = true;
+	}
+
 	/// Drive the connection until str0m surfaces an [`Event`]. ICE disconnection is
 	/// reported as [`Error::Closed`] instead.
 	///
@@ -127,15 +145,16 @@ impl Agent {
 			if let Some(event) = self.events.pop_front() {
 				return Ok(event);
 			}
-			if let Phase::Failed(err) = &self.phase {
-				return Err(err.clone());
-			}
+			// Sent before reporting an end too, which may have queued a close_notify.
 			while let Some((data, dst)) = self.outbox.front() {
 				match self.socket.send_to(data, *dst).await {
 					Ok(_) => {}
 					Err(err) => tracing::warn!(%err, dst = %dst, "send failed"),
 				}
 				self.outbox.pop_front();
+			}
+			if let Phase::Failed(err) = &self.phase {
+				return Err(err.clone());
 			}
 
 			// A dead Rtc (DTLS failure, explicit disconnect) reports a never-firing
@@ -152,6 +171,15 @@ impl Agent {
 			let deadline = establish.map_or(self.timeout, |at| at.min(self.timeout));
 
 			let now = Instant::now();
+			// Once SRTP is up with nothing due, str0m has packetized and sent every frame
+			// written to it.
+			if deadline > now && self.rtc.is_connected() && std::mem::take(&mut self.closing) {
+				let result = self.rtc_mut().close();
+				if let Err(err) = result {
+					self.fail(Error::rtc(err));
+				}
+				continue;
+			}
 			if deadline > now {
 				tokio::select! {
 					packet = self.inbound.packets.recv() => {
@@ -439,6 +467,80 @@ mod tests {
 				panic!("the agent ended without a check: {err:?}");
 			}
 		}
+	}
+
+	/// A close sends every frame written before it: str0m packetizes a frame only on a
+	/// timeout, so closing at once would drop what it still queued.
+	#[tokio::test]
+	async fn a_close_sends_what_was_written_first() {
+		use str0m::media::{Direction, Frequency, MediaKind, MediaTime};
+		const FRAMES: u64 = 50;
+
+		let now = Instant::now().into_std();
+		let mut sender = crate::session::rtc_config().unwrap().build(now);
+		let mut receiver = crate::session::rtc_config().unwrap().build(now);
+		// Candidates go into the SDP, so bind before the exchange.
+		let sender_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		let receiver_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+		for (rtc, socket) in [(&mut sender, &sender_socket), (&mut receiver, &receiver_socket)] {
+			let local = socket.local_addr().unwrap();
+			rtc.add_local_candidate(str0m::Candidate::host(local, "udp").unwrap());
+		}
+		let mut api = sender.sdp_api();
+		let mid = api.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+		let (offer, pending) = api.apply().unwrap();
+		let answer = receiver.sdp_api().accept_offer(offer).unwrap();
+		sender.sdp_api().accept_answer(pending, answer).unwrap();
+		let agent = |rtc, socket: Arc<UdpSocket>| {
+			let local = socket.local_addr().unwrap();
+			Agent::new(
+				rtc,
+				Socket::new(socket.clone(), vec![local], crate::ice::reader(socket)).unwrap(),
+			)
+			.unwrap()
+		};
+		let mut sender = agent(sender, sender_socket);
+		let mut receiver = agent(receiver, receiver_socket);
+
+		while !(sender.rtc().is_connected() && receiver.rtc().is_connected()) {
+			tokio::select! {
+				event = sender.next() => { event.unwrap(); }
+				event = receiver.next() => { event.unwrap(); }
+			}
+		}
+
+		// Every frame written in one go, as a session drains its writes, then the close.
+		let mut rtc = sender.rtc_mut();
+		let pt = rtc.writer(mid).unwrap().payload_params().next().unwrap().pt();
+		for n in 0..FRAMES {
+			let time = MediaTime::new(960 * n, Frequency::FORTY_EIGHT_KHZ);
+			rtc.writer(mid)
+				.unwrap()
+				.write(pt, now, time, vec![0xfc, n as u8])
+				.unwrap();
+		}
+		drop(rtc);
+		sender.close();
+
+		let mut received = 0;
+		let mut sending = true;
+		loop {
+			tokio::select! {
+				event = sender.next(), if sending => match event {
+					Ok(_) => {}
+					Err(Error::Closed) => sending = false,
+					Err(err) => panic!("the sender failed: {err:?}"),
+				},
+				event = receiver.next() => match event {
+					Ok(Event::MediaData(_)) => received += 1,
+					Ok(_) => {}
+					// The sender's close_notify ends the receiver.
+					Err(Error::Closed) => break,
+					Err(err) => panic!("the receiver failed: {err:?}"),
+				},
+			}
+		}
+		assert_eq!(received, FRAMES, "frames written before the close were lost");
 	}
 
 	#[test]

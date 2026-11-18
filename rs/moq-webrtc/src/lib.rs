@@ -235,6 +235,57 @@ mod tests {
 		(viewer, opus_output(&output_consumer).await)
 	}
 
+	/// A bare str0m WHEP viewer of `url`, an audio line alone: each payload it receives, until
+	/// the channel closes with the server's close. Unlike [`Client::pull`], which aborts its
+	/// output when the session ends, it keeps everything that arrived.
+	async fn raw_view(url: url::Url) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+		use str0m::media::{Direction, MediaKind};
+
+		let socket = crate::session::bind_udp().await.unwrap();
+		let mut rtc = crate::session::rtc_config()
+			.unwrap()
+			.build(kio::clock::now().into_std());
+		for addr in socket.locals() {
+			rtc.add_local_candidate(str0m::Candidate::host(*addr, "udp").unwrap());
+		}
+		let mut api = rtc.sdp_api();
+		api.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
+		let (offer, pending) = api.apply().unwrap();
+		let client = Client::new(client::Config::default()).unwrap();
+		let answer = (client.http().post(url))
+			.header(reqwest::header::CONTENT_TYPE, "application/sdp")
+			.body(offer.to_sdp_string())
+			.send()
+			.await
+			.unwrap()
+			.text()
+			.await
+			.unwrap();
+		let answer = str0m::change::SdpAnswer::from_sdp_string(&answer).unwrap();
+		rtc.sdp_api().accept_answer(pending, answer).unwrap();
+		let mut agent = crate::ice::Agent::new(rtc, socket).unwrap();
+
+		let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+		tokio::spawn(async move {
+			loop {
+				match agent.next().await {
+					Ok(str0m::Event::MediaData(data)) => tx.send(data.data.to_vec()).unwrap(),
+					Ok(_) => {}
+					Err(crate::ice::Error::Closed) => return,
+					Err(err) => panic!("the viewer failed: {err:?}"),
+				}
+			}
+		});
+		rx
+	}
+
+	/// The next payload `viewer` receives, or `None` once the server closed.
+	async fn received(viewer: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Option<Vec<u8>> {
+		kio::clock::timeout(TIMEOUT, viewer.recv())
+			.await
+			.expect("the viewer neither received nor closed")
+	}
+
 	/// A WHEP viewer stays on the instance its session resolved: a publisher taking over the
 	/// path never reaches it, so the session never resets its timestamps or codec state, and it
 	/// fails once that instance's route dies.
@@ -279,29 +330,57 @@ mod tests {
 		push(&mut *bridge, 20_000, OPUS_PACKET);
 
 		let (url, http, mut sessions) = serve_whep(&origin).await;
-		let (viewer, mut played) = view(url).await;
+		let mut viewer = raw_view(url).await;
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
-		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
+		assert_eq!(received(&mut viewer).await.unwrap(), OPUS_PACKET);
 
 		// The publisher's final packet, then its clean end, as an RTMP `deleteStream` does.
 		push(&mut *bridge, 40_000, NEW_PACKET);
 		let _finished = bridge.finish().unwrap();
 		catalog.finish().unwrap();
-		assert_eq!(next_payload(&mut played).await, NEW_PACKET, "the final packet was lost");
-
+		assert_eq!(
+			received(&mut viewer).await.as_deref(),
+			Some(NEW_PACKET),
+			"the final packet was lost"
+		);
+		assert_eq!(received(&mut viewer).await, None, "the viewer was not closed");
 		kio::clock::timeout(TIMEOUT, session)
 			.await
 			.expect("the session outlived its broadcast")
 			.unwrap()
 			.expect("the session ended cleanly");
-		kio::clock::timeout(TIMEOUT, viewer)
+		http.abort();
+	}
+
+	/// A viewer joining once the catalog ended, while a track still sends, plays that track to
+	/// its end before its session closes.
+	#[tokio::test]
+	async fn a_whep_viewer_joining_after_the_catalog_ends_plays_the_rest() {
+		let origin = moq_tokio::origin::spawn();
+		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Instance::random());
+		push(&mut *bridge, 20_000, OPUS_PACKET);
+		catalog.finish().unwrap();
+
+		let (url, http, mut sessions) = serve_whep(&origin).await;
+		let mut viewer = raw_view(url).await;
+		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
-			.expect("the viewer never saw its session close")
+			.expect("WHEP negotiation timed out")
+			.unwrap();
+		// The line subscribed at the group it found, so it plays that group.
+		assert_eq!(received(&mut viewer).await.as_deref(), Some(OPUS_PACKET));
+		push(&mut *bridge, 40_000, NEW_PACKET);
+		let _finished = bridge.finish().unwrap();
+		assert_eq!(received(&mut viewer).await.as_deref(), Some(NEW_PACKET));
+		assert_eq!(received(&mut viewer).await, None, "the viewer was not closed");
+		kio::clock::timeout(TIMEOUT, session)
+			.await
+			.expect("the session outlived its broadcast")
 			.unwrap()
-			.expect("the viewer saw a clean close");
+			.expect("the session ended cleanly");
 		http.abort();
 	}
 

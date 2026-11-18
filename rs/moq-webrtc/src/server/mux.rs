@@ -10,10 +10,11 @@
 //! Routing key: ICE. A session is registered under the local ICE ufrag we mint
 //! for it ([`IceCreds::new`]). The peer's first packets are STUN binding
 //! requests whose USERNAME is `<our-ufrag>:<their-ufrag>`, so we parse the local
-//! ufrag out of the STUN message and look the session up. Each binding request
-//! caches `addr -> session`, so subsequent DTLS/RTP/RTCP (which carry no ufrag)
-//! route by address. A binding request always routes by its ufrag, so a peer that
-//! re-offers from the same address moves the address to its new session.
+//! ufrag out of the STUN message and look the session up. A binding request
+//! signed with that session's password caches `addr -> session`, so subsequent
+//! DTLS/RTP/RTCP (which carry no ufrag) route by address. A binding request always
+//! routes by its ufrag, so a peer that re-offers from the same address moves the
+//! address to its new session, while a forged one cannot move another peer's.
 //!
 //! Backpressure mirrors a UDP socket buffer: each session has a bounded inbox
 //! and a full inbox drops the datagram (WebRTC tolerates loss). A closed inbox
@@ -33,8 +34,9 @@ use crate::Result;
 use crate::session::advertised_candidates;
 
 /// Per-session routing table, shared between the demux task and the accept path.
-#[derive(Default)]
 struct Registry {
+	/// Checks a binding request's MESSAGE-INTEGRITY, as str0m does.
+	hmac: &'static dyn str0m::crypto::Sha1HmacProvider,
 	/// Local ICE ufrag -> session inbox. Populated at registration, the only
 	/// way a brand-new peer (STUN binding request) finds its session.
 	by_ufrag: HashMap<String, Arc<Entry>>,
@@ -45,6 +47,8 @@ struct Registry {
 
 struct Entry {
 	ufrag: String,
+	/// The session's ICE password, which only its peer can sign a binding request with.
+	pass: String,
 	sender: mpsc::Sender<Packet>,
 }
 
@@ -92,12 +96,20 @@ impl Drop for Registration {
 }
 
 impl Registry {
-	/// The session a datagram from `src` goes to: the one a binding request's `ufrag` names,
-	/// which then holds `src`, or else whichever holds `src`.
-	fn route(&mut self, src: SocketAddr, ufrag: Option<&str>) -> Option<Arc<Entry>> {
-		if let Some(entry) = ufrag.and_then(|ufrag| self.by_ufrag.get(ufrag)) {
-			let entry = entry.clone();
-			self.by_addr.insert(src, entry.clone());
+	/// The session a datagram from `src` goes to: the one a binding `request` names, or else
+	/// whichever holds `src`. A request signed with that session's password moves `src` to
+	/// it, so a peer re-offering from the same address reaches its new session; a forged one
+	/// still reaches the session it names, which drops it, but leaves `src` where it was.
+	fn route(&mut self, src: SocketAddr, request: Option<&StunMessage>) -> Option<Arc<Entry>> {
+		let named = request.and_then(|request| {
+			let (local, _remote) = request.split_username()?;
+			Some((request, self.by_ufrag.get(local)?.clone()))
+		});
+		if let Some((request, entry)) = named {
+			let hmac = self.hmac;
+			if request.verify(entry.pass.as_bytes(), |key, payloads| hmac.sha1_hmac(key, payloads)) {
+				self.by_addr.insert(src, entry.clone());
+			}
 			return Some(entry);
 		}
 		let entry = self.by_addr.get(&src).cloned()?;
@@ -119,7 +131,14 @@ impl Mux {
 		let local = socket.local_addr()?;
 		let candidates = advertised_candidates(ice_candidates, local)?;
 
-		let registry = Arc::new(Mutex::new(Registry::default()));
+		moq_crypto::cpu::check()?;
+		// rind-str0m repeats the check above, so its error is unreachable here.
+		let crypto = rind_str0m::default_provider().expect("the CPU check passed");
+		let registry = Arc::new(Mutex::new(Registry {
+			hmac: crypto.sha1_hmac_provider,
+			by_ufrag: HashMap::new(),
+			by_addr: HashMap::new(),
+		}));
 		let demux = tokio::spawn(demux(socket.clone(), registry.clone()));
 
 		tracing::info!(?candidates, bound = %local, "webrtc media mux listening");
@@ -146,6 +165,7 @@ impl Mux {
 		let (tx, rx) = mpsc::channel(crate::ice::INBOX);
 		let entry = Arc::new(Entry {
 			ufrag: creds.ufrag.clone(),
+			pass: creds.pass.clone(),
 			sender: tx,
 		});
 		self.registry
@@ -191,8 +211,8 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 		let src = crate::ice::canonical(src);
 		let data = &buf[..len];
 
-		let ufrag = local_ufrag(data);
-		let entry = registry.lock().unwrap().route(src, ufrag.as_deref());
+		let request = parse_binding(data);
+		let entry = registry.lock().unwrap().route(src, request.as_ref());
 		let Some(entry) = entry else {
 			continue;
 		};
@@ -209,18 +229,15 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 	}
 }
 
-/// Extract the local ICE ufrag from a STUN binding request, if `data` is one.
-/// The USERNAME is `<local-ufrag>:<remote-ufrag>`; we route on the local half.
-fn local_ufrag(data: &[u8]) -> Option<String> {
+/// `data` as a STUN binding request, if it is one. Its USERNAME is
+/// `<local-ufrag>:<remote-ufrag>`; we route on the local half.
+fn parse_binding(data: &[u8]) -> Option<StunMessage<'_>> {
 	// Only STUN starts with 0..=3 (RFC 7983), so media skips the parse.
 	if *data.first()? > 3 {
 		return None;
 	}
 	let msg = StunMessage::parse(data).ok()?;
-	if !msg.is_binding_request() {
-		return None;
-	}
-	msg.split_username().map(|(local, _remote)| local.to_string())
+	msg.is_binding_request().then_some(msg)
 }
 
 #[cfg(test)]
@@ -265,12 +282,18 @@ mod tests {
 		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
 		let (a, mut inbound_a, registration_a) = mux.register();
 		let (b, mut inbound_b, _registration_b) = mux.register();
+		let unknown = IceCreds::new();
+		let (request_a, request_b, request_unknown) =
+			(binding_request(&a), binding_request(&b), binding_request(&unknown));
+		fn parse(request: &[u8]) -> StunMessage<'_> {
+			parse_binding(request).expect("a binding request")
+		}
 		let address_a = "127.0.0.1:10001".parse().unwrap();
 		let address_b = "127.0.0.1:10002".parse().unwrap();
 		let mut registry = mux.registry.lock().unwrap();
-		assert!(registry.route(address_a, Some("unknown")).is_none());
+		assert!(registry.route(address_a, Some(&parse(&request_unknown))).is_none());
 		registry
-			.route(address_a, Some(&a.ufrag))
+			.route(address_a, Some(&parse(&request_a)))
 			.unwrap()
 			.sender
 			.try_send((vec![1], address_a))
@@ -283,7 +306,7 @@ mod tests {
 			.try_send((vec![2], address_a))
 			.unwrap();
 		registry
-			.route(address_b, Some(&b.ufrag))
+			.route(address_b, Some(&parse(&request_b)))
 			.unwrap()
 			.sender
 			.try_send((vec![3], address_b))
@@ -298,11 +321,12 @@ mod tests {
 		drop(registration_a);
 		let mut registry = mux.registry.lock().unwrap();
 		assert!(registry.route(address_a, None).is_none());
-		assert!(registry.route(address_a, Some(&a.ufrag)).is_none());
+		assert!(registry.route(address_a, Some(&parse(&request_a))).is_none());
 	}
 
 	/// A peer re-offering from the address its old session still holds reaches its new
-	/// session: a binding request routes by the session it names, and moves the address there.
+	/// session: a binding request routes by the session it names, and one signed with that
+	/// session's password moves the address there.
 	#[tokio::test]
 	async fn a_reoffer_from_the_same_address_reaches_its_new_session() {
 		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
@@ -321,6 +345,23 @@ mod tests {
 		let request = binding_request(&old);
 		peer.send_to(&request, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
 		assert_eq!(recv(&mut old_inbound).await, request);
+
+		// A request naming another session without its password, as one forged from this
+		// address would, reaches that session but leaves the address where it was.
+		let forged = binding_request(&IceCreds {
+			ufrag: new.ufrag.clone(),
+			pass: old.pass.clone(),
+		});
+		peer.send_to(&forged, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
+		assert_eq!(recv(&mut new_inbound).await, forged);
+		peer.send_to(&[22, 254, 253], (Ipv4Addr::LOCALHOST, port))
+			.await
+			.unwrap();
+		assert_eq!(
+			recv(&mut old_inbound).await,
+			[22, 254, 253],
+			"a forged request moved the address"
+		);
 
 		let request = binding_request(&new);
 		peer.send_to(&request, (Ipv4Addr::LOCALHOST, port)).await.unwrap();

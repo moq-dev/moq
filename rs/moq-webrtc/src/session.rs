@@ -108,9 +108,8 @@ pub struct Session {
 	/// sessions; pumps send frames here, the main loop forwards them into
 	/// str0m's [`Writer`](str0m::media::Writer).
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
-	/// Why the egress source's catalog stopped. `Some` only for [`MediaRole::Egress`] sessions,
-	/// until it does.
-	catalog_end: Option<tokio::task::JoinHandle<Result<()>>>,
+	/// Where an egress source's catalog stands.
+	catalog: Catalog,
 	/// Rebases each ingested track's raw RTP timestamps onto one session
 	/// timeline so audio and video stay in sync. Unused by egress sessions.
 	ingest_clock: IngestClock,
@@ -133,7 +132,7 @@ impl Session {
 			role: MediaRole::Ingest(sink),
 			opened_media: HashSet::new(),
 			writes_rx: None,
-			catalog_end: None,
+			catalog: Catalog::Settled,
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 			rate: None,
@@ -151,7 +150,7 @@ impl Session {
 			role: MediaRole::Egress(Box::new(source)),
 			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
-			catalog_end: Some(catalog_end),
+			catalog: Catalog::Following(catalog_end),
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 			rate: None,
@@ -217,23 +216,20 @@ impl Session {
 				biased;
 
 				// A failed catalog, as every subscription fails once the source's route dies,
-				// means nothing more will flow, so fail rather than idle. A clean end opens no
-				// more lines, and the pumps serve what they still hold until the writes run dry.
-				// Polled before the writes, which could otherwise stay ready and starve it; it
-				// completes once.
+				// means nothing more will flow, so fail rather than idle. A clean end lets the
+				// pumps serve what they still hold until the writes run dry. Polled before the
+				// writes, which could otherwise stay ready and starve it; it completes once.
 				ended = async {
-					match self.catalog_end.as_mut() {
-						Some(end) => end.await,
-						None => std::future::pending().await,
+					match &mut self.catalog {
+						Catalog::Following(end) => end.await,
+						_ => std::future::pending().await,
 					}
 				} => {
-					self.catalog_end = None;
 					if let Ok(Err(err)) = ended {
 						return Err(err);
 					}
-					if let MediaRole::Egress(source) = &mut self.role {
-						source.end();
-					}
+					self.catalog = Catalog::Ended;
+					self.settle()?;
 				}
 
 				req = async {
@@ -246,12 +242,11 @@ impl Session {
 						let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
 						crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 					}
-					// The catalog ended and every pump has written its last frame, which str0m
-					// already sent: close with an RTCP BYE and a DTLS close_notify, so the peer
-					// learns at once that the broadcast is over, and end once they are out.
+					// The catalog ended and every pump has written its last frame: close once
+					// str0m has sent them, so the peer learns at once that the broadcast is over.
 					None => {
 						self.writes_rx = None;
-						self.agent.rtc_mut().close().map_err(Error::rtc)?;
+						self.agent.close();
 					}
 				},
 
@@ -277,13 +272,34 @@ impl Session {
 				} => self.send_remb(),
 
 				event = self.agent.next() => match event {
-					Ok(event) => self.handle_event(event)?,
+					Ok(event) => {
+						self.handle_event(event)?;
+						self.settle()?;
+					}
 					Err(crate::ice::Error::Closed) => return Ok(()),
 					Err(crate::ice::Error::Timeout) => return Err(Error::IceTimeout),
 					Err(crate::ice::Error::Rtc(err)) => return Err(Error::Rtc(err)),
 				},
 			}
 		}
+	}
+
+	/// Once the catalog ended and the peer connected, open the negotiated lines and stop the
+	/// source opening more, so its writes run dry once those lines' pumps finish. str0m opens
+	/// the lines only once SRTP is up, all in the drain that connected, so a catalog that ends
+	/// before the peer connects still has its lines served.
+	fn settle(&mut self) -> Result<()> {
+		if !matches!(self.catalog, Catalog::Ended) || !self.agent.rtc().is_connected() {
+			return Ok(());
+		}
+		self.catalog = Catalog::Settled;
+		while let Some(event) = self.agent.queued() {
+			self.handle_event(event)?;
+		}
+		if let MediaRole::Egress(source) = &mut self.role {
+			source.end();
+		}
+		Ok(())
 	}
 
 	fn handle_event(&mut self, event: Event) -> Result<()> {
@@ -462,6 +478,16 @@ impl Session {
 			}
 		}
 	}
+}
+
+/// Where an egress source's catalog stands.
+enum Catalog {
+	/// Followed until it stops, for why.
+	Following(tokio::task::JoinHandle<Result<()>>),
+	/// Ended cleanly, with the source still opening lines until the peer connects.
+	Ended,
+	/// Opening no more lines: an ingest, or an egress whose catalog ended.
+	Settled,
 }
 
 /// An ingest's cap: the meter that closes it past the cap plus burst, and the REMB that
