@@ -47,4 +47,3 @@ Public API: none. Wire: none.
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the epic
 - [Route benches](/quest/m3/route-benches.md) - the path-rule benches and costs the switch left
 - [Proof binding](/quest/m3/route-proof-binding.md) - binds the route proof to the router
-- [The moq-cluster draft](/quest/m2/moq-cluster-draft.md) - kept, since third-party relays ship it
