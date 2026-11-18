@@ -200,8 +200,9 @@ const REPLACEMENT_DELAY_MS = 50;
 
 /**
  * How long a following player may take to present a replacement or fallback once the new route is
- * ready or the old one withdrawn. Routing: the relay holds a route change for its update hold
- * (moq-net's `origin::DEFAULT_UPDATE_HOLD`; the JS origin holds none), and the announcement plus
+ * ready or the old one withdrawn. Routing: the relay holds a route change that arrived over a hop
+ * chain (lite-06 and older, or moq-transport) for its update hold (moq-net's
+ * `origin::DEFAULT_UPDATE_HOLD`; lite-07 and the JS origin hold none), and the announcement plus
  * the catalog and track subscriptions take five loopback round trips, each charged at QUIC's 1 ms
  * timer granularity. Presentation: a keyframe interval of codec cadence, one frame to decode, and
  * the player's delay. Observation: one page sample and one driver poll.

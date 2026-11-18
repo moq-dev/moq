@@ -113,13 +113,20 @@ struct Left(Arc<AtomicU8>);
 
 impl Left {
 	const HELD: u8 = 0;
-	const RELEASED: u8 = 1;
-	const ENDED: u8 = 2;
+	/// Another session serves the claim.
+	const MOVED: u8 = 1;
+	/// The node let go of the claim, and every copy with it.
+	const LOST: u8 = 2;
+	const ENDED: u8 = 3;
 }
 
 impl Orphan for Left {
-	fn release(self: Box<Self>, ended: bool) {
-		let how = if ended { Self::ENDED } else { Self::RELEASED };
+	fn release(self: Box<Self>, gone: Gone) {
+		let how = match gone {
+			Gone::Moved => Self::MOVED,
+			Gone::Lost => Self::LOST,
+			Gone::Ended => Self::ENDED,
+		};
 		self.0.store(how, Ordering::SeqCst);
 	}
 }
@@ -211,7 +218,7 @@ fn only_the_closest_newest_copy_is_served() {
 		assert_eq!(confirm(&second), 1);
 		let serves = serves(&first);
 		assert!(
-			matches!(serves.as_slice(), [Output::Unserve { ended: false, .. }]),
+			matches!(serves.as_slice(), [Output::Unserve { gone: Gone::Moved, .. }]),
 			"{serves:?}"
 		);
 	}
@@ -376,7 +383,8 @@ fn an_unavailable_routed_claim_takes_no_request() {
 }
 
 /// A session that closes leaves what it served as an orphan, which the node holds while
-/// the reader still shows the claim and releases, not ended, once the debounce runs out.
+/// the reader still shows the claim and releases as lost, every copy with it, once the
+/// debounce runs out.
 #[test]
 fn an_orphan_is_released_when_the_reader_lets_go() {
 	let (node, clock) = node();
@@ -394,7 +402,7 @@ fn an_orphan_is_released_when_the_reader_lets_go() {
 	);
 
 	expire(&node, &clock);
-	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
 }
 
 /// A session that returns before the debounce runs out takes the claim over: the orphan
@@ -414,7 +422,7 @@ fn an_orphan_is_released_once_another_session_serves_the_claim() {
 	announce(&second, &room, live(0));
 	assert_eq!(left.load(Ordering::SeqCst), Left::HELD, "nothing serves the claim yet");
 	assert_eq!(confirm(&second), 1);
-	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+	assert_eq!(left.load(Ordering::SeqCst), Left::MOVED);
 }
 
 /// The origin's own copy of a claim never waits to be served, so a session refusing the
@@ -435,7 +443,7 @@ fn an_orphan_is_released_once_every_session_refuses_the_claim() {
 	announce(&second, &room, live(0));
 	assert_eq!(left.load(Ordering::SeqCst), Left::HELD);
 	second.serving(node.me(), &room, false);
-	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+	assert_eq!(left.load(Ordering::SeqCst), Left::MOVED);
 }
 
 /// A claim its publisher withdraws stops being served as ended, so the origin withdraws
@@ -450,7 +458,7 @@ fn a_withdrawn_claim_is_unserved_as_ended() {
 	announce(&publisher, &room, Change::Ended);
 	let serves = serves(&publisher);
 	assert!(
-		matches!(serves.as_slice(), [Output::Unserve { ended: true, .. }]),
+		matches!(serves.as_slice(), [Output::Unserve { gone: Gone::Ended, .. }]),
 		"{serves:?}"
 	);
 }

@@ -463,8 +463,10 @@ impl Lan {
 /// publisher only over the CDN's own expensive link, never through the LAN.
 ///
 /// At the cut `lan[0]` moves onto the route through the CDN at once: its reader's
-/// announcement stays, available. The closed session still ends the subscription it
-/// carried, so a fresh one reads on through the CDN.
+/// announcement stays. `cdn[0]` reached the local broadcast through `lan[0]`, so it offered
+/// it nothing until the cut, and `lan[0]` shows it unavailable until that route lands, here
+/// in the same instant. The closed session still ends the subscription it carried, so a
+/// fresh one reads on through the CDN.
 #[kio::test]
 async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let mut lan = Lan::new().await;
@@ -498,9 +500,13 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let partitioned = island.seen();
 	// The local publisher's push, `lan[1]`'s uplink, the CDN's link, and `lan[0]`'s uplink.
 	let through_cdn = 1 + 1 + CDN_INTERNAL + 1;
-	let [moved] = partitioned.as_slice() else {
+	let [lost, moved] = partitioned.as_slice() else {
 		panic!("the island moved once: {partitioned:?}");
 	};
+	assert!(
+		lost.kind == Kind::Update && !lost.available && lost.instance == instance && lost.at == cut_at,
+		"unavailable until the CDN's route lands: {partitioned:?}"
+	);
 	assert!(
 		moved.kind == Kind::Update
 			&& moved.available

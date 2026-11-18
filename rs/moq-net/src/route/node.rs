@@ -115,21 +115,32 @@ pub(crate) enum Output {
 		instance: Instance,
 		served: Served,
 	},
-	/// Stop serving it. `ended` when its publisher withdrew it, as far as this node
-	/// knows; otherwise the node let go of it here.
+	/// Stop serving it, for the reason `gone` gives.
 	Unserve {
 		origin: NodeId,
 		path: Path,
 		instance: Instance,
-		ended: bool,
+		gone: Gone,
 	},
+}
+
+/// Why a session stops serving a claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gone {
+	/// Another session serves it now.
+	Moved,
+	/// The node let go of it here: every copy the origin holds goes, offline.
+	Lost,
+	/// Its publisher withdrew it, as far as this node knows: every copy the origin holds
+	/// ends.
+	Ended,
 }
 
 /// A served claim's place in the origin, which outlives the session that served it until
 /// another session serves the claim or the reader lets it go.
 pub(crate) trait Orphan: Send {
-	/// Let go of it: `ended` when the claim's publisher withdrew it.
-	fn release(self: Box<Self>, ended: bool);
+	/// Let go of it, for the reason `gone` gives.
+	fn release(self: Box<Self>, gone: Gone);
 }
 
 /// Where a request a peer sent goes; see [`Node::poll_forward`].
@@ -191,7 +202,7 @@ struct State {
 	/// The broadcasts each session has a slot for.
 	serving: HashMap<Key, BTreeSet<Broadcast>>,
 	/// Orphans to release once the lock is.
-	released: Vec<(Box<dyn Orphan>, bool)>,
+	released: Vec<(Box<dyn Orphan>, Gone)>,
 	/// Whether each of the origin's own claims is filed as having crossed a marked link.
 	own: BTreeMap<Broadcast, bool>,
 }
@@ -247,8 +258,8 @@ impl Drop for Locked<'_> {
 		let released = std::mem::take(&mut state.released);
 		drop(state);
 		// An orphan's release reaches into the origin, which may be feeding this node.
-		for (orphan, ended) in released {
-			orphan.release(ended);
+		for (orphan, gone) in released {
+			orphan.release(gone);
 		}
 	}
 }
@@ -613,7 +624,7 @@ impl Stream {
 		let key = (origin, self.key);
 		match (state.lanes.get_mut(broadcast)).and_then(|slots| slots.get_mut(&key)) {
 			Some(slot) => slot.orphan = Some(orphan),
-			None => state.released.push((orphan, false)),
+			None => state.released.push((orphan, Gone::Moved)),
 		}
 	}
 }
@@ -828,6 +839,13 @@ impl State {
 		if shown && !served {
 			return;
 		}
+		// Unshown, every slot leaves at once, so each tells its copy all of them go: the
+		// origin then drops them together rather than showing the rest in turn.
+		let gone = match (shown, ended) {
+			(_, true) => Gone::Ended,
+			(false, false) => Gone::Lost,
+			(true, false) => Gone::Moved,
+		};
 		let leaving: Vec<SlotKey> = (slots.iter())
 			.filter(|(_, slot)| slot.leaving)
 			.map(|(key, _)| *key)
@@ -843,7 +861,7 @@ impl State {
 				}
 			}
 			match slot.orphan {
-				Some(orphan) => self.released.push((orphan, ended)),
+				Some(orphan) => self.released.push((orphan, gone)),
 				None => {
 					let (path, instance) = broadcast.clone();
 					outputs.push((
@@ -852,7 +870,7 @@ impl State {
 							origin,
 							path,
 							instance,
-							ended,
+							gone,
 						},
 					));
 				}

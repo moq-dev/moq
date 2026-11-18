@@ -137,11 +137,18 @@ type ServedKey = (NodeId, Path, Instance);
 struct Left(crate::origin::Claim);
 
 impl node::Orphan for Left {
-	fn release(self: Box<Self>, ended: bool) {
-		// Dropped, a claim the node let go of goes offline rather than ending.
-		if ended {
-			self.0.withdrawn();
-		}
+	fn release(self: Box<Self>, gone: node::Gone) {
+		release(self.0, gone);
+	}
+}
+
+/// Let go of a copy of a claim the origin holds, for the reason `gone` gives.
+fn release(claim: crate::origin::Claim, gone: node::Gone) {
+	match gone {
+		// Dropped, it goes offline, while another copy serves.
+		node::Gone::Moved => drop(claim),
+		node::Gone::Lost => claim.retire(false),
+		node::Gone::Ended => claim.retire(true),
 	}
 }
 
@@ -767,13 +774,10 @@ impl Routed {
 				origin,
 				path,
 				instance,
-				ended,
+				gone,
 			} => {
-				// Dropped, a claim the node let go of goes offline rather than ending.
-				if let Some(served) = self.served.remove(&(origin, path, instance))
-					&& ended
-				{
-					served.route.dynamic.withdrawn();
+				if let Some(served) = self.served.remove(&(origin, path, instance)) {
+					release(served.route.dynamic, gone);
 				}
 			}
 		}
