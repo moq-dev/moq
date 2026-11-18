@@ -254,3 +254,29 @@ fn consumer_creation_with_existing_demand_does_not_relock() {
 		.expect("consumer creation reacquired the held lock");
 	worker.join().unwrap();
 }
+
+/// Unlike `wanted_changed`, a held change counts the consumers still draining a closed
+/// channel, and wakes when the last of them leaves.
+#[test]
+fn held_changed_outlives_the_close() {
+	let producer = Producer::new(0u32);
+	let weak = producer.weak();
+	let consumer = producer.consume();
+
+	let (waker, w) = counting();
+	let waiter = crate::Waiter::new(w);
+	producer.close().ok().expect("open");
+	assert!(
+		weak.poll_wanted_changed(&waiter, true).is_ready(),
+		"wanted_changed stops at the close"
+	);
+	assert!(
+		weak.poll_held_changed(&waiter, true).is_pending(),
+		"a draining consumer holds it"
+	);
+
+	drop(consumer);
+	assert!(waker.count() >= 1, "the last consumer leaving did not wake it");
+	assert_eq!(weak.poll_held_changed(&waiter, true), Poll::Ready(false));
+	assert_eq!(weak.poll_held_changed(&waiter, false), Poll::Pending);
+}

@@ -9330,6 +9330,70 @@ mod tests {
 		);
 	}
 
+	/// A grant that widens to cover a claim the answer already held back sends it at once,
+	/// though the node queues nothing behind it to flush it out.
+	#[kio::test]
+	async fn a_widened_grant_flushes_the_claim_it_shows() {
+		use crate::model::ProduceTest as _;
+		const VERSION: Version = Version::Lite07;
+		let publish = origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
+		let route = publish.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		route.announce().unwrap();
+		// The peer asks for the whole tree, hidden paths included.
+		let request = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceBroadcast::Request {
+				more: false,
+				remove: Vec::new(),
+				add: vec![(Path::empty(), true)],
+			}
+			.encode(w, VERSION)
+			.unwrap()
+		};
+		let session = crate::lite::test_transport::ScriptedSession::new(announce_script(VERSION, &[&request]));
+		// Only the half answering the peer is limited, so a change to it is all that happens.
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			cost: Some(1),
+			peer_node: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		subscriber.peer_setup.set(lite::Setup::default()).unwrap();
+		let recv = crate::transport::boxed::RecvStream::new(session.recv());
+		let _ = (subscriber.announce_streams).try_push(route_stream::Reader::new(recv, VERSION));
+		let mut routes = route_stream::RouteStream::new(
+			subscriber.clone(),
+			route_stream::Publish {
+				origin: publish.consume(),
+				auth: auth.clone(),
+				withdrawal: Default::default(),
+				routing: false,
+			},
+		);
+		let written = || session.log.writes.lock().unwrap().len();
+		// Run until everything parks: the request answered, the claim held back.
+		let settled = kio::clock::timeout(
+			std::time::Duration::from_millis(1),
+			kio::wait(|waiter| routes.poll(waiter).map(|err| panic!("{err:?}"))),
+		)
+		.await;
+		assert!(settled.is_err(), "the session ended");
+		let held = written();
+
+		// The grant change is the one wakeup: the pass it runs must send what it shows,
+		// since nothing else is queued to wake the session again.
+		auth.handle().authorize(&crate::auth::Grant::all());
+		assert!(routes.poll(&kio::Waiter::noop()).is_pending());
+		assert!(written() > held, "the claim the grant now shows stayed buffered");
+	}
+
 	/// A peer streaming announces gets a budget of them read per poll, so the session's
 	/// other tasks run between them, and the announce behind the flood still arrives.
 	#[kio::test]
@@ -10629,7 +10693,7 @@ impl TrackServe {
 						let widened = (changed && demand.is_some())
 							.then(|| subscription.start().or(active.started.flatten()).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
-							tail.set_grace(producer.tail_grace(subscription.budget()));
+							tail.follow(producer, subscription.budget());
 							let now = self.subscriber.runtime.now();
 							for groups in lowered.into_iter().chain(widened) {
 								tail.demand(groups, now);
@@ -10819,11 +10883,12 @@ impl TrackServe {
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
 		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
-		let grace = match &copy {
-			Some(copy) => copy.producer.tail_grace(subscription.budget()),
-			None => tail::grace(subscription.budget()),
-		};
-		let tail = kio::Producer::new(Tail::new(grace));
+		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.budget())));
+		if let Some(copy) = &copy
+			&& let Ok(mut tail) = tail.write()
+		{
+			tail.follow(&copy.producer, subscription.budget());
+		}
 		let mut entry = TrackEntry::new(copy, tail.clone());
 		let version = self.subscriber.version;
 		if version.has_datagrams() && !version.has_datagram_tracks() {
@@ -12194,7 +12259,7 @@ impl ServeLoop {
 			PipelinedState::Open(active) => &active.tail,
 		};
 		if let Ok(mut tail) = tail.write() {
-			tail.set_grace(self.serving.tail_grace(pipelined.pref.budget()));
+			tail.follow(&self.serving, pipelined.pref.budget());
 		}
 		self.serving.seen_subscription(Some(pipelined.pref));
 		match pipelined.state {
@@ -12499,7 +12564,7 @@ impl ServeLoop {
 			if !serve.subscriber.version.has_track_stream() {
 				tail.end();
 			}
-			tail.set_grace(serving.tail_grace(budget.unwrap_or_default()));
+			tail.follow(serving, budget.unwrap_or_default());
 			tail.expire(serve.subscriber.runtime.now());
 		}
 		Settle::new(&serve.subscriber.runtime, active.tail.consume())

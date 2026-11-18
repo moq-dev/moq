@@ -23,5 +23,5 @@
  *
  * @module
  */
-export { rotateDimensions } from "./presentation";
-export * from "./renderer";
+export { rotateDimensions } from "./presentation.ts";
+export * from "./renderer.ts";
