@@ -302,6 +302,28 @@ test("a session-fed key-order read folds without losing the keys it passed", () 
 		sub.close();
 	}));
 
+test("a gap the bounds left out below the read never pins its record", () => {
+	const producer = receivedTrack();
+	const sub = producer.subscribe({ delay: { max: null } });
+	const ordered = sub.ordered();
+	put(producer, 0n, false);
+	expect(items(ordered)).toEqual(["group 0"]);
+	// Group 1 is owed, so the gap at 2 waits; the bounds then leave both out.
+	drop(producer, 2n, 3n);
+	expect(items(ordered)).toEqual([]);
+	ordered.withRange({ start: { included: 3n } });
+	for (let i = 0n; i < 1000n; i++) {
+		const key = 3n + i * 20n;
+		put(producer, key, false);
+		producer.skipGroups(key + 1n, key + 20n);
+		expect(items(ordered)).toEqual([`group ${key}`]);
+	}
+	expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(1);
+	// The read never goes back, so widening the bounds again offers nothing below it.
+	ordered.withRange({ start: { included: 0n } });
+	expect(items(ordered)).toEqual([]);
+});
+
 test("a key-order read draining its drops folds its record", () => {
 	const producer = new TrackProducer("test");
 	const sub = producer.subscribe({ delay: { max: null } });

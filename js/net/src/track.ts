@@ -4981,7 +4981,8 @@ export class Subscriber {
 	}
 
 	// Fold the record below `at`, where a key-order read is, into the floor, held below every run
-	// still to report there: a run given up and not reported yet, and a gap found and not returned.
+	// still to report there: a run given up and not reported yet, and a gap found and not returned
+	// that the read may still reach.
 	// The record then holds only what lies ahead of the read, bounded however long it plays. A
 	// session-fed read loses nothing, since every key it passed was handed out or reported; a group
 	// a local track produces below the floor is told as nothing, where Rust, folding only under pool
@@ -4989,9 +4990,13 @@ export class Subscriber {
 	// keeps.
 	#fold(at: bigint): void {
 		if (this.#wired) return;
-		if (this.#items) {
-			at = min(at, this.#items.at);
-			for (const gap of this.#items.gaps) at = min(at, gap.start);
+		const items = this.#items;
+		if (items) {
+			// A gap the bounds left out below where the read is can never come in key order, and an
+			// ordered read never goes back, so it is dropped rather than held for a widening.
+			if ((items.gaps[0]?.start ?? items.at) < items.at) items.gaps = removeRun(items.gaps, 0n, items.at);
+			at = min(at, items.at);
+			for (const gap of items.gaps) at = min(at, gap.start);
 		}
 		for (const run of this.#pending) if (run.end > this.#floor) at = min(at, run.start);
 		if (at <= this.#floor) return;
@@ -5344,7 +5349,8 @@ export class Ordered {
 	/**
 	 * Limit subsequent reads to these groups and return this reader for chaining; see
 	 * {@link Subscriber.withRange}. An ordered read never goes back, so lowering the floor
-	 * below a group it already returned offers nothing.
+	 * below a group it already returned offers nothing, not even a gap it passed while the
+	 * range left it out.
 	 */
 	withRange(groups: Groups): this {
 		this.#subscriber.withRange(groups);
