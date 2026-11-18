@@ -230,8 +230,22 @@ struct Attached {
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
 	/// Whether the peer has accepted the connection, credential included: at once, unless
-	/// the session [awaits the peer's SETUP](Link::await_setup).
-	accepted: bool,
+	/// the session [awaits its answer](Link::await_acceptance) or the version
+	/// [has none](Link::silent).
+	acceptance: Acceptance,
+}
+
+/// Whether a session's peer accepted the connection credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Acceptance {
+	/// With its handshake, or with the answer the session awaited.
+	Accepted,
+	/// Not yet: the peer's SETUP (a client without AUTH) or its AUTH_OK to the connection's
+	/// own credential (a lite-07 client) is still to come, and the peer can still refuse.
+	Awaiting,
+	/// Never said: the version has no answer, so the peer refuses only by closing the
+	/// session (a lite-03/04 client).
+	Silent,
 }
 
 /// One token as one session presents it.
@@ -322,7 +336,7 @@ impl Attached {
 			issued: BTreeMap::new(),
 			scope: None,
 			epoch: 0,
-			accepted: true,
+			acceptance: Acceptance::Accepted,
 		};
 		attached.rescope(limit);
 		attached
@@ -1117,6 +1131,10 @@ impl Link {
 			if !matches!(slot.phase, Phase::Pending { .. } | Phase::Granted(_)) {
 				return;
 			}
+			// The answer to the connection's own credential accepts the session.
+			if slot.setup && link.acceptance == Acceptance::Awaiting {
+				link.acceptance = Acceptance::Accepted;
+			}
 			slot.phase = Phase::Granted(grant);
 			link.replied = true;
 			link.recompute();
@@ -1409,19 +1427,42 @@ impl Link {
 		self.read(|link, _| link.closed.clone())
 	}
 
-	/// The peer accepts the connection credential only with its SETUP, which this client
-	/// reads after the session is live, while the server can still refuse it.
-	pub(crate) fn await_setup(&self) {
-		self.with(|link| link.accepted = false);
+	/// The peer accepts the connection credential only with an answer this client reads after
+	/// the session is live, while the server can still refuse it: its SETUP on a version
+	/// without AUTH, or the AUTH_OK to the connection's own credential on one with it.
+	pub(crate) fn await_acceptance(&self) {
+		self.with(|link| link.acceptance = Acceptance::Awaiting);
+	}
+
+	/// The version never answers the connection credential: the peer refuses it only by
+	/// closing the session, however soon.
+	pub(crate) fn silent(&self) {
+		self.with(|link| link.acceptance = Acceptance::Silent);
 	}
 
 	/// The peer's SETUP arrived, so it accepted the connection credential.
 	pub(crate) fn accepted(&self) {
 		self.with_state(|state, link| {
-			attached(&mut state.links, link).accepted = true;
+			let link = attached(&mut state.links, link);
+			if link.acceptance == Acceptance::Awaiting {
+				link.acceptance = Acceptance::Accepted;
+			}
 			// Latch a set this acceptance completed, before a later end can replace its answer.
 			state.record();
 		});
+	}
+
+	/// Ready once the peer said it accepts the connection credential, which a version without
+	/// that answer never does. A close afterward leaves it accepted.
+	pub(crate) fn poll_accepted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let id = self.id();
+		let _ = ready_or!(self.state().poll(waiter, |state| {
+			match state.links.get(&id).map(|link| link.acceptance) {
+				Some(Acceptance::Accepted) => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		}));
+		Poll::Ready(())
 	}
 
 	/// End the session: fail every pending token here, leaving the handle's tokens for the

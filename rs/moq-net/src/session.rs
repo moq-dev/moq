@@ -472,6 +472,13 @@ impl Session {
 		self.credential.as_ref()
 	}
 
+	/// Ready once the peer accepted the connection credential: with its SETUP, or on
+	/// moq-lite-07-wip the AUTH_OK to the connection's own credential. Ready at once when the
+	/// handshake already carried that answer, and never on moq-lite 03/04, which have none.
+	pub(crate) fn poll_accepted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.link.poll_accepted(waiter)
+	}
+
 	/// This session's side of its [`auth`](Self::auth) handle.
 	pub(crate) fn link(&self) -> &auth::Link {
 		&self.link
