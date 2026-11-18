@@ -581,17 +581,15 @@ mod tests {
 			}
 		}
 
-		// Every frame written in one go, as a session drains its writes, then the close.
-		let mut rtc = sender.rtc_mut();
-		let pt = rtc.writer(mid).unwrap().payload_params().next().unwrap().pt();
+		// Every frame written back to back, each through its own guard, which drains it as
+		// str0m requires before the next write, then the close.
+		let pt = (sender.rtc_mut().writer(mid).unwrap().payload_params().next().unwrap()).pt();
 		for n in 0..FRAMES {
 			let time = MediaTime::new(960 * n, Frequency::FORTY_EIGHT_KHZ);
-			rtc.writer(mid)
-				.unwrap()
+			(sender.rtc_mut().writer(mid).unwrap())
 				.write(pt, now, time, vec![0xfc, n as u8])
 				.unwrap();
 		}
-		drop(rtc);
 		sender.close();
 
 		let mut received = 0;

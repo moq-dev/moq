@@ -235,15 +235,21 @@ mod tests {
 		(viewer, opus_output(&output_consumer).await)
 	}
 
-	/// A bare str0m WHEP viewer of `url`, an audio line alone: each payload it receives, until
-	/// the channel closes with the server's close. Unlike [`Client::pull`], which aborts its
-	/// output when the session ends, it keeps everything that arrived.
-	async fn raw_view(url: url::Url) -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+	/// A bare str0m WHEP viewer of `url`, an audio line alone: the task driving it, which ends
+	/// with the server's close, and each payload it receives, until the channel closes with that
+	/// task. Unlike [`Client::pull`], which aborts its output when the session ends, it keeps
+	/// everything that arrived.
+	async fn raw_view(
+		url: url::Url,
+	) -> (
+		tokio::task::JoinHandle<()>,
+		tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+	) {
 		let udp = std::sync::Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
-		raw_view_on(url, udp).await.1
+		raw_view_on(url, udp).await
 	}
 
-	/// [`raw_view`] from `udp`, with the task driving it, which ends with the server's close.
+	/// [`raw_view`] from `udp`.
 	async fn raw_view_on(
 		url: url::Url,
 		udp: std::sync::Arc<tokio::net::UdpSocket>,
@@ -343,7 +349,7 @@ mod tests {
 		push(&mut *bridge, 20_000, OPUS_PACKET);
 
 		let (url, http, mut sessions) = serve_whep(&origin).await;
-		let mut viewer = raw_view(url).await;
+		let (task, mut viewer) = raw_view(url).await;
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
@@ -360,6 +366,11 @@ mod tests {
 			"the final packet was lost"
 		);
 		assert_eq!(received(&mut viewer).await, None, "the viewer was not closed");
+		// The channel also closes if the viewer panicked, so only its task tells a clean close.
+		kio::clock::timeout(TIMEOUT, task)
+			.await
+			.expect("the viewer outlived its channel")
+			.expect("the viewer failed");
 		kio::clock::timeout(TIMEOUT, session)
 			.await
 			.expect("the session outlived its broadcast")
@@ -378,7 +389,7 @@ mod tests {
 		catalog.finish().unwrap();
 
 		let (url, http, mut sessions) = serve_whep(&origin).await;
-		let mut viewer = raw_view(url).await;
+		let (task, mut viewer) = raw_view(url).await;
 		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
@@ -389,6 +400,11 @@ mod tests {
 		let _finished = bridge.finish().unwrap();
 		assert_eq!(received(&mut viewer).await.as_deref(), Some(NEW_PACKET));
 		assert_eq!(received(&mut viewer).await, None, "the viewer was not closed");
+		// The channel also closes if the viewer panicked, so only its task tells a clean close.
+		kio::clock::timeout(TIMEOUT, task)
+			.await
+			.expect("the viewer outlived its channel")
+			.expect("the viewer failed");
 		kio::clock::timeout(TIMEOUT, session)
 			.await
 			.expect("the session outlived its broadcast")

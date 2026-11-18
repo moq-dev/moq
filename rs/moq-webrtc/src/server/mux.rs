@@ -149,9 +149,9 @@ impl Registry {
 						None => {
 							self.by_addr.insert(src, entry.clone());
 						}
-						Some(holder) if Arc::ptr_eq(&holder, &entry) => {
-							self.claims.remove(&src);
-						}
+						// The holder refreshing its own address leaves any claim on it, which
+						// waits for its claimant to confirm, end, or be replaced.
+						Some(holder) if Arc::ptr_eq(&holder, &entry) => {}
 						Some(_) => {
 							self.claims.insert(src, entry.clone());
 						}
@@ -401,6 +401,7 @@ mod tests {
 	/// path, or the holder ends. A forged request claims nothing.
 	#[tokio::test]
 	async fn a_claimed_address_moves_once_confirmed() {
+		kio::clock::host_time();
 		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
 		let port = mux.local_addr().port();
 		let (old, mut old_inbound, _old_registration) = mux.register();
@@ -633,6 +634,25 @@ mod tests {
 			.is_some_and(|entry| entry.ufrag == session.ufrag)
 	}
 
+	/// A claim survives its holder refreshing the address, so the claimant can still confirm it.
+	#[tokio::test]
+	async fn a_claim_survives_its_holder_refreshing() {
+		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
+		let (old, _old_inbound, _old_registration) = mux.register();
+		let (new, new_inbound, _new_registration) = mux.register();
+		let (request_old, request_new) = (binding_request(&old), binding_request(&new));
+		let address = "127.0.0.1:10001".parse().unwrap();
+		let mut registry = mux.registry.lock().unwrap();
+		registry.route(address, &Datagram::parse(&request_old));
+		registry.route(address, &Datagram::parse(&request_new));
+		registry.route(address, &Datagram::parse(&request_old));
+		drop(registry);
+
+		new_inbound.route.as_ref().unwrap().confirm(address);
+		let [holder, _] = mux.registry.lock().unwrap().route(address, &Datagram::Other);
+		assert_eq!(holder.unwrap().ufrag, new.ufrag, "the refresh dropped the claim");
+	}
+
 	/// A claimant takes the address once its holder ends, confirmed or not.
 	#[tokio::test]
 	async fn a_claim_outlives_its_holder() {
@@ -661,6 +681,7 @@ mod tests {
 	/// against the wrong-family ICE host candidate.
 	#[tokio::test]
 	async fn dual_stack_mux_routes_an_ipv4_peer_with_a_canonical_source() {
+		kio::clock::host_time();
 		let bind = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0);
 		let advertise = [
 			SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
