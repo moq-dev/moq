@@ -5047,9 +5047,15 @@ export class Subscriber {
 		if (start >= end || this.#nextKey === 0n || !this.#dropsSeen || !producer) return;
 		const owed = [...intersect(this.#asked, start, end), ...intersect(this.#givenUp, start, end)];
 		if (wireFed(producer)) owed.push(...this.#window.runs(max(start, feedFloor(producer) ?? 0n), end));
-		const drops = this.#state.drops;
+		// Only a drop that settles this reader reports the key; a stale verdict under a tighter budget
+		// does not, so the key is still this reader's to give up.
+		const { drops, refused } = this.#state;
+		const coverage = this.#coverage();
 		for (const run of owed) {
-			for (const passed of runGaps(drops.overlapping(run.start, run.end), run.start, run.end)) {
+			const settled = givenUp(drops, refused.peek(), run.start, run.end, (drop) =>
+				settles(drop, drift.budget, coverage),
+			).filter((drop) => settles(drop, drift.budget, coverage));
+			for (const passed of runGaps(settled, run.start, run.end)) {
 				this.#giveUp(passed, staleHole(drift.budget));
 			}
 		}

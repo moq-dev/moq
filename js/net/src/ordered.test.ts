@@ -4,7 +4,7 @@ import { expect, test } from "bun:test";
 import { Duration, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
-import { hooks } from "./internal.ts";
+import { hooks, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { type Ordered, Producer as TrackProducer } from "./track.ts";
@@ -115,6 +115,20 @@ test("a group held behind a gap is not returned once the reader closes", () => {
 	expect(ordered.tryNextItem()).toBeUndefined();
 });
 
+test("a key passed under a stale verdict that does not settle this reader is still a gap", () =>
+	withClock((clock) => {
+		const producer = receivedTrack();
+		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		put(producer, 0n, false);
+		expect(items(ordered)).toEqual(["group 0"]);
+		// The feed gave key 1 up under a 10 ms budget, which binds no reader waiting 50 ms.
+		hooks.dropTrackGroups(producer, 1n, 2n, staleHole(10));
+		put(producer, 2n, false);
+		clock.jump(Duration.millis(60));
+		put(producer, 3n, false);
+		expect(items(ordered)).toEqual(["gap 1..2 (old)", "group 2", "group 3"]);
+	}));
+
 test("a key a local track never produced is no gap", () => {
 	const producer = new TrackProducer("test");
 	const ordered = producer.subscribe({ delay: { max: Duration.secs(1) } }).ordered();
@@ -135,15 +149,18 @@ test("a gap waits behind what is owed below it, and goes out before the end", ()
 		expect(items(ordered)).toEqual(["group 1", "group 2"]);
 		put(producer, 3n, false);
 		expect(items(ordered)).toEqual(["group 3", "gap 4..5 (delivery timeout)"]);
-
-		const local = new TrackProducer("test");
-		const read = local.subscribe({ delay: { max: null } }).ordered();
-		put(local, 0n);
-		drop(local, 1n, 2n);
-		local.finish();
-		expect(items(read)).toEqual(["group 0", "gap 1..2 (delivery timeout)"]);
-		expect(read.tryNextItem()).toBeUndefined();
 	}));
+
+test("the last gap goes out before the end, and the read then ends", async () => {
+	const local = new TrackProducer("test");
+	const read = local.subscribe({ delay: { max: null } }).ordered();
+	put(local, 0n);
+	drop(local, 1n, 2n);
+	local.finish();
+	expect(items(read)).toEqual(["group 0", "gap 1..2 (delivery timeout)"]);
+	const end = await Promise.race([read.nextItem(), sleep(Duration.millis(100)).then(() => "hung")]);
+	expect(end).toBeUndefined();
+});
 
 test("a gap is returned once, even when a later drop names it again", () =>
 	withClock((clock) => {
