@@ -8611,7 +8611,10 @@ async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 }
 
 /// Only skipped schedule slots flag the PCR, keeping the program and release clock.
-/// Short holes keep the grid continuous; long ones exceed the scheduler's backfill window.
+/// Short holes keep the grid continuous; long ones exceed the scheduler's backfill window, and
+/// with no delay each flags its resume. With a delay the export waits the whole of it for the
+/// missing group, so the group after it is read right at its deadline, and a long hole may be
+/// backfilled instead.
 #[tokio::test(start_paused = true)]
 async fn a_skipped_group_flags_the_clock() {
 	let cases = [Duration::ZERO, Duration::from_millis(500)]
@@ -8670,18 +8673,23 @@ async fn a_skipped_group_flags_the_clock() {
 			out.extend(drain_frames(&mut export).await);
 
 			assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
-			assert_skip_discontinuity(&out, 2 * usize::from(missing == 60 && delay.is_zero()));
+			let resumes: Vec<u64> = [20 + missing, 40 + 2 * missing]
+				.into_iter()
+				.filter(|_| missing == 60)
+				.map(|sequence| (60_000 + sequence * 100) * 90)
+				.collect();
+			let flags = count_discontinuity(&out);
+			match delay.is_zero() {
+				true => assert_eq!(flags, resumes.len(), "each long hole flags its resume"),
+				false => assert!(flags <= resumes.len(), "{flags} flags for {} long holes", resumes.len()),
+			}
+			assert_skip_discontinuity(&out, flags);
 			let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
 			for pair in out.windows(2) {
 				let jumped = pair[1].timestamp.as_micros().unwrap() > pair[0].timestamp.as_micros().unwrap() + 25_000;
 				assert_eq!(count_discontinuity(&pair[1..]), usize::from(jumped));
 			}
 			// Each flag lands right before the audio that resumes after its hole.
-			let resumes: Vec<u64> = [20 + missing, 40 + 2 * missing]
-				.into_iter()
-				.filter(|_| missing == 60 && delay.is_zero())
-				.map(|sequence| (60_000 + sequence * 100) * 90)
-				.collect();
 			let mut reader = TsPacketReader::new(Cursor::new(&ts));
 			let (mut flagged, mut after) = (false, Vec::new());
 			while let Some(packet) = reader.read_ts_packet().unwrap() {
@@ -8694,7 +8702,11 @@ async fn a_skipped_group_flags_the_clock() {
 					after.extend(pes.header.pts.map(|pts| pts.as_u64()));
 				}
 			}
-			assert_eq!(after, resumes, "the first PES after each flag resumes its hole");
+			assert_eq!(after.len(), flags);
+			assert!(
+				after.iter().all(|pts| resumes.contains(pts)),
+				"the first PES after each flag resumes its hole: {after:?}, holes resume at {resumes:?}"
+			);
 			let (_, audio) = collect_pes_pts(&ts);
 			assert!(
 				audio.iter().any(|&pts| pts >= (60_000 + (70 + 2 * missing) * 100) * 90),
@@ -10316,6 +10328,26 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	let end = follower.next().await;
 	assert!(matches!(end, Ok(None)), "{end:?}");
 	assert_eq!(start.elapsed(), follow);
+}
+
+/// Each track subscription states the whole delay as its min and max, so a relay holds a group
+/// as long as the export could still play it.
+#[tokio::test(start_paused = true)]
+async fn a_subscription_states_the_whole_delay() {
+	let origin = crate::source::produce_origin();
+	let (live, mut catalog) = publish_bare(&origin, None);
+	let mut audio = aac_rendition(&mut live.broadcast().clone(), &mut catalog, "a.aac");
+	write_aac(&mut audio, 0);
+	let delay = Duration::from_secs(2);
+	let mut export = open_export(crate::source::resolved(&origin, "live").await, delay)
+		.await
+		.unwrap();
+	let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
+	assert_eq!(
+		audio.track().subscription().unwrap().delay,
+		moq_net::track::Delay::default().with_min(delay).with_max(delay),
+	);
+	drop((live, catalog));
 }
 
 /// A program that ends while stitching, then returns after the unresolved replacement goes,
@@ -12666,8 +12698,8 @@ async fn fixed_delay_keeps_buffered_pes_ahead_of_the_clock() {
 	end.unwrap();
 	all.extend(frames);
 	assert_decodes_after_the_clock(&all);
-	// Joining retains half the delay plus its boundary frame.
-	assert_eq!(pes_count(&all), 76);
+	// Joining retains the whole delay plus its boundary frame.
+	assert_eq!(pes_count(&all), 151);
 	assert_skip_discontinuity(&all, 0);
 }
 
