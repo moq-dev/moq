@@ -6,6 +6,7 @@ use std::time::Duration;
 use kio::clock::Instant;
 
 use super::error::unsupported;
+use super::export;
 
 #[cfg(feature = "async")]
 use crate::catalog::CatalogFormat;
@@ -194,11 +195,8 @@ impl Release {
 		};
 		match &self.track {
 			None => {
-				let source = ExportSource::for_stream(
-					&self.source,
-					&passthrough.track,
-					moq_net::track::Delay::default().with_max(self.delay / 2),
-				)?;
+				let source = ExportSource::for_stream(&self.source, &passthrough.track, export::subscribed(self.delay))?;
+				let source = export::skipping(source, self.delay);
 				let source = match self.replay {
 					true => source,
 					false => source.live(),

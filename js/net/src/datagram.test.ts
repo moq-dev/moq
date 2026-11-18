@@ -10,9 +10,9 @@ test("a broadcast keeps same-name datagram and stream tracks independent", async
 	const streams = broadcast.createTrack("audio");
 	const datagrams = broadcast.createDatagrams("audio");
 	const reader = broadcast.consume().datagrams("audio");
-	expect(streams.appendGroup().sequence).toBe(0n);
+	expect(hooks.appendNext(streams).start).toBe(0n);
 	expect(datagrams.append(seq(0n), new Uint8Array([1]))).toBe(0n);
-	expect(streams.appendGroup().sequence).toBe(1n);
+	expect(hooks.appendNext(streams).start).toBe(1n);
 	expect((await reader.recv())?.sequence).toBe(0n);
 	reader.close();
 	datagrams.finish();

@@ -14,7 +14,7 @@ C++17 is the floor, and C++20 adds `co_await` on a future. The bindings are
 generated from the same [UniFFI](https://mozilla.github.io/uniffi-rs/) crate as
 the other wrappers, so
 a method means the same thing here as in Python or Go. For a plain C ABI, use
-[moq-c](/lib/c/).
+[libmoq](/lib/c/).
 
 ## Install
 
@@ -51,7 +51,7 @@ an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the defaul
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
 if it cannot verify it. Direct CMake builds and `just cpp check` build the
 current checkout unless given an explicit native directory. The package is
-`moq-cpp`. It and the C package, `moq-c`, each link in their own copy of the
+`moq-cpp`. It and the C package, `libmoq`, each link in their own copy of the
 Rust core, so a program links one of the two, never both.
 
 ## Example
@@ -257,7 +257,7 @@ Set `ClientConfig::tokens` instead of putting the credential in the URL. The fir
 
 ## Stats
 
-`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed session, such as a refused credential, ends the session with that error rather than retrying); independent watchers keep their own revisions.
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. Connect returns a connecting session. Read `session->state()` and wait with `state_changed(state.revision)` to observe its reconnects (until the peer has accepted a session's credential or drained a session with a GOAWAY (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed session, such as a refused credential, ends the session with that error rather than retrying); independent watchers keep their own revisions.
 
 ## Shutdown
 

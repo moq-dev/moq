@@ -114,7 +114,7 @@ export interface ConnectionProps {
  * The loop reconnects for as long as a handle holds it, so an outage of any length recovers
  * on its own. An auth rejection stops retrying those credentials and retires the shared
  * connection so the next handle dials fresh; a new URL on this handle starts another
- * sequence. {@link closed} settles only when this handle is released.
+ * key. {@link closed} settles only when this handle is released.
  *
  * A relay's GOAWAY migrates rather than drops: the replacement dials at once while the old
  * session finishes its groups, and the handle and its origin carry across. A redirect the
@@ -160,7 +160,7 @@ export class Connection {
 	 *
 	 * Set on an auth rejection, when a private retry window expires, or when {@link versions} names
 	 * one this build cannot offer. Cleared when a new URL or version list, or a disable/re-enable,
-	 * starts another sequence, not on a page hide/show.
+	 * starts another key, not on a page hide/show.
 	 */
 	readonly error: Getter<Error | undefined>;
 

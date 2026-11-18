@@ -39,9 +39,9 @@ typedef Request = MoqRequest;
 /// The network transport carrying an incoming session.
 typedef Transport = MoqTransport;
 
-/// The congestion control family for a QUIC connection. Build one with
-/// `CongestionControl.delay()`, `.loss()`, or `.none()`; a new algorithm joins as
-/// a new constructor.
+/// The congestion control algorithm for a QUIC connection. Build one with
+/// `CongestionControl.bbr()`, `.cubic()`, or `.unlimited()`; a new algorithm joins
+/// as a new constructor named after it.
 typedef CongestionControl = MoqCongestionControl;
 
 /// Certificate trust and the mTLS identity for `ConnectOptions.tls`.
@@ -170,9 +170,12 @@ extension type Timestamp._(MoqTimestamp _timestamp) implements MoqTimestamp {
 
 /// How far behind the live edge a subscriber or decoder plays: where it starts, and how late it may fall.
 extension type Delay._(MoqDelay _delay) implements MoqDelay {
-  /// `min` is the target latency and where a cold join starts, and `max` is how far a
-  /// non-latest group may fall behind before it is skipped. Both default to zero, moq-net's
-  /// default. An explicit null `min` leaves it unstated, which a decoder plays as zero, and an
+  /// `min` is the target latency, where a cold join starts, and how long a decoder waits for a
+  /// missing group, and `max` is how far a non-latest group may fall behind before it is skipped.
+  /// Both default to zero, moq-net's default. An explicit null `min` leaves it unstated, which a
+  /// decoder starts as zero, waiting a missing group for `max` instead (an audio decoder floors it
+  /// at zero and waits only its playout estimate, which can be larger; a catalog warmup or an audio
+  /// decoder's playout delay still states a `min` to the publisher), and an
   /// explicit null `max` sets no subscriber limit. A `min` past `max` starts at `max`.
   Delay({Duration? min = Duration.zero, Duration? max = Duration.zero})
     : this._(MoqDelay(min: min, max: max));
@@ -299,8 +302,9 @@ typedef ConnectionState = MoqConnectionState;
 
 /// Retry pacing for the automatic reconnect: initial delay, multiplier, ceiling, and give-up window.
 /// A null field keeps its default, zero means zero (retry at once, or give up
-/// at the first failure), and `maxUnlimited` lifts the ceiling. Until a session
-/// has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+/// at the first failure), and `maxUnlimited` lifts the ceiling. Until the peer
+/// has accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed
 /// session, such as a refused credential, ends the connection with its error
 /// rather than retrying.
 typedef Backoff = MoqBackoff;

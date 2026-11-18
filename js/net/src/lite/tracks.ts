@@ -30,16 +30,10 @@ export class Tracks {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. */
 	instance?: Instance.Valid;
-	/** The publisher node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
-	node: bigint;
-	/** How many leading segments of `broadcast` make up the prefix of the route it follows. Lite-07+. */
-	depth: number;
 
-	constructor(broadcast: Path.Valid, instance?: Instance.Valid, node = 0n, depth = 0) {
+	constructor(broadcast: Path.Valid, instance?: Instance.Valid) {
 		this.broadcast = broadcast;
 		this.instance = instance;
-		this.node = node;
-		this.depth = depth;
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -47,7 +41,7 @@ export class Tracks {
 		return Message.encode(w, async (w) => {
 			await w.string(Path.encode(this.broadcast));
 			await encodePin(w, version, this.instance);
-			await encodeNode(w, version, this.node, this.depth);
+			await encodeNode(w, version);
 		});
 	}
 
@@ -56,8 +50,8 @@ export class Tracks {
 		return Message.decode(r, async (r) => {
 			const broadcast = Path.decode(await r.string());
 			const instance = await decodePin(r, version);
-			const { node, depth } = await decodeNode(r, version, broadcast);
-			return new Tracks(broadcast, instance, node, depth);
+			await decodeNode(r, version);
+			return new Tracks(broadcast, instance);
 		});
 	}
 }

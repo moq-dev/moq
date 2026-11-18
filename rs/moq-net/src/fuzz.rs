@@ -443,8 +443,7 @@ fn hop_chain(ids: impl IntoIterator<Item = u64>) -> Hops {
 
 /// One announcement on an announce stream, resolved: what the application sees.
 ///
-/// The hop chain is lite-06's, and lite-07's trailing Lite-06 Chain: a lite-07 claim
-/// names its route instead, and carries a chain only when it was learned over lite-06.
+/// The hop ids are lite-06's hop chain, and the relays a lite-07 claim's chain names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Announced {
 	/// ANNOUNCE_START: a route's suffix and wire hop ids, taking the next id.
@@ -453,6 +452,18 @@ pub enum Announced {
 	Update(u64, Vec<u64>),
 	/// ANNOUNCE_END: a live id retired.
 	End(u64),
+}
+
+/// A lite-07 claim whose chain names the relays `chain`.
+fn announce_claim(chain: &[u64]) -> crate::route::node::Claim {
+	crate::route::relay::Claim {
+		item: crate::route::node::Attr { epoch: 0, above: 0 },
+		cost: 0,
+		priority: i8::MAX,
+		draining: false,
+		unavailable: false,
+		chain: chain.to_vec(),
+	}
 }
 
 fn announce_version(compress: bool) -> lite::Version {
@@ -481,29 +492,39 @@ impl AnnounceWriter {
 
 	/// Append one announcement to `data`. An update or end must name a live id.
 	pub fn write(&mut self, announced: &Announced, data: &mut Vec<u8>) {
+		let routes = self.version.has_routes();
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix) = self.encoder.start(suffix.clone());
-				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
-				lite::AnnounceBroadcast::Active {
-					route: 0,
-					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
-					epoch: 0,
-					suffix,
-					hops: hop_chain(hops.iter().copied()),
-					cost: Default::default(),
-					above: 0,
+				match routes {
+					// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
+					true => lite::AnnounceBroadcast::Start {
+						suffix,
+						instance: "a".parse().unwrap(),
+						claim: announce_claim(hops),
+					},
+					false => lite::AnnounceBroadcast::Active {
+						suffix,
+						hops: hop_chain(hops.iter().copied()),
+						cost: Default::default(),
+					},
 				}
 			}
+			Announced::Update(id, hops) if routes => lite::AnnounceBroadcast::Change {
+				id: *id,
+				claim: announce_claim(hops),
+			},
 			Announced::Update(id, hops) => lite::AnnounceBroadcast::Update {
 				id: *id,
 				hops: hop_chain(hops.iter().copied()),
 				cost: Default::default(),
-				above: 0,
 			},
 			Announced::End(id) => {
 				self.encoder.end(*id);
-				lite::AnnounceBroadcast::EndedId { id: *id }
+				match routes {
+					true => lite::AnnounceBroadcast::End { id: *id, lost: false },
+					false => lite::AnnounceBroadcast::EndedId { id: *id },
+				}
 			}
 		};
 		msg.encode(&mut Encoder::new(data, self.version.into()), self.version)
@@ -582,20 +603,54 @@ fn route_clock() -> kio::clock::Deadlines {
 	kio::clock::Deadlines::new(kio::clock::Instant::now())
 }
 
-/// The session `tag` to the node `node`.
-fn route_peer(tag: u64, node: u64) -> crate::route::node::Peer {
-	crate::route::node::Peer { tag, node }
+/// The forwarding node of the relay `relay`.
+fn route_id(relay: u64) -> crate::route::NodeId {
+	crate::route::NodeId { relay, start: 1 }
 }
 
-/// The route the publisher `node` sends about itself.
-fn route_offer(node: u64) -> crate::route::path::Offer {
-	crate::route::path::Offer {
-		path: [crate::route::path::Hop { node, session: 0 }].into(),
-		draining: false,
-		priority: i8::MAX,
-		metric: 0,
-		down_only: false,
+/// A link to a neighbour in `role`.
+fn route_port(role: crate::route::relay::Role) -> crate::route::relay::Port {
+	crate::route::relay::Port {
+		cost: 1,
+		priority: 0,
+		upstream: false,
+		role,
 	}
+}
+
+/// A neighbour that forwards nothing, asked for nothing yet.
+fn route_leaf() -> crate::route::relay::Port {
+	route_port(crate::route::relay::Role::Scoped(Vec::new()))
+}
+
+/// A claim at `epoch`, `cost` from its publisher.
+fn route_claim(epoch: u64, cost: u64) -> crate::route::node::Claim {
+	crate::route::relay::Claim {
+		item: crate::route::node::Attr { epoch, above: 0 },
+		cost,
+		priority: i8::MAX,
+		draining: false,
+		unavailable: false,
+		chain: Vec::new(),
+	}
+}
+
+/// A peer's request for `prefix` alone.
+fn route_ask(prefix: Path) -> crate::route::node::Msg {
+	crate::route::node::Msg::Ask(crate::route::relay::Edit {
+		remove: Vec::new(),
+		add: vec![prefix],
+	})
+}
+
+/// Take everything queued on `streams`, returning how many messages and serve changes
+/// there were.
+fn route_drain<'a>(streams: impl IntoIterator<Item = &'a crate::route::node::Stream>) -> usize {
+	(streams.into_iter())
+		.map(|stream| {
+			std::iter::from_fn(|| stream.try_wire()).count() + std::iter::from_fn(|| stream.try_serve()).count()
+		})
+		.sum()
 }
 
 /// One origin's lite-07 route node answering announce streams, for the routes bench.
@@ -607,19 +662,20 @@ pub struct RouteNode {
 
 impl RouteNode {
 	/// A node holding `claims` claims of its own under `live/`, answering one session
-	/// per prefix in `streams`, each already sent its snapshot.
+	/// per prefix in `streams`, each already sent its initial set.
 	pub fn new(claims: usize, streams: &[&str]) -> Self {
-		let node = crate::route::Node::new(1, 1, route_clock());
+		let node = crate::route::Node::new(route_id(1), route_clock());
 		let instance = crate::Instance::random();
 		for i in 0..claims {
-			node.own(Path::new(&format!("live/{i}")).unwrap(), Some(Self::claim(&instance)));
+			let path = Path::new(&format!("live/{i}")).unwrap();
+			let live = crate::route::relay::Change::Live(route_claim(0, 0));
+			node.own(false, (path, instance.clone()), live);
 		}
 		let streams = (streams.iter().enumerate())
 			.map(|(i, prefix)| {
-				let link = crate::route::Link::default();
-				let peer = route_peer(i as u64 + 1, i as u64 + 2);
-				let stream = node.connect(peer, link).unwrap();
-				stream.edit(route_ask(Path::new(prefix).unwrap())).unwrap();
+				let stream = node.connect(i as u64 + 1, route_leaf()).unwrap();
+				stream.recv(route_ask(Path::new(prefix).unwrap())).unwrap();
+				stream.flush();
 				stream
 			})
 			.collect();
@@ -632,34 +688,24 @@ impl RouteNode {
 		node
 	}
 
-	fn claim(instance: &crate::Instance) -> crate::route::node::Claim {
-		crate::route::node::Claim {
-			instance: instance.clone(),
-			epoch: 0,
-			cost: 0,
-			upstream: false,
-			learned: false,
-			above: 0,
-			chain: crate::Hops::new(),
-		}
-	}
-
 	/// Start or withdraw the node's own claim at `path`.
 	pub fn own(&self, path: &str, start: bool) {
-		let claim = start.then(|| Self::claim(&self.instance));
-		self.node.own(Path::new(path).unwrap(), claim);
+		let change = match start {
+			true => crate::route::relay::Change::Live(route_claim(0, 0)),
+			false => crate::route::relay::Change::Ended,
+		};
+		let broadcast = (Path::new(path).unwrap(), self.instance.clone());
+		self.node.own(false, broadcast, change);
 	}
 
 	/// Take every output queued on the streams, returning how many there were.
 	pub fn drain(&self) -> usize {
-		(self.streams.iter())
-			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
-			.sum()
+		route_drain(&self.streams)
 	}
 }
 
-/// A relay's lite-07 route node hearing one origin's claims on streams it asked for,
-/// and forwarding them on streams it answers, for the routes bench.
+/// A relay's lite-07 route node hearing one origin's claims on the sessions to it, and
+/// telling them to the sessions that ask, for the routes bench.
 pub struct RouteRelay {
 	// Dropped first: a stream disconnects from its node on drop.
 	receive: Vec<crate::route::node::Stream>,
@@ -668,9 +714,9 @@ pub struct RouteRelay {
 	node: crate::route::Node,
 	instance: crate::Instance,
 	claims: usize,
-	/// The origin's revision as the first stream last heard it.
+	/// The origin's revision as the first session last heard it.
 	rev: u64,
-	/// The one-claim batches the first stream heard that the second has yet to: each
+	/// The one-claim changes the first session heard that the second has yet to: each
 	/// revision and the claim it changed.
 	behind: std::collections::VecDeque<(u64, usize)>,
 }
@@ -680,31 +726,44 @@ impl RouteRelay {
 	const ORIGIN: u64 = 1;
 
 	/// A relay that already heard the origin's `claims` claims under `live/` on each of
-	/// `streams` streams, and forwarded them on each of `answers` streams.
+	/// `streams` sessions, and told them to each of `answers` sessions.
 	fn new(claims: usize, streams: usize, answers: usize) -> Self {
-		let node = crate::route::Node::new(2, 2, route_clock());
+		let node = crate::route::Node::new(route_id(2), route_clock());
 		let answer = (0..answers as u64)
 			.map(|i| {
-				let peer = route_peer(i + 1, i + 3);
-				let stream = node.connect(peer, crate::route::Link::default()).unwrap();
-				stream.edit(route_ask(Path::empty())).unwrap();
+				let stream = node.connect(i + 1, route_leaf()).unwrap();
+				stream.recv(route_ask(Path::empty())).unwrap();
+				stream.flush();
 				stream
 			})
 			.collect();
 		let instance = crate::Instance::random();
 		let rev = claims as u64;
+		let origin = route_id(Self::ORIGIN);
 		let receive = (0..streams as u64)
 			.map(|i| {
-				let peer = route_peer(answers as u64 + i + 1, Self::ORIGIN);
-				let receive = node.connect(peer, crate::route::Link::default()).unwrap();
+				let port = route_port(crate::route::relay::Role::Routing(origin));
+				let receive = node.connect(answers as u64 + i + 1, port).unwrap();
 				// The peer answered what the node asks it for.
-				receive.edited(Default::default());
-				let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
-				receive.route(Self::ORIGIN, Path::empty(), Some(reach));
-				let snapshot = (0..claims)
-					.map(|i| (Self::path(i), Some(Self::claim(&instance, 0))))
-					.collect();
-				receive.batch(Self::ORIGIN, Path::empty(), snapshot, Some(rev));
+				receive.recv(crate::route::node::Msg::Edited).unwrap();
+				let offer = crate::route::relay::Offer {
+					path: [crate::route::relay::Hop {
+						node: origin,
+						session: 0,
+					}]
+					.into(),
+					draining: false,
+					priority: i8::MAX,
+					cost: 0,
+					marked: false,
+				};
+				let route = crate::route::node::Msg::Route {
+					origin,
+					offer: Some(offer),
+				};
+				receive.recv(route).unwrap();
+				let changes = (0..claims).map(|i| (i, route_claim(0, 0))).collect();
+				Self::hear(&receive, &instance, changes, rev);
 				receive
 			})
 			.collect();
@@ -721,20 +780,19 @@ impl RouteRelay {
 		relay
 	}
 
-	/// A relay hearing the origin's `claims` claims on one stream.
+	/// A relay hearing the origin's `claims` claims on one session.
 	pub fn heard(claims: usize) -> Self {
 		Self::new(claims, 1, 1)
 	}
 
-	/// A relay hearing the origin's `claims` claims on one stream and answering
-	/// `answers` streams, holding every claim back from them since none is confirmed
-	/// served.
+	/// A relay hearing the origin's `claims` claims on one session and answering
+	/// `answers` sessions.
 	pub fn held(claims: usize, answers: usize) -> Self {
 		Self::new(claims, 1, answers)
 	}
 
-	/// A relay hearing the origin's `claims` claims on two streams, the second `lag`
-	/// one-claim batches behind the first.
+	/// A relay hearing the origin's `claims` claims on two sessions, the second `lag`
+	/// one-claim changes behind the first.
 	pub fn lagging(claims: usize, lag: usize) -> Self {
 		let mut relay = Self::new(claims, 2, 1);
 		for _ in 0..lag {
@@ -744,29 +802,34 @@ impl RouteRelay {
 		relay
 	}
 
-	fn path(i: usize) -> Path {
-		Path::new(&format!("live/{i}")).unwrap()
+	/// `stream` hears the origin change the claims `changes` names, up to `rev`.
+	fn hear(
+		stream: &crate::route::node::Stream,
+		instance: &crate::Instance,
+		changes: Vec<(usize, crate::route::node::Claim)>,
+		rev: u64,
+	) {
+		let changes = (changes.into_iter())
+			.map(|(i, claim)| {
+				let path = Path::new(&format!("live/{i}")).unwrap();
+				((path, instance.clone()), crate::route::relay::Change::Live(claim))
+			})
+			.collect();
+		let claims = crate::route::node::Msg::Claims {
+			origin: route_id(Self::ORIGIN),
+			changes,
+			floor: rev,
+		};
+		stream.recv(claims).unwrap();
+		stream.flush();
 	}
 
-	fn claim(instance: &crate::Instance, cost: u64) -> crate::route::node::Claim {
-		crate::route::node::Claim {
-			instance: instance.clone(),
-			epoch: 0,
-			cost,
-			upstream: false,
-			learned: false,
-			above: 0,
-			chain: crate::Hops::new(),
-		}
-	}
-
-	/// Hear one batch updating the first `changes` claims, returning how many outputs
-	/// the relay queued: what it serves into its origin, and what it forwards.
+	/// Hear the first `changes` claims change at once, returning how many outputs the
+	/// relay queued: what it serves into its origin, and what it tells its sessions.
 	pub fn change(&mut self, changes: usize) -> usize {
 		self.rev += 1;
-		let claim = Self::claim(&self.instance, self.rev);
-		let batch = (0..changes).map(|i| (Self::path(i), Some(claim.clone()))).collect();
-		self.receive[0].batch(Self::ORIGIN, Path::empty(), batch, Some(self.rev));
+		let changes = (0..changes).map(|i| (i, route_claim(0, self.rev))).collect();
+		Self::hear(&self.receive[0], &self.instance, changes, self.rev);
 		self.drain()
 	}
 
@@ -779,518 +842,130 @@ impl RouteRelay {
 	/// The first claim changes to `epoch`, and the relay confirms serving it.
 	fn confirm(&mut self, epoch: u64) -> usize {
 		self.rev += 1;
-		let claim = crate::route::node::Claim {
-			epoch,
-			..Self::claim(&self.instance, 0)
-		};
-		let batch = vec![(Self::path(0), Some(claim))];
-		self.receive[0].batch(Self::ORIGIN, Path::empty(), batch, Some(self.rev));
-		let serves: Vec<_> = std::iter::from_fn(|| self.receive[0].try_output()).collect();
+		Self::hear(
+			&self.receive[0],
+			&self.instance,
+			vec![(0, route_claim(epoch, 0))],
+			self.rev,
+		);
+		let serves: Vec<_> = std::iter::from_fn(|| self.receive[0].try_serve()).collect();
 		for serve in &serves {
 			if let crate::route::node::Output::Serve {
-				id,
-				claim,
-				prefix,
-				served,
-				..
+				origin, path, instance, ..
 			} = serve
 			{
-				self.receive[0].serving(*id, claim, prefix, &served.claim);
+				self.receive[0].serving(*origin, &(path.clone(), instance.clone()), true);
 			}
 		}
 		serves.len() + self.drain()
 	}
 
-	/// The first stream hears the origin's next revision, which changes one claim.
+	/// The first session hears the origin's next revision, which changes one claim.
 	fn advance(&mut self) {
 		self.rev += 1;
 		let i = self.rev as usize % self.claims;
-		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, self.rev)))];
-		self.receive[0].batch(Self::ORIGIN, Path::empty(), batch, Some(self.rev));
+		let changes = vec![(i, route_claim(0, self.rev))];
+		Self::hear(&self.receive[0], &self.instance, changes, self.rev);
 		self.behind.push_back((self.rev, i));
 	}
 
-	/// Each stream hears its next one-claim batch, the second still lagging, returning
+	/// Each session hears its next one-claim change, the second still lagging, returning
 	/// how many outputs the relay queued.
 	pub fn step(&mut self) -> usize {
 		self.advance();
-		let (rev, i) = self.behind.pop_front().expect("the second stream lags");
-		let batch = vec![(Self::path(i), Some(Self::claim(&self.instance, rev)))];
-		self.receive[1].batch(Self::ORIGIN, Path::empty(), batch, Some(rev));
+		let (rev, i) = self.behind.pop_front().expect("the second session lags");
+		Self::hear(&self.receive[1], &self.instance, vec![(i, route_claim(0, rev))], rev);
 		self.drain()
 	}
 
 	fn drain(&self) -> usize {
-		(self.receive.iter().chain(&self.answer))
-			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
-			.sum()
+		route_drain(self.receive.iter().chain(&self.answer))
 	}
 }
 
-/// A lite-07 route node following one origin on a stream per prefix, as a viewer
-/// session holding many announce prefixes does, for the routes bench.
+/// A lite-07 route node asking one peer for many prefixes, as a viewer session holding
+/// many announce prefixes does, for the routes bench.
 pub struct RouteFollower {
+	#[allow(dead_code, reason = "held so the stream keeps a node to talk to")]
 	node: crate::route::Node,
-	/// Each prefix's stream, `None` only while [`Self::refollow`] replaces it.
-	streams: Vec<Option<crate::route::node::Stream>>,
+	stream: crate::route::node::Stream,
 	instance: crate::Instance,
+	prefixes: usize,
 	claims: usize,
-	/// The next stream [`Self::refollow`] replaces.
+	/// The next prefix [`Self::refollow`] replaces.
 	next: usize,
 }
 
 impl RouteFollower {
-	/// The origin's identity and revision as the node hears them.
-	const ORIGIN: u64 = 1;
-	const REV: u64 = 1;
-	/// The viewer session every stream belongs to.
-	const TAG: u64 = 1;
-
-	/// A node following `prefixes` prefixes `live/{k}`, each holding `claims` claims.
+	/// A node asking for `prefixes` prefixes `live/{k}`, each holding `claims` claims.
 	pub fn new(prefixes: usize, claims: usize) -> Self {
-		let mut follower = Self {
-			node: crate::route::Node::new(2, 2, route_clock()),
-			streams: Vec::new(),
+		let node = crate::route::Node::new(route_id(2), route_clock());
+		let stream = node.connect(1, route_leaf()).unwrap();
+		let follower = Self {
+			node,
+			stream,
 			instance: crate::Instance::random(),
+			prefixes,
 			claims,
 			next: 0,
-		};
-		follower.streams = (0..prefixes).map(|k| Some(follower.follow(k))).collect();
-		follower.drain();
-		follower
-	}
-
-	/// Open the session for prefix `k`, which hears the origin's route and snapshot.
-	fn follow(&self, k: usize) -> crate::route::node::Stream {
-		let prefix = Path::new(&format!("live/{k}")).unwrap();
-		let peer = route_peer(Self::TAG + k as u64, Self::ORIGIN);
-		let link = crate::route::Link {
-			interest: [prefix.clone()].into(),
-			..Default::default()
-		};
-		let stream = self.node.connect(peer, link).unwrap();
-		// The peer answered what the node asks it for.
-		stream.edited(Default::default());
-		let reach = crate::route::path::Reach::Finite(route_offer(Self::ORIGIN));
-		stream.route(Self::ORIGIN, prefix.clone(), Some(reach));
-		let claim = crate::route::node::Claim {
-			instance: self.instance.clone(),
-			epoch: 0,
-			cost: 0,
-			upstream: false,
-			learned: false,
-			above: 0,
-			chain: crate::Hops::new(),
-		};
-		let snapshot = (0..self.claims)
-			.map(|j| (Path::new(&format!("live/{k}/{j}")).unwrap(), Some(claim.clone())))
-			.collect();
-		stream.batch(Self::ORIGIN, prefix, snapshot, Some(Self::REV));
-		stream
-	}
-
-	/// Close one prefix's session and open it again, returning how many outputs the
-	/// node queued.
-	pub fn refollow(&mut self) -> usize {
-		let k = self.next % self.streams.len();
-		self.next += 1;
-		// Closed first, so the node lets go of the prefix before hearing it again.
-		drop(self.streams[k].take());
-		self.streams[k] = Some(self.follow(k));
-		self.drain()
-	}
-
-	/// Close every session.
-	pub fn teardown(self) {
-		drop(self.streams);
-	}
-
-	fn drain(&self) -> usize {
-		(self.streams.iter().flatten())
-			.map(|stream| std::iter::from_fn(|| stream.try_output()).count())
-			.sum()
-	}
-}
-
-/// A peer's request for `prefix` alone.
-fn route_ask(prefix: Path) -> crate::route::path::Edit {
-	crate::route::path::Edit {
-		remove: Vec::new(),
-		add: vec![prefix],
-	}
-}
-
-/// The path router originating claims and answering streams, for the routes bench.
-pub struct PathRouteNode(crate::route::path::Router<usize, ()>);
-
-impl PathRouteNode {
-	/// An origin with `claims` claims, answering the given interests.
-	pub fn new(claims: usize, interests: &[&str]) -> Self {
-		let mut node = Self(crate::route::path::Router::new(1, 1, Default::default()));
-		node.0.originate(1);
-		for i in 0..claims {
-			node.own(&format!("live/{i}"), true);
-		}
-		for (peer, prefix) in interests.iter().enumerate() {
-			node.0.connect(peer, peer as u64 + 2, Default::default()).unwrap();
-			let add = vec![Path::new(prefix).unwrap().to_owned()];
-			node.0
-				.edit(
-					peer,
-					crate::route::path::Edit {
-						remove: Vec::new(),
-						add,
-					},
-				)
-				.unwrap();
-		}
-		node.drain();
-		node
-	}
-
-	/// Start or withdraw a claim.
-	pub fn own(&mut self, claim: &str, start: bool) {
-		let claim = Path::new(claim).unwrap();
-		if start {
-			self.0.announce(claim, ()).unwrap();
-		} else {
-			self.0.unannounce(claim).unwrap();
-		}
-	}
-
-	/// Consume messages and reader notifications, returning the messages sent.
-	pub fn drain(&mut self) -> usize {
-		let sent = self.0.drain().len();
-		self.0.events();
-		self.0.changed();
-		sent
-	}
-}
-
-/// A path router receiving one publisher and forwarding its claims to a reader.
-pub struct PathRouteRelay {
-	router: crate::route::path::Router<usize, u64>,
-	revision: u64,
-}
-
-impl PathRouteRelay {
-	/// Hear `claims` claims and answer one stream watching the root.
-	pub fn new(claims: usize) -> Self {
-		use crate::route::path::{Hop, Offer, Reach};
-		let mut relay = Self {
-			router: crate::route::path::Router::new(2, 2, Default::default()),
-			revision: 1,
-		};
-		relay.router.connect(0, 1, Default::default()).unwrap();
-		relay.router.edited(0);
-		relay.router.route(
-			0,
-			1,
-			Path::empty(),
-			Some(Reach::Finite(Offer {
-				path: [Hop { node: 1, session: 0 }].into(),
-				draining: false,
-				priority: i8::MAX,
-				metric: 0,
-				down_only: false,
-			})),
-		);
-		let snapshot = (0..claims)
-			.map(|i| (Path::new(&format!("live/{i}")).unwrap(), Some(1)))
-			.collect();
-		relay.router.batch(0, 1, Path::empty(), snapshot, Some(1));
-		relay.router.connect(1, 3, Default::default()).unwrap();
-		let add = vec![Path::empty()];
-		relay
-			.router
-			.edit(
-				1,
-				crate::route::path::Edit {
-					remove: Vec::new(),
-					add,
-				},
-			)
-			.unwrap();
-		relay.drain();
-		relay
-	}
-
-	/// Receive one batch and return its forwarded messages and reader changes.
-	pub fn change(&mut self, claims: usize) -> (usize, usize) {
-		self.revision += 1;
-		let changes = (0..claims)
-			.map(|i| (Path::new(&format!("live/{i}")).unwrap(), Some(self.revision)))
-			.collect();
-		self.router.batch(0, 1, Path::empty(), changes, Some(self.revision));
-		self.drain()
-	}
-
-	fn drain(&mut self) -> (usize, usize) {
-		let sent = self.router.drain().len();
-		let events = self.router.events().len();
-		self.router.changed();
-		(sent, events)
-	}
-}
-
-/// The path router following one publisher on a session per prefix, for the routes bench.
-pub struct PathRouteFollower {
-	router: crate::route::path::Router<usize, ()>,
-	prefixes: Vec<Path>,
-	claims: usize,
-	next: usize,
-	now: kio::clock::Instant,
-}
-
-impl PathRouteFollower {
-	/// A route for each `live/{k}`, each carrying `claims` claims.
-	pub fn new(prefixes: usize, claims: usize) -> Self {
-		let mut follower = Self {
-			router: crate::route::path::Router::new(2, 2, crate::route::path::Doubt::default()),
-			prefixes: (0..prefixes)
-				.map(|k| Path::new(&format!("live/{k}")).unwrap())
-				.collect(),
-			claims,
-			next: 0,
-			now: kio::clock::Instant::now(),
 		};
 		for k in 0..prefixes {
 			follower.follow(k);
 		}
 		follower.drain();
-		assert_eq!(follower.router.shown().len(), prefixes * claims);
 		follower
 	}
 
-	fn follow(&mut self, k: usize) {
-		use crate::route::path::{Hop, Offer, Reach};
-		let prefix = self.prefixes[k].clone();
-		self.router.connect(k, 1, crate::route::Link::default()).unwrap();
-		self.router.edited(k);
-		self.router.route(
-			k,
-			1,
-			prefix.clone(),
-			Some(Reach::Finite(Offer {
-				path: [Hop { node: 1, session: 0 }].into(),
-				draining: false,
-				priority: i8::MAX,
-				metric: 0,
-				down_only: false,
-			})),
-		);
+	fn prefix(k: usize) -> Path {
+		Path::new(&format!("live/{k}")).unwrap()
+	}
+
+	/// Ask for prefix `k`, which the peer answers with its initial set.
+	fn follow(&self, k: usize) {
+		let prefix = Self::prefix(k);
+		let edit = crate::route::relay::Edit {
+			remove: Vec::new(),
+			add: vec![prefix.clone()],
+		};
+		self.stream.ask(edit).unwrap();
+		self.stream.recv(crate::route::node::Msg::Edited).unwrap();
 		let changes = (0..self.claims)
-			.map(|j| (Path::new(&format!("live/{k}/{j}")).unwrap(), Some(())))
-			.collect();
-		self.router.batch(k, 1, prefix, changes, Some(1));
-	}
-
-	/// Close every session in one call, including the resulting timer work.
-	pub fn teardown(mut self) {
-		self.router.disconnect(0..self.prefixes.len(), self.now);
-		self.expire();
-		assert!(self.router.shown().is_empty());
-		self.drain();
-	}
-
-	/// Replace one prefix's session and snapshot, including the resulting timer work.
-	pub fn refollow(&mut self) {
-		let k = self.next % self.prefixes.len();
-		self.next += 1;
-		self.router.disconnect([k], self.now);
-		self.follow(k);
-		self.expire();
-		assert_eq!(self.router.shown().len(), self.prefixes.len() * self.claims);
-		self.drain();
-	}
-
-	fn expire(&mut self) {
-		// Advance the mocked input clock rather than waiting a real doubt interval.
-		self.now = self.now.saturating_add(crate::route::path::Doubt::default().timer);
-		self.router.timeout(self.now);
-	}
-
-	fn drain(&mut self) {
-		self.router.drain();
-		self.router.events();
-		self.router.changed();
-	}
-}
-
-/// A path router hearing one publisher through `sessions` sessions of a node that
-/// then sends GOAWAY, a route per session, and answering `recipients` streams that
-/// watch the root, for the routes bench.
-pub struct PathRouteDrain {
-	router: crate::route::path::Router<usize, ()>,
-	recipients: usize,
-}
-
-impl PathRouteDrain {
-	const LEAVING: u64 = 500;
-
-	/// Hear a route over each of `sessions` sessions of the leaving node, and answer
-	/// `recipients` streams watching the root.
-	pub fn new(sessions: usize, recipients: usize) -> Self {
-		use crate::route::path::{Hop, Offer, Reach};
-		let mut router = crate::route::path::Router::new(2, 2, crate::route::path::Doubt::default());
-		for i in 0..sessions {
-			let prefix = Path::new(&format!("live/{i}")).unwrap();
-			let via = 1_000 + i as u64;
-			router.connect(i, via, crate::route::Link::default()).unwrap();
-			router.edited(i);
-			let path = [
-				Hop { node: 1, session: 0 },
-				Hop {
-					node: Self::LEAVING,
-					session: i as u64 + 1,
-				},
-				Hop { node: via, session: 1 },
-			];
-			router.route(
-				i,
-				1,
-				prefix.clone(),
-				Some(Reach::Finite(Offer {
-					path: path.into(),
-					draining: false,
-					priority: i8::MAX,
-					metric: 1,
-					down_only: false,
-				})),
-			);
-			let claim = Path::new(&format!("live/{i}/x")).unwrap();
-			router.batch(i, 1, prefix, vec![(claim, Some(()))], Some(1));
-		}
-		for r in 0..recipients {
-			let peer = sessions + r;
-			router
-				.connect(peer, 5_000 + r as u64, crate::route::Link::default())
-				.unwrap();
-			let add = vec![Path::empty()];
-			router
-				.edit(
-					peer,
-					crate::route::path::Edit {
-						remove: Vec::new(),
-						add,
-					},
-				)
-				.unwrap();
-		}
-		let mut node = Self { router, recipients };
-		node.flush();
-		node
-	}
-
-	/// Hear the leaving node drain, returning the messages sent: each recipient's
-	/// DRAIN, then each route it was sent, now ranked draining.
-	pub fn drain(&mut self) -> usize {
-		use crate::route::path::{Dead, Out};
-		let now = kio::clock::Instant::now();
-		self.router.dead(0, Dead::Draining { node: Self::LEAVING }, now);
-		let out = self.router.drain();
-		let told = (out.iter())
-			.filter(|out| {
-				matches!(
-					out,
-					Out::Dead {
-						dead: Dead::Draining { .. },
-						..
-					}
-				)
+			.map(|j| {
+				let path = Path::new(&format!("live/{k}/{j}")).unwrap();
+				let live = crate::route::relay::Change::Live(route_claim(0, 0));
+				((path, self.instance.clone()), live)
 			})
-			.count();
-		assert_eq!(told, self.recipients, "each recipient hears the drain once");
-		self.router.events();
-		self.router.changed();
-		out.len()
-	}
-
-	fn flush(&mut self) -> usize {
-		let sent = self.router.drain().len();
-		self.router.events();
-		self.router.changed();
-		sent
-	}
-}
-
-/// A path router hearing one publisher from a neighbour, under a prefix of its own with
-/// `claims` claims, and answering `streams` streams that each watch a prefix it does not
-/// claim under, for the routes bench.
-pub struct PathRouteChange {
-	router: crate::route::path::Router<usize, ()>,
-	far: u64,
-}
-
-impl PathRouteChange {
-	const UP: u64 = 1_000;
-
-	fn reach(id: u64, far: u64) -> crate::route::path::Reach {
-		use crate::route::path::{Hop, Offer, Reach};
-		let path = [
-			Hop { node: id, session: 0 },
-			Hop { node: far, session: 1 },
-			Hop {
-				node: Self::UP,
-				session: 1,
-			},
-		];
-		Reach::Finite(Offer {
-			path: path.into(),
-			draining: false,
-			priority: i8::MAX,
-			metric: 1,
-			down_only: false,
-		})
-	}
-
-	/// Hear one publisher with `claims` claims, and answer `streams` streams its route
-	/// misses.
-	pub fn new(claims: usize, streams: usize) -> Self {
-		let mut router = crate::route::path::Router::new(2, 2, crate::route::path::Doubt::default());
-		router.connect(0, Self::UP, crate::route::Link::default()).unwrap();
-		router.edited(0);
-		let prefix = Path::new("o0").unwrap();
-		router.route(0, 1, prefix.clone(), Some(Self::reach(1, 500)));
-		let changes = (0..claims)
-			.map(|c| (Path::new(&format!("o0/{c}")).unwrap(), Some(())))
 			.collect();
-		router.batch(0, 1, prefix, changes, Some(1));
-		for s in 0..streams {
-			let peer = 1 + s;
-			router
-				.connect(peer, 5_000 + s as u64, crate::route::Link::default())
-				.unwrap();
-			let add = vec![Path::new(&format!("x{s}")).unwrap().to_owned()];
-			router
-				.edit(
-					peer,
-					crate::route::path::Edit {
-						remove: Vec::new(),
-						add,
-					},
-				)
-				.unwrap();
-		}
-		let mut node = Self { router, far: 500 };
-		node.flush();
-		node
+		let announce = crate::route::node::Msg::Announce { changes };
+		self.stream.recv(announce).unwrap();
+		self.stream.recv(crate::route::node::Msg::Synced(prefix)).unwrap();
+		self.stream.flush();
 	}
 
-	/// The neighbour moves the publisher's route onto another path, which no stream
-	/// watches.
-	pub fn repath(&mut self) {
-		self.far = if self.far == 500 { 501 } else { 500 };
-		self.router
-			.route(0, 1, Path::new("o0").unwrap(), Some(Self::reach(1, self.far)));
-		assert_eq!(self.flush(), 0);
+	/// Stop asking for one prefix and ask for it again, returning how many outputs the
+	/// node queued.
+	pub fn refollow(&mut self) -> usize {
+		let k = self.next % self.prefixes;
+		self.next += 1;
+		let edit = crate::route::relay::Edit {
+			remove: vec![Self::prefix(k)],
+			add: Vec::new(),
+		};
+		self.stream.ask(edit).unwrap();
+		// Answered first, so the node lets go of the prefix before hearing it again.
+		self.stream.recv(crate::route::node::Msg::Edited).unwrap();
+		self.stream.flush();
+		self.follow(k);
+		self.drain()
 	}
 
-	fn flush(&mut self) -> usize {
-		let sent = self.router.drain().len();
-		self.router.events();
-		self.router.changed();
-		sent
+	/// Close the session.
+	pub fn teardown(self) {
+		drop(self.stream);
+	}
+
+	fn drain(&self) -> usize {
+		route_drain([&self.stream])
 	}
 }
 
@@ -1397,8 +1072,14 @@ pub fn decode_announces(data: &[u8], compress: bool) -> Vec<Announced> {
 				.start(Some(suffix))
 				.and_then(|suffix| suffix.ok_or(crate::Error::ProtocolViolation))
 				.map(|suffix| Announced::Start(suffix, hops.into_ids())),
-			// A refused message assigns ids this harness does not model.
-			lite::AnnounceBroadcast::Refused { .. } => break,
+			lite::AnnounceBroadcast::Start { suffix, claim, .. } => decoder
+				.start(Some(suffix))
+				.and_then(|suffix| suffix.ok_or(crate::Error::ProtocolViolation))
+				.map(|suffix| Announced::Start(suffix, claim.chain)),
+			lite::AnnounceBroadcast::Change { id, claim } => {
+				decoder.get(id).map(|_| Announced::Update(id, claim.chain))
+			}
+			lite::AnnounceBroadcast::End { id, .. } => decoder.end(id).map(|_| Announced::End(id)),
 			lite::AnnounceBroadcast::Update { id, hops, .. } => {
 				decoder.get(id).map(|_| Announced::Update(id, hops.into_ids()))
 			}
@@ -1505,8 +1186,7 @@ impl LiteSample {
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -1705,8 +1385,7 @@ impl Default for Messages {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -1889,8 +1568,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			id: 0,
 			broadcast: broadcast.clone(),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			track: track.into(),
 			priority: 0,
 			max_delay: Some(std::time::Duration::ZERO),
@@ -1966,7 +1644,12 @@ pub fn path(data: &[u8]) -> bool {
 			Err(crate::path::Error::TooLong)
 		} else if escaped_segments(s).iter().any(|segment| !paired(segment)) {
 			Err(crate::path::Error::InvalidEscape)
-		} else if escaped_segments(s).iter().any(String::is_empty) {
+		} else if escaped_segments(s).iter().any(String::is_empty)
+			// TEMPORARY MIGRATION, delete at the next version cut: the previous release splits at
+			// every `/`, escaped or not, so a `/` doubled or at the end is refused even after a `\`.
+			|| s.ends_with('/')
+			|| s.contains("//")
+		{
 			Err(crate::path::Error::EmptySegment)
 		} else {
 			Ok(())
@@ -2132,25 +1815,22 @@ pub fn pattern(data: &[u8]) -> bool {
 }
 
 /// Lite seeds whose envelope bytes the uniform sweep never forms, on the newest
-/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message,
-/// both kinds of DEAD, and an ANNOUNCE_REQUEST and its ANNOUNCE_OK (the sweep sets
-/// ROUTE_START's type byte but fills its size byte with the body pattern, so none
-/// decodes whole), and a DATAGRAMS request, whose eight fields outgrow the sweep's
-/// longest body.
+/// version: a typed empty TRACKS_SYNCED, an AUTH_OK reply, every route message, and
+/// an ANNOUNCE_REQUEST and its ANNOUNCE_OK (the sweep sets ROUTE's type byte but
+/// fills its size byte with the body pattern, so none decodes whole), and a DATAGRAMS
+/// request, whose seven fields outgrow the sweep's longest body.
 const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(23, &[4, 0]),
-	(30, &[8, 0, 0, 0, 0, 0, 0, 0, 0]),
+	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
-	(5, &[6, 9, 1, 0, 0, 1, 1, 0, 0, 0x80, 1]),
-	(5, &[7, 7, 0, 1, 1, 0, 0, 0x80, 1]),
+	// ROUTE, ROUTE_END, DEAD, DRAIN, ANNOUNCE_FLOOR, ANNOUNCE_REQUEST, ANNOUNCE_OK.
+	(5, &[7, 7, 1, 7, 1, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
-	(5, &[9, 2, 0, 1]),
-	(5, &[11, 1, 0]),
-	(5, &[15, 6, 0, 1, 1, 2, 0, 0]),
-	(5, &[15, 6, 0, 1, 1, 2, 1, 2]),
-	(5, &[15, 2, 1, 1]),
-	(5, &[16, 4, 0, 1, 0, 0]),
-	(5, &[17, 0]),
+	(5, &[9, 5, 7, 1, 2, 9, 1]),
+	(5, &[10, 2, 7, 1]),
+	(5, &[3, 2, 0, 1]),
+	(5, &[5, 4, 0, 1, 0, 0]),
+	(5, &[6, 0]),
 ];
 
 /// The inputs the fuzzer starts from: every (version, type) pair the dispatch knows,

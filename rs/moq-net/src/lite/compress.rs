@@ -120,27 +120,12 @@ impl AnnounceDecoder {
 		Ok(suffix)
 	}
 
-	/// The next unassigned id.
-	pub fn next(&self) -> u64 {
-		self.live.next
-	}
-
-	/// Assign the next id to a claim at `path` that no ANNOUNCE_START carries: an edit of
-	/// the stream's prefixes presents a live claim there.
-	pub fn insert(&mut self, path: Path) -> u64 {
-		let id = self.live.next;
-		self.live.next += 1;
-		self.live.suffixes.insert(id, path);
-		id
-	}
-
 	/// The id the last start assigned.
 	pub fn last(&self) -> u64 {
 		self.live.next.saturating_sub(1)
 	}
 
-	/// The suffix of the live id an ANNOUNCE_UPDATE or ANNOUNCE_RESTART names, which
-	/// stays live. An id whose path was refused has none.
+	/// The suffix of the live id an ANNOUNCE_UPDATE names, which stays live. An id whose path was refused has none.
 	pub fn get(&self, id: u64) -> Result<Path, Error> {
 		self.live.suffix(id).cloned()
 	}
@@ -262,21 +247,6 @@ impl AnnounceEncoder {
 		self.heads.insert(raw_parts(&suffix), id);
 		self.live.suffixes.insert(id, suffix);
 		(Some(id), path)
-	}
-
-	/// The next unassigned id.
-	pub fn next(&self) -> u64 {
-		self.live.next
-	}
-
-	/// Assign the next id to a claim at `path` without an ANNOUNCE_START: an edit of the
-	/// stream's prefixes presents a live claim there.
-	pub fn insert(&mut self, path: Path) -> u64 {
-		let id = self.live.next;
-		self.live.next += 1;
-		self.heads.insert(raw_parts(&path), id);
-		self.live.suffixes.insert(id, path);
-		id
 	}
 
 	/// An ANNOUNCE_END for a live `id`.
@@ -497,12 +467,6 @@ mod tests {
 		// A head ending inside an escape that nothing completes is refused, its id assigned.
 		assert_eq!(decoder.start(Some(path(3, 2, ""))).unwrap(), None);
 		assert_eq!(decoder.last(), 3);
-
-		// A claim an edit inserts is indexed the same way, so its end leaves nothing behind.
-		let mut encoder = AnnounceEncoder::new(VERSION);
-		let id = encoder.insert(Path::from_static(r"a\/b"));
-		encoder.end(id);
-		assert!(encoder.heads.children.is_empty());
 	}
 
 	#[test]
@@ -527,12 +491,12 @@ mod tests {
 
 	/// A compressed stream pinned byte for byte. `js/net/src/lite/announce.test.ts` decodes
 	/// this hex too.
-	const GOLDEN: &str = "001400000a726f6f6d2f612f63616d00016100000000000d0102036d6963000161000000000203000000010101000b0201016200016100000000";
+	const GOLDEN: &str = "001600000a726f6f6d2f612f63616d01610000000000ff00000f0102036d696301610000000000ff0002070000000000ff0001020100000d0201016201610000000000ff00";
 
 	#[cfg(feature = "async")]
 	fn golden() -> Vec<crate::fuzz::Announced> {
 		use crate::fuzz::Announced;
-		// Lite-07 names a route instead of a hop chain, so none travels.
+		// No relay announced these again, so their chains are empty.
 		vec![
 			Announced::Start(Path::from_static("room/a/cam"), vec![]),
 			Announced::Start(Path::from_static("room/a/mic"), vec![]),
@@ -553,7 +517,7 @@ mod tests {
 
 	/// The literal lite-07 stream `js/net` writes for the same announcements, never picking a
 	/// base; `js/net/src/lite/announce.test.ts` pins its encoder to it.
-	const JS_LITERAL: &str = "001400000a726f6f6d2f612f63616d00016100000000001400000a726f6f6d2f612f6d69630001610000000002030000000101010010000006726f6f6d2f6200016100000000";
+	const JS_LITERAL: &str = "001600000a726f6f6d2f612f63616d01610000000000ff00001600000a726f6f6d2f612f6d696301610000000000ff0002070000000000ff00010201000012000006726f6f6d2f6201610000000000ff00";
 
 	#[test]
 	#[cfg(feature = "async")]

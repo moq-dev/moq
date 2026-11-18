@@ -7,7 +7,7 @@ import { fillChanged, wantedRuns } from "../fill.ts";
 import { hooks, insertRun, type Run, removeRun, runGaps } from "../internal.ts";
 import type { Tail } from "../tail.ts";
 import type * as track from "../track.ts";
-import { max, min } from "../util/sequence.ts";
+import { max, min } from "../util/key.ts";
 
 /** The lowest priority, which any fill's outranks. */
 const NO_PRIORITY = -128;
@@ -306,7 +306,7 @@ export class RangeFills {
 		// as a run is asked and once as it is done, and the streams of its answered groups keep
 		// arriving. One no fill owes stays while any of its streams is still arriving, each group
 		// searched for once.
-		for (const [sequence, closed] of this.#reading) if (closed.peek() !== undefined) this.#reading.delete(sequence);
+		for (const [key, closed] of this.#reading) if (closed.peek() !== undefined) this.#reading.delete(key);
 		const groups = ask.groups.map((run) => ({ ...run }));
 		const draining: Run[] = [];
 		for (const run of this.ask.groups) {
@@ -316,20 +316,20 @@ export class RangeFills {
 			}
 			// Only the groups the cache holds, so a wide run costs what it holds.
 			for (const gap of runGaps(this.#draining, run.start, run.end)) {
-				for (const sequence of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
+				for (const key of hooks.arrivingIn(this.#copy, gap.start, gap.end)) {
 					// Only watched until it ends, never taken over, so it is not held.
-					const arriving = hooks.arrivingGroup(this.#copy, sequence);
+					const arriving = hooks.arrivingGroup(this.#copy, key);
 					arriving?.release();
-					if (arriving !== undefined) this.#reading.set(sequence, arriving.settled);
+					if (arriving !== undefined) this.#reading.set(key, arriving.settled);
 				}
 			}
-			if ([...this.#reading.keys()].some((sequence) => run.start <= sequence && sequence < run.end)) {
+			if ([...this.#reading.keys()].some((key) => run.start <= key && key < run.end)) {
 				insertRun(groups, run.start, run.end);
 				insertRun(draining, run.start, run.end);
 			}
 		}
-		for (const sequence of this.#reading.keys())
-			if (!draining.some((run) => run.start <= sequence && sequence < run.end)) this.#reading.delete(sequence);
+		for (const key of this.#reading.keys())
+			if (!draining.some((run) => run.start <= key && key < run.end)) this.#reading.delete(key);
 		this.#draining = draining;
 		// A run being recovered leaves the subscription, even out of a run kept whole: the subscription
 		// dropped it for good, so asking it there again would never be answered.

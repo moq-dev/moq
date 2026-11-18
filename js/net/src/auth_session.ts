@@ -620,6 +620,12 @@ export interface AuthSessionProps {
 	 * session without AUTH that is live before its peer has checked the credential.
 	 */
 	awaiting?: boolean;
+	/**
+	 * Whether the version never answers the connection credential (a moq-lite-03/04 client),
+	 * so the peer refuses it only by closing the session. Its credential still counts as
+	 * accepted, but {@link AuthSession.accepted} never says so.
+	 */
+	silent?: boolean;
 }
 
 /**
@@ -657,6 +663,9 @@ export class AuthSession {
 	// The peer's verdict on the connection credential this session presented: null once accepted,
 	// the refusal, or undefined while it has none.
 	#credential = new Signal<Error | null | undefined>(undefined);
+	// Whether the peer said it accepts the connection credential, which a silent version never does.
+	#accepted = new Signal(false);
+	#silent: boolean;
 	#closed = false;
 
 	// Whoever answers the peer's tokens is decided once, after the task that established
@@ -665,16 +674,20 @@ export class AuthSession {
 	#decided = yieldNow();
 
 	/** Throws {@link Duplicate} while `handle` backs another active session, or the handle's end. */
-	constructor({ wire, requests, peerGrant, handle, draining, awaiting }: AuthSessionProps) {
+	constructor({ wire, requests, peerGrant, handle, draining, awaiting, silent }: AuthSessionProps) {
 		this.handle = handle ?? ownHandle();
 		this.#state = stateOf(this.handle);
 		this.#wire = wire;
 		this.#requests = requests ?? false;
 		this.#peerGrant = peerGrant;
 		this.#draining = draining ?? (() => false);
+		this.#silent = silent ?? false;
 		this.#state.attach(this);
 		// A session without AUTH has the peer's acceptance with its handshake, unless it awaits its SETUP.
-		if (!wire && !awaiting) this.#credential.set(null);
+		if (!wire && !awaiting) {
+			this.#credential.set(null);
+			if (!silent) this.#accepted.set(true);
+		}
 
 		// Present the connection's own credential right away, so both sides learn their
 		// grant without waiting on the app.
@@ -696,9 +709,28 @@ export class AuthSession {
 		return this.#credential;
 	}
 
+	/**
+	 * Whether the peer said it accepts the connection credential: with its handshake, its SETUP,
+	 * or the AUTH_OK to the connection's own credential (moq-lite-07). Never on a silent version.
+	 * The session ending leaves it as it was.
+	 */
+	get accepted(): Getter<boolean> {
+		return this.#accepted;
+	}
+
+	/**
+	 * Whether the version never answers the connection credential (a moq-lite-03/04 client), so
+	 * only uptime suggests the peer took it.
+	 */
+	get silent(): boolean {
+		return this.#silent;
+	}
+
 	/** The peer's SETUP arrived, so it accepted the connection credential a session without AUTH presented. */
-	accepted(): void {
-		if (!this.#wire) this.#credential.set(null);
+	accept(): void {
+		if (this.#wire) return;
+		this.#credential.set(null);
+		this.#accepted.set(true);
 	}
 
 	/** The union of this session's grants, undefined until its peer first answers. */
@@ -959,7 +991,10 @@ export class AuthSession {
 						answered = granted = replied = true;
 						delay = undefined;
 						this.#replied = true;
-						if (presented.setup) this.#credential.set(null);
+						if (presented.setup) {
+							this.#credential.set(null);
+							this.#accepted.set(true);
+						}
 						this.#answered(presented);
 						this.#recompute();
 						continue;

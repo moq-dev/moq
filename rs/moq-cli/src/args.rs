@@ -1309,7 +1309,7 @@ pub struct BufferedFragmented {
 pub struct Transport {
 	/// How far behind the source the output runs (e.g. `2s`), like an SRT receiver's latency,
 	/// including how far ahead of its decode time each frame is sent. A frame that arrives
-	/// later than this is dropped, and a stalled group is skipped once it falls half this
+	/// later than this is dropped, and a stalled group is skipped once it falls this far
 	/// behind the newest content.
 	#[usage(long, default = "1s")]
 	pub delay: moq_tokio::cli::Duration,

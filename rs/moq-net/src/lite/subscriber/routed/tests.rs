@@ -1,35 +1,68 @@
-use crate::lite::{AnnounceBroadcast as Msg, PathRef, test_transport::SinkSession};
+use crate::lite::{AnnounceBroadcast as Wire, PathRef, test_transport::SinkSession};
 use crate::{
-	Instance, Path,
+	Error, Instance, Path,
 	auth::Permit,
-	origin::Cost,
-	route::path::{Hop, Offer},
+	route::{
+		NodeId,
+		node::{Attr, Msg},
+		relay::{Claim, Hop, Offer},
+	},
 };
 
-fn offer() -> Offer {
-	Offer {
-		path: [Hop { node: 7, session: 0 }].into(),
-		draining: false,
-		priority: i8::MAX,
-		metric: 0,
-		down_only: false,
+use super::{Routed, Subscriber};
+
+/// The forwarding node the peer declares.
+const PEER: NodeId = NodeId { relay: 7, start: 1 };
+
+fn subscriber() -> (Subscriber, crate::origin::Consumer) {
+	super::super::tests::restart_subscriber(SinkSession::new(Default::default()))
+}
+
+/// A subscriber whose origin forwards, as a relay's does.
+fn forwarding() -> (Subscriber, crate::origin::Consumer) {
+	let (mut subscriber, consumer) = subscriber();
+	subscriber.origin = subscriber.origin.with_proxy(true);
+	(subscriber, consumer)
+}
+
+/// The peer's route to `node`, which it reaches itself or through the hops after it.
+fn route(node: NodeId) -> Wire {
+	let path: Vec<Hop> = [node, PEER]
+		.into_iter()
+		.take(if node == PEER { 1 } else { 2 })
+		.enumerate()
+		.map(|(session, node)| Hop {
+			node,
+			session: session as u64,
+		})
+		.collect();
+	Wire::Route {
+		offer: Offer {
+			path: path.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost: 0,
+			marked: false,
+		},
 	}
 }
 
-fn start(path: &'static str) -> Msg {
-	start_on(0, path)
+fn claim(above: u64) -> Claim<Attr> {
+	Claim {
+		item: Attr { epoch: 0, above },
+		cost: 0,
+		priority: i8::MAX,
+		draining: false,
+		unavailable: false,
+		chain: Vec::new(),
+	}
 }
 
-/// A claim of `path` on the Route ID `route`.
-fn start_on(route: u64, path: &'static str) -> Msg {
-	Msg::Active {
+fn start(path: &'static str) -> Wire {
+	Wire::Start {
 		suffix: PathRef::literal(Path::from_static(path)),
-		route,
-		instance: Some(Instance::random()),
-		epoch: 0,
-		hops: Default::default(),
-		cost: Cost::new(0),
-		above: 0,
+		instance: Instance::random(),
+		claim: claim(0),
 	}
 }
 
@@ -37,855 +70,513 @@ fn limited(pattern: &str) -> Permit {
 	Permit::limited([pattern.parse::<crate::Pattern>().unwrap()].into_iter().collect())
 }
 
-/// The claims the stream serves into the origin, by path.
-fn served(routed: &super::Routed) -> Vec<String> {
-	let mut served: Vec<String> = routed.served.keys().map(|(_, path, _)| path.to_string()).collect();
+/// Send the peer what the node asks of it, which the peer answers at once, then serve
+/// what the node hands the session.
+fn pump(routed: &mut Routed, subscriber: &Subscriber) {
+	let stream = routed.stream();
+	routed.flush();
+	while let Some(msg) = stream.try_wire() {
+		if let Msg::Ask(edit) = msg {
+			assert!(!routed.ask(edit).is_empty(), "an edit is at least one request");
+			routed.receive(Wire::Ok).unwrap();
+		}
+	}
+	routed.flush();
+	while let Some(output) = stream.try_serve() {
+		routed.output(subscriber, output);
+	}
+}
+
+/// A session with a peer that declared no Node ID, asked for everything.
+fn asking(subscriber: &Subscriber, permit: &Permit) -> Routed {
+	let mut routed = Routed::new(subscriber, 1, permit, None, None).unwrap();
+	routed.want(Path::empty(), subscriber.origin.snapshot(""));
+	pump(&mut routed, subscriber);
+	routed
+}
+
+/// A session with the forwarding node [`PEER`].
+fn routing(subscriber: &Subscriber) -> Routed {
+	let mut routed = Routed::new(subscriber, 1, &Permit::default(), None, Some(PEER)).unwrap();
+	pump(&mut routed, subscriber);
+	routed
+}
+
+/// The claims the session serves into the origin that a route reaches, by path.
+fn served(routed: &Routed) -> Vec<String> {
+	let mut served: Vec<String> = (routed.served.iter())
+		.filter(|(_, served)| served.route.route.available)
+		.map(|((_, path, _), _)| path.to_string())
+		.collect();
 	served.sort();
 	served
 }
 
-/// A peer that withholds its ANNOUNCE_OK still answers the set before the edit, and what
-/// it sends counts against the session's announce cap whatever prefix it answers: the
-/// routes and claims held never pass the cap.
+/// A peer that exchanges no routes has each claim served as it arrives, and withdrawn
+/// as it ends, with no route or floor.
 #[kio::test]
-async fn a_withheld_announce_ok_holds_no_more_than_the_cap() {
-	let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	// One route and two claims.
-	subscriber.announces = crate::session::Slots::new(3);
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	routed.receive(route).unwrap();
-	routed.receive(start("a/x")).unwrap();
+async fn a_claim_is_served_as_it_arrives() {
+	let (subscriber, consumer) = subscriber();
+	let mut cursor = consumer.routes();
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("room")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["room"]);
+	cursor.expect_next_active("room").await;
 
-	// The origin now wants less, and the peer never answers the edit.
-	routed.unwant(&prefix);
-	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
-	let requests = routed.outputs(&subscriber);
-	assert!(matches!(requests.as_slice(), [Msg::Request { .. }]), "{requests:?}");
-
-	routed.receive(start("b/y")).unwrap();
-	let over = routed.receive(start("b/z")).unwrap_err();
-	assert_eq!(crate::SessionError::from(&over), crate::SessionError::TooManyRequests);
+	routed.receive(Wire::End { id: 0, lost: false }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty());
+	cursor.expect_next_ended("room").await;
 }
 
-/// A route this node cannot hold under its root, though its prefix fits the session,
-/// carries over an edit as the peer carries it: the peer, which knows nothing of the
-/// root, assigns the next Route ID to the route it narrows, and so does this node.
+/// A session whose peer declared no Node ID asks it only for what the origin's readers
+/// want, and for nothing once none does.
 #[kio::test]
-async fn a_route_past_the_root_carries_over_as_the_peer_carries_it() {
-	let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let everything: crate::Patterns = ["**"]
-		.into_iter()
-		.map(|p| p.parse::<crate::Pattern>().unwrap())
-		.collect();
-	subscriber.origin = subscriber.origin.scope("r", &everything).unwrap();
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	// The longest path fits the session's paths, and not beneath the root.
-	let deep = Path::new(&"d".repeat(Path::MAX_BYTES)).unwrap();
-	let far = Msg::RouteStart {
-		node: 8,
-		prefix: 0,
-		suffix: deep,
-		exact: false,
-		offer: offer(),
-	};
-	let near = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	routed.receive(far).unwrap();
-	routed.receive(near).unwrap();
-	assert!(routed.routes[&0].prefix.is_none(), "this node cannot hold it");
+async fn a_session_asks_for_what_its_readers_want() {
+	let (subscriber, _consumer) = subscriber();
+	let mut routed = Routed::new(&subscriber, 1, &Permit::default(), None, None).unwrap();
+	let stream = routed.stream();
+	assert_eq!(stream.try_wire(), None, "nothing is wanted yet");
 
-	// Narrowed to `x`: the far route lies outside it and ends, and the near one narrows
-	// into the next Route ID.
-	routed.want(Path::from_static("x"), subscriber.origin.snapshot("x"));
-	routed.unwant(&prefix);
-	let requests = routed.outputs(&subscriber);
-	assert!(
-		matches!(requests.as_slice(), [Msg::Request { remove, add, .. }] if remove.len() == 1 && add.len() == 1),
-		"{requests:?}"
+	let room = Path::from_static("room");
+	routed.want(room.clone(), subscriber.origin.snapshot("room"));
+	let Some(Msg::Ask(edit)) = stream.try_wire() else {
+		panic!("the node asks for the prefix");
+	};
+	assert_eq!(
+		(edit.remove.as_slice(), edit.add.as_slice()),
+		(&[][..], &[room.clone()][..])
 	);
-	routed.receive(Msg::Ok).unwrap();
-	let routes: Vec<_> = routed.routes.iter().map(|(id, route)| (*id, route.node)).collect();
-	assert_eq!(routes, [(2, 7)]);
-	routed.receive(start_on(2, "x/y")).unwrap();
+	let requests = routed.ask(edit);
+	assert_eq!(
+		requests,
+		[Wire::Request {
+			more: false,
+			remove: Vec::new(),
+			add: vec![(room.clone(), true)],
+		}]
+	);
+	routed.receive(Wire::Ok).unwrap();
+
+	routed.unwant(&room);
+	let Some(Msg::Ask(edit)) = stream.try_wire() else {
+		panic!("the node stops asking for the prefix");
+	};
+	assert_eq!(
+		routed.ask(edit),
+		[Wire::Request {
+			more: false,
+			remove: vec![0],
+			add: Vec::new(),
+		}]
+	);
 }
 
-/// A limit narrower than its regions still leaves out the claims it does not
-/// admit, and a change that keeps the regions brings them in and out again.
+/// A peer slow to answer an edit is sent no more of them: what the readers want by
+/// the time it answers goes out as the next one.
+#[kio::test]
+async fn interest_changes_wait_for_the_unanswered_edit() {
+	let (subscriber, _consumer) = subscriber();
+	let mut routed = Routed::new(&subscriber, 1, &Permit::default(), None, None).unwrap();
+	let stream = routed.stream();
+	let room = Path::from_static("room");
+	routed.want(room.clone(), subscriber.origin.snapshot("room"));
+	let Some(Msg::Ask(edit)) = stream.try_wire() else {
+		panic!("the node asks for the prefix");
+	};
+	routed.ask(edit);
+
+	// Unanswered: readers come and go, and nothing more is asked.
+	let other = Path::from_static("other");
+	for _ in 0..8 {
+		routed.want(other.clone(), subscriber.origin.snapshot("other"));
+		routed.unwant(&other);
+	}
+	routed.want(other.clone(), subscriber.origin.snapshot("other"));
+	assert_eq!(stream.try_wire(), None, "an edit is still unanswered");
+	assert_eq!(routed.edits.len(), 1);
+
+	routed.receive(Wire::Ok).unwrap();
+	let Some(Msg::Ask(edit)) = stream.try_wire() else {
+		panic!("the answer asks for what is wanted now");
+	};
+	assert_eq!((edit.remove.as_slice(), edit.add.as_slice()), (&[][..], &[other][..]));
+	assert_eq!(stream.try_wire(), None);
+}
+
+/// Both ends drop every claim within a prefix an edit removes when its ANNOUNCE_OK
+/// arrives: the claim's Announce ID is retired with no ANNOUNCE_END, and no route
+/// reaches it any longer.
+#[kio::test]
+async fn an_answered_edit_drops_the_claims_of_a_removed_prefix() {
+	let (subscriber, _consumer) = subscriber();
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("room")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["room"]);
+
+	routed.unwant(&Path::empty());
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty());
+	let again = routed.receive(Wire::End { id: 0, lost: false });
+	assert!(matches!(again, Err(Error::ProtocolViolation)), "{again:?}");
+}
+
+/// What the peer sends counts against the session's announce cap, one slot per live
+/// claim, so the claims held never pass it.
+#[kio::test]
+async fn claims_never_pass_the_announce_cap() {
+	let (mut subscriber, _consumer) = subscriber();
+	subscriber.announces = crate::session::Slots::new(2);
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("a")).unwrap();
+	routed.receive(start("b")).unwrap();
+	assert!(routed.receive(start("c")).is_err());
+
+	// An ended claim frees its slot.
+	let (mut subscriber, _consumer) = self::subscriber();
+	subscriber.announces = crate::session::Slots::new(2);
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("a")).unwrap();
+	routed.receive(start("b")).unwrap();
+	routed.receive(Wire::End { id: 0, lost: false }).unwrap();
+	routed.receive(start("c")).unwrap();
+}
+
+/// A limit leaves out the claims it does not admit, and a change of limit brings them
+/// in and out again.
 #[kio::test]
 async fn the_limit_admits_each_claim() {
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
+	let (subscriber, _consumer) = subscriber();
 	let public = limited("live/*/public/**");
 	let everything = limited("live/**");
-	assert_eq!(public.regions(), everything.regions(), "the limits share their regions");
 
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &public).unwrap();
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
+	let mut routed = asking(&subscriber, &public);
+	for msg in [start("live/a/public/x"), start("live/a/private/y")] {
 		routed.receive(msg).unwrap();
 	}
-	routed.outputs(&subscriber);
+	pump(&mut routed, &subscriber);
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 
-	routed.relimit(&subscriber, &everything).unwrap();
+	routed.limit(&everything).unwrap();
+	pump(&mut routed, &subscriber);
 	assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
 
-	routed.relimit(&subscriber, &public).unwrap();
+	routed.limit(&public).unwrap();
+	pump(&mut routed, &subscriber);
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 }
 
-/// A claim beneath a subtree the origin handle excludes never enters the node, on
-/// the floor or on a replay, even though the permit admits it; a covering claim
-/// overlapping the handle's scope still does.
+/// A forwarding neighbour's claims wait for the floor that closes their batch, and are
+/// served under the route the floor names.
 #[kio::test]
-async fn an_excluded_claim_never_enters_the_node() {
-	let (mut subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	subscriber.origin = {
-		let patterns: crate::Patterns = ["live/*/public/**", ".stats/**"]
-			.into_iter()
-			.map(|pattern| pattern.parse::<crate::Pattern>().unwrap())
-			.collect();
-		subscriber.origin.scope("", &patterns).unwrap()
+async fn a_routing_neighbours_claims_wait_for_their_floor() {
+	let (subscriber, consumer) = forwarding();
+	let mut cursor = consumer.routes();
+	let mut routed = routing(&subscriber);
+	routed.receive(route(PEER)).unwrap();
+	routed.receive(start("live/a")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty(), "no floor closed the batch");
+
+	routed.receive(Wire::Floor { id: 0, revision: 1 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["live/a"]);
+	let shown = cursor.expect_next_active("live/a").await;
+	assert!(shown.available);
+}
+
+/// A routing neighbour that withholds the floor holds one change per claim here,
+/// however often it updates the claim, and none for a claim it starts and ends.
+#[kio::test]
+async fn a_batch_keeps_one_change_per_claim() {
+	let (subscriber, _consumer) = forwarding();
+	let mut routed = routing(&subscriber);
+	routed.receive(route(PEER)).unwrap();
+	routed.receive(start("live/a")).unwrap();
+	for cost in 0..64 {
+		let mut claim = claim(0);
+		claim.cost = cost;
+		routed.receive(Wire::Change { id: 0, claim }).unwrap();
 	}
-	.exclude(".stats")
-	.unwrap();
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	for msg in [
-		route,
-		start("live"),
-		start(".stats/node"),
-		start(".stats/node/evil"),
-		floor,
+	assert_eq!(routed.pending.changes.len(), 1);
+	for id in 1..64 {
+		routed.receive(start("live/b")).unwrap();
+		routed.receive(Wire::End { id, lost: false }).unwrap();
+	}
+	assert_eq!(routed.pending.changes.len(), 1);
+
+	routed.receive(Wire::Floor { id: 0, revision: 1 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["live/a"]);
+
+	// One the node was told ends at the next floor.
+	routed.receive(Wire::End { id: 0, lost: false }).unwrap();
+	assert_eq!(routed.pending.changes.len(), 1);
+	routed.receive(Wire::Floor { id: 0, revision: 2 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty());
+}
+
+/// Only its floor closes a batch of claim messages: anything else between them closes
+/// the session, as does a floor naming a route the peer never sent.
+#[kio::test]
+async fn a_batch_ends_only_at_its_floor() {
+	let (subscriber, _consumer) = forwarding();
+	for (what, msg) in [
+		("a route", route(PEER)),
+		("a synced", Wire::Synced { prefix: 0 }),
+		("a drain", Wire::Drain { node: PEER }),
 	] {
-		routed.receive(msg).unwrap();
+		let mut routed = routing(&subscriber);
+		routed.receive(route(PEER)).unwrap();
+		routed.receive(start("live/a")).unwrap();
+		let inside = routed.receive(msg);
+		assert!(matches!(inside, Err(Error::ProtocolViolation)), "{what}: {inside:?}");
 	}
-	let shown = |routed: &super::Routed| -> Vec<String> {
-		routed.node.shown().keys().map(|(_, path)| path.to_string()).collect()
-	};
-	routed.outputs(&subscriber);
-	assert_eq!(shown(&routed), ["live"]);
-	assert_eq!(served(&routed), ["live"]);
 
-	// A narrower limit asks for less, which carries the route over under the next
-	// Route ID with the claims the narrower prefix covers.
-	routed.relimit(&subscriber, &limited("live/**")).unwrap();
-	assert_eq!(shown(&routed), ["live"]);
-	assert_eq!(served(&routed), ["live"]);
+	let mut routed = routing(&subscriber);
+	routed.receive(route(PEER)).unwrap();
+	routed.receive(start("live/a")).unwrap();
+	let unknown = routed.receive(Wire::Floor { id: 5, revision: 1 });
+	assert!(matches!(unknown, Err(Error::ProtocolViolation)), "{unknown:?}");
+}
 
-	// Widening it again keeps the route, without the claim at its prefix or a floor:
-	// the peer sends what the wider prefix adds and floors it, and only the filter
-	// keeps `.stats` out.
-	routed.relimit(&subscriber, &Default::default()).unwrap();
-	let floor = Msg::Floor {
-		id: 1,
-		revision: Some(0),
-	};
-	for msg in [
-		start_on(1, "live"),
-		start_on(1, ".stats/node"),
-		start_on(1, ".stats/node/evil"),
-		floor,
+/// A ROUTE naming a node the stream already has a route to replaces that route under
+/// the same Route ID, and one naming another node takes the next.
+#[kio::test]
+async fn a_route_to_the_same_node_keeps_its_route_id() {
+	let (subscriber, _consumer) = forwarding();
+	let other = NodeId { relay: 9, start: 1 };
+	let mut routed = routing(&subscriber);
+	routed.receive(route(PEER)).unwrap();
+	routed.receive(route(PEER)).unwrap();
+	routed.receive(route(other)).unwrap();
+	assert_eq!(routed.named[&PEER], 0);
+	assert_eq!(routed.named[&other], 1);
+
+	// Each floor files its batch under its own node.
+	routed.receive(start("live/a")).unwrap();
+	routed.receive(Wire::Floor { id: 0, revision: 1 }).unwrap();
+	routed.receive(start("live/b")).unwrap();
+	routed.receive(Wire::Floor { id: 1, revision: 1 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["live/a", "live/b"]);
+	let nodes: std::collections::BTreeSet<NodeId> = routed.served.keys().map(|(node, _, _)| *node).collect();
+	assert_eq!(nodes, [PEER, other].into_iter().collect());
+}
+
+/// ROUTE_END retires the route's ID and every claim under it, with no ANNOUNCE_END, so
+/// naming either again closes the session.
+#[kio::test]
+async fn a_route_end_retires_its_claims() {
+	let (subscriber, _consumer) = forwarding();
+	let mut routed = routing(&subscriber);
+	routed.receive(route(PEER)).unwrap();
+	routed.receive(start("live/a")).unwrap();
+	routed.receive(Wire::Floor { id: 0, revision: 1 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert_eq!(served(&routed), ["live/a"]);
+
+	routed.receive(Wire::RouteEnd { id: 0 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty());
+	for (what, msg) in [
+		("the claim", Wire::End { id: 0, lost: false }),
+		("the route", Wire::RouteEnd { id: 0 }),
 	] {
-		routed.receive(msg).unwrap();
+		let again = routed.receive(msg);
+		assert!(matches!(again, Err(Error::ProtocolViolation)), "{what}: {again:?}");
 	}
-	routed.outputs(&subscriber);
-	assert_eq!(shown(&routed), ["live"]);
-	assert_eq!(served(&routed), ["live"]);
 }
 
-/// An unscoped stream narrowed to a limit that leaves a claim out certifies nothing,
-/// so widening it again brings that claim back at the same revision.
+/// A forwarding neighbour is trusted with the whole tree, so a permit that confines it
+/// ends the session rather than narrowing what it sends.
 #[kio::test]
-async fn a_new_scope_certifies_against_its_own_regions() {
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
-	assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
-
-	routed.relimit(&subscriber, &limited("live/*/public/**")).unwrap();
-	assert_eq!(served(&routed), ["live/a/public/x"]);
-
-	routed.relimit(&subscriber, &limited("live/**")).unwrap();
-	assert_eq!(served(&routed), ["live/a/private/y", "live/a/public/x"]);
+async fn a_routing_neighbour_keeps_a_whole_permit() {
+	let (subscriber, _consumer) = forwarding();
+	let mut routed = routing(&subscriber);
+	routed.limit(&Permit::default()).unwrap();
+	// A grant that names everything confines nothing, as a relay's token for a peer does.
+	routed.limit(&limited("**")).unwrap();
+	let narrowed = routed.limit(&limited("live/**"));
+	assert!(matches!(narrowed, Err(Error::Unauthorized)), "{narrowed:?}");
 }
 
-/// Two sessions proving one route key share the peer's routes, but a session serves
-/// only the claims its own limit admits, even where its regions reach the rest.
+/// A session that closes leaves what it served in the origin, shown but unavailable,
+/// for the node to hand to another session or let go.
 #[kio::test]
-async fn a_claim_is_served_only_where_the_limit_admits_it() {
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	let everything = limited("live/**");
-	let public = limited("live/*/public/**");
-	let mut wide = super::Routed::asking(&subscriber, &prefix, 1, &everything).unwrap();
-	let mut narrow = super::Routed::asking(&subscriber, &prefix, 1, &everything).unwrap();
-	narrow.session_key = wide.session_key;
-	narrow.relimit(&subscriber, &public).unwrap();
+async fn a_closed_session_leaves_its_claims_unavailable() {
+	let (subscriber, consumer) = subscriber();
+	let mut cursor = consumer.routes();
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("room")).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(cursor.expect_next_active("room").await.available);
 
-	for routed in [&mut wide, &mut narrow] {
-		let floor = Msg::Floor {
-			id: 0,
-			revision: Some(0),
-		};
-		let route = Msg::RouteStart {
-			node: 7,
-			prefix: 0,
-			suffix: Path::empty(),
-			exact: false,
-			offer: offer(),
-		};
-		for msg in [route, start("live/a/public/x"), start("live/a/private/y"), floor] {
-			routed.receive(msg).unwrap();
-		}
-	}
-	wide.outputs(&subscriber);
-	narrow.outputs(&subscriber);
-	assert_eq!(served(&wide), ["live/a/private/y", "live/a/public/x"]);
-	assert_eq!(served(&narrow), ["live/a/public/x"]);
+	drop(routed);
+	assert!(!cursor.expect_next_active("room").await.available);
 }
 
-/// What the stream keeps between floors is the net change to its committed claims,
-/// however many messages the peer sends without one.
-#[kio::test]
-async fn pending_changes_net_out() {
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	for msg in [route, start("room/host"), floor] {
-		routed.receive(msg).unwrap();
-	}
-	let pending = |routed: &super::Routed| routed.routes[&0].pending.len();
-	assert_eq!(pending(&routed), 0);
-
-	for cost in 1..1000 {
-		let update = Msg::Update {
-			id: 0,
-			hops: Default::default(),
-			cost: Cost::new(cost),
-			above: 0,
-		};
-		routed.receive(update).unwrap();
-	}
-	assert_eq!(pending(&routed), 1, "updates to one claim");
-
-	let back = Msg::Update {
-		id: 0,
-		hops: Default::default(),
-		cost: Cost::new(0),
-		above: 0,
-	};
-	routed.receive(back).unwrap();
-	assert_eq!(pending(&routed), 0, "an update back to the committed claim");
-
-	for _ in 0..100 {
-		routed.receive(start("room/guest")).unwrap();
-		let id = routed.decoder.last();
-		routed.receive(Msg::EndedId { id }).unwrap();
-	}
-	assert_eq!(pending(&routed), 0, "claims started and ended between floors");
+/// Prefixes named `head/0`, `head/1`, ... each padded to about `bytes`.
+fn prefixes(head: &str, count: usize, bytes: usize) -> std::collections::BTreeSet<Path> {
+	(0..count)
+		.map(|i| Path::new(&format!("{head}/{i}{}", "x".repeat(bytes))).expect("a path"))
+		.collect()
 }
 
-/// A claim this node refuses was not withdrawn by its origin: while its route holds
-/// one, the route's floors certify nothing, so a relay forwards no withdrawal for it,
-/// and a usable restart certifies the route again.
-#[kio::test]
-async fn a_refused_claim_forwards_no_withdrawal() {
-	use crate::lite::{Refusable, Refusal};
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let peer = crate::route::node::Peer { tag: u64::MAX, node: 9 };
-	let edge = (routed.node)
-		.answer(peer, crate::route::Link::default(), Path::empty())
-		.unwrap();
-	let floor = |revision| Msg::Floor {
-		id: 0,
-		revision: Some(revision),
-	};
-	let refused = |id| Msg::Refused {
-		message: Refusable::Change { id },
-		reason: Refusal::Instance,
-	};
-	let restart = |id| Msg::Restart {
-		id,
-		instance: Some(Instance::random()),
-		epoch: 1,
-		cost: Cost::new(0),
-		hops: Default::default(),
-		above: 0,
-	};
-	// Each batch the edge would send for node 7: the paths it changes, whether each is
-	// present, and its floor.
-	let batches = |routed: &mut super::Routed| {
-		routed.outputs(&subscriber);
-		let mut batches = Vec::new();
-		while let Some(output) = edge.try_output() {
-			if let crate::route::node::Output::Batch {
-				id: 7, changes, floor, ..
-			} = output
-			{
-				let changes: Vec<_> = (changes.into_iter())
-					.map(|(path, claim)| (path.to_string(), claim.is_some()))
-					.collect();
-				batches.push((changes, floor));
-			}
-		}
-		batches
-	};
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	for msg in [route, start("live/a"), start("live/b"), floor(0)] {
-		routed.receive(msg).unwrap();
-	}
+#[test]
+fn a_set_past_one_request_is_asked_for_more_coarsely() {
+	let fits =
+		|set: &std::collections::BTreeSet<Path>| crate::lite::request_fits(set.iter(), crate::lite::Version::Lite07);
+	let path = |path: &str| Path::new(path).expect("a path");
+
+	// A set that fits is asked for as it is.
+	let small = prefixes("a", 16, 64);
+	assert_eq!(super::coarsen(small.clone(), &Default::default()), small);
+
+	// Without a confined grant, what the prefixes share stands for them.
+	let wide = prefixes("a", 17, 4000);
+	assert!(!fits(&wide));
 	assert_eq!(
-		batches(&mut routed),
-		[(vec![("live/a".into(), true), ("live/b".into(), true)], Some(0))]
+		super::coarsen(wide.clone(), &Default::default()),
+		[path("a")].into_iter().collect()
 	);
 
-	// Refused, live/a goes without a withdrawal certified for it.
-	for msg in [refused(0), floor(1)] {
-		routed.receive(msg).unwrap();
-	}
-	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
-	// Nor does live/b's change certify anything, while the route holds the refused claim.
-	let update = Msg::Update {
-		id: 1,
-		hops: Default::default(),
-		cost: Cost::new(5),
-		above: 0,
-	};
-	for msg in [update, floor(2)] {
-		routed.receive(msg).unwrap();
-	}
-	assert_eq!(batches(&mut routed), [(vec![("live/b".into(), true)], None)]);
+	// Within a grant, each region's prefixes give way inside it, the largest group first,
+	// and nothing is asked for above a region.
+	let regions: std::collections::BTreeSet<Path> = [path("a"), path("b")].into_iter().collect();
+	let mut both = wide.clone();
+	both.extend(prefixes("b", 2, 64));
+	let asked = super::coarsen(both, &regions);
+	assert!(fits(&asked));
+	assert!(asked.contains(&path("a")));
+	assert_eq!(asked.len(), 3);
 
-	// A usable restart brings live/a back, certified again.
-	for msg in [restart(0), floor(3)] {
-		routed.receive(msg).unwrap();
-	}
-	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), true)], Some(3))]);
-
-	// A refused restart withholds it as the update did.
-	for msg in [refused(0), floor(4)] {
-		routed.receive(msg).unwrap();
-	}
-	assert_eq!(batches(&mut routed), [(vec![("live/a".into(), false)], None)]);
-}
-
-/// A DEAD and the ROUTE_UPDATEs it counts apply as one: nothing changes before the
-/// last update, which moves what they named and ends the rest. Another message
-/// between them, an update of a route that is not live, not through the hop, or named
-/// twice, and a count above the routes through the hop are each a violation.
-#[kio::test]
-async fn a_dead_and_its_updates_apply_as_one() {
-	use crate::lite::Dead;
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	let hop = |session| Hop { node: 5, session };
-	// Node 8's route reaches node 5 through node 7, over the same session as 7's own.
-	let through = |node, session| Offer {
-		path: match node {
-			7 => [Hop { node: 7, session: 0 }, hop(session)].into(),
-			_ => [Hop { node, session: 0 }, Hop { node: 7, session: 1 }, hop(session)].into(),
-		},
-		..offer()
-	};
-	let start = || {
-		let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-		for node in [7, 8] {
-			let start = Msg::RouteStart {
-				node,
-				prefix: 0,
-				suffix: Path::empty(),
-				exact: false,
-				offer: through(node, 3),
-			};
-			routed.receive(start).unwrap();
-		}
-		// A route that does not cross the hop.
-		let aside = Msg::RouteStart {
-			node: 9,
-			prefix: 0,
-			suffix: Path::empty(),
-			exact: false,
-			offer: Offer {
-				path: [Hop { node: 9, session: 0 }].into(),
-				..offer()
-			},
-		};
-		routed.receive(aside).unwrap();
-		routed
-	};
-	let dead = |moved| {
-		Msg::Dead(Dead::Closed {
-			hop: hop(3),
-			far: 7,
-			gone: true,
-			moved,
-		})
-	};
-	let update = |id, session| Msg::RouteUpdate {
-		id,
-		offer: through(7, session),
-	};
-
-	let mut routed = start();
-	routed.receive(dead(1)).unwrap();
-	assert_eq!(routed.routes.len(), 3);
+	// One prefix alone in each region gives way to its region.
+	let regions: std::collections::BTreeSet<Path> = (0..17).map(|i| path(&format!("r{i}"))).collect();
+	let alone: std::collections::BTreeSet<Path> = (regions.iter())
+		.map(|region| path(&format!("{region}/{}", "x".repeat(4000))))
+		.collect();
+	assert!(!fits(&alone));
+	let asked = super::coarsen(alone, &regions);
+	assert!(fits(&asked));
 	assert!(
-		routed.routes[&0].path().contains(&hop(3)),
-		"nothing applies before the last update"
+		asked
+			.iter()
+			.all(|prefix| regions.iter().any(|region| prefix.has_prefix(region)))
 	);
-	routed.receive(update(0, 4)).unwrap();
-	let mut live: Vec<_> = routed.routes.keys().copied().collect();
-	live.sort_unstable();
-	assert_eq!(live, [0, 2], "the route it did not move ended");
-	assert!(routed.routes[&0].path().contains(&hop(4)));
-
-	// Another message between the DEAD and its updates.
-	let mut routed = start();
-	routed.receive(dead(1)).unwrap();
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	assert!(routed.receive(floor).is_err());
-
-	// An update of a route that is not live, and of one not through the hop.
-	for id in [9, 2] {
-		let mut routed = start();
-		routed.receive(dead(1)).unwrap();
-		assert!(routed.receive(update(id, 4)).is_err(), "route {id}");
-	}
-
-	// A route named twice.
-	let mut routed = start();
-	routed.receive(dead(2)).unwrap();
-	routed.receive(update(0, 4)).unwrap();
-	assert!(routed.receive(update(0, 5)).is_err());
-
-	// More updates than the stream has routes through the hop.
-	let mut routed = start();
-	assert!(routed.receive(dead(3)).is_err());
+	assert_eq!(asked.len(), 17);
 }
 
-/// A route this node refuses still follows a DEAD naming a hop on its path, so both
-/// ends agree on which routes live: the closed session it crossed ends it, its claims
-/// with it, and the peer may start it over. A refused moved offer withdraws the route
-/// it names until a usable offer comes.
+/// A claim whose path this node cannot resolve lies in a prefix it cannot name, so
+/// removing another prefix leaves it for the peer to end by its id.
 #[kio::test]
-async fn a_refused_route_still_follows_a_dead() {
-	use crate::lite::{Dead, Refusable, Refusal};
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let path = |session| -> std::sync::Arc<[Hop]> { [Hop { node: 7, session: 0 }, Hop { node: 5, session }].into() };
-	let floor = |id| Msg::Floor { id, revision: Some(0) };
-	let claim = |route, path: &'static str| Msg::Active {
-		suffix: PathRef::literal(Path::from_static(path)),
-		route,
-		instance: Some(Instance::random()),
-		epoch: 0,
-		hops: Default::default(),
-		cost: Cost::new(0),
-		above: 0,
-	};
-	let closed = |session, gone, moved| {
-		Msg::Dead(Dead::Closed {
-			hop: Hop { node: 5, session },
-			far: 7,
-			gone,
-			moved,
-		})
-	};
-
-	// Refused for a flag this node does not know: its claim is held, never served.
-	let refused = Msg::Refused {
-		message: Refusable::RouteStart {
-			node: 7,
-			prefix: 0,
-			suffix: Some(Path::empty()),
-			exact: false,
-			path: path(3),
-		},
-		reason: Refusal::Flags(8),
-	};
-	for msg in [refused, claim(0, "live/a"), floor(0)] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
-	assert!(served(&routed).is_empty());
-
-	// The session it crossed closed for good: it ends, and its Announce ID retires.
-	routed.receive(closed(3, true, 0)).unwrap();
-	assert!(routed.routes.is_empty() && routed.claims.is_empty() && routed.named.is_empty());
-	assert!(routed.receive(Msg::EndedId { id: 0 }).is_err());
-
-	// So the peer starts the route over, usably.
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let usable = |session| Offer {
-		path: path(session),
-		..offer()
-	};
-	let route = |session| Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: usable(session),
-	};
-	for msg in [
-		Msg::Refused {
-			message: Refusable::RouteStart {
-				node: 7,
-				prefix: 0,
-				suffix: Some(Path::empty()),
-				exact: false,
-				path: path(3),
-			},
-			reason: Refusal::Flags(8),
-		},
-		claim(0, "live/a"),
-		closed(3, true, 0),
-		route(4),
-		claim(1, "live/b"),
-		floor(1),
-	] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
-	assert_eq!(served(&routed), ["live/b"]);
-
-	// It moved to an offer this node refuses: withdrawn, though the peer still holds it.
-	let moved = Msg::Refused {
-		message: Refusable::RouteUpdate { id: 1, path: path(5) },
-		reason: Refusal::Flags(8),
-	};
-	routed.receive(closed(4, false, 1)).unwrap();
-	routed.receive(moved).unwrap();
-	routed.outputs(&subscriber);
-	assert!(served(&routed).is_empty());
-	assert!(routed.routes[&1].reach().is_none());
-
-	// A usable offer files it again with its last floor's claims.
-	let update = Msg::RouteUpdate {
-		id: 1,
-		offer: usable(6),
-	};
-	routed.receive(update).unwrap();
-	assert!(routed.routes[&1].reach().is_some());
-	assert_eq!(
-		routed.routes[&1].committed.as_ref().map(|(claims, _)| claims.len()),
-		Some(1)
-	);
-}
-
-/// A DEAD the node does not credit, here naming the wrong far node, still changes the
-/// stream's routes as the peer applies it, and the node hears each change as the
-/// peer's own: a gone route ends there too, and a kept one holds, so neither side
-/// keeps a route the other let go.
-#[kio::test]
-async fn an_uncredited_dead_keeps_the_node_in_step() {
-	use crate::lite::Dead;
-	let prefix = Path::empty();
-	let shown = |routed: &super::Routed| -> Vec<(String, bool)> {
-		(routed.node.shown().into_iter())
-			.map(|((_, path), (_, available))| (path.to_string(), available))
-			.collect()
-	};
-	for gone in [true, false] {
-		let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-		let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-		let route = Msg::RouteStart {
-			node: 7,
-			prefix: 0,
-			suffix: Path::empty(),
-			exact: false,
-			offer: Offer {
-				path: [Hop { node: 7, session: 0 }, Hop { node: 5, session: 3 }].into(),
-				..offer()
-			},
-		};
-		let floor = Msg::Floor {
-			id: 0,
-			revision: Some(0),
-		};
-		for msg in [route, start("live"), floor] {
-			routed.receive(msg).unwrap();
-		}
-		routed.outputs(&subscriber);
-		assert_eq!(shown(&routed), [("live".to_string(), true)], "gone: {gone}");
-
-		// Node 7, not 9, is the far end of the session node 5 learned the route on.
-		let dead = Msg::Dead(Dead::Closed {
-			hop: Hop { node: 5, session: 3 },
-			far: 9,
-			gone,
-			moved: 0,
-		});
-		routed.receive(dead).unwrap();
-		routed.outputs(&subscriber);
-		match gone {
-			true => {
-				assert!(routed.routes.is_empty());
-				assert_eq!(shown(&routed), []);
-			}
-			false => {
-				assert!(routed.routes[&0].held);
-				assert_eq!(shown(&routed), [("live".to_string(), false)]);
-			}
-		}
-	}
-}
-
-/// A scoped peer's DRAIN ranks only its own routes through the node draining, which the
-/// node keeps in their offers alone, so a new limit files them again still draining.
-/// An unscoped peer's drain is the node's to remember, and the offers stay as sent.
-#[kio::test]
-async fn a_scoped_drain_survives_a_new_limit() {
-	use crate::lite::Dead;
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	for (permit, scoped) in [(limited("live/**"), true), (Permit::default(), false)] {
-		let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &permit).unwrap();
-		let route = Msg::RouteStart {
-			node: 9,
-			prefix: 0,
-			suffix: Path::empty(),
-			exact: false,
-			offer: Offer {
-				path: [Hop { node: 9, session: 0 }, Hop { node: 7, session: 1 }].into(),
-				..offer()
-			},
-		};
-		routed.receive(route).unwrap();
-		routed.receive(Msg::Dead(Dead::Drain { node: 9 })).unwrap();
-		// Narrowing the request carries the route over under another Route ID.
-		let draining = |routed: &super::Routed| {
-			let route = routed.routes.values().next().expect("the route");
-			route.offer.as_ref().unwrap().draining
-		};
-		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
-		routed.relimit(&subscriber, &limited("live/a/**")).unwrap();
-		assert_eq!(draining(&routed), scoped, "scoped: {scoped}");
-	}
-}
-
-/// A route whose path leaves no room for this node's hop is one the node refuses as
-/// ended, so its claims wait on the stream; a later shorter path files the route and
-/// its claims again.
-#[kio::test]
-async fn a_route_shortened_from_the_hop_limit_files_its_claims() {
-	use crate::route::MAX_HOPS;
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let prefix = Path::empty();
-	let mut routed = super::Routed::asking(&subscriber, &prefix, 1, &Default::default()).unwrap();
-	let along = |hops: usize| Offer {
-		path: (0..hops as u64)
-			.map(|i| Hop {
-				node: 7 + i,
-				session: u64::from(i > 0),
-			})
-			.collect(),
-		..offer()
-	};
-	let shown = |routed: &super::Routed| -> Vec<String> {
-		routed.node.shown().keys().map(|(_, path)| path.to_string()).collect()
-	};
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: along(MAX_HOPS),
-	};
-	let floor = Msg::Floor {
-		id: 0,
-		revision: Some(0),
-	};
-	for msg in [route, start("live"), floor] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
-	assert!(shown(&routed).is_empty(), "no room for this node's hop");
-
-	let update = Msg::RouteUpdate {
-		id: 0,
-		offer: along(MAX_HOPS - 1),
-	};
-	routed.receive(update).unwrap();
-	routed.outputs(&subscriber);
-	assert_eq!(shown(&routed), ["live"]);
-}
-
-/// A route whose ROUTE_START marked it exact stays at its own prefix when the request
-/// widens past it, as the peer keeps it, while one presented there because it covers
-/// it widens. The node keeps the exact one where the peer names it, so a claim the
-/// peer later sends under it is served.
-#[kio::test]
-async fn an_exact_route_stays_where_a_widening_leaves_it() {
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let narrow = Path::from_static("a/b");
-	let mut routed = super::Routed::asking(&subscriber, &narrow, 1, &Default::default()).unwrap();
-	// Node 7 is the peer itself; node 8 lies past it.
-	let route = |node, exact| Msg::RouteStart {
-		node,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact,
-		offer: Offer {
-			path: [Hop { node, session: 0 }, Hop { node: 7, session: 1 }][usize::from(node == 7)..].into(),
-			..offer()
-		},
-	};
-	let floor = |id, revision| Msg::Floor {
-		id,
-		revision: Some(revision),
-	};
-	for msg in [
-		route(7, true),
-		start_on(0, "a/b/x"),
-		floor(0, 0),
-		route(8, false),
-		start_on(1, "a/b/y"),
-		floor(1, 0),
-	] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
-	assert_eq!(served(&routed), ["a/b/x", "a/b/y"]);
-
+async fn an_unresolved_claim_outlives_another_prefixs_removal() {
+	let (subscriber, _consumer) = subscriber();
+	let mut routed = Routed::new(&subscriber, 1, &Permit::default(), None, None).unwrap();
 	routed.want(Path::from_static("a"), subscriber.origin.snapshot("a"));
-	routed.unwant(&narrow);
-	let requests = routed.outputs(&subscriber);
-	assert!(matches!(requests.as_slice(), [Msg::Request { .. }]), "{requests:?}");
-	routed.receive(Msg::Ok).unwrap();
-	let mut routes: Vec<_> = (routed.routes.iter())
-		.map(|(id, route)| (*id, route.node, route.wire.clone(), route.exact))
-		.collect();
-	routes.sort_unstable();
-	assert_eq!(
-		routes,
-		[
-			(0, 7, Some(Path::from_static("a/b")), true),
-			(1, 8, Some(Path::from_static("a")), false)
-		]
-	);
+	routed.want(Path::from_static("b"), subscriber.origin.snapshot("b"));
+	pump(&mut routed, &subscriber);
 
-	for msg in [start_on(0, "a/b/z"), floor(0, 1)] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
-	assert!(served(&routed).contains(&"a/b/z".to_string()), "{:?}", served(&routed));
+	// A base and a rest that each fit a path, and together do not.
+	let long = "x".repeat(Path::MAX_BYTES - 8);
+	let literal = Wire::Start {
+		suffix: PathRef::literal(Path::new(&format!("a/{long}")).unwrap()),
+		instance: Instance::random(),
+		claim: claim(0),
+	};
+	let unresolved = || Wire::Start {
+		suffix: PathRef {
+			base: 1,
+			keep: 2,
+			rest: Path::new(&long).unwrap(),
+		},
+		instance: Instance::random(),
+		claim: claim(0),
+	};
+	routed.receive(literal).unwrap();
+	routed.receive(unresolved()).unwrap();
+	routed.receive(unresolved()).unwrap();
+	assert!(routed.claims[&1].relative.is_none() && routed.claims[&2].relative.is_none());
+
+	routed.unwant(&Path::from_static("b"));
+	pump(&mut routed, &subscriber);
+	routed.receive(Wire::End { id: 1, lost: false }).unwrap();
+
+	// Once no earlier prefix is left for it to lie in, it goes with the rest.
+	routed.unwant(&Path::from_static("a"));
+	pump(&mut routed, &subscriber);
+	assert!(routed.claims.is_empty());
+	let ended = routed.receive(Wire::End { id: 2, lost: false });
+	assert!(matches!(ended, Err(Error::ProtocolViolation)), "{ended:?}");
 }
 
-/// A narrowing carries the claim covering the new prefix from above to that prefix, as the
-/// peer does, under the next Announce ID and that many segments more above its path.
+/// The node shows a peer's claim to the sessions it reaches before the session serving it
+/// lands its route in the origin, each on its own task. A reader asking for the claim the
+/// moment it hears of it waits for that route, and is not refused for want of it.
 #[kio::test]
-async fn a_narrowed_claim_is_more_above_its_new_path() {
-	let (subscriber, _consumer) = super::super::tests::restart_subscriber(SinkSession::new(Default::default()));
-	let wide = Path::from_static("a");
-	let mut routed = super::Routed::asking(&subscriber, &wide, 1, &Default::default()).unwrap();
-	let route = Msg::RouteStart {
-		node: 7,
-		prefix: 0,
-		suffix: Path::empty(),
-		exact: false,
-		offer: offer(),
-	};
-	// The root's claim, presented at `a`.
-	let mut covering = start("a");
-	let Msg::Active { above, .. } = &mut covering else {
-		unreachable!()
-	};
-	*above = 1;
-	for msg in [
-		route,
-		covering,
-		Msg::Floor {
-			id: 0,
-			revision: Some(0),
-		},
-	] {
-		routed.receive(msg).unwrap();
-	}
-	routed.outputs(&subscriber);
+async fn a_request_for_a_claim_shown_waits_for_its_route() {
+	use crate::model::ProduceTest;
+	const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+	let version = crate::Version::lite(crate::lite::Version::Lite07);
+	let (subscriber, _consumer) = forwarding();
+	let mut upstream = asking(&subscriber, &Permit::default());
 
-	let narrow = Path::from_static("a/b/c");
-	routed.want(narrow.clone(), subscriber.origin.snapshot("a/b/c"));
-	routed.unwant(&wide);
-	let requests = routed.outputs(&subscriber);
-	assert!(matches!(requests.as_slice(), [Msg::Request { .. }]), "{requests:?}");
-	routed.receive(Msg::Ok).unwrap();
-	let claims: Vec<_> = (routed.claims.iter())
-		.map(|(id, claim)| (*id, claim.wire.clone(), claim.claim.as_ref().map(|claim| claim.above)))
-		.collect();
-	assert_eq!(claims, [(1, Some(narrow), Some(3))]);
+	// A reader on lite-07, served from the relay's origin.
+	let reader = crate::origin::Config::new(std::num::NonZeroU64::new(3).unwrap()).produce();
+	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
+		protocol: Some(version.alpn().to_string()),
+		..Default::default()
+	});
+	let dial = crate::Client::new()
+		.with_versions(version.into())
+		.with_subscriber(reader.clone());
+	let serve = crate::Server::new()
+		.with_versions(version.into())
+		.with_publisher(subscriber.origin.consume());
+	let (_client, _server) = futures::join!(
+		async {
+			let (session, driver) = dial.connect(kio::clock::now(), client).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+		async {
+			let (session, driver) = serve.accept(kio::clock::now(), server).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+	);
+
+	// The claim reaches the node, which shows it to the reader, while the session it
+	// arrived on has yet to land its route.
+	upstream.receive(start("live")).unwrap();
+	upstream.flush();
+	let live = kio::clock::timeout(TIMEOUT, reader.consume().follow("live", None).unwrap().available())
+		.await
+		.expect("the reader hears of the claim")
+		.unwrap()
+		.expect("the claim is shown");
+	// It asks at once, and its request reaches the relay before the route does.
+	let _subscribing = kio::clock::sim::spawn(async move { live.track("video").unwrap().subscribe(None).await });
+	kio::clock::sleep(std::time::Duration::from_millis(100)).await;
+
+	// The route lands, and the request goes on to the session serving the claim. Refused
+	// instead, the reader would wait for a route change that never comes.
+	let stream = upstream.stream();
+	while let Some(output) = stream.try_serve() {
+		upstream.output(&subscriber, output);
+	}
+	let minted = kio::clock::timeout(
+		TIMEOUT,
+		kio::wait(|waiter| {
+			upstream.poll(&subscriber, waiter);
+			subscriber.sources.poll_pop(waiter)
+		}),
+	)
+	.await
+	.expect("the request reaches the claim")
+	.unwrap();
+	assert_eq!(minted.path.as_str(), "live");
 }

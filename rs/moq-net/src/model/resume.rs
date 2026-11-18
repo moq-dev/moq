@@ -276,6 +276,12 @@ impl Producer {
 		self.state.read().phase.end().is_some()
 	}
 
+	/// Whether a front may still replace the copy: the track is open, or finished with
+	/// reads still to move off a dying route.
+	pub(super) fn moves(&self) -> bool {
+		self.state.read().phase.moves()
+	}
+
 	/// The track ended: cleanly with `Ok`, or failed for good. A clean end still moves to
 	/// each copy the front serves from until it concludes.
 	pub(super) fn end(&self, result: Result<()>) {
@@ -2785,16 +2791,13 @@ impl kio::Task for Fetching {
 					}
 				},
 			};
-			let served = match target {
-				Target::Serving(served) => served,
-				// Never handed out before its copy's info passes the front's check.
-				Target::Staged(_) => {
-					asked.answer = Some(result);
-					return match self.route.end() {
-						Some(Some(Err(err))) => Poll::Ready(Err(err)),
-						_ => Poll::Pending,
-					};
-				}
+			// Never handed out before its copy's info passes the front's check.
+			let Target::Serving(served) = target else {
+				asked.answer = Some(result);
+				return match self.route.end() {
+					Some(Some(Err(err))) => Poll::Ready(Err(err)),
+					_ => Poll::Pending,
+				};
 			};
 			let serving = copy;
 			return match result {

@@ -44,7 +44,7 @@ jobs:
 
       - uses: ./.github/actions/nix
 
-      # The relay, cli, moq-ffi, and moq-c all build from source. The nightly
+      # The relay, cli, moq-ffi, and libmoq all build from source. The nightly
       # run publishes them for the pull requests that touch the harness.
       - name: Rust cache
         id: rust-cache

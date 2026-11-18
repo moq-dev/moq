@@ -144,7 +144,7 @@ type Item = (Read, Option<Instant>);
 /// One subscription and the decoder it feeds.
 struct Reader {
 	/// A [`Sink`] rather than a bare `Decoder`: the read loop below is held
-	/// across `.await` by every caller (moq-c's spawned task, moq-transcode),
+	/// across `.await` by every caller (libmoq's spawned task, moq-transcode),
 	/// so the codec would otherwise migrate between executor workers and
 	/// unbalance the per-thread COM apartment the Windows backend opens.
 	decoder: Sink,
@@ -350,16 +350,20 @@ impl Reader {
 				// Drained so the pictures from before the boundary all come out ahead of it,
 				// rather than whenever the media after it pushes them through. The decoder
 				// stays usable and restarts on the next group's keyframe.
+				// The marker is consumed, so a failed drain still queues it and arms recovery
+				// before reporting, or the next read would never see it.
 				Some(Encoded::Gap { timestamp, duration }) => {
-					self.drain().await?;
+					let drained = self.drain().await;
 					self.pending.push_back((Read::Gap { timestamp, duration }, None));
 					self.recover = true;
+					drained?;
 					continue;
 				}
 				// A fresh encoder has no preceding GOP to reference, so no recovery.
 				Some(Encoded::End { end, .. }) => {
-					self.drain().await?;
+					let drained = self.drain().await;
 					self.pending.push_back((Read::End { end }, None));
+					drained?;
 					continue;
 				}
 				None => None,
@@ -370,7 +374,7 @@ impl Reader {
 				// dropped before the drain ran retries it rather than reporting
 				// an end the stream has not reached. Flushing twice is safe: the
 				// second hands back nothing.
-				let tail = self.decoder.flush().await;
+				let drained = self.drain().await;
 				// Set before the error is returned, not after. A flush that
 				// failed once fails the same way every time, and the track has
 				// ended either way, so leaving the flag down turns one bad
@@ -378,13 +382,7 @@ impl Reader {
 				// nothing in between to wait on. A caller that treats a codec
 				// error as one lost picture and carries on then spins.
 				self.drained = true;
-				// Queue what the flush readied before reporting its error, so a
-				// later read still hands those pictures over.
-				let received = self.receive();
-				// Whatever the flush did not return never comes back.
-				self.arrivals.clear();
-				tail?;
-				received?;
+				drained?;
 				continue;
 			};
 
@@ -452,15 +450,14 @@ impl Reader {
 		Ok(())
 	}
 
-	/// Queue every picture the decoder still holds.
+	/// Queue every picture the decoder still holds. A flush that fails still
+	/// queues what it readied, so a later read hands those pictures over.
 	async fn drain(&mut self) -> Result<(), Error> {
-		let drained = match self.decoder.flush().await {
-			Ok(()) => self.receive(),
-			Err(err) => Err(err),
-		};
+		let flushed = self.decoder.flush().await;
+		let received = self.receive();
 		// Whatever the flush did not return never comes back.
 		self.arrivals.clear();
-		drained
+		flushed.and(received)
 	}
 }
 
@@ -489,7 +486,7 @@ mod tests {
 	use super::*;
 	use crate::decode::Kind;
 	use crate::decode::backend::probe;
-	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Producer as EncodeProducer};
+	use crate::encode::{Config as EncodeConfig, Encoder, Kind as EncodeKind, Publisher as EncodePublisher};
 	use moq_mux::container::Container as _;
 
 	#[tokio::test]
@@ -508,7 +505,7 @@ mod tests {
 		let track = source_broadcast
 			.unique_track(".avc3", reserved.track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
-		let mut producer = EncodeProducer::new(track, reserved, rendition).unwrap();
+		let mut producer = EncodePublisher::new(track, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {
@@ -1142,6 +1139,145 @@ mod tests {
 		// The discontinuity marker starts a microsecond before the content's end, so content
 		// resuming there still starts a later group.
 		assert_eq!(reads, ["frame 100000", "end 133332", "frame 200000", "none"]);
+	}
+
+	/// Every read until the track is done, as text: a codec error is one read too.
+	async fn read_all(consumer: &mut Consumer) -> Vec<String> {
+		let mut reads = Vec::new();
+		loop {
+			reads.push(match consumer.read().await {
+				Ok(Some(Read::Frame(frame))) => format!("frame {}", frame.timestamp.as_micros().unwrap()),
+				Ok(Some(Read::Gap { timestamp, .. })) => format!("gap {}", timestamp.as_micros().unwrap()),
+				Ok(Some(Read::End { end })) => format!("end {}", end.as_micros().unwrap()),
+				Ok(None) => return reads,
+				Err(_) => "error".to_string(),
+			});
+		}
+	}
+
+	/// A drain that fails at an end still delivers the pictures it readied ahead
+	/// of the end, and the end itself, after reporting the error.
+	#[tokio::test]
+	async fn a_failed_drain_keeps_its_end() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = broadcast.consume();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let picture = |micros: u64| moq_mux::container::Frame {
+			timestamp: Timestamp::from_micros(micros).unwrap(),
+			duration: Some(Timestamp::from_micros(33_333).unwrap()),
+			payload: Bytes::from_static(b"access unit"),
+			keyframe: true,
+		};
+		producer.write(picture(100_000)).unwrap();
+		producer.cut(None).unwrap();
+		producer.discontinuity().unwrap();
+		producer.write(picture(200_000)).unwrap();
+		let _finished = producer.finish().unwrap();
+
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&subscriber,
+			&catalog,
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::FAILING_FLUSH_NAME.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(
+			read_all(&mut consumer).await,
+			["error", "frame 100000", "end 133332", "error", "frame 200000"]
+		);
+	}
+
+	/// A drain that fails at a gap still delivers the gap after the pictures it
+	/// readied, and still trims the leading pictures of the recovery group.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_drain_keeps_its_gap_and_recovery() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::FAILING_FLUSH_NAME.into()),
+					..Config::new()
+				},
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let write = |sequence, stamps: &[u64]| {
+			let mut group = track.create_group(moq_net::group::Info { start: sequence }).unwrap();
+			let frames: Vec<_> = stamps
+				.iter()
+				.enumerate()
+				.map(|(index, stamp)| moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(*stamp).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(b"access unit"),
+					keyframe: index == 0,
+				})
+				.collect();
+			wire.write(&mut group, &frames).unwrap();
+			group.finish().unwrap();
+		};
+		write(10, &[1000, 1100]);
+		let first = consumer.next_frame().await.unwrap().unwrap();
+		assert_eq!(first.timestamp.as_micros().unwrap(), 1000);
+
+		consumer.reader().track.set_delay(Delay::default());
+		write(11, &[2000]);
+		write(12, &[3000, 2800, 2900, 3100]);
+		let _track = track.finish().unwrap();
+		let reads = read_all(&mut consumer).await;
+		assert_eq!(
+			reads[..3],
+			["error", "frame 1100", "gap 1100"],
+			"the drained picture, then its gap: {reads:?}"
+		);
+		assert_eq!(
+			reads[3..],
+			["frame 3000", "error", "frame 3100"],
+			"recovery trims the leading pictures: {reads:?}"
+		);
 	}
 
 	/// A read dropped while a threaded flush is in flight loses nothing: the

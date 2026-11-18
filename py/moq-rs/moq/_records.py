@@ -228,9 +228,12 @@ class Delay:
     """How far behind the live edge a subscriber or decoder plays, mirroring moq-net's ``track::Delay``.
 
     ``min`` is the target latency: the playout or jitter-buffer delay held behind the
-    live edge, and where a cold join starts. ``None`` leaves it unstated, which a decoder
-    plays as zero while the subscription keeps it unstated, so it never pulls the
-    aggregate across subscribers to zero. A ``min`` past ``max`` starts at ``max``.
+    live edge, where a cold join starts, and how long a decoder waits for a missing group.
+    ``None`` leaves it unstated, which a decoder starts as zero, waiting a missing group for
+    ``max`` instead (an audio decoder floors it at zero and waits only its playout estimate,
+    which can be larger), while the subscription keeps it unstated, so it never pulls the
+    aggregate across subscribers to zero, unless a catalog warmup or an audio decoder's
+    playout delay states one. A ``min`` past ``max`` starts at ``max``.
     ``max`` is how far a non-latest group may fall behind before it is skipped; zero
     skips at once, ``None`` sets no subscriber limit and leaves the publisher's max age
     alone to bound it, and it caps every range.
@@ -345,7 +348,8 @@ def _track_info(info: TrackInfo | None) -> MoqTrackInfo | None:
 class Backoff:
     """Retry pacing for the automatic reconnect.
 
-    Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or
+    Until the peer has accepted a session's credential or drained a session with a GOAWAY
+    (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or
     a closed session, such as a refused credential, ends the connection with its error
     rather than retrying.
 
@@ -412,8 +416,8 @@ class QuicConfig:
     ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
     (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
     raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
-    the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
-    ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
+    the ping interval (zero uses the default). ``gso`` and ``mtu_discovery`` leave the
+    choice to the backend when ``None``, and a ``None`` ``congestion_control`` runs BBR v3. ``qlog`` is a
     directory, which must exist, for qlog traces.
     ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
     decrypting a capture; without ``SSLKEYLOGFILE`` the client refuses to build.

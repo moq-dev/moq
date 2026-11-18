@@ -147,6 +147,12 @@ its counters run from its start, and its first publish carries them. A reader
 treats each instance as its own set of counters. The instance rides moq-lite 07
 announcements; over anything else the receiving session mints one per
 announcement, so a reader sees the same change as an end and a start at the path.
+A minted instance also changes on every reconnect, so it cannot tell a restart from a
+redial. When a minted instance follows a minted one while the departed one is still
+within the aggregating reader's grace ([`Config::grace`](https://docs.rs/moq-stats/latest/moq_stats/aggregate/struct.Config.html#structfield.grace)),
+its first frame decides: counters that continue are the same node, and a new bucket
+epoch or a counter going down is a restart, which adds to the old counters. A return
+after the grace starts over, so its earlier traffic counts twice.
 An aggregating reader pins each node's subscription to its instance.
 
 Every bucket shares the node's broadcast, so a token scoped to the stats prefix

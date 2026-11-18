@@ -4,7 +4,7 @@ import { Signal } from "@moq/signals";
 import type { Request } from "../auth.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair, manual, waitFor } from "../mock.ts";
+import { createMockTransportPair, type MockTransport, manual, waitFor } from "../mock.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
 import { accept as acceptSession } from "./index.ts";
@@ -44,20 +44,25 @@ function relay(decide: (token: string, request: Request) => void) {
 
 /**
  * A lite-06 relay, which has no AUTH: it accepts any credential but `refused`, whose session it
- * closes once `release` resolves, before its SETUP.
+ * closes once `release` resolves, before its SETUP. `dials` counts the dials, and `served` holds
+ * the server side of each session it accepted.
  */
 function closing(refused: string, release: Promise<void>) {
+	const served: MockTransport[] = [];
+	const dials = new Signal(0);
 	const stub = function StubWebTransport(target: string | URL) {
+		dials.update((n) => n + 1);
 		const pair = createMockTransportPair(Lite.ALPN_06);
 		const url = new URL(target);
 		if (url.searchParams.get("jwt") === refused) {
 			void release.then(() => pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" }));
 		} else {
+			served.push(pair.server);
 			void acceptSession({ transport: pair.server, url });
 		}
 		return pair.client;
 	};
-	return stub as unknown as typeof WebTransport;
+	return { dials, served, stub: stub as unknown as typeof WebTransport };
 }
 
 function loop(versions: string[], tokens: Signal<readonly string[]>) {
@@ -110,13 +115,20 @@ test("a close that refuses the connection credential answers a session without A
 	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
-	globalThis.WebTransport = closing("old", release);
-	const tokens = new Signal<readonly string[]>(["old"]);
+	const { dials, served, stub } = closing("old", release);
+	globalThis.WebTransport = stub;
+	const tokens = new Signal<readonly string[]>(["ok"]);
 	const reload = loop(["moq-lite-06"], tokens);
 	try {
+		// The server's SETUP accepts the first credential, so the refusing session's close is
+		// retried rather than ending the URL.
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
-		// A session that stayed up past the healthy bar, so its close is retried rather than ending the URL.
-		await clock.advance(Duration.millis(1500));
+		// Swapped while no session is live, so no session takes it in band.
+		served[0]?.close({ closeCode: 0, reason: "restart" });
+		await clock.drive(waitFor(reload.established, (established) => established === undefined));
+		tokens.set(["old"]);
+		await clock.drive(waitFor(dials, (n) => n >= 2));
+		await clock.advance(Duration.millis(10));
 		const waiting = refusal(reload.answered());
 		resolve();
 		const err = await clock.drive(waiting);
@@ -126,6 +138,31 @@ test("a close that refuses the connection credential answers a session without A
 		tokens.set(["new"]);
 		await clock.drive(reload.answered());
 	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a lite-07 session up past the healthy bar without an AUTH_OK never reads as connected", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const held = new Signal<readonly Request[]>([]);
+	globalThis.WebTransport = relay((_token, request) => held.update((requests) => [...requests, request]));
+	const reload = loop(["moq-lite-07-wip"], new Signal<readonly string[]>([]));
+	const statuses: string[] = [];
+	const unsubscribe = reload.status.subscribe((status) => statuses.push(status));
+	try {
+		const [credential] = await clock.drive(waitFor(held, (requests) => requests.length > 0));
+		// Uptime stands in for an answer only on moq-lite 03/04, which have none.
+		await clock.advance(Duration.millis(5000));
+		expect(statuses).not.toContain("connected");
+		expect(reload.established.peek()).toBeUndefined();
+
+		credential?.accept(GRANT);
+		await clock.drive(waitFor(reload.status, (status) => status === "connected"));
+		expect(reload.established.peek()).toBeDefined();
+	} finally {
+		unsubscribe();
 		reload.close();
 		globalThis.WebTransport = original;
 	}

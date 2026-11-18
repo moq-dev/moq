@@ -89,6 +89,8 @@ type Op =
 	| { op: "mutate" }
 	// Sets a near-copy of the current value, where equality bugs hide.
 	| { op: "edit"; edit: Edit }
+	// Sets a copy of the value from before this batch, so the flush nets no change.
+	| { op: "revert" }
 	| { op: "listen"; kind: Kind }
 	// Picks any listener, including a gone one, since disposing twice must be harmless.
 	| { op: "unlisten"; index: number };
@@ -98,6 +100,7 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 		.record({ op: fc.constant("set" as const), via: fc.constantFrom("set", "update"), value, force: fc.boolean() })
 		.map((o) => (o.via === "update" ? { ...o, force: false } : o)),
 	fc.constant({ op: "mutate" as const }),
+	fc.constant({ op: "revert" as const }),
 	fc.record({ op: fc.constant("edit" as const), edit: fc.constantFrom<Edit>("clone", "rename", "grow") }),
 	fc.record({ op: fc.constant("listen" as const), kind: fc.constantFrom<Kind>("subscribe", "changed", "effect") }),
 	fc.record({ op: fc.constant("unlisten" as const), index: fc.nat() }),
@@ -105,12 +108,14 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 
 // A listener's expected deliveries. An effect is pending until its run subscribes it, and a
 // listener is gone once disposed or, for `changed`, once it fired; gone ones must stay quiet.
-type Listener = { kind: Kind; seen: unknown[]; pending: boolean; gone: boolean };
+// `saw` is the value it read when it registered while a flush was pending.
+type Listener = { kind: Kind; seen: unknown[]; pending: boolean; gone: boolean; saw?: { value: unknown } };
 
 // The reference model of the notification contract. A write captures the value it replaces,
 // and the flush at the end of the microtask delivers the final value to every listener when
-// it differs from that capture or the write was forced. A write while nobody listens drops
-// the capture, so nothing is delivered for it. `update` is an unforced write and `mutate` a
+// it differs from that capture or the write was forced, and to a listener that registered
+// mid-batch when it differs from the value that listener read. A write while nobody listens
+// drops the capture, so nothing is delivered for it. `update` is an unforced write and `mutate` a
 // forced write of the current value, since no write method may notify differently.
 type Model = {
 	value: unknown;
@@ -145,6 +150,9 @@ function apply(m: Model, r: Real, o: Op): void {
 		case "edit":
 			apply(m, r, { op: "set", via: "set", value: edit(m.value, o.edit), force: false });
 			return;
+		case "revert":
+			apply(m, r, { op: "set", via: "set", value: clone(m.base ? m.base.value : m.value), force: false });
+			return;
 		case "mutate":
 			r.signal.mutate(() => {});
 			write(m, m.value, true);
@@ -177,7 +185,8 @@ function apply(m: Model, r: Real, o: Op): void {
 				r.dispose.set(id, () => effect.close());
 				m.queue.push(id);
 			}
-			m.listeners.set(id, { kind: o.kind, seen: [], pending: o.kind === "effect", gone: false });
+			const saw = m.base && o.kind !== "effect" ? { value: m.value } : undefined;
+			m.listeners.set(id, { kind: o.kind, seen: [], pending: o.kind === "effect", gone: false, saw });
 			return;
 		}
 		case "unlisten": {
@@ -199,6 +208,7 @@ function settle(m: Model): void {
 			if (!effect || effect.gone) continue;
 			effect.pending = false;
 			effect.seen.push(m.value);
+			effect.saw = m.base ? { value: m.value } : undefined;
 			continue;
 		}
 
@@ -206,10 +216,14 @@ function settle(m: Model): void {
 		const force = m.force;
 		m.base = undefined;
 		m.force = false;
-		if (!force && (!base || shape(base.value) === shape(m.value))) continue;
+		if (!base) continue;
+		const changed = force || shape(base.value) !== shape(m.value);
 
 		for (const [id, l] of m.listeners) {
+			const saw = l.saw;
+			l.saw = undefined;
 			if (l.pending || l.gone) continue;
+			if (!changed && (!saw || shape(saw.value) === shape(m.value))) continue;
 			if (l.kind === "effect") {
 				// An effect reruns on a later microtask, reading the value then.
 				l.pending = true;

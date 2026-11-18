@@ -1,8 +1,7 @@
 name: Release C
 
 # Builds the moq C package (c/moq) for every target and publishes one archive per target to a
-# c-v<version> GitHub release. moq-c-v* tags belong to the hand-written rs/moq-c crate until it
-# retires.
+# c-v<version> GitHub release. The hand-written rs/libmoq crate publishes under libmoq-v* tags.
 
 on:
   push:

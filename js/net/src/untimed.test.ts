@@ -5,6 +5,7 @@ import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -44,7 +45,7 @@ const WIRES: Wire[] = [
  * Serve one group of `timestamps` on a track with `timescale`, starting at `sequence` (the next
  * one by default), and read it back over `wire`.
  */
-async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: Timestamp[], sequence?: bigint) {
+async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamps: Timestamp[], key?: bigint) {
 	const pair = createMockTransportPair(wire.protocol);
 	const origin = new OriginProducer();
 	const [client, server] = await Promise.all([
@@ -60,7 +61,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
 			const track = request.accept({ timescale });
-			const group = sequence === undefined ? track.appendGroup() : track.createGroup(sequence);
+			const group = key === undefined ? hooks.appendNext(track) : track.createGroup(key);
 			for (const [i, timestamp] of timestamps.entries()) {
 				group.writeFrame({ payload: new Uint8Array([i]), timestamp });
 			}
@@ -93,7 +94,7 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 			const groups = subscription.ordered();
 			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
 				// The same group, so a scale-less frame's key still names it.
-				const out = video.createGroup(group.sequence);
+				const out = video.createGroup(group.start);
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
 				out.finish();
 			}
@@ -130,7 +131,7 @@ test("a forwarded untimed track stays untimed", async () => {
 		for (;;) {
 			const request = await wireOf(broadcast).requested();
 			if (!request) break;
-			const group = request.accept({ timescale: Timescale.MICRO }).appendGroup();
+			const group = hooks.appendNext(request.accept({ timescale: Timescale.MICRO }));
 			group.writeFrame({ payload: new Uint8Array([7]), timestamp: Timestamp.fromMicros(1_234) });
 			group.finish();
 		}

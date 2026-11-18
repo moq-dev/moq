@@ -1031,7 +1031,9 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.stalled()).toBe(false);
 			expect(playback.ended()).toBe(false);
 
-			await clock.advance(Duration.millis(1000));
+			// Past the end, but not so far that the replacement continuing the timeline trails the clock
+			// past the stretch bound, which a live replacement never does.
+			await clock.advance(Duration.millis(300));
 			await microtasks();
 			expect(playback.ended()).toBe(true);
 			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
@@ -1160,6 +1162,37 @@ describe("Decoder across a rendition's absence", () => {
 			expect(contexts).toHaveLength(1);
 			expect(playback.rings()).toEqual([ring]);
 		} finally {
+			playback.close();
+		}
+	});
+
+	// A publisher replays the audio it captured while nobody listened, so a viewer falling back to it
+	// receives seconds of it behind the picture, in order over a WebSocket. Written to the ring, it
+	// anchored playback there, and the ring skipped and re-stalled on each refill until it ran out.
+	it("decodes a backlog behind the clock to warm the codec but plays from the live edge", async () => {
+		const playback = await play(Duration.millis(50));
+		const video = playback.sync.track({ target: new Signal<Duration | undefined>(undefined) });
+		try {
+			// The picture anchors the clock at the live edge, 3 s in.
+			video.received(Duration.secs(3), now());
+			const stale = [];
+			for (let ms = 1000; ms < 1400; ms += 20) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: BigInt(ms / 20) });
+				stale.push(ms * 1000);
+				await microtasks();
+			}
+			for (let ms = 3000; ms < 3200; ms += 20) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: BigInt(ms / 20) });
+				await microtasks();
+			}
+			expect(audioInputs.slice(0, stale.length)).toEqual(stale);
+			const inserted = playback.inserted();
+			expect(inserted.length).toBeGreaterThan(0);
+			expect(Math.min(...inserted)).toBeGreaterThanOrEqual(3_000_000);
+		} finally {
+			video.close();
 			playback.close();
 		}
 	});

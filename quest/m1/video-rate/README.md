@@ -33,8 +33,10 @@ Decided with the maintainer on 2026-11-15 (/quest-plan):
   `js/publish/src/video/encoder.ts`). Keep it that way.
 - **Fallback.** ✅ A backend uses its quality mode with a peak where it
   actually honors one, decided at setup from its capabilities; otherwise it
-  runs CBR at the cap, so it never exceeds the price (rejected: an average
-  target with no hard peak, which can overshoot what ABR priced).
+  runs CBR at the cap (rejected: an average target with no hard peak, which
+  can overshoot what ABR priced). A browser's CBR doesn't hold the cap
+  exactly, and its fallback doesn't need to (decided 2026-11-17 on
+  [moq-dev/moq#9026](https://github.com/moq-dev/moq/pull/9026#issuecomment-6966230347)).
 - **Quiet scenes.** ✅ Keep `min(cap, grant)` and BBR3's app-limited aging
   ([moq-dev/moq#7017](https://github.com/moq-dev/moq/pull/7017), kept on
   2026-10-27), and measure a quiet-to-busy switch (rejected: ignoring

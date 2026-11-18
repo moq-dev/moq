@@ -13,8 +13,8 @@ use moq_net::{Version, origin};
 use crate::support;
 use support::harness::{MockConnectOptions, connect_mock};
 
-/// Long enough, in virtual time, for anything in flight to reach the far side,
-/// past the second a redialed session waits out the doubt on its peer.
+/// Long enough, in virtual time, for anything in flight to reach the far side, past
+/// the time a claim no route reaches is shown unavailable.
 const SETTLE: Duration = Duration::from_secs(2);
 
 fn produce_origin(hop: u64) -> origin::Producer {
@@ -132,11 +132,11 @@ async fn a_second_session_catches_up() {
 	drop(second);
 }
 
-/// A session redialed after a cut waits out the doubt on the publisher before
-/// its route reaches the origin, and the consumer stays unsynced until then:
-/// synced still means every route the peer announced is shown.
+/// A cut session's claim is shown unavailable, then let go. A session redialed after
+/// that tells the claim again, and the consumer stays unsynced until it is in: synced
+/// still means every route the peer announced is shown.
 #[kio::test]
-async fn a_redial_syncs_once_the_doubt_lets_its_routes_in() {
+async fn a_redial_syncs_once_its_claims_are_in() {
 	let publisher = produce_origin(1);
 	let a = publisher.route("a", moq_net::origin::RouteOptions::hidden()).unwrap();
 	a.announce().unwrap();
@@ -157,11 +157,18 @@ async fn a_redial_syncs_once_the_doubt_lets_its_routes_in() {
 
 	first.client.abort(moq_net::Error::Cancel);
 	first.server.abort(moq_net::Error::Cancel);
-	let gone = kio::clock::timeout(SETTLE, announced.next())
-		.await
-		.expect("withdrawn in time")
-		.expect("the cursor stays open");
-	assert!(matches!(gone.kind, origin::RouteKind::End | origin::RouteKind::Offline));
+	let gone = kio::clock::timeout(SETTLE, async {
+		loop {
+			let event = announced.next().await.expect("the cursor stays open");
+			match event.kind {
+				origin::RouteKind::Update => assert!(!event.announce.route.available(), "{event:?}"),
+				_ => break event,
+			}
+		}
+	})
+	.await
+	.expect("let go in time");
+	assert_eq!(gone.kind, origin::RouteKind::Offline);
 
 	let _second = connect().await;
 	assert_eq!(

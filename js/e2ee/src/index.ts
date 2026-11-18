@@ -23,7 +23,7 @@
  * const video = await new Broadcast.Producer(route.broadcast, generation).createTrack("video", { timescale });
  * route.announce();
  *
- * const group = video.appendGroup();
+ * const group = video.appendGroup(timestamp);
  * await group.writeFrame(timestamp, frame);
  * group.finish();
  * video.finish();

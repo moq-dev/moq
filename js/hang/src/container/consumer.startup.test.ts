@@ -13,7 +13,7 @@ function setup(maxDelay = 100) {
 	const track = new Track.Producer("video");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("video"),
-		delay: { max: Duration.millis(maxDelay) },
+		delay: { min: null, max: Duration.millis(maxDelay) },
 	});
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -51,10 +51,12 @@ function frames(results: Read[]) {
 	return results.flatMap((read) => (read.kind === "frame" ? [read] : []));
 }
 
+// Stamped by the group's key rather than its media time, so a marker or a bridge sharing its
+// predecessor's media time still starts past it, as a group's first frame has to.
 function write(group: Group.Producer, timestamp: number, marker = false) {
 	group.writeFrame({
 		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Duration.micros(timestamp)),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(Number(group.start)),
 	});
 }
 

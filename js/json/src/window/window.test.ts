@@ -274,7 +274,11 @@ test("a window refresh reuses the newest timestamp", async () => {
 	expect(event?.at?.as(Time.Timescale.MILLI)).toBe(30);
 });
 
-test("a window refresh after an older edit starts at the newest timestamp", async () => {
+// An op may carry a timestamp older than its group's first frame, but a new group must start past
+// that frame, so a refresh whose newest timestamp is still the group's own start waits for a later
+// edit, then restates the window there. (Mirrors the Rust
+// `a_refresh_after_older_edits_waits_for_a_later_one`.)
+test("a window refresh after an older edit waits for a later one", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
 	const producer = new Producer<Rec>({ track });
 	producer.push({ n: 0 }, Time.Timestamp.fromMillis(30));
@@ -283,13 +287,17 @@ test("a window refresh after an older edit starts at the newest timestamp", asyn
 
 	const joiner = track.subscribe();
 	await settle();
+	// No group may share the open group's start.
+	expect(track.largest()?.group).toBe(30n);
+
+	producer.push({ n: 2 }, Time.Timestamp.fromMillis(40));
 	producer.finish();
 	joiner.close();
 
-	// Restating at the last edit's 10 would rewind past group 0's start and be refused.
+	// The later edit rides as an op in the open group, and the refresh restates the window after it.
 	expect(await groups(track)).toEqual([
-		[2, 30],
-		[1, 30],
+		[3, 30],
+		[1, 40],
 	]);
 });
 
@@ -396,20 +404,20 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		new NetError.Stream(StreamCode.Old),
 		new NetError.Stream(StreamCode.Evicted),
 	]) {
-		const track = new Track.Producer("test");
+		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 		const consumer = new Consumer<Rec>({ track: track.subscribe() });
 		const encoder = new Encoder<Rec>({ ops: false });
 
 		let frame = encoder.push({ n: 0 });
-		let group = track.appendGroup();
-		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
+		let group = track.appendGroup(Time.Timestamp.fromMillis(1));
+		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(1) });
 		frame.commit();
 		expect((await consumer.next())?.value).toEqual({ push: { index: 0, value: { n: 0 } } });
 		group.abort(error);
 
 		frame = encoder.push({ n: 1 });
-		group = track.appendGroup();
-		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
+		group = track.appendGroup(Time.Timestamp.fromMillis(2));
+		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(2) });
 		frame.commit();
 		group.finish();
 		track.finish();

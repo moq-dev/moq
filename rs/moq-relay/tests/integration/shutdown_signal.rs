@@ -349,7 +349,9 @@ async fn a_session_arriving_mid_drain_gets_what_is_left_inner() {
 	// then told to leave at once.
 	kio::clock::sleep(DRAIN_TIMEOUT / 2).await;
 	let dialed = kio::clock::now();
-	let arrival = connect(&client, port).await;
+	// Reconnecting, so the GOAWAY that lands with the relay's acceptance leaves the drained
+	// session readable as the predecessor, where a one-shot loop ends on it.
+	let arrival = connect(&client.clone().with_reconnect(true), port).await;
 	let draining = arrival.draining().expect("connected");
 	let goaway = kio::clock::timeout(Duration::from_secs(1), kio::wait(|waiter| draining.poll(waiter)))
 		.await

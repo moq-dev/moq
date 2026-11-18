@@ -9,18 +9,18 @@ import { createMockTransportPair, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
 for (const release of [false, true]) {
 	test(`${release ? "releasing" : "closing"} a track preserves finished groups and aborts its unfinished tail`, async () => {
 		const producer = new TrackProducer("video").accept({ timescale: Timescale.MILLI });
-		const complete = producer.appendGroup();
-		complete.writeFrame(textFrame("complete"));
+		const complete = hooks.appendNext(producer);
+		complete.writeFrame(textFrame("complete", Timestamp.fromMillis(0)));
 		complete.finish();
-		const tail = producer.appendGroup();
-		tail.writeFrame(textFrame("prefix"));
+		const tail = hooks.appendNext(producer);
+		tail.writeFrame(textFrame("prefix", Timestamp.fromMillis(1)));
 		const finished = complete.consume();
 		const unfinished = tail.consume();
 		producer.finish();
@@ -59,7 +59,7 @@ test("a lite protocol violation reaches the subscribed track and its open group"
 	const origin = new OriginProducer();
 	const publication = origin.route(Path.from("room"));
 	const producer = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	producer.appendGroup().writeFrame(textFrame("prefix"));
+	hooks.appendNext(producer).writeFrame(textFrame("prefix"));
 	const url = new URL("https://example.com");
 	const client = new Connection({ url, quic: pair.client, version: Version.DRAFT_06 });
 	const server = new Connection({

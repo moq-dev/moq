@@ -31,6 +31,7 @@ import {
 import { Handover } from "./handover";
 import { bound, maxDelay, ringHold, target } from "./latency";
 import { Order } from "./order";
+import { playable } from "./playhead";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -190,6 +191,8 @@ export class Decoder {
 
 	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
+	// How far ahead of the clock the ring renders, so what it renders sounds when due.
+	#output: Getter<Duration | undefined>;
 
 	// The context, worklet, and ring are keyed on this alone. It outlives a rendition's absence, so
 	// the queued tail plays out and a return with the same shape reuses the graph.
@@ -283,6 +286,10 @@ export class Decoder {
 				complete,
 			};
 		});
+		this.#output = this.#signals.computed((effect) => {
+			const ring = effect.get(this.#ring);
+			return ring ? effect.get(ring.lead) : undefined;
+		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());
 		this.#identity = this.#signals.computed((effect) => {
@@ -363,8 +370,8 @@ export class Decoder {
 	// estimate rising one bucket at a time. The container
 	// consumer drops aged media at the same max delay, since it observes each frame before applying
 	// it, and carves out the warmup the subscription adds once it has warmed, as Rust's does. It waits
-	// on a missing group only for the delay plus the lookahead: past that the group would play late,
-	// and a reordered backlog's holes waited out to the max would read as jitter to the estimator.
+	// on a missing group only for the delay, its min: past that the group would play late, and a
+	// reordered backlog's holes waited out to the max would read as jitter to the estimator.
 	// See doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const budget = this.#budget(effect);
@@ -944,10 +951,9 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			delay: this.#delay,
-			wait: this.sync.out.maxDelay,
 			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
-			playhead: this.sync,
+			playhead: playable(this.sync, this.#output),
 		});
 		effect.cleanup(() => consumer.close());
 		this.#phase.set({ ...phase, consumer: { path, codec: config.codec, consumer } });
@@ -1098,6 +1104,13 @@ export class Decoder {
 		const durationMicro = (frames / sample.sampleRate) * 1_000_000;
 		const start = Duration.micros(timestamp);
 		const end = Duration.micros(timestamp + durationMicro);
+
+		// Audio the ring would skip anyway only warmed the codec. Written, it would anchor the ring behind
+		// the clock, which then skips and re-stalls on each refill until the backlog runs out.
+		if (ring.stale(end.asMicros())) {
+			sample.close();
+			return;
+		}
 
 		// A new subscription has taken over the timeline: drop the previous one's write-ahead tail
 		// rather than letting it play out after this frame. See #runDecoder.

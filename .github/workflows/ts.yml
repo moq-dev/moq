@@ -244,7 +244,7 @@ jobs:
         run: nix develop --command just test ts --headroom --rate 7000000 --queue 250ms --duration 120
         env:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_QUIC_CONGESTION_CONTROL: loss
+          MOQ_QUIC_CONGESTION_CONTROL: cubic
 
       # Passthrough over the overflowing path, under its 10 Mb/s multiplex: what arrives must be
       # the source's packets in place, through the source's last packet.
@@ -253,7 +253,7 @@ jobs:
         run: nix develop --command just test ts --passthrough --rate 7000000 --queue 250ms --duration 120
         env:
           HARNESS_RUNS: ${{ runner.temp }}/moq-test-runs
-          MOQ_QUIC_CONGESTION_CONTROL: loss
+          MOQ_QUIC_CONGESTION_CONTROL: cubic
 
       # Two minutes of MoQ content faults and a congested bottleneck, on a paused clock: each
       # recovery graded against what was delivered and decoded, and the latency must not drift.

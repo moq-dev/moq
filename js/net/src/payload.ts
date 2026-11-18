@@ -38,7 +38,7 @@ export async function receiveFrame(
 	frame: WirePayload,
 	inflated?: number,
 ): Promise<boolean> {
-	const timestamp = received(frame.timestamp, producer.sequence);
+	const timestamp = received(frame.timestamp, producer.start);
 	if (frame.payload) {
 		hooks.writeGroupFrame(producer, { payload: frame.payload, timestamp }, inflated);
 		return true;

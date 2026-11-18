@@ -39,14 +39,11 @@ impl Fixture {
 		let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
 		let decider = tokio::spawn(async move {
 			while let Some(admission) = admissions.next().await {
-				let prefix = admission
-					.request
-					.query
-					.as_deref()
-					.unwrap_or("initial")
-					.strip_prefix("jwt=")
-					.unwrap_or("initial")
-					.to_owned();
+				// An in-band token arrives as the request's token; the connection has none.
+				let prefix = match &admission.request.token {
+					Some(token) => String::from_utf8(token.value.clone()).unwrap(),
+					None => "initial".to_owned(),
+				};
 				let (producer, consumer) = lease::Producer::new(grant(&prefix));
 				admission.grant(consumer);
 				if send.send((prefix, producer)).is_err() {

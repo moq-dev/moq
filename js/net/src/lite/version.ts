@@ -84,7 +84,7 @@ export function hasDatagrams(version: Version): boolean {
 	}
 }
 
-/** Whether datagram tracks have their own request and sequence space, and datagrams a leading type. */
+/** Whether datagram tracks have their own request and key space, and datagrams a leading type. */
 export function hasDatagramTracks(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:
@@ -235,7 +235,7 @@ export function hasRouteCost(version: Version): boolean {
 }
 
 /** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, and FETCH carry frame indices alongside
- * their group sequences, so a subscription or fetch can start and end partway through a
+ * their group keys, so a subscription or fetch can start and end partway through a
  * group. Added in lite-06. Older versions only address whole groups, so a route change
  * has to wait for the next group before it can resume.
  *
@@ -368,10 +368,10 @@ export function hasGroupOrder(version: Version): boolean {
 
 /**
  * Whether SUBSCRIBE's `Group Start` is an absolute floor the publisher resolves a start
- * from: the raw minimum group sequence (default 0), with `Subscriber Max Age` as the only
+ * from: the raw minimum group key (default 0), with `Subscriber Max Age` as the only
  * gate on how far back delivery begins. Changed in lite-06.
  *
- * Older versions encode `Group Start` as the sequence + 1, with 0 meaning the latest
+ * Older versions encode `Group Start` as the key + 1, with 0 meaning the latest
  * group, so an absent start there pins the cursor to the live edge instead of letting the
  * budget reach back.
  */
@@ -399,22 +399,6 @@ export function fillsFromStart(version: Version): boolean {
 	return resolvesStart(version) && !hasMediaTime(version) && !hasFetchMaxDelay(version);
 }
 
-/** Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07. */
-export function hasHidden(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
 /**
  * Whether a served SUBSCRIBE completes only once the subscriber FINs or resets its half of the
  * Subscribe Stream. A subscriber FINs once its tail accounting settles, since a transport ACK
@@ -433,24 +417,6 @@ export function waitsForSubscriberFin(version: Version): boolean {
  */
 export function keepsSubscribeOpen(version: Version): boolean {
 	return hasRanges(version);
-}
-
-/** Whether the announce stream has ANNOUNCE_RESTART: another publisher instance replacing an
- * advertisement in place. Added in lite-07. Older versions send an ANNOUNCE_END then an
- * ANNOUNCE_START. */
-export function hasAnnounceRestart(version: Version): boolean {
-	// Explicitly list older versions so future versions keep the lite-07+ behavior.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
 }
 
 /** Whether announcements carry their instance and epoch, and TRACK, TRACKS, SUBSCRIBE, and FETCH
@@ -635,7 +601,7 @@ export function hasGroupSpan(version: Version): boolean {
 }
 
 /**
- * Whether holes split into SUBSCRIBE_SKIP, for sequences declared never produced, and
+ * Whether holes split into SUBSCRIBE_SKIP, for keys declared never produced, and
  * SUBSCRIBE_DROP, which names the `Update` in effect when it was given up; SUBSCRIBE and
  * SUBSCRIBE_UPDATE carry that `Update` number. Added in lite-07; earlier versions name every
  * hole in SUBSCRIBE_DROP.
@@ -715,22 +681,6 @@ export function hasSynced(version: Version): boolean {
  * parameter carrying a Node ID rather than a Hop ID.
  */
 export function hasRoutes(version: Version): boolean {
-	// Explicitly list older versions so future versions default to carrying it.
-	switch (version) {
-		case Version.DRAFT_01:
-		case Version.DRAFT_02:
-		case Version.DRAFT_03:
-		case Version.DRAFT_04:
-		case Version.DRAFT_05:
-		case Version.DRAFT_06:
-			return false;
-		default:
-			return true;
-	}
-}
-
-/** Whether SETUP may carry a route key proof, added in lite-07. */
-export function hasRouteKey(version: Version): boolean {
 	// Explicitly list older versions so future versions default to carrying it.
 	switch (version) {
 		case Version.DRAFT_01:

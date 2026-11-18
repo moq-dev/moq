@@ -166,7 +166,7 @@ func TestListenKeylogRequiresSSLKEYLOGFILE(t *testing.T) {
 	}
 }
 
-// A Go worker survives a relay restart the way a moq-c worker does: the session
+// A Go worker survives a relay restart the way a libmoq worker does: the session
 // redials with backoff, the publisher re-announces its broadcast to the fresh
 // relay, and the subscriber's subscription receives frames again. The connect count
 // pairs with Status so a worker can log each reconnect.
@@ -229,15 +229,16 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
+	// Connected once the relay accepted each session, so the drop below redials rather than
+	// ending them as refusals.
+	waitConnects(t, ctx, publisher.Session(), 1)
+	waitConnects(t, ctx, subscriber.Session(), 1)
 	if state := subscriber.Session().State(); !isConnected(state) {
 		t.Fatalf("not serving before any drop: %+v", state)
 	}
 	if version := subscriber.Session().Stats().Version; version == nil || *version == "" {
 		t.Fatal("a live session must report its negotiated version")
 	}
-
-	// Past the 1s healthy bar, so the drop redials rather than ending the sessions.
-	time.Sleep(time.Second)
 
 	// Drop every session and the listener, then bind a replacement on the same
 	// port: a deploy, with an origin the replacement has never seen.
@@ -330,7 +331,7 @@ func TestDialConnectionOptions(t *testing.T) {
 			KeepAlive:         ptr(time.Duration(0)),
 			GSO:               ptr(false),
 			MTUDiscovery:      ptr(true),
-			CongestionControl: moq.LossCongestionControl(),
+			CongestionControl: moq.CubicCongestionControl(),
 		},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
 	})

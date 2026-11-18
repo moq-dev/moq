@@ -57,7 +57,7 @@ class TsFilterTest(unittest.TestCase):
             for line in (
                 "          filters: |",
                 "            obs:",
-                '              - "rs/moq-c/**"',
+                '              - "rs/libmoq/**"',
                 "            ts:",
                 '              - "test/ts/**"',
                 "              # A comment.",
@@ -73,7 +73,7 @@ class TsFilterTest(unittest.TestCase):
 
     def test_missing(self):
         with self.assertRaises(SystemExit):
-            module.ts_filter('            obs:\n              - "rs/moq-c/**"\n')
+            module.ts_filter('            obs:\n              - "rs/libmoq/**"\n')
 
 
 if __name__ == "__main__":

@@ -181,6 +181,16 @@ mod tests {
 		}
 	}
 
+	/// A subsecond cadence writes as the nearest whole second, never the zero a relay refuses.
+	#[test]
+	fn a_subsecond_revalidate_writes_rounded() {
+		let mut grant = full();
+		for (cadence, seconds) in [(750, 1), (1400, 1), (1600, 2)] {
+			grant.revalidate = Some(Duration::from_millis(cadence));
+			assert_eq!(serde_json::to_value(&grant).unwrap()["revalidate"], seconds);
+		}
+	}
+
 	#[test]
 	fn round_trips_in_seconds() {
 		let grant = full();

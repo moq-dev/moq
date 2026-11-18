@@ -699,6 +699,7 @@ impl Publish {
 			} => {
 				drop(gate);
 				let mut report = self.report;
+				let has_video = video.is_some();
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
@@ -722,29 +723,31 @@ impl Publish {
 				};
 				let audio_fut = async move {
 					match audio {
-						Some((config, encode, retain)) => {
-							let capture = moq_audio::capture::Producer::open(config).await?;
-							let mut options = moq_audio::encode::Capture::new(capture.consume());
-							options.encode = encode;
-							options.retain = retain;
-							let (_publication, driver) =
-								moq_audio::encode::publish_capture(broadcast, catalog, options)?;
-							let mut publish = std::pin::pin!(driver.run());
-							tokio::select! {
-								result = capture.run() => {
-									// Let the encoder serve its retained audio, then end its
-									// track with the source error, before its future is dropped.
-									let published = publish.await;
-									result.and(published).map_err(anyhow::Error::from)
-								}
-								result = &mut publish => result.map_err(anyhow::Error::from),
-							}
-						}
-						None => Ok(()),
+						Some(audio) => publish_audio(broadcast, catalog, audio).await,
+						None => Ok(Ok(())),
 					}
 				};
 
-				let capture = async { tokio::try_join!(video_fut, audio_fut).map(|_| ()) };
+				// A video failure ends the publish. An audio failure that outlasted its reopens
+				// ends only the audio track: the video keeps publishing, and the command reports
+				// the audio failure once the video ends.
+				let capture = async {
+					let mut video_fut = std::pin::pin!(video_fut);
+					let mut audio_fut = std::pin::pin!(audio_fut);
+					tokio::select! {
+						result = &mut video_fut => {
+							result?;
+							audio_fut.await?
+						}
+						result = &mut audio_fut => {
+							let ended = result?;
+							if let Err(err) = &ended && has_video {
+								tracing::error!(error = %format_args!("{err:#}"), "audio capture ended; video keeps publishing");
+							}
+							video_fut.await.and(ended)
+						}
+					}
+				};
 				// Written beside the encoders, so a capture waiting on its first viewer still reports.
 				let result = match report.as_mut() {
 					Some(report) => tokio::select! {
@@ -761,6 +764,115 @@ impl Publish {
 				result
 			}
 		}
+	}
+}
+
+/// Publish the captured audio, reopening the device and its track when the capture fails
+/// mid-session, as a USB microphone re-enumerating or a sample-rate change does.
+///
+/// moq-audio never reopens a failed device, so this loop does. Each reopen publishes a new track,
+/// since the failed one ends with its error. Returns once the track closes, or with the last
+/// failure once failures outlast [`Reopen::BUDGET`].
+///
+/// A first open or publication that fails is a setup problem, such as a wrong device id or a
+/// denied permission, so it fails the whole publish at once: the outer error. The inner one ends
+/// only the audio.
+#[cfg(feature = "capture")]
+async fn publish_audio(
+	broadcast: moq_net::broadcast::Producer,
+	catalog: moq_mux::catalog::Producer,
+	(config, encode, retain): (moq_audio::capture::Config, moq_audio::encode::Options, bool),
+) -> anyhow::Result<anyhow::Result<()>> {
+	// A failed track keeps serving its retained audio until it is served or expires, up to
+	// `--max-age`, without holding up the reopen or the report.
+	let mut draining = tokio::task::JoinSet::new();
+	let mut reopen = Reopen::default();
+	let mut published = false;
+	let result = loop {
+		let mut live = None;
+		let attempt = async {
+			let capture = moq_audio::capture::Producer::open(config.clone()).await?;
+			live = Some(kio::clock::Instant::now());
+			let mut options = moq_audio::encode::Capture::new(capture.consume());
+			options.encode = encode.clone();
+			options.retain = retain;
+			let (_publication, driver) =
+				moq_audio::encode::publish_capture(broadcast.clone(), catalog.clone(), options)?;
+			published = true;
+			let mut publish = Box::pin(driver.run());
+			tokio::select! {
+				result = capture.run() => {
+					draining.spawn(publish);
+					result
+				}
+				result = &mut publish => result,
+			}
+		};
+		let err = match attempt.await {
+			Ok(()) => break Ok(()),
+			Err(err) => anyhow::Error::from(err),
+		};
+		if !published {
+			return Err(err);
+		}
+		while draining.try_join_next().is_some() {}
+		match reopen.failed(live, kio::clock::Instant::now()) {
+			Some(wait) => {
+				tracing::warn!(error = %format_args!("{err:#}"), ?wait, "audio capture failed; reopening");
+				kio::clock::sleep(wait).await;
+			}
+			None => break Err(err.context(format!("audio capture kept failing for {:?}", Reopen::BUDGET))),
+		}
+	};
+	// Report at once: the failed tracks keep draining in the background while the video runs,
+	// each ending with its error, and are dropped when the command exits.
+	draining.detach_all();
+	Ok(result)
+}
+
+/// When to reopen a failed audio capture, and when to give up on it.
+#[cfg(feature = "capture")]
+struct Reopen {
+	/// The wait before the next reopen.
+	delay: std::time::Duration,
+	/// When the current run of failures began, with no healthy capture since.
+	failing: Option<kio::clock::Instant>,
+}
+
+#[cfg(feature = "capture")]
+impl Default for Reopen {
+	fn default() -> Self {
+		Self {
+			delay: Self::MIN,
+			failing: None,
+		}
+	}
+}
+
+#[cfg(feature = "capture")]
+impl Reopen {
+	/// The first wait. It covers a USB device re-enumerating.
+	const MIN: std::time::Duration = std::time::Duration::from_millis(500);
+	/// The longest wait, so a returning device is picked up within seconds.
+	const MAX: std::time::Duration = std::time::Duration::from_secs(4);
+	/// A capture that ran this long recovered, so its failure starts a fresh run of retries.
+	const HEALTHY: std::time::Duration = std::time::Duration::from_secs(1);
+	/// How long failures may persist before the audio track ends.
+	const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
+
+	/// Record a failure at `now` of a capture live since `live` (`None` when it never opened),
+	/// returning the wait before the next reopen, or `None` to give up.
+	fn failed(&mut self, live: Option<kio::clock::Instant>, now: kio::clock::Instant) -> Option<std::time::Duration> {
+		if live.is_some_and(|live| now.saturating_duration_since(live) >= Self::HEALTHY) {
+			*self = Self::default();
+		}
+		let failing = *self.failing.get_or_insert(now);
+		if now.saturating_duration_since(failing) >= Self::BUDGET {
+			return None;
+		}
+		let wait = self.delay;
+		self.delay = (self.delay * 2).min(Self::MAX);
+		Some(wait)
 	}
 }
 
@@ -1239,6 +1351,58 @@ pub(crate) mod tests {
 	use moq_net::Timestamp;
 
 	use super::*;
+
+	/// Each wait in a run of reopens that never open, from the first failure until giving up.
+	#[cfg(feature = "capture")]
+	fn reopen_waits(reopen: &mut Reopen, mut now: kio::clock::Instant) -> Vec<Duration> {
+		let mut waits = Vec::new();
+		while let Some(wait) = reopen.failed(None, now) {
+			waits.push(wait);
+			now = now.saturating_add(wait);
+		}
+		waits
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn a_failing_audio_capture_backs_off_then_gives_up() {
+		let ms = Duration::from_millis;
+		let waits = reopen_waits(&mut Reopen::default(), kio::clock::Instant::ZERO);
+		assert_eq!(waits, [ms(500), ms(1000), ms(2000), ms(4000), ms(4000)]);
+		assert!(waits.iter().sum::<Duration>() >= Reopen::BUDGET);
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn a_healthy_audio_capture_restarts_its_reopens() {
+		let start = kio::clock::Instant::ZERO;
+		let mut reopen = Reopen::default();
+		reopen_waits(&mut reopen, start);
+
+		// A capture that ran past healthy recovered, however long the failures before it.
+		let live = start.saturating_add(Duration::from_secs(60));
+		let failed = live.saturating_add(Reopen::HEALTHY);
+		assert_eq!(reopen.failed(Some(live), failed), Some(Reopen::MIN));
+		assert_eq!(
+			reopen.failed(None, failed.saturating_add(Reopen::MIN)),
+			Some(Reopen::MIN * 2)
+		);
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn a_flapping_audio_capture_still_gives_up() {
+		// Opens that fail sooner than healthy are no recovery, so the budget still runs out.
+		let mut reopen = Reopen::default();
+		let mut now = kio::clock::Instant::ZERO;
+		let mut attempts = 0;
+		while let Some(wait) = reopen.failed(Some(now), now.saturating_add(Reopen::HEALTHY / 2)) {
+			now = now.saturating_add(Reopen::HEALTHY / 2 + wait);
+			attempts += 1;
+			assert!(attempts < 100, "a flapping capture never gave up");
+		}
+		assert_eq!(attempts, 5);
+	}
 
 	#[cfg(feature = "capture")]
 	fn capture_args(flags: &[&str]) -> CaptureArgs {

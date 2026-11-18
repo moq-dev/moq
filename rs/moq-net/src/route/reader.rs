@@ -2,20 +2,17 @@
 //! one implementation for every route rule, keyed by whatever names a claim's owner
 //! there (a publisher under the path rule, an Instance under the relay rule).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use crate::Path;
 
-use super::view::ancestors;
+use super::prefix::ancestors;
 use super::{Event, Id, Kind, Shown};
 
 /// How the reader sees each claim, and the events not yet taken.
 #[derive(Clone, Debug)]
 pub(crate) struct Reader<A, K = Id> {
 	shown: BTreeMap<(K, Path), Shown<A>>,
-	/// The identities recomputed since [`Self::changed`] last took them, each with
-	/// the claims whose shown state changed.
-	changed: BTreeMap<K, BTreeSet<Path>>,
 	events: Vec<Event<A, K>>,
 	/// Per claim this node has shown, how many times it forgot that claim.
 	#[cfg(test)]
@@ -26,7 +23,6 @@ impl<A, K> Default for Reader<A, K> {
 	fn default() -> Self {
 		Self {
 			shown: BTreeMap::new(),
-			changed: BTreeMap::new(),
 			events: Vec::new(),
 			#[cfg(test)]
 			forgot: BTreeMap::new(),
@@ -44,47 +40,9 @@ impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A
 		self.shown.get(&(id, claim.clone()))
 	}
 
-	/// The claims of `id` the reader sees.
-	pub fn claims(&self, id: K) -> impl Iterator<Item = &Path> {
-		self.shown
-			.range((id.clone(), Path::empty())..)
-			.take_while(move |((key, _), _)| *key == id)
-			.map(|((_, claim), _)| claim)
-	}
-
-	/// Take the identities recomputed since the last call, each with the claims whose
-	/// shown state changed.
-	pub fn changed(&mut self) -> BTreeMap<K, BTreeSet<Path>> {
-		std::mem::take(&mut self.changed)
-	}
-
 	/// Take the events, in order.
 	pub fn events(&mut self) -> Vec<Event<A, K>> {
 		std::mem::take(&mut self.events)
-	}
-
-	/// Count a forget against each claim of `id` this node has shown that `kept` does not keep.
-	#[cfg_attr(not(test), allow(unused_variables, reason = "only fixtures count forgets"))]
-	pub fn forget(&mut self, id: K, kept: impl Fn(&Path) -> bool) {
-		#[cfg(test)]
-		for ((key, claim), count) in self.forgot.iter_mut() {
-			if *key == id && !kept(claim) {
-				*count += 1;
-			}
-		}
-	}
-
-	/// Assert that `now`, recomputed for some claims of `id`, agrees with `full`,
-	/// recomputed for all of them.
-	#[cfg(test)]
-	pub fn check(&self, id: K, now: &BTreeMap<Path, Option<Shown<A>>>, full: BTreeMap<Path, Option<Shown<A>>>) {
-		for (claim, full) in full {
-			let got = match now.get(&claim) {
-				Some(got) => got.as_ref(),
-				None => self.get(id.clone(), &claim),
-			};
-			assert_eq!(got, full.as_ref(), "incremental reader view of {id:?} {claim:?}");
-		}
 	}
 
 	/// The reader now sees each claim of `id` in `now` as it says, where `watched`. Log
@@ -123,9 +81,11 @@ impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A
 					// A claim presented at a narrower region moved up to the claim it
 					// stood for, which is still shown. That claim may have changed
 					// meanwhile, so a presented claim needs only something shown above it.
-					let moved = ancestors(claim)
-						.filter(|above| above != claim)
-						.any(|above| shown(&above).is_some_and(|now| was.presented || now.item == was.item));
+					// A claim its origin announced there is its own, whatever is above it.
+					let moved = was.presented
+						&& ancestors(claim)
+							.filter(|above| above != claim)
+							.any(|above| shown(&above).is_some());
 					let kind = if !watched(claim) {
 						Kind::Unwatched
 					} else if !moved && ended(claim) {
@@ -150,15 +110,8 @@ impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A
 		for (claim, kind, item) in events {
 			self.log(id.clone(), claim, kind, item);
 		}
-		// Named as recomputed whether or not anything it shows changed, so a driver
-		// serves its claims through the routes it has now.
-		let changed = self.changed.entry(id.clone()).or_default();
 		for (claim, now) in now {
 			let key = (id.clone(), claim);
-			if self.shown.get(&key) == now.as_ref() {
-				continue;
-			}
-			changed.insert(key.1.clone());
 			match now {
 				Some(now) => {
 					self.shown.insert(key, now);
@@ -181,5 +134,43 @@ impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A
 			#[cfg(test)]
 			forgot,
 		});
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn p(path: &str) -> Path {
+		Path::new(path).expect("a path")
+	}
+
+	fn shown(presented: bool) -> Option<Shown<u64>> {
+		Some(Shown {
+			item: 0,
+			available: true,
+			presented,
+		})
+	}
+
+	fn kinds(reader: &mut Reader<u64, u64>) -> Vec<(String, Kind)> {
+		(reader.events().into_iter())
+			.map(|event| (event.claim.to_string(), event.kind))
+			.collect()
+	}
+
+	/// A claim presented at a narrower region that goes while the claim it stood for is
+	/// still shown moved up to it, so it went offline there, never ended, even when its
+	/// origin withdrew it. One its origin announced there ends.
+	#[test]
+	fn a_presented_claim_that_moved_up_goes_offline() {
+		let mut reader = Reader::<u64, u64>::default();
+		let now = BTreeMap::from([(p("a"), shown(false)), (p("a/b"), shown(true)), (p("c"), shown(false))]);
+		reader.apply(1, |_| true, now, |_| false);
+		reader.events();
+		reader.apply(1, |_| true, BTreeMap::from([(p("a/b"), None)]), |_| true);
+		assert_eq!(kinds(&mut reader), [("a/b".to_string(), Kind::Offline)]);
+		reader.apply(1, |_| true, BTreeMap::from([(p("c"), None)]), |_| true);
+		assert_eq!(kinds(&mut reader), [("c".to_string(), Kind::End)]);
 	}
 }
