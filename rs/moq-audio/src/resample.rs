@@ -9,7 +9,8 @@ use std::f32::consts::FRAC_1_SQRT_2;
 
 use rubato::audioadapter_buffers::direct::SequentialSliceOfVecs;
 use rubato::{
-	Async, FixedAsync, Resampler as RubatoTrait, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+	Async, FixedAsync, Resampler as RubatoTrait, SincInterpolationParameters, SincInterpolationType, Slip,
+	WindowFunction,
 };
 
 use crate::layout::Speaker;
@@ -33,9 +34,14 @@ impl BackendError {
 	}
 }
 
+/// The most an [`adjustable`](Resampler::adjustable) resampler's ratio moves from nominal: 2000
+/// ppm, 3.5 cents. Twice the 1000 ppm a capture clock may be off, the bound capture already follows
+/// a device's stream clock within, so a device at that bound still has room to remove an offset.
+pub(crate) const MAX_ADJUST: f64 = 2e-3;
+
 /// Sample-rate converter over interleaved `f32` PCM.
 pub struct Resampler {
-	resampler: Async<f32>,
+	resampler: Box<dyn RubatoTrait<f32> + Send>,
 	chunk_frames: usize,
 	/// Rate the caller's input arrives at, for walking [`held`](Self::held) over
 	/// the frames each chunk consumes.
@@ -59,6 +65,10 @@ pub struct Resampler {
 	/// chunks are consumed so it also names where the next input lands once
 	/// nothing is buffered. `None` until the first input.
 	held: Option<moq_net::Timestamp>,
+	/// The ratio [`adjust`](Self::adjust) set, relative to `output_rate / input_rate`.
+	relative: f64,
+	/// Output frames the adjustment added to the converted chunks, beyond the nominal ratio.
+	skew: f64,
 }
 
 impl Resampler {
@@ -73,10 +83,41 @@ impl Resampler {
 			return Err(Error::Unsupported("chunk_frames must be > 0".into()));
 		}
 
-		Self::new_inner(input_rate, output_rate, channels, chunk_frames).map_err(BackendError::into_public)
+		let resampler = Self::sinc(input_rate, output_rate, channels, chunk_frames, 1.0);
+		Self::wrap(resampler, input_rate, output_rate, channels, chunk_frames).map_err(BackendError::into_public)
 	}
 
-	fn new_inner(input_rate: u32, output_rate: u32, channels: u32, chunk_frames: usize) -> Result<Self, BackendError> {
+	/// A converter whose ratio [`adjust`](Self::adjust) can move by up to [`MAX_ADJUST`], to keep a
+	/// device clock's audio on the host's.
+	///
+	/// Between equal rates it slips a crossfaded frame now and then rather than filtering every
+	/// sample, which costs a copy and adds no filter delay. Its 10 ms chunk is the common device
+	/// callback, so it rarely holds input waiting for a chunk to fill.
+	pub(crate) fn adjustable(input_rate: u32, output_rate: u32, channels: u32) -> Result<Self, Error> {
+		let chunk_frames = (input_rate as usize / 100).max(4);
+		let resampler: Result<Box<dyn RubatoTrait<f32> + Send>, BackendError> = match input_rate == output_rate {
+			true => Slip::new(chunk_frames, channels as usize, FixedAsync::Input)
+				.map(|slip| Box::new(slip) as _)
+				.map_err(BackendError::from),
+			// The bound applies both ways, and the slowest ratio is its reciprocal.
+			false => Self::sinc(
+				input_rate,
+				output_rate,
+				channels,
+				chunk_frames,
+				1.0 / (1.0 - MAX_ADJUST),
+			),
+		};
+		Self::wrap(resampler, input_rate, output_rate, channels, chunk_frames).map_err(BackendError::into_public)
+	}
+
+	fn sinc(
+		input_rate: u32,
+		output_rate: u32,
+		channels: u32,
+		chunk_frames: usize,
+		max_relative: f64,
+	) -> Result<Box<dyn RubatoTrait<f32> + Send>, BackendError> {
 		let params = SincInterpolationParameters {
 			sinc_len: 128,
 			f_cutoff: Some(0.95),
@@ -85,9 +126,25 @@ impl Resampler {
 			window: WindowFunction::BlackmanHarris2,
 		};
 		let ratio = output_rate as f64 / input_rate as f64;
-		let resampler =
-			Async::<f32>::new_sinc(ratio, 1.0, &params, chunk_frames, channels as usize, FixedAsync::Input)?;
+		let resampler = Async::<f32>::new_sinc(
+			ratio,
+			max_relative,
+			&params,
+			chunk_frames,
+			channels as usize,
+			FixedAsync::Input,
+		)?;
+		Ok(Box::new(resampler))
+	}
 
+	fn wrap(
+		resampler: Result<Box<dyn RubatoTrait<f32> + Send>, BackendError>,
+		input_rate: u32,
+		output_rate: u32,
+		channels: u32,
+		chunk_frames: usize,
+	) -> Result<Self, BackendError> {
+		let resampler = resampler?;
 		let delay = resampler.output_delay();
 		let input_planar = (0..channels as usize).map(|_| vec![0.0f32; chunk_frames]).collect();
 		let output_frames_max = resampler.output_frames_max();
@@ -108,7 +165,32 @@ impl Resampler {
 			output_frames_max,
 			pending: Vec::new(),
 			held: None,
+			relative: 1.0,
+			skew: 0.0,
 		})
+	}
+
+	/// Run at `relative` times the nominal ratio from the next chunk on: above one emits more
+	/// output per input. Only an [`adjustable`](Self::adjustable) converter accepts a move.
+	pub(crate) fn adjust(&mut self, relative: f64) -> Result<(), Error> {
+		let adjustable = self
+			.resampler
+			.as_adjustable()
+			.ok_or_else(|| Error::Resample("the resampler's ratio is fixed".into()))?;
+		adjustable
+			.set_resample_ratio_relative(relative, false)
+			.map_err(|err| Error::Resample(err.to_string()))?;
+		self.relative = relative;
+		Ok(())
+	}
+
+	/// Output frames everything given to [`process`](Self::process) since the last reset maps to,
+	/// counting what is still buffered at the current ratio: where the next input lands.
+	pub(crate) fn position(&self) -> f64 {
+		self.input_frames as f64 * f64::from(self.output_rate) / f64::from(self.input_rate)
+			+ self.skew
+			+ (self.relative - 1.0) * self.pending_frames() as f64 * f64::from(self.output_rate)
+				/ f64::from(self.input_rate)
 	}
 
 	/// Input frames buffered from earlier calls, waiting for enough to fill a chunk.
@@ -137,8 +219,10 @@ impl Resampler {
 	/// startup delay, so subtract the duration actually held, not that fixed delay.
 	pub(crate) fn output_at(&self, held: moq_net::Timestamp) -> Result<moq_net::Timestamp, Error> {
 		let consumed = self.input_frames - self.pending_frames() as u64;
-		let held_frames = (consumed as u128 * self.output_rate as u128)
-			.checked_sub(self.output_frames as u128 * self.input_rate as u128)
+		let skew = (self.skew * f64::from(self.input_rate)).round() as i128;
+		let held_frames = (consumed as i128 * self.output_rate as i128 + skew)
+			.checked_sub(self.output_frames as i128 * self.input_rate as i128)
+			.and_then(|held| u128::try_from(held).ok())
 			.ok_or_else(|| Error::Resample("output exceeds input duration".into()))?;
 		let held_frames = u64::try_from(held_frames).map_err(|_| Error::Resample("held duration overflow".into()))?;
 		let scale = held.scale().ok_or(moq_net::TimeOverflow)?;
@@ -153,13 +237,20 @@ impl Resampler {
 	/// The escape hatch for a *reported* discontinuity: where [`flush`](Self::flush)
 	/// ends the stream, this starts a new one in place, so audio from before the
 	/// gap can't bleed through the filter into audio from after it.
+	///
+	/// An [`adjust`](Self::adjust)ed ratio stays: it describes the source's clock, not the stream.
 	pub fn reset(&mut self) {
 		self.resampler.reset();
+		if let Some(adjustable) = self.resampler.as_adjustable() {
+			// The backend accepted this ratio before.
+			let _ = adjustable.set_resample_ratio_relative(self.relative, false);
+		}
 		self.pending.clear();
 		self.skip = self.delay;
 		self.input_frames = 0;
 		self.output_frames = 0;
 		self.held = None;
+		self.skew = 0.0;
 	}
 
 	/// Resample what is still buffered, ending the stream.
@@ -203,8 +294,10 @@ impl Resampler {
 		// rather than adding a separately rounded pending chunk to a fixed delay.
 		let frames = (self.input_frames as u128 * self.output_rate as u128 + self.input_rate as u128 / 2)
 			/ self.input_rate as u128;
+		let frames = (frames as i128 + self.skew.round() as i128)
+			.checked_sub(self.output_frames as i128)
+			.and_then(|frames| u128::try_from(frames).ok());
 		let wanted = frames
-			.checked_sub(self.output_frames as u128)
 			.and_then(|frames| usize::try_from(frames).ok())
 			.and_then(|frames| frames.checked_mul(self.channels))
 			.ok_or_else(|| Error::Resample("output duration overflow".into()))?;
@@ -288,6 +381,8 @@ impl Resampler {
 			// A chunk the filter refused stays buffered.
 			if result.is_ok() {
 				consumed += chunk_samples;
+				self.skew += (self.relative - 1.0) * self.chunk_frames as f64 * f64::from(self.output_rate)
+					/ f64::from(self.input_rate);
 			}
 		}
 		self.pending.drain(..consumed);
