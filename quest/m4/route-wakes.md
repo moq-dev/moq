@@ -26,11 +26,15 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   `select` under the table read lock (`retain_routes`, then `best_route`,
   which hashes every pool member), then the driver polls every track and
   rescans deadlines. `Pin` is gone (#4741).
-- `route_order` ranks the most specific claim first, then drain and
-  availability, priority, and cost, and breaks the remaining tie on lite-07
-  by the draft's Rendezvous Hash of the path and the claim's Instance
-  (`rendezvous`), lowest first. A join moves only paths the newcomer wins, a
-  leave only paths the leaver was winning.
+- `route_order` ranks, in order: the most specific claim; the claim the
+  route layer marks primary; a route neither draining nor unavailable; the
+  higher link priority; an identified hop chain before an anonymous one,
+  whatever the cost; the cheaper cost; a broadcast published on this origin;
+  the shorter hop chain. The remaining tie goes, on lite-07, to the draft's
+  Rendezvous Hash of the path and the claim's Instance (`rendezvous`), and
+  on older versions to a hash of the Instance and then the chain, lowest
+  first. A join moves only paths the newcomer wins, a leave only paths the
+  leaver was winning.
 - On lite-07 the route layer writes into this table through `route::node`,
   one write per broadcast whose way changed; a change to one route rewrites
   every broadcast behind it, which [route benches](/quest/m3/route-benches.md)

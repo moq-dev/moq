@@ -42,8 +42,9 @@ and doubt) went with the old router; it is in
   it reaches a CDN or a peer. A route ranks by drain, then the lowest
   priority on its path, then additive cost. Link costs are strictly positive
   (default one per link): zero is refused, and there is no hop-count
-  component. Equal claims spread by the draft's Rendezvous Hash, and among
-  otherwise identical routes a node stays on its next hop.
+  component. Equal lite-07 claims spread by the draft's Rendezvous Hash
+  (a claim from an older version compares its hop chain's length first),
+  and among otherwise identical routes a node stays on its next hop.
 - The first hop selects the claim's routing node; forwarded requests name it
   and aggregation preserves it.
 - GOAWAY makes every route through the node draining, ranked below every
