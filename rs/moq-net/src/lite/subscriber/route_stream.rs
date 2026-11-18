@@ -275,7 +275,13 @@ impl Running {
 		}
 		let direction = crate::auth::Direction::Subscribe;
 		while let Poll::Ready(permit) = subscriber.auth.poll_permit(direction, &mut self.epoch, waiter) {
-			self.routed.limit(&permit)?;
+			if let Err(err) = self.routed.limit(&permit) {
+				// A narrowed grant is not the route layer's; only what the node refused is.
+				if let Some(kind) = self.routed.cause() {
+					subscriber.origin.stats().route_closed(kind);
+				}
+				return Poll::Ready(Err(err));
+			}
 		}
 
 		// What the node queued goes out before the peer's next messages are read, and
@@ -399,6 +405,7 @@ impl Running {
 		while let Poll::Ready(Ok(reader)) = subscriber.announce_streams.poll_pop(waiter) {
 			// The peer opens one stream for the session.
 			if self.reader.replace(reader).is_some() {
+				subscriber.origin.stats().route_closed(RouteClose::Malformed);
 				return Err(Error::ProtocolViolation);
 			}
 		}
@@ -430,11 +437,26 @@ impl Running {
 			if budget.poll_yield(waiter).is_pending() {
 				return Ok(false);
 			}
+			// Whatever the peer sends that closes the session counts as a route-layer close.
+			let stats = subscriber.origin.stats();
 			match reader.poll_decode_maybe::<Msg>(waiter) {
-				Poll::Ready(Ok(Some(Msg::Request { more, remove, add }))) => self.answer.request(more, remove, add)?,
+				Poll::Ready(Ok(Some(Msg::Request { more, remove, add }))) => {
+					if let Err(err) = self.answer.request(more, remove, add) {
+						stats.route_closed(self.answer.closed());
+						return Err(err);
+					}
+				}
 				// Nothing comes between the ANNOUNCE_REQUESTs of one edit.
-				Poll::Ready(Ok(Some(_))) if self.answer.continuing() => return Err(Error::ProtocolViolation),
-				Poll::Ready(Ok(Some(announce))) => self.routed.receive(announce)?,
+				Poll::Ready(Ok(Some(_))) if self.answer.continuing() => {
+					stats.route_closed(RouteClose::Malformed);
+					return Err(Error::ProtocolViolation);
+				}
+				Poll::Ready(Ok(Some(announce))) => {
+					if let Err(err) = self.routed.receive(announce) {
+						stats.route_closed(self.routed.closed());
+						return Err(err);
+					}
+				}
 				// The peer is leaving: what it sent ended, and it asks for nothing more.
 				Poll::Ready(Ok(None)) => {
 					self.finished = true;
@@ -448,6 +470,7 @@ impl Running {
 						return Err(err);
 					}
 					tracing::debug!(%err, "the peer's Announce Stream broke");
+					stats.route_closed(RouteClose::Malformed);
 					return Err(Error::ProtocolViolation);
 				}
 				Poll::Pending => return Ok(read),

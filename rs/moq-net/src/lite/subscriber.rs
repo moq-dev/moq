@@ -9614,6 +9614,35 @@ mod tests {
 		assert_eq!((refused.path, refused.total()), (1, 1), "{refused:?}");
 	}
 
+	/// A peer that declared no Node ID and sends a route closes the session, counted under
+	/// its label as a close for its role.
+	#[kio::test]
+	async fn a_route_from_a_peer_without_a_node_counts_its_close() {
+		let node = crate::route::NodeId::new(7, 1);
+		let offer = crate::route::relay::Offer {
+			path: vec![crate::route::relay::Hop { node, session: 0 }].into(),
+			draining: false,
+			priority: i8::MAX,
+			cost: 0,
+			marked: false,
+		};
+		let mut script = two_claims();
+		script.extend(announce_script(
+			Version::Lite07,
+			&[&wire(lite::AnnounceBroadcast::Route { offer })],
+		));
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let (registry, stats) = counted();
+		let (mut prefix, _consumer) = root_prefix_counted(Version::Lite07, session, stats);
+		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation), "{err}");
+		let closed: Vec<_> = (registry.snapshot().sessions().into_iter())
+			.map(|(_, presence)| presence.routes.closed)
+			.collect();
+		assert_eq!(closed.len(), 1);
+		assert_eq!((closed[0].role, closed[0].total()), (1, 1), "{closed:?}");
+	}
+
 	/// A claim shown below the requested prefix may still be broader than its path, as a
 	/// relay forwards one it learned from a narrower stream; one broader than its path has
 	/// segments cannot be, and closes the session.

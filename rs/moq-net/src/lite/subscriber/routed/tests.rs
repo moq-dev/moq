@@ -652,6 +652,39 @@ async fn a_routing_neighbours_withdrawals_and_errors_count() {
 	offer.path = vec![Hop { node: far, session: 0 }].into();
 	let err = routed.receive(Wire::Route { offer });
 	assert!(matches!(err, Err(Error::ProtocolViolation)), "{err:?}");
-	let closed = routes(&registry).closed;
-	assert_eq!((closed.malformed, closed.total()), (1, 1), "{closed:?}");
+	// The session's route stream counts the close, by the kind the route layer gave.
+	assert_eq!(routed.closed(), crate::stats::RouteClose::Malformed);
+}
+
+/// A peer that declared no Node ID sends no routes: the close it earns is its role's.
+#[kio::test]
+async fn a_route_from_a_non_routing_peer_closes_for_its_role() {
+	let (subscriber, _consumer) = subscriber();
+	let mut routed = asking(&subscriber, &Permit::default());
+	let err = routed.receive(route(PEER));
+	assert!(matches!(err, Err(Error::ProtocolViolation)), "{err:?}");
+	assert_eq!(routed.closed(), crate::stats::RouteClose::Role);
+	// Noted once: an error the route layer gives no kind counts as malformed.
+	assert_eq!(routed.closed(), crate::stats::RouteClose::Malformed);
+}
+
+/// A claim a peer forwards whose chain already names this relay came back to it: the node
+/// takes it as lost, keeps the session, and counts it as looped.
+#[kio::test]
+async fn a_claim_back_through_this_relay_counts_as_looped() {
+	let (mut subscriber, _consumer) = forwarding();
+	let registry = counted(&mut subscriber);
+	let mut routed = asking(&subscriber, &Permit::default());
+	let mut looped = claim(0);
+	looped.chain = vec![routed.me.relay];
+	let start = |claim| Wire::Start {
+		suffix: PathRef::literal(Path::from_static("live/a")),
+		instance: Instance::random(),
+		claim,
+	};
+	routed.receive(start(looped)).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty());
+	let refused = routes(&registry).refused;
+	assert_eq!((refused.looped, refused.total()), (1, 1), "{refused:?}");
 }

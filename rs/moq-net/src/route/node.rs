@@ -715,6 +715,9 @@ impl State {
 	/// session `cause`, whose input changed it.
 	fn note(&mut self, cause: Option<Key>) {
 		let changes = self.router.changes();
+		if let Some(stats) = cause.and_then(|cause| self.stats.get(&cause)) {
+			stats.refuse_routes(crate::stats::RouteRefusal::Looped, changes.looped);
+		}
 		for origin in changes.routes {
 			self.rerouted.entry(origin).or_insert(cause);
 		}

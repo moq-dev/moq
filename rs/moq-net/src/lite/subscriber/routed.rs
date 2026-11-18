@@ -21,7 +21,7 @@ use crate::{
 		node::{self, Change, Claim, Msg},
 		relay,
 	},
-	stats::{RouteRefusal, Withdrawal},
+	stats::{RouteClose, RouteRefusal, Withdrawal},
 };
 
 use super::{AnnouncedRoute, Subscriber};
@@ -186,6 +186,8 @@ pub(in crate::lite) struct Routed {
 	served: HashMap<ServedKey, ServedClaim>,
 	/// Served claims whose request queue woke since the last pass.
 	ready: kio::Queue<ServedKey>,
+	/// Why the last error closes the session, when the route layer said.
+	cause: Option<RouteClose>,
 }
 
 /// The absolute prefixes a session asks a peer that grants `permit` for, to serve
@@ -303,7 +305,10 @@ impl Routed {
 		let stream = (node.connect(subscriber.peer_setup.tag(), port))
 			// Said here, since the peer is told only that it broke the protocol.
 			.inspect_err(|err| tracing::warn!(%err, peer = ?routing, "the route layer refused the session"))
-			.map_err(refused(subscriber.origin.stats()))?
+			.map_err(|err| {
+				subscriber.origin.stats().route_closed(err.close());
+				Error::ProtocolViolation
+			})?
 			.with_clock(subscriber.runtime.clone())
 			.with_stats(subscriber.origin.stats().clone());
 		Ok(Self {
@@ -329,7 +334,19 @@ impl Routed {
 			held: Vec::new(),
 			served: HashMap::new(),
 			ready: Default::default(),
+			cause: None,
 		})
+	}
+
+	/// Why the error this session last returned closes it, as its stats count it: what
+	/// the route layer said, or else a message the rule never builds.
+	pub(in crate::lite) fn closed(&mut self) -> RouteClose {
+		self.cause.take().unwrap_or(RouteClose::Malformed)
+	}
+
+	/// Why the last error closes the session, only when the route layer said.
+	pub(in crate::lite) fn cause(&mut self) -> Option<RouteClose> {
+		self.cause.take()
 	}
 
 	/// The session's key on the node.
@@ -506,7 +523,9 @@ impl Routed {
 				self.named.clear();
 			}
 		}
-		self.stream.recv(Msg::Edited).map_err(refused(self.origin.stats()))?;
+		self.stream
+			.recv(Msg::Edited)
+			.map_err(|err| refused(err, &mut self.cause))?;
 		self.reask();
 		Ok(())
 	}
@@ -528,6 +547,7 @@ impl Routed {
 			Wire::Route { .. } | Wire::RouteEnd { .. } | Wire::Dead { .. } | Wire::Drain { .. } | Wire::Floor { .. }
 		);
 		if route && !self.routing {
+			self.cause = Some(RouteClose::Role);
 			return Err(Error::ProtocolViolation);
 		}
 		match announce {
@@ -539,12 +559,16 @@ impl Routed {
 				let path = asked.path.clone();
 				self.stream
 					.recv(Msg::Synced(path))
-					.map_err(refused(self.origin.stats()))?;
+					.map_err(|err| refused(err, &mut self.cause))?;
 			}
 			Wire::Route { offer } => {
 				let origin = offer.path.first().ok_or(Error::ProtocolViolation)?.node;
 				if !self.named.contains_key(&origin) {
-					self.held.push(self.slots.acquire()?);
+					self.held.push(
+						self.slots
+							.acquire()
+							.inspect_err(|_| self.cause = Some(RouteClose::Other))?,
+					);
 					let id = self.next_route;
 					self.next_route += 1;
 					self.named.insert(origin, id);
@@ -553,7 +577,7 @@ impl Routed {
 				let offer = Some(offer);
 				self.stream
 					.recv(Msg::Route { origin, offer })
-					.map_err(refused(self.origin.stats()))?;
+					.map_err(|err| refused(err, &mut self.cause))?;
 			}
 			Wire::RouteEnd { id } => {
 				let (origin, claims) = self.routes.remove(&id).ok_or(Error::ProtocolViolation)?;
@@ -568,19 +592,19 @@ impl Routed {
 				let offer = None;
 				self.stream
 					.recv(Msg::Route { origin, offer })
-					.map_err(refused(self.origin.stats()))?;
+					.map_err(|err| refused(err, &mut self.cause))?;
 			}
 			Wire::Dead { hop, far } => {
 				self.origin.stats().withdrawal(Withdrawal::Dead, true);
 				self.stream
 					.recv(Msg::Dead { hop, far })
-					.map_err(refused(self.origin.stats()))?
+					.map_err(|err| refused(err, &mut self.cause))?
 			}
 			Wire::Drain { node } => {
 				self.origin.stats().withdrawal(Withdrawal::Drain, true);
 				self.stream
 					.recv(Msg::Drain { node })
-					.map_err(refused(self.origin.stats()))?
+					.map_err(|err| refused(err, &mut self.cause))?
 			}
 			Wire::Floor { id, revision } => self.floor(id, revision)?,
 			Wire::Start {
@@ -597,7 +621,11 @@ impl Routed {
 					self.origin.stats().refuse_route(RouteRefusal::Path);
 				}
 				self.above(relative.as_ref(), &claim)?;
-				self.held.push(self.slots.acquire()?);
+				self.held.push(
+					self.slots
+						.acquire()
+						.inspect_err(|_| self.cause = Some(RouteClose::Other))?,
+				);
 				let wire = WireClaim {
 					path,
 					relative,
@@ -638,7 +666,7 @@ impl Routed {
 					let changes = vec![(broadcast, change)];
 					self.stream
 						.recv(Msg::Announce { changes })
-						.map_err(refused(self.origin.stats()))?;
+						.map_err(|err| refused(err, &mut self.cause))?;
 				}
 			}
 			// The peer's own requests go to the half answering them, and lite-07 has its
@@ -694,7 +722,7 @@ impl Routed {
 		let changes = vec![(broadcast, change)];
 		self.stream
 			.recv(Msg::Announce { changes })
-			.map_err(refused(self.origin.stats()))
+			.map_err(|err| refused(err, &mut self.cause))
 	}
 
 	/// ANNOUNCE_FLOOR: the claim changes since the last one are those of the node the
@@ -718,7 +746,7 @@ impl Routed {
 		let floor = revision;
 		self.stream
 			.recv(Msg::Claims { origin, changes, floor })
-			.map_err(refused(self.origin.stats()))
+			.map_err(|err| refused(err, &mut self.cause))
 	}
 
 	/// Tell the node's other sessions what the messages received changed.
@@ -766,7 +794,7 @@ impl Routed {
 			let changes = vec![change];
 			self.stream
 				.recv(Msg::Announce { changes })
-				.map_err(refused(self.origin.stats()))?;
+				.map_err(|err| refused(err, &mut self.cause))?;
 		}
 		self.stream.flush();
 		Ok(())
@@ -907,13 +935,11 @@ impl Drop for Routed {
 	}
 }
 
-/// The node refuses what no node following the rule sends, closing the session, which
-/// counts on `stats`.
-fn refused(stats: &crate::stats::Session) -> impl FnOnce(route::Error) -> Error + '_ {
-	|err| {
-		stats.route_closed(err.close());
-		Error::ProtocolViolation
-	}
+/// The node refuses what no node following the rule sends, closing the session for the
+/// `cause` it notes.
+fn refused(err: route::Error, cause: &mut Option<RouteClose>) -> Error {
+	*cause = Some(err.close());
+	Error::ProtocolViolation
 }
 
 /// Whether the node may hold the peer's claim at `path`: the permit's limit admits

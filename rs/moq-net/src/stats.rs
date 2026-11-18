@@ -1676,7 +1676,14 @@ impl Session {
 	/// Count a route or claim the peer forwarded that this node refused.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn refuse_route(&self, kind: RouteRefusal) {
-		self.routes(|routes| routes.refused.bump(kind));
+		self.refuse_routes(kind, 1);
+	}
+
+	/// Count `count` routes or claims the peer forwarded that this node refused.
+	pub(crate) fn refuse_routes(&self, kind: RouteRefusal, count: u64) {
+		if count > 0 {
+			self.routes(|routes| routes.refused.add(kind, count));
+		}
 	}
 
 	/// Count a change to a relay's route that the peer caused, and the broadcasts it rewrote.
@@ -1688,15 +1695,15 @@ impl Session {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn withdrawal(&self, kind: Withdrawal, received: bool) {
 		self.routes(|routes| match received {
-			true => routes.received.bump(kind),
-			false => routes.sent.bump(kind),
+			true => routes.received.add(kind, 1),
+			false => routes.sent.add(kind, 1),
 		});
 	}
 
 	/// Count the session closing for its route layer.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn route_closed(&self, kind: RouteClose) {
-		self.routes(|routes| routes.closed.bump(kind));
+		self.routes(|routes| routes.closed.add(kind, 1));
 	}
 
 	fn routes(&self, bump: impl FnOnce(&RouteCounters)) {

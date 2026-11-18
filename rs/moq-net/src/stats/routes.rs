@@ -68,11 +68,11 @@ macro_rules! kinds {
 		}
 
 		impl $atomics {
-			pub(super) fn bump(&self, kind: $kind) {
+			pub(super) fn add(&self, kind: $kind, count: u64) {
 				let counter = match kind {
 					$($kind::$variant => &self.$field,)+
 				};
-				counter.fetch_add(1, Ordering::Relaxed);
+				counter.fetch_add(count, Ordering::Relaxed);
 			}
 
 			pub(super) fn snapshot(&self) -> $counts {
@@ -125,7 +125,8 @@ kinds!(
 		Stalled => stalled,
 		/// The peer read its route stream too slowly for what changed.
 		Overrun => overrun,
-		/// The peer sent a route, claim, or prefix the rule never builds.
+		/// The peer sent a route, claim, request, or prefix the rule never builds, or broke
+		/// its route stream.
 		Malformed => malformed,
 		/// The peer sent what its role never sends, such as a routing peer asking for
 		/// part of the tree.
@@ -136,7 +137,7 @@ kinds!(
 		/// The peer's relay restarted with an older start than a session of it already
 		/// closed: its clock went back, or two relays share an id.
 		Regressed => regressed,
-		/// This node's route layer refused the session for any other reason.
+		/// Any other reason, such as the peer announcing past the session's cap.
 		Other => other,
 	}
 );
