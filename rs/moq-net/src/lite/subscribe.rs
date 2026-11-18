@@ -1886,6 +1886,29 @@ mod test {
 		assert!(refused, "the live ranges are held to one SUBSCRIBE");
 	}
 
+	/// An edit to ranges too large for a SUBSCRIBE is refused before anything changes, so the
+	/// live ranges stay those last sent and the next edit is made against them.
+	#[test]
+	fn lite07_a_refused_edit_leaves_the_ranges_as_sent() {
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let wide: Vec<Range> = (0..super::super::message::MAX_MESSAGE_SIZE as u64 / 4)
+			.map(|group| Range {
+				start: absolute(group << 20, 0),
+				end: absolute((group << 20) + 1, 0),
+			})
+			.collect();
+		assert!(matches!(live.edit(&wide), Err(EncodeError::TooLarge)));
+		assert_eq!(live.numbered(), [(0, Range::OLDEST)]);
+		assert_eq!(live.next(), 1);
+		assert_eq!(
+			live.edit(&wide[..2]).unwrap(),
+			RangeEdit::Edit {
+				remove: vec![0],
+				add: wide[..2].to_vec(),
+			}
+		);
+	}
+
 	/// SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it.
 	#[test]
 	fn subscribe_started_is_type_4_on_lite07() {

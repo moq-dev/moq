@@ -8,6 +8,9 @@
 
 use rangemap::RangeSet;
 
+#[cfg(test)]
+use super::FillAsk;
+
 use crate::{
 	EncodeError,
 	coding::{Form, varint},
@@ -268,4 +271,177 @@ fn collapse(ranges: Vec<Range>) -> Vec<Range> {
 		};
 	}
 	kinds
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use rand::{RngExt, SeedableRng};
+
+	fn budget(bytes: usize) -> Budget {
+		Budget {
+			bytes,
+			form: lite::Version::Lite07.into(),
+			id: 2,
+		}
+	}
+
+	fn total(budget: Budget, ranges: &[Range], groups: &RangeSet<u64>) -> usize {
+		let fills = FillAsk::wire(groups);
+		ranges.iter().copied().chain(fills).map(|range| budget.cost(&range).unwrap()).sum()
+	}
+
+	/// Whether `outer` asks for everything `inner` does, judged without the latest group.
+	fn covers(outer: &Range, inner: &Range) -> bool {
+		let start = match (outer.start, inner.start) {
+			(None, _) => true,
+			(Some(Anchor::Relative(outer)), Some(Anchor::Relative(inner))) => outer >= inner,
+			(Some(Anchor::Absolute(outer)), Some(Anchor::Absolute(inner))) => outer <= inner,
+			(Some(Anchor::Time(outer)), Some(Anchor::Time(inner))) => outer <= inner,
+			_ => false,
+		};
+		let end = match (outer.end, inner.end) {
+			(None, _) => true,
+			(Some(Anchor::Absolute(outer)), Some(Anchor::Absolute(inner))) => outer >= inner,
+			(Some(Anchor::Time(outer)), Some(Anchor::Time(inner))) => outer >= inner,
+			(Some(Anchor::Relative(outer)), Some(Anchor::Relative(inner))) => outer <= inner,
+			_ => false,
+		};
+		start && end
+	}
+
+	fn random(rng: &mut rand::rngs::StdRng) -> (Vec<Range>, RangeSet<u64>, RangeSet<u64>) {
+		let group = |rng: &mut rand::rngs::StdRng| rng.random_range(0..2_000u64) << rng.random_range(0..30);
+		let mut demand = Vec::new();
+		for _ in 0..rng.random_range(0..300) {
+			let start = group(rng);
+			let end = (rng.random_bool(0.9)).then(|| Position::group(start + rng.random_range(1..50)));
+			demand.push(match rng.random_range(0..10) {
+				0 => Range {
+					start: Some(Anchor::Relative(rng.random_range(0..20))),
+					end: end.map(Anchor::Absolute),
+				},
+				1 => Range {
+					start: None,
+					end: end.map(Anchor::Absolute),
+				},
+				_ => span(Position::group(start), end),
+			});
+		}
+		let mut fills = RangeSet::new();
+		let mut avoid = RangeSet::new();
+		for _ in 0..rng.random_range(0..300) {
+			let start = group(rng);
+			let groups = start..start + rng.random_range(1..20);
+			match rng.random_bool(0.8) {
+				true => fills.insert(groups),
+				false => avoid.insert(groups),
+			}
+		}
+		for groups in avoid.iter() {
+			fills.remove(groups.clone());
+		}
+		(demand, fills, avoid)
+	}
+
+	/// What fits stays as asked; what doesn't is widened to a covering superset that fits,
+	/// never asking for a group the fills avoid while a narrower choice remains.
+	#[test]
+	fn widens_only_what_does_not_fit() {
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x666974);
+		for step in 0..2_000 {
+			let (demand, fills, avoid) = random(&mut rng);
+			let budget = budget(rng.random_range(200..4_000));
+			let before = total(budget, &demand, &fills);
+			let (ranges, groups) = fit(demand.clone(), &fills, &avoid, budget).unwrap();
+			if before <= budget.bytes {
+				assert_eq!((&ranges, &groups), (&demand, &fills), "step {step}");
+				continue;
+			}
+			assert!(total(budget, &ranges, &groups) <= budget.bytes, "step {step}");
+			for range in &demand {
+				assert!(ranges.iter().any(|outer| covers(outer, range)), "step {step}: {range:?}");
+			}
+			for run in fills.iter() {
+				assert!(groups.gaps(run).next().is_none(), "step {step}: {run:?}");
+			}
+		}
+	}
+
+	/// Two fitted sets fit one SUBSCRIBE_UPDATE between them however little they share, at its
+	/// widest fields, and either fits a SUBSCRIBE.
+	#[test]
+	fn any_edit_between_fitted_ranges_fits_one_message() {
+		use crate::coding::Encode as _;
+		let version = lite::Version::Lite07;
+		let widest = |ranges| lite::SubscribeUpdate {
+			wanted_group: Some(u64::MAX - 1),
+			priority: i8::MIN,
+			max_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
+			min_delay: Some(std::time::Duration::from_millis(u64::MAX - 1)),
+			ranges,
+			order: crate::track::Order::Descending,
+		};
+		let empty = lite::RangeEdit::Edit {
+			remove: Vec::new(),
+			add: Vec::new(),
+		};
+		assert!(widest(empty).encode_bytes(version).unwrap().len() <= UPDATE_FIELDS);
+
+		// Sets of many short ranges and of fewer long ones, alternately, so the IDs one retires
+		// outweigh what the other's ranges leave.
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x65646974);
+		let wide = |rng: &mut rand::rngs::StdRng, next: u64, bits: u32| {
+			let ranges: Vec<Range> = (0..10_000)
+				.map(|_| {
+					let start = rng.random_range(0..1u64 << bits);
+					span(Position::group(start), Some(Position::group(start + 1)))
+				})
+				.collect();
+			let budget = Budget::new(version, 0, next, ranges.len());
+			fit(ranges, &RangeSet::new(), &RangeSet::new(), budget).unwrap().0
+		};
+		let mut live = lite::LiveRanges::new(version, &wide(&mut rng, 0, 14));
+		for round in 0..4 {
+			let next = wide(&mut rng, live.next(), [50, 14][round % 2]);
+			let edit = live.edit(&next).unwrap();
+			widest(edit).encode_bytes(version).unwrap();
+		}
+	}
+
+	/// Each kind of start collapses to the one range covering it once nothing else fits.
+	#[test]
+	fn collapses_ranges_with_no_gap_to_close() {
+		let relative: Vec<Range> = (0..200)
+			.map(|back| Range {
+				start: Some(Anchor::Relative(back)),
+				end: Some(Anchor::Absolute(Position::group(1_000 + back))),
+			})
+			.collect();
+		let (ranges, _) = fit(relative.clone(), &RangeSet::new(), &RangeSet::new(), budget(100)).unwrap();
+		assert_eq!(
+			ranges,
+			[Range {
+				start: Some(Anchor::Relative(199)),
+				end: Some(Anchor::Absolute(Position::group(1_199))),
+			}]
+		);
+		assert!(matches!(
+			fit(relative, &RangeSet::new(), &RangeSet::new(), budget(4)),
+			Err(EncodeError::TooLarge)
+		));
+	}
+
+	/// The narrowest gaps close first, so the fewest unwanted groups are asked for.
+	#[test]
+	fn closes_the_narrowest_gaps_first() {
+		let groups = |runs: &[std::ops::Range<u64>]| runs.iter().cloned().collect::<RangeSet<u64>>();
+		let fills = groups(&[0..1, 2..3, 100..101, 103..104, 1_000..1_001]);
+		let fits = total(budget(0), &[], &groups(&[0..3, 100..104, 1_000..1_001]));
+		let (_, got) = fit(Vec::new(), &fills, &RangeSet::new(), budget(fits)).unwrap();
+		assert_eq!(got, groups(&[0..3, 100..104, 1_000..1_001]));
+		// A gap the fills avoid closes last, however narrow.
+		let (_, got) = fit(Vec::new(), &fills, &groups(&[1..2]), budget(fits)).unwrap();
+		assert_eq!(got, groups(&[0..1, 2..104, 1_000..1_001]));
+	}
 }
