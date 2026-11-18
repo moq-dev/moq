@@ -1106,6 +1106,13 @@ export class Decoder {
 		const start = Duration.micros(timestamp);
 		const end = Duration.micros(timestamp + durationMicro);
 
+		// Audio the ring would skip anyway only warmed the codec. Written, it would anchor the ring behind
+		// the clock, which then skips and re-stalls on each refill until the backlog runs out.
+		if (ring.stale(end.asMicros())) {
+			sample.close();
+			return;
+		}
+
 		// A new subscription has taken over the timeline: drop the previous one's write-ahead tail
 		// rather than letting it play out after this frame. See #runDecoder.
 		const takeover = this.#handover.takeover();

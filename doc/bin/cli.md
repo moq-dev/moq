@@ -358,7 +358,8 @@ of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
 track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
 [instance](/concept/moq-lite#publisher-instances) records under its own key; a route
 over an older wire gets a fresh instance each time it announces, so it never
-resumes or stitches into an older recording. Any recording that fails ends the export.
+resumes or stitches into an older recording. A broadcast whose recording fails is logged and
+dropped, and every other keeps recording; only the origin failing ends the export.
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 

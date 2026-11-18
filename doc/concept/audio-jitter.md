@@ -846,7 +846,13 @@ content; past the threshold it snaps onto the clock, as video does. When the
 audio received ahead of the playhead is about to run out, playback slows down
 to bridge the gap, never trailing the clock past the threshold. A congestion
 stall within the threshold costs a slowdown, a gap, and a catch-up; one past it
-costs a skip.
+costs a skip. Audio that arrives trailing the clock past the threshold, such as a
+publisher's replayed history ahead of the live edge, is decoded only to warm the
+codec and never reaches the playout buffer, so playback starts at the live edge
+instead of anchoring on the backlog. The exception is audio up to an end the
+stream declares before that audio decodes, such as a mute, which plays out
+rather than being skipped; a track's finish declares its end only after its
+last audio decodes, so that audio is skipped like the rest.
 
 The splice is waveform-similarity overlap-add (WSOLA), after Verhelst and
 Roelands, "An overlap-add technique based on waveform similarity (WSOLA) for
