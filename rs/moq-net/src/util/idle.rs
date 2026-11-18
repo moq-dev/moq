@@ -109,6 +109,17 @@ impl<K: Copy + Eq> Idle<K> {
 			idle.parked = None;
 		}
 	}
+
+	/// [`Self::disarm`] for a change made outside the read, which a gate the read nests in
+	/// never hears: it parked on this one and answers `Pending` again until woken. So this
+	/// wakes through the gate's own waiter, and every gate it nests in reads again, as does
+	/// the task.
+	pub(crate) fn reopen(this: &mut Option<Box<Self>>) {
+		if let Some(idle) = this {
+			idle.parked = None;
+			idle.wake.wake_by_ref();
+		}
+	}
 }
 
 #[cfg(test)]
@@ -153,6 +164,44 @@ mod test {
 		let idle = Idle::start(&mut slot, &task);
 		idle.finish(&mut slot, (), true);
 		assert!(!Idle::parked(&slot, (), &other), "another task reads anew");
+	}
+
+	/// A reopen reaches the gate the read nests in, which parked on this one and would
+	/// otherwise answer `Pending` again without reading through it. A disarm does not.
+	#[test]
+	fn a_reopen_reaches_the_gates_the_read_nests_in() {
+		for reopen in [false, true] {
+			let task = Arc::new(Woken {
+				woken: AtomicBool::new(false),
+				task: Waker::noop().clone(),
+			});
+			let waiter = kio::Waiter::new(Waker::from(task.clone()));
+			let mut outer_slot: Option<Box<Idle>> = None;
+			let mut inner_slot: Option<Box<Idle>> = None;
+
+			// The outer read parks through the inner one, as an ordered read parks on its cursor.
+			let mut outer = Idle::start(&mut outer_slot, &waiter);
+			let inner = Idle::start(&mut inner_slot, outer.waiter());
+			inner.finish(&mut inner_slot, (), true);
+			outer.finish(&mut outer_slot, (), true);
+			assert!(Idle::parked(&outer_slot, (), &waiter));
+
+			match reopen {
+				true => Idle::reopen(&mut inner_slot),
+				false => Idle::disarm(&mut inner_slot),
+			}
+			assert!(!Idle::parked(&inner_slot, (), &kio::Waiter::noop()));
+			assert_eq!(
+				Idle::parked(&outer_slot, (), &waiter),
+				!reopen,
+				"reopen {reopen}: the outer gate reads through"
+			);
+			assert_eq!(
+				task.woken.load(Ordering::Acquire),
+				reopen,
+				"reopen {reopen}: the task wakes"
+			);
+		}
 	}
 
 	/// A gate keyed by read answers only for the read that parked.

@@ -8434,6 +8434,8 @@ impl Cursor {
 	/// The next run given up, judging the live edge first only when `probe`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn poll_drop(&mut self, probe: bool, waiter: &kio::Waiter) -> Poll<(ops::Range<u64>, Hole)> {
+		// What the group read walks, which this poll may move outside that read.
+		let walks = (self.filter.revision, self.fill_view());
 		self.sync();
 		if self.drops.is_none() {
 			self.drops = Some(Box::new(DropCursor::new(&self.state.read())));
@@ -8452,6 +8454,12 @@ impl Cursor {
 			let from = self.next_key.max(self.floor());
 			self.probe(from, &drift, waiter);
 			judged = Some(drift);
+		}
+		// The window settled, or a fill was asked or answered, on this poll's waiter rather
+		// than the one the group read parked on: that read, and every gate it nests in, reads
+		// again.
+		if (self.filter.revision, self.fill_view()) != walks {
+			idle::Idle::reopen(&mut self.idle);
 		}
 		// A cap at or below the floor leaves nothing to report, not a reversed span.
 		let floor = self.floor();
@@ -9203,6 +9211,15 @@ impl Cursor {
 			}
 		}
 		group
+	}
+
+	/// What a group read consults of the fills: the lowest group still owed, whether a filled
+	/// one waits to be taken, and whether any is owed at all.
+	fn fill_view(&self) -> (Option<u64>, bool, bool) {
+		let Some(misses) = &self.misses else {
+			return (None, false, false);
+		};
+		(misses.lowest_wanted(), misses.has_filled(), misses.is_waiting())
 	}
 
 	/// Whether a fill still owes this cursor a group, so the end of the feed is not its end.
