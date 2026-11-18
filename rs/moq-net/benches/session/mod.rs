@@ -430,23 +430,34 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
+/// How long a lite-07 origin's route node holds a closed session's claims in case another
+/// session serves them: its debounce, 32 hops of 25 ms (`route::relay::debounce`).
+const ROUTE_LINGER: Duration = Duration::from_millis(32 * 25);
+
 /// Drop what a cell built on `rt`, if Criterion's filter ran it, and assert every task its
 /// sessions and origins spawned ends with it: a task that outlives its handles leaks for
-/// as long as a relay runs.
+/// as long as a relay runs. The origins may first wait out [`ROUTE_LINGER`], on a paused
+/// clock so the wait costs nothing.
 fn retire<T>(rt: &tokio::runtime::Runtime, built: Option<T>) {
 	let Some(built) = built else {
 		return;
 	};
 	drop(built);
-	// Each close reaches the next driver on its following poll; this many passes is far
-	// more than any teardown chain takes.
 	rt.block_on(async {
-		for _ in 0..1024 {
-			if rt.metrics().num_alive_tasks() == 0 {
-				break;
+		tokio::time::pause();
+		// Each close reaches the next driver on its following poll; this many passes is far
+		// more than any teardown chain takes.
+		let settle = || async {
+			for _ in 0..1024 {
+				if rt.metrics().num_alive_tasks() == 0 {
+					break;
+				}
+				tokio::task::yield_now().await;
 			}
-			tokio::task::yield_now().await;
-		}
+		};
+		settle().await;
+		tokio::time::sleep(ROUTE_LINGER).await;
+		settle().await;
 	});
 	assert_eq!(rt.metrics().num_alive_tasks(), 0, "tasks outlived the cell's handles");
 }
