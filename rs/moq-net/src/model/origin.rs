@@ -1215,9 +1215,10 @@ struct RemoteFront {
 	/// The front's spliced broadcast, weak: dead once the front ends, so a
 	/// later request re-creates the front instead of joining a corpse.
 	broadcast: broadcast::WeakConsumer,
-	/// Which routes serve the front's content, fixed by its first source. A
-	/// request joins the front only while the best route is one of them.
-	pin: kio::Lock<Pin>,
+	/// Which routes serve the front's content, and the route its source came
+	/// through, fixed by its first source. A request joins the front only while
+	/// the best route is that route: the front never changes routes, it ends.
+	pin: kio::Lock<(Pin, Option<u64>)>,
 }
 
 /// The last route a cursor observed at a presented prefix.
@@ -2685,7 +2686,7 @@ struct FrontTask {
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
 	/// Published for requesters once the first source fixes it; see [`RemoteFront::pin`].
-	pin: kio::Lock<Pin>,
+	pin: kio::Lock<(Pin, Option<u64>)>,
 	timers: Clock,
 }
 
@@ -2886,7 +2887,7 @@ async fn run_front(task: FrontTask) {
 							continue;
 						};
 						front.identify(candidate);
-						*pin.lock() = front.pin();
+						*pin.lock() = (front.pin(), Some(route));
 						if let Some(source) = source {
 							let id = next_source;
 							next_source += 1;
@@ -4717,16 +4718,16 @@ impl Consumer {
 		// Join the live front for this path and horizon, if any: its watcher
 		// resolves (or already resolved) the request channel with the front's
 		// spliced broadcast, so repeat requests share one upstream
-		// subscription. Only while the best route still serves the front's
-		// content, though: once a different publisher wins (a cheaper route), a
-		// newcomer gets a fresh front from it, and the old front keeps serving the
-		// readers it has, since other content can't be spliced into it.
+		// subscription. Only while the best route is still the one the front's
+		// source came through, though: once another route wins, even from the
+		// same publisher, the front is about to end rather than splice it in, so
+		// a newcomer gets a fresh front from it at once.
 		let key = (absolute.clone(), horizon);
 		if let Some(front) = state.fronts.get(&key) {
-			let pin = *front.pin.lock();
+			let (pin, route) = *front.pin.lock();
 			let current = state
 				.best_route(&absolute.as_path(), horizon, Pin::Any, &HashSet::new())
-				.is_some_and(|entry| entry.qualifies(pin));
+				.is_some_and(|entry| entry.qualifies(pin) && route.is_none_or(|route| entry.id == route));
 			if current {
 				let pending = Requesting::queued(front.request.consume())
 					.with_path(requested)
@@ -4748,7 +4749,7 @@ impl Consumer {
 		let request = kio::Producer::<PendingBroadcast>::default();
 		let consumer = request.consume();
 		let watch = state.watch(&self.shared, &absolute);
-		let pin = kio::Lock::new(Pin::Any);
+		let pin = kio::Lock::new((Pin::Any, None));
 		state.fronts.insert(
 			key,
 			RemoteFront {
@@ -8335,14 +8336,15 @@ mod tests {
 		let first = producer.publish("room/alice", Route::default()).unwrap();
 		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
 
-		// A second source at the same path is a new broadcast: the first's front
-		// ends, and a new request gets a fresh one rather than a splice.
+		// A second source at the same path is a new broadcast: a request right
+		// away, before the driver has ended the first's front, gets a fresh one
+		// rather than joining the front about to end.
 		let second = producer.publish("room/alice", Route::default()).unwrap();
+		let again = consumer.request_broadcast("room/alice").await.expect("resolves");
+		assert!(!again.is_clone(&resolved));
 		tokio::time::timeout(Duration::from_secs(10), resolved.closed())
 			.await
 			.expect("the first front ends");
-		let again = consumer.request_broadcast("room/alice").await.expect("resolves");
-		assert!(!again.is_clone(&resolved));
 
 		// The first source leaving leaves the second's front; losing both closes it.
 		first.close();
