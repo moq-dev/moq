@@ -293,7 +293,16 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 
 	let mut objects = Vec::with_capacity(holding.len());
 	for (start, path) in &holding {
-		let load = super::object(shared, path, *start, timed);
+		let load = async {
+			let loaded = super::object(shared, path, *start, timed).await;
+			if let Err(Error::NotFound(_)) = loaded {
+				// Pruned since it was listed, and likely not alone.
+				if let Err(err) = index::pruned(shared.store.inner(), index, *start).await {
+					tracing::warn!(%path, %err, "archived track is unavailable to list");
+				}
+			}
+			loaded
+		};
 		let loaded = match asker {
 			// A lookup owes no group, so nothing says when its readers stop waiting: it finishes
 			// the read.
@@ -310,10 +319,6 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 		match loaded {
 			Ok(object) => objects.push(object),
 			Err(Error::NotFound(_)) => {
-				// Pruned since it was listed, and likely not alone.
-				if let Err(err) = index::pruned(shared.store.inner(), index, *start).await {
-					tracing::warn!(%path, %err, "archived track is unavailable to list");
-				}
 				asker.drop_groups(sequence..sequence + 1);
 				return;
 			}

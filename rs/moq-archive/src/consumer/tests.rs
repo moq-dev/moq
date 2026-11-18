@@ -1051,6 +1051,49 @@ async fn a_seek_across_pruned_history_reaches_the_oldest_retained_group() {
 	assert_eq!(read_range(&broadcast, "video", range(500)).await, [6_000]);
 }
 
+/// Retention that replaced everything the reader indexed before it refreshed leaves a seek the
+/// newer objects the store holds, which the listing the pruned GET starts adds to the index.
+#[tokio::test(start_paused = true)]
+async fn a_seek_finds_objects_retention_replaced_the_index_with() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..2).await;
+
+	let broadcast = broadcast::Info::new().produce();
+	let (indexes, _run) = open(&archive.store, &broadcast, Config::default().with_cache(0)).await;
+	stored(&archive, 2..6).await;
+	archive.prune("video", 0).await;
+	let mock = archive.store.inner().clone();
+	mock.take();
+
+	let track = broadcast.consume().track("video").unwrap();
+	let subscription = Subscription::default()
+		.with_ranges([from(500)])
+		.with_order(Order::Ascending)
+		.with_delay(Delay::default().with_max(None));
+	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
+	assert!(sequence(&mut reader).await.is_some());
+	// Before any refresh lists after the cursor: yields, not time.
+	for _ in 0..1000 {
+		if indexes["video"].lock().unwrap().len() == 2 {
+			break;
+		}
+		tokio::task::yield_now().await;
+	}
+	assert_eq!(
+		indexes["video"].lock().unwrap().len(),
+		2,
+		"both retained objects are indexed"
+	);
+	assert!(
+		!mock
+			.take()
+			.iter()
+			.any(|op| matches!(op, crate::mock::Op::List { offset: Some(offset), .. } if !offset.ends_with(".info"))),
+		"no refresh listed after the cursor"
+	);
+}
+
 /// Recorded through a real DVR producer while a reader stays attached for many rotations: its
 /// index stays about the size of what the store retains, and a seek to the start of time
 /// reaches the oldest group the store holds, as a direct listing finds it.

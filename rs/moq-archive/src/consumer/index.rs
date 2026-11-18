@@ -81,7 +81,7 @@ impl Index {
 	}
 
 	/// The newest start indexed when the next refresh should list the whole directory, which
-	/// [`Self::retain`] then reconciles up to.
+	/// [`Self::reconcile`] then reconciles up to.
 	fn due(&self) -> Option<Start> {
 		if self.added <= self.listed {
 			return None;
@@ -89,11 +89,15 @@ impl Index {
 		self.objects.last_key_value().map(|(start, _)| *start)
 	}
 
-	/// Drop the objects up to `through`, all indexed before the listing that `found` began, that it
-	/// no longer holds: the store pruned them. Later objects were listed since.
-	fn retain(&mut self, through: Start, found: &[Listing]) {
+	/// Take in a listing of the whole directory, `found`: drop the objects up to `through`, all
+	/// indexed before it began, that it no longer holds, since the store pruned them, and add
+	/// every object it holds. The cursor stays, so the live feed still takes the new ones.
+	fn reconcile(&mut self, through: Start, found: &[Listing]) {
 		self.objects
 			.retain(|start, _| *start > through || found.binary_search_by_key(start, |(start, _)| *start).is_ok());
+		for (start, path) in found {
+			self.objects.insert(*start, path.clone());
+		}
 		self.listed = self.objects.len();
 		self.added = 0;
 	}
@@ -176,7 +180,7 @@ pub(super) async fn refresh<S: ObjectStore>(store: &S, index: &Mutex<Index>, end
 	let mut listed = list(store, &dir, &from, end).await?;
 	let mut index = index.lock().unwrap();
 	if let Some(through) = through {
-		index.retain(through, &listed.objects);
+		index.reconcile(through, &listed.objects);
 		listed.objects.retain(|(_, path)| *path > cursor);
 	}
 	index.extend(&listed.objects);
@@ -194,16 +198,16 @@ pub(super) async fn refresh<S: ObjectStore>(store: &S, index: &Mutex<Index>, end
 pub(super) async fn pruned<S: ObjectStore>(store: &S, index: &Mutex<Index>, missing: Start) -> Result<()> {
 	let (dir, from, through) = {
 		let mut index = index.lock().unwrap();
+		let Some((&through, _)) = index.objects.last_key_value() else {
+			return Ok(());
+		};
 		if index.objects.remove(&missing).is_none() {
 			return Ok(());
 		}
-		let Some((through, _)) = index.objects.last_key_value() else {
-			return Ok(());
-		};
-		(index.dir.clone(), index.origin.clone(), *through)
+		(index.dir.clone(), index.origin.clone(), through)
 	};
 	let listed = list(store, &dir, &from, false).await?;
-	index.lock().unwrap().retain(through, &listed.objects);
+	index.lock().unwrap().reconcile(through, &listed.objects);
 	Ok(())
 }
 
