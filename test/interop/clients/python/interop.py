@@ -23,8 +23,10 @@ AUTH and prints it as an `auth granted` line before the client starts.
 import argparse
 import asyncio
 import contextlib
+import faulthandler
 import json
 import math
+import signal
 import struct
 import sys
 from datetime import timedelta
@@ -368,6 +370,9 @@ def main() -> None:
     if args.role == "subscribe" and not args.finish and (not args.audio_out or not args.audio_ms):
         parser.error("subscribe needs --audio-out and --audio-ms")
 
+    # The harness's `timeout` sends SIGTERM to a client that hangs: dump every thread first, so
+    # the log shows where it waited, then end as SIGTERM would.
+    faulthandler.register(signal.SIGTERM, all_threads=True, chain=True)
     # Warnings and errors from the Rust layer, such as a publication outside the grant.
     moq.log_level("warn")
     try:

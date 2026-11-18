@@ -1773,7 +1773,9 @@ run_finishes() {
         broadcast="$name-$$-$RANDOM/fixture.hang"
         grant="${broadcast%/*}/**"
         ack="$LOGS/$name-ack"
-        local pids=() fds=() names=() all_ready=1 all_clean=1 publisher_ok=1
+        # why[i] is reader i's own failure; row is what failed the whole row, which every
+        # cell without a failure of its own reports, so a withheld acknowledgement names its cause.
+        local pids=() fds=() names=() why=() failed=() row="" status
         late=0
         started=$SECONDS
         echo "=== finished media: $pub ==="
@@ -1805,14 +1807,15 @@ run_finishes() {
             names+=("$sub")
         done
         for i in "${!pids[@]}"; do
-            if ! finish_ready "${pids[$i]}" "$LOGS/$name-${names[$i]}.log" '^finish reader ready$'; then all_ready=0; fi
+            finish_ready "${pids[$i]}" "$LOGS/$name-${names[$i]}.log" '^finish reader ready$' || why[i]="never ready"
         done
-        if [[ "$all_ready" -eq 1 ]]; then
+        pid=""
+        if [[ ${#why[@]} -eq 0 ]]; then
             harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_finish_publisher "$pub" "$broadcast" "$(token_url --publish "$grant")" "$ack"
             pid="$HARNESS_PID"
-            if ! finish_ready "$pid" "$LOGS/$name-pub.log" '^finish ready linger_us='; then all_ready=0; fi
-        else pid=""; fi
-        if [[ "$all_ready" -eq 1 ]]; then
+            finish_ready "$pid" "$LOGS/$name-pub.log" '^finish ready linger_us=' || row="publisher never ready"
+        fi
+        if [[ -z "$row" && ${#why[@]} -eq 0 ]]; then
             for reader_fd in "${fds[@]}"; do printf 'read\n' >&"$reader_fd"; done
             if [[ "$late" -eq 1 ]]; then
                 harness_spawn "$name-gst" "$LOGS/$name-gst.log" run_finish_gst "$broadcast" "$(token_url --subscribe "$grant")" "$LOGS/$name-gst.out"
@@ -1821,24 +1824,37 @@ run_finishes() {
                 names+=(gst)
             fi
             for i in "${!pids[@]}"; do
-                harness_wait "${pids[$i]}" || all_clean=0
-                if ! grep -qx "$(finish_marker "${names[$i]}")" "$LOGS/$name-${names[$i]}.log"; then all_clean=0; fi
+                status=0
+                harness_wait "${pids[$i]}" || status=$?
+                # A reader that printed its marker can still fail on the way out, such as a
+                # session drain that times out, and that withholds the acknowledgement too.
+                if [[ "$status" -ne 0 ]]; then
+                    why[i]="exited $status"
+                elif ! grep -qx "$(finish_marker "${names[$i]}")" "$LOGS/$name-${names[$i]}.log"; then
+                    why[i]="no finish marker"
+                fi
             done
-        else all_clean=0; fi
-        if [[ "$all_clean" -eq 1 ]]; then
+        fi
+        for i in "${!why[@]}"; do failed+=("${names[$i]}"); done
+        [[ ${#failed[@]} -eq 0 ]] || row="reader failed: ${failed[*]}"
+        if [[ -z "$row" ]]; then
             printf 'complete\n' >&"$ack_fd"
             exec {ack_fd}>&-
-            harness_wait "$pid" || publisher_ok=0
-            grep -qx 'finish acknowledged' "$LOGS/$name-pub.log" || publisher_ok=0
+            status=0
+            harness_wait "$pid" || status=$?
+            if [[ "$status" -ne 0 ]]; then
+                row="publisher exited $status after the acknowledgement"
+            elif ! grep -qx 'finish acknowledged' "$LOGS/$name-pub.log"; then
+                row="publisher did not print finish acknowledged"
+            fi
         else
-            publisher_ok=0
             [[ -z "$pid" ]] || harness_reap "$pid"
             exec {ack_fd}>&-
         fi
         for i in "${!pids[@]}"; do
             sub="${names[$i]}"
             local cell=(case=finish publisher="$pub" subscriber="$sub" seconds=$((SECONDS - started)) log="$LOGS/$name-$sub.log")
-            if [[ "$all_ready" -eq 1 && "$publisher_ok" -eq 1 ]] && grep -qx "$(finish_marker "$sub")" "$LOGS/$name-$sub.log"; then
+            if [[ -z "$row" ]]; then
                 if [[ "$sub" == gst ]]; then
                     echo "  PASS  finish $pub -> $sub (late tail; end N/A, moqsrc keeps watching)"
                     record pass "${cell[@]}" detail="late tail only; end N/A: moqsrc keeps watching a finished broadcast"
@@ -1847,8 +1863,8 @@ run_finishes() {
                     record pass "${cell[@]}"
                 fi
             else
-                record fail "${cell[@]}" detail="missing finish tail/EOF/withdrawal/health or acknowledgement"
-                echo "  FAIL  finish $pub -> $sub"
+                record fail "${cell[@]}" detail="${why[$i]:-$row}"
+                echo "  FAIL  finish $pub -> $sub (${why[$i]:-$row})"
                 overall=1
                 cat "$LOGS/$name-$sub.log" "$LOGS/$name-pub.log" 2>/dev/null || true
                 harness_reap "${pids[$i]}"
