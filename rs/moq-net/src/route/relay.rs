@@ -2034,10 +2034,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			// the same claimant, so none ranks ahead here: the reader takes the cheapest,
 			// and the newest of those, so a peer that reconnects serves the moment its
 			// new session gives the claim.
-			if origin == self.me
-				&& let Some(givers) = self.givers.get(broadcast)
-			{
-				for (peer, given) in givers {
+			if origin == self.me {
+				for (peer, given) in self.givers.get(broadcast).into_iter().flatten() {
 					self.visit();
 					if precedence(&given.item) != precedence(&claim.item) || given.unavailable {
 						continue;
@@ -2048,17 +2046,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						origin,
 						next: Next::Local(*peer),
 						claim: given,
-						closest: closest == Some(origin),
-					});
-				}
-				continue;
-			}
-			if origin == self.me {
-				if let Some(source) = self.sources.get(broadcast) {
-					ways.push(Way {
-						origin,
-						next: Next::Local(*source),
-						claim: claim.clone(),
 						closest: closest == Some(origin),
 					});
 				}
@@ -2956,6 +2943,119 @@ mod tests {
 		assert_eq!(router.own().1[&(p("near"), 7)].cost, Metric::MAX, "an endpoint's claim");
 	}
 
+	/// A claim reached over a route ranks as the route does too: draining if the route is,
+	/// at the lower of the two priorities, and at the sum of the two costs. Beside it, this
+	/// node's own copy leads to the neighbour that gave it.
+	#[test]
+	fn a_way_ranks_with_the_route_it_takes() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		let Msg::Route {
+			origin,
+			offer: Some(offer),
+		} = route(5, 2, 3)
+		else {
+			unreachable!("a live route");
+		};
+		let offer = Offer {
+			draining: true,
+			priority: -3,
+			..offer
+		};
+		router
+			.recv(
+				2,
+				Msg::Route {
+					origin,
+					offer: Some(offer),
+				},
+			)
+			.unwrap();
+		let broadcast = (p("live"), 7);
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: vec![(broadcast.clone(), claim(run(0), 2))],
+			floor: 1,
+		};
+		router.recv(2, claims).unwrap();
+		open(&mut router, 3, Role::Endpoint);
+		let announce = Msg::Announce {
+			changes: vec![(broadcast.clone(), claim(run(0), 0))],
+		};
+		router.recv(3, announce).unwrap();
+		let ways = router.ways(&broadcast);
+		let [own, routed] = ways.as_slice() else {
+			panic!("two ways: {ways:?}");
+		};
+		assert_eq!((own.origin, &own.next), (node(1), &Next::Local(3)));
+		assert_eq!((routed.origin, &routed.next), (node(5), &Next::Via(2)));
+		let claim = &routed.claim;
+		assert_eq!((claim.draining, claim.priority, claim.cost), (true, -3, 6));
+	}
+
+	/// Of the neighbours that gave this node a claim, only those whose own copy is of the
+	/// best precedence and available serve it.
+	#[test]
+	fn a_way_leads_only_to_a_giver_that_can_serve() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		let broadcast = (p("live"), 7);
+		let give = |router: &mut Router<usize, u64, Run>, peer, item, unavailable| {
+			open(router, peer, Role::Endpoint);
+			let Change::Live(claim) = claim(item, 0) else {
+				unreachable!("a live claim");
+			};
+			let change = Change::Live(Claim { unavailable, ..claim });
+			let announce = Msg::Announce {
+				changes: vec![(broadcast.clone(), change)],
+			};
+			router.recv(peer, announce).unwrap();
+		};
+		give(&mut router, 2, run(1), false);
+		give(&mut router, 3, run(0), false);
+		give(&mut router, 4, run(1), true);
+		let next: Vec<_> = (router.ways(&broadcast).into_iter()).map(|way| way.next).collect();
+		assert_eq!(next, [Next::Local(2)]);
+	}
+
+	/// A route as long as the longest path is held, but never used: no link could extend
+	/// it. One hop shorter, it is.
+	#[test]
+	fn a_route_at_the_longest_path_is_never_used() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		let route = |hops: usize| {
+			let between = (10..).take(hops - 2).map(|relay| Hop {
+				node: node(relay),
+				session: 1,
+			});
+			let path: Vec<Hop> = std::iter::once(Hop {
+				node: node(5),
+				session: 0,
+			})
+			.chain(between)
+			.chain([Hop {
+				node: node(2),
+				session: 1,
+			}])
+			.collect();
+			let offer = Offer {
+				path: path.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			};
+			Msg::Route {
+				origin: node(5),
+				offer: Some(offer),
+			}
+		};
+		router.recv(2, route(MAX_HOPS)).unwrap();
+		assert_eq!(router.best(node(5)), None);
+		router.recv(2, route(MAX_HOPS - 1)).unwrap();
+		assert!(router.best(node(5)).is_some());
+	}
+
 	/// A viewer is withdrawn with the cause of the claim it was shown, never with a broader
 	/// claim's: one shown the exact claim at its prefix hears it lost even as a broader
 	/// claim above ends in the same batch, and one shown only the broader claim hears it
@@ -3236,6 +3336,142 @@ mod tests {
 		assert!(
 			matches!(told.as_slice(), [((path, 7), Change::Live(claim))] if *path == p("a/b/c") && claim.item == Run { epoch: 1, above: 2 }),
 			"{told:?}"
+		);
+	}
+
+	/// A prefix nested in one already asked for, above or below it, is refused, whichever
+	/// side asks.
+	#[test]
+	fn a_nested_prefix_is_refused() {
+		let mut router = relay(1);
+		router.connect(2, port(Role::Scoped(Vec::new()))).unwrap();
+		let add = |path: &str| Edit {
+			remove: Vec::new(),
+			add: vec![p(path)],
+		};
+		router.edit(2, add("a/b")).unwrap();
+		assert_eq!(router.edit(2, add("a")), Err(Error::Nested), "above");
+		assert_eq!(router.edit(2, add("a/b/c")), Err(Error::Nested), "below");
+		router.edit(2, add("a/c")).unwrap();
+		router.ask(2, add("x/y")).unwrap();
+		assert_eq!(router.ask(2, add("x")), Err(Error::Nested), "above");
+		assert_eq!(router.ask(2, add("x/y/z")), Err(Error::Nested), "below");
+		router.ask(2, add("x/z")).unwrap();
+	}
+
+	/// A request from a marked neighbour never follows a claim that reached this node
+	/// over a marked link, which that neighbour is never told; another neighbour's may.
+	#[test]
+	fn a_marked_request_never_follows_a_marked_claim() {
+		let mut router = relay(1);
+		let marked = |role| Port {
+			upstream: true,
+			..port(role)
+		};
+		router.connect(2, marked(Role::Endpoint)).unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		router.connect(3, marked(Role::Endpoint)).unwrap();
+		open(&mut router, 4, Role::Endpoint);
+		let room = (p("room"), 7);
+		let announce = Msg::Announce {
+			changes: vec![(room.clone(), live(0))],
+		};
+		router.recv(2, announce).unwrap();
+		let me = router.me();
+		assert!(!router.admits(3, me, &room));
+		assert!(router.admits(4, me, &room));
+	}
+
+	/// What a neighbour holds of what this node sent it: each route with its origin's
+	/// claims, and each claim told.
+	#[test]
+	fn a_neighbour_holds_each_route_and_claim_sent() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Endpoint);
+		let changes = ["a", "b", "c"].map(|path| ((p(path), 7), live(0)));
+		router
+			.recv(
+				2,
+				Msg::Announce {
+					changes: changes.into(),
+				},
+			)
+			.unwrap();
+		open(&mut router, 3, Role::Endpoint);
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(3, edit).unwrap();
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.drain();
+		assert_eq!(router.held(3), 3, "three claims told");
+		assert_eq!(router.held(4), 4, "its route to this node, with three claims");
+		assert_eq!(router.held(5), 0, "no such neighbour");
+	}
+
+	/// A lost claim waiting out the debounce, or one no route reaches, is shown unavailable
+	/// to a neighbour that asks, even one unmarked when its source was marked, but never
+	/// back to its source, marked or not.
+	#[test]
+	fn an_unavailable_claim_is_shown_to_every_asker_but_its_source() {
+		let mut router = relay(1);
+		let marked = Port {
+			upstream: true,
+			..port(Role::Endpoint)
+		};
+		router.connect(2, marked).unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		open(&mut router, 3, Role::Endpoint);
+		let all = || Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(2, all()).unwrap();
+		router.edit(3, all()).unwrap();
+		let announce = |path: &str, change| Msg::Announce {
+			changes: vec![((p(path), 7), change)],
+		};
+		router.recv(2, announce("room", live(0))).unwrap();
+		router.recv(3, announce("hall", live(0))).unwrap();
+		router.recv(3, announce("yard", live(0))).unwrap();
+		router.drain();
+		router.recv(2, announce("room", Change::Lost)).unwrap();
+		router.recv(3, announce("hall", Change::Lost)).unwrap();
+		let told = |to: usize, out: &[(usize, Msg<u64, u64>)]| -> Vec<Change<u64>> {
+			(out.iter())
+				.filter(|(peer, _)| *peer == to)
+				.filter_map(|(_, msg)| match msg {
+					Msg::Announce { changes } => Some(changes.clone()),
+					_ => None,
+				})
+				.flatten()
+				.map(|(_, change)| change)
+				.collect()
+		};
+		let out = router.drain();
+		assert!(
+			matches!(told(2, &out).as_slice(), [Change::Live(claim)] if claim.unavailable),
+			"hall, to a marked neighbour: {out:?}"
+		);
+		assert!(
+			matches!(told(3, &out).as_slice(), [Change::Live(claim)] if claim.unavailable),
+			"room, to an unmarked neighbour: {out:?}"
+		);
+		// So is a claim its source tells unavailable, which no route reaches.
+		let Change::Live(unavailable) = live(0) else {
+			unreachable!("a live claim");
+		};
+		let unavailable = Change::Live(Claim {
+			unavailable: true,
+			..unavailable
+		});
+		router.recv(3, announce("yard", unavailable)).unwrap();
+		let out = router.drain();
+		assert!(told(3, &out).is_empty(), "{out:?}");
+		assert!(
+			matches!(told(2, &out).as_slice(), [Change::Live(claim)] if claim.unavailable),
+			"{out:?}"
 		);
 	}
 

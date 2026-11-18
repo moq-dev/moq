@@ -2785,16 +2785,13 @@ impl kio::Task for Fetching {
 					}
 				},
 			};
-			let served = match target {
-				Target::Serving(served) => served,
-				// Never handed out before its copy's info passes the front's check.
-				Target::Staged(_) => {
-					asked.answer = Some(result);
-					return match self.route.end() {
-						Some(Some(Err(err))) => Poll::Ready(Err(err)),
-						_ => Poll::Pending,
-					};
-				}
+			// Never handed out before its copy's info passes the front's check.
+			let Target::Serving(served) = target else {
+				asked.answer = Some(result);
+				return match self.route.end() {
+					Some(Some(Err(err))) => Poll::Ready(Err(err)),
+					_ => Poll::Pending,
+				};
 			};
 			let serving = copy;
 			return match result {

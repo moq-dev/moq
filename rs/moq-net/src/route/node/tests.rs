@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::*;
 use crate::route::relay::{Edit, Hop, Offer, Role};
@@ -134,6 +134,31 @@ fn own_claims_are_told_and_never_served() {
 	assert_eq!(told(&viewer), [("room".to_string(), false)]);
 }
 
+/// An own claim refiled as having crossed a marked link leaves its unmarked filing, so a
+/// marked neighbour stops being told it, and is told it again once filed back.
+#[test]
+fn an_own_claim_refiled_as_marked_is_withdrawn_from_a_marked_neighbour() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let marked = Port {
+		upstream: true,
+		..port(Role::Scoped(Vec::new()))
+	};
+	let viewer = node.connect(1, marked).unwrap();
+	let ask = Edit {
+		remove: Vec::new(),
+		add: vec![Path::empty()],
+	};
+	viewer.recv(Msg::Ask(ask)).unwrap();
+	viewer.flush();
+	node.own(false, room.clone(), live(0));
+	assert_eq!(told(&viewer), [("room".to_string(), true)]);
+	node.own(true, room.clone(), live(0));
+	assert_eq!(told(&viewer), [("room".to_string(), false)]);
+	node.own(false, room, live(0));
+	assert_eq!(told(&viewer), [("room".to_string(), true)]);
+}
+
 /// A claim a neighbour announces is handed back to that session to serve, naming no
 /// node, since the neighbour is where requests for it go.
 #[test]
@@ -248,6 +273,70 @@ fn a_routed_claim_names_its_node() {
 	assert_eq!(node.poll_forward(2, Some(id(8)), &room, &waiter), Poll::Ready(None));
 }
 
+/// A routed claim told unavailable while its route stays is served unavailable, once
+/// however often it changes, and a request naming its node goes nowhere.
+#[test]
+fn an_unavailable_routed_claim_takes_no_request() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let relay = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	relay.recv(Msg::Edited).unwrap();
+	let offer = Offer {
+		path: [
+			Hop { node: far, session: 0 },
+			Hop {
+				node: id(7),
+				session: 4,
+			},
+		]
+		.into(),
+		draining: false,
+		priority: i8::MAX,
+		cost: 3,
+		marked: false,
+	};
+	relay
+		.recv(Msg::Route {
+			origin: far,
+			offer: Some(offer),
+		})
+		.unwrap();
+	let claims = |cost, unavailable, floor| Msg::Claims {
+		origin: far,
+		changes: vec![(
+			room.clone(),
+			Change::Live(Claim {
+				item: Attr { epoch: 0, above: 0 },
+				cost,
+				priority: i8::MAX,
+				draining: false,
+				unavailable,
+				chain: Vec::new(),
+			}),
+		)],
+		floor,
+	};
+	relay.recv(claims(0, false, 1)).unwrap();
+	relay.flush();
+	assert_eq!(confirm(&relay), 1);
+
+	relay.recv(claims(0, true, 2)).unwrap();
+	relay.flush();
+	let serves = serves(&relay);
+	let [Output::Serve { served, .. }] = serves.as_slice() else {
+		panic!("served unavailable: {serves:?}");
+	};
+	assert!(!served.available);
+	relay.recv(claims(5, true, 3)).unwrap();
+	relay.flush();
+	assert!(self::serves(&relay).is_empty(), "already served unavailable");
+	assert_eq!(
+		node.poll_forward(2, Some(far), &room, &kio::Waiter::noop()),
+		Poll::Ready(None)
+	);
+}
+
 /// A session that closes leaves what it served as an orphan, which the node holds while
 /// the reader still shows the claim and releases, not ended, once the debounce runs out.
 #[test]
@@ -290,6 +379,27 @@ fn an_orphan_is_released_once_another_session_serves_the_claim() {
 	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
 }
 
+/// The origin's own copy of a claim never waits to be served, so a session refusing the
+/// claim still releases the orphan another session left.
+#[test]
+fn an_orphan_is_released_once_every_session_refuses_the_claim() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	node.own(false, room.clone(), live(0));
+	let first = publisher(&node, 1);
+	announce(&first, &room, live(0));
+	assert_eq!(confirm(&first), 1);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	first.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(first);
+
+	let second = publisher(&node, 2);
+	announce(&second, &room, live(0));
+	assert_eq!(left.load(Ordering::SeqCst), Left::HELD);
+	second.serving(node.me(), &room, false);
+	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+}
+
 /// A claim its publisher withdraws stops being served as ended, so the origin withdraws
 /// it rather than showing it offline.
 #[test]
@@ -307,14 +417,14 @@ fn a_withdrawn_claim_is_unserved_as_ended() {
 	);
 }
 
-/// A mount is a key of its own on the session: it is told what it asks for, and closing
-/// the session closes it too.
+/// A mount is a key of its own on the session: it is told what it asks for, never asks
+/// the peer itself however much its session does, and closing the session closes it too.
 #[test]
 fn a_mount_asks_on_its_own_key() {
 	let (node, _clock) = node();
 	node.own(false, cast("a/x"), live(0));
 	node.own(false, cast("b/y"), live(0));
-	let session = node.connect(1, port(Role::Scoped(Vec::new()))).unwrap();
+	let session = publisher(&node, 1);
 	let mount = session.mount().unwrap();
 	let ask = Edit {
 		remove: Vec::new(),
@@ -322,10 +432,112 @@ fn a_mount_asks_on_its_own_key() {
 	};
 	mount.recv(Msg::Ask(ask)).unwrap();
 	mount.flush();
-	assert_eq!(told(&mount), [("b/y".to_string(), true)]);
+	let sent: Vec<Msg> = std::iter::from_fn(|| mount.try_wire()).collect();
+	assert!(!sent.iter().any(|msg| matches!(msg, Msg::Ask(_))), "{sent:?}");
+	let mounted: Vec<_> = (sent.into_iter())
+		.filter_map(|msg| match msg {
+			Msg::Announce { changes } => Some(changes),
+			_ => None,
+		})
+		.flatten()
+		.map(|((path, _), change)| (path.to_string(), matches!(change, Change::Live(_))))
+		.collect();
+	assert_eq!(mounted, [("b/y".to_string(), true)]);
 	assert!(told(&session).is_empty());
 
 	drop(session);
 	node.own(false, cast("b/z"), live(0));
 	assert!(told(&mount).is_empty(), "the mount closed with its session");
+}
+
+/// A session that is leaving is queued nothing more, and loses what was queued.
+#[test]
+fn a_muted_session_is_sent_nothing() {
+	let (node, _clock) = node();
+	let viewer = viewer(&node, 1);
+	node.own(false, cast("a"), live(0));
+	viewer.mute();
+	assert!(viewer.try_wire().is_none(), "what was queued is dropped");
+	node.own(false, cast("b"), live(0));
+	assert!(viewer.try_wire().is_none(), "nothing more is queued");
+}
+
+/// A request from a session still goes nowhere back to it once another session closes.
+#[test]
+fn a_closed_session_leaves_the_others_requests_alone() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let publisher = publisher(&node, 1);
+	announce(&publisher, &room, live(0));
+	assert_eq!(confirm(&publisher), 1);
+	drop(viewer(&node, 2));
+	let waiter = kio::Waiter::noop();
+	assert_eq!(node.poll_forward(1, None, &room, &waiter), Poll::Ready(None));
+}
+
+/// When one of two sessions serving a claim closes, the other keeps serving it as it
+/// was, unchanged, and requests go to it at once.
+#[test]
+fn a_closed_session_leaves_the_others_slots_alone() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let first = publisher(&node, 1);
+	let second = publisher(&node, 2);
+	let _viewer = viewer(&node, 3);
+	announce(&first, &room, live(0));
+	announce(&second, &room, live(0));
+	confirm(&first);
+	confirm(&second);
+	drop(first);
+	assert!(serves(&second).is_empty(), "nothing changed for the second session");
+	assert_eq!(
+		node.poll_forward(3, None, &room, &kio::Waiter::noop()),
+		Poll::Ready(Some(Via::Route { node: node.me() }))
+	);
+}
+
+struct Flag(AtomicBool);
+
+impl std::task::Wake for Flag {
+	fn wake(self: Arc<Self>) {
+		self.0.store(true, Ordering::SeqCst);
+	}
+}
+
+impl Flag {
+	fn woken(&self) -> bool {
+		self.0.swap(false, Ordering::SeqCst)
+	}
+}
+
+fn flag() -> (Arc<Flag>, kio::Waiter) {
+	let flag = Arc::new(Flag(AtomicBool::new(false)));
+	let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
+	(flag, waiter)
+}
+
+/// A request waiting on a claim wakes when the session confirms it, and when the claim
+/// changes, and not when nothing it follows does.
+#[test]
+fn a_waiting_request_wakes_when_its_claim_moves() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let (flag, waiter) = flag();
+	let publisher = publisher(&node, 1);
+	let _viewer = viewer(&node, 2);
+	announce(&publisher, &room, live(0));
+	assert!(node.poll_forward(2, None, &room, &waiter).is_pending());
+	publisher.flush();
+	assert!(!flag.woken(), "nothing changed");
+	assert_eq!(confirm(&publisher), 1);
+	assert!(flag.woken(), "the session serves the claim");
+
+	assert!(node.poll_forward(2, None, &cast("other"), &waiter).is_ready());
+	let hall = cast("hall");
+	announce(&publisher, &hall, live(0));
+	assert!(node.poll_forward(2, None, &hall, &waiter).is_pending());
+	flag.woken();
+	announce(&publisher, &hall, Change::Ended);
+	assert!(flag.woken(), "the claim went");
+	assert_eq!(node.poll_forward(2, None, &hall, &waiter), Poll::Ready(None));
 }
