@@ -476,8 +476,11 @@ test("a first session refused before its credential is accepted stops the URL, e
 		tokens,
 		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
+	const statuses: string[] = [];
+	const unsubscribe = reload.status.subscribe((status) => statuses.push(status));
 	try {
-		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
+		await clock.drive(waitFor(dialed, (dialed) => dialed.length > 0));
+		await clock.advance(Duration.millis(10));
 		tokens.set(["new"]);
 		resolve();
 		// The refusal arrives once the session is live, before the server's SETUP, as a relay
@@ -488,7 +491,10 @@ test("a first session refused before its credential is accepted stops the URL, e
 		await clock.advance(Duration.millis(100));
 		expect(dialed.peek()).toEqual(["old"]);
 		expect(reload.established.peek()).toBeUndefined();
+		// The refused session never read as connected.
+		expect(statuses).not.toContain("connected");
 	} finally {
+		unsubscribe();
 		reload.close();
 		globalThis.WebTransport = original;
 	}

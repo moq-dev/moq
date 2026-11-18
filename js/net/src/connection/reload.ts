@@ -629,11 +629,31 @@ export class Reload {
 					}
 					current = connection;
 					this.#verdict.connected(connection);
-
-					// The replacement serves now; a predecessor keeps draining its groups in flight.
-					this.#serve(connection);
-					this.#setDialing(false);
 					connected = now();
+
+					// Serve only once the session is established: the peer accepted its credential,
+					// drained it with a GOAWAY, or it stayed up past the healthy bar, the only sign
+					// on a version that never answers (moq-lite-03/04). Until then it may still be a
+					// refusal, which never reads as connected. A close first is handled below.
+					const bar = this.#pacing().healthy;
+					const acceptance = wireOf(connection).auth.accepted;
+					if (!acceptance.peek()) {
+						const waiting = new AbortController();
+						const uptime = sleep(bar, { signal: waiting.signal }).catch(() => {});
+						await effect
+							.race(Signal.race(acceptance), uptime, connection.closed, connection.draining)
+							.finally(() => waiting.abort());
+						if (signal.aborted) return;
+					}
+					if (
+						acceptance.peek() ||
+						connection.draining.peek() !== undefined ||
+						now().since(connected).ge(bar)
+					) {
+						// The replacement serves now; a predecessor keeps draining its groups in flight.
+						this.#serve(connection);
+					}
+					this.#setDialing(false);
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
