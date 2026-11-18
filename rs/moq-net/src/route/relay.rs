@@ -1495,6 +1495,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		let flipped = was.is_some() != pick.is_some();
 		let moved = was.map(|best| best.offer.rank()) != pick.as_ref().map(|best| best.offer.rank());
+		// Every claim shown through the route carries its mark, whatever the rank.
+		let remarked = (was.zip(pick.as_ref())).is_some_and(|(was, pick)| was.offer.marked != pick.offer.marked);
 		match pick {
 			Some(best) => self.best.insert(origin, best),
 			None => self.best.remove(&origin),
@@ -1504,7 +1506,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		// Whether its claims are reachable follows the route, and so does the rank of each
 		// that the rank reaches.
-		if flipped && let Some(known) = self.known.get(&origin) {
+		if (flipped || remarked)
+			&& let Some(known) = self.known.get(&origin)
+		{
 			self.count(known.items.len());
 			self.dirty.extend(known.items.keys().cloned());
 		} else if moved && let Some(ranked) = self.ranked.get(&origin) {
@@ -1581,6 +1585,17 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let peers: Vec<N> = self.routing.iter().copied().collect();
 		while let Some(origin) = self.stale.pop_first() {
 			for &peer in &peers {
+				self.advertise_to(origin, peer);
+			}
+		}
+	}
+
+	/// Send what changed of `origin`'s route to every routing neighbour now, rather than at
+	/// the next drain.
+	fn advertise_now(&mut self, origin: NodeId) {
+		if self.stale.remove(&origin) {
+			let peers: Vec<N> = self.routing.iter().copied().collect();
+			for peer in peers {
 				self.advertise_to(origin, peer);
 			}
 		}
@@ -2001,8 +2016,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 				self.revise(owner, broadcast.clone(), Change::Live(claim));
 				// A claim that moved between the identities leaves the old one after the new
-				// one holds it.
+				// one holds it, and after a routing neighbour hears the new one's route, which
+				// a first claim only marks stale: else the neighbour sees it gone between them.
 				if let Some(old) = filed.filter(|old| *old != owner) {
+					self.advertise_now(owner);
 					self.revise(old, broadcast, Change::Lost);
 				}
 			}
@@ -3719,6 +3736,151 @@ mod tests {
 		let told: Vec<&Msg<u64, u64>> = (out.iter()).filter(|(to, _)| *to == 3).map(|(_, msg)| msg).collect();
 		assert_eq!(told, [&Msg::Edited, &Msg::Synced(p("other"))]);
 		assert_eq!(router.kept().told, 0);
+	}
+
+	/// A claim moving to an identity that never announced reaches a routing neighbour
+	/// under the new identity before it leaves the old one.
+	#[test]
+	fn a_claim_moving_identity_is_routed_before_it_leaves() {
+		let mut router = relay(1);
+		router
+			.connect(
+				2,
+				Port {
+					upstream: true,
+					..port(Role::Endpoint)
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		open(&mut router, 3, Role::Routing(node(3)));
+		open(&mut router, 5, Role::Endpoint);
+		router.drain();
+
+		let broadcast = (p("live"), 7);
+		let give = |change| Msg::Announce {
+			changes: vec![(broadcast.clone(), change)],
+		};
+		router.recv(5, give(live(0))).unwrap();
+		router.recv(2, give(live(0))).unwrap();
+		router.drain();
+		assert!(
+			router.own().1.contains_key(&broadcast),
+			"the unmarked giver is preferred"
+		);
+
+		router.recv(5, give(Change::Lost)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 3)
+			.map(|(_, msg)| msg)
+			.collect();
+		let me = router.me();
+		let me_marked = router.me_marked();
+		let routed = out
+			.iter()
+			.position(|msg| matches!(msg, Msg::Route { origin, offer: Some(_) } if *origin == me_marked));
+		let left = out.iter().position(|msg| {
+			matches!(msg, Msg::Claims { origin, changes, .. }
+				if *origin == me && changes.iter().any(|(_, change)| *change == Change::Lost))
+		});
+		let (Some(routed), Some(left)) = (routed, left) else {
+			panic!("the move was not told: {out:?}");
+		};
+		assert!(routed < left, "the old identity left first: {out:?}");
+		assert!(router.own_as(me_marked).1.contains_key(&broadcast));
+	}
+
+	/// A route that turns marked at the same rank re-tells a scoped neighbour each claim
+	/// it reaches, now marked.
+	#[test]
+	fn a_route_turning_marked_at_equal_rank_retells_its_claims() {
+		let mut router = relay(1);
+		open(&mut router, 3, Role::Routing(node(3)));
+		router
+			.connect(
+				4,
+				Port {
+					upstream: true,
+					..port(Role::Routing(node(4)))
+				},
+			)
+			.unwrap();
+		router.recv(4, Msg::Edited).unwrap();
+		router
+			.edit(
+				4,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		open(&mut router, 5, Role::Scoped(vec![p(ROOT)]));
+		router
+			.edit(
+				5,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		router.drain();
+
+		let route = |via: Id| Msg::Route {
+			origin: node(9),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(9),
+						session: 0,
+					},
+					Hop {
+						node: node(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		router.recv(3, route(3)).unwrap();
+		router.recv(4, route(4)).unwrap();
+		let broadcast = (p("live"), 7);
+		let claims = Msg::Claims {
+			origin: node(9),
+			changes: vec![(broadcast.clone(), live(0))],
+			floor: 1,
+		};
+		router.recv(3, claims).unwrap();
+		let told = |out: Vec<(usize, Msg<u64, u64>)>| {
+			(out.into_iter()).find_map(|(to, msg)| match msg {
+				Msg::Announce { changes } if to == 5 => (changes.into_iter())
+					.find(|(told, _)| told.0 == broadcast.0)
+					.and_then(|(_, change)| match change {
+						Change::Live(claim) => Some(claim),
+						_ => None,
+					}),
+				_ => None,
+			})
+		};
+		let first = told(router.drain()).expect("the scoped neighbour is told the claim");
+		assert!(!first.marked, "the unmarked route is preferred");
+
+		router
+			.recv(
+				3,
+				Msg::Route {
+					origin: node(9),
+					offer: None,
+				},
+			)
+			.unwrap();
+		let again = told(router.drain()).expect("the scoped neighbour is told the claim again");
+		assert!(again.marked, "now reached over a marked link");
 	}
 
 	/// A claim taken over a marked link goes under the node's marked identity, whose route
