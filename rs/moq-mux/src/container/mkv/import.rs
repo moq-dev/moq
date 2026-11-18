@@ -1033,8 +1033,8 @@ pub struct Finished<E: crate::catalog::hang::CatalogExt = ()> {
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Finished<E> {
-	/// Release every track's cache, reporting `err` to readers that have not drained it; see
-	/// [`Import::abort`].
+	/// Abort every track with `err`; see [`Import::abort`]. Readers still draining a track get its
+	/// clean end instead once every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.import.abort(err);
 	}
