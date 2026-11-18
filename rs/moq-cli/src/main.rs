@@ -508,6 +508,9 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
 	let cluster = moq.cluster()?;
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+	// Before the stage listeners bind: a signal sent once one is up would otherwise
+	// take the default action and kill the process before it shuts down.
+	tasks.spawn(shutdown_signal()?);
 	// The stdin/capture pipelines run on this thread instead of the JoinSet: the
 	// platform capture stream is not Send, so their futures cannot be spawned.
 	let mut locals: Vec<Publish> = Vec::new();
@@ -800,8 +803,6 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 /// Run every endpoint until the first finishes (stdin EOF, SIGINT, SIGTERM, or an
 /// error), then drop the rest.
 async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
-	tasks.spawn(shutdown_signal());
-
 	while let Some(res) = tasks.join_next().await {
 		match res {
 			Ok(Ok(())) => return Ok(()),
@@ -814,21 +815,30 @@ async fn drive(mut tasks: JoinSet<anyhow::Result<()>>) -> anyhow::Result<()> {
 	Ok(())
 }
 
-/// Resolve on SIGINT or, on unix, SIGTERM (what process supervisors send on stop).
-async fn shutdown_signal() -> anyhow::Result<()> {
+/// A future that resolves on SIGINT or, on unix, SIGTERM (what process supervisors
+/// send on stop). The handlers are installed here rather than on its first poll, so a
+/// signal that arrives before the future runs is still caught.
+fn shutdown_signal() -> anyhow::Result<impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static> {
 	#[cfg(unix)]
 	{
-		let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-			.context("failed to listen for SIGTERM")?;
-		tokio::select! {
-			res = tokio::signal::ctrl_c() => res.context("failed to listen for SIGINT")?,
-			_ = term.recv() => {}
-		}
-		Ok(())
+		use tokio::signal::unix::{SignalKind, signal};
+		let mut term = signal(SignalKind::terminate()).context("failed to listen for SIGTERM")?;
+		let mut int = signal(SignalKind::interrupt()).context("failed to listen for SIGINT")?;
+		Ok(async move {
+			tokio::select! {
+				_ = int.recv() => {}
+				_ = term.recv() => {}
+			}
+			Ok(())
+		})
 	}
 	#[cfg(not(unix))]
 	{
-		tokio::signal::ctrl_c().await.context("failed to listen for SIGINT")
+		let mut ctrl_c = tokio::signal::windows::ctrl_c().context("failed to listen for SIGINT")?;
+		Ok(async move {
+			ctrl_c.recv().await;
+			Ok(())
+		})
 	}
 }
 
@@ -868,6 +878,23 @@ mod tests {
 	use std::pin::Pin;
 
 	type Pipeline = Pin<Box<dyn Future<Output = anyhow::Result<()>>>>;
+
+	/// The handlers are installed when the future is made, not when it first runs: a
+	/// SIGTERM in between is caught instead of killing the process.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn a_signal_before_the_first_poll_is_caught() {
+		let shutdown = shutdown_signal().unwrap();
+		let signaled = std::process::Command::new("kill")
+			.args(["-TERM", &std::process::id().to_string()])
+			.status()
+			.unwrap();
+		assert!(signaled.success());
+		tokio::time::timeout(std::time::Duration::from_secs(10), shutdown)
+			.await
+			.expect("the SIGTERM was never seen")
+			.unwrap();
+	}
 
 	/// A local pipeline that dies takes the process with it, even while another one is
 	/// still running. Reporting completion from inside the task instead would miss
