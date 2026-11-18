@@ -193,13 +193,28 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 }
 
 /// [`failures`] over seeded meshes of 12 relays, past the three relays and one session
-/// close the exhaustive check reaches.
-#[kio::test]
-async fn failures_at_one_instant() {
-	for seed in 0..8 {
-		let worst = failures(0x6d6f71 + seed, 12).await;
-		eprintln!("measured failures at one instant, seed {seed}: worst stall {worst:?}");
+/// close the exhaustive check reaches, one test to a seed so they run in parallel.
+mod failures_at_one_instant {
+	macro_rules! seeds {
+		($($name:ident = $seed:literal),*) => {$(
+			#[kio::test]
+			async fn $name() {
+				let worst = super::failures(0x6d6f71 + $seed, 12).await;
+				eprintln!("measured failures at one instant, seed {}: worst stall {worst:?}", $seed);
+			}
+		)*};
 	}
+
+	seeds!(
+		seed_0 = 0,
+		seed_1 = 1,
+		seed_2 = 2,
+		seed_3 = 3,
+		seed_4 = 4,
+		seed_5 = 5,
+		seed_6 = 6,
+		seed_7 = 7
+	);
 }
 
 /// One encoder pushes to `X` (`R0`) at cost 1 and `Y` (`R1`), and `A` (`R2`) links to `X` at
