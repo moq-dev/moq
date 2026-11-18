@@ -2,8 +2,10 @@
 //!
 //! A [`Front`] is one path served through a spliced broadcast: it picks the
 //! source it serves from and splices each logical track from that source's
-//! copy, re-splicing when the source is replaced and refusing what a source
-//! will not serve. Everything here is plain data: [`Front::step`] takes one
+//! copy, refusing what the source will not serve. A front serves one source for
+//! its life: when that source ends or another route becomes best, the front
+//! ends and bounces the path's announcement rather than splicing in a source
+//! that may be another broadcast under the same path and group numbers. Everything here is plain data: [`Front::step`] takes one
 //! [`Event`] and returns the [`Action`]s to perform, without locks or waiters.
 //! The origin's driver task feeds events from the world (the route table, the
 //! sources, the tracks, the clock) and executes the actions; see
@@ -140,17 +142,17 @@ pub(super) enum Identity {
 	/// covering route, and whoever serves it fixes the identity.
 	Undetermined,
 	/// The first source was a broadcast published on this origin. A newer local
-	/// publisher takes over while the incumbent is live; once the incumbent is
-	/// closing the front ends instead, so a newcomer gets a fresh broadcast
-	/// rather than being spliced into one that is over.
+	/// publisher ends the front, so the newcomer gets a fresh broadcast rather
+	/// than being spliced into the incumbent's.
 	Local,
 	/// The serving route's first hop was absent or [`Hop::UNKNOWN`], which
 	/// identifies nobody: the front cannot resume through any other route, so
 	/// its source ending, `route` leaving the table, or `route` gaining a first
 	/// hop ends it.
 	Anonymous { route: u64 },
-	/// The first hop of the serving route. Routes sharing it are the same
-	/// origin reached another way and safe to resume through.
+	/// The first hop of the serving route. Routes sharing it are the same origin
+	/// reached another way, so they qualify while the first request resolves;
+	/// once a source serves, any route change still ends the front.
 	Publisher(Hop),
 }
 
@@ -375,14 +377,20 @@ impl Front {
 				actions.push(Action::Request { route: candidate.route });
 			}
 			// Nothing qualifies: the front is over, even with a live source. Its
-			// route left the table and nothing with the same content replaced it,
-			// so it serves nobody new; a later announcement gets a fresh front.
+			// route left the table or now names another publisher, and nothing with
+			// the same content replaced it, so it serves nobody new; a later
+			// announcement gets a fresh front. A route still at the path (renamed in
+			// place) shows the announce cursors only an update, so a front that
+			// served bounces it like any other end.
 			None => {
 				self.upstream = None;
 				let err = match self.identity {
 					Identity::Undetermined => self.last_err.take().unwrap_or(Error::Unroutable),
 					_ => self.last_err.take().unwrap_or(Error::Dropped),
 				};
+				if self.resolved {
+					actions.push(Action::Bounce);
+				}
 				self.end(err, actions);
 			}
 		}
@@ -909,7 +917,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -935,7 +943,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 

@@ -3664,9 +3664,9 @@ struct OriginState {
 	cursors: HashMap<ConsumerId, TableCursor>,
 
 	// The remotely-served fronts; see [`FrontKey`]. Each is a spliced broadcast
-	// whose watcher task materializes it from the best covering route and
-	// re-splices it through routes sharing its first hop, so a route change the
-	// identity survives is invisible to subscribers. Weak, so a front dies with
+	// whose watcher task materializes it from the best covering route and serves
+	// that one source until it ends or another route becomes best, when the
+	// front ends and bounces the path's announcement. Weak, so a front dies with
 	// its watcher and a later request re-creates it.
 	fronts: WeakCache<FrontKey, RemoteFront>,
 
@@ -4693,12 +4693,11 @@ impl Consumer {
 	/// the best announced route covering it (the most specific prefix, then the
 	/// cheapest, a broadcast published on this origin winning ties) and
 	/// materializes it, from the broadcast itself or from the peer that
-	/// announced the route. When its serving source dies or a better qualifying
-	/// route appears, the front re-splices through the best route sharing its
-	/// first hop at a group boundary, invisibly to subscribers. A change that
-	/// does not preserve the first hop ends the broadcast instead, as does its
-	/// route retracting with no replacement, and the next request re-serves the
-	/// path. Tracks already in flight carry on to their own end.
+	/// announced the route. A front never splices a second source in: when its
+	/// serving source dies, another route becomes best, or its route retracts or
+	/// is renamed, the broadcast ends and the path's announcement is bounced
+	/// (ended, then announced again where a route remains), and the next request
+	/// re-serves the path. Tracks already in flight carry on to their own end.
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
@@ -8142,6 +8141,34 @@ mod tests {
 			view.assert_next_wait();
 			drop(other);
 		}
+	}
+
+	/// A route renamed in place to another publisher leaves the front's pin with
+	/// nothing to select, so the front ends while the path stays announced, and it
+	/// bounces like any other end.
+	#[tokio::test]
+	async fn a_route_renamed_in_place_bounces_its_announce() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut view = consumer.announced();
+		let server = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		view.assert_next_active("room/alice");
+		let pending = consumer.request_broadcast("room/alice");
+		// Held open, so the front ends for its route, not for a closed source.
+		let source = broadcast::Info::new().produce();
+		queued(&server).await.accept(&source);
+		let resolved = pending.await.expect("resolves");
+
+		server.update(Route::default().with_hops(hops(&[11]))).unwrap();
+		tokio::time::timeout(Duration::from_secs(10), resolved.closed())
+			.await
+			.expect("the front ends");
+		view.assert_next_ended("room/alice");
+		view.assert_next_active("room/alice");
+		view.assert_next_wait();
+		drop(source);
 	}
 
 	/// A front at a path served only through a covering prefix bounces nothing:
