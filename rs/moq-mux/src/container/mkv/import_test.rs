@@ -2148,11 +2148,12 @@ fn repeated_reinit_keeps_flat_state() {
 	}
 }
 
-/// An avcC or hvcC track whose first keyframe repeats its SPS in band lands as `avc3`/`hev1`; one
-/// whose keyframe doesn't stays `avc1`/`hvc1`. The keyframe decides even when it streams in a byte
-/// at a time behind an earlier audio block.
-#[test]
-fn keyframe_decides_where_parameter_sets_live() {
+/// An avcC or hvcC track whose first keyframe carries a parameter set in band lands as
+/// `avc3`/`hev1`; one whose keyframe doesn't stays `avc1`/`hvc1`. The keyframe decides even when it
+/// streams in a byte at a time behind an earlier audio block, and the catalog waits for it: the
+/// first one published already lists the video.
+#[tokio::test(start_paused = true)]
+async fn keyframe_decides_where_parameter_sets_live() {
 	use crate::codec::{h264, h265};
 	use bytes::Bytes;
 
@@ -2210,10 +2211,26 @@ fn keyframe_decides_where_parameter_sets_live() {
 			for chunk in [1, data.len()] {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+				let mut published = crate::catalog::hang::Consumer::<()>::new(
+					broadcast.consume().track(hang::Catalog::DEFAULT_NAME).unwrap(),
+				);
 				let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+				let waiter = kio::Waiter::noop();
+				let mut first = None;
 				for chunk in data.chunks(chunk) {
 					mkv.decode(chunk).unwrap();
+					if first.is_none()
+						&& let std::task::Poll::Ready(snapshot) = published.poll_next(&waiter)
+					{
+						first = snapshot.unwrap();
+					}
 				}
+				let first = first.expect("the keyframe publishes the catalog");
+				assert_eq!(
+					first.video.renditions.len(),
+					1,
+					"{codec_id}: the first catalog lists the video"
+				);
 				let snapshot = catalog.snapshot();
 				assert_eq!(snapshot.audio.renditions.len(), 1);
 				let config = snapshot

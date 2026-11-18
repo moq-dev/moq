@@ -3,7 +3,7 @@
 //! Publishes H.265 frames on a single moq track and resolves the catalog
 //! rendition, in either framing: Annex-B with inline VPS/SPS/PPS (always hev1), or
 //! length-prefixed NALU with an out-of-band hvcC (hev1 when its first keyframe
-//! repeats an SPS in band, hvc1 otherwise). A layered stream
+//! carries a parameter set in band, hvc1 otherwise). A layered stream
 //! (MV-HEVC, SHVC) imports as its base layer: only a base-layer SPS configures the
 //! rendition, while every layer's NAL units pass through (VPS is cached but not parsed).
 //!
@@ -78,7 +78,7 @@ impl Import {
 	/// - **hvcC** (no leading start code): parsed as an `HEVCDecoderConfigurationRecord`,
 	///   which resolves the config and is stored as the catalog `description`. Required
 	///   for length-prefixed frames. The rendition publishes at the first keyframe, as hev1
-	///   when that keyframe repeats an SPS in band and hvc1 otherwise.
+	///   when that keyframe carries a parameter set in band and hvc1 otherwise.
 	/// - **Annex-B** (leading start code): the first base-layer SPS resolves the config, as hev1.
 	///   Optional, since Annex-B also self-initializes from the first keyframe.
 	///
@@ -142,16 +142,40 @@ impl Import {
 	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
 	/// track, which keeps it and its catalog rendition published.
 	///
-	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	/// A record no keyframe followed publishes as it stands. A finish that fails ends the track with
+	/// the cause instead, so it can't be retried.
 	pub fn finish(
-		self,
+		mut self,
 	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>> {
-		self.track.finish()
+		match self.publish_pending() {
+			Ok(()) => self.track.finish(),
+			Err(err) => {
+				drop(self.track.fail(err.reason()));
+				Err(err)
+			}
+		}
 	}
 
 	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
 	pub(crate) fn finish_in_place(&mut self) -> crate::Result<()> {
-		self.track.end_with(None)
+		let published = self.publish_pending();
+		let ended = self.track.end_with(published.as_ref().err().map(crate::Error::reason));
+		published.and(ended)
+	}
+
+	/// End the track unless it already ended, dropping a record no keyframe followed, for an owner
+	/// replacing this importer with a successor.
+	pub(crate) fn end(&mut self) -> crate::Result<()> {
+		self.pending = None;
+		self.track.end()
+	}
+
+	/// Publish a held record as it stands: no keyframe follows to say where the parameter sets live.
+	fn publish_pending(&mut self) -> crate::Result<()> {
+		match self.pending.take() {
+			Some(config) => self.apply_config(config),
+			None => Ok(()),
+		}
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -312,10 +336,14 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	Ok(super::config_from_sps(&sps, true)?)
 }
 
-/// Whether a length-prefixed access unit carries an SPS in band.
-pub(crate) fn has_sps(payload: &[u8], length_size: usize) -> bool {
-	crate::codec::annexb::length_prefixed_nals(payload, length_size)
-		.is_ok_and(|nals| nals.map_while(|nal| nal.ok()).any(is_sps))
+/// Whether a length-prefixed access unit carries a parameter set (VPS, SPS, or PPS) in band.
+pub(crate) fn has_parameter_set(payload: &[u8], length_size: usize) -> bool {
+	crate::codec::annexb::length_prefixed_nals(payload, length_size).is_ok_and(|nals| {
+		nals.map_while(|nal| nal.ok()).any(|nal| {
+			nal.first()
+				.is_some_and(|h| matches!(NalType::of(*h), NalType::VPS | NalType::SPS | NalType::PPS))
+		})
+	})
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -536,22 +564,27 @@ mod tests {
 		crate::codec::h265::hvc1_frame(au, 4, moq_net::Timestamp::from_micros(0).unwrap()).unwrap()
 	}
 
-	/// An hvcC stream whose keyframes repeat the parameter sets in band lands as hev1; the record
-	/// still frames it.
+	/// An hvcC stream whose keyframes carry any parameter set in band lands as hev1, a VPS alone
+	/// included; the record still frames it.
 	#[tokio::test(start_paused = true)]
 	async fn hvcc_with_in_band_parameter_sets_lands_as_hev1() {
 		let hvcc = fixtures::hvcc();
-		let (track, catalog) = setup("video");
-		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
-		import.initialize(&hvcc).unwrap();
-		import
-			.decode([idr_frame(&[fixtures::VPS, fixtures::SPS, fixtures::PPS])])
-			.unwrap();
+		for in_band in [&[fixtures::VPS, fixtures::SPS, fixtures::PPS][..], &[fixtures::VPS][..]] {
+			let (track, catalog) = setup("video");
+			let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+			import.initialize(&hvcc).unwrap();
+			import.decode([idr_frame(in_band)]).unwrap();
 
-		let snapshot = catalog.snapshot();
-		let cfg = &snapshot.video.renditions["video"];
-		assert_eq!(cfg.codec.to_string().get(..4), Some("hev1"));
-		assert_eq!(cfg.description.as_deref(), Some(hvcc.as_ref()));
+			let snapshot = catalog.snapshot();
+			let cfg = &snapshot.video.renditions["video"];
+			assert_eq!(
+				cfg.codec.to_string().get(..4),
+				Some("hev1"),
+				"{} in band",
+				in_band.len()
+			);
+			assert_eq!(cfg.description.as_deref(), Some(hvcc.as_ref()));
+		}
 	}
 
 	/// An hvc1 payload is never scanned for an inline SPS. A NAL of exactly 322 bytes

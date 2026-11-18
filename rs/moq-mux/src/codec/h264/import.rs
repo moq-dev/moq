@@ -10,12 +10,13 @@
 //! splitter packages into the first Annex-B keyframe (scanned out of the frame
 //! here). The codec string says where the parameter sets live, never the
 //! framing: Annex-B is always avc3, and an avcC is avc3 when its first keyframe
-//! repeats an SPS in band and avc1 otherwise. A keyframe that can't be configured from either is an error;
-//! non-keyframes before the first config are tolerated (mid-stream joins).
+//! carries a parameter set in band and avc1 otherwise. A keyframe that can't be
+//! configured from either is an error; non-keyframes before the first config are
+//! tolerated (mid-stream joins).
 
 use bytes::Bytes;
 
-use super::{Error, NAL_TYPE_SEI, NAL_TYPE_SPS, Sps};
+use super::{Error, NAL_TYPE_PPS, NAL_TYPE_SEI, NAL_TYPE_SPS, Sps};
 use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
@@ -75,7 +76,7 @@ impl Import {
 	/// - **avcC** (no leading start code): parsed as an `AVCDecoderConfigurationRecord`,
 	///   which resolves the config and is stored as the catalog `description`. Required
 	///   for length-prefixed frames. The rendition publishes at the first keyframe, as avc3
-	///   when that keyframe repeats an SPS in band and avc1 otherwise.
+	///   when that keyframe carries a parameter set in band and avc1 otherwise.
 	/// - **Annex-B** (leading start code): any SPS resolves the config, as avc3.
 	///   Optional, since Annex-B also self-initializes from the first keyframe.
 	///
@@ -140,16 +141,40 @@ impl Import {
 	/// Finish the track, flushing the current group, and return the [`Finished`](crate::container::Finished)
 	/// track, which keeps it and its catalog rendition published.
 	///
-	/// A finish that fails ends the track with the cause instead, so it can't be retried.
+	/// A record no keyframe followed publishes as it stands. A finish that fails ends the track with
+	/// the cause instead, so it can't be retried.
 	pub fn finish(
-		self,
+		mut self,
 	) -> crate::Result<crate::container::Finished<crate::catalog::hang::Container, hang::catalog::VideoConfig>> {
-		self.track.finish()
+		match self.publish_pending() {
+			Ok(()) => self.track.finish(),
+			Err(err) => {
+				drop(self.track.fail(err.reason()));
+				Err(err)
+			}
+		}
 	}
 
 	/// [`finish`](Self::finish) the track in place, for an owner that keeps this importer.
 	pub(crate) fn finish_in_place(&mut self) -> crate::Result<()> {
-		self.track.end_with(None)
+		let published = self.publish_pending();
+		let ended = self.track.end_with(published.as_ref().err().map(crate::Error::reason));
+		published.and(ended)
+	}
+
+	/// End the track unless it already ended, dropping a record no keyframe followed, for an owner
+	/// replacing this importer with a successor.
+	pub(crate) fn end(&mut self) -> crate::Result<()> {
+		self.pending = None;
+		self.track.end()
+	}
+
+	/// Publish a held record as it stands: no keyframe follows to say where the parameter sets live.
+	fn publish_pending(&mut self) -> crate::Result<()> {
+		match self.pending.take() {
+			Some(config) => self.apply_config(config),
+			None => Ok(()),
+		}
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -350,10 +375,14 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	Ok(config)
 }
 
-/// Whether a length-prefixed access unit carries an SPS in band.
-pub(crate) fn has_sps(payload: &[u8], length_size: usize) -> bool {
-	crate::codec::annexb::length_prefixed_nals(payload, length_size)
-		.is_ok_and(|nals| nals.map_while(|nal| nal.ok()).any(is_sps))
+/// Whether a length-prefixed access unit carries a parameter set (SPS or PPS) in band.
+pub(crate) fn has_parameter_set(payload: &[u8], length_size: usize) -> bool {
+	crate::codec::annexb::length_prefixed_nals(payload, length_size).is_ok_and(|nals| {
+		nals.map_while(|nal| nal.ok()).any(|nal| {
+			nal.first()
+				.is_some_and(|h| matches!(h & 0x1f, NAL_TYPE_SPS | NAL_TYPE_PPS))
+		})
+	})
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -731,10 +760,46 @@ mod tests {
 		crate::codec::h264::avc1_frame(au, 4, moq_net::Timestamp::from_millis(ms).unwrap()).unwrap()
 	}
 
-	/// An avcC stream whose keyframes repeat the SPS in band lands as avc3, since a keyframe
-	/// may change parameter sets the record would otherwise fix; the record still frames it.
+	/// An avcC stream whose keyframes carry any parameter set in band lands as avc3, since a keyframe
+	/// may change or supply parameter sets the record would otherwise fix: a PPS alone counts, as for
+	/// a record that omits it. The record still frames the stream.
 	#[tokio::test(start_paused = true)]
 	async fn avcc_with_in_band_parameter_sets_lands_as_avc3() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+		let full =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
+		let sps_only = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[]).unwrap();
+		for (avcc, in_band) in [(full, &[SPS_BT709, PPS][..]), (sps_only, &[PPS][..])] {
+			let (track, catalog) = setup("video");
+			let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+			import.initialize(&avcc).unwrap();
+
+			let mut au = Vec::new();
+			for nal in in_band.iter().chain([&&[0x65, 0x88, 0x84, 0x21][..]]) {
+				au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+				au.extend_from_slice(nal);
+			}
+			let pts = moq_net::Timestamp::from_micros(0).unwrap();
+			import
+				.decode([crate::codec::h264::avc1_frame(au, 4, pts).unwrap()])
+				.unwrap();
+
+			let snapshot = catalog.snapshot();
+			let cfg = &snapshot.video.renditions["video"];
+			assert_eq!(
+				cfg.codec.to_string().get(..4),
+				Some("avc3"),
+				"{} in band",
+				in_band.len()
+			);
+			assert_eq!(cfg.description.as_deref(), Some(avcc.as_ref()));
+		}
+	}
+
+	/// A record no keyframe followed publishes as it stands when the track finishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_record_without_a_keyframe_publishes_at_finish() {
 		use crate::codec::h264::fixtures::{PPS, SPS_BT709};
 
 		let avcc =
@@ -742,21 +807,13 @@ mod tests {
 		let (track, catalog) = setup("video");
 		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
 		import.initialize(&avcc).unwrap();
-
-		let mut au = Vec::new();
-		for nal in [SPS_BT709, PPS, &[0x65, 0x88, 0x84, 0x21][..]] {
-			au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
-			au.extend_from_slice(nal);
-		}
-		let pts = moq_net::Timestamp::from_micros(0).unwrap();
-		import
-			.decode([crate::codec::h264::avc1_frame(au, 4, pts).unwrap()])
-			.unwrap();
-
+		assert!(catalog.snapshot().video.renditions.is_empty());
+		let _finished = import.finish().unwrap();
 		let snapshot = catalog.snapshot();
-		let cfg = &snapshot.video.renditions["video"];
-		assert_eq!(cfg.codec.to_string().get(..4), Some("avc3"));
-		assert_eq!(cfg.description.as_deref(), Some(avcc.as_ref()));
+		assert_eq!(
+			snapshot.video.renditions["video"].codec.to_string().get(..4),
+			Some("avc1")
+		);
 	}
 
 	/// An avc3 stream self-initializes: the config is resolved from the SPS the

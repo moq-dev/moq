@@ -1156,7 +1156,8 @@ async fn a_newer_sequence_header_supersedes_a_held_record() {
 	assert!(matches!(codecs[..], [VideoCodec::AV1(_)]), "{codecs:?}");
 }
 
-/// A seek made while a record waits for its keyframe keys the group that keyframe opens.
+/// A seek made while a record waits for its keyframe keys the group that keyframe opens, even when
+/// the sequence header repeats in between.
 #[tokio::test(start_paused = true)]
 async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
 	let (headers, keyframe) = avc_session(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
@@ -1167,6 +1168,8 @@ async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
 	let mut importer = Import::new(broadcast, catalog.reserve());
 	importer.decode(&headers).unwrap();
 	importer.seek(100).unwrap();
+	// The same sequence headers again, past the FLV file header.
+	importer.decode(&headers[flv_header(0).len()..]).unwrap();
 	importer.decode(&keyframe).unwrap();
 	let _finished = importer.finish().unwrap();
 
