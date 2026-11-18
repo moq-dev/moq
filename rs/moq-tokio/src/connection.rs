@@ -256,7 +256,10 @@ impl Backoff {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Status {
-	/// A session connected (the first connect, or a reconnect after a drop).
+	/// A session connected and its peer accepted the connection credential (the first
+	/// connect, or a reconnect after a drop). On moq-lite 03/04, which never answer the
+	/// credential, the session must stay up past [`Backoff::healthy`] instead. A session the
+	/// peer refuses never reports it.
 	Connected,
 	/// An established session dropped; a reconnect attempt follows.
 	Disconnected,
@@ -1122,6 +1125,9 @@ impl Connection {
 		let (mut probe, mut fallback): (Option<Probing>, Option<url::Url>) = (None, None);
 		// Mirrors the live session's estimates while it serves.
 		let mut forward: Option<Forward> = None;
+		// The transport of the connected session the policy has yet to establish, published
+		// only once it does, so a refused session never shows as connected.
+		let mut pending: Option<crate::Transport> = None;
 		let mut timer: Option<kio::clock::Sleep> = None;
 		// Consecutive walks that failed since the last session, and whether a dial failed
 		// since then, which tells a failed walk from a session that ended too soon.
@@ -1138,8 +1144,7 @@ impl Connection {
 							Ok(crate::client::Dialed { session, transport }) => {
 								tracing::info!(peer = %Endpoint(&url), %transport, "connected");
 								(failed_walks, dial_failed) = (0, false);
-								shared.connected(&session, transport);
-								forward = Some(Forward::new(&session));
+								pending = Some(transport);
 								policy.connected(kio::clock::now(), session);
 								if client.on_fallback(&url, transport) {
 									policy.fallback(kio::clock::now());
@@ -1198,6 +1203,12 @@ impl Connection {
 					dial = Some((url, Box::pin(async move { client.dial(attempt).await })));
 				}
 				// The policy already counted the timeout; dropping the dial cancels it.
+				Action::Established => {
+					if let (Some(transport), Some(session)) = (pending.take(), policy.session()) {
+						shared.connected(session, transport);
+						forward = Some(Forward::new(session));
+					}
+				}
 				Action::Abandon => {
 					if dial.is_some() {
 						dial_failed = true;
@@ -1274,9 +1285,9 @@ impl Connection {
 
 	/// Wait until a session is established, handing the connection back.
 	///
-	/// Returns as soon as a session is live, so the first call waits out the initial dial
-	/// (surfacing its error if the loop gives up, e.g. on an auth failure or in one-shot
-	/// mode). Useful when a caller wants dial errors up front rather than through
+	/// Returns once a session reports [`Status::Connected`], so the first call waits out the
+	/// initial dial and the peer's answer to its credential, surfacing the error if the loop
+	/// gives up instead, e.g. when the peer refuses the credential or in one-shot mode. Useful when a caller wants dial errors up front rather than through
 	/// [`closed`](Self::closed).
 	///
 	/// It consumes and returns the connection so the reconnecting chain,
@@ -2044,8 +2055,9 @@ mod tests {
 		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 		tokio::spawn(async move {
 			while let Ok(request) = server.accept().await {
-				let _ = accepted.send(());
-				let _ = request.ok().await;
+				// Held open: a session the server drops before the client reads its answer
+				// is a refusal.
+				let _ = accepted.send(request.ok().await);
 			}
 		});
 

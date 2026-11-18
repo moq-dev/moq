@@ -6,7 +6,8 @@
 //! [`Reconnect::failed`], and otherwise polls it with the current time. The machine
 //! watches each live session for its close and GOAWAY itself, keeps a drained
 //! predecessor serving through its handover, and drops neither on the caller's behalf
-//! until it reports [`Action::Done`].
+//! until it reports [`Action::Done`]. A connected session serves only once the machine
+//! reports it [`Action::Established`], so a caller never shows a refusal as connected.
 //!
 //! The policy fails fast until a session is established: the peer accepts the connection
 //! credential (its SETUP, or on moq-lite-07-wip the AUTH_OK to the connection's own
@@ -340,6 +341,10 @@ pub enum Action<A, E> {
 	/// [`Reconnect::failed`], polling meanwhile. Build each session's client with
 	/// [`Attempt::client`].
 	Dial(Attempt<A>),
+	/// The live session is established: its peer accepted the connection credential,
+	/// drained it with a GOAWAY, or it stayed up past [`Backoff::healthy`]. Until then a
+	/// connected session may still be a refusal, so report it as serving only from here.
+	Established,
 	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
 	/// its failure, or the predecessor's peer redirected while it headed for that peer.
 	Abandon,
@@ -417,6 +422,8 @@ struct Live {
 	session: Session,
 	since: Instant,
 	index: usize,
+	/// Whether [`Action::Established`] was reported for this session.
+	established: bool,
 	/// Dropped once a restart is waited out: it is a latch, so it would keep firing.
 	goaway: Option<goaway::Consumer>,
 	/// Set while the session runs on a fallback transport.
@@ -560,9 +567,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			}
 
 			let live = matches!(self.phase, Phase::Live(_));
+			// A replacement serves only once established: until then it may be a refusal.
+			let serving = matches!(&self.phase, Phase::Live(live) if live.established);
 			if let Some(predecessor) = self.predecessor.as_mut() {
 				// The replacement serves, so a predecessor carrying nothing closes now.
-				if live {
+				if serving {
 					predecessor.poll_idle(waiter);
 				}
 				if predecessor.poll(now, waiter) {
@@ -570,7 +579,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					self.queue.push_back(Action::Retired);
 					// Nothing is serving once it retires between sessions, so a caller must
 					// stop handing out a session that is already closed.
-					if !live {
+					if !serving {
 						self.queue.push_back(Action::Offline(None));
 					}
 					continue;
@@ -600,8 +609,11 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 				Phase::Live(live) => {
 					// Checked before the close, which may follow the peer's acceptance in one wake:
 					// a session the peer accepted and then dropped is an outage, not a refusal.
-					if !self.established && live.session.poll_accepted(waiter).is_ready() {
+					let healthy = live.since.saturating_add(self.config.backoff.healthy);
+					if !live.established && (now >= healthy || live.session.poll_accepted(waiter).is_ready()) {
+						live.established = true;
 						self.established = true;
+						return Action::Established;
 					}
 					let mut ended = None;
 					// Checked before the close: a GOAWAY means the session is still up, and
@@ -612,6 +624,9 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						// client started while its relay drains rides out the restart, whether it
 						// redials now or serves until the peer closes the session.
 						self.established = true;
+						if !std::mem::replace(&mut live.established, true) {
+							self.queue.push_back(Action::Established);
+						}
 						// Under `Handoff`, a session drained before it was healthy is a redial that
 						// reached the draining process rather than a replacement, so another would
 						// only reach it again.
@@ -636,6 +651,14 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						self.end(now, ended);
 						continue;
 					}
+					if !self.queue.is_empty() {
+						continue;
+					}
+					// An unestablished session is established by uptime at the latest.
+					let handover = match live.established {
+						true => handover,
+						false => earliest(Some(healthy), handover),
+					};
 					match live.probe.as_mut().map(|probe| probe.poll(now)) {
 						None => return Action::Wait(handover),
 						Some(ProbePoll::Wait(at)) => return Action::Wait(earliest(at, handover)),
@@ -689,6 +712,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 			session,
 			since: now,
 			index: dialing.index,
+			established: false,
 			probe: None,
 		}));
 	}
