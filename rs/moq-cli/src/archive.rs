@@ -573,10 +573,11 @@ mod tests {
 		recording.abort();
 	}
 
-	/// A publisher that goes away without closing cleanly, as a dropped session does, ends only
-	/// its own recording.
+	/// A track aborted with an error code, then its route dropped, ends only its own recording.
+	/// The archive records the abort as an end and returns `Ok`, so this does not reach the
+	/// failure isolation the tests above pin.
 	#[tokio::test(start_paused = true)]
-	async fn a_dropped_publisher_leaves_the_others_recording() {
+	async fn an_aborted_track_leaves_the_others_recording() {
 		let dir = tempfile::tempdir().unwrap();
 		let args = ExportArgs {
 			store: Url::from_directory_path(dir.path()).unwrap(),
