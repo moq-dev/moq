@@ -1621,42 +1621,35 @@ impl Cluster {
 
 		let addrs = moq_tokio::Addrs::collect(urls).context("peer advertised no reachable address")?;
 
-		// Sessions shorter than this are treated as churn: we keep backing off
-		// instead of resetting, otherwise a peer that rejects us instantly would
-		// turn into a tight reconnect loop.
-		let stable_threshold = std::time::Duration::from_secs(10);
-
 		let mut redial = Redial::default();
 
 		loop {
-			let started = tokio::time::Instant::now();
-			let result = self
-				.run_remote_once(&addrs, cost, target.lan, target.fingerprint.as_deref())
+			let mut connected = false;
+			// An attempt only ends in an error: its own reconnects retry until they give up.
+			let Err(err) = self
+				.run_remote_once(&addrs, cost, target.lan, target.fingerprint.as_deref(), &mut connected)
 				.await;
-			let elapsed = started.elapsed();
+			tracing::warn!(%err, "cluster peer error; will retry");
 
-			match result {
-				Ok(()) if elapsed >= stable_threshold => redial = Redial::default(),
-				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
-				Err(err) => tracing::warn!(%err, "cluster peer error; will retry"),
-			}
-
-			let wait = redial.next(&mut rand::rng());
+			let wait = redial.next(connected, &mut rand::rng());
 			tokio::time::sleep(wait).await;
 		}
 	}
 
+	/// One session to `target` over `addrs`. It runs until the session gives up, and
+	/// sets `connected` once the peer has accepted it.
 	async fn run_remote_once(
 		&self,
 		addrs: &moq_tokio::Addrs,
 		cost: Option<u64>,
 		lan: bool,
 		fingerprint: Option<&str>,
-	) -> anyhow::Result<()> {
+		connected: &mut bool,
+	) -> anyhow::Result<std::convert::Infallible> {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
-		self.run_remote_session(id, addrs, cost, lan, fingerprint)
+		self.run_remote_session(id, addrs, cost, lan, fingerprint, connected)
 			.instrument(tracing::info_span!("conn", id))
 			.await
 	}
@@ -1668,7 +1661,8 @@ impl Cluster {
 		cost: Option<u64>,
 		lan: bool,
 		fingerprint: Option<&str>,
-	) -> anyhow::Result<()> {
+		connected: &mut bool,
+	) -> anyhow::Result<std::convert::Infallible> {
 		// The peer URL may carry the cluster JWT in its query, so neither the log
 		// line nor the node label below may show the raw URL.
 		let first = addrs.as_slice().first().expect("Addrs is non-empty").url();
@@ -1721,6 +1715,7 @@ impl Cluster {
 		loop {
 			match reconnect.status().await? {
 				moq_tokio::Status::Connected if connection.is_none() => {
+					*connected = true;
 					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
 				}
 				moq_tokio::Status::Disconnected => connection = None,
@@ -1958,7 +1953,12 @@ impl Redial {
 	const CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
 	/// A wait drawn uniformly below the ceiling, which then doubles up to [`Self::CAP`].
-	fn next(&mut self, rng: &mut impl rand::RngExt) -> std::time::Duration {
+	/// An attempt that `connected` starts over at [`Self::FIRST`]: the peer was reachable,
+	/// so what ended it is new, not the outage the ceiling grew through.
+	fn next(&mut self, connected: bool, rng: &mut impl rand::RngExt) -> std::time::Duration {
+		if connected {
+			*self = Self::default();
+		}
 		let wait = self.ceiling.mul_f64(rng.random());
 		self.ceiling = (self.ceiling * 2).min(Self::CAP);
 		wait
@@ -2139,7 +2139,7 @@ mod tests {
 		let ceilings = [1, 2, 4, 8, 16, 30, 30].map(std::time::Duration::from_secs);
 		let mut redials: Vec<Redial> = (0..1000).map(|_| Redial::default()).collect();
 		for ceiling in ceilings {
-			let waits: Vec<_> = redials.iter_mut().map(|redial| redial.next(&mut rng)).collect();
+			let waits: Vec<_> = redials.iter_mut().map(|redial| redial.next(false, &mut rng)).collect();
 			assert!(waits.iter().all(|wait| *wait <= ceiling), "a wait passed {ceiling:?}");
 			// Uniform over the range: every tenth of it is hit, so none is a lockstep.
 			for tenth in 0..10 {
@@ -2150,6 +2150,21 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// A peer that was reachable redials from the first ceiling, so a flap after a
+	/// long outage does not wait out the 30 s the outage grew it to.
+	#[test]
+	fn redial_resets_after_an_attempt_that_connected() {
+		use rand::SeedableRng;
+		let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+		let mut redial = Redial::default();
+		for _ in 0..8 {
+			redial.next(false, &mut rng);
+		}
+		assert_eq!(redial.ceiling, Redial::CAP);
+		assert!(redial.next(true, &mut rng) <= Redial::FIRST);
+		assert_eq!(redial.ceiling, Redial::FIRST * 2);
 	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
