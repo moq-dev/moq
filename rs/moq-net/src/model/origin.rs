@@ -3592,7 +3592,7 @@ impl Claim {
 	}
 
 	/// The route layer let go of the claim this follows: every copy of it the table holds,
-	/// each of the same node, instance, epoch and [`Lane::lifecycle`], goes with this one
+	/// each of the same node, instance and [`Lane::lifecycle`] at any epoch, goes with this one
 	/// under one lock, rather than readers seeing the rest in turn as their sessions
 	/// retract them. They end with `ended`, else go offline.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -6518,8 +6518,9 @@ impl OriginState {
 	}
 
 	/// Retire every other copy at its prefix of the claim `entry` follows: the same
-	/// forwarding node, instance, epoch and showing ([`Lane::lifecycle`]). See
-	/// [`Claim::retire`].
+	/// forwarding node, instance and showing ([`Lane::lifecycle`]), at any epoch, since a
+	/// copy whose session has yet to take a newer epoch would otherwise be left as the
+	/// fallback. See [`Claim::retire`].
 	fn retire_copies(&mut self, entry: &RouteEntry) {
 		let Some(node) = entry.node else {
 			return;
@@ -6527,7 +6528,6 @@ impl OriginState {
 		for other in self.routes.at_mut(&entry.prefix) {
 			if other.node == Some(node)
 				&& other.instance == entry.instance
-				&& other.epoch == entry.epoch
 				&& other.lane.lifecycle == entry.lane.lifecycle
 			{
 				other.retired = true;
@@ -13282,8 +13282,9 @@ mod tests {
 	}
 
 	/// The route layer letting go of one copy of a lite-07 claim takes every copy of the
-	/// same node, instance and epoch with it: a cursor sees the claim end or go offline,
-	/// never a move onto another copy first. Another node's claim of the instance stays.
+	/// same node, instance and showing with it, a copy still at an older epoch too: a
+	/// cursor sees the claim end or go offline, never a move onto another copy first.
+	/// Another node's claim of the instance stays.
 	#[kio::test]
 	async fn retiring_a_claim_retires_every_copy() {
 		for ended in [true, false] {
@@ -13299,6 +13300,19 @@ mod tests {
 			};
 			let near = peer.forward("room", copy(7, 1)).unwrap();
 			let _far = peer.forward("room", copy(7, 2)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			near.retire(ended);
+			match ended {
+				true => announced.expect_next_ended("room").await,
+				false => announced.expect_next_offline("room").await,
+			}
+			announced.assert_next_wait();
+
+			// A session that has yet to take the newer epoch still holds the older one.
+			let newer = |node: u64, cost: u64| copy(node, cost).with_instance(instance(), 1);
+			let near = peer.forward("room", newer(7, 1)).unwrap();
+			let _stale = peer.forward("room", copy(7, 2)).unwrap();
 			announced.expect_next_active("room").await;
 			announced.assert_next_wait();
 			near.retire(ended);
