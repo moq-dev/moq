@@ -2,7 +2,7 @@
 
 ## Goal
 
-Every defect the 2026-11-17 pre-cut correctness audit found is fixed on `main` before the `0.22.0` cut,
+Every defect assigned to this epic by the November 17 and 18 pre-cut audits is fixed on `main` before the `0.22.0` cut,
 so the cut publishes none of them.
 
 ## Plan
@@ -28,6 +28,15 @@ source with no field report (rejected: keeping it in the gate; deleting it).
 Each child reproduces its finding before fixing it: most were read from
 source, not run. The reviewers' reports were scratch and are not kept; each
 quest carries what its implementer needs.
+
+Decided 2026-11-18 (maintainer, release audit interview): ✅ a fresh audit of
+[release](https://github.com/moq-dev/moq/commit/c636e03df1) through
+[main](https://github.com/moq-dev/moq/commit/d0ce553674), independently of the prior review.
+✅ Hold the cut for the seven correctness findings, resolve the DVR retention and scoped discovery
+findings, and settle the SDK contracts before publication. The ranged-reader failure reproduced
+on the audited head. The empty-token dial and file-pacing defects can ship as patches because their
+fixes preserve the published contract (rejected: holding the cut for every reproduced defect).
+This policy adds to the November 17 decisions.
 
 ## Related
 
