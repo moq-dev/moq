@@ -366,6 +366,11 @@ interface Copy {
 	lease: number;
 	/** It handed out a group, so a failure is its route failing mid-serve rather than refusing. */
 	delivered?: boolean;
+	/**
+	 * One past the highest group the reader's window dropped from it, which it no longer offers
+	 * though a widened window may name it again: a resume point, as {@link Copy.floor} is.
+	 */
+	dropped?: bigint;
 }
 
 /**
@@ -386,6 +391,11 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 /** Take a copy's next group, in sequence or arrival order. */
 function take(copy: Copy, ordered: boolean, floor?: bigint): Recv {
 	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, false);
+}
+
+/** Where `copy` stopped offering the groups below, which only a backfill of its route reads. */
+function resumePoint(copy: Pick<Copy, "floor" | "dropped">): bigint | undefined {
+	return copy.dropped === undefined ? copy.floor : max(copy.floor ?? 0n, copy.dropped);
 }
 
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
@@ -802,8 +812,9 @@ class Reader implements ResumeSource {
 	 */
 	#backfill(start: bigint, passed: bigint): void {
 		const newest = this.#copies.at(-1);
-		if (this.#closed || this.#ended || newest?.floor === undefined) return;
-		const end = min(passed, newest.floor);
+		const resumed = newest && resumePoint(newest);
+		if (this.#closed || this.#ended || !newest || resumed === undefined) return;
+		const end = min(passed, resumed);
 		// An ordered reader never goes back, nor does any reader past its budget.
 		if (this.#delivered.covers(start, end)) return;
 		// A floor lowered again asks once.
@@ -855,7 +866,8 @@ class Reader implements ResumeSource {
 		const floor = this.#window().floor();
 		if (floor === undefined) return;
 		this.#resumed = false;
-		const resumed = this.#copies.at(-1)?.floor;
+		const serving = this.#copies.at(-1);
+		const resumed = serving && resumePoint(serving);
 		if (resumed === undefined) return;
 		const [gap] = delivered.gaps(max(floor, this.#shell.cursor.peek().start), resumed);
 		if (gap) this.#backfill(gap.start, resumed);
@@ -950,7 +962,9 @@ class Reader implements ResumeSource {
 				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 				if (recv.kind === "group") {
 					const key = recv.group.start;
-					if (!this.#deliverable(copy, key, delivered) || !this.#inWindow(key)) {
+					const deliverable = this.#deliverable(copy, key, delivered);
+					if (!deliverable || !this.#inWindow(key)) {
+						if (deliverable) this.#skip(copy, key);
 						recv.group.close();
 						continue;
 					}
@@ -995,9 +1009,10 @@ class Reader implements ResumeSource {
 		}
 		if (this.#letGo(delivered)) return false;
 		const end = window.end();
-		if (serving.floor !== undefined && end !== undefined) {
+		const resumed = resumePoint(serving);
+		if (resumed !== undefined && end !== undefined) {
 			const cursor = this.#shell.cursor.peek();
-			for (const run of window.runs(window.floor() ?? 0n, min(serving.floor, end))) {
+			for (const run of window.runs(window.floor() ?? 0n, min(resumed, end))) {
 				for (const gap of delivered.gaps(run.start, run.end)) {
 					if (gap.start < cursor.start || (cursor.end !== undefined && gap.end > cursor.end)) return false;
 				}
@@ -1101,6 +1116,12 @@ class Reader implements ResumeSource {
 		return copy.done === undefined && !this.#expired(copy, this.#budget());
 	}
 
+	// `copy` gave up `key`, a group outside the reader's window, for good: a widened window asks
+	// its route again for it.
+	#skip(copy: Copy, key: bigint): void {
+		copy.dropped = max(copy.dropped ?? 0n, key + 1n);
+	}
+
 	// The copy whose next group is the lowest deliverable one in the reader's window, dropping any
 	// it holds next that are not, and the copies whose ordered cursor is left on such a group
 	// because the window still owes a lower one that may yet land there.
@@ -1131,6 +1152,7 @@ class Reader implements ResumeSource {
 				}
 				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 				if (recv.kind !== "group") break;
+				if (deliverable) this.#skip(copy, recv.group.start);
 				recv.group.close();
 			}
 		}

@@ -10,12 +10,10 @@ Rust reader (`rs/moq-net/src/model/resume.rs`) where Rust passes the same case.
 ## Plan
 
 The fix for this sweep's `group N outside ranges` failures let it run past
-where `main` failed, uncovering the defects below. Items 1 and 2 fail the same
-way on `main` at [f1df3c3a8e](https://github.com/moq-dev/moq/commit/f1df3c3a8e).
-Item 3 is that fix's own gap: `main` hands the group out early, outside the
-window, and fails `outside ranges` instead. Seeds 3, 11 and 12 pass 50k cases;
-seeds 1, 2, 4, 5, 6, 7, 8, 9, 10 and 13 still fail. Expect more behind these:
-each fix so far exposed the next.
+where `main` failed, uncovering the defects below. Both fail the same way on
+`main` at [f1df3c3a8e](https://github.com/moq-dev/moq/commit/f1df3c3a8e).
+Seeds 3, 10, 11 and 12 pass 50k cases; seeds 1, 2, 4, 5, 6, 7, 8, 9 and 13
+still fail. Expect more behind these: each fix so far exposed the next.
 
 Replay a counterexample by adding it to the `regressions` test.
 
@@ -50,22 +48,6 @@ Replay a counterexample by adding it to the `regressions` test.
    whether the forget rule or the JS clock is wrong: Rust in production polls
    its pool and may share the defect. Seed 6 fails the same way at 16,450
    cases, also a give-up followed by `expire`.
-3. **A group the window dropped is lost once the ranges widen.** Seed 10 at
-   79 cases:
-
-   ```
-   up 1/0; join r0 [3,4]; up 1/2; write 1/0 g3; write 1/2 next;
-   down 1/0; ranges r0 none; leave r1
-   ```
-
-   This fails with `missing groups 0`. JS switches to route 1/2 before any
-   group is handed out, so its copy has no resume point. That copy places time
-   3 at group 0 (the only group it holds), and the window drops group 0 by
-   taking it, as Rust's `poll_lowest` does with `sub.take`. Widening the ranges
-   then has no resume point to backfill under. Rust passes only because its
-   front switches after handing out group 3. A dropped group must stay
-   reachable once a widened window names it: leave it unread on the copy, or
-   backfill below the dropped key.
 
 Public API: none. Wire: none.
 

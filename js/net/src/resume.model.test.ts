@@ -1160,6 +1160,20 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A group the window dropped from a copy with no resume point is asked of its route again
+		// once the ranges widen to name it.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 0 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [3, 4], false) },
+				{ kind: "up", instance: 1, slot: 2 },
+				{ kind: "write", instance: 1, slot: 0, group: 3, frames: 1 },
+				{ kind: "write", instance: 1, slot: 2, group: undefined, frames: 1 },
+				{ kind: "down", instance: 1, slot: 0 },
+				{ kind: "ranges", reader: 0, range: undefined },
+			],
+			finish: false,
+		},
 		// Ranges widened below the serving copy's resume point ask its route for the groups they
 		// newly cover, as a route change does.
 		{
