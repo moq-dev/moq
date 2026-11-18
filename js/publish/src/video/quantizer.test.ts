@@ -10,20 +10,23 @@ const PIXELS = 1280 * 720;
 // delta, about what Chrome's VP9 measured on high motion.
 type Frame = { qp: number; key: boolean; bits: number; budget: number; timestamp: number };
 
-function simulate(
-	frames: number,
-	scene: (i: number) => { complexity: number; budget: number; key?: boolean; drop?: boolean },
-): Frame[] {
+// A scene's frame: its size at QP 0, the budget, whether a keyframe is asked for, whether the
+// encoder makes one anyway, and whether it drops the frame.
+type Scene = { complexity: number; budget: number; key?: boolean; made?: boolean; drop?: boolean };
+
+// The frames the control admitted and the encoder output.
+function simulate(frames: number, scene: (i: number) => Scene): Frame[] {
 	const control = new Quantizer(AVC, PIXELS);
 	const out: Frame[] = [];
 	for (let i = 0; i < frames; i++) {
 		const timestamp = Math.round((i * 1_000_000) / FPS);
-		const { complexity, budget, key = i % 60 === 0, drop } = scene(i);
+		const { complexity, budget, key = i % 60 === 0, made = key, drop } = scene(i);
+		if (!control.admit(timestamp, budget)) continue;
 		const qp = control.next(timestamp, key, budget);
-		const bits = Math.round(complexity * (key ? 2.5 : 1) * 2 ** (-qp / 6));
+		const bits = Math.round(complexity * (made ? 2.5 : 1) * 2 ** (-qp / 6));
 		if (drop) continue;
-		control.output(timestamp, Math.ceil(bits / 8));
-		out.push({ qp, key, bits, budget, timestamp });
+		control.output(timestamp, Math.ceil(bits / 8), made);
+		out.push({ qp, key: made, bits, budget, timestamp });
 	}
 	return out;
 }
@@ -111,6 +114,37 @@ test("a frame the encoder dropped doesn't hold the QP up", () => {
 		drop: i === 30,
 	}));
 	expect(frames.at(-1)?.qp).toBe(26);
+});
+
+test("a scene past the largest QP skips frames rather than overshoot", () => {
+	// Even QP 51 makes 8x the budget.
+	const frames = simulate(600, () => ({ complexity: at(8 * 33_333, 51), budget: 1_000_000 }));
+	expect(frames.length).toBeLessThan(600 / 4);
+	// The first keyframe's size is a guess, which takes a few seconds to drain.
+	const settled = frames.filter((frame) => frame.timestamp >= 10_000_000);
+	expect(settled.every((frame) => frame.qp === 51)).toBe(true);
+	// Admitted only below the window, so at most one frame past it.
+	const largest = Math.max(...settled.map((frame) => frame.bits));
+	expect(backlog(frames, 10_000_000)).toBeLessThanOrEqual(0.25 + largest / 1_000_000);
+});
+
+test("a zero grant holds every frame back until a grant returns", () => {
+	const frames = simulate(120, (i) => ({ complexity: at(20_000, 26), budget: i >= 30 && i < 90 ? 0 : 1_000_000 }));
+	const held = frames.filter((frame) => frame.budget === 0);
+	expect(held).toEqual([]);
+	expect(frames.filter((frame) => frame.timestamp >= 3_000_000)).toHaveLength(30);
+});
+
+test("a keyframe the encoder makes on its own isn't taken for a delta", () => {
+	const frames = simulate(120, (i) => ({
+		complexity: at(20_000, 26),
+		budget: 4_000_000,
+		key: i === 0,
+		// A scene-change keyframe, 2.5x a delta, that nobody asked for.
+		made: i === 0 || i === 60,
+	}));
+	// Mistaken for a delta, it would raise the next deltas' estimate 2.5x and their QP with it.
+	expect(frames[61].qp).toBe(26);
 });
 
 test("Chrome's VP9 qindex scale keeps the quality QP in its range", () => {

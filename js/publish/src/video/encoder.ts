@@ -446,7 +446,8 @@ export class Encoder {
 		let quantizer: { scale: Scale; control: Quantizer } | undefined;
 		let budget = 0;
 		effect.subscribe(this.out.resolved, (config) => {
-			if (config?.bitrate) budget = config.bitrate;
+			// Including a zero grant, which holds every frame back.
+			if (config?.bitrate !== undefined) budget = config.bitrate;
 		});
 
 		// What the encoder is configured with. Quantizer mode reads the budget per frame instead, so a
@@ -482,7 +483,7 @@ export class Encoder {
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
 					}));
 
-					quantizer?.control.output(frame.timestamp, frame.byteLength);
+					quantizer?.control.output(frame.timestamp, frame.byteLength, key);
 					producer.encode(frame, Duration.micros(frame.timestamp), key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
@@ -560,7 +561,11 @@ export class Encoder {
 							// A pending input means the codec is saturated. Keep capture live instead of
 							// growing a stale encode queue whose lateness becomes permanent catalog delay.
 							// Drop before answering a keyframe request or advancing the frame-rate cursor.
-							if (encoder.encodeQueueSize > 0) {
+							// Likewise while quantizer mode's bucket is full: the scene outgrew the largest QP.
+							if (
+								encoder.encodeQueueSize > 0 ||
+								quantizer?.control.admit(frame.timestamp, budget) === false
+							) {
 								this.#out.stats.update((stats) => ({ ...stats, skipped: stats.skipped + 1 }));
 								continue;
 							}

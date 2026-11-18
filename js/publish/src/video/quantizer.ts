@@ -49,8 +49,8 @@ const BPP = 1;
 // Measured in Chrome: about 2.6x on high motion, and far more on calm scenes, which the last keyframe covers.
 const KEY_RATIO = 2;
 
-// A frame inside the encoder: its timestamp, QP, type, and predicted size in bits.
-type Pending = { timestamp: number; qp: number; key: boolean; bits: number };
+// A frame inside the encoder: its timestamp, QP, and predicted size in bits.
+type Pending = { timestamp: number; qp: number; bits: number };
 
 /**
  * Per-frame QP for WebCodecs' quantizer mode: a constant quality QP, raised only as far as keeps the
@@ -95,14 +95,19 @@ export class Quantizer {
 		this.#key = pixels * BPP * 2 ** (this.#base / this.#halving);
 	}
 
-	/** The QP for the frame at `timestamp` (microseconds), under a budget of `bitrate` bits per second. */
+	/**
+	 * Whether to encode the frame at `timestamp` (microseconds) under a budget of `bitrate` bits per
+	 * second: not while the bucket is full, as when the scene outgrows even the largest QP or the
+	 * grant is zero, so the backlog never passes the window by more than a frame.
+	 */
+	admit(timestamp: number, bitrate: number): boolean {
+		this.#drain(timestamp, bitrate);
+		return this.#level < bitrate * WINDOW;
+	}
+
+	/** The QP for an admitted frame at `timestamp`, under a budget of `bitrate` bits per second. */
 	next(timestamp: number, key: boolean, bitrate: number): number {
-		if (this.#at !== undefined && timestamp > this.#at) {
-			const elapsed = timestamp - this.#at;
-			this.#level = Math.max(0, this.#level - (bitrate * elapsed) / 1_000_000);
-			this.#interval = elapsed;
-		}
-		this.#at = timestamp;
+		this.#drain(timestamp, bitrate);
 
 		const capacity = bitrate * WINDOW;
 		const share = (bitrate * this.#interval) / 1_000_000;
@@ -117,13 +122,13 @@ export class Quantizer {
 		if (!key) this.#qp = qp;
 
 		const bits = complexity * 2 ** (-qp / this.#halving);
-		this.#pending.push({ timestamp, qp, key, bits });
+		this.#pending.push({ timestamp, qp, bits });
 		this.#level += bits;
 		return qp;
 	}
 
-	/** Account the encoded frame at `timestamp`, `bytes` long. */
-	output(timestamp: number, bytes: number): void {
+	/** Account the encoded frame at `timestamp`, `bytes` long, a keyframe if `key`. */
+	output(timestamp: number, bytes: number, key: boolean): void {
 		// A frame the encoder dropped never outputs; forget its prediction.
 		while (this.#pending.length > 0 && this.#pending[0].timestamp < timestamp) {
 			const dropped = this.#pending.shift();
@@ -134,10 +139,21 @@ export class Quantizer {
 		this.#level = Math.max(0, this.#level + bits - (frame?.bits ?? 0));
 		if (!frame) return;
 
+		// By what the encoder made, which may be a keyframe nobody asked for.
 		const complexity = bits * 2 ** (frame.qp / this.#halving);
-		if (frame.key) this.#key = complexity;
+		if (key) this.#key = complexity;
 		else if (this.#delta === undefined || complexity > this.#delta) this.#delta = complexity;
 		else this.#delta += (complexity - this.#delta) * SMOOTH;
+	}
+
+	// Empty the bucket at `bitrate` up to `timestamp`.
+	#drain(timestamp: number, bitrate: number): void {
+		if (this.#at !== undefined && timestamp > this.#at) {
+			const elapsed = timestamp - this.#at;
+			this.#level = Math.max(0, this.#level - (bitrate * elapsed) / 1_000_000);
+			this.#interval = elapsed;
+		}
+		this.#at = timestamp;
 	}
 }
 

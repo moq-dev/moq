@@ -17,6 +17,9 @@ static frame for the scene-cut case) during
 - macOS VideoToolbox H.264 in `"constant"` at 1 Mbps drops 37% of frames and
   still peaks at 2.1x over a second.
 - Firefox ignores the per-frame quantizer, so it always runs `"constant"`.
+- A zero grant, which the allocator gives once higher priorities take the
+  estimate, fails a `"constant"` rendition: `configure()` rejects bitrate 0.
+  Quantizer mode holds frames back instead.
 
 The quantizer path holds 1.00x with at most 0.3 s queued in all of these
 cases, short of a scene cut.

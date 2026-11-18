@@ -441,9 +441,13 @@ for (const quantizer of ["honored", "ignored", "refused"] as const) {
 			expect(encoder.out.resolved.peek()?.bitrate).toBe(200_000);
 			if (mode === "quantizer") {
 				expect(live.configs).toHaveLength(1);
+				// The first keyframe, never output by this fake, still fills the smaller bucket, so the
+				// next frame waits rather than overshoot.
+				const skipped = encoder.out.stats.peek().skipped;
 				controller.enqueue({ timestamp: 33_333, close: () => {} } as unknown as VideoFrame);
 				await clock.advance(PROBE);
-				expect(live.options.at(-1)?.avc?.quantizer).toBeGreaterThan(26);
+				expect(live.options).toHaveLength(1);
+				expect(encoder.out.stats.peek().skipped).toBe(skipped + 1);
 			} else {
 				expect(live.configs.map((config) => config.bitrate)).toEqual([cap, 200_000]);
 			}
