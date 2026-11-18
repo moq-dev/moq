@@ -21,6 +21,18 @@ exclude_re = [
     # whatever the count, which only sends round again a request that read it just
     # before another thread bumped it.
     'replace \+= with \*= in (Stream::serving|State::flush)$',
+    # relay.rs: `visit` and `count` only feed the tests' work budgets, which read the
+    # count as an upper bound.
+    'replace Router<N, I, A>::(visit|count) with \(\)$',
+    # A pick's key ends in its next hop or its claimant, so no two keys tie.
+    'replace < with <= in Router<N, I, A>::(reselect|closest)$',
+    # A session closed at a floor already recorded touches routes that stay as they
+    # were, and reselecting an unchanged route does nothing.
+    'replace > with >= in Router<N, I, A>::closed$',
+    # What a claim leaves when dropped is read only for a lost broadcast that did not
+    # end, and `restate` already dropped this node's own claim first, with its source,
+    # which wins the tie.
+    'replace && with \|\| in Router<N, I, A>::publish$',
     # resume.rs: the sweep of handed-out groups only bounds memory, since
     # `let_go` drops dead entries itself before anything reads `out`.
     'replace (== with !=|> with >=) in Reader::hand_out$',

@@ -649,8 +649,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			gone.extend(claims.keys().map(|path| (path.clone(), instance.clone())));
 			self.reader.apply(instance, |_| true, claims, |_| false);
 		}
-		// As in `refresh`: nothing reads which claims the reader recomputed.
-		self.reader.changed();
 		// An endpoint or scoped neighbour hears it lost only now.
 		for broadcast in &gone {
 			self.exports(broadcast);
@@ -1107,12 +1105,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				// relay, by its own hop, and never past the longest path.
 				let path = &offer.path;
 				let built = path.len() >= 2 || offer.cost == 0;
-				if origin.relay == self.me.relay
-					|| path.first()
-						!= Some(&Hop {
-							node: origin,
-							session: 0,
-						}) || path.last().map(|hop| hop.node) != Some(sender)
+				if path.first()
+					!= Some(&Hop {
+						node: origin,
+						session: 0,
+					}) || path.last().map(|hop| hop.node) != Some(sender)
 					|| path.len() > MAX_HOPS
 					|| names(path, self.me.relay)
 					|| !built
@@ -1228,7 +1225,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			// a stale one may start it again, until the newer floor behind it arrives.
 			#[cfg(test)]
 			{
-				self.forgets += u32::from(known.floor > 0);
+				self.forgets += 1;
 			}
 		}
 		for peer in self.sent_to.remove(&origin).into_iter().flatten() {
@@ -1569,10 +1566,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.out.push((peer, Msg::Route { origin, offer }));
 		// A route that starts brings the claims as they stand, even none: the floor alone
 		// outranks an older copy of what was withdrawn.
-		if started
-			&& let Some(known) = self.known.get(&origin)
-			&& known.floor > 0
-		{
+		if started && let Some(known) = self.known.get(&origin) {
 			self.count(known.items.len());
 			let changes = (known.items.iter())
 				.filter(|(broadcast, _)| !self.withheld(peer, origin, broadcast))
@@ -2215,9 +2209,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			let ended = |claim: &Path| lost_ends || ended.contains(&(claim.clone(), instance.clone()));
 			reader.apply(instance.clone(), |_| true, claims, ended);
 		}
-		// A request finds its way by `pick` and `step`, never by which claims the reader
-		// recomputed, so nothing keeps that list.
-		reader.changed();
 		for broadcast in &dirty {
 			self.exports(broadcast);
 		}
@@ -3305,7 +3296,6 @@ mod tests {
 		router.timeout(router.deadline().expect("a debounce"));
 		router.events();
 		assert!(router.shown().is_empty());
-		assert!(router.reader.changed().is_empty(), "nothing reads which claims changed");
 	}
 
 	/// A neighbour asking a prefix under a broader claim is told it there, lowered by the
@@ -3475,6 +3465,180 @@ mod tests {
 		);
 	}
 
+	/// A message outside the sender's role is refused, and so is one a routing neighbour
+	/// sends before it answered what this node asked.
+	#[test]
+	fn a_message_outside_its_role_is_refused() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		router.connect(2, port(Role::Routing(node(2)))).unwrap();
+		assert_eq!(router.recv(2, route(5, 2, 1)), Err(Error::Unasked));
+		router.recv(2, Msg::Edited).unwrap();
+		let announce = Msg::Announce {
+			changes: vec![((p("room"), 7), claim(run(0), 0))],
+		};
+		assert_eq!(router.recv(2, announce), Err(Error::Role));
+		open(&mut router, 3, Role::Endpoint);
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: Vec::new(),
+			floor: 1,
+		};
+		let dead = Msg::Dead {
+			hop: Hop {
+				node: node(3),
+				session: 1,
+			},
+			far: node(5),
+		};
+		for msg in [route(5, 3, 1), claims, dead, Msg::Drain { node: node(5) }] {
+			assert_eq!(router.recv(3, msg.clone()), Err(Error::Role), "{msg:?}");
+		}
+	}
+
+	/// A routing neighbour that stops asking holds nothing this node sent it, and is sent
+	/// nothing more.
+	#[test]
+	fn a_routing_neighbour_that_stops_asking_holds_nothing() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Endpoint);
+		let announce = |path: &str| Msg::Announce {
+			changes: vec![((p(path), 7), live(0))],
+		};
+		router.recv(2, announce("room")).unwrap();
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.drain();
+		assert_eq!(router.held(3), 2, "this node's route, with its claim");
+		let edit = Edit {
+			remove: vec![p(ROOT)],
+			add: Vec::new(),
+		};
+		router.edit(3, edit).unwrap();
+		assert_eq!(router.held(3), 0);
+		router.drain();
+		router.recv(2, announce("hall")).unwrap();
+		let out = router.drain();
+		assert!(out.iter().all(|(to, _)| *to != 3), "{out:?}");
+	}
+
+	/// A claim chain as long as the longest path is malformed: the rule never builds one.
+	#[test]
+	fn a_chain_at_the_longest_path_is_malformed() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Endpoint);
+		let announce = |path: &str, hops: usize| {
+			let Change::Live(claim) = live(0) else {
+				unreachable!("a live claim");
+			};
+			let chain = (10..).take(hops).collect();
+			Msg::Announce {
+				changes: vec![((p(path), 7), Change::Live(Claim { chain, ..claim }))],
+			}
+		};
+		assert_eq!(router.recv(2, announce("long", MAX_HOPS)), Err(Error::Malformed));
+		router.recv(2, announce("short", MAX_HOPS - 1)).unwrap();
+	}
+
+	/// A copy that lagged and then overtakes another tells what it lacks as lost, unless
+	/// its message ended it, which shows at once.
+	#[test]
+	fn a_lagging_copy_ends_only_what_its_message_ends() {
+		use super::super::Kind;
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.recv(2, route(5, 2, 1)).unwrap();
+		router.recv(3, route(5, 3, 2)).unwrap();
+		let changes = ["a", "b"].map(|path| ((p(path), 7), claim(run(0), 0)));
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: changes.into(),
+			floor: 1,
+		};
+		router.recv(2, claims).unwrap();
+		router.events();
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: vec![((p("b"), 7), Change::Ended)],
+			floor: 2,
+		};
+		router.recv(3, claims).unwrap();
+		let kinds: Vec<_> = (router.events().into_iter())
+			.map(|event| (event.claim.to_string(), event.kind))
+			.collect();
+		assert_eq!(
+			kinds,
+			[("a".to_string(), Kind::Unavailable), ("b".to_string(), Kind::End)]
+		);
+	}
+
+	/// A lost claim goes offline when its debounce fires, never earlier because a later
+	/// input touched it after its deadline passed.
+	#[test]
+	fn a_lost_claim_goes_offline_only_when_its_timer_fires() {
+		use super::super::Kind;
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Endpoint);
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.recv(3, route(5, 3, 1)).unwrap();
+		let room = (p("room"), 7);
+		let announce = |change| Msg::Announce {
+			changes: vec![(room.clone(), change)],
+		};
+		router.recv(2, announce(claim(run(0), 0))).unwrap();
+		router.recv(2, announce(Change::Lost)).unwrap();
+		router.events();
+		let due = router.deadline().expect("a debounce");
+		router.clock(due);
+		let claims = Msg::Claims {
+			origin: node(5),
+			changes: vec![(room.clone(), Change::Lost)],
+			floor: 1,
+		};
+		router.recv(3, claims).unwrap();
+		assert!(router.events().is_empty());
+		router.timeout(due);
+		let kinds: Vec<_> = router.events().into_iter().map(|event| event.kind).collect();
+		assert_eq!(kinds, [Kind::Offline]);
+	}
+
+	/// A neighbour is shown, while a lost broadcast waits out its debounce, the claim the
+	/// reader showed, even when a claim of lower precedence was lost with it.
+	#[test]
+	fn a_lost_broadcast_shows_the_claim_the_reader_showed() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		router.recv(2, route(5, 2, 1)).unwrap();
+		router.recv(2, route(6, 2, 1)).unwrap();
+		let room = (p("room"), 7);
+		let claims = |origin, epoch| Msg::Claims {
+			origin: node(origin),
+			changes: vec![(room.clone(), claim(run(epoch), 0))],
+			floor: 1,
+		};
+		router.recv(2, claims(5, 1)).unwrap();
+		router.recv(2, claims(6, 0)).unwrap();
+		open(&mut router, 3, Role::Endpoint);
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(3, edit).unwrap();
+		router.drain();
+		router.disconnect(2);
+		let told: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 3)
+			.filter_map(|(_, msg)| match msg {
+				Msg::Announce { changes } => Some(changes),
+				_ => None,
+			})
+			.flatten()
+			.collect();
+		assert!(
+			matches!(told.as_slice(), [(_, Change::Live(claim))] if claim.unavailable && claim.item == run(1)),
+			"{told:?}"
+		);
+	}
+
 	/// A claim outside what this node asked a scoped neighbour for is refused whole.
 	#[test]
 	fn a_claim_outside_the_grant_is_refused() {
@@ -3608,15 +3772,14 @@ mod tests {
 			),
 			Err(Error::Malformed)
 		);
-		router
-			.recv(
-				2,
-				Msg::Dead {
-					hop: sender,
-					far: node(5),
-				},
-			)
-			.unwrap();
+		let dead = Msg::Dead {
+			hop: sender,
+			far: node(5),
+		};
+		router.recv(2, dead.clone()).unwrap();
+		// It ended the route: no live one crosses the hop or names the node now.
+		assert_eq!(router.recv(2, dead), Err(Error::Unrouted));
+		assert_eq!(router.recv(2, Msg::Drain { node: node(5) }), Err(Error::Unrouted));
 	}
 
 	/// A relay whose start is below one of its sessions known closed is refused as a

@@ -180,6 +180,37 @@ fn a_claim_is_served_through_the_session_that_gave_it() {
 	assert!(told(&publisher).is_empty());
 }
 
+/// Of two sessions giving a claim, only the one whose copy is closest to its path and
+/// then newest serves it: the other is unserved once the first serves.
+#[test]
+fn only_the_closest_newest_copy_is_served() {
+	let attr = |epoch, above| {
+		Change::Live(Claim {
+			item: Attr { epoch, above },
+			cost: 0,
+			priority: i8::MAX,
+			draining: false,
+			unavailable: false,
+			chain: Vec::new(),
+		})
+	};
+	for (worse, better) in [(attr(1, 0), attr(2, 0)), (attr(0, 1), attr(0, 0))] {
+		let (node, _clock) = node();
+		let room = cast("room");
+		let first = publisher(&node, 1);
+		let second = publisher(&node, 2);
+		announce(&first, &room, worse);
+		assert_eq!(confirm(&first), 1);
+		announce(&second, &room, better);
+		assert_eq!(confirm(&second), 1);
+		let serves = serves(&first);
+		assert!(
+			matches!(serves.as_slice(), [Output::Unserve { ended: false, .. }]),
+			"{serves:?}"
+		);
+	}
+}
+
 /// A request naming no node goes to the session serving the claim, once that session
 /// confirmed it, and never back to the session it came from.
 #[test]
