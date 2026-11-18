@@ -55,6 +55,7 @@ fn claim(above: u64) -> Claim<Attr> {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	}
 }
 

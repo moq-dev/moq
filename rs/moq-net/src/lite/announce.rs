@@ -128,6 +128,8 @@ const MARKED: u8 = 0x1;
 const DRAINING: u8 = 0x2;
 /// Claim flag: no route reaches the claim from the node that told it.
 const UNAVAILABLE: u8 = 0x1;
+/// Claim flag: a marked link lies on the way to the claim, so it is never told over another.
+const CLAIM_MARKED: u8 = 0x4;
 
 fn encode_node(w: &mut Encoder<'_>, node: NodeId) -> Result<(), EncodeError> {
 	// No node names itself 0.
@@ -221,6 +223,9 @@ fn encode_claim(w: &mut Encoder<'_>, claim: &Claim) -> Result<(), EncodeError> {
 	if claim.draining {
 		flags |= DRAINING;
 	}
+	if claim.marked {
+		flags |= CLAIM_MARKED;
+	}
 	w.u8(flags);
 	w.u8(super::priority::to_wire(claim.priority));
 	w.varint(claim.chain.len() as u64)?;
@@ -236,7 +241,7 @@ fn decode_claim(r: &mut Decoder<'_>, epoch: u64) -> Result<Claim, DecodeError> {
 	let cost = r.varint()?;
 	let above = r.varint()?;
 	let flags = r.u8()?;
-	if flags & !(UNAVAILABLE | DRAINING) != 0 {
+	if flags & !(UNAVAILABLE | DRAINING | CLAIM_MARKED) != 0 {
 		return Err(DecodeError::InvalidValue);
 	}
 	let priority = super::priority::from_wire(r.u8()?);
@@ -260,6 +265,7 @@ fn decode_claim(r: &mut Decoder<'_>, epoch: u64) -> Result<Claim, DecodeError> {
 		draining: flags & DRAINING != 0,
 		unavailable: flags & UNAVAILABLE != 0,
 		chain,
+		marked: flags & CLAIM_MARKED != 0,
 	})
 }
 
@@ -909,6 +915,7 @@ mod chain_tests {
 			draining: false,
 			unavailable: false,
 			chain: (1..=relays).collect(),
+			marked: false,
 		};
 		let encode = |relays: u64| {
 			let mut buf = Vec::new();

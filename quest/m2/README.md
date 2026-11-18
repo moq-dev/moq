@@ -33,8 +33,10 @@ removal, a rename, or a wire, catalog, or format change that is free until
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
   all seven lite versions, the hidden `.` path prefix, and the route plan
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
-  [switch](/quest/m2/multicast/switch.md) also settles the public route API
-  and retires the moq-cluster draft.
+  [switch](/quest/m2/multicast/switch.md) settled the public route API in
+  [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053). The
+  [moq-cluster draft](/quest/m2/moq-cluster-draft.md) stays, since
+  third-party relays ship it.
 - **moq-net API.** [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each

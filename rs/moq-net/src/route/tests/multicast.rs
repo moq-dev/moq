@@ -94,6 +94,7 @@ fn own() -> Claim<()> {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	}
 }
 
@@ -183,8 +184,7 @@ impl RelaySim {
 	pub fn truth(&self, origin: NodeId, floor: Rev) -> Option<&relay::Claims<Id, ()>> {
 		let current = (0..self.spots.len())
 			.filter_map(|node| self.router(node))
-			.find(|router| router.me() == origin)
-			.map(Router::history);
+			.find_map(|router| router.history(origin));
 		let history = current.or_else(|| self.histories.get(&origin).map(Vec::as_slice))?;
 		history.get(usize::try_from(floor).ok()?)
 	}
@@ -359,7 +359,10 @@ impl RelaySim {
 		self.restarts[node] += 1;
 		if let Spot::Relay(router) = &self.spots[node] {
 			self.spent += router.work_done();
-			self.histories.insert(router.me(), router.history().to_vec());
+			for id in [router.me(), router.me_marked()] {
+				let history = router.history(id).expect("an identity of its own").to_vec();
+				self.histories.insert(id, history);
+			}
 			self.spots[node] = Spot::Relay(Box::new(self.fresh(node)));
 		}
 	}

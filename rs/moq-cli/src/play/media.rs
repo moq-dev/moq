@@ -2436,9 +2436,6 @@ mod tests {
 		write(&mut old, 10, OLD).await;
 
 		let (_new_broadcast, _new_catalog, mut new) = publish(&origin);
-		// Give the player the update hold to see the restart, so it joins the new
-		// broadcast at its live edge.
-		kio::clock::sleep(moq_net::origin::Config::default().update_hold).await;
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;

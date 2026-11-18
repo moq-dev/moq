@@ -120,10 +120,10 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> u64 {
 	.await
 	.unwrap_or_else(|_| panic!("{path}: the dialer never learned the namespace"));
 
-	match event.route.source() {
-		origin::Source::Peer(hop) => hop,
-		origin::Source::Local => panic!("{path}: a route learned from the peer looks local"),
-	}
+	event
+		.route
+		.entered_from()
+		.unwrap_or_else(|| panic!("{path}: a route learned from the peer looks local"))
 }
 
 fn hop(id: u64) -> NonZeroU64 {
@@ -181,10 +181,10 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [NonZeroU
 		panic!("the other edge's first event was not the namespace: {subscriber_saw:?}");
 	};
 	assert_eq!(subscriber_saw.prefix.as_str(), "room");
-	let subscriber_hop = match subscriber_saw.route.source() {
-		origin::Source::Peer(hop) => hop,
-		origin::Source::Local => panic!("the forwarded route looks local"),
-	};
+	let subscriber_hop = subscriber_saw
+		.route
+		.entered_from()
+		.expect("the forwarded route looks local");
 	assert_ne!(subscriber_hop, publisher_hop, "each dial gets its own hop");
 	assert_ne!(subscriber_hop, 0);
 

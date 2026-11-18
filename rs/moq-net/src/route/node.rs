@@ -97,6 +97,8 @@ pub(crate) struct Served {
 	pub primary: bool,
 	/// The relays that announced it again across a scoped grant or an older version.
 	pub chain: Vec<Id>,
+	/// The way to it crossed a marked link, so the origin never offers it to an upstream.
+	pub marked: bool,
 	/// The node a request through the session names, or `None` when the peer selects:
 	/// it gave this node the claim itself.
 	pub named: Option<NodeId>,
@@ -752,6 +754,7 @@ impl State {
 					available: true,
 					primary: way.closest,
 					chain: way.claim.chain,
+					marked: way.claim.marked,
 					named,
 				};
 				wanted.insert((way.origin, session), served);

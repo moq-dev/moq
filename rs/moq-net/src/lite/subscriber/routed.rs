@@ -827,7 +827,8 @@ impl Routed {
 			.with_node(Some(*origin))
 			.with_lane(lane)
 			.with_draining(served.draining)
-			.with_available(served.available);
+			.with_available(served.available)
+			.with_marked(served.marked);
 		if let Some(entry) = self.served.get_mut(key)
 			&& entry.route.route.epoch == route.epoch
 		{

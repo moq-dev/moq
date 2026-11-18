@@ -4651,7 +4651,6 @@ dependencies = [
  "proptest",
  "rand 0.10.3",
  "rangemap",
- "rind",
  "serde",
  "serde_json",
  "slab",

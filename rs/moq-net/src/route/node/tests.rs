@@ -54,6 +54,7 @@ fn live(epoch: u64) -> Change {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	})
 }
 

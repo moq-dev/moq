@@ -491,12 +491,6 @@ impl Connection {
 		moq_net::transport::ReceiveWindow::new(Some(state.inner.receive_window()), state.inner.stream_receive_window())
 	}
 
-	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
-	/// or `None` before the handshake completes.
-	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.0.state.lock().inner.export_keying_material(label, context)
-	}
-
 	/// How many send streams the connection still holds state for
 	#[cfg(test)]
 	pub(crate) fn send_streams(&self) -> usize {

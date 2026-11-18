@@ -189,10 +189,17 @@
 		"expect": "decoded"
 	},
 	{
+		"name": "a claim's 0x4 flag says a marked session lies on the way to it",
+		"version": "moq-lite-07-wip",
+		"message": "announce",
+		"hex": "000d00000178016100010300078000",
+		"expect": "decoded"
+	},
+	{
 		"name": "a claim flag no version defines is refused",
 		"version": "moq-lite-07-wip",
 		"message": "announce",
-		"hex": "000d00000178016100010300048000",
+		"hex": "000d00000178016100010300088000",
 		"expect": "refused"
 	},
 	{

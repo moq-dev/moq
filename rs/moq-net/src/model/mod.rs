@@ -60,7 +60,7 @@ pub mod origin {
 	pub(crate) use super::origin_impl::Mounted;
 	pub use super::origin_impl::{
 		Claim, Config, Consumer, Cost, Driver, Link, Priority, Producer, Request, Requesting, Route, RouteInfo,
-		RouteOptions, Source,
+		RouteOptions,
 	};
 	#[cfg(feature = "async")]
 	pub(crate) use super::origin_impl::{Lane, NodeFilter};

@@ -463,6 +463,7 @@ fn announce_claim(chain: &[u64]) -> crate::route::node::Claim {
 		draining: false,
 		unavailable: false,
 		chain: chain.to_vec(),
+		marked: false,
 	}
 }
 
@@ -632,6 +633,7 @@ fn route_claim(epoch: u64, cost: u64) -> crate::route::node::Claim {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	}
 }
 
