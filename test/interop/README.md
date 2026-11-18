@@ -108,7 +108,13 @@ GStreamer checks the late tail alone. `moqsrc` keeps watching a finished
 broadcast, since an announcement means online/offline, so it has no end,
 withdrawal, or session to report. It joins once the broadcast has finished and
 requires exactly ten nonempty video buffers; its cell passes with the end check
-marked N/A. A pinned moq-transport pass records the case as skipped:
+marked N/A. A finished track's last group ages out its max delay after it ends,
+so like the other finish readers it subscribes with a max delay of its whole
+read phase: how late `gst-launch` starts is not the delivery under test.
+
+The runner releases a publisher's teardown only once every reader exited
+cleanly with its marker, so one failed reader fails the whole row. Each failed
+cell names its own cause, or the reader or publisher that failed its row. A pinned moq-transport pass records the case as skipped:
 moq-transport is a compatibility layer, and a finished broadcast's late tail
 between our own clients is not planned work.
 

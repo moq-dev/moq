@@ -1689,13 +1689,17 @@ run_finish_publisher() {
 # leaving a WebSocket fallback that won a slow race would move it to a second session mid-read.
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
 run_finish_gst() {
-    local broadcast="$1" url="$2" out="$3" version pid deadline count
+    local broadcast="$1" url="$2" out="$3" version pid deadline budget count
     version=$(cell_version gst)
     # The read phase's deadline, as the other readers get; SECONDS counts whole seconds.
     deadline=$((SECONDS + ${TIMEOUT%.*} * 2))
     [[ "$TIMEOUT" != *.* ]] || deadline=$((deadline + 2))
+    # A finished track's last group ages out its max delay after it ends, so moqsrc's 1 s default
+    # drops the tail whenever gst-launch takes longer than that to start. Like the other finish
+    # readers it grants the whole read phase: how late it joins is not the delivery under test.
+    budget=$(awk -v t="$TIMEOUT" 'BEGIN { print int(t * 2000) }')
     GST_PLUGIN_PATH_1_0="$GST_PLUGIN_DIR" GST_REGISTRY_1_0="$HARNESS_RUN/gst-run-registry.bin" \
-        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" ${version:+connect-version="$version"} connect-websocket-enabled=false \
+        gst-launch-1.0 -v moqsrc name=s url="$url" broadcast="$broadcast" max-delay="$budget" ${version:+connect-version="$version"} connect-websocket-enabled=false \
         s.video_0 ! identity name=frames silent=false ! fakesink >"$out" 2>&1 &
     pid=$!
     count=0
@@ -1773,9 +1777,9 @@ run_finishes() {
         broadcast="$name-$$-$RANDOM/fixture.hang"
         grant="${broadcast%/*}/**"
         ack="$LOGS/$name-ack"
-        # why[i] is reader i's own failure; row is what failed the whole row, which every
+        # causes[i] is reader i's own failure; row is what failed the whole row, which every
         # cell without a failure of its own reports, so a withheld acknowledgement names its cause.
-        local pids=() fds=() names=() why=() failed=() row="" status
+        local pids=() fds=() names=() causes=() failed=() row="" status
         late=0
         started=$SECONDS
         echo "=== finished media: $pub ==="
@@ -1807,15 +1811,15 @@ run_finishes() {
             names+=("$sub")
         done
         for i in "${!pids[@]}"; do
-            finish_ready "${pids[$i]}" "$LOGS/$name-${names[$i]}.log" '^finish reader ready$' || why[i]="never ready"
+            finish_ready "${pids[$i]}" "$LOGS/$name-${names[$i]}.log" '^finish reader ready$' || causes[i]="never ready"
         done
         pid=""
-        if [[ ${#why[@]} -eq 0 ]]; then
+        if [[ ${#causes[@]} -eq 0 ]]; then
             harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_finish_publisher "$pub" "$broadcast" "$(token_url --publish "$grant")" "$ack"
             pid="$HARNESS_PID"
             finish_ready "$pid" "$LOGS/$name-pub.log" '^finish ready linger_us=' || row="publisher never ready"
         fi
-        if [[ -z "$row" && ${#why[@]} -eq 0 ]]; then
+        if [[ -z "$row" && ${#causes[@]} -eq 0 ]]; then
             for reader_fd in "${fds[@]}"; do printf 'read\n' >&"$reader_fd"; done
             if [[ "$late" -eq 1 ]]; then
                 harness_spawn "$name-gst" "$LOGS/$name-gst.log" run_finish_gst "$broadcast" "$(token_url --subscribe "$grant")" "$LOGS/$name-gst.out"
@@ -1829,13 +1833,13 @@ run_finishes() {
                 # A reader that printed its marker can still fail on the way out, such as a
                 # session drain that times out, and that withholds the acknowledgement too.
                 if [[ "$status" -ne 0 ]]; then
-                    why[i]="exited $status"
+                    causes[i]="exited $status"
                 elif ! grep -qx "$(finish_marker "${names[$i]}")" "$LOGS/$name-${names[$i]}.log"; then
-                    why[i]="no finish marker"
+                    causes[i]="no finish marker"
                 fi
             done
         fi
-        for i in "${!why[@]}"; do failed+=("${names[$i]}"); done
+        for i in "${!causes[@]}"; do failed+=("${names[$i]}"); done
         [[ ${#failed[@]} -eq 0 ]] || row="reader failed: ${failed[*]}"
         if [[ -z "$row" ]]; then
             printf 'complete\n' >&"$ack_fd"
@@ -1863,8 +1867,8 @@ run_finishes() {
                     record pass "${cell[@]}"
                 fi
             else
-                record fail "${cell[@]}" detail="${why[$i]:-$row}"
-                echo "  FAIL  finish $pub -> $sub (${why[$i]:-$row})"
+                record fail "${cell[@]}" detail="${causes[$i]:-$row}"
+                echo "  FAIL  finish $pub -> $sub (${causes[$i]:-$row})"
                 overall=1
                 cat "$LOGS/$name-$sub.log" "$LOGS/$name-pub.log" 2>/dev/null || true
                 harness_reap "${pids[$i]}"
