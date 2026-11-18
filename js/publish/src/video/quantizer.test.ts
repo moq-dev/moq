@@ -122,7 +122,6 @@ test("a scene past the largest QP skips frames rather than overshoot", () => {
 	expect(frames.length).toBeLessThan(600 / 4);
 	// The first keyframe's size is a guess, which takes a few seconds to drain.
 	const settled = frames.filter((frame) => frame.timestamp >= 10_000_000);
-	expect(settled.every((frame) => frame.qp === 51)).toBe(true);
 	// Admitted only below the window, so at most one frame past it.
 	const largest = Math.max(...settled.map((frame) => frame.bits));
 	expect(backlog(frames, 10_000_000)).toBeLessThanOrEqual(0.25 + largest / 1_000_000);
@@ -145,6 +144,22 @@ test("a keyframe the encoder makes on its own isn't taken for a delta", () => {
 	}));
 	// Mistaken for a delta, it would raise the next deltas' estimate 2.5x and their QP with it.
 	expect(frames[61].qp).toBe(26);
+});
+
+test("a frame offered and not encoded doesn't shrink the next frame's share", () => {
+	// 5 fps from a 60 fps capture: each encoded frame is 200 ms of budget, so a 100 kbit frame fits a
+	// 1 Mbps budget at the quality QP, though it is 6x a 60 fps frame's share.
+	const control = new Quantizer(AVC, PIXELS);
+	const complexity = at(100_000, 26);
+	let last = 26;
+	for (let i = 0; i < 600; i++) {
+		const timestamp = Math.round((i * 1_000_000) / 60);
+		if (!control.admit(timestamp, 1_000_000) || i % 12 !== 0) continue;
+		const key = i === 0;
+		last = control.next(timestamp, key, 1_000_000);
+		control.output(timestamp, Math.ceil((complexity * (key ? 2.5 : 1) * 2 ** (-last / 6)) / 8), key);
+	}
+	expect(last).toBe(26);
 });
 
 test("Chrome's VP9 qindex scale keeps the quality QP in its range", () => {

@@ -71,8 +71,9 @@ export class Quantizer {
 	// Bits in the bucket, as of `#at` microseconds.
 	#level = 0;
 	#at?: number;
-	// The microseconds between the last two frames.
+	// The microseconds between the last two encoded frames, and the last one's timestamp.
 	#interval = 1_000_000 / 30;
+	#encoded?: number;
 	// The last delta frame's QP, which the next falls from by at most DROP.
 	#qp: number;
 	#pending: Pending[] = [];
@@ -108,6 +109,9 @@ export class Quantizer {
 	/** The QP for an admitted frame at `timestamp`, under a budget of `bitrate` bits per second. */
 	next(timestamp: number, key: boolean, bitrate: number): number {
 		this.#drain(timestamp, bitrate);
+		// Between encoded frames, not every frame offered: a capped frame rate or a held frame drops some.
+		if (this.#encoded !== undefined && timestamp > this.#encoded) this.#interval = timestamp - this.#encoded;
+		this.#encoded = timestamp;
 
 		const capacity = bitrate * WINDOW;
 		const share = (bitrate * this.#interval) / 1_000_000;
@@ -149,9 +153,7 @@ export class Quantizer {
 	// Empty the bucket at `bitrate` up to `timestamp`.
 	#drain(timestamp: number, bitrate: number): void {
 		if (this.#at !== undefined && timestamp > this.#at) {
-			const elapsed = timestamp - this.#at;
-			this.#level = Math.max(0, this.#level - (bitrate * elapsed) / 1_000_000);
-			this.#interval = elapsed;
+			this.#level = Math.max(0, this.#level - (bitrate * (timestamp - this.#at)) / 1_000_000);
 		}
 		this.#at = timestamp;
 	}
