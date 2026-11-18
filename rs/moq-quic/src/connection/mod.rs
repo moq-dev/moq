@@ -252,7 +252,7 @@ pub struct Connection {
 	/// A probe timed out with the peer unheard since the packet it probed for went out, so the
 	/// path may have been down: the next packet heard brings the next probe forward.
 	probe_when_heard: bool,
-	/// When handshake CRYPTO last went out ahead of its PTO ([`Self::resend_crypto_early`])
+	/// When handshake CRYPTO was last recovered ahead of the PTO ([`Self::recover_crypto_early`])
 	early_crypto_sent: Option<Instant>,
 
 	//
@@ -948,7 +948,7 @@ impl Connection {
 				if ack_eliciting
 					&& !close && !datagram_cleared
 					&& self.spaces[space_id].loss_probes == 0
-					&& self.path.in_flight.bytes + segment_size as u64 + untracked_bytes > self.path.congestion.window()
+					&& self.path.in_flight.bytes + untracked_bytes > self.path.congestion.window()
 				{
 					space_idx += 1;
 					send_blocked = true;
@@ -2099,47 +2099,50 @@ impl Connection {
 		self.set_loss_detection_timer(now);
 	}
 
-	/// Re-send the handshake CRYPTO the peer has not acknowledged now, rather than at its PTO,
-	/// once the peer shows it lacks some (RFC 9002 §6.2.3). With `ask`, the peer's packet showed
-	/// we lack some of its CRYPTO instead, so with none of ours to re-send, PING in our newest
-	/// handshake space: a peer that hears it without moving forward re-sends its own.
+	/// Act on a peer's packet showing handshake CRYPTO went missing, now rather than at a PTO
+	/// (RFC 9002 §6.2.3): re-send ours that it has not acknowledged, or PING in our newest
+	/// handshake space for a packet it answers by re-sending its own
 	///
 	/// A PTO backed off under heavy loss can be seconds out, past a peer's handshake timeout.
 	/// At most once a round trip, so the peer's packets that prompted it, such as each datagram
 	/// of a lost flight, cannot multiply into a flood; each still crosses the path at most once.
-	fn resend_crypto_early(&mut self, now: Instant, ask: bool) {
+	fn recover_crypto_early(&mut self, now: Instant, missing: Missing) {
 		if self
 			.early_crypto_sent
 			.is_some_and(|sent| now.saturating_duration_since(sent) < self.path.rtt.get())
 		{
 			return;
 		}
-		let mut resent = false;
-		for space_id in [SpaceId::Initial, SpaceId::Handshake] {
-			let space = &mut self.spaces[space_id];
-			if space.crypto.is_none() {
-				continue;
+		let mut sent = false;
+		match missing {
+			Missing::Ours => {
+				for space_id in [SpaceId::Initial, SpaceId::Handshake] {
+					let space = &mut self.spaces[space_id];
+					if space.crypto.is_none() {
+						continue;
+					}
+					for packet in space.sent_packets.values_mut() {
+						if packet.retransmits.get().is_some_and(|x| !x.crypto.is_empty()) {
+							let crypto = mem::take(&mut packet.retransmits.get_or_create().crypto);
+							space.pending.crypto.extend(crypto);
+							sent = true;
+						}
+					}
+				}
 			}
-			for packet in space.sent_packets.values_mut() {
-				if packet.retransmits.get().is_some_and(|x| !x.crypto.is_empty()) {
-					let crypto = mem::take(&mut packet.retransmits.get_or_create().crypto);
-					space.pending.crypto.extend(crypto);
-					resent = true;
+			Missing::Theirs => {
+				let space = match self.spaces[SpaceId::Handshake].crypto {
+					Some(_) => SpaceId::Handshake,
+					None => SpaceId::Initial,
+				};
+				if self.spaces[space].crypto.is_some() {
+					self.spaces[space].ping_pending = true;
+					sent = true;
 				}
 			}
 		}
-		if !resent && ask {
-			let space = match self.spaces[SpaceId::Handshake].crypto {
-				Some(_) => SpaceId::Handshake,
-				None => SpaceId::Initial,
-			};
-			if self.spaces[space].crypto.is_some() {
-				self.spaces[space].ping_pending = true;
-				resent = true;
-			}
-		}
-		if resent {
-			trace!("re-sending handshake CRYPTO ahead of its PTO");
+		if sent {
+			trace!(?missing, "recovering handshake CRYPTO ahead of the PTO");
 			self.early_crypto_sent = Some(now);
 		}
 	}
@@ -2678,14 +2681,14 @@ impl Connection {
 		partial_decode: PartialDecode,
 	) {
 		// A server's Handshake or 1-RTT packet before its ServerHello means an Initial of its was
-		// lost, so ask for it again (RFC 9002 §6.2.3)
+		// lost
 		if self.side.is_client()
 			&& self.state.is_handshake()
 			&& remote == self.path.remote
 			&& matches!(partial_decode.space(), Some(SpaceId::Handshake | SpaceId::Data))
 			&& self.spaces[SpaceId::Handshake].crypto.is_none()
 		{
-			self.resend_crypto_early(now, true);
+			self.recover_crypto_early(now, Missing::Theirs);
 		}
 		if let Some(decoded) =
 			packet_crypto::unprotect_header(partial_decode, &self.spaces, self.peer_params.stateless_reset_token)
@@ -2773,9 +2776,10 @@ impl Connection {
 						&& self.early_1rtt.len() < MAX_EARLY_1RTT_PACKETS
 					{
 						trace!("buffering short packet during handshake");
-						// The client sent this after its Finished, which we lack
+						// The client sent this after its Finished, which we lack, so it already
+						// holds our whole flight
 						if self.side.is_server() {
-							self.resend_crypto_early(now, true);
+							self.recover_crypto_early(now, Missing::Theirs);
 						}
 						self.early_1rtt.push(EarlyPacket {
 							remote,
@@ -3194,7 +3198,7 @@ impl Connection {
 			// A peer probing without moving its handshake forward, by repeating its CRYPTO or
 			// with a PING, is missing some of ours (RFC 9002 §6.2.3)
 			if self.spaces[space].crypto_stream.bytes_read() == read {
-				self.resend_crypto_early(now, false);
+				self.recover_crypto_early(now, Missing::Ours);
 			}
 		}
 
@@ -4603,6 +4607,15 @@ mod state {
 		/// peer sends on the current path meanwhile
 		pub(super) send_close: bool,
 	}
+}
+
+/// Whose handshake CRYPTO a peer's packet showed is missing
+#[derive(Debug, Clone, Copy)]
+enum Missing {
+	/// Ours: the peer probed without moving its handshake forward
+	Ours,
+	/// The peer's: it sent what follows CRYPTO we never got
+	Theirs,
 }
 
 fn get_max_ack_delay(params: &TransportParameters) -> Duration {
