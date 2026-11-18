@@ -394,6 +394,18 @@ mod tests {
 	/// Build a 320x240 avc3 source broadcast: a catalog plus a video track with
 	/// `groups` groups of `frames` gray frames each, encoded with openh264.
 	fn source_broadcast(groups: u64, frames: u64) -> Source {
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
+		source_broadcast_keyed(groups, frames, info, |sequence, _| sequence)
+	}
+
+	/// [`source_broadcast`] on a track described by `info`, each group keyed by `key` from its
+	/// sequence and its first frame's microseconds.
+	fn source_broadcast_keyed(
+		groups: u64,
+		frames: u64,
+		info: moq_net::track::Info,
+		key: impl Fn(u64, u64) -> u64,
+	) -> Source {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
 		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
@@ -409,7 +421,6 @@ mod tests {
 		video.framerate = Some(30.0);
 		catalog.modify().unwrap().video.insert("video", video).unwrap();
 
-		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let track = broadcast.create_track("video", info).unwrap();
 
 		let mut encoder = moq_video::encode::Encoder::new(&{
@@ -421,7 +432,8 @@ mod tests {
 		let gray = vec![0x80u8; 320 * 240 * 4];
 
 		for sequence in 0..groups {
-			let mut group = track.create_group(sequence.into()).unwrap();
+			let start = key(sequence, sequence * frames * 33_333);
+			let mut group = track.create_group(start.into()).unwrap();
 			for index in 0..frames {
 				let timestamp = (sequence * frames + index) * 33_333;
 				if index == 0 {
@@ -2051,6 +2063,75 @@ mod tests {
 			assert_eq!(groups, expected);
 			transcoder.abort();
 		}
+	}
+
+	/// A source keyed finer than microseconds maps several of its starts to each output start.
+	/// A cold fetch of an output group still transcodes the source group live serves there,
+	/// rather than asking for the lowest start that maps to it and dropping a group that exists.
+	#[tokio::test]
+	async fn a_finer_source_fetches_the_group_live_serves() {
+		// Each group starts a nanosecond past its first frame, which the output's microseconds
+		// can't name: the inverse of the output start is a start the source never used.
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::NANO);
+		let source = source_broadcast_keyed(2, 5, info, |_, first| first * 1_000 + 1);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let instance = || async {
+			let output = moq_net::broadcast::Info::default().produce();
+			let consumer = output.consume();
+			let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config.clone()));
+			let track = loop {
+				match consumer.track(hang::Catalog::DEFAULT_NAME) {
+					Ok(track) => break track,
+					Err(moq_net::Error::NotFound) => tokio::task::yield_now().await,
+					Err(err) => panic!("catalog track: {err}"),
+				}
+			};
+			let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(track);
+			await_catalog(&mut catalogs, |snapshot| {
+				snapshot.video.renditions.contains_key("video/120p")
+			})
+			.await;
+			(consumer.track("video/120p").unwrap(), transcoder)
+		};
+		let timestamps = |mut group: moq_net::group::Consumer| async move {
+			let mut timestamps = Vec::new();
+			while let Some(payload) = group.read_frame().await.unwrap() {
+				let frame = hang::container::Frame::decode(payload.payload).unwrap();
+				timestamps.push(frame.timestamp.as_micros().unwrap());
+			}
+			(group.start, timestamps)
+		};
+		let expected = |sequence: u64| -> Vec<u128> { (0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect() };
+
+		// The live loop serves the latest source group, at its first frame's microsecond.
+		let (rung, live) = instance().await;
+		let mut subscriber = rung
+			.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::live()]))
+			.await
+			.unwrap()
+			.ordered();
+		let group = loop {
+			if let Some(group) = subscriber.next_group().await.unwrap().unwrap().group() {
+				break group;
+			}
+		};
+		let served = timestamps(group).await;
+		assert_eq!(served, (166_665, expected(1)));
+		live.abort();
+
+		// A fresh instance has neither group cached, so each fetch fills from the source.
+		let (rung, cold) = instance().await;
+		let fetched = timestamps(rung.fetch_group(166_665, None).await.unwrap()).await;
+		assert_eq!(fetched, served, "a cold fetch serves what live served at the same key");
+		let first = timestamps(rung.fetch_group(0, None).await.unwrap()).await;
+		assert_eq!(first, (0, expected(0)));
+		cold.abort();
 	}
 
 	/// A source whose codec description changes rebuilds the shared decode, so

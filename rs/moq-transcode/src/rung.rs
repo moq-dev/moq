@@ -155,14 +155,16 @@ pub(crate) fn output_start(start: u64, scale: Option<moq_net::Timescale>) -> Opt
 	Some(start.convert(hang::container::TIMESCALE).ok()?.value())
 }
 
-/// The start of the source group the output group starting at `start` mirrors, for a source in
-/// `scale`: the lowest source start [`output_start`] maps there, or `None` when none does.
-///
-/// Exact for a source no finer than microseconds. A finer one maps several starts to each output
-/// start, and only the lowest is found.
-fn source_start(start: u64, scale: Option<moq_net::Timescale>) -> Option<u64> {
-	let source = source_from(start, scale)?;
-	(output_start(source, scale) == Some(start)).then_some(source)
+/// The source starts [`output_start`] maps to the output start `start`, for a source in `scale`,
+/// or `None` when none does: one start for a source no finer than microseconds, and a run of
+/// them for a finer one.
+fn source_starts(start: u64, scale: Option<moq_net::Timescale>) -> Option<std::ops::RangeInclusive<u64>> {
+	let low = source_from(start, scale)?;
+	let high = match start.checked_add(1).and_then(|next| source_from(next, scale)) {
+		Some(next) => next.checked_sub(1)?,
+		None => u64::MAX,
+	};
+	(low <= high).then_some(low..=high)
 }
 
 /// The lowest source start that [`output_start`] maps at or after the output start `start`, or
@@ -757,22 +759,29 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::FillGroups, sequence: u64, li
 			}
 		},
 	};
-	let Some(start) = source_start(sequence, info.timescale) else {
+	let Some(starts) = source_starts(sequence, info.timescale) else {
 		// No source start maps here: the group can't exist.
 		return drop_gap(rung, &track, fill, sequence, info.timescale).await;
 	};
-	let options = moq_net::group::Fetch::default().with_priority(fill.priority());
+	// Only a lookup by time can wait on the source's media, which a retired rung's drain can't.
+	let placing = starts.start() != starts.end();
+	let mut retire = rung.retire.clone();
 	let mut source = tokio::select! {
 		biased;
 		_ = fill.unwanted(sequence) => return abandon(sequence),
-		source = track.fetch_group(start, options) => match source {
-			Ok(source) => source,
-			Err(moq_net::Error::NotFound) => return drop_gap(rung, &track, fill, sequence, info.timescale).await,
+		source = source_group(&track, starts, fill.priority()) => match source {
+			Ok(Some(source)) => source,
+			Ok(None) => return drop_gap(rung, &track, fill, sequence, info.timescale).await,
 			Err(err) => {
 				refuse(err.clone());
 				return Err(err.into());
 			}
 		},
+		() = retire.fired(), if placing => {
+			// Nothing says the source lost it: a later reader asks the rung that replaces this one.
+			refuse(moq_net::Error::Cancel);
+			return Ok(());
+		}
 	};
 
 	let _permit = tokio::select! {
@@ -824,8 +833,66 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::FillGroups, sequence: u64, li
 	// live path is idle. Reference counted, so overlapping the live session
 	// bills the rendition once rather than twice.
 	let active = rung.active.attach(&rung.rendition);
-	transcode_group(pipeline, &container, &mut source, Writing(Some(output)), &active).await?;
+	transcode_group(pipeline, &container, &mut source.group, Writing(Some(output)), &active).await?;
 	Ok(())
+}
+
+/// The source group an output group mirrors, with the subscription that delivers it, if any.
+struct Source {
+	group: moq_net::group::Consumer,
+	/// Held until the group is read, since it is what feeds the group.
+	_subscriber: Option<moq_net::track::Ordered>,
+}
+
+/// The source group starting at one of `starts`, the source starts an output group maps back to,
+/// or `None` when the source has none.
+///
+/// A single start is fetched by key. A run of them is looked up by time instead, rather than a
+/// fetch per start: the group holding the run's last start is the newest starting in or before
+/// it, so it is the one asked for, and the run holds a group only if it starts there. A source
+/// with two groups inside one output start gives that start to whichever path writes it first.
+async fn source_group(
+	track: &moq_net::track::Consumer,
+	starts: std::ops::RangeInclusive<u64>,
+	priority: i8,
+) -> moq_net::Result<Option<Source>> {
+	use moq_net::track::{Anchor, Delay, Item, Range, Subscription};
+
+	if starts.start() == starts.end() {
+		let options = moq_net::group::Fetch::default().with_priority(priority);
+		return match track.fetch_group(*starts.start(), options).await {
+			Ok(group) => Ok(Some(Source {
+				group,
+				_subscriber: None,
+			})),
+			Err(moq_net::Error::NotFound) => Ok(None),
+			Err(err) => Err(err),
+		};
+	}
+
+	let last = Anchor::Time(*starts.end());
+	let subscription = Subscription::default()
+		.with_ranges([Range {
+			start: last,
+			end: Some(last),
+		}])
+		.with_priority(priority)
+		.with_delay(Delay::default().with_max(None));
+	let mut groups = track.subscribe(subscription).await?.ordered();
+	while let Some(item) = groups.next_group().await? {
+		// A group given up on is no source group.
+		let Item::Group(group) = item else {
+			continue;
+		};
+		if !starts.contains(&group.start) {
+			return Ok(None);
+		}
+		return Ok(Some(Source {
+			group,
+			_subscriber: Some(groups),
+		}));
+	}
+	Ok(None)
 }
 
 /// Drop the run of output groups around `sequence`, which the source doesn't have, up to the
@@ -1380,6 +1447,87 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		drop(video);
+	}
+
+	/// A source keyed finer than microseconds maps a run of its starts to each output start. A
+	/// fill asks the source for the one group holding the run's last start, rather than a fetch
+	/// per start or the groups below it, and serves the group starting inside the run.
+	#[tokio::test(start_paused = true)]
+	async fn a_finer_source_is_asked_for_one_group() {
+		let fetched = fill_finer(Some(1_000_001), false).await;
+		assert_eq!(fetched.expect("the source has it").start, 1_000);
+	}
+
+	/// The group holding the run's last start starts below the run, so the source has no group
+	/// the output group could mirror.
+	#[tokio::test(start_paused = true)]
+	async fn a_finer_source_without_the_group_drops_it() {
+		assert!(
+			fill_finer(Some(999_999), false).await.is_err(),
+			"the source doesn't have it"
+		);
+	}
+
+	/// A retired rung's drain can't wait on the source to place a time, so it refuses the group
+	/// for the rung that replaces it rather than holding the retirement.
+	#[tokio::test(start_paused = true)]
+	async fn a_retired_rung_refuses_a_finer_lookup_it_cant_place() {
+		assert!(fill_finer(None, true).await.is_err(), "nothing places the group yet");
+	}
+
+	/// Fetch output group 1000 of a rung over a nanosecond source holding only a later live group,
+	/// answering the source's lookup with a group at `answer`, and return what the fetch got.
+	async fn fill_finer(answer: Option<u64>, retired: bool) -> moq_net::Result<moq_net::group::Consumer> {
+		let (rung, source, retire) = idle_rung();
+		let video = source
+			.create_track(
+				"video",
+				hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::NANO),
+			)
+			.unwrap();
+		let source_fills = video.requests();
+		video
+			.create_group(moq_net::group::Info { start: 5_000_000_001 })
+			.unwrap()
+			.finish()
+			.unwrap();
+
+		let output = moq_net::broadcast::Info::default().produce();
+		let track = output
+			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let fills = track.requests();
+		let consumer = track.consume();
+		let fetching = tokio::spawn(async move { consumer.fetch_group(1_000, None).await });
+		let fill = fills.requested_fill().await.map(groups).unwrap();
+
+		if retired {
+			retire.send(true).unwrap();
+		}
+		let mut tasks = tokio::task::JoinSet::new();
+		spawn_fill(&mut tasks, rung, fill, Arc::new(Semaphore::new(1)));
+		let wait = std::time::Duration::from_secs(5);
+		if let Some(answer) = answer {
+			let moq_net::track::Fill::Lookup(lookup) = kio::clock::timeout(wait, source_fills.requested_fill())
+				.await
+				.expect("the source is asked")
+				.unwrap()
+			else {
+				panic!("a time lookup");
+			};
+			// The last nanosecond microsecond 1000 holds.
+			assert_eq!(lookup.time(), 1_000_999);
+			lookup.accept(answer, None).unwrap().finish().unwrap();
+		}
+		// Not timed: the paused clock runs ahead while a codec thread opens the encoder.
+		let fetched = fetching.await.unwrap();
+		tasks.join_next().await.unwrap().unwrap();
+		assert!(
+			kio::clock::timeout(wait, source_fills.requested_fill()).await.is_err(),
+			"the source is asked nothing else"
+		);
+		drop(video);
+		fetched
 	}
 
 	/// Fill output starts 1 to an hour, with source groups at 0 and an hour, or, when `empty`,
