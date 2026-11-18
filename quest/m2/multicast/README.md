@@ -277,9 +277,8 @@ judged the route layer at this plan's end state):
     [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) finished:
     the public route API and config that would freeze by omission, the half
     `js/net` implements, and what a non-forwarding endpoint must parse. The
-    moq-cluster draft, which still specifies the warm discount item 5
-    forbids, is [its own quest](/quest/m2/moq-cluster-draft.md), since
-    third-party relays ship it.
+    moq-cluster draft specified the warm discount item 5 forbids until it
+    was rewritten to what ships, since third-party relays ship it.
 
 The shape those decisions give, as
 [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) built it; a
