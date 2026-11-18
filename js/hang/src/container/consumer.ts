@@ -1079,9 +1079,8 @@ export class Consumer {
 						full ||
 						ended !== undefined
 					) {
-						// What an ordered reader gives up it reports as a gap; a key it skips without one was never a
-						// group. A gap an empty group carries still marks the next frame, which follows the loss.
-						if (!contiguous && (decided ? head.gap : !empty)) {
+						// What an ordered reader gives up it reports as a gap; a key it skips without one was never a group.
+						if (!contiguous && !empty && (!decided || head.gap)) {
 							this.#lost = true;
 							if (!startup) {
 								console.warn(

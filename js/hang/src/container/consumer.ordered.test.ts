@@ -41,6 +41,7 @@ function setup(wait: number) {
 	};
 	return {
 		clock,
+		track,
 		consumer,
 		reads,
 		write,
@@ -80,6 +81,22 @@ test("a hole is waited for as long as the ordered reader waits, then read as a g
 		await t.clock.advance(Duration.millis(1));
 		await flush();
 		expect(t.read()).toEqual(["frame 0", "gap 0+40", "frame 40"]);
+	} finally {
+		await t.close();
+	}
+});
+
+test("a gap reported before an empty group still reads as a gap before the next frame", async () => {
+	const t = setup(100);
+	try {
+		t.write(0n, 0);
+		t.write(3n, 60);
+		// Group 2 holds nothing, so the gap the reader reports for group 1 rides on an empty group; the
+		// timeline breaking at group 3 still reads as the gap.
+		t.track.createGroup(2n).finish();
+		await t.clock.advance(Duration.millis(100));
+		await flush();
+		expect(t.read()).toEqual(["frame 0", "gap 0+60", "frame 60"]);
 	} finally {
 		await t.close();
 	}
