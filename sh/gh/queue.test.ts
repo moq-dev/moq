@@ -274,7 +274,8 @@ const features = await workflow("features");
 assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features"]);
 // Nightly runs the whole gate over every package on the queue's runners, never
 // beside Gate cost, so the queue keeps a runner; both run main's code alone.
-assert.ok(nightly.jobs.gate.steps.at(-1).run.includes("nix develop --command just gate"));
+// The exact command: `just gate -rs` would skip a module.
+assert.match(nightly.jobs.gate.steps.at(-1).run, /^nix develop --command just gate$/m);
 assert.deepEqual(nightly.jobs.gate["runs-on"], ["self-hosted", "moq-queue"]);
 for (const job of ["gate", "gate-cost"]) {
 	assert.equal(
@@ -284,5 +285,5 @@ for (const job of ["gate", "gate-cost"]) {
 	);
 }
 assert.equal(nightly.jobs.gate.concurrency.group, nightly.jobs["gate-cost"].concurrency.group);
-assert.ok(!JSON.stringify(nightly.jobs.gate).includes("secrets."), "a self-hosted Nightly job gets no secrets");
+assert.ok(!/secrets\s*[.[]/.test(JSON.stringify(nightly.jobs.gate)), "a self-hosted Nightly job gets no secrets");
 console.log("queue event policy passed");
