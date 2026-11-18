@@ -338,7 +338,7 @@ fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), Encode
 }
 
 /// The bytes a lite-07 range takes on the wire, or `None` when it can't go out.
-fn range_size(range: &Range, form: Form) -> Option<usize> {
+pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 	let size = |value| varint::size(value, form).ok();
 	let anchor = |anchor, end| -> Option<usize> {
 		let (kind, value) = wire_anchor(anchor, end).ok()?;
@@ -878,6 +878,11 @@ impl LiveRanges {
 		Some(range)
 	}
 
+	/// The Range ID the next range added takes.
+	pub fn next(&self) -> u64 {
+		self.next
+	}
+
 	/// Every live range with its Range ID, in Range ID order.
 	pub fn numbered(&self) -> Vec<(u64, Range)> {
 		self.iter().map(|(id, range)| (id, *range)).collect()
@@ -1006,15 +1011,20 @@ impl LiveRanges {
 			})
 			.copied()
 			.collect();
+		let add: Vec<Range> = added.iter().map(|(_, range)| *range).collect();
+		// Checked before anything changes, so a refused edit leaves the ranges as last sent.
+		let form = self.version.into();
+		let size = |range: &Range| range_size(range, form).unwrap_or(usize::MAX);
+		let removed = remove.iter().map(|id| size(&self.live[id])).fold(0, usize::saturating_add);
+		let size = add.iter().map(size).fold(self.size.saturating_sub(removed), usize::saturating_add);
+		if size > super::message::MAX_MESSAGE_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
 		for &id in &remove {
 			self.remove(id);
 		}
-		let ids = (self.next..).zip(added.iter().map(|(key, _)| *key)).collect();
-		let add: Vec<Range> = added.into_iter().map(|(_, range)| range).collect();
+		let ids = (self.next..).zip(added.into_iter().map(|(key, _)| key)).collect();
 		self.add(add.iter().copied());
-		if self.size > super::message::MAX_MESSAGE_SIZE {
-			return Err(EncodeError::TooLarge);
-		}
 		Ok((RangeEdit::Edit { remove, add }, ids))
 	}
 }
