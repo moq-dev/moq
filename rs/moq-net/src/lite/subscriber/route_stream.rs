@@ -20,6 +20,7 @@ use crate::{
 	lite::{self, AnnounceBroadcast as Msg, Version},
 	origin,
 	route::{node, relay},
+	stats::RouteClose,
 	transport::poll::Session as _,
 };
 
@@ -218,9 +219,14 @@ impl RouteStream {
 				// This origin asks the peer for nothing.
 				role: relay::Role::Scoped(Vec::new()),
 			};
+			let stats = self.publish.origin.stats();
 			let stream = (answering.connect(subscriber.peer_setup.tag(), port))
-				.map_err(|_| Error::ProtocolViolation)?
-				.with_clock(subscriber.runtime.clone());
+				.map_err(|err| {
+					stats.route_closed(err.close());
+					Error::ProtocolViolation
+				})?
+				.with_clock(subscriber.runtime.clone())
+				.with_stats(stats.clone());
 			streams.push(Arc::new(stream));
 		}
 		let main = streams.last().expect("the session's key").clone();
@@ -319,10 +325,12 @@ impl Running {
 							// A reader that keeps reading a trickle while its routes fail faster
 							// is cut off too, before the node holds every failure for it.
 							if self.answer.poll_overrun(waiter).is_ready() {
+								subscriber.origin.stats().route_closed(RouteClose::Overrun);
 								self.stall.close("announce stream fell behind");
 								return Poll::Ready(Err(Error::Timeout));
 							}
 							if self.stall.poll(self.writer.written(), waiter).is_ready() {
+								subscriber.origin.stats().route_closed(RouteClose::Stalled);
 								return Poll::Ready(Err(Error::Timeout));
 							}
 							break;

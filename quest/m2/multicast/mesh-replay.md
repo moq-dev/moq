@@ -57,15 +57,15 @@ Agent's choices, for the implementer to revisit:
   relay.
 - The counts are a report, not a gate, as benchmarks are (2026-10-20,
   maintainer).
+- Each relay's route counts come from its stats (`routes` in a label's
+  presence) or `/metrics` (`moq_relay_route_*`), which
+  [moq-dev/moq#9126](https://github.com/moq-dev/moq/pull/9126) added; see
+  `doc/concept/stats.md`.
 - A pair of edges joined over lite-06 can still transit, a known gap of the
   lite-06 path that ends when the mesh finishes its roll. Name it in the
   report instead of failing on it.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [A relay counts what its route layer does](/quest/m2/multicast/route-counters.md) - the counts the report reads from each relay
 
 ## Related
 
@@ -73,3 +73,4 @@ Public API: none. Wire: none.
 - [The cases no test covers run on real sessions](/quest/m2/multicast/accept.md) - the same failures on mock sessions with mocked time
 - [Random fault schedules](/quest/m4/cluster-fault-schedules.md) - searches fault timings on the simulated clock
 - [A nightly soak](/quest/m4/relay-soak.md) - one real relay under churn
+- [A draining relay drains the cluster links it dialed](/quest/m3/drain-dialed-links.md) - without it, a drained relay's dialed links end with DEAD and no DRAIN

@@ -21,6 +21,7 @@ use crate::{
 		node::{self, Change, Claim, Msg},
 		relay,
 	},
+	stats::{RouteRefusal, Withdrawal},
 };
 
 use super::{AnnouncedRoute, Subscriber};
@@ -302,8 +303,9 @@ impl Routed {
 		let stream = (node.connect(subscriber.peer_setup.tag(), port))
 			// Said here, since the peer is told only that it broke the protocol.
 			.inspect_err(|err| tracing::warn!(%err, peer = ?routing, "the route layer refused the session"))
-			.map_err(refused)?
-			.with_clock(subscriber.runtime.clone());
+			.map_err(refused(subscriber.origin.stats()))?
+			.with_clock(subscriber.runtime.clone())
+			.with_stats(subscriber.origin.stats().clone());
 		Ok(Self {
 			me: node.me(),
 			stream: Arc::new(stream),
@@ -504,7 +506,7 @@ impl Routed {
 				self.named.clear();
 			}
 		}
-		self.stream.recv(Msg::Edited).map_err(refused)?;
+		self.stream.recv(Msg::Edited).map_err(refused(self.origin.stats()))?;
 		self.reask();
 		Ok(())
 	}
@@ -535,7 +537,9 @@ impl Routed {
 				let asked = asked.ok_or(Error::ProtocolViolation)?;
 				asked.synced = true;
 				let path = asked.path.clone();
-				self.stream.recv(Msg::Synced(path)).map_err(refused)?;
+				self.stream
+					.recv(Msg::Synced(path))
+					.map_err(refused(self.origin.stats()))?;
 			}
 			Wire::Route { offer } => {
 				let origin = offer.path.first().ok_or(Error::ProtocolViolation)?.node;
@@ -547,7 +551,9 @@ impl Routed {
 					self.routes.insert(id, (origin, BTreeSet::new()));
 				}
 				let offer = Some(offer);
-				self.stream.recv(Msg::Route { origin, offer }).map_err(refused)?;
+				self.stream
+					.recv(Msg::Route { origin, offer })
+					.map_err(refused(self.origin.stats()))?;
 			}
 			Wire::RouteEnd { id } => {
 				let (origin, claims) = self.routes.remove(&id).ok_or(Error::ProtocolViolation)?;
@@ -560,10 +566,22 @@ impl Routed {
 					self.held.pop();
 				}
 				let offer = None;
-				self.stream.recv(Msg::Route { origin, offer }).map_err(refused)?;
+				self.stream
+					.recv(Msg::Route { origin, offer })
+					.map_err(refused(self.origin.stats()))?;
 			}
-			Wire::Dead { hop, far } => self.stream.recv(Msg::Dead { hop, far }).map_err(refused)?,
-			Wire::Drain { node } => self.stream.recv(Msg::Drain { node }).map_err(refused)?,
+			Wire::Dead { hop, far } => {
+				self.origin.stats().withdrawal(Withdrawal::Dead, true);
+				self.stream
+					.recv(Msg::Dead { hop, far })
+					.map_err(refused(self.origin.stats()))?
+			}
+			Wire::Drain { node } => {
+				self.origin.stats().withdrawal(Withdrawal::Drain, true);
+				self.stream
+					.recv(Msg::Drain { node })
+					.map_err(refused(self.origin.stats()))?
+			}
 			Wire::Floor { id, revision } => self.floor(id, revision)?,
 			Wire::Start {
 				suffix,
@@ -576,7 +594,7 @@ impl Routed {
 				// Fields valid alone can still resolve to a path this node cannot hold. The
 				// claim keeps its id, and reaches no reader here.
 				if path.is_none() {
-					self.origin.stats().refuse_route();
+					self.origin.stats().refuse_route(RouteRefusal::Path);
 				}
 				self.above(relative.as_ref(), &claim)?;
 				self.held.push(self.slots.acquire()?);
@@ -589,13 +607,13 @@ impl Routed {
 					filed: false,
 				};
 				self.claims.insert(id, wire);
-				self.changed(id)?;
+				self.changed(id, true)?;
 			}
 			Wire::Change { id, claim } => {
 				let wire = self.claims.get(&id).ok_or(Error::ProtocolViolation)?;
 				self.above(wire.relative.as_ref(), &claim)?;
 				self.claims.get_mut(&id).expect("checked above").claim = claim;
-				self.changed(id)?;
+				self.changed(id, false)?;
 			}
 			Wire::End { id, lost } => {
 				self.decoder.end(id)?;
@@ -618,7 +636,9 @@ impl Routed {
 					self.pending.end(id, broadcast, change, wire.origin.is_some());
 				} else if let (true, Some(broadcast)) = (wire.filed, broadcast) {
 					let changes = vec![(broadcast, change)];
-					self.stream.recv(Msg::Announce { changes }).map_err(refused)?;
+					self.stream
+						.recv(Msg::Announce { changes })
+						.map_err(refused(self.origin.stats()))?;
 				}
 			}
 			// The peer's own requests go to the half answering them, and lite-07 has its
@@ -644,9 +664,9 @@ impl Routed {
 		}
 	}
 
-	/// The claim with Announce ID `id` started or changed: a routing neighbour's waits
-	/// for its floor, and any other goes to the node at once.
-	fn changed(&mut self, id: u64) -> Result<(), Error> {
+	/// The claim with Announce ID `id` started, when `fresh`, or changed: a routing
+	/// neighbour's waits for its floor, and any other goes to the node at once.
+	fn changed(&mut self, id: u64, fresh: bool) -> Result<(), Error> {
 		let wire = self.claims.get_mut(&id).expect("a live claim");
 		let broadcast = wire.path.clone().map(|path| (path, wire.instance.clone()));
 		let change = Change::Live(wire.claim.clone());
@@ -661,6 +681,10 @@ impl Routed {
 			return Ok(());
 		};
 		let admitted = admits(&self.origin, &self.root, &self.permit, &broadcast.0);
+		// Counted once per claim: as it starts, or as a change takes it out of scope.
+		if !admitted && (fresh || wire.filed) {
+			self.origin.stats().refuse_route(RouteRefusal::Scope);
+		}
 		let change = match (wire.filed, admitted) {
 			(_, true) => change,
 			(true, false) => Change::Lost,
@@ -668,7 +692,9 @@ impl Routed {
 		};
 		wire.filed = admitted;
 		let changes = vec![(broadcast, change)];
-		self.stream.recv(Msg::Announce { changes }).map_err(refused)
+		self.stream
+			.recv(Msg::Announce { changes })
+			.map_err(refused(self.origin.stats()))
 	}
 
 	/// ANNOUNCE_FLOOR: the claim changes since the last one are those of the node the
@@ -692,7 +718,7 @@ impl Routed {
 		let floor = revision;
 		self.stream
 			.recv(Msg::Claims { origin, changes, floor })
-			.map_err(refused)
+			.map_err(refused(self.origin.stats()))
 	}
 
 	/// Tell the node's other sessions what the messages received changed.
@@ -738,7 +764,9 @@ impl Routed {
 		}
 		for change in changes {
 			let changes = vec![change];
-			self.stream.recv(Msg::Announce { changes }).map_err(refused)?;
+			self.stream
+				.recv(Msg::Announce { changes })
+				.map_err(refused(self.origin.stats()))?;
 		}
 		self.stream.flush();
 		Ok(())
@@ -780,8 +808,14 @@ impl Routed {
 	}
 
 	/// Serve a claim through this session, or update how it is served. Returns whether
-	/// the session may carry it.
+	/// the session may carry it, counting a refusal.
 	fn serve(&mut self, subscriber: &Subscriber, key: &ServedKey, served: node::Served) -> bool {
+		// The root and limit checks below are not counted: a claim the peer sent outside
+		// them was refused as it arrived, and the node may hand this session another's.
+		let refuse = |kind| {
+			self.origin.stats().refuse_route(kind);
+			false
+		};
 		let (origin, claim, instance) = key;
 		let Some(path) = claim.strip_prefix(&self.root) else {
 			// Outside the session's root, so nothing a request could name here.
@@ -805,12 +839,12 @@ impl Routed {
 		for relay in relays {
 			let pushed = route::node::hop(relay).is_some_and(|hop| hops.push(hop).is_ok());
 			if !pushed {
-				return false;
+				return refuse(RouteRefusal::Looped);
 			}
 		}
 		if subscriber.names_self(&hops) || hops.len() > self.origin.max_hops().get() {
 			tracing::debug!(route = %subscriber.log_path(&path), node = ?origin, "dropping looped claim");
-			return false;
+			return refuse(RouteRefusal::Looped);
 		}
 		let lane = crate::origin::Lane {
 			primary: served.primary,
@@ -851,7 +885,7 @@ impl Routed {
 				true
 			}
 			// Outside our origin's scope.
-			Err(_) => false,
+			Err(_) => refuse(RouteRefusal::Scope),
 		}
 	}
 
@@ -873,9 +907,13 @@ impl Drop for Routed {
 	}
 }
 
-/// The node refuses what no node following the rule sends.
-fn refused(_: route::Error) -> Error {
-	Error::ProtocolViolation
+/// The node refuses what no node following the rule sends, closing the session, which
+/// counts on `stats`.
+fn refused(stats: &crate::stats::Session) -> impl FnOnce(route::Error) -> Error + '_ {
+	|err| {
+		stats.route_closed(err.close());
+		Error::ProtocolViolation
+	}
 }
 
 /// Whether the node may hold the peer's claim at `path`: the permit's limit admits

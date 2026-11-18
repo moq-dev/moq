@@ -589,3 +589,69 @@ async fn a_request_for_a_claim_shown_waits_for_its_route() {
 	.unwrap();
 	assert_eq!(minted.path.as_str(), "live");
 }
+
+/// Count `subscriber`'s sessions under the label `peer`.
+fn counted(subscriber: &mut Subscriber) -> crate::stats::Registry {
+	let registry = crate::stats::Registry::new(crate::stats::Config::new());
+	let session = (registry.tier(crate::stats::Tier::default()))
+		.session(crate::stats::SessionInfo::new(Path::from_static("peer")));
+	subscriber.origin = subscriber.origin.clone().with_stats(session);
+	registry
+}
+
+/// What `registry`'s one label counted on the route layer.
+fn routes(registry: &crate::stats::Registry) -> crate::stats::Routes {
+	let sessions = registry.snapshot().sessions();
+	let [(_, presence)] = sessions.as_slice() else {
+		panic!("one label: {sessions:?}");
+	};
+	assert_eq!(presence.routes_refused, presence.routes.refused.total());
+	presence.routes
+}
+
+/// A claim the limit leaves out counts as refused once, as it starts, and not again as it
+/// changes or as a later limit takes it in and out.
+#[kio::test]
+async fn a_claim_outside_the_limit_counts_once() {
+	let (mut subscriber, _consumer) = subscriber();
+	let registry = counted(&mut subscriber);
+	let public = limited("live/*/public/**");
+	let mut routed = asking(&subscriber, &public);
+	for msg in [start("live/a/public/x"), start("live/a/private/y")] {
+		routed.receive(msg).unwrap();
+	}
+	routed.receive(Wire::Change { id: 1, claim: claim(1) }).unwrap();
+	routed.limit(&limited("live/**")).unwrap();
+	routed.limit(&public).unwrap();
+	pump(&mut routed, &subscriber);
+	let refused = routes(&registry).refused;
+	assert_eq!((refused.scope, refused.total()), (1, 1), "{refused:?}");
+}
+
+/// A routing neighbour's withdrawals count as received, and an input the route layer
+/// refuses counts the session closed by its kind.
+#[kio::test]
+async fn a_routing_neighbours_withdrawals_and_errors_count() {
+	let (mut subscriber, _consumer) = forwarding();
+	let registry = counted(&mut subscriber);
+	let mut routed = routing(&subscriber);
+	let far = NodeId { relay: 8, ..PEER };
+	routed.receive(route(far)).unwrap();
+	routed.receive(Wire::Drain { node: far }).unwrap();
+	let hop = Hop { node: PEER, session: 1 };
+	routed.receive(Wire::Dead { hop, far }).unwrap();
+	pump(&mut routed, &subscriber);
+	let counted = routes(&registry);
+	assert_eq!((counted.received.drain, counted.received.dead), (1, 1), "{counted:?}");
+	assert_eq!(counted.closed, Default::default());
+
+	// A route whose path does not end at the neighbour that sent it.
+	let Wire::Route { mut offer } = route(far) else {
+		unreachable!()
+	};
+	offer.path = vec![Hop { node: far, session: 0 }].into();
+	let err = routed.receive(Wire::Route { offer });
+	assert!(matches!(err, Err(Error::ProtocolViolation)), "{err:?}");
+	let closed = routes(&registry).closed;
+	assert_eq!((closed.malformed, closed.total()), (1, 1), "{closed:?}");
+}

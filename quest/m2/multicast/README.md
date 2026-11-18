@@ -32,8 +32,7 @@ chain name its announcing relay, then each grant's exporter and adopter.
 Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
 wire were retargeted or deleted. The lite-07 cut still waits on this epic's
-children, [the uncovered cases](/quest/m2/multicast/accept.md),
-[route counters](/quest/m2/multicast/route-counters.md), and
+children, [the uncovered cases](/quest/m2/multicast/accept.md) and
 [the mesh replay](/quest/m2/multicast/mesh-replay.md), and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. After the cut come warmth's wire

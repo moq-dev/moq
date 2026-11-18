@@ -9555,10 +9555,14 @@ mod tests {
 		(registry, session)
 	}
 
-	/// The claims `registry`'s sessions refused.
-	fn refusals(registry: &crate::stats::Registry) -> u64 {
-		let sessions = registry.snapshot().sessions();
-		sessions.iter().map(|(_, presence)| presence.routes_refused).sum()
+	/// The claims `registry`'s sessions refused, by reason.
+	fn refusals(registry: &crate::stats::Registry) -> crate::stats::RouteRefusals {
+		let mut refused = crate::stats::RouteRefusals::default();
+		for (_, presence) in registry.snapshot().sessions() {
+			assert_eq!(presence.routes_refused, presence.routes.refused.total());
+			refused.add(presence.routes.refused);
+		}
+		refused
 	}
 
 	/// A lite-07 ANNOUNCE_START at `suffix`, `above` segments broader than it.
@@ -9606,7 +9610,8 @@ mod tests {
 		cursor.assert_next_active("c");
 		cursor.assert_next_active(&deep);
 		cursor.assert_next_wait();
-		assert_eq!(refusals(&registry), 1);
+		let refused = refusals(&registry);
+		assert_eq!((refused.path, refused.total()), (1, 1), "{refused:?}");
 	}
 
 	/// A claim shown below the requested prefix may still be broader than its path, as a

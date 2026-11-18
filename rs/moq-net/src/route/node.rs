@@ -194,6 +194,12 @@ struct State {
 	released: Vec<(Box<dyn Orphan>, bool)>,
 	/// Whether each of the origin's own claims is filed as having crossed a marked link.
 	own: BTreeMap<Broadcast, bool>,
+	/// Where each session counts what its peer causes.
+	stats: HashMap<Key, crate::stats::Session>,
+	/// What the router changed since the last flush, each changed route with the session
+	/// whose input first changed it.
+	rerouted: BTreeMap<NodeId, Option<Key>>,
+	redrawn: BTreeSet<Broadcast>,
 }
 
 /// The node every lite-07 session of one origin shares.
@@ -292,6 +298,9 @@ impl Node {
 				serving: HashMap::new(),
 				released: Vec::new(),
 				own: BTreeMap::new(),
+				stats: HashMap::new(),
+				rerouted: BTreeMap::new(),
+				redrawn: BTreeSet::new(),
 			})),
 			timer: kio::Shared::new(None),
 			moved: kio::Shared::new(0),
@@ -450,6 +459,12 @@ impl Stream {
 		self
 	}
 
+	/// Count the route changes the session's peer causes on `stats`.
+	pub fn with_stats(self, stats: crate::stats::Session) -> Self {
+		self.node.lock().stats.insert(self.key, stats);
+		self
+	}
+
 	/// The next message to send the peer.
 	pub fn poll_wire(&self, waiter: &kio::Waiter) -> Poll<Msg> {
 		let ready = |outbox: &kio::Ref<'_, Outbox>| match outbox.wire.is_empty() {
@@ -515,6 +530,9 @@ impl Stream {
 		};
 		let key = state.register(port)?;
 		state.mounts.entry(main).or_default().insert(key);
+		if let Some(stats) = state.stats.get(&main).cloned() {
+			state.stats.insert(key, stats);
+		}
 		Ok(Stream {
 			node: self.node.clone(),
 			key,
@@ -537,7 +555,9 @@ impl Stream {
 		let mut state = self.node.lock();
 		let now = self.now(&state);
 		state.router.clock(now);
-		state.router.recv(self.key, msg)
+		let result = state.router.recv(self.key, msg);
+		state.note(Some(self.key));
+		result
 	}
 
 	/// Tell the other sessions what the messages taken in changed.
@@ -549,6 +569,7 @@ impl Stream {
 	pub fn ask(&self, edit: relay::Edit) -> Result<(), Error> {
 		let mut state = self.node.lock();
 		state.router.ask(self.key, edit)?;
+		state.note(Some(self.key));
 		state.flush(&self.node);
 		Ok(())
 	}
@@ -569,6 +590,7 @@ impl Stream {
 		let now = self.now(&state);
 		state.router.clock(now);
 		state.router.goaway(self.key);
+		state.note(Some(self.key));
 		state.flush(&self.node);
 	}
 
@@ -587,6 +609,7 @@ impl Stream {
 		let now = self.now(&state);
 		state.router.clock(now);
 		state.close(self.key);
+		state.note(Some(self.key));
 		state.flush(&self.node);
 	}
 
@@ -626,6 +649,7 @@ impl Drop for Stream {
 		for mount in state.mounts.remove(&self.key).unwrap_or_default() {
 			state.close(mount);
 			state.queues.remove(&mount);
+			state.stats.remove(&mount);
 		}
 		if let Some(main) = self.main
 			&& let Some(mounts) = state.mounts.get_mut(&main)
@@ -636,7 +660,9 @@ impl Drop for Stream {
 		state.queues.remove(&self.key);
 		let key = self.key;
 		state.tags.retain(|_, session| *session != key);
+		state.note(Some(key));
 		state.flush(&self.node);
+		state.stats.remove(&key);
 	}
 }
 
@@ -685,6 +711,16 @@ impl State {
 		}
 	}
 
+	/// Take what the router changed, crediting each route it changed first here to the
+	/// session `cause`, whose input changed it.
+	fn note(&mut self, cause: Option<Key>) {
+		let changes = self.router.changes();
+		for origin in changes.routes {
+			self.rerouted.entry(origin).or_insert(cause);
+		}
+		self.redrawn.extend(changes.broadcasts);
+	}
+
 	/// Queue what the router has to say, and bring what the origin serves in line with
 	/// what its reader shows.
 	fn flush(&mut self, node: &Node) {
@@ -711,11 +747,20 @@ impl State {
 			.filter(|event| event.kind == Kind::End)
 			.map(|event| (event.claim, event.id))
 			.collect();
-		let changes = self.router.changes();
-		let mut dirty = changes.broadcasts;
-		for origin in changes.routes {
-			dirty.extend(self.router.claimed(origin).cloned());
+		self.note(None);
+		let mut dirty = BTreeSet::new();
+		for (origin, cause) in std::mem::take(&mut self.rerouted) {
+			// Each broadcast is relaned once a flush, so it counts for the first change
+			// that brings it in.
+			let mut rewritten = 0;
+			for broadcast in self.router.claimed(origin) {
+				rewritten += u64::from(dirty.insert(broadcast.clone()));
+			}
+			if let Some(stats) = cause.and_then(|cause| self.stats.get(&cause)) {
+				stats.route_changed(rewritten);
+			}
 		}
+		dirty.append(&mut self.redrawn);
 		let moved = !dirty.is_empty();
 		// What the reader shows first, so the instance that replaces another at a path is
 		// served before the one it replaces goes.

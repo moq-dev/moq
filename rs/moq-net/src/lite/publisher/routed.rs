@@ -29,6 +29,7 @@ use crate::{
 		node::{self, Change, Claim, Msg},
 		relay,
 	},
+	stats::Withdrawal,
 };
 
 /// A node key the answer reads: the session's own, or a mount's.
@@ -307,8 +308,14 @@ impl Answer {
 		match msg {
 			Msg::Route { origin, offer } => self.route(writer, origin, offer),
 			Msg::Claims { origin, changes, floor } => self.claims(writer, origin, changes, floor),
-			Msg::Dead { hop, far } => writer.buffer(&Wire::Dead { hop, far }),
-			Msg::Drain { node } => writer.buffer(&Wire::Drain { node }),
+			Msg::Dead { hop, far } => {
+				self.origin.stats().withdrawal(Withdrawal::Dead, false);
+				writer.buffer(&Wire::Dead { hop, far })
+			}
+			Msg::Drain { node } => {
+				self.origin.stats().withdrawal(Withdrawal::Drain, false);
+				writer.buffer(&Wire::Drain { node })
+			}
 			Msg::Announce { changes } => {
 				for (broadcast, change) in changes {
 					self.announce(writer, source, broadcast, change)?;
