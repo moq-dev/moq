@@ -110,7 +110,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 
 ```toml
 [quic]
-congestion_control = "delay"         # "delay" (BBR v3, the default), "loss" (CUBIC), or "none".
+congestion_control = "bbr"           # "bbr" (BBR v3, the default), "cubic", or "unlimited".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 # keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout.
@@ -123,8 +123,8 @@ qlog = "/var/log/moq/qlog"           # Existing directory.
 # keylog = "/private/keys.log"       # Explicit secret log path; unset is off.
 ```
 
-`congestion_control = "none"` runs no congestion control and no pacing. It is
-meant for tests and controlled links, where nothing else shares the path.
+`congestion_control = "unlimited"` runs no congestion control and no pacing. It
+is meant for tests and controlled links, where nothing else shares the path.
 
 Set `keylog` only while debugging, since the file decrypts every captured session.
 Tokio and io\_uring open the configured path at initialization. New Unix files are
@@ -271,7 +271,6 @@ See [Authentication](/bin/relay/auth).
 connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
-route_key = "route.key"                               # Route key; relays sharing the file fail over as one to scoped peers.
 max_hops = 32                                         # Legacy: longest hop path on moq-lite-03 to 06 (1 to 32).
 
 [cluster.api]

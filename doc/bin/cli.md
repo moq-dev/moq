@@ -246,8 +246,11 @@ moq ... import capture --audio on                        # encode audio continuo
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. An audio device that fails or stops ends the import with its source
-error; restart the command after the device is available again. Audio appears
+backends. An audio device that fails mid-session, such as a USB microphone
+re-enumerating, is reopened every 0.5 to 4 seconds as a new audio track. One
+still failing after 10 seconds ends only the audio track: video keeps
+publishing, and the import exits with the audio error once it stops. A device
+that fails to open at startup ends the import at once. Audio appears
 in the catalog once its device opens; a microphone permission prompt leaves
 other media available. The camera and
 microphone stay open while publishing, so a late
@@ -358,7 +361,8 @@ of media (or wall clock for an [untimed](/concept/moq-lite#subscriptions)
 track) and at least every 4 s, splitting a long group between frames. A broadcast restarted under a new
 [instance](/concept/moq-lite#publisher-instances) records under its own key; a route
 over an older wire gets a fresh instance each time it announces, so it never
-resumes or stitches into an older recording. Any recording that fails ends the export.
+resumes or stitches into an older recording. A broadcast whose recording fails is logged and
+dropped, and every other keeps recording; only the origin failing ends the export.
 `--retention 1h` keeps only the last hour, a DVR, deleting older objects
 `--retention-grace` (default 30 s) after they leave the window.
 

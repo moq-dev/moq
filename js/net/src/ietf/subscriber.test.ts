@@ -1144,7 +1144,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	expect((await track.info()).priority).toBe(127 - 37);
 	expect(group.publisherPriority).toBe(37);
 	const ordered = track.ordered();
-	expect((await ordered.nextGroup())?.sequence).toBe(3n);
+	expect((await ordered.nextGroup())?.start).toBe(3n);
 	const explicit = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 4n,
@@ -1155,7 +1155,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
 	expect(explicit.publisherPriority).toBe(9);
 	expect((await track.info()).priority).toBe(127 - 37);
-	expect((await ordered.nextGroup())?.sequence).toBe(4n);
+	expect((await ordered.nextGroup())?.start).toBe(4n);
 	ordered.close();
 	track.close();
 });
@@ -1170,7 +1170,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { absolute: 1n } }],
+				ranges: [{ start: { time: 1n } }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1202,9 +1202,9 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			await Promise.all(arrivals);
 			const ordered = consumer.ordered();
 			try {
-				for (const sequence of [1n, 2n]) {
+				for (const key of [1n, 2n]) {
 					const group = await ordered.nextGroup();
-					expect(group?.sequence).toBe(sequence);
+					expect(group?.start).toBe(key);
 					if (!group) throw new Error("missing prefix group");
 					expect(await group.readString()).toBe("object 0");
 					expect(await group.readString()).toBe("object 0");
@@ -1230,7 +1230,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			.track("video")
 			.subscribe({
 				...track.Subscription.default(),
-				ranges: [{ start: { absolute: 0n } }],
+				ranges: [{ start: { time: 0n } }],
 				order: "ascending",
 				delay: { max: null },
 			});
@@ -1293,7 +1293,7 @@ test("a bounded subscription asks upstream from its start without an end", async
 		.track("video")
 		.subscribe({
 			...track.Subscription.default(),
-			ranges: [{ start: { absolute: 4n }, end: { absolute: 10n } }],
+			ranges: [{ start: { time: 4n }, end: { time: 9n } }],
 			order: "ascending",
 			delay: { max: null },
 		});
@@ -1338,7 +1338,7 @@ test("a group served from partway through is dropped", async () => {
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(4n);
+	expect(group?.start).toBe(4n);
 
 	track.close();
 });
@@ -1358,7 +1358,7 @@ test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(3n);
+	expect(group?.start).toBe(3n);
 	if (!group) return;
 	expect(await group.readString()).toBe("object 0");
 	expect(group.frameCount).toBe(2);
@@ -1383,7 +1383,7 @@ test("an END_OF_GROUP status on a marked stream finishes the group", async () =>
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(3n);
+	expect(group?.start).toBe(3n);
 	if (!group) return;
 	for (let i = 0; i < 5; i++) {
 		expect(await group.readString()).toBe("object 0");
@@ -1449,7 +1449,7 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(4n);
+	expect(group?.start).toBe(4n);
 
 	track.close();
 });
@@ -1492,7 +1492,7 @@ test.each([
 
 	// This tests stream framing, independent of gaps below these groups. An ordered
 	// subscription with this budget would wait for the unreceived groups 0..2.
-	for (const sequence of expected) expect((await track.recvGroup())?.sequence).toBe(BigInt(sequence));
+	for (const key of expected) expect((await track.recvGroup())?.start).toBe(BigInt(key));
 	track.close();
 });
 
@@ -1511,7 +1511,7 @@ test("a group that claims its first object must start at zero", async () => {
 	const group = await track.ordered().nextGroup();
 	expect(group).toBeDefined();
 	if (!group) return;
-	await expect(group.readFrameSequence()).rejects.toThrow(/object IDs must start at 0/);
+	await expect(group.readFrameIndex()).rejects.toThrow(/object IDs must start at 0/);
 
 	track.close();
 });
@@ -1525,9 +1525,9 @@ for (const [name, firstObject, bytes] of [
 		const { subscriber, track } = await subscribeTrack();
 		const opened = Promise.withResolvers<Tail>();
 		const open = Tail.prototype.open;
-		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+		const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, key) {
 			opened.resolve(this);
-			return open.call(this, sequence);
+			return open.call(this, key);
 		});
 		const cancelled = jest.fn();
 		let controller: ReadableStreamDefaultController<Uint8Array>;
@@ -1569,9 +1569,9 @@ test("an END_OF_TRACK after the track closed locally leaves the session open", a
 	const close = spyOn(pair.server, "close");
 	const opened = Promise.withResolvers<void>();
 	const open = Tail.prototype.open;
-	const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, sequence) {
+	const opening = spyOn(Tail.prototype, "open").mockImplementation(function (this: Tail, key) {
 		opened.resolve();
-		return open.call(this, sequence);
+		return open.call(this, key);
 	});
 	const ended = Promise.withResolvers<void>();
 	// Restored even when an assertion or a wait below fails, so no other test runs through the spies.

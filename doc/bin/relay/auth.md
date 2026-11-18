@@ -425,9 +425,10 @@ subscribe = []
 Upgrade auth servers before relays when adopting the `webtransport` or `tls` transport value.
 WebTransport sessions report `webtransport`; native QUIC sessions report `quic`.
 `tls://` sessions report `tls`; plaintext `tcp://` sessions report `tcp`.
-An auth server built before `tls` existed does not fail to parse it: the Rust and JavaScript
-parsers read an unrecognized transport name as `unknown`, so admission then depends on how your
-policy treats `unknown`. Update any policy keyed on `tcp` for stream links to handle `tls` too.
+A `moq auth serve` from a `release` build answers 422 to a request naming a transport it predates,
+such as `webtransport` or `tls`, which the relay refuses. Current parsers read an unrecognized
+transport name as `unknown`, so admission then depends on how your policy treats `unknown`.
+Update any policy keyed on `tcp` for stream links to handle `tls` too.
 
 `moq auth serve` is the reference auth server, answering the contract above.
 

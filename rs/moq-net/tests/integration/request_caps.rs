@@ -186,8 +186,8 @@ async fn an_announce_past_the_cap_closes_the_session() {
 	}
 }
 
-/// On moq-lite-07 the peer's route takes a slot as well as each claim under it, so
-/// whatever a peer makes the route layer hold stays under the cap: here its route and
+/// On moq-lite-07 a forwarding peer's route takes a slot as well as each claim under it,
+/// so whatever a peer makes the route layer hold stays under the cap: here its route and
 /// first claim fill it, and the second claim closes the session.
 #[kio::test]
 async fn a_lite07_claim_past_the_cap_closes_the_session() {
@@ -199,8 +199,11 @@ async fn a_lite07_claim_past_the_cap_closes_the_session() {
 	a.announce().unwrap();
 	b.announce().unwrap();
 
+	let [client, server] = [client, server].map(|node| node.with_link(moq_net::origin::Link::Peer));
 	let mut options = MockConnectOptions::new(version);
 	options.client_publish = Some(client.consume());
+	options.client_subscribe = Some(client.clone());
+	options.server_publish = Some(server.consume());
 	options.server_subscribe = Some(server.clone());
 	options.server_limits = Some(limits(2));
 	let pair = connect_mock(options).await;

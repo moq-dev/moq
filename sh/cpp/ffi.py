@@ -44,7 +44,7 @@ def stage(release, target, library, output):
     (output / "lib").mkdir()
     for filename in (static, metadata):
         shutil.copyfile(library / filename, output / "lib" / filename)
-    shutil.copyfile(ROOT / f"rs/moq-c/native-libs/{platform}.txt", output / "native-libs.txt")
+    shutil.copyfile(ROOT / f"rs/libmoq/native-libs/{platform}.txt", output / "native-libs.txt")
     (output / "manifest.json").write_text(
         json.dumps(
             {

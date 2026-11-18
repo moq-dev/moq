@@ -33,12 +33,13 @@ const server = await Stream.accept(pair.server, version);
 assert(server);
 const responses: number[][] = [];
 const streams: number[][] = [];
+let next = 0n;
 function publishGroup() {
-	const group = track.appendGroup();
+	const group = track.appendGroup(Time.Timestamp.unscaled(next++));
 	for (let object = 0; object < 2; object++)
 		group.writeFrame({
-			payload: new Uint8Array([Number(group.sequence), object]),
-			timestamp: Time.Timestamp.unscaled(group.sequence),
+			payload: new Uint8Array([Number(group.start), object]),
+			timestamp: Time.Timestamp.unscaled(group.start),
 		});
 	group.finish();
 }

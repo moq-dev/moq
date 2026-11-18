@@ -170,6 +170,14 @@ impl<T> ProducerWeak<T> {
 		crate::consumer::poll_wanted_changed(&self.state, &self.counts, waiter, last)
 	}
 
+	/// Poll for [`Self::wanted`] to differ from `last`, whether or not the channel closed:
+	/// a closed channel's consumers may still be draining its final value. `Ready` with the
+	/// new value once it does, else `Pending`.
+	#[cfg_attr(feature = "sim", track_caller)]
+	pub fn poll_held_changed(&self, waiter: &Waiter, last: bool) -> Poll<bool> {
+		crate::consumer::poll_held_changed(&self.state, &self.counts, waiter, last)
+	}
+
 	/// Returns `true` if both handles share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.state, &other.state)

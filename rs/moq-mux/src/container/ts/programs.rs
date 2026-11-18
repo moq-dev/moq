@@ -77,10 +77,12 @@ pub struct Programs {
 	/// Times the programs waiting for their PMT.
 	clock: Clock,
 	/// The [`Clock`] reading past which a waiting program is late or a PMT PID it waits on is
-	/// overdue, while one waits.
+	/// overdue, while one waits. A PMT only moves it later, so one may leave it early: passing
+	/// it then times the waits again and finds nothing due.
 	deadline: Option<u64>,
-	/// Whether a waiting program is not late yet, so a PID no program claims may be its.
-	joining: bool,
+	/// How many waiting programs are not late yet: while one is, a PID no program claims may
+	/// be its. Counted as each one's PMT arrives, so that costs no pass over every program.
+	joining: usize,
 	/// Where the input can next expire a program's health check, so a program that reads no
 	/// packet is advanced without a scan of every program per packet. Kept early when a routed
 	/// packet moves its check later.
@@ -358,7 +360,7 @@ impl Programs {
 			announced: false,
 			clock: Clock::default(),
 			deadline: None,
-			joining: false,
+			joining: 0,
 			due: health::Due::default(),
 			unclaimed: Unclaimed::default(),
 		}
@@ -543,21 +545,21 @@ impl Programs {
 		Ok(())
 	}
 
-	/// Time the next wait for a PMT to run out, once the programs waiting have changed.
+	/// Time the next wait for a PMT to run out, and count the programs not late yet, once a
+	/// PAT or an expiry changed which programs wait.
 	fn time_waits(&mut self) {
-		self.joining = false;
+		self.joining = 0;
 		self.deadline = None;
 		for (pid, waiting) in &self.waiting {
 			let overdue = self.pmts.get(pid).map(|pmt| pmt.section + PMT_LIMIT);
-			let late = waiting
-				.values()
-				.filter_map(|wait| match wait {
-					Wait::Since(since) => Some(since + PMT_LIMIT),
-					Wait::Late | Wait::Described => None,
-				})
-				.min();
-			self.joining |= late.is_some();
-			self.deadline = self.deadline.into_iter().chain(overdue).chain(late).min();
+			for wait in waiting.values() {
+				if let Wait::Since(since) = wait {
+					self.joining += 1;
+					let late = since + PMT_LIMIT;
+					self.deadline = Some(self.deadline.map_or(late, |deadline| deadline.min(late)));
+				}
+			}
+			self.deadline = self.deadline.into_iter().chain(overdue).min();
 		}
 	}
 
@@ -704,7 +706,7 @@ impl Programs {
 			return;
 		}
 		// A program still waiting for its PMT may claim it, until it is late.
-		if self.pat.is_some() && !self.joining {
+		if self.pat.is_some() && self.joining == 0 {
 			self.unclaimed.packet(packet.pid);
 		}
 	}
@@ -758,30 +760,24 @@ impl Programs {
 		let (Some(waiting), Some(before)) = (waiting.as_mut(), before) else {
 			return Ok(());
 		};
-		let mut described = false;
+		// A program no longer waiting only moves the deadline later, so it stays as it is.
+		let mut joined = 0;
 		for pmt in latest.iter().filter(|pmt| pmt.streams.is_empty()) {
-			described |= matches!(
-				waiting.insert(pmt.program_number, Wait::Described),
-				Some(Wait::Since(_))
-			);
+			let wait = waiting.insert(pmt.program_number, Wait::Described);
+			joined += usize::from(matches!(wait, Some(Wait::Since(_))));
 		}
 		latest.retain(|pmt| !pmt.streams.is_empty());
-		if latest.is_empty() {
-			if described {
-				self.time_waits();
-			}
-			return Ok(());
-		}
 		for pmt in &latest {
-			waiting.remove(&pmt.program_number);
+			let wait = waiting.remove(&pmt.program_number);
+			joined += usize::from(matches!(wait, Some(Wait::Since(_))));
 		}
 		if waiting.is_empty() {
 			self.waiting.remove(&packet.pid);
 		}
+		self.joining -= joined;
 		for pmt in latest {
 			self.start(pmt.program_number, packet.pid, before.clone())?;
 		}
-		self.time_waits();
 		Ok(())
 	}
 

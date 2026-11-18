@@ -161,7 +161,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		offer,
 		mut ingest,
 	} = request;
-	let (offer, refused) = sdp::parse_offer(offer)?;
+	let (offer, refused) = sdp::parse_offer(offer, sdp::Lines::Every)?;
 
 	// Create the broadcast hidden up front, so an out-of-scope offer is refused before
 	// any mux work. It announces only once negotiation succeeds (below).

@@ -51,6 +51,9 @@ impl Socket {
 pub struct Inbound {
 	/// Ends once every sender is dropped, which ends the agent.
 	pub packets: mpsc::Receiver<Packet>,
+	/// Where a shared socket routes them, which the agent confirms the path its ICE
+	/// connected on with. `None` for a socket the agent owns.
+	pub(crate) route: Option<crate::server::Route>,
 }
 
 /// Pump every datagram from a socket the caller owns 1:1 into a queue for
@@ -77,7 +80,10 @@ pub fn reader(socket: Arc<UdpSocket>) -> Inbound {
 			}
 		}
 	});
-	Inbound { packets: rx }
+	Inbound {
+		packets: rx,
+		route: None,
+	}
 }
 
 #[cfg(test)]
@@ -88,7 +94,7 @@ mod tests {
 	async fn construction_refuses_a_socket_without_advertised_candidates() {
 		let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let (_, packets) = mpsc::channel(INBOX);
-		let inbound = Inbound { packets };
+		let inbound = Inbound { packets, route: None };
 		let Err(err) = Socket::new(udp, Vec::new(), inbound) else {
 			panic!("an unusable socket escaped construction");
 		};

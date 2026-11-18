@@ -8,7 +8,7 @@ import * as Zod from "./zod.ts";
 test("read validates each frame and ends only at the end of the group", async () => {
 	const producer = new Producer(0n);
 	const consumer = producer.consume();
-	producer.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(producer.sequence) });
+	producer.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(producer.start) });
 	// Falsy values are frames like any other, not the end of the stream.
 	for (const json of ["0", "false", "null", '"ok"']) producer.writeFrame(textFrame(json));
 	producer.finish();

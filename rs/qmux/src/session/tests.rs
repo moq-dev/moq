@@ -742,6 +742,41 @@ async fn an_oversized_record_is_a_frame_encoding_error() {
 	}
 }
 
+/// A WebSocket message over the record limit, which the socket refuses before buffering it,
+/// also closes the connection with a CONNECTION_CLOSE the peer can read.
+#[tokio::test(start_paused = true)]
+async fn an_oversized_websocket_message_is_a_frame_encoding_error() {
+	use futures::{SinkExt, StreamExt};
+	use tokio_tungstenite::{
+		WebSocketStream,
+		tungstenite::{Message, protocol::Role},
+	};
+
+	use crate::transport::WsTransport;
+
+	for version in [Version::QMux01, Version::QMux02] {
+		let config = config(version);
+		let (client, raw) = tokio::io::duplex(PIPE);
+		let ws = WebSocketStream::from_raw_socket(client, Role::Client, Some(crate::ws::capped(&config))).await;
+		let session = spawn(Session::new(WsTransport::new(ws, Address::Uri), Side::Client, config.clone()).unwrap());
+		let mut raw = WebSocketStream::from_raw_socket(raw, Role::Server, None).await;
+		let limit = usize::try_from(config.max_record_size)
+			.unwrap()
+			.max(crate::MAX_FRAME_SIZE);
+		raw.send(Message::Binary(vec![0; limit + 1].into())).await.unwrap();
+
+		let err = session.closed().await;
+		assert!(matches!(err, Error::FrameEncoding), "{version:?}: got {err:?}");
+		let mut closed = false;
+		while let Some(Ok(message)) = raw.next().await {
+			if let Message::Binary(data) = message {
+				closed |= data.windows(2).any(|w| w == [0x1c, 0x07]);
+			}
+		}
+		assert!(closed, "{version:?}: no CONNECTION_CLOSE");
+	}
+}
+
 #[tokio::test(start_paused = true)]
 async fn the_wire_counters_track_both_directions() {
 	let (client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;

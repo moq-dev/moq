@@ -25,8 +25,8 @@ export interface Frame {
  * Writes run through the track's serial pump, so each frame's index is its net write order.
  */
 export class Producer {
-	/** The group's sequence number. */
-	readonly sequence: bigint;
+	/** Where the group starts, in its track's timescale: its key on the track. */
+	readonly start: bigint;
 
 	#inner: NetGroup.Producer;
 	#writer: Writer;
@@ -38,7 +38,7 @@ export class Producer {
 	private constructor(inner: NetGroup.Producer, writer: Writer) {
 		this.#inner = inner;
 		this.#writer = writer;
-		this.sequence = inner.sequence;
+		this.start = inner.start;
 	}
 
 	/** @internal */
@@ -64,7 +64,7 @@ export class Producer {
 		if (this.#closed || this.#writer.closed)
 			throw this.#aborted ?? this.#writer.aborted ?? new Error("group is closed");
 		if (plaintext.byteLength + TAG_LEN > MAX_GROUPED_PAYLOAD) throw new Failure("oversize");
-		const at = NetTrack.rescaleIn(this.#writer.track, timestamp, this.sequence);
+		const at = NetTrack.rescaleIn(this.#writer.track, timestamp, this.start);
 		const owned = plaintext.slice();
 		return this.#writer.pump.run(() => this.#write(at, owned));
 	}
@@ -72,7 +72,7 @@ export class Producer {
 	async #write(timestamp: Time.Timestamp, plaintext: Uint8Array<ArrayBuffer>): Promise<void> {
 		this.#check();
 		const frame = this.#next;
-		const iv = this.#writer.key.admitSeal(this.sequence, frame, plaintext.byteLength, MAX_GROUPED_PAYLOAD);
+		const iv = this.#writer.key.admitSeal(this.start, frame, plaintext.byteLength, MAX_GROUPED_PAYLOAD);
 		this.#next = frame + 1;
 		try {
 			const payload = await this.#writer.key.encrypt(iv, plaintext);
@@ -122,8 +122,8 @@ export class Producer {
  * {@link Failure} `authentication` and the underlying subscription is released.
  */
 export class Consumer {
-	/** The group's sequence number. */
-	readonly sequence: bigint;
+	/** Where the group starts, in its track's timescale: its key on the track. */
+	readonly start: bigint;
 
 	#inner: NetGroup.Consumer;
 	#reader: Reader;
@@ -133,7 +133,7 @@ export class Consumer {
 	private constructor(inner: NetGroup.Consumer, reader: Reader) {
 		this.#inner = inner;
 		this.#reader = reader;
-		this.sequence = inner.sequence;
+		this.start = inner.start;
 	}
 
 	/** @internal */
@@ -156,9 +156,9 @@ export class Consumer {
 
 	async #read(): Promise<Frame | undefined> {
 		this.#check();
-		let frame: Awaited<ReturnType<NetGroup.Consumer["readFrameSequence"]>>;
+		let frame: Awaited<ReturnType<NetGroup.Consumer["readFrameIndex"]>>;
 		try {
-			frame = await this.#inner.readFrameSequence();
+			frame = await this.#inner.readFrameIndex();
 		} catch (err) {
 			this.#check();
 			throw err;
@@ -169,7 +169,7 @@ export class Consumer {
 		// The frame's transport index is the nonce half, so a group resumed above frame 0 still opens.
 		try {
 			const { key, pump } = this.#reader;
-			const iv = key.admitOpen(this.sequence, frame.sequence, frame.payload.byteLength, MAX_GROUPED_PAYLOAD);
+			const iv = key.admitOpen(this.start, frame.index, frame.payload.byteLength, MAX_GROUPED_PAYLOAD);
 			// A failure queued ahead of this open ends it before any crypto runs.
 			const plaintext = await pump.run(() => {
 				this.#check();

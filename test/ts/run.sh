@@ -798,10 +798,10 @@ stop_shaper() {
     }
     # The shaper accepts a silent profile while silence is still likely, and never requires a
     # rate limit to act; a lossy run needs loss, and a congested one a rate limit that held
-    # datagrams back. A loss-based sender (MOQ_QUIC_CONGESTION_CONTROL=loss) grows until it
+    # datagrams back. A loss-based sender (MOQ_QUIC_CONGESTION_CONTROL=cubic) grows until it
     # loses, and the queue's tail drop is the only loss here, so its run must overflow too.
     local counter overflow=""
-    [[ -n "$RATE" && "${MOQ_QUIC_CONGESTION_CONTROL:-}" == loss ]] && overflow=overflowed
+    [[ -n "$RATE" && "${MOQ_QUIC_CONGESTION_CONTROL:-}" == cubic ]] && overflow=overflowed
     for counter in ${LOSS:+lost} ${RATE:+throttled} $overflow; do
         if ! python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["down"][sys.argv[2]] == 0)' \
             "$HARNESS_RUN/shaper.json" "$counter"; then

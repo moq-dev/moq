@@ -18,24 +18,19 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuz
 default:
     just check
 
-# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/route/RouteHandoff.tla`.
+# Model-check a TLA+ spec with TLC, e.g. `just rs tla moq-net/verify/failover/FailoverChain.tla`.
 # Pass `-config rs/<path>.cfg` for a config not named after the spec, and
 # `../<path>.tla` for a spec outside `rs/`, such as a generated one in `.tmp/`.
 # sh/tlc.py says how a run shares the host.
 tla spec *args:
     python3 sh/tlc.py rs/{{ spec }} {{ args }}
 
-# Prove a Tamarin model's lemmas, e.g. `just rs tamarin moq-net/verify/route-key/RouteKey.spthy`.
-# Pass `-D=<VARIANT>` for a variant the model defines.
-tamarin spec *args:
-    nix shell --inputs-from . nixpkgs#tamarin-prover --command tamarin-prover --prove {{ args }} rs/{{ spec }}
-
 # Default features for the selected packages; `features` covers the feature
 # matrix nightly and on release PRs. No `cargo check` pass: clippy is a
 # superset of it, and the two use different rustc wrappers, so running both
 # compiles the workspace twice.
 #
-# A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
+# A bare `just rs check` is default-members, which skips libmoq, moq-ffi,
 # and moq-gst; pass `--workspace` for all of it.
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
@@ -240,7 +235,7 @@ audit:
 
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
-# Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
+# Compile and run libmoq's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
 c-tests:
     sh/rs/c-tests.sh
 
@@ -256,7 +251,6 @@ features:
     run just rs net-features --all
     run just rs coroutines
     run just rs quic-features --all
-    run just rs crypto-key
     run just rs media-features --all
     run bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
     run bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
@@ -293,29 +287,11 @@ coroutines:
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-hls --no-deps --no-default-features
     run bash sh/rs/coroutines.sh moq-stats -- --no-default-features
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-stats --no-deps --no-default-features
-    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features endpoint,provider,serde
-    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features endpoint,provider,serde
+    run bash sh/rs/coroutines.sh moq-crypto -- --no-default-features --features provider
+    run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-crypto --no-deps --no-default-features --features provider
     run bash sh/rs/coroutines.sh moq-e2ee
     run env RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-e2ee --no-deps
     run bash sh/rs/coroutines.sh rs/moq-auth/Cargo.toml -- --no-default-features
-    finish
-
-# Prove moq-crypto's key-only build, which moq-auth depends on, leaves out the transport, then lint and test it alone; a workspace build unifies the default features back in.
-crypto-key:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source sh/checks.sh
-    key_only_dependencies() {
-        graph=$(cargo tree --locked -p moq-crypto --no-default-features --features serde -e normal --prefix none) || return
-        if grep -E '^moq-net ' <<<"$graph"; then
-            echo "moq-crypto without endpoint must not depend on moq-net" >&2
-            return 1
-        fi
-    }
-    run key_only_dependencies
-    run bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --all-targets -- -D warnings
-    run bash sh/local.sh cargo clippy --locked -p moq-crypto --no-default-features --features serde --all-targets -- -D warnings
-    run bash sh/rs/nextest.sh cargo nextest run --locked -p moq-crypto --no-default-features --features serde
     finish
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
@@ -542,10 +518,10 @@ package-nfpm *args:
 package-ffi *args:
     rs/moq-ffi/build.sh "$@"
 
-# Build and package moq-c.
+# Build and package libmoq.
 [positional-arguments]
-package-moq-c *args:
-    rs/moq-c/build.sh "$@"
+package-libmoq *args:
+    rs/libmoq/build.sh "$@"
 
 # Build and package the moq-gst GStreamer plugin.
 [positional-arguments]

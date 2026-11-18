@@ -1,7 +1,7 @@
 import type * as Moq from "@moq/net";
 import { Error as NetError } from "@moq/net";
 
-import { frameTime, openGroup } from "../time.ts";
+import { frameTime } from "../time.ts";
 import { type Config as CodecConfig, Encoder, type Pending } from "./encoder.ts";
 
 /**
@@ -60,7 +60,7 @@ export class Producer<T> {
 			throw err;
 		}
 
-		this.#group ??= openGroup(this.#track, at);
+		this.#group ??= this.#track.appendGroup(at);
 
 		try {
 			this.#group.writeFrame({ payload: record.payload, timestamp: frameTime(this.#group, at) });

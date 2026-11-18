@@ -54,7 +54,7 @@ impl PeerSetup {
 
 	/// Tell `link` once the peer's SETUP arrives that it accepted the connection credential.
 	pub fn accepting(mut self, link: crate::auth::Link) -> Self {
-		link.await_setup();
+		link.await_acceptance();
 		self.accept = Some(link);
 		self
 	}

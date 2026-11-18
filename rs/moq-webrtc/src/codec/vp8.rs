@@ -25,6 +25,10 @@ impl codec::Bridge for Bridge {
 		self.import.decode(frame.payload, pts)
 	}
 
+	fn discontinuity(&mut self) -> Result<()> {
+		self.import.discontinuity()
+	}
+
 	fn finish(self: Box<Self>) -> Result<codec::Finished> {
 		self.import.finish()
 	}

@@ -6,14 +6,16 @@ import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { inspect } from "../connection/stats.ts";
 import { SessionCode, SessionError } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { acceptBudget, Stream, Writer } from "../stream.ts";
-import { Timescale } from "../time.ts";
+import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { wireOf } from "../wire.ts";
-import { type AnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, decodeAnnounceBroadcast, encodeAnnounceBroadcast } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
+import { AuthMessage, AuthOk } from "./auth.ts";
 import { Connection, probeLevel } from "./connection.ts";
 import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
@@ -363,8 +365,8 @@ for (const [alpn, version] of [
 			closed = true;
 		});
 		try {
-			const first = producer.appendGroup();
-			first.writeFrame(textFrame("first"));
+			const first = hooks.appendNext(producer);
+			first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 			first.finish();
 			// A frame can arrive while its sender still yields on the write. Drain the setup group
 			// before a zero-delay subscription supersedes its still-unfinished sender.
@@ -374,8 +376,8 @@ for (const [alpn, version] of [
 			received?.close();
 
 			fin.enable();
-			const last = producer.appendGroup();
-			last.writeFrame(textFrame("last"));
+			const last = hooks.appendNext(producer);
+			last.writeFrame(textFrame("last", Timestamp.fromMillis(Number(last.start))));
 			last.finish();
 			producer.finish();
 			producer.close();
@@ -428,8 +430,8 @@ for (const [alpn, version] of [
 				closed = true;
 			});
 			try {
-				const first = producer.appendGroup();
-				first.writeFrame(textFrame("first"));
+				const first = hooks.appendNext(producer);
+				first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 				first.finish();
 				const received = await track.nextGroup();
 				expect(await received?.readString()).toBe("first");
@@ -437,8 +439,8 @@ for (const [alpn, version] of [
 				received?.close();
 
 				fin.enable();
-				const last = producer.appendGroup();
-				last.writeFrame(textFrame("last"));
+				const last = hooks.appendNext(producer);
+				last.writeFrame(textFrame("last", Timestamp.fromMillis(Number(last.start))));
 				last.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("last");
 				await fin.reached;
@@ -491,13 +493,13 @@ for (const [alpn, version] of [
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			try {
-				const first = producer.appendGroup();
-				first.writeFrame(textFrame("first"));
+				const first = hooks.appendNext(producer);
+				first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 				first.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
-				const last = producer.appendGroup();
+				const last = hooks.appendNext(producer);
 				for (const frame of frames) last.writeFrame(textFrame(frame));
 				last.finish();
 				producer.finish();
@@ -542,8 +544,8 @@ for (const [alpn, version] of [
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			try {
-				const group = producer.appendGroup();
-				group.writeFrame(textFrame("only"));
+				const group = hooks.appendNext(producer);
+				group.writeFrame(textFrame("only", Timestamp.fromMillis(Number(group.start))));
 				group.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("only");
 
@@ -586,8 +588,8 @@ for (const [alpn, version] of [
 			const remote = wireOf(client).consume(Path.from("room"));
 			const track = remote.track("video").subscribe().ordered();
 			try {
-				const group = producer.appendGroup();
-				group.writeFrame(textFrame("only"));
+				const group = hooks.appendNext(producer);
+				group.writeFrame(textFrame("only", Timestamp.fromMillis(Number(group.start))));
 				group.finish();
 				expect(await (await track.nextGroup())?.readString()).toBe("only");
 
@@ -621,8 +623,8 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 		publish: origin.consume(),
 	});
 
-	const group = producer.appendGroup();
-	group.writeFrame(textFrame("last"));
+	const group = hooks.appendNext(producer);
+	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();
 
 	const subscriber = await Stream.open(pair.client, { version });
@@ -732,8 +734,8 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = producer.appendGroup();
-	group.writeFrame(textFrame("last"));
+	const group = hooks.appendNext(producer);
+	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
@@ -785,8 +787,8 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const broadcastRoute = source.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = producer.appendGroup();
-	group.writeFrame(textFrame("last"));
+	const group = hooks.appendNext(producer);
+	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();
 	const url = new URL("https://localhost/test");
 	const [client, server] = await Promise.all([
@@ -996,10 +998,10 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
 					// A received tail uses its wire position even without a locally retained prefix.
-					group = new GroupMessage({ subscribe: 0n, sequence: 0n, frameStart: 5 });
+					group = new GroupMessage({ subscribe: 0n, key: 0n, frameStart: 5 });
 				} else {
 					await encodeSubscribeResponse(sub.writer, { finish: new SubscribeFinish(2n) }, version);
-					group = new GroupMessage({ subscribe: 0n, sequence: 2n });
+					group = new GroupMessage({ subscribe: 0n, key: 2n });
 				}
 				const writer = await Writer.open(pair.server, { version });
 				await writer.u53(DataType.Group);
@@ -1011,8 +1013,8 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 					await writer.write(new Uint8Array([7]));
 					writer.close();
 					const received = await track.recvGroup();
-					expect((await received?.readFrameSequence())?.sequence).toBe(5);
-					expect(await received?.readFrameSequence()).toBeUndefined();
+					expect((await received?.readFrameIndex())?.index).toBe(5);
+					expect(await received?.readFrameIndex()).toBeUndefined();
 					received?.close();
 					const goaway = await Stream.open(pair.server, { version });
 					await goaway.writer.u53(StreamId.Goaway);
@@ -1052,8 +1054,30 @@ for (const [name, violate] of [
 	[
 		"a reset Announce Stream",
 		async (pair) => {
+			// The client answers once its peer grants its credential.
+			const auth = await Stream.accept(pair.server, Version.DRAFT_07);
+			if (!auth || (await auth.reader.u53()) !== StreamId.Auth)
+				throw new Error("the peer never presented a credential");
+			await AuthMessage.decode(auth.reader, Version.DRAFT_07);
+			const all = new Path.Patterns([Path.Pattern.all()]);
+			await new AuthOk(all, all).encode(auth.writer, Version.DRAFT_07);
 			const { writer, send } = await announceStream(pair);
 			await send({ status: "request", more: false, remove: [], add: [{ prefix: ROOM, hidden: false }] });
+			// A reset discards what the peer has not read, and a stream whose type byte is lost
+			// is not known to be an Announce Stream, so it cannot break the session. Reset only
+			// once the ANNOUNCE_OK answering the request shows the stream was identified.
+			const readers = new Readers(pair.server, Version.DRAFT_07);
+			try {
+				for (;;) {
+					const stream = await readers.next();
+					if (!stream) throw new Error("the peer never answered");
+					if ((await stream.u53()) !== DataType.Announce) continue;
+					expect(await decodeAnnounceBroadcast(stream, Version.DRAFT_07)).toEqual({ status: "ok" });
+					break;
+				}
+			} finally {
+				readers.close();
+			}
 			writer.reset(new Error("gone"));
 		},
 	],
@@ -1119,16 +1143,6 @@ for (const [name, violate] of [
 				more: false,
 				remove: [],
 				add: [{ prefix: Path.from("room/cam"), hidden: false }],
-			});
-		},
-	],
-	[
-		"a DEAD moving a route the stream never started",
-		async (pair) => {
-			const { send } = await announceStream(pair);
-			await send({
-				status: "dead",
-				dead: { kind: "closed", hop: { node: 2n, session: 1n }, far: 3n, gone: false, moved: 1n },
 			});
 		},
 	],

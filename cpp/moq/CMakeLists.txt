@@ -43,7 +43,7 @@ endif()
 # The bindings compile here at the including project's CMAKE_CXX_STANDARD (else the compiler's
 # default, at least C++17) and with its flags. Only a target that links them builds them: the
 # package ships the source, not this library.
-# Named moq-cpp so an in-tree build can sit beside moq-c's `moq` target.
+# Named moq-cpp so an in-tree build can sit beside libmoq's `moq` target.
 add_library(moq-cpp STATIC EXCLUDE_FROM_ALL src/moq.cpp)
 add_library(moq::cpp ALIAS moq-cpp)
 add_dependencies(moq-cpp moq_ffi)

@@ -230,8 +230,22 @@ struct Attached {
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
 	/// Whether the peer has accepted the connection, credential included: at once, unless
-	/// the session [awaits the peer's SETUP](Link::await_setup).
-	accepted: bool,
+	/// the session [awaits its answer](Link::await_acceptance) or the version
+	/// [has none](Link::silent).
+	acceptance: Acceptance,
+}
+
+/// Whether a session's peer accepted the connection credential.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Acceptance {
+	/// With its handshake, or with the answer the session awaited.
+	Accepted,
+	/// Not yet: the peer's SETUP (a client without AUTH) or its AUTH_OK to the connection's
+	/// own credential (a lite-07 client) is still to come, and the peer can still refuse.
+	Awaiting,
+	/// Never said: the version has no answer, so the peer refuses only by closing the
+	/// session (a lite-03/04 client).
+	Silent,
 }
 
 /// One token as one session presents it.
@@ -322,7 +336,7 @@ impl Attached {
 			issued: BTreeMap::new(),
 			scope: None,
 			epoch: 0,
-			accepted: true,
+			acceptance: Acceptance::Accepted,
 		};
 		attached.rescope(limit);
 		attached
@@ -596,30 +610,6 @@ impl Permit {
 		covers(&self.granted) && covers(&self.limit)
 	}
 
-	/// Whether the limit alone allows every path at or beneath `prefix`, judged
-	/// pattern by pattern, so a `false` may be spurious but a `true` never is.
-	#[cfg(feature = "async")]
-	pub(crate) fn within_limit_subtree(&self, prefix: &str) -> bool {
-		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return false;
-		};
-		self.limit.as_ref().is_none_or(|limit| limit.contains(&subtree))
-	}
-
-	/// The prefixes this confines the peer to, or `None` when it confines nothing: the
-	/// heads of the scope's patterns, which grants this side issued. What the peer
-	/// granted this side limits only what this side does, so a client never scopes the
-	/// relay that answered its token.
-	#[cfg(feature = "async")]
-	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
-		let limit = self.limit.as_ref()?;
-		let everything = moq_pattern::Pattern::subtree("").ok()?;
-		if limit.contains(&everything) {
-			return None;
-		}
-		Some(crate::model::interest_prefixes(limit))
-	}
-
 	/// The prefixes the peer's grant confines this direction to, or `None` while it
 	/// grants everything: asking for one of them, rather than a prefix above it, is a
 	/// request the peer's floors can certify.
@@ -631,12 +621,6 @@ impl Permit {
 			return None;
 		}
 		Some(crate::model::interest_prefixes(granted))
-	}
-
-	/// The limit this side set on the peer, or `None` while unrestricted.
-	#[cfg(feature = "async")]
-	pub(crate) fn limit(&self) -> Option<&Patterns> {
-		self.limit.as_ref()
 	}
 
 	/// Whether both set the same limit on the peer, whatever either was granted.
@@ -1117,6 +1101,10 @@ impl Link {
 			if !matches!(slot.phase, Phase::Pending { .. } | Phase::Granted(_)) {
 				return;
 			}
+			// The answer to the connection's own credential accepts the session.
+			if slot.setup && link.acceptance == Acceptance::Awaiting {
+				link.acceptance = Acceptance::Accepted;
+			}
 			slot.phase = Phase::Granted(grant);
 			link.replied = true;
 			link.recompute();
@@ -1409,19 +1397,48 @@ impl Link {
 		self.read(|link, _| link.closed.clone())
 	}
 
-	/// The peer accepts the connection credential only with its SETUP, which this client
-	/// reads after the session is live, while the server can still refuse it.
-	pub(crate) fn await_setup(&self) {
-		self.with(|link| link.accepted = false);
+	/// The peer accepts the connection credential only with an answer this client reads after
+	/// the session is live, while the server can still refuse it: its SETUP on a version
+	/// without AUTH, or the AUTH_OK to the connection's own credential on one with it.
+	pub(crate) fn await_acceptance(&self) {
+		self.with(|link| link.acceptance = Acceptance::Awaiting);
+	}
+
+	/// The version never answers the connection credential: the peer refuses it only by
+	/// closing the session, however soon.
+	pub(crate) fn silent(&self) {
+		self.with(|link| link.acceptance = Acceptance::Silent);
+	}
+
+	/// Whether the version never answers the connection credential, so only uptime can
+	/// suggest the peer took it.
+	pub(crate) fn is_silent(&self) -> bool {
+		self.read(|link, _| link.acceptance == Acceptance::Silent)
 	}
 
 	/// The peer's SETUP arrived, so it accepted the connection credential.
 	pub(crate) fn accepted(&self) {
 		self.with_state(|state, link| {
-			attached(&mut state.links, link).accepted = true;
+			let link = attached(&mut state.links, link);
+			if link.acceptance == Acceptance::Awaiting {
+				link.acceptance = Acceptance::Accepted;
+			}
 			// Latch a set this acceptance completed, before a later end can replace its answer.
 			state.record();
 		});
+	}
+
+	/// Ready once the peer said it accepts the connection credential, which a version without
+	/// that answer never does. A close afterward leaves it accepted.
+	pub(crate) fn poll_accepted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		let id = self.id();
+		let _ = ready_or!(self.state().poll(waiter, |state| {
+			match state.links.get(&id).map(|link| link.acceptance) {
+				Some(Acceptance::Accepted) => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		}));
+		Poll::Ready(())
 	}
 
 	/// End the session: fail every pending token here, leaving the handle's tokens for the
@@ -3060,30 +3077,6 @@ mod tests {
 			subscribe: patterns(subscribe),
 			expires: None,
 		}
-	}
-
-	/// Only a grant this side issued confines the peer's claims: a client scoped by the
-	/// relay that answered its token leaves the relay's own routes unscoped.
-	#[cfg(feature = "async")]
-	#[test]
-	fn regions_come_from_the_issued_scope_alone() {
-		let earned = Permit {
-			granted: Some(patterns(&[".socket"])),
-			limit: None,
-		};
-		assert_eq!(earned.regions(), None, "the peer's grant to us scoped the peer");
-
-		let issued = Permit {
-			granted: None,
-			limit: Some(patterns(&[".socket/bob"])),
-		};
-		assert_eq!(issued.regions(), Some(vec![crate::Path::from_static(".socket/bob")]));
-
-		let everything = Permit {
-			granted: Some(patterns(&[".socket"])),
-			limit: Some(patterns(&[""])),
-		};
-		assert_eq!(everything.regions(), None, "a root grant confines nothing");
 	}
 
 	/// What the peer granted confines the prefixes asked of it, whatever the limit is.

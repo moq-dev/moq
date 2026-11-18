@@ -161,6 +161,8 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Where the subscription starts behind the live edge, and how late a group may fall.
 	delay: moq_net::track::Delay,
+	/// The delay the consumer skips and starts at, if not the one the subscription states.
+	skip: Option<moq_net::track::Delay>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
 	/// OpusHead). Some once the codec config is available - from the catalog
@@ -177,6 +179,8 @@ pub(crate) struct ExportSource {
 	markers: u64,
 	/// Whether a frame of the group being read went out and the group has not ended since.
 	open: bool,
+	/// Whether any frame was read, including one the transform absorbed or the splice dropped.
+	read: bool,
 	cuts: u64,
 	// A stopped encoder may still emit final packets in this group on the old timeline.
 	ends: Option<(u64, u64)>,
@@ -321,6 +325,7 @@ impl ExportSource {
 			state: target.request(source, media),
 			target,
 			delay,
+			skip: None,
 			transform: None,
 			description: None,
 			video_codec: None,
@@ -329,6 +334,7 @@ impl ExportSource {
 			skips: 0,
 			markers: 0,
 			open: false,
+			read: false,
 			cuts: 0,
 			ends: None,
 			received: source.received(name),
@@ -396,6 +402,14 @@ impl ExportSource {
 		self
 	}
 
+	/// Skip and start at `delay` instead of the subscription's own, which still tells the
+	/// publisher how long to keep a group: for a reader that asks the publisher for more than
+	/// it plays out itself.
+	pub(crate) fn skipping_at(mut self, delay: moq_net::track::Delay) -> Self {
+		self.skip = Some(delay);
+		self
+	}
+
 	/// The subscription options a builder sets. Each builder consumes a source no poll has
 	/// moved out of [`SourceState::Requesting`], since only the constructors hand one out.
 	fn start(&mut self) -> &mut Start {
@@ -423,6 +437,11 @@ impl ExportSource {
 	/// Gaps and declared ends this source has advanced past.
 	pub fn skips(&self) -> u64 {
 		self.skips
+	}
+
+	/// Whether any frame was read, even one that never came out as an [`Event::Frame`].
+	pub(crate) fn read(&self) -> bool {
+		self.read
 	}
 
 	/// The resolved codec-config record, if available.
@@ -622,6 +641,10 @@ impl ExportSource {
 				None => track,
 			};
 			let consumer = Consumer::new(track, media).continuing(reached);
+			let consumer = match self.skip {
+				Some(delay) => consumer.skipping_at(delay),
+				None => consumer,
+			};
 			let consumer = match live {
 				true => consumer.live(),
 				false => consumer,
@@ -670,6 +693,7 @@ impl ExportSource {
 							self.finish_ends();
 						}
 						self.open = true;
+						self.read = true;
 						self.received.frame(frame.timestamp, frame.payload.len());
 						(frame, arrived)
 					}

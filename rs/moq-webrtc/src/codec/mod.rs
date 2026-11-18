@@ -44,6 +44,10 @@ pub struct Frame {
 pub trait Bridge: Send {
 	fn push(&mut self, frame: Frame) -> Result<()>;
 
+	/// Mark a break in the published track's timeline before the next frame, which opens a group,
+	/// as the session's clock stepped.
+	fn discontinuity(&mut self) -> Result<()>;
+
 	/// Finish the published track after its final frame, returning what keeps serving it while
 	/// the finished broadcast is held.
 	fn finish(self: Box<Self>) -> Result<Finished>;
@@ -66,6 +70,9 @@ pub(crate) trait DeferredImport: Send + Sized {
 	/// Decode one complete codec frame.
 	fn decode(&mut self, frame: Bytes, pts: moq_net::Timestamp) -> moq_mux::Result<()>;
 
+	/// Mark a break in the active media track's timeline.
+	fn discontinuity(&mut self) -> moq_mux::Result<()>;
+
 	/// Finish the active media track.
 	fn finish(self) -> moq_mux::Result<moq_mux::container::Finished<moq_mux::catalog::hang::Container, VideoConfig>>;
 
@@ -86,6 +93,10 @@ impl DeferredImport for moq_mux::codec::vp8::Import {
 		moq_mux::codec::vp8::Import::finish(self)
 	}
 
+	fn discontinuity(&mut self) -> moq_mux::Result<()> {
+		moq_mux::codec::vp8::Import::discontinuity(self)
+	}
+
 	fn abort(self, err: moq_net::Error) {
 		moq_mux::codec::vp8::Import::abort(self, err);
 	}
@@ -102,6 +113,10 @@ impl DeferredImport for moq_mux::codec::vp9::Import {
 
 	fn finish(self) -> moq_mux::Result<moq_mux::container::Finished<moq_mux::catalog::hang::Container, VideoConfig>> {
 		moq_mux::codec::vp9::Import::finish(self)
+	}
+
+	fn discontinuity(&mut self) -> moq_mux::Result<()> {
+		moq_mux::codec::vp9::Import::discontinuity(self)
 	}
 
 	fn abort(self, err: moq_net::Error) {
@@ -162,6 +177,14 @@ impl<I: DeferredImport> DeferredVideo<I> {
 			unreachable!();
 		};
 		import.decode(frame, pts).map_err(Into::into)
+	}
+
+	/// Mark a break in the media track's timeline, which a track no frame has created yet has none of.
+	pub fn discontinuity(&mut self) -> Result<()> {
+		match &mut self.state {
+			DeferredState::Active(import) => import.discontinuity().map_err(Into::into),
+			_ => Ok(()),
+		}
 	}
 
 	/// Finish the media track, whether or not a frame ever created its importer.

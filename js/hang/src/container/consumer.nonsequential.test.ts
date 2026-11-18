@@ -60,14 +60,14 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("data"),
-		delay: { max: Duration.millis(5000) },
+		delay: { min: null, max: Duration.millis(5000) },
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
 	const a = track.createGroup(1_000_000n);
 	a.writeFrame({
 		payload: encodeLegacyFrame(0, new Uint8Array([0x01])),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(0),
 	});
 	a.finish();
 
@@ -84,7 +84,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const b = track.createGroup(1_090_000n);
 	b.writeFrame({
 		payload: encodeLegacyFrame(1_000_000, new Uint8Array([0x02])),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(1_000_000),
 	});
 
 	// Within the max delay budget (5s), the parked next() stays parked: no duration means no proof of
@@ -108,7 +108,7 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 		for (const timestamp of timestamps) {
 			group.writeFrame({
 				payload: encodeLegacyFrame(timestamp, new Uint8Array([0x01])),
-				timestamp: Time.Timestamp.now(),
+				timestamp: Time.Timestamp.fromMicros(timestamp),
 			});
 		}
 	};
@@ -149,14 +149,14 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 	});
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat(config),
-		delay: { max: Duration.millis(5000) },
+		delay: { min: null, max: Duration.millis(5000) },
 	});
 	// One 20 ms CELT packet per group, each read before the next lands. The group starting at 40 ms
 	// never arrives.
 	const packet = new Uint8Array([31 << 3, 0]);
 	const publish = (start: number) => {
 		const group = track.createGroup(BigInt(start));
-		group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.now() });
+		group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.fromMicros(start) });
 		group.finish();
 	};
 

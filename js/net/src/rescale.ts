@@ -1,6 +1,6 @@
 // Shared by stream and datagram tracks, without a cycle through their model modules.
 import { TimestampMismatch } from "./error.ts";
-import { floorAt, keyOf, type Timescale, Timestamp } from "./time.ts";
+import { floorAt, type Timescale, Timestamp } from "./time.ts";
 
 /**
  * `timestamp` at `info`'s timescale, rounded down, as Rust's `Timestamp::convert` does.
@@ -31,7 +31,7 @@ export function rescale(info: { timescale?: Timescale | null }, timestamp: Times
  */
 export function rescaleIn(info: { timescale?: Timescale | null }, timestamp: Timestamp, key: bigint): Timestamp {
 	const rescaled = rescale(info, timestamp);
-	const unscaled = keyOf(rescaled);
+	const unscaled = rescaled.key;
 	if (unscaled !== undefined && unscaled !== key) throw new TimestampMismatch();
 	return rescaled;
 }

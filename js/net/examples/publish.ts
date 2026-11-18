@@ -23,8 +23,9 @@ async function main() {
 async function publishTrack(track: Moq.Track.Producer) {
 	console.log("Publishing to track:", track.name);
 
-	// Create a group (e.g., keyframe boundary)
-	const group = track.appendGroup();
+	// Create a group (e.g., keyframe boundary), starting at its first frame's time
+	const start = Moq.Time.Timestamp.now();
+	const group = track.appendGroup(start);
 
 	// Write two frames to the group
 	for (const text of ["Hello", "MoQ!"]) {

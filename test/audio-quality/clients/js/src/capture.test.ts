@@ -217,7 +217,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
-		const group = track.appendGroup();
+		const group = track.appendGroup(Time.Timestamp.fromMicros(0));
 		group.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(0),
 			payload: Legacy.encodeFrame(new Uint8Array([1]), Duration.micros(0)),

@@ -41,6 +41,19 @@ ignore = [
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
 
+    # chrono is unmaintained, with no patched release; no vulnerability is known.
+    # Every crate that reaches it is already at its newest release: object_store
+    # (moq-archive, moq-cli), m3u8-rs (moq-hls), procfs (moq-bench), s3s (dev),
+    # and boytacean and gst-plugin-version-helper (build-time). Our own use is
+    # only the moq-tokio clock example. Drop when those migrate to jiff or time.
+    "RUSTSEC-2026-0543",
+
+    # humantime is unmaintained only because chrono's maintainers stewarded it;
+    # it has no dependencies and no known vulnerability. object_store and qlog
+    # (moq-quic) still use it at their newest releases, so replacing our own
+    # duration parsing with jiff would not remove it. Drop with chrono's above.
+    "RUSTSEC-2026-0542",
+
 ]
 
 [licenses]

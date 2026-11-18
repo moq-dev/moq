@@ -106,7 +106,7 @@ pub struct MoqClientTls {
 /// QUIC transport tuning, mirroring moq-tokio's QUIC config. Ignored by the WebSocket fallback.
 ///
 /// Null fields use the library default, which [`moq_client_defaults`] reports where there is
-/// one; `gso`, `mtu_discovery`, and `congestion_control` leave the choice to the backend.
+/// one; `gso` and `mtu_discovery` leave the choice to the backend.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqQuicConfig {
 	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint; 0 is refused.
@@ -127,7 +127,7 @@ pub struct MoqQuicConfig {
 	/// Path MTU discovery: probes for the largest packet size the path allows.
 	#[uniffi(default = None)]
 	pub mtu_discovery: Option<bool>,
-	/// The congestion control family.
+	/// The congestion control algorithm, BBR v3 when null.
 	#[uniffi(default = None)]
 	pub congestion_control: Option<Arc<MoqCongestionControl>>,
 	/// Directory, which must exist, to write qlog traces into.
@@ -139,7 +139,7 @@ pub struct MoqQuicConfig {
 	pub keylog: Option<bool>,
 }
 
-/// The congestion control family for a QUIC connection.
+/// The congestion control algorithm for a QUIC connection.
 ///
 /// An immutable object rather than an enum, so a new algorithm joins as a constructor without
 /// breaking callers that switch over a closed enum.
@@ -149,23 +149,23 @@ pub struct MoqCongestionControl(moq_tokio::quic::CongestionControl);
 
 #[uniffi::export]
 impl MoqCongestionControl {
-	/// Loss-based (CUBIC): chases throughput, so the send rate sawtooths.
+	/// BBR v3, the default: keeps queues short and the send rate steady enough for an encoder
+	/// to track.
 	#[uniffi::constructor]
-	pub fn loss() -> Arc<Self> {
-		Arc::new(Self(moq_tokio::quic::CongestionControl::Loss))
+	pub fn bbr() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Bbr))
 	}
 
-	/// Delay-based (BBR v3), the default: keeps queues short and the send rate steady enough for
-	/// an encoder to track.
+	/// CUBIC: chases throughput, so the send rate sawtooths.
 	#[uniffi::constructor]
-	pub fn delay() -> Arc<Self> {
-		Arc::new(Self(moq_tokio::quic::CongestionControl::Delay))
+	pub fn cubic() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Cubic))
 	}
 
 	/// No congestion control and no pacing, for tests and controlled links.
 	#[uniffi::constructor]
-	pub fn none() -> Arc<Self> {
-		Arc::new(Self(moq_tokio::quic::CongestionControl::None))
+	pub fn unlimited() -> Arc<Self> {
+		Arc::new(Self(moq_tokio::quic::CongestionControl::Unlimited))
 	}
 }
 
@@ -177,7 +177,7 @@ impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 		quic.keep_alive = config.keep_alive.map(Into::into);
 		quic.gso = config.gso;
 		quic.mtu_discovery = config.mtu_discovery;
-		quic.congestion_control = config.congestion_control.map(|family| family.0);
+		quic.congestion_control = config.congestion_control.map(|algorithm| algorithm.0);
 		quic.qlog = config.qlog.map(Into::into);
 		quic.keylog = config
 			.keylog
@@ -202,7 +202,8 @@ pub struct MoqWebSocketConfig {
 
 /// Retry pacing for the automatic reconnect.
 ///
-/// Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a
+/// Until the peer has accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a
 /// closed session, such as a refused credential, ends the connection with its error rather
 /// than retrying. The delay starts at `initial`, multiplies by `multiplier` after each
 /// failed attempt, and caps at `max`.
@@ -615,8 +616,9 @@ impl MoqClient {
 	///
 	/// Once a session has been established, it automatically reconnects with backoff when
 	/// the transport drops (unless [`MoqClientConfig::once`] is set), and broadcasts
-	/// consumed through it ride out the gap. Until a session has stayed up past 1s or been
-	/// drained by a GOAWAY it fails fast instead: if none of the peer's addresses yields a session, or the peer closes the
+	/// consumed through it ride out the gap. Until the peer has accepted a session's credential or drained
+	/// a session with a GOAWAY
+	/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s) it fails fast instead: if none of the peer's addresses yields a session, or the peer closes the
 	/// one it accepted, as a relay refusing a credential does, [`MoqSession::closed`] resolves
 	/// with that error, so an app started before its relay is reachable must start the session
 	/// again.
@@ -737,7 +739,8 @@ pub enum MoqConnectionPhase {
 		/// The latest failed dial, or none before the first one fails.
 		failure: Option<MoqError>,
 	},
-	/// A session is serving.
+	/// A session is serving: its peer accepted the credential, or on moq-lite 03/04, which
+	/// never answer it, the session stayed up 1s. A refused session never reaches this phase.
 	Connected {
 		/// The live session's negotiated version, spelled like `moq-lite-03`.
 		version: String,

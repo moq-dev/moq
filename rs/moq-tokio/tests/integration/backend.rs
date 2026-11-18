@@ -277,10 +277,13 @@ async fn sni_test() {
 	let fingerprints = server.certificates().fingerprints();
 	assert_eq!(fingerprints.len(), 2, "expected both certificates to be served");
 
-	// Keep accepting so the client handshakes complete, then drop the server.
+	// Keep accepting and holding each session, so the client sees it accepted.
 	let server_handle = tokio::spawn(async move {
 		let mut server = server;
-		while server.accept().await.is_ok() {}
+		let mut sessions = Vec::new();
+		while let Ok(request) = server.accept().await {
+			sessions.push(request.ok().await);
+		}
 	});
 
 	let dial = |host_name: &str, fingerprint: &str| {

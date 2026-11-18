@@ -592,7 +592,7 @@ void main() {
           keepAlive: Duration.zero,
           gso: false,
           mtuDiscovery: true,
-          congestionControl: CongestionControl.loss(),
+          congestionControl: CongestionControl.cubic(),
           keylog: false,
         ),
         once: true,

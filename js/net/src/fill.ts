@@ -15,11 +15,10 @@ import { type GetPromise, type Getter, Signal } from "@moq/signals";
 import { NotFound, StreamCode, toStreamCode } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { cutRun, insertRun, NO_MAX_DELAY, runGaps, runsFrom } from "./internal.ts";
-import type { Timestamp } from "./time.ts";
 import type { Info, Order } from "./track.ts";
-import { checkEnd, checkSequence, max, min } from "./util/sequence.ts";
+import { checkEnd, checkKey, max, min } from "./util/key.ts";
 
-// A half-open run of group sequences, as `internal.ts` has it, kept local so the published
+// A half-open run of group keys, as `internal.ts` has it, kept local so the published
 // declarations never reach the package internals.
 type Run = { start: bigint; end: bigint };
 
@@ -31,18 +30,18 @@ type Run = { start: bigint; end: bigint };
 export interface FillTrack {
 	/** The track's name. */
 	readonly name: string;
-	/** Insert group `sequence` into the cache, committing `info` first if the track has none. */
-	accept(sequence: bigint, info: Info | undefined): GroupProducer;
+	/** Insert group `key` into the cache, committing `info` first if the track has none. */
+	accept(key: bigint, info: Info | undefined): GroupProducer;
 	/**
 	 * Record `[start, end)` as never to be delivered, with `error`. With `stale`, judged too old
 	 * under that budget in milliseconds: a verdict only on readers no more tolerant.
 	 */
 	drop(start: bigint, end: bigint, hole: { error: Error; stale?: number }): void;
 	/**
-	 * Whether the track still caches group `sequence`, not failed: `"headless"` for a copy missing
+	 * Whether the track still caches group `key`, not failed: `"headless"` for a copy missing
 	 * its first frames, which a fill from frame 0 replaces.
 	 */
-	holds(sequence: bigint): boolean | "headless";
+	holds(key: bigint): boolean | "headless";
 	/** Whether the track closed, so nothing more can be served. */
 	closed(): boolean;
 	/** Settles once the track closes. */
@@ -73,7 +72,7 @@ export interface Asker {
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
-	accept(state: FillState, pending: Pending, sequence: bigint, info: Info | undefined): GroupProducer;
+	accept(state: FillState, pending: Pending, key: bigint, info: Info | undefined): GroupProducer;
 	drop(state: FillState, pending: Pending, start: bigint, end: bigint, hole?: { error: Error; stale?: number }): void;
 	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error, stale?: number): void;
 	settle(state: FillState, pending: Pending): void;
@@ -100,11 +99,11 @@ class Pending {
 	// Bumped on every change to what the fill owes, for its handler to wake on.
 	readonly revision = new Signal(0);
 	// The time a lookup asks for, which owes no group.
-	readonly time?: Timestamp;
+	readonly time?: bigint;
 	// The first group a lookup's handler accepted.
 	answer?: bigint;
 
-	constructor(start: bigint, end: bigint, time?: Timestamp) {
+	constructor(start: bigint, end: bigint, time?: bigint) {
 		this.start = start;
 		this.end = end;
 		this.time = time;
@@ -147,7 +146,7 @@ export class FillState {
 	#queue: Pending[] = [];
 	readonly #queued = new Signal(0);
 	readonly #pending = new Set<Pending>();
-	// What each fill still owes, by sequence: its unanswered, unwithdrawn parts, which no two fills
+	// What each fill still owes, by key: its unanswered, unwithdrawn parts, which no two fills
 	// share, so a reader's ask or an arrival costs the fills it touches, never every fill out.
 	#live: Live[] = [];
 	// Bumped as each handler opens, so readers parked on a miss nobody could take ask again.
@@ -201,7 +200,7 @@ export class FillState {
 	 * Queue a fill looking up `time` among the groups below `end` for `asker`, as the Rust
 	 * `FillState::queue_lookup` does. Undefined while no handler is open to answer it.
 	 */
-	lookup(time: Timestamp, end: bigint, asker: Asker): Lookup | undefined {
+	lookup(time: bigint, end: bigint, asker: Asker): Lookup | undefined {
 		if (this.#handlers === 0 || this.#track.closed()) return undefined;
 		const pending = new Pending(0n, end, time);
 		pending.askers.add(asker);
@@ -260,10 +259,10 @@ export class FillState {
 		for (const pending of judged) this.#judge(pending);
 	}
 
-	/** Group `sequence` landed in the cache, through a fill or live: it is answered. */
-	arrived(sequence: bigint): void {
-		const [live] = this.#overlapping(sequence, sequence + 1n);
-		if (live) this.#resolve(live.pending, sequence, sequence + 1n);
+	/** Group `key` landed in the cache, through a fill or live: it is answered. */
+	arrived(key: bigint): void {
+		const [live] = this.#overlapping(key, key + 1n);
+		if (live) this.#resolve(live.pending, key, key + 1n);
 	}
 
 	/**
@@ -390,20 +389,20 @@ export class FillState {
 
 	static {
 		fillOps = {
-			accept: (state, pending, sequence, info) => {
-				if (sequence < pending.start || sequence >= pending.end) {
-					throw new RangeError(`group ${sequence} is outside the fill ${pending.start}..${pending.end}`);
+			accept: (state, pending, key, info) => {
+				if (key < pending.start || key >= pending.end) {
+					throw new RangeError(`group ${key} is outside the fill ${pending.start}..${pending.end}`);
 				}
-				if (pending.resolved.some((run) => run.start <= sequence && sequence < run.end)) {
-					throw new Error(`group ${sequence} was already answered`);
+				if (pending.resolved.some((run) => run.start <= key && key < run.end)) {
+					throw new Error(`group ${key} was already answered`);
 				}
 				// A copy missing its head is replaced from frame 0, as a bounded reader asked.
-				if (state.#track.holds(sequence) === true) throw new Error(`duplicate group: sequence=${sequence}`);
+				if (state.#track.holds(key) === true) throw new Error(`duplicate group: key=${key}`);
 				// Landing in the cache answers it, as `arrived` records.
-				const group = state.#track.accept(sequence, info);
+				const group = state.#track.accept(key, info);
 				// A lookup waits only on its first answer.
 				if (pending.time !== undefined && pending.answer === undefined && !pending.done) {
-					pending.answer = sequence;
+					pending.answer = key;
 					state.#finish(pending);
 				}
 				return group;
@@ -488,7 +487,7 @@ export let rejectGroups: (
 
 // Constructs the public handles from within this module; assigned in their static blocks.
 let makeGroups: (state: FillState, pending: Pending) => FillGroups;
-let makeLookup: (state: FillState, pending: Pending, time: Timestamp) => FillLookup;
+let makeLookup: (state: FillState, pending: Pending, time: bigint) => FillLookup;
 let makeRequests: (state: FillState) => Requests;
 
 // The most urgent delivery priority among the readers waiting on `pending` now.
@@ -590,7 +589,7 @@ export type Fill = FillGroups | FillLookup;
  * is `undefined`, which {@link wantedChanged} waits on. {@link close} the fill once done; closing
  * names whatever is still wanted dropped rather than leaving its readers waiting.
  *
- * Groups keep their sequence, so an accepted group should hold the frames, payloads, and
+ * Groups keep their key, so an accepted group should hold the frames, payloads, and
  * boundaries it had when it was first published: a fill replays the track, never a new version.
  *
  * @public
@@ -649,10 +648,10 @@ export class FillGroups {
 		return this.#pending.askers.size > 0 ? "ascending" : "descending";
 	}
 
-	/** Whether a reader still waits for group `sequence` from this fill. Once false, it stays false. */
-	isWanted(sequence: bigint): boolean {
-		checkSequence(sequence);
-		return this.#pending.owed(sequence, sequence + 1n).length > 0;
+	/** Whether a reader still waits for group `key` from this fill. Once false, it stays false. */
+	isWanted(key: bigint): boolean {
+		checkKey(key);
+		return this.#pending.owed(key, key + 1n).length > 0;
 	}
 
 	/**
@@ -683,22 +682,22 @@ export class FillGroups {
 		}
 	}
 
-	/** Resolves once no reader waits for group `sequence` from this fill, so stop serving it. */
-	async unwanted(sequence: bigint): Promise<void> {
-		checkSequence(sequence);
-		while (this.isWanted(sequence)) await this.#pending.revision.changed();
+	/** Resolves once no reader waits for group `key` from this fill, so stop serving it. */
+	async unwanted(key: bigint): Promise<void> {
+		checkKey(key);
+		while (this.isWanted(key)) await this.#pending.revision.changed();
 	}
 
 	/**
-	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
+	 * Insert group `key` into the track's cache, handing it to the readers waiting on it,
 	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
 	 * if it has none yet. A cached copy missing its first frames, which a reader asked whole, is
 	 * replaced. Throws a `RangeError` outside the fill, and an error if the group was already
 	 * answered or cached whole, or the track is closed.
 	 */
-	accept(sequence: bigint, info?: Info): GroupProducer {
-		checkSequence(sequence);
-		return fillOps.accept(this.#state, this.#pending, sequence, info);
+	accept(start: bigint, info?: Info): GroupProducer {
+		checkKey(start);
+		return fillOps.accept(this.#state, this.#pending, start, info);
 	}
 
 	/**
@@ -707,7 +706,7 @@ export class FillGroups {
 	 * still reads count; the rest of the fill was never owed.
 	 */
 	dropGroups(start: bigint, end: bigint): void {
-		checkSequence(start);
+		checkKey(start);
 		checkEnd(end);
 		fillOps.drop(this.#state, this.#pending, start, end);
 	}
@@ -718,7 +717,7 @@ export class FillGroups {
 	 * again.
 	 */
 	refuseGroups(start: bigint, end: bigint, error: Error): void {
-		checkSequence(start);
+		checkKey(start);
 		checkEnd(end);
 		fillOps.refuse(this.#state, this.#pending, start, end, error);
 	}
@@ -750,13 +749,13 @@ export class FillGroups {
 export class FillLookup {
 	/** Tells it apart from a {@link FillGroups}. */
 	readonly kind = "lookup";
-	/** The presentation time to look up. */
-	readonly time: Timestamp;
+	/** The time to look up, in the track's timescale (a bare start on a track without one). */
+	readonly time: bigint;
 
 	#state: FillState;
 	#pending: Pending;
 
-	private constructor(state: FillState, pending: Pending, time: Timestamp) {
+	private constructor(state: FillState, pending: Pending, time: bigint) {
 		this.#state = state;
 		this.#pending = pending;
 		this.time = time;
@@ -780,14 +779,14 @@ export class FillLookup {
 	}
 
 	/**
-	 * Insert group `sequence`, the one containing {@link time}, into the track's cache, answering
-	 * the lookup, and return the producer to write its frames into. `info` commits the track's
+	 * Insert the group starting at `start`, the one containing {@link time}, into the track's
+	 * cache, answering the lookup, and return the producer to write its frames into. `info` commits the track's
 	 * {@link Info} if it has none yet. Throws a `RangeError` at or past the live edge the lookup
 	 * was asked below, and an error if the group is cached whole or the track is closed.
 	 */
-	accept(sequence: bigint, info?: Info): GroupProducer {
-		checkSequence(sequence);
-		return fillOps.accept(this.#state, this.#pending, sequence, info);
+	accept(start: bigint, info?: Info): GroupProducer {
+		checkKey(start);
+		return fillOps.accept(this.#state, this.#pending, start, info);
 	}
 
 	/** Done serving: unanswered, the reader's range falls back to the groups cached. Idempotent. */

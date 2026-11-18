@@ -121,14 +121,17 @@ const publisher = new Moq.Connection({
 });
 
 let lastPublished = -1;
+// Each group starts a millisecond after the last, so its start counts the groups.
+let next = 0;
 const ticker = setInterval(() => {
-	const group = track.appendGroup();
+	const at = Moq.Time.Timestamp.fromMillis(next++);
+	const group = track.appendGroup(at);
 	group.writeFrame({
-		payload: new TextEncoder().encode(String(group.sequence)),
-		timestamp: Moq.Time.Timestamp.now(),
+		payload: new TextEncoder().encode(String(group.start)),
+		timestamp: at,
 	});
 	group.finish();
-	lastPublished = Number(group.sequence);
+	lastPublished = Number(group.start);
 }, GROUP_INTERVAL_MS);
 
 // ── viewer through the name ───────────────────────────────────────────────────
@@ -163,11 +166,11 @@ void (async () => {
 				return;
 			}
 			const text = await group.readString();
-			if (text !== String(group.sequence)) {
-				corrupt ??= `group ${group.sequence} carried ${text}`;
+			if (text !== String(group.start)) {
+				corrupt ??= `group ${group.start} carried ${text}`;
 				return;
 			}
-			seen.set(Number(group.sequence), (seen.get(Number(group.sequence)) ?? 0) + 1);
+			seen.set(Number(group.start), (seen.get(Number(group.start)) ?? 0) + 1);
 		}
 	} catch (err) {
 		ended = err instanceof Error ? err.message : String(err);
