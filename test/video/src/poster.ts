@@ -12,9 +12,9 @@ async function poster(audio: boolean, buffered: boolean) {
 	const producerRoute = origin.route(name, { hidden: true });
 	const producer = producerRoute.broadcast;
 	const track = producer.createTrack("video");
-	const group = track.appendGroup();
+	const group = track.appendGroup(Time.Timestamp.unscaled(0n));
 	const audioTrack = audio ? producer.createTrack("audio") : undefined;
-	const audioGroup = audioTrack?.appendGroup();
+	const audioGroup = audioTrack?.appendGroup(Time.Timestamp.unscaled(0n));
 	const catalog: Catalog.Root = {
 		video: {
 			renditions: {
@@ -84,7 +84,7 @@ async function poster(audio: boolean, buffered: boolean) {
 		if (!payload) throw new Error("missing encoded frame");
 		group.writeFrame({
 			payload: Legacy.encodeFrame(payload, Duration.micros(timestamp)),
-			timestamp: Time.Timestamp.unscaled(group.sequence),
+			timestamp: Time.Timestamp.unscaled(group.start),
 		});
 	};
 	return {
@@ -99,7 +99,7 @@ async function poster(audio: boolean, buffered: boolean) {
 					chunk.copyTo(data);
 					audioGroup.writeFrame({
 						payload: Legacy.encodeFrame(data, Duration.micros(chunk.timestamp)),
-						timestamp: Time.Timestamp.unscaled(audioGroup.sequence),
+						timestamp: Time.Timestamp.unscaled(audioGroup.start),
 					});
 				},
 				error(error) {

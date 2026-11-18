@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Origin, Path } from "@moq/net";
+import { Origin, Path, Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import * as Announce from "./announce";
 import { Broadcast } from "./broadcast";
@@ -95,8 +95,10 @@ test("a subscriber arriving at announce time sees every rendition in its first c
 
 	const net = env.broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
-	const group = await net.track(Broadcast.CATALOG_TRACK).subscribe().ordered().nextGroup();
-	expect(group?.sequence).toBe(0n);
+	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe({ delay: { max: null } });
+	const group = await subscriber.ordered().nextGroup();
+	// Reaching back over every group, the oldest is also the newest: nothing was published before it.
+	expect(group?.start).toBe((await subscriber.largest())?.group);
 	const catalog = (await group?.readJson()) as Catalog.Root;
 	expect(Object.keys(catalog.video?.renditions ?? {})).toEqual(["video"]);
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);
@@ -182,7 +184,7 @@ test("capture gaps keep the broadcast instance and its track sequences", async (
 		await settle();
 		const track = env.audio.rendition.track.peek();
 		if (!track) throw new Error("expected the demanded audio track");
-		expect(track.appendGroup().sequence).toBe(0n);
+		expect(track.appendGroup(Time.Timestamp.fromMicros(0)).start).toBe(0n);
 
 		// Both devices may be absent during a swap or retry, even though both remain selected.
 		env.video.source.set(undefined);
@@ -198,7 +200,7 @@ test("capture gaps keep the broadcast instance and its track sequences", async (
 		await start(env);
 		expect(env.broadcast.net.peek()).toBe(net);
 		expect(env.audio.rendition.track.peek()).toBe(track);
-		expect(track.appendGroup().sequence).toBe(1n);
+		expect(track.appendGroup(Time.Timestamp.fromMicros(1)).start).toBe(1n);
 
 		// A different device format uses the broadcast's existing fresh-track mechanism.
 		env.audio.rendition.config.set({ ...audioConfig, sampleRate: Catalog.u53(44100) });

@@ -1,6 +1,5 @@
-//! One script on [`path::Router`], which keeps its doubt until the timer fires. The
-//! ignored benchmarks also compare the rejected early-collection policy, and the
-//! replaced rule where doubt kept relays off every route to a doubted publisher.
+//! One script on each router under comparison: the multicast epic's prototype and
+//! [`relay::Router`], the router that ships.
 //!
 //! A [`Lab`] builds the same mesh on each, applies one change at a time, and
 //! delivers in rounds: every message queued when a round starts crosses its link
@@ -15,11 +14,9 @@ use super::multi::{Broadcast, MultiSim, Suspect, Tie, Tune};
 use super::multicast::RelaySim;
 use super::*;
 
-/// A router under comparison: today's rule, the multicast epic's prototype, or its
-/// production router.
+/// A router under comparison: the multicast epic's prototype, or its production router.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Arm {
-	Path(Rule),
 	Multi(Tune),
 	/// [`relay::Router`]: the rule [`Self::KEPT`] measures, as it ships, its readers
 	/// showing a lost claim unavailable for this long before offline.
@@ -27,8 +24,6 @@ pub(super) enum Arm {
 }
 
 impl Arm {
-	/// Today's rule as it ships.
-	pub const TODAY: Self = Self::Path(Rule::PATH);
 	/// The epic's rule as written.
 	pub const PLAIN: Self = Self::Multi(Tune {
 		suspect: Suspect::Never,
@@ -88,7 +83,6 @@ impl Arm {
 
 	pub fn name(self) -> String {
 		let tune = match self {
-			Self::Path(rule) => return rule.as_str().into(),
 			Self::Multi(tune) => tune,
 			Self::Relay(debounce) if debounce.is_zero() => return "relay-undebounced".into(),
 			Self::Relay(_) => return "relay".into(),
@@ -109,23 +103,16 @@ impl Arm {
 
 	fn net(self, nodes: usize) -> Box<dyn Net> {
 		match self {
-			Self::Path(rule) => Box::new(Sim::with(rule, nodes)),
 			Self::Multi(tune) => Box::new(MultiSim::new(tune, nodes)),
 			Self::Relay(debounce) => Box::new(RelaySim::new(nodes, debounce)),
 		}
 	}
 }
 
-impl From<Rule> for Arm {
-	fn from(rule: Rule) -> Self {
-		Self::Path(rule)
-	}
-}
-
 /// What the routers retain, summed over every node.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Held {
-	/// Routes selected: one per publisher today, one per forwarding node in the prototype.
+	/// Routes selected: one per forwarding node.
 	pub routes: usize,
 	/// Routes heard, one per neighbour offering one, selected or not.
 	pub offers: usize,
@@ -146,17 +133,11 @@ pub(super) struct Faults {
 	pub revivals: usize,
 }
 
-/// The scope every scoped link in a comparison grants.
-const GRANT: Grant = Grant {
-	subject: "mesh",
-	scope: "",
-};
-
 /// The production rule, checked in ordinary CI.
-const RULES: [Rule; 1] = [Rule::PATH];
+const RULES: [Arm; 1] = [Arm::RELAY];
 
 /// The rules compared, in the report's order.
-pub(super) const COMPARED: [Rule; 3] = [Rule::EARLY, Rule::ORIGIN, Rule::PATH];
+pub(super) const COMPARED: [Arm; 2] = [Arm::KEPT, Arm::RELAY];
 
 /// A queue of messages from one node to another.
 pub(super) type Chan = (Node, Node);
@@ -249,148 +230,6 @@ pub(super) fn tally(kinds: impl Iterator<Item = Kind>) -> (usize, usize, usize) 
 		}
 	}
 	(offline, unavailable, starts)
-}
-
-impl Net for Sim {
-	fn client(&mut self, node: Node) {
-		self.leaf(node);
-	}
-
-	fn link(&mut self, a: Node, b: Node, cost: Metric, tie: Tie) {
-		let side = SimLink::cost(cost);
-		match tie {
-			Tie::Peer => Sim::link(self, a, b, side, side),
-			Tie::Up => Sim::link(self, a, b, side.upstream(), side),
-			Tie::Scoped => Sim::link(self, a, b, side.grant(GRANT), side.grant(GRANT)),
-		}
-	}
-
-	fn goaway(&mut self, node: Node) {
-		Sim::goaway(self, node);
-	}
-
-	fn open(&mut self, a: Node, b: Node) {
-		self.connect(a, b);
-	}
-
-	fn close(&mut self, a: Node, b: Node) {
-		self.disconnect(a, b);
-	}
-
-	fn mute(&mut self, node: Node, peer: Node) {
-		self.hold(node, peer);
-		self.hold(peer, node);
-	}
-
-	fn sever(&mut self, node: Node, peer: Node) {
-		Sim::sever(self, node, peer);
-	}
-
-	fn reset(&mut self, node: Node) {
-		self.kill(node);
-	}
-
-	fn publish(&mut self, node: Node, id: Id) {
-		self.originate(node, id);
-	}
-
-	fn claim(&mut self, node: Node, claim: &str, live: bool) {
-		match live {
-			true => self.announce(node, claim, 0, None),
-			false => self.unannounce(node, claim),
-		}
-	}
-
-	fn ready(&self) -> Vec<(Chan, usize)> {
-		(self.busy().into_iter())
-			.filter(|chan| !self.held.contains(chan))
-			.map(|(from, to)| ((from, to), self.queued(from, to)))
-			.collect()
-	}
-
-	fn step(&mut self, (from, to): Chan) {
-		self.deliver(from, to);
-	}
-
-	fn tick(&mut self) -> bool {
-		self.wait(HOP);
-		self.deadline().is_some()
-	}
-
-	fn chase(&self, from: Node, id: Id) -> Option<(Vec<Node>, bool)> {
-		let mut hops = Vec::new();
-		if self.grants.is_empty() {
-			let mut at = from;
-			self.toward(at, id)?;
-			while hops.len() <= self.nodes.len() {
-				match self.toward(at, id) {
-					None => return Some((hops, false)),
-					Some(None) => return Some((hops, true)),
-					Some(Some(next)) => {
-						hops.push(next);
-						at = next;
-					}
-				}
-			}
-			return Some((hops, false));
-		}
-		// Past a scoped link the publisher goes by its qualified identity.
-		let claim = p(&Mesh::claim(0));
-		let key = [id, qualified(GRANT.subject, id)]
-			.into_iter()
-			.find(|key| self.path(from).forward(*key, &claim, None).is_some())?;
-		let (mut at, mut key, mut prev) = (from, key, None);
-		while hops.len() <= self.nodes.len() {
-			match self.path(at).forward(key, &claim, prev.take()) {
-				None => return Some((hops, false)),
-				Some(path::Forward::Here) => return Some((hops, true)),
-				Some(path::Forward::Next { next, named, prefix }) => {
-					prev = Some((at, prefix));
-					hops.push(next);
-					(at, key) = (next, named);
-				}
-			}
-		}
-		Some((hops, false))
-	}
-
-	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool> {
-		(self.shows(node, id, claim)).or_else(|| self.shows(node, qualified(GRANT.subject, id), claim))
-	}
-
-	fn held(&self) -> Held {
-		let kept = self.kept();
-		Held {
-			routes: kept.routes,
-			offers: kept.offers,
-			claims: kept.items + kept.heard + kept.sent,
-			pending: kept.dead + kept.doubt + kept.draining,
-			lasting: 0,
-		}
-	}
-
-	fn faults(&self) -> Faults {
-		Faults {
-			false_ends: false_ends(&self.events),
-			revivals: revivals(&self.events),
-		}
-	}
-
-	fn work(&self) -> usize {
-		Sim::work(self)
-	}
-
-	fn sent(&self) -> Sent {
-		let (offline, unavailable, starts) = tally(self.events.iter().map(|event| event.kind));
-		Sent {
-			msgs: self.stats.route_msgs,
-			items: self.stats.route_items,
-			claims: self.stats.claim_items,
-			offline,
-			unavailable,
-			starts,
-		}
-	}
 }
 
 impl Net for MultiSim {
@@ -1281,7 +1120,7 @@ fn benchmark_route_churn() {
 	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
 	for rule in COMPARED {
 		let churn = churn(rule, 0..400, false);
-		let (rule, steps, sent) = (rule.as_str(), churn.steps, churn.sent);
+		let (rule, steps, sent) = (rule.name(), churn.steps, churn.sent);
 		println!("{rule},{},{}", sent.msgs, sent.claims);
 		eprintln!(
 			"{rule},{steps},{},{},{},{},{},{},{},{}",
@@ -1299,7 +1138,7 @@ fn benchmark_route_churn_two_homes() {
 	eprintln!("rule,steps,loops,stale,dark,msgs,items,claims,offline,unavailable");
 	for rule in COMPARED {
 		let churn = churn(rule, 0..400, true);
-		let (rule, steps, sent) = (rule.as_str(), churn.steps, churn.sent);
+		let (rule, steps, sent) = (rule.name(), churn.steps, churn.sent);
 		println!("{rule},2,{},{}", sent.msgs, sent.claims);
 		eprintln!(
 			"{rule},{steps},{},{},{},{},{},{},{},{}",
@@ -1322,21 +1161,25 @@ fn every_rule_converges_on_every_shape() {
 	}
 }
 
-/// Path changes carry no claim changes; a claim withdrawal changes no route.
-/// Counts and recovery times are measurements in the benchmarks below.
+/// Every change settles, and loops no request unless a relay died: its neighbours then
+/// route through each other until the news of every closed session is in. In a clique a
+/// path change carries no claim changes, and a detour takes no claim offline on either
+/// shape. Counts and recovery times are measurements in the benchmarks below.
 #[test]
-fn path_changes_keep_claims_and_withdrawals_keep_routes() {
-	for mesh in [Mesh::clique(6, 1), Mesh::ring(6)] {
-		let costs = RULES.map(|rule| run(rule, &mesh).into_iter().collect::<BTreeMap<_, _>>());
-		for costs in &costs {
-			assert!(costs.values().all(|cost| cost.settled && cost.loops == 0));
-		}
-		for path in &costs {
-			for change in [Change::Leave, Change::Detour, Change::Home] {
-				assert_eq!(path[&change].sent.claims, 0);
+fn path_changes_keep_claims() {
+	for (mesh, clique) in [(Mesh::clique(6, 1), true), (Mesh::ring(6), false)] {
+		for rule in RULES {
+			let costs: BTreeMap<_, _> = run(rule, &mesh).into_iter().collect();
+			for (change, cost) in &costs {
+				assert!(cost.settled, "{change:?}");
+				assert!(*change == Change::Home || cost.loops == 0, "{change:?}");
 			}
-			assert_eq!(path[&Change::Detour].sent.offline, 0, "a detour keeps claims");
-			assert_eq!(path[&Change::Withdraw].sent.msgs, 0, "claims alone change no route");
+			if clique {
+				for change in [Change::Detour, Change::Home] {
+					assert_eq!(costs[&change].sent.claims, 0, "{change:?}");
+				}
+			}
+			assert_eq!(costs[&Change::Detour].sent.offline, 0, "a detour keeps claims");
 		}
 	}
 }
@@ -1368,7 +1211,7 @@ fn benchmark_route_rules() {
 				for (change, costs) in all {
 					let mean =
 						|field: fn(&Cost) -> usize| costs.iter().map(field).sum::<usize>() as f64 / costs.len() as f64;
-					let (change, rule) = (change.as_str(), rule.as_str());
+					let (change, rule) = (change.as_str(), rule.name());
 					if relays == 24 {
 						println!(
 							"{shape},{relays},{change},{rule},{:.1},{:.1},{:.1},{:.1}",

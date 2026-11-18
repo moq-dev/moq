@@ -91,7 +91,7 @@ export class Capture {
 								try {
 									for await (const arrival of arrivals(group, { decoder, config })) {
 										// A resubscribe after a rerun re-delivers cached frames with a later stamp.
-										const key = `${group.sequence}:${arrival[1]}`;
+										const key = `${group.start}:${arrival[1]}`;
 										if (this.#seen.has(key)) continue;
 										this.#seen.add(key);
 										this.#arrivals.push(arrival);
@@ -179,7 +179,7 @@ export async function* arrivals(
 				if (duration === undefined || duration.isZero()) {
 					throw new Error(`no encoded frame duration for ${config.codec}`);
 				}
-				yield [at, frame.timestamp.asMillis(), Number(group.sequence), duration.asMillis()];
+				yield [at, frame.timestamp.asMillis(), Number(group.start), duration.asMillis()];
 			}
 		}
 	} finally {

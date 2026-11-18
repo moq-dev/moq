@@ -166,7 +166,7 @@ func TestListenKeylogRequiresSSLKEYLOGFILE(t *testing.T) {
 	}
 }
 
-// A Go worker survives a relay restart the way a moq-c worker does: the session
+// A Go worker survives a relay restart the way a libmoq worker does: the session
 // redials with backoff, the publisher re-announces its broadcast to the fresh
 // relay, and the subscriber's subscription receives frames again. The connect count
 // pairs with Status so a worker can log each reconnect.

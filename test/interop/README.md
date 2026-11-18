@@ -33,7 +33,7 @@ C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
 `interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
-Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
+Go, and C++, `libmoq` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 `@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes the first
 600 ms of PCM and frame timestamps of each rendition, named by its codec, for
 [`tone.py`](tone.py), which requires the
@@ -144,7 +144,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/moq-c` | `cargo build -p moq-c` + `cc` | subscribe |
+| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
@@ -191,7 +191,7 @@ Clients that print the grant the relay sent back over AUTH, as an
 their token implies: the Rust CLI (a `moq_net::auth` debug log), the Python,
 Go, and C++ clients (read through moq-ffi before they start), and the native
 JS subscribers. A cell whose grant is missing or wrong fails even when media
-flowed. moq-c's frozen ABI and GStreamer expose no grant, and the browser's
+flowed. libmoq's frozen ABI and GStreamer expose no grant, and the browser's
 shared connection keeps its session private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
@@ -210,24 +210,6 @@ Tokens use patterns no prefix could carry, so every cell checks that AUTH\_OK
 delivers them as minted: a publisher is granted its exact broadcast, a subscriber
 `**/name` (a leading `**` matching zero segments), and the refused publisher
 `interop-allowed-*.hang`.
-
-## Route key proof
-
-After the matrix, a Chromium tab and a Firefox tab each dial the relay on
-moq-lite-07 over WebTransport (`clients/js/route-key.ts`). A tab proves its
-route key in SETUP when its exporter derives what draft-ietf-webtrans-http3
-section 4.8 specifies, and the relay ends a session whose proof fails, so the
-lane reads the relay's log rather than the page: the tab advertises an
-implementation unique to the run, the relay records it when it admits the
-session, and its `moq_net::lite::setup` debug line on that connection shows the
-proof verified. The lane prints each browser build.
-
-Chromium 158 and later must prove; an older Chromium skips, or fails under
-`CI_STRICT`, which release PRs set, so the lite-07 cut waits for it to prove.
-Firefox's exporter writes the session ID as a varint rather than the draft's 64
-bits, so `@moq/net` sends no proof from Firefox, and the tab passes when it
-connects unproven, a supported state the cut does not wait on. A build the
-table says cannot prove but that does fails, so the table follows the browsers.
 
 ## moq-transport
 
@@ -536,11 +518,15 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The replacement case is quarantined from the default run off Chromium: on Firefox its
-fallback intermittently misses the switch bound, as often with the audio fixes that
-restored it on Chromium as without them. Run it explicitly with
-`--media-cases replacement --media-engines firefox`; its content, sync, switch, and
-fallback assertions remain active.
+Off Chromium, the replacement case skips its IETF draft 22 viewer and reports it as
+quarantined. The fallback rejoins an incumbent that encodes its audio on demand, so the
+incumbent replays the audio it captured while nobody listened, as far back as the
+returning subscription asks. A moq-lite viewer's max delay bounds that to about two
+seconds, and the player decodes audio that trails the clock past its bound only to warm
+the codec, so it rejoins at the live edge on every engine. moq-transport states no
+delay, so the incumbent can only cut the replay at the retention, and a WebSocket
+delivers all of it ahead of the live edge; Chromium's WebTransport delivers newest
+first. This is a known moq-transport limitation.
 
 The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
@@ -595,7 +581,6 @@ clients/
   js/                     headless-Chromium publish/subscribe via @moq/watch + @moq/publish
     driver.ts             the interop matrix's browser publisher/subscriber
     close.ts              the refused session's close code and reason
-    route-key.ts          each browser's route key proof, read off the relay's log
     media.ts              the media output + lifecycle checks
     harness.ts            shared Playwright plumbing
     src/contract.ts       what the page and its drivers agree on, free of browser imports
@@ -605,11 +590,10 @@ clients/
     src/probe.ts          subscriber-side measurement, taken at the sinks
     src/instrument.ts     live counts of the platform resources the page holds, and the speaker tap
     src/close.ts          the refused session, read off `WebTransport.closed`
-    src/route-key.ts      the lite-07 session that proves the tab's route key
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version
   js-native/hls.ts        the HLS grid publisher via @moq/hang
-  c/subscribe.c           subscribe via rs/moq-c
+  c/subscribe.c           subscribe via rs/libmoq
 ```
 
 ## CI

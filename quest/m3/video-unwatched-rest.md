@@ -12,7 +12,7 @@ of frames encoded at a rate the grant would not have funded.
 Accepted 2026-11-16 (maintainer, on
 [moq-dev/moq#8964](https://github.com/moq-dev/moq/pull/8964#issuecomment-6931517209)):
 #8964 lifted the capture driver's rule into `encode::Producer`, so moq-ffi's
-`MoqVideoProducer`, moq-c's `moq_encode_video*` and moq-boy now also encode an
+`MoqVideoProducer`, libmoq's `moq_encode_video*` and moq-boy now also encode an
 unwatched rendition at its ceiling (`Producer::rest` in
 `rs/moq-video/src/encode/producer.rs`), where the bindings used to follow the
 grant regardless. Its groups wait in the track cache, so the cost is encoder

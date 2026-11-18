@@ -226,8 +226,8 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   `rs/moq-e2ee` at 0.0.25 and publishes it; once the cut merges `main` into
   `release`, its copy is `publish = false` at 0.0.26. Check that
   release-plz proposes nothing for `moq-e2ee`.
-- ✅ The hand-written C API publishes as `libmoq` 0.22
-  ([its final line](/quest/m2/libmoq-name.md)), reversing 2026-10-25, so the
+- ✅ The hand-written C API publishes as `libmoq` 0.22, its final line,
+  reversing 2026-10-25, so the
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
   quests for a code-free `libmoq` stub were deleted.
 

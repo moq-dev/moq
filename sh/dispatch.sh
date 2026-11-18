@@ -123,18 +123,18 @@ module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|test/in
 # from. The pinned crate2nix comes from flake.lock.
 module cargo_nix '((^|/)(Cargo\.(toml|lock)|build\.rs)$|^rs/.*/src/(lib\.rs|main\.rs|bin/)|^nix/(Cargo\.nix|crate-hashes\.json)$|^sh/rs/cargo-nix\.sh$|^flake\.lock$)' \
     tools='nix nixfmt cargo' fix
-# The C package links moq-c's native-libs lists, and the C++ package's FFI
+# The C package links libmoq's native-libs lists, and the C++ package's FFI
 # pin. Both packages format with sh/clang-format.sh and OBS's style file.
-module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
+module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/libmoq/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
     tools='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format' compiles=check fix
-# The package links moq-c's native-libs lists, and compiles its doc samples.
+# The package links libmoq's native-libs lists, and compiles its doc samples.
 # It shares a lane with obs_compile because both build cpp/moq/build.
-module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
+module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/libmoq/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
     tools='cargo cmake c++ uniffi-bindgen-cpp clang-format' compiles=check lane=cpp fix
 # The plugin and its tests call through the bindings generated from cpp/moq
-# and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
+# and moq-ffi and link through libmoq's native-libs lists, and flake.nix owns
 # the libobs headers it compiles against.
-module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/moq-c/native-libs/|flake\.nix$)' \
+module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi/|rs/libmoq/native-libs/|flake\.nix$)' \
     tools='cargo cmake pkg-config uniffi-bindgen-cpp' compiles=check lane=cpp
 # The bun lane serializes fixers and JS builds that write shared outputs.
 # Dependency setup separately uses sh/js/install.py across every entry point.

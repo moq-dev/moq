@@ -203,4 +203,6 @@ export function deepEqual(a: unknown, b: unknown): boolean;
 export function diff(oldVal: unknown, newVal: unknown): Diff;
 
 export function merge(target: unknown, patch: unknown): unknown;
+
+export function next(track: Track.Producer, at: Time.Timestamp): Time.Timestamp;
 ```

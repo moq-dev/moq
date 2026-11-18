@@ -668,6 +668,40 @@ describe("AudioBuffer steering", () => {
 		}
 	});
 
+	// A rejoin's replayed backlog trails the clock by seconds, and the ring skips it unheard. Held to the
+	// ring's pace, the live edge behind it would arrive only once the ring had drained it all.
+	it("releases at once, and reports stale, what trails the clock past its bound short of a declared end", () => {
+		const clock = started();
+		const { buffer, state } = fake(100, {
+			bound: 200,
+			clock: { position: () => 3000, out: { reference: new Signal<number | undefined>(0) } },
+		});
+		const signal = new AbortController().signal;
+		try {
+			buffer.insert(ms(2900), [new Float32Array(160)]);
+			state(ms(2900), false, 0);
+			// Within the bound the ring plays it, so the gate holds what lies past its floor and window.
+			expect(buffer.stale(ms(2850))).toBe(false);
+			expect(Bun.peek.status(buffer.wait(ms(3300), signal))).toBe("pending");
+			expect(buffer.stale(ms(2700))).toBe(true);
+			expect(Bun.peek.status(buffer.wait(ms(1000), signal))).toBe("fulfilled");
+
+			// A finite tail plays out however far it trails the clock, through the next utterance too.
+			buffer.end(ms(2800));
+			expect(buffer.stale(ms(2700))).toBe(false);
+			// The decoder asks with where its output ends, which for the last packet is the end itself.
+			expect(buffer.stale(ms(2800))).toBe(false);
+			buffer.next();
+			expect(buffer.stale(ms(2700))).toBe(false);
+			expect(buffer.stale(ms(2790))).toBe(false);
+			buffer.reset();
+			expect(buffer.stale(ms(2700))).toBe(true);
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
+
 	// Before media zero's turn, as while an opening waits for its output to sound it, the clock pairs
 	// at its negative position rather than the zero it reads as.
 	it("pairs a clock short of media zero at its negative position", () => {

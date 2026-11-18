@@ -5,7 +5,7 @@
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
-# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/moq-c, all
+# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/libmoq, all
 # talking to each other. There's no apt/brew/npm/PyPI here, just
 # cargo/bun/uv/go/cmake/cc.
 #
@@ -83,7 +83,7 @@ FINISH_ONLY=0
 VERSIONS="auto"
 IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 
-# Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
+# Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
 
@@ -260,9 +260,6 @@ needs() {
     return 1
 }
 
-# The browsers whose tabs prove their route key to the relay (route-key.ts).
-ROUTE_KEY_ENGINES=(chromium firefox)
-
 # True if any browser/native JS client is in play (they share one bun install).
 needs_js() {
     needs js || needs js-native || needs js-native-node || needs js-native-bun
@@ -275,7 +272,7 @@ COMPAT=0
 [[ -n "${INTEROP_VERSION:-}" ]] && COMPAT=1
 
 # The clients that print the grant they received as an `auth granted` line. The
-# Python, Go, and C++ clients read it through moq-ffi; moq-c's frozen ABI and
+# Python, Go, and C++ clients read it through moq-ffi; libmoq's frozen ABI and
 # GStreamer expose none, and the browser's shared connection keeps its session private.
 # Grants are checked on $AUTH_VERSION, so only in the `auto` pass.
 prints_grant() {
@@ -494,9 +491,6 @@ plan_pass() {
         fi
         if [[ "$VERSION" == auto ]] && needs js; then
             record "not run" case="refused session" subscriber=js
-            for engine in "${ROUTE_KEY_ENGINES[@]}"; do
-                record "not run" case="route key $engine" subscriber=js version=moq-lite-07-wip
-            done
         fi
     fi
     [[ "$IN_TREE" -eq 1 ]] || return 0
@@ -599,7 +593,7 @@ require_tools() {
         exit 1
     fi
     # Resolve the cargo target dir once (honors a custom CARGO_TARGET_DIR, which
-    # the self-hosted CI runner sets), so the built binaries and moq-c's header
+    # the self-hosted CI runner sets), so the built binaries and libmoq's header
     # are found wherever cargo actually writes them.
     TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
         sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -789,7 +783,7 @@ prepare_cpp() {
     CPP_INTEROP="$build/client/cpp-interop"
 }
 
-# Build moq-c (the C staticlib + cbindgen header) and compile the C subscriber
+# Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
 # against it. cargo writes libmoq.a to the profile dir, and build.rs writes
 # moq.h into its OUT_DIR, which only cargo's JSON messages name.
 prepare_c() {
@@ -798,30 +792,30 @@ prepare_c() {
         mark_broken c "no C compiler ($cc) on PATH"
         return
     }
-    echo "building c client (workspace moq-c + cc)..."
+    echo "building c client (workspace libmoq + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-c --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
-        mark_broken c "cargo build -p moq-c failed"
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
+        mark_broken c "cargo build -p libmoq failed"
         sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
         return
     fi
-    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/moq-c#' |
+    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/libmoq#' |
         sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
     header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
     [[ -f "$header" && -f "$lib" ]] || {
-        mark_broken c "moq-c artifacts missing ($header / $lib)"
+        mark_broken c "libmoq artifacts missing ($header / $lib)"
         return
     }
     harness_stage c/include/moq.h "$header"
     harness_stage c/libmoq.a "$lib"
     # cargo can't inject libmoq.a's native deps into an external link, so read
-    # them from the same list moq-c.pc and CMake use.
+    # them from the same list moq.pc and CMake use.
     local native_libs
     case "$(uname -s)" in
-        Darwin) native_libs="$WORKSPACE/rs/moq-c/native-libs/apple.txt" ;;
-        *) native_libs="$WORKSPACE/rs/moq-c/native-libs/linux.txt" ;;
+        Darwin) native_libs="$WORKSPACE/rs/libmoq/native-libs/apple.txt" ;;
+        *) native_libs="$WORKSPACE/rs/libmoq/native-libs/linux.txt" ;;
     esac
     os_libs=()
     while read -r entry; do
@@ -965,10 +959,9 @@ fi
 # info stays the base, ahead of the inherited RUST_LOG so its own level still wins: a filter naming
 # only targets, such as quinn=debug, would otherwise silence every other warning, such as why the
 # relay refused a request. Connection spans and clean closes must survive an
-# inherited warn-only filter. The route key lane reads the relay's debug line for each verified proof,
-# and the idle-out check its upstream subscribe and fetch starts.
+# inherited warn-only filter. The idle-out check reads its upstream subscribe and fetch starts.
 harness_spawn relay "$HARNESS_RUN/relay.log" env \
-    "RUST_LOG=info,${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::setup=debug,moq_net::lite::subscriber=debug" \
+    "RUST_LOG=info,${RUST_LOG:+$RUST_LOG,}moq_relay::connection=info,moq_relay::relay=info,moq_net::lite::subscriber=debug" \
     "$RELAY" "$HARNESS_RUN/relay.toml"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "relay never became ready" >&2
@@ -2331,41 +2324,6 @@ run_matrix() {
         fi
     fi
 
-    # Each browser's lite-07 session proves its route key when that build can, and the relay
-    # verifies it. A build the lite-07 cut waits on skips, except under CI_STRICT (release PRs);
-    # route-key.ts passes one that connects unproven by design. The relay reads no version from
-    # the tab beyond lite-07's, so one pass covers it.
-    if [[ "$VERSION" == auto ]] && needs js; then
-        echo "=== browser route key ==="
-        local engine status
-        for engine in "${ROUTE_KEY_ENGINES[@]}"; do
-            log="$HARNESS_RUN/route-key-$engine.log"
-            if is_broken js; then
-                echo "  FAIL  route key $engine (browser client unavailable)"
-                record fail case="route key $engine" subscriber=js version=moq-lite-07-wip detail="browser client unavailable"
-                overall=1
-                continue
-            fi
-            started=$SECONDS
-            status=0
-            (cd "$CLIENTS/js" && bun route-key.ts --url "$(token_url --subscribe "route-key-$$")" \
-                --relay-log "$HARNESS_RUN/relay.log" --engine "$engine" --timeout "$TIMEOUT") >"$log" 2>&1 || status=$?
-            grep -m1 '^BROWSER ' "$log" | sed 's/^BROWSER /  /' || true
-            local cell=(case="route key $engine" subscriber=js version=moq-lite-07-wip seconds=$((SECONDS - started)) log="$log")
-            if [[ "$status" -eq 0 ]]; then
-                echo "  PASS  route key $engine ($((SECONDS - started))s)"
-                record pass "${cell[@]}"
-            elif [[ "$status" -eq 77 && -z "${CI_STRICT:-}" ]]; then
-                echo "  SKIP  route key $engine: $(grep -m1 '^SKIP ' "$log" | cut -c6-)"
-                record skip "${cell[@]}" detail="$(grep -m1 '^SKIP ' "$log" | cut -c6-)"
-            else
-                echo "  FAIL  route key $engine ($((SECONDS - started))s)"
-                record fail "${cell[@]}" detail="$(grep -m1 '^\(SKIP\|FAIL\) ' "$log" || echo "route-key.ts exited $status")"
-                sed 's/^/        /' "$log" >&2 || true
-                overall=1
-            fi
-        done
-    fi
 }
 
 # A publisher and fresh readers exercise on-demand claims through this run's relay.

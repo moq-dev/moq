@@ -8,6 +8,7 @@ import { RequestOk } from "../src/ietf/request";
 import { NativeSession } from "../src/ietf/session";
 import { Subscribe, SubscribeOk, SubscribeUpdate } from "../src/ietf/subscribe";
 import { ALPN, Version } from "../src/ietf/version";
+import { hooks } from "../src/internal.ts";
 import { createMockTransportPair } from "../src/mock";
 import { Producer } from "../src/origin";
 import * as Path from "../src/path";
@@ -23,8 +24,8 @@ for (const groups of [2, 16, 128]) {
 		const publication = origin.route(Path.from("fills"));
 		const track = publication.broadcast.createTrack("video", { maxAge: Duration.millis(60_000) });
 		for (let i = 0; i < groups; i++) {
-			const group = track.appendGroup();
-			group.writeFrame({ payload: new Uint8Array([i % 256]), timestamp: Timestamp.unscaled(group.sequence) });
+			const group = hooks.appendNext(track);
+			group.writeFrame({ payload: new Uint8Array([i % 256]), timestamp: Timestamp.unscaled(group.start) });
 			group.finish();
 		}
 		const peers = await Promise.all(

@@ -20,7 +20,7 @@ interface Case {
 	budget?: number;
 	/** `client_setup`: the one version the server accepts. */
 	server?: string;
-	expect: "decoded" | "refused" | "withdrawn";
+	expect: "decoded" | "refused";
 }
 
 const VERSIONS = new Map<string, Version>(Object.values(Version).map((v) => [versionName(v), v]));
@@ -32,11 +32,10 @@ function version(name: string): Version {
 }
 
 // Decode `r` the way a session does, returning how to encode what it decoded.
-async function decode(c: Case, r: Reader, v: Version): Promise<((w: Writer) => Promise<void>) | "withdrawn"> {
+async function decode(c: Case, r: Reader, v: Version): Promise<(w: Writer) => Promise<void>> {
 	switch (c.message) {
 		case "announce": {
 			const msg = await decodeAnnounceBroadcast(r, v);
-			if (msg.status === "refused") return "withdrawn";
 			return (w) => encodeAnnounceBroadcast(w, msg, v);
 		}
 		case "announce_init": {
@@ -59,7 +58,7 @@ async function decode(c: Case, r: Reader, v: Version): Promise<((w: Writer) => P
 async function outcome(c: Case): Promise<string> {
 	const v = version(c.version);
 	const r = new Reader(undefined, Buffer.from(c.hex, "hex"), v);
-	let encode: ((w: Writer) => Promise<void>) | "withdrawn";
+	let encode: (w: Writer) => Promise<void>;
 	try {
 		encode = await decode(c, r, v);
 	} catch (err) {
@@ -67,7 +66,6 @@ async function outcome(c: Case): Promise<string> {
 		return err instanceof UnexpectedEnd && !isDecodeError(err) ? "short" : "refused";
 	}
 	if (!(await r.done())) return "left bytes";
-	if (encode === "withdrawn") return encode;
 	return Buffer.from(await Writer.collect(v, encode)).toString("hex");
 }
 
@@ -77,8 +75,24 @@ test("the corpus has cases", () => {
 	expect(cases.length).toBeGreaterThan(0);
 });
 
+// The lite-07 Announce Stream types only two nodes that both declared a Node ID exchange. This
+// node declares none, so it refuses them all, where a routing node decodes the well-formed ones.
+const ROUTING = new Set([3, 7, 8, 9, 10]);
+
+function routing(c: Case): boolean {
+	return (
+		c.message === "announce" &&
+		version(c.version) === Version.DRAFT_07 &&
+		ROUTING.has(Number.parseInt(c.hex.slice(0, 2), 16))
+	);
+}
+
 for (const c of cases) {
 	test(c.name, async () => {
+		if (routing(c)) {
+			expect(await outcome(c)).toBe("refused");
+			return;
+		}
 		expect(await outcome(c)).toBe(c.expect === "decoded" ? c.hex : c.expect);
 	});
 }

@@ -113,9 +113,9 @@ test("groups still draining are promoted after the subscription closes", () => {
 test("the subscription's order picks which group goes first", async () => {
 	const { priority, subscriber, open, streams, broadcast } = ranking({ priority: 7, order: "ascending" });
 
-	const writers = [5n, 1n, 10n].map((sequence) => {
+	const writers = [5n, 1n, 10n].map((key) => {
 		const writer = open();
-		priority.add(writer, sequence, 0);
+		priority.add(writer, key, 0);
 		return writer;
 	});
 	const at = (...positions: number[]) => positions.map((position) => sendOrder({ priority: 7, position }));
@@ -171,9 +171,9 @@ test.each(["ascending", "descending"] as const)("re-ranking matches rank for eve
 		[1n, 0],
 		[9n, 0],
 	];
-	const writers = starts.map(([sequence, object]) => {
+	const writers = starts.map(([key, object]) => {
 		const writer = open();
-		priority.add(writer, sequence, object);
+		priority.add(writer, key, object);
 		return writer;
 	});
 	const check = (live: number[]) => {
