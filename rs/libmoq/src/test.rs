@@ -8524,8 +8524,7 @@ fn announce_route_crosses_a_relay_session() {
 
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	// Each client first: closed by its peer before it was healthy, it would end on its own.
-	// Its peer gone, the accepted session ends too.
+	// Each client's close ends its accepted session too.
 	for (client, client_cb, accepted, accepted_cb) in [
 		(downstream_client, &downstream_client_cb, downstream, &downstream_cb),
 		(upstream_client, &upstream_client_cb, upstream, &upstream_cb),
@@ -8641,7 +8640,6 @@ fn a_minted_instance_pins_request_and_follow() {
 	assert_eq!(moq_origin_announced_free(announced), 0);
 	assert_eq!(moq_origin_announced_cancel(task), 0);
 	assert_eq!(announced_cb.recv_announce_terminal(), 0);
-	// The client first: closed by its peer before it was healthy, it would end on its own.
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 	// Its peer gone, the accepted session ends too, which releases its handle.
@@ -8758,6 +8756,8 @@ fn server_accepts_a_session() {
 	assert_eq!((terminal.failure, terminal.connects), (0, 1));
 	assert!(moq_consume_track_cancel(consumer) < 0, "the consumer ended");
 	assert_eq!(moq_consume_close(consumed), 0);
+	// The server answered the client's credential, so its close leaves the client redialing
+	// rather than ended, and the handle is still there to close.
 	assert_eq!(moq_session_close(client), 0);
 	client_cb.recv_terminal();
 
@@ -8793,9 +8793,9 @@ fn server_rejects_a_session() {
 	assert_eq!(moq_session_request_reject(request, 403), 0);
 	assert!(moq_session_request_free(request) < 0, "reject consumes the request");
 
-	// The rejection closes a session the transport already established, so the client
-	// sees it connect first. Refused before it was healthy, the session then ends with the
-	// rejection rather than redialing, as a refused first dial does.
+	// The rejection closes a session the transport already established. Closed before the
+	// server answered its credential, the session ends with the rejection rather than
+	// redialing, as a refused first dial does.
 	let terminal = client_cb.recv_terminal();
 	let protocol = terminal.protocol.expect("the terminal snapshot names the rejection");
 	assert_eq!(protocol.scope, moq_error_scope::MOQ_ERROR_SCOPE_SESSION as u32);
