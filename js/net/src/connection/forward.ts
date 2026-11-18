@@ -23,13 +23,13 @@ export const DISCOVERY_REMOVED =
 const LINGER = Duration.millis(2000);
 
 /**
- * Names one route a session reports: its prefix, and on lite-07 the origin node whose claim it
- * is, since a stream reports each node's claim at a path as its own route.
+ * Names one route a session reports: its prefix, and on lite-07 the instance whose claim it is,
+ * since a stream reports each instance's claim at a path as its own route.
  */
 type Key = string;
 
 function keyOf(prefix: Path.Valid, route: WireRoute): Key {
-	return route.node === undefined ? prefix : `${prefix}\u0000${route.node}`;
+	return route.claimed && route.instance !== undefined ? `${prefix}\u0000${route.instance}` : prefix;
 }
 
 /** One announce request open on the session, and the routes it currently reports. */
@@ -94,13 +94,6 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 	const originWire = wireOf(origin);
 	const session = wireOf(conn);
 	const exclusive = session.exclusive;
-	// A lite-07 claim covers only what its origin node's newest floor on the session still
-	// certifies beneath it, which the origin asks per request. Mirrors `covering` in rs/moq-net.
-	const covering = (prefix: Path.Valid, route: WireRoute) => {
-		const node = route.node;
-		if (node === undefined || !session.covers) return undefined;
-		return (path: Path.Valid) => session.covers?.(node, prefix, path) ?? true;
-	};
 	// Reassigned on a downgrade, so the origin stops counting this session as discovering.
 	// Called through a closure so the session's death always detaches the current one.
 	let detach = originWire.attach(true);
@@ -123,7 +116,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 
 		const existing = routes.get(key);
 		if (!existing) {
-			const handle = originWire.receive(prefix, route, covering(prefix, route));
+			const handle = originWire.receive(prefix, route);
 			routes.set(key, { prefix, handle, reporters: new Map([[interest, route]]) });
 			void drive(handle, conn);
 			return;
@@ -147,7 +140,7 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		if (restart || route.instance !== current?.instance || route.epoch !== current?.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
-			const handle = originWire.receive(existing.prefix, route, covering(existing.prefix, route));
+			const handle = originWire.receive(existing.prefix, route);
 			existing.handle.close();
 			existing.handle = handle;
 			void drive(handle, conn);
@@ -305,20 +298,9 @@ export function forwardAnnounced(conn: Session, origin: OriginProducer): void {
 		if (want && !covered && !blind) open(prefix);
 	});
 
-	// A floor can move what a claim covers while every route stays as it was, so the open
-	// requests beneath each claim are admitted anew: advertising a route as it stands reroutes them.
-	const uncovered = session.coverage?.subscribe(() => {
-		if (dead) return;
-		for (const { handle } of routes.values()) {
-			const wire = wireOf(handle);
-			if (wire.info?.node !== undefined) wire.update(wire.info);
-		}
-	});
-
 	void conn.closed.then(() => {
 		dead = true;
 		unsubscribe();
-		uncovered?.();
 		// End every request the moment the session closes rather than waiting for the wire to
 		// error it, so the retractions land promptly.
 		for (const interest of interests.values()) interest.announced.close();

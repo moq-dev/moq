@@ -204,7 +204,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                     raise RuntimeError("catalog ended without video")
                 id, video = next(iter(catalog.video.items()))
                 async with await moq.media.TrackConsumer.subscribe(
-                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
+                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(min=None, max=MAX_DELAY))
                 ) as media:
                     count = 0
                     async for frame in media:
@@ -322,7 +322,7 @@ async def subscribe(
         id, video = next(iter(catalog.video.items()))
 
         media = await moq.media.TrackConsumer.subscribe(
-            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
+            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(min=None, max=MAX_DELAY))
         )
 
         total = 0

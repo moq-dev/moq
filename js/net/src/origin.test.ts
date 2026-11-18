@@ -13,7 +13,6 @@ import {
 	hooks,
 	mostSpecific,
 	presented,
-	rendezvousHash,
 	spreadHash,
 	superseded,
 } from "./internal.ts";
@@ -2213,25 +2212,12 @@ test("announced filters before rooting and retains lifecycle, routing and watch 
 	expect(wireOf(reader).advertised.peek()).toBeUndefined();
 });
 
-// Rust keys each candidate on its own, a lite-07 claim by its node and any other by its instance
-// and chain, as `lite07_ties_match_js` in rs/moq-net pins: here the claim wins.
-test("a lite-07 and a lite-06 route beneath one prefix rank by each one's own key", () => {
-	const job = Path.from("pool/job");
-	const pool = Path.from("pool");
-	const claim = { ...WireRoute.default, instance: Instance.parse("a"), node: 0x7an, cost: 1n };
-	const legacy = { ...WireRoute.default, instance: Instance.parse("b"), hops: [toHop(11n)], cost: 1n };
-	expect(rendezvousHash(job, 0x7an)).toBe(0xc376be7bf47aebbfn);
-	expect(spreadHash(job, "b")).toBe(0xd16a3821c67a2d25n);
-	expect(compareRouteCandidates(job, pool, claim, legacy)).toBeLessThan(0);
-	expect(compareRouteCandidates(job, pool, legacy, claim)).toBeGreaterThan(0);
-});
-
 // A claim exactly at the path outranks one that only covers it, whatever else ranks them, as the
 // Rust router's `above` does: the covering one is cheaper and ahead on priority here.
 test("a claim nearer its path outranks a broader one", () => {
 	const path = Path.from("src/derived");
-	const exact = { ...WireRoute.default, instance: Instance.parse("a"), node: 1n, cost: 9n, priority: -5 };
-	const broad = { ...WireRoute.default, instance: Instance.parse("b"), node: 2n, cost: 1n, above: 1n };
+	const exact = { ...WireRoute.default, instance: Instance.parse("a"), claimed: true, cost: 9n, priority: -5 };
+	const broad = { ...WireRoute.default, instance: Instance.parse("b"), claimed: true, cost: 1n, above: 1n };
 	expect(compareRouteCandidates(path, path, exact, broad)).toBeLessThan(0);
 	expect(compareRouteCandidates(path, path, broad, exact)).toBeGreaterThan(0);
 	expect(compareRouteCandidates(path, path, exact, { ...broad, above: 0n })).toBeGreaterThan(0);
@@ -2241,8 +2227,8 @@ test("a claim nearer its path outranks a broader one", () => {
 // so a broad claim shown deep never beats the more specific claim filed shallower.
 test("the most specific claim wins whichever prefix shows it", () => {
 	const path = Path.from("src/a/b/c");
-	const broad = { ...WireRoute.default, node: 1n, above: 2n };
-	const exact = { ...WireRoute.default, node: 2n };
+	const broad = { ...WireRoute.default, claimed: true, above: 2n };
+	const exact = { ...WireRoute.default, claimed: true };
 	const at = new Map([
 		[Path.from("src/a/b"), broad],
 		[Path.from("src/a"), exact],
@@ -2251,7 +2237,7 @@ test("the most specific claim wins whichever prefix shows it", () => {
 	expect(mostSpecific(path, pick, (route) => route)).toBe(exact);
 	// Claims as specific as each other go to the deepest prefix.
 	const same = new Map([
-		[Path.from("src/a/b"), { ...WireRoute.default, node: 3n, above: 1n }],
+		[Path.from("src/a/b"), { ...WireRoute.default, claimed: true, above: 1n }],
 		[Path.from("src/a"), exact],
 	]);
 	expect(
@@ -2259,8 +2245,8 @@ test("the most specific claim wins whichever prefix shows it", () => {
 			path,
 			(prefix) => same.get(prefix),
 			(route) => route,
-		)?.node,
-	).toBe(3n);
+		)?.above,
+	).toBe(1n);
 });
 
 // An instance's epoch supersedes only within one claim, as Rust's `Epochs` keys by prefix and Above:
@@ -2268,8 +2254,8 @@ test("the most specific claim wins whichever prefix shows it", () => {
 test("a broader claim at a higher epoch does not supersede the exact one", () => {
 	const path = Path.from("src/a");
 	const instance = Instance.parse("i");
-	const exact = { ...WireRoute.default, instance, node: 1n, epoch: 0n };
-	const broad = { ...WireRoute.default, instance, node: 2n, epoch: 1n, above: 1n };
+	const exact = { ...WireRoute.default, instance, claimed: true, epoch: 0n };
+	const broad = { ...WireRoute.default, instance, claimed: true, epoch: 1n, above: 1n };
 	expect(bestCandidate(path, path, [exact, broad], (route) => route)).toBe(exact);
 	expect(bestCandidate(path, path, [broad, exact], (route) => route)).toBe(exact);
 	// The same claim at a higher epoch still supersedes its older one.
@@ -2279,13 +2265,13 @@ test("a broader claim at a higher epoch does not supersede the exact one", () =>
 	expect(superseded(exact, [exact, broad])).toBe(false);
 });
 
-// A lite-07 claim ranks as the one hop to its origin node in what the origin announces, as in
+// A lite-07 claim ranks as the one hop to the peer that sent it in what the origin announces, as in
 // what a request resolves: tied with a newer one-hop route, the newer wins both.
 test("an announcement counts a lite-07 claim as one hop", async () => {
 	const origin = new Producer();
 	const room = Path.from("room");
 	const b = Instance.parse("b");
-	const older = wireOf(origin).receive(room, { ...WireRoute.default, instance: Instance.parse("a"), node: 0x7an });
+	const older = wireOf(origin).receive(room, { ...WireRoute.default, instance: Instance.parse("a"), claimed: true });
 	const newer = wireOf(origin).receive(room, { ...WireRoute.default, instance: b, hops: [PEER] });
 	const announced = origin.consume().routes();
 	expect(await announced.next()).toMatchObject({ prefix: room, route: { instance: b } });
