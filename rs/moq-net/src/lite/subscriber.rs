@@ -9330,6 +9330,70 @@ mod tests {
 		);
 	}
 
+	/// A grant that widens to cover a claim the answer already held back sends it at once,
+	/// though the node queues nothing behind it to flush it out.
+	#[kio::test]
+	async fn a_widened_grant_flushes_the_claim_it_shows() {
+		use crate::model::ProduceTest as _;
+		const VERSION: Version = Version::Lite07;
+		let publish = origin::Config::new(std::num::NonZeroU64::new(2).unwrap()).produce();
+		let route = publish.route("room", crate::origin::RouteOptions::hidden()).unwrap();
+		route.announce().unwrap();
+		// The peer asks for the whole tree, hidden paths included.
+		let request = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceBroadcast::Request {
+				more: false,
+				remove: Vec::new(),
+				add: vec![(Path::empty(), true)],
+			}
+			.encode(w, VERSION)
+			.unwrap()
+		};
+		let session = crate::lite::test_transport::ScriptedSession::new(announce_script(VERSION, &[&request]));
+		// Only the half answering the peer is limited, so a change to it is all that happens.
+		let auth = crate::auth::Link::new(false);
+		auth.handle().authorize(&crate::auth::Grant::default());
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(session.clone()),
+			origin: origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			cost: Some(1),
+			peer_node: None,
+			going_away: Default::default(),
+			auth: crate::auth::Link::new(false),
+		});
+		subscriber.peer_setup.set(lite::Setup::default()).unwrap();
+		let recv = crate::transport::boxed::RecvStream::new(session.recv());
+		let _ = (subscriber.announce_streams).try_push(route_stream::Reader::new(recv, VERSION));
+		let mut routes = route_stream::RouteStream::new(
+			subscriber.clone(),
+			route_stream::Publish {
+				origin: publish.consume(),
+				auth: auth.clone(),
+				withdrawal: Default::default(),
+				routing: false,
+			},
+		);
+		let written = || session.log.writes.lock().unwrap().len();
+		// Run until everything parks: the request answered, the claim held back.
+		let settled = kio::clock::timeout(
+			std::time::Duration::from_millis(1),
+			kio::wait(|waiter| routes.poll(waiter).map(|err| panic!("{err:?}"))),
+		)
+		.await;
+		assert!(settled.is_err(), "the session ended");
+		let held = written();
+
+		// The grant change is the one wakeup: the pass it runs must send what it shows,
+		// since nothing else is queued to wake the session again.
+		auth.handle().authorize(&crate::auth::Grant::all());
+		assert!(routes.poll(&kio::Waiter::noop()).is_pending());
+		assert!(written() > held, "the claim the grant now shows stayed buffered");
+	}
+
 	/// A peer streaming announces gets a budget of them read per poll, so the session's
 	/// other tasks run between them, and the announce behind the flood still arrives.
 	#[kio::test]
