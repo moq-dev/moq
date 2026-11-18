@@ -1060,7 +1060,7 @@ test("a moq-transport copy resolves a time anchor", () => {
 	for (const key of [0n, 1000n, 2000n]) stampGroup(producer, key, Number(key));
 	const reader = producer.subscribe({
 		delay: { max: null },
-		ranges: [{ start: { time: Timestamp.fromMillis(1500) } }],
+		ranges: [{ start: { time: 1500n } }],
 	});
 	expect(readable(reader)).toEqual([1000n, 2000n]);
 });
