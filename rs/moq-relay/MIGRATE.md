@@ -125,8 +125,7 @@ An auth server that scopes tenants by hostname must see them over TLS, and still
 ### A client certificate alone lists no hidden routes (#6509)
 
 Only a grant with `peer: true` lists `.`-named routes to a session that did not ask for them.
-Have the auth server mark cluster peers as `peer` (`moq auth serve --mtls-link peer`) before upgrading, or a peer below moq-lite-07-wip loses those paths.
-A certificate-only peer also gets `[limits.client]` instead of `[limits.peer]`, so it is closed with `TOO_MANY_REQUESTS` past 1000 announced broadcasts (`announces`) instead of 100000.
+Have the auth server mark cluster peers as `peer` (`moq auth serve --mtls-peer`) before upgrading, or a peer below moq-lite-07-wip loses those paths.
 
 ### `stats.interval` is a duration (#6472)
 

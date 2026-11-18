@@ -17,7 +17,9 @@ pub enum Error {
 	Read(PathBuf, #[source] std::io::Error),
 
 	/// The key itself was given where its file belongs. The error never repeats it.
-	#[error("the secret must be the path of a file holding it, not the key itself (`openssl rand -hex 32 > secret.key`)")]
+	#[error(
+		"the secret must be the path of a file holding it, not the key itself (`openssl rand -hex 32 > secret.key`)"
+	)]
 	Inline,
 }
 

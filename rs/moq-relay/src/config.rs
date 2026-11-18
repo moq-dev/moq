@@ -998,7 +998,10 @@ max_streams = 64
 		resolve("[stats]\nenabled = true\n");
 
 		// A setting only a dialed peer or API reads is refused with none to read it.
-		refuse("[cluster.api]\nroot = [\"api.pem\"]\n", "--cluster-api-root requires --cluster-api-url");
+		refuse(
+			"[cluster.api]\nroot = [\"api.pem\"]\n",
+			"--cluster-api-root requires --cluster-api-url",
+		);
 		resolve("[cluster.api]\nurl = \"https://api.example/peers\"\nroot = [\"api.pem\"]\n");
 		for alone in [
 			"[cluster]\ntoken = \"cluster.jwt\"\n",
