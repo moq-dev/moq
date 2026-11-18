@@ -406,7 +406,8 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 });
 
 // A claim says its cost, how far above its path it is, whether it is unavailable, draining, or
-// behind a marked session, the lowest priority on its way, and the nodes that announced it again.
+// behind a marked session, the lowest priority on its way, and the relays it entered or left a
+// routing domain by.
 test("a lite-07 claim round-trips with its exact bytes", async () => {
 	const v = Version.DRAFT_07;
 	const claim: Claim = {
