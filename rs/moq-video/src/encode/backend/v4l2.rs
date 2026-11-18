@@ -595,8 +595,8 @@ impl Backend for V4l2 {
 	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
 		// Settable on a streaming encoder and applied without an IDR, which is
 		// exactly what the congestion controller wants. A driver that refuses gets
-		// `BitrateUnsupported`, which tells the control loop to stop adapting
-		// rather than to stop encoding.
+		// `BitrateUnsupported`, which leaves it encoding at its current rate rather
+		// than stopping it.
 		set_bitrate(&self.device, bitrate).map_err(|err| {
 			tracing::debug!(encoder = NAME, %err, "driver refused a bitrate change");
 			Error::BitrateUnsupported(NAME)

@@ -8303,6 +8303,96 @@ fn encode_video_bitrate_caps_the_reservation() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Finishing an encoder releases its claim, whatever reservation handle the caller keeps.
+#[test]
+fn encode_finish_releases_a_reservation_the_caller_keeps() {
+	let (bandwidth, estimate) = test_allocator();
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	let origin = id(moq_origin_create());
+	let path = b"finish-releases";
+	let broadcast = publish_broadcast(origin, path);
+	let consume = request_broadcast(origin, path);
+
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 4_000_000,
+		join_us: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let video = id(unsafe {
+		moq_encode_video(
+			broadcast,
+			&input,
+			&output,
+			&moq_video_encode_options { bandwidth, lower: 0 },
+		)
+	});
+	let audio_input = moq_audio_encoder_input {
+		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
+		sample_rate: 48_000,
+		channels: 1,
+	};
+	let audio_output = moq_audio_encoder_output {
+		codec: c"opus".as_ptr(),
+		codec_len: 4,
+		sample_rate: 0,
+		channels: 0,
+		bitrate: 0,
+		frame_duration_us: 0,
+	};
+	let audio =
+		id(unsafe { moq_encode_audio(broadcast, c"audio".as_ptr(), 5, &audio_input, &audio_output, bandwidth) });
+	let video_claim = id(moq_encode_video_reservation(video));
+	let audio_claim = id(moq_encode_audio_reservation(audio));
+
+	let (_, video_cb) = subscribe_named_track(consume, b"0.avc3");
+	let (_, audio_cb) = subscribe_named_track(consume, b"audio");
+	let sibling_track = publish_named_track(broadcast, b"sibling");
+	let (sibling_sub, sibling_cb) = subscribe_named_track(consume, b"sibling");
+	let sibling = id(moq_allocator_reserve(bandwidth, sibling_track, 4_000_000));
+	// Media outranks a default track, so its tier takes the whole estimate.
+	wait_rate(sibling, 0);
+
+	assert_eq!(moq_encode_video_finish(video), 0);
+	assert_eq!(moq_encode_audio_finish(audio), 0);
+	assert_eq!(rate(sibling), Some(4_000_000));
+	for claim in [video_claim, audio_claim] {
+		assert_eq!(rate(claim), None);
+		assert_eq!(moq_reservation_update(claim, 1_000_000), 0);
+		let policy = moq_rate_policy {
+			max_bps: 1_000_000,
+			lower_bps: 0,
+			has_lower: false,
+		};
+		assert!(moq_rate_control_create(claim, policy) < 0);
+		assert_eq!(moq_reservation_close(claim), 0);
+	}
+
+	assert_eq!(moq_reservation_close(sibling), 0);
+	// Finishing ended the media subscriptions; only the sibling's is still open.
+	assert_eq!(moq_consume_track_cancel(sibling_sub), 0);
+	for cb in [video_cb, audio_cb, sibling_cb] {
+		let _ = cb.recv_terminal();
+	}
+	assert_eq!(moq_allocator_close(bandwidth), 0);
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// A simulcast rung needs a bandwidth allocator and a bitrate above its lower rendition's.
 #[test]
 fn encode_video_rung_needs_a_grant_and_a_band() {
@@ -8336,72 +8426,6 @@ fn encode_video_rung_needs_a_grant_and_a_band() {
 	assert_eq!(moq_encode_video_finish(high), 0);
 	assert_eq!(moq_encode_video_finish(low), 0);
 	assert_eq!(moq_allocator_close(bandwidth), 0);
-	assert_eq!(moq_publish_close(broadcast), 0);
-	assert_eq!(moq_origin_close(origin), 0);
-}
-
-/// A rung watches its lower rendition's own ceiling, which wakes it when that moves or
-/// ends, so it notices even when the lower rendition reserves nothing it shares.
-#[test]
-fn encode_video_ceiling_wakes_a_rung_above() {
-	struct Flag(std::sync::atomic::AtomicBool);
-	impl std::task::Wake for Flag {
-		fn wake(self: std::sync::Arc<Self>) {
-			self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-		}
-	}
-
-	let origin = id(moq_origin_create());
-	let broadcast = publish_broadcast(origin, b"rung");
-	let input = moq_video_encoder_input {
-		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
-		width: 320,
-		height: 240,
-		framerate: moq_video_frame_rate {
-			numerator: 30,
-			denominator: 1,
-		},
-	};
-	let output = moq_video_encoder_output {
-		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
-		bitrate: 500_000,
-		join_us: 0,
-		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
-		encoder: std::ptr::null(),
-		encoder_len: 0,
-	};
-	// No allocator, so nothing it does moves a reservation a rung would share.
-	let low = id(unsafe { moq_encode_video(broadcast, &input, &output, std::ptr::null()) });
-	let ceiling = State::lock()
-		.video
-		.producer(Id::try_from(low).unwrap())
-		.unwrap()
-		.lock()
-		.as_ref()
-		.unwrap()
-		.ceiling
-		.consume();
-
-	let flag = std::sync::Arc::new(Flag(std::sync::atomic::AtomicBool::new(false)));
-	let waiter = kio::Waiter::new(std::task::Waker::from(flag.clone()));
-	let arm = || ceiling.poll(&waiter, |_| std::task::Poll::<()>::Pending).is_pending();
-	assert!(arm());
-
-	assert_eq!(moq_encode_video_bitrate(low, 400_000), 0);
-	assert!(
-		flag.0.swap(false, std::sync::atomic::Ordering::SeqCst),
-		"a moved ceiling wakes the rung"
-	);
-	assert_eq!(*ceiling.read(), moq_net::bandwidth::Rate::from_bps(400_000));
-	assert!(arm());
-
-	assert_eq!(moq_encode_video_finish(low), 0);
-	assert!(
-		flag.0.load(std::sync::atomic::Ordering::SeqCst),
-		"an ended rendition wakes the rung"
-	);
-	assert!(!arm(), "the ceiling closes with the rendition");
-
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
