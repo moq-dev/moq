@@ -2674,7 +2674,7 @@ impl RunFill {
 		let stream = match opening {
 			Ok(stream) => stream,
 			Err(err) => {
-				tracing::debug!(err = %Error::from_transport(err), fill = %self.request_id, "fill stream failed to open");
+				tracing::debug!(err = %publisher.version.transport_error(err), fill = %self.request_id, "fill stream failed to open");
 				return Poll::Ready(());
 			}
 		};
@@ -5446,7 +5446,7 @@ impl FetchRespond {
 			waiter,
 			self.rank.as_mut().expect("ranked until opened").options(),
 		))
-		.map_err(Error::from_transport)?;
+		.map_err(|err| self.version.transport_error(err))?;
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
 			Writer::new(Ranked::new(uni, self.rank.take()).lapsing(&self.lapse), self.version);
 		writer.buffer_varint(FetchHeader::TYPE)?;
@@ -7592,7 +7592,7 @@ impl EndOfTrack {
 			object: self.end.frame,
 		});
 		let stream = wait!(Open => serve.session.poll_open_uni(&mut self.open, waiter, rank.options()))
-			.map_err(Error::from_transport)?;
+			.map_err(|err| serve.version.transport_error(err))?;
 		serve.opened.fetch_add(1, Ordering::Relaxed);
 		let stream = Ranked::new(stream, Some(rank)).lapsing(&serve.ranking.lapse);
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
@@ -7964,7 +7964,7 @@ impl GroupServe {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;
-				return Poll::Ready(Err(Error::from_transport(err)));
+				return Poll::Ready(Err(self.version.transport_error(err)));
 			}
 		};
 		self.opened.fetch_add(1, Ordering::Relaxed);
@@ -10860,18 +10860,22 @@ mod serve_tests {
 			for (token, expected, why) in [
 				(
 					&[0x01, 0x07, 0x00][..],
-					crate::SessionError::AuthTokenCacheOverflow,
+					crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW,
 					"REGISTER",
 				),
-				(&[0x00, 0x07][..], crate::SessionError::UnknownAuthTokenAlias, "DELETE"),
+				(
+					&[0x00, 0x07][..],
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
+					"DELETE",
+				),
 				(
 					&[0x02, 0x07][..],
-					crate::SessionError::UnknownAuthTokenAlias,
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
 					"USE_ALIAS",
 				),
 				(
 					&[0x03][..],
-					crate::SessionError::KeyValueFormatting,
+					crate::ietf::error::session::KEY_VALUE_FORMATTING,
 					"USE_VALUE without a type",
 				),
 			] {
@@ -17504,7 +17508,7 @@ mod serve_tests {
 			h.log
 				.closes()
 				.iter()
-				.any(|close| close.0 == crate::SessionError::TooManyRequestUpdates.to_code()),
+				.any(|close| close.0 == crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES.to_code()),
 			"the flood must close the session with TOO_MANY_REQUEST_UPDATES: {:?}",
 			h.log.closes()
 		);

@@ -431,8 +431,12 @@ impl Producer {
 	}
 
 	/// [`Self::reserve_track`] for a track no listing ever names, so only a reader who
-	/// already knows the name finds it, as a socket session's track.
-	pub(super) fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
+	/// already knows the name finds it, such as a per-session track whose name the two
+	/// sides agreed on.
+	///
+	/// Unlisted controls discovery, not authorization: anyone allowed to subscribe to the
+	/// broadcast can read the track by name.
+	pub fn reserve_unlisted_track(&self, name: impl Into<Arc<str>>) -> Result<track::Request, Error> {
 		let mut state = self.state.lock();
 		let request = track::Request::new(self.info.clone(), name.into()).with_stats(self.stats.clone());
 		state.insert_track(request.weak())?;
@@ -511,11 +515,6 @@ impl Producer {
 	/// Dropping the last producer does the same. Closing twice is a no-op.
 	pub fn close(&self) {
 		self.alive.close();
-	}
-
-	/// `Ready` once the broadcast ended, by [`Self::close`] or the last producer dropping.
-	pub(super) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.alive.token.poll_closed(waiter)
 	}
 
 	/// Whether any [`Consumer`] handle exists, which is not itself demand for a track.

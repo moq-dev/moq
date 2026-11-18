@@ -82,7 +82,7 @@ async function read(
 		for (;;) {
 			const group = await subscriber.recvGroup();
 			if (!group) break;
-			const entry: Received["groups"][number] = { sequence: Number(group.sequence), frames: [] };
+			const entry: Received["groups"][number] = { sequence: Number(group.start), frames: [] };
 			received.groups.push(entry);
 			frames.push(
 				(async () => {
@@ -96,7 +96,7 @@ async function read(
 					} catch (err) {
 						entry.error = String(err);
 						if (err instanceof Moq.Error.Stream && err.code === Moq.StreamCode.Old) return;
-						entry.fetched = await fetch(consumer, group.sequence);
+						entry.fetched = await fetch(consumer, group.start);
 					}
 				})(),
 			);

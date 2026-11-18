@@ -889,8 +889,7 @@ mod tests {
 			.buffer(&lite::Track {
 				broadcast: crate::Path::from_static("test"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				track: "video".into(),
 			})
 			.unwrap();

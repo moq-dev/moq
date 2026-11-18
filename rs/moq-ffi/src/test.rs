@@ -3948,7 +3948,7 @@ async fn resolve_rejects_a_reference_without_an_origin() {
 	consumer.resolve(referencing(Some(""), None)).await.unwrap();
 	assert!(consumer.resolve(referencing(Some("/"), None)).await.is_err());
 
-	// Reported in normalized form, matching `EscapingBroadcast` and moq-c: it names what the
+	// Reported in normalized form, matching `EscapingBroadcast` and libmoq: it names what the
 	// resolver actually tried to reach, not the caller's spelling of it.
 	match consumer.resolve(referencing(Some("./source"), None)).await {
 		Err(MoqError::UnresolvableBroadcast { reason: reference }) => assert_eq!(reference, "source"),
@@ -7204,7 +7204,7 @@ async fn client_connects_with_every_knob_set() {
 			keep_alive: Some(Duration::ZERO),
 			gso: Some(false),
 			mtu_discovery: Some(true),
-			congestion_control: Some(MoqCongestionControl::loss()),
+			congestion_control: Some(MoqCongestionControl::cubic()),
 			qlog: None,
 			keylog: Some(false),
 		},
@@ -10395,14 +10395,4 @@ async fn group_calls_wake_ready_after_unlocking() {
 	group.abort(1).unwrap();
 	let result = parked.result.lock().unwrap().take();
 	assert!(matches!(result, Some(Err(MoqError::Closed))), "{result:?}");
-}
-
-/// An endpoint's broadcast is told apart from media by path, and a malformed path fails.
-#[test]
-fn socket_is_endpoint() {
-	use crate::socket::moq_socket_is_endpoint;
-	assert!(moq_socket_is_endpoint("room/.server/a".into()).unwrap());
-	assert!(moq_socket_is_endpoint("room/.client/a".into()).unwrap());
-	assert!(!moq_socket_is_endpoint("room/a".into()).unwrap());
-	assert!(moq_socket_is_endpoint("room//a".into()).is_err());
 }

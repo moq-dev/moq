@@ -283,10 +283,6 @@ impl Server {
 				token: None,
 				ietf: self.extensions.ietf && version.has_ietf(),
 				implementation: self.implementation(),
-				// Filled by `lite::start` from the attached origin handles.
-				route_key: None,
-				// Filled by `lite::start` from the version.
-				lite06_chain: false,
 			}
 		} else {
 			lite::Setup::default()
@@ -348,7 +344,8 @@ impl Server {
 				client_setup.setup.path.clone(),
 				client_setup.setup.role,
 				// Lite-07 declares a Node ID where older versions declare a Hop ID.
-				client_setup.setup.hop.or(client_setup.setup.node.map(crate::Hop::from)),
+				(client_setup.setup.hop)
+					.or((client_setup.setup.node).and_then(|node| crate::route::node::hop(node.relay))),
 				client_setup.setup.token.clone(),
 				client_setup.setup.implementation.clone(),
 				PausedHandshake::LiteSetup {
@@ -1758,8 +1755,6 @@ mod tests {
 			token: None,
 			ietf: false,
 			implementation: None,
-			route_key: None,
-			lite06_chain: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();
@@ -2130,7 +2125,7 @@ mod tests {
 		let truncated = [0x3]; // USE_VALUE with no Token Type
 		for (raw, code) in [
 			(&delete[..], SessionError::ProtocolViolation),
-			(&truncated[..], SessionError::KeyValueFormatting),
+			(&truncated[..], crate::ietf::error::session::KEY_VALUE_FORMATTING),
 		] {
 			let mut params = ietf::Parameters::default();
 			params.set_bytes(ietf::ParameterBytes::AuthorizationToken, raw.to_vec());
@@ -2287,37 +2282,6 @@ mod tests {
 		crate::transport::poll::Session::close(&session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new().handshake(kio::clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/closed");
-	}
-
-	/// A client whose route key proof fails is refused with PROTOCOL_VIOLATION, not left waiting.
-	#[kio::test]
-	async fn a_failed_route_key_proof_closes_with_its_code() {
-		let v = lite::Version::Lite07;
-		// Signed for another session's exported secret, so it fails against this one's.
-		let proof = crate::route::Transcript::new([1; 32]).prove(&crate::origin::RouteKey::generate(), true);
-		let mut setup = Vec::new();
-		lite::DataType::Setup
-			.encode(&mut crate::coding::Encoder::new(&mut setup, v.into()), v)
-			.unwrap();
-		lite::Setup {
-			route_key: Some(proof),
-			..Default::default()
-		}
-		.encode(&mut crate::coding::Encoder::new(&mut setup, v.into()), v)
-		.unwrap();
-
-		let session = FakeSession::new(ALPN_LITE_07_WIP, [setup]);
-		let transport = session.clone();
-		let request = Server::new()
-			.with_versions(Version::lite(v).into())
-			.handshake(kio::clock::now(), session)
-			.await
-			.unwrap();
-		assert!(matches!(request.ok().await, Err(Error::ProtocolViolation)));
-		assert_eq!(
-			transport.close_code(),
-			Some(Version::lite(v).session_code(&SessionError::ProtocolViolation))
-		);
 	}
 
 	#[kio::test]

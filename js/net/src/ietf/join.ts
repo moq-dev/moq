@@ -39,7 +39,7 @@ type State =
  */
 export class Join {
 	/** The group this join brings the head of: SUBSCRIBE_OK's Largest group. */
-	readonly sequence: bigint;
+	readonly key: bigint;
 
 	#state: State = { kind: "pending" };
 	// Tails parked on the head, woken synchronously so they hold the end before the head lets go.
@@ -56,8 +56,8 @@ export class Join {
 	 * Stream Count includes: a draft-22 fill. A draft-18 joining FETCH is a request of its own,
 	 * so the join holds the end open for it instead.
 	 */
-	constructor(sequence: bigint, tail: Tail, { counted = false }: { counted?: boolean } = {}) {
-		this.sequence = sequence;
+	constructor(key: bigint, tail: Tail, { counted = false }: { counted?: boolean } = {}) {
+		this.key = key;
 		this.#tail = tail;
 		this.#release = counted ? () => {} : tail.hold();
 		this.#settled = new Promise((resolve) => {
@@ -85,7 +85,7 @@ export class Join {
 	 * The fetch stream's first object arrived: create the group for the head with `create`.
 	 *
 	 * Returns undefined when nothing should be written: a whole group already took the
-	 * sequence, the join gave up, or a second stream answers the one request.
+	 * key, the join gave up, or a second stream answers the one request.
 	 */
 	open(create: () => netGroup.Producer): netGroup.Producer | undefined {
 		const state = this.#state;
@@ -159,7 +159,7 @@ export class Join {
 	/**
 	 * A live stream for this group starts at object 0, so it carries the whole group.
 	 *
-	 * Before the head it wins the sequence, and the head is dropped when it lands. After it,
+	 * Before the head it wins the key, and the head is dropped when it lands. After it,
 	 * the publisher served those objects twice and the track has one producer per group, so
 	 * both are refused rather than cache a cut group as complete. Returns whether the whole
 	 * group may stand. Matches the Rust subscriber.
@@ -171,7 +171,7 @@ export class Join {
 			return true;
 		}
 		if (state.kind === "writing" || state.kind === "ready") {
-			console.warn(`a whole group arrived for one its fetch stream already headed: group=${this.sequence}`);
+			console.warn(`a whole group arrived for one its fetch stream already headed: group=${this.key}`);
 			state.producer.abort(new Error("the publisher served the group's head twice"));
 			this.#transition({ kind: "done" });
 			return false;
@@ -203,9 +203,7 @@ export class Join {
 		const state = this.#state;
 		if (state.kind !== "ready") return undefined;
 		if (start !== undefined && start !== state.next) {
-			console.warn(
-				`the head does not meet the live tail: group=${this.sequence} head=${state.next} tail=${start}`,
-			);
+			console.warn(`the head does not meet the live tail: group=${this.key} head=${state.next} tail=${start}`);
 			state.producer.abort(new Error("the head and the live tail do not meet"));
 			this.#transition({ kind: "done" });
 			return undefined;

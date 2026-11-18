@@ -135,8 +135,11 @@ async fn a_dropped_run_waits_for_the_next_groups_first_packet() {
 			.expect("announced")
 			.expect("remote broadcast")
 			.unwrap();
-		let subscription = moq_net::track::Subscription::default()
-			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5)));
+		let subscription = moq_net::track::Subscription::default().with_delay(
+			moq_net::track::Delay::default()
+				.with_min(None)
+				.with_max(Duration::from_secs(5)),
+		);
 		let subscribed = kio::clock::timeout(TIMEOUT, remote.track("audio").expect("track").subscribe(subscription))
 			.await
 			.expect("subscribed")

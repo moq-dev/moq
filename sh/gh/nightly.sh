@@ -122,7 +122,7 @@ case "$1" in
     rust-test-apps)
         export NEXTEST_PROFILE=bench NEXTEST_TEST_THREADS=1
         nextest just rs bench-tests --no-fail-fast --run-ignored only \
-            -p moq-audio -p moq-mux -p moq-c -p moq-relay -p moq-cli -p moq-ffi \
+            -p moq-audio -p moq-mux -p libmoq -p moq-relay -p moq-cli -p moq-ffi \
             --features moq-audio/playback --lib --bin moq \
             -E 'test(benchmark_mixer_callbacks) | test(benchmark_resampler) | test(benchmark_raw_audio) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_handles) | test(benchmark_stream_import) | test(benchmark_timebase_reservation_fanout)'
         ;;
@@ -177,7 +177,7 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills fill-probe forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams socket; do
+        for benchmark in broadcasts requests fills fill-probe forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression datagrams; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench

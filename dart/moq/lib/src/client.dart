@@ -129,7 +129,7 @@ final class QuicConfig {
   /// Path MTU discovery; null leaves the choice to the backend.
   final bool? mtuDiscovery;
 
-  /// The congestion control family; null leaves the choice to the backend.
+  /// The congestion control algorithm; null runs BBR v3.
   final CongestionControl? congestionControl;
 
   /// Directory, which must exist, to write qlog traces into.

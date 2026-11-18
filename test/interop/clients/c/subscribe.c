@@ -1,7 +1,7 @@
 // Subscribe-only cross-language interop client for the interop test, linked
-// against the workspace moq-c (the C bindings, built by `cargo build -p moq-c`).
+// against the workspace libmoq (the C bindings, built by `cargo build -p libmoq`).
 //
-// moq-c is a handle + callback API: connect, consume a broadcast, get a
+// libmoq is a handle + callback API: connect, consume a broadcast, get a
 // catalog snapshot via callback, start the video track and a decoder per audio
 // rendition, and a callback fires as each frame arrives. Once a non-empty video
 // frame has landed and --audio-ms of every audio rendition has been decoded to
@@ -83,13 +83,13 @@ struct ctx {
 
     // One flag per registration handed &ctx, set by that registration's terminal
     // (<= 0) callback. main returns only once every registration is done: that terminal is
-    // moq-c's documented last touch of user_data, so it is what makes main's
+    // libmoq's documented last touch of user_data, so it is what makes main's
     // frame safe to destroy.
     int done_status, done_broadcast, done_catalog, done_frame;
 };
 
-// Callbacks run on moq-c's runtime thread; main waits on the condvar. ctx lives
-// on main's stack and moq-c keeps the pointer until each registration's
+// Callbacks run on libmoq's runtime thread; main waits on the condvar. ctx lives
+// on main's stack and libmoq keeps the pointer until each registration's
 // terminal (<= 0) callback fires, so main must not return until every one of
 // them has. Closing the session ends its state registration alone;
 // moq_origin_follow, moq_consume_catalog and moq_consume_video each
@@ -159,7 +159,7 @@ static void on_frame(void *ud, int32_t frame) {
 
 // Writes each decoded audio frame to its rendition's files for tone.py, until enough has arrived.
 // A gap or an encoder end before then fails the run, as the Rust client does.
-// Runs on moq-c's runtime thread, the only writer, so the files need no lock.
+// Runs on libmoq's runtime thread, the only writer, so the files need no lock.
 static void on_audio(void *ud, int32_t id) {
     audio_t *a = (audio_t *)ud;
     ctx_t *c = a->ctx;
@@ -347,7 +347,7 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            moq_delay delay = {.max_us = MAX_DELAY_US};
+            moq_delay delay = {.min_unstated = true, .max_us = MAX_DELAY_US};
             int32_t track = moq_consume_video((uint32_t)catalog, 0, &delay, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
@@ -454,7 +454,7 @@ static void on_finish_health(void *ud, moq_follow_event event, int32_t broadcast
 // The context whose session a failure closes, once connected.
 static ctx_t *failing;
 
-// Report a failure and exit 1, for the paths where moq-c still holds &ctx.
+// Report a failure and exit 1, for the paths where libmoq still holds &ctx.
 //
 // _exit rather than a return: it leaves main's frame (and so ctx) intact for the
 // callbacks still pointing at it, which is what the failure paths want. Only the
@@ -622,7 +622,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // moq-c reads the config during the call alone.
+    // libmoq reads the config during the call alone.
     moq_client_config config;
     memset(&config, 0, sizeof(config));
     moq_string versions[1];
@@ -724,7 +724,7 @@ int main(int argc, char **argv) {
 
     // The data path succeeded, which is all this interop client verifies. Returning
     // (rather than _exit) is the other half of what it verifies: an embedder that
-    // closes and drains gets a clean process exit, with moq-c's runtime thread
+    // closes and drains gets a clean process exit, with libmoq's runtime thread
     // still live behind its LazyLock.
     drain(&c);
     if (finish_mode) moq_consume_close((uint32_t)c.finish.health_broadcast);

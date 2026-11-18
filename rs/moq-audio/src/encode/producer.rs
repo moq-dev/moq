@@ -539,7 +539,7 @@ impl Producer {
 		self.backlog.expire(now);
 		// Replayed groups land as fresh arrivals, so only this cut keeps a rejoining live
 		// subscriber from receiving all the retained audio before the live edge.
-		if active && let Some(budget) = self.track.track().subscription().and_then(|sub| sub.delay.max) {
+		if active && let Some(budget) = self.track.track().subscription().and_then(|sub| replay_budget(&sub)) {
 			self.backlog.expire_within(now, budget);
 		}
 		// Live input completes the partial frame within one codec frame, so only idle refreshes expire it.
@@ -883,6 +883,25 @@ impl Finished {
 	}
 }
 
+/// How far back a subscription wants retained audio replayed. A live join starts its min delay
+/// behind the live edge, which a player states as its playout delay plus the codec's warmup, so
+/// that bounds it within the max delay. Any other range, or a live join stating no min
+/// (moq-transport, moq-lite before 07), wants all its max delay keeps; `None` leaves the retention.
+#[cfg(any(feature = "capture", test))]
+fn replay_budget(subscription: &moq_net::track::Subscription) -> Option<std::time::Duration> {
+	let live = !subscription.ranges.is_empty()
+		&& subscription
+			.ranges
+			.iter()
+			.all(|range| *range == moq_net::track::Range::live());
+	let max = subscription.delay.max;
+	match (subscription.delay.min.filter(|_| live), max) {
+		(Some(min), Some(max)) => Some(min.min(max)),
+		(Some(min), None) => Some(min),
+		(None, max) => max,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
@@ -1068,9 +1087,35 @@ mod tests {
 	}
 
 	/// Replayed groups reach the track as fresh arrivals, so only the encoder can tell they are old:
-	/// a live viewer rejoining after seconds idle would otherwise receive all of them first.
+	/// a live viewer rejoining after seconds idle would otherwise receive all of them first. A live
+	/// join states how far back it plays as its min delay, which bounds the replay however far its
+	/// max delay reaches; one that states none (moq-transport, moq-lite before 07) is bounded by its
+	/// max alone, as is a reader asking for history.
 	#[tokio::test(start_paused = true)]
-	async fn demand_replays_only_the_history_its_max_delay_wants() {
+	async fn demand_replays_only_the_history_its_delay_wants() {
+		let budget = Duration::from_millis(130);
+		let long = Duration::from_secs(10);
+		let live = || vec![moq_net::track::Range::live()];
+		for (delay, ranges) in [
+			(moq_net::track::Delay::default().with_min(budget).with_max(long), live()),
+			(moq_net::track::Delay::default().with_min(None).with_max(budget), live()),
+			(moq_net::track::Delay::default().with_min(long).with_max(budget), live()),
+			// A reader reaching back for history, such as an archive, wants all its max delay keeps.
+			(
+				moq_net::track::Delay::default().with_max(budget),
+				vec![moq_net::track::Range::oldest()],
+			),
+		] {
+			replays_from(
+				moq_net::track::Subscription::default()
+					.with_delay(delay)
+					.with_ranges(ranges),
+			)
+			.await;
+		}
+	}
+
+	async fn replays_from(subscription: moq_net::track::Subscription) {
 		let input = Input::default();
 		let options = Options {
 			track: Some("audio".into()),
@@ -1091,15 +1136,7 @@ mod tests {
 				))
 				.unwrap();
 		}
-		let track = consumer
-			.track("audio")
-			.unwrap()
-			.subscribe(
-				moq_net::track::Subscription::default()
-					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(130))),
-			)
-			.await
-			.unwrap();
+		let track = consumer.track("audio").unwrap().subscribe(subscription).await.unwrap();
 		let mut reader =
 			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
 		// One replay turn, read at once as a network subscriber is served: the group it wrote is

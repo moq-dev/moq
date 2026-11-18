@@ -953,9 +953,12 @@ test("a group stream whose FIN never completes is reset when the group expires",
 			server,
 		);
 
-		const write = (sequence: bigint) => {
-			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
+		const write = (key: bigint) => {
+			const group = track.createGroup(key);
+			group.writeFrame({
+				payload: new TextEncoder().encode("frame"),
+				timestamp: Timestamp.fromMillis(Number(key)),
+			});
 			group.finish();
 		};
 
@@ -1036,10 +1039,13 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 		expect(await client.reader.u53()).toBe(SubscribeOk.id);
 		await SubscribeOk.decode(client.reader, VERSION);
 
-		// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
-		const write = (sequence: bigint) => {
-			const group = track.createGroup(sequence);
-			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(0) });
+		// Timestamps a millisecond apart, so only the wall clock since group 1 arrived convicts group 0.
+		const write = (key: bigint) => {
+			const group = track.createGroup(key);
+			group.writeFrame({
+				payload: new TextEncoder().encode("frame"),
+				timestamp: Timestamp.fromMillis(Number(key)),
+			});
 			group.finish();
 		};
 
@@ -1122,8 +1128,8 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 			server,
 		);
 
-		const write = (sequence: bigint, ms: number) => {
-			const group = track.createGroup(sequence);
+		const write = (key: bigint, ms: number) => {
+			const group = track.createGroup(key);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
 			group.finish();
 		};
@@ -2327,9 +2333,13 @@ function fixture(
 
 /** Write `frames` numbered payloads into a new closed group. */
 function writeGroup(track: TrackProducer, frames: number): void {
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	for (let i = 0; i < frames; i++) {
-		group.writeFrame({ payload: new TextEncoder().encode(`${group.sequence}.${i}`), timestamp: Timestamp.now() });
+		// Stamped at its key, so groups start in key order.
+		group.writeFrame({
+			payload: new TextEncoder().encode(`${group.start}.${i}`),
+			timestamp: Timestamp.fromMillis(Number(group.start)),
+		});
 	}
 	group.finish();
 }
@@ -2499,7 +2509,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
 		// The request forwarded upstream carries the model's exclusive end, one past the
 		// filter's inclusive last group.
 		expect(track.subscription.peek()).toMatchObject({
-			ranges: [{ start: { absolute: 1n }, end: { absolute: 3n } }],
+			ranges: [{ start: { time: 1n }, end: { time: 2n } }],
 		});
 
 		const first = await nextUni(fx.uni);
@@ -2643,7 +2653,7 @@ test.each(["nextObject", "unfiltered"] as const)(
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 		writeGroup(track, 1);
-		const group = track.appendGroup();
+		const group = hooks.appendNext(track);
 		for (let i = 0; i < 2; i++) {
 			group.writeFrame({ payload: new TextEncoder().encode(`1.${i}`), timestamp: Timestamp.now() });
 		}
@@ -2713,7 +2723,7 @@ test("draft-22: a fill never rewinds an absolute live join", async () => {
 			{ group: 0, id: 0, payload: "0.0" },
 			{ group: 0, id: 1, payload: "0.1" },
 		]);
-		const group = track.appendGroup();
+		const group = hooks.appendNext(track);
 		group.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
 		group.finish();
 		const live = await nextUni(fx.uni);
@@ -2737,7 +2747,7 @@ test("draft-22: an open group with a shed front refuses a tail join", async () =
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	for (let i = 0; i < 40; i++) {
 		group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
 	}
@@ -2774,7 +2784,7 @@ test("draft-22: a backwards range within one group serves nothing and ends the s
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	// Deliberately left open: a hang here would outlive the group rather than end with it.
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	for (let i = 0; i < 3; i++) {
 		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
 	}
@@ -2804,10 +2814,13 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 	// No max age: group 9 is served live, and a zero budget would give it up mid-write once the
 	// live group supersedes it, racing this test's read of the refused fill.
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	for (const sequence of [0n, 3n, 9n]) {
-		const group = track.createGroup(sequence);
+	for (const key of [0n, 3n, 9n]) {
+		const group = track.createGroup(key);
 		for (let i = 0; i < 2; i++)
-			group.writeFrame({ payload: new TextEncoder().encode(`${sequence}.${i}`), timestamp: Timestamp.now() });
+			group.writeFrame({
+				payload: new TextEncoder().encode(`${key}.${i}`),
+				timestamp: Timestamp.fromMillis(Number(key)),
+			});
 		group.finish();
 	}
 
@@ -2828,7 +2841,7 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 		const served = await readFill(fill, order);
 		expect(served.reset).toBeInstanceOf(StreamError);
 		expect(served.objects).toEqual([]);
-		const live = track.appendGroup();
+		const live = hooks.appendNext(track);
 		live.writeFrame({ payload: new TextEncoder().encode("live"), timestamp: Timestamp.now() });
 		live.finish();
 		const objects = [];
@@ -3074,7 +3087,7 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 	try {
 		const group = track.createGroup(5n);
 		for (let i = 0; i < 5; i++)
-			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.start) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
@@ -3145,7 +3158,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 	try {
 		const group = track.createGroup(5n);
 		for (let i = 0; i < 5; i++)
-			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.sequence) });
+			group.writeFrame({ payload: new Uint8Array([i]), timestamp: Timestamp.unscaled(group.start) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
@@ -3226,12 +3239,43 @@ test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DO
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, V22);
 		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
-		expect(done.streamCount).toBe(2n);
-
-		// Only the in-range group was ever served; the other stream marks the track's end.
-		const end = await nextUni(fx.uni);
-		expect(await readEndOfTrack(end)).toBe(2n);
+		// Only the in-range group was ever served: the range stopped short of the track's end,
+		// so no END_OF_TRACK claims it.
+		expect(done.streamCount).toBe(1n);
 		expect(await opens(fx.uni.read(), clock)).toBe(false);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+test("draft-22: a bounded filter that reaches the track's end still sends END_OF_TRACK", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	writeGroup(track, 1); // group 0
+	writeGroup(track, 1); // group 1, the filter's last and the track's
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 1n },
+		}),
+	);
+
+	try {
+		for (let i = 0; i < 2; i++) await readGroup(await nextUni(fx.uni));
+		track.finish();
+		track.close();
+
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, V22);
+		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
+		expect(done.streamCount).toBe(3n);
+		expect(await readEndOfTrack(await nextUni(fx.uni))).toBe(2n);
 	} finally {
 		fx.close();
 		client.close();
@@ -3253,7 +3297,7 @@ test("draft-22: a fill works on a dynamically requested track", async () => {
 		const request = await wireOf(fx.broadcast).requested();
 		if (!request) throw new Error("no track was requested");
 		const track = request.accept({ timescale: Timescale.MILLI });
-		const group = track.appendGroup();
+		const group = hooks.appendNext(track);
 		for (let i = 0; i < 2; i++) {
 			group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
 		}
@@ -3707,8 +3751,11 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 		const fx = fixture(V22);
 		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 		const write = (text: string) => {
-			const group = track.appendGroup();
-			group.writeFrame({ payload: new TextEncoder().encode(text), timestamp: Timestamp.now() });
+			const group = hooks.appendNext(track);
+			group.writeFrame({
+				payload: new TextEncoder().encode(text),
+				timestamp: Timestamp.fromMillis(Number(group.start)),
+			});
 			group.finish();
 		};
 		const { client } = await runSubscribe(
@@ -4033,7 +4080,7 @@ test("a pause resets a group stream parked on flow control", async () => {
 		}),
 	);
 	try {
-		track.appendGroup().writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
+		hooks.appendNext(track).writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
 		await parked;
 		const parameters = new Parameters();
 		parameters.forward = false;
@@ -4066,7 +4113,7 @@ test("draft-22: narrowing resets a group stream parked on flow control", async (
 			filter: { kind: "nextObject" },
 		}),
 	);
-	const open = track.appendGroup();
+	const open = hooks.appendNext(track);
 	try {
 		open.writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
 		await parked;
@@ -4251,17 +4298,16 @@ test("draft-22: a range update replaces the live subscription bounds", async () 
 		expect(
 			served
 				.sort((a, b) => Number(a.sequence - b.sequence))
-				.map(({ sequence, objects }) => ({ sequence, objects })),
+				.map(({ sequence: key, objects }) => ({ key: key, objects })),
 		).toEqual([
-			{ sequence: 2n, objects: [{ id: 1, payload: "2.1" }] },
-			{ sequence: 3n, objects: [{ id: 0, payload: "3.0" }] },
+			{ key: 2n, objects: [{ id: 1, payload: "2.1" }] },
+			{ key: 3n, objects: [{ id: 0, payload: "3.0" }] },
 		]);
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, fx.version);
 		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
-		expect(done.streamCount).toBe(3n);
-		const end = await nextUni(fx.uni);
-		expect(await readEndOfTrack(end)).toBe(5n);
+		// The range ends at group 3, short of the track's end, so no END_OF_TRACK.
+		expect(done.streamCount).toBe(2n);
 	} finally {
 		client.close();
 		track.finish();
@@ -4291,7 +4337,7 @@ test("IETF draft-18: range updates preserve the shared subscription", async () =
 			await new SubscribeUpdate({ requestId: id, parameters }).encode(client.writer, fx.version);
 			expect(await client.reader.u53()).toBe(RequestOk.id);
 			await RequestOk.decode(client.reader, fx.version);
-			expect(track.subscription.peek()?.ranges).toEqual([{ start: { absolute: 6n }, end: { absolute: 8n } }]);
+			expect(track.subscription.peek()?.ranges).toEqual([{ start: { time: 6n }, end: { time: 7n } }]);
 		}
 	} finally {
 		client.close();
@@ -4353,7 +4399,7 @@ test("draft-22: an empty newer group is not an object in Largest or a relative f
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 2);
-	const empty = track.appendGroup();
+	const empty = hooks.appendNext(track);
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4399,7 +4445,7 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 	try {
 		expect(ok.largest).toEqual({ groupId: 4n, objectId: 3n });
 		writeGroup(track, 2);
-		const empty = track.appendGroup();
+		const empty = hooks.appendNext(track);
 		await clock.advance(Duration.millis(60_000));
 		expect(hooks.cachedLargest(track)).toBeUndefined();
 		const parameters = new Parameters();
@@ -4436,10 +4482,10 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 			fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false },
 		}),
 	);
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	try {
 		expect(ok.largest).toBeUndefined();
-		expect(group.sequence).toBe(0n);
+		expect(group.start).toBe(0n);
 		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
 		group.finish();
 		const stream = await nextUni(fx.uni);
@@ -4456,7 +4502,7 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 test("draft-22: Next Object on an empty group still delivers its first object", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = track.appendGroup();
+	const group = hooks.appendNext(track);
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4609,8 +4655,8 @@ test("draft-22: an update's fill reads the cache at the converted subscriber pri
 test("draft-22: narrowing gives up an excluded group's open stream", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.now() });
+	const open = hooks.appendNext(track);
+	open.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4654,7 +4700,7 @@ test("draft-22: an update reopening a drained subscription serves its tail", asy
 		return createUni(options);
 	});
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const open = track.appendGroup();
+	const open = hooks.appendNext(track);
 	open.writeFrame({ payload: new TextEncoder().encode("head"), timestamp: Timestamp.now() });
 	const { client } = await runSubscribe(
 		fx,
@@ -4699,8 +4745,8 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const open = hooks.appendNext(track);
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4742,8 +4788,8 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const open = hooks.appendNext(track);
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4788,8 +4834,8 @@ test("draft-22: a fill-only update keeps the subscription's floor", async () => 
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const open = hooks.appendNext(track);
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),
@@ -4832,8 +4878,8 @@ test.each([
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	writeGroup(track, 1);
-	const open = track.appendGroup();
-	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.now() });
+	const open = hooks.appendNext(track);
+	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({ requestId: 0n, trackNamespace: Path.from("test"), trackName: "video", subscriberPriority: 0 }),

@@ -142,10 +142,10 @@ export function finish(
 		const healthRoute = origin.route(Moq.Path.from(`${path}.health`), { hidden: true });
 		const health = healthRoute.broadcast;
 		const healthTrack = health.createTrack("live");
-		const group = healthTrack.appendGroup();
+		const group = healthTrack.appendGroup(Moq.Time.Timestamp.unscaled((healthTrack.largest()?.group ?? -1n) + 1n));
 		group.writeFrame({
 			payload: new TextEncoder().encode("session-alive"),
-			timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+			timestamp: Moq.Time.Timestamp.unscaled(group.start),
 		});
 		group.finish();
 		healthTrack.finish();

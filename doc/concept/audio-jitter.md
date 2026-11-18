@@ -46,12 +46,15 @@ Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
 group is observed when the stall clears. A missing group, one that has delivered
-no frame, is waited for only the playout delay plus any lookahead, since past that
-it would play late: a reordered backlog's holes waited out to the whole budget
+no frame, is waited for only the playout delay, the subscription's `delay.min`,
+since past that it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
-jitter. The browser player waits less still, only until its clock reaches the
-group past the hole: a viewer resuming behind a replayed backlog, which arrives
-newest first, would otherwise hold the live audio for the backlog's oldest group. A caller that estimates keeps the budget past the target, which is why
+jitter. The browser player waits less still, only until the group past the hole
+trails its clock by the stretch threshold, past which the ring would skip the
+hole's audio anyway: a viewer resuming behind a replayed backlog, which arrives
+newest first, would otherwise hold the live audio for the backlog's oldest group,
+while a late burst that fills a hole a moment after the group past it lands
+still plays it. A caller that estimates keeps the budget past the target, which is why
 `moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
 ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
@@ -843,7 +846,13 @@ content; past the threshold it snaps onto the clock, as video does. When the
 audio received ahead of the playhead is about to run out, playback slows down
 to bridge the gap, never trailing the clock past the threshold. A congestion
 stall within the threshold costs a slowdown, a gap, and a catch-up; one past it
-costs a skip.
+costs a skip. Audio that arrives trailing the clock past the threshold, such as a
+publisher's replayed history ahead of the live edge, is decoded only to warm the
+codec and never reaches the playout buffer, so playback starts at the live edge
+instead of anchoring on the backlog. The exception is audio up to an end the
+stream declares before that audio decodes, such as a mute, which plays out
+rather than being skipped; a track's finish declares its end only after its
+last audio decodes, so that audio is skipped like the rest.
 
 The splice is waveform-similarity overlap-add (WSOLA), after Verhelst and
 Roelands, "An overlap-add technique based on waveform similarity (WSOLA) for

@@ -11,13 +11,14 @@ import { accept, connect, type Session } from "./connection/index.ts";
 import type { Producer as GroupProducer } from "./group.ts";
 import { FetchHeader } from "./ietf/fetch.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { sendOrder } from "./priority.ts";
 import type { SendStream } from "./stream.ts";
-import { Timescale } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type { Order, Producer as TrackProducer, Subscriber as TrackSubscriber } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -29,8 +30,8 @@ const MAX_DELAY = Duration.millis(30_000);
 // The send orders a subscription at priority 0 gives its streams, in the order they opened,
 // when stream `i` carries group `i` of `count` all still in flight.
 function expected(order: Order, count: number): number[] {
-	return Array.from({ length: count }, (_, sequence) =>
-		sendOrder({ priority: 0, position: order === "ascending" ? sequence : count - 1 - sequence }),
+	return Array.from({ length: count }, (_, key) =>
+		sendOrder({ priority: 0, position: order === "ascending" ? key : count - 1 - key }),
 	);
 }
 
@@ -79,8 +80,8 @@ function liteSendOrders(transport: MockTransport): number[] {
 	const written = headers.get(transport);
 	return transport.sendStreams.uni
 		.flatMap((stream, index) => {
-			const sequence = written?.get(index)?.[3];
-			return stream.sendOrder === undefined || sequence === undefined ? [] : [[sequence, stream.sendOrder]];
+			const key = written?.get(index)?.[3];
+			return stream.sendOrder === undefined || key === undefined ? [] : [[key, stream.sendOrder]];
 		})
 		.sort(([a], [b]) => a - b)
 		.map(([, order]) => order);
@@ -93,23 +94,28 @@ function sendOrders(transport: MockTransport): number[] {
 	);
 }
 
+// The last first-frame time written, in milliseconds: each group starts strictly after the one
+// below it, so groups written within one millisecond still get distinct starts.
+let written = -1;
+
 // A group with one frame, left open.
 function writeGroup(track: TrackProducer): GroupProducer {
-	const group = track.appendGroup();
-	group.writeFrame(textFrame("x"));
+	const group = hooks.appendNext(track);
+	written = Math.max(written + 1, Timestamp.now().asMillis());
+	group.writeFrame(textFrame("x", Timestamp.fromMillis(written)));
 	return group;
 }
 
 // Receiving a group means its stream header was written, which the publisher does only after
 // ranking the stream.
 async function receive(subscriber: TrackSubscriber, count: number): Promise<bigint[]> {
-	const sequences: bigint[] = [];
+	const keys: bigint[] = [];
 	for (let i = 0; i < count; i++) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended early");
-		sequences.push(group.sequence);
+		keys.push(group.start);
 	}
-	return sequences;
+	return keys;
 }
 
 // Resolve once the producer's aggregate subscription satisfies `predicate`.
@@ -148,12 +154,12 @@ async function backlog(protocol: string, order: Order, update?: Order) {
 	const subscriber = remote.track("video").subscribe({
 		delay: { max: MAX_DELAY },
 		order,
-		ranges: [{ start: { absolute: 0n } }],
+		ranges: [{ start: { time: 0n } }],
 	});
 	await receive(subscriber, groups.length);
 
 	if (update !== undefined) {
-		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { absolute: 0n } }] });
+		subscriber.update({ delay: { max: MAX_DELAY }, order: update, ranges: [{ start: { time: 0n } }] });
 		await aggregate(video, (upstream) => upstream === update);
 	}
 

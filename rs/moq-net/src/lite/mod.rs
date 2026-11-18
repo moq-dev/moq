@@ -35,7 +35,6 @@ mod publisher;
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 pub use publisher::CoverageBench;
 #[cfg(feature = "async")]
-mod rekey;
 mod replay;
 #[cfg(feature = "async")]
 mod session;

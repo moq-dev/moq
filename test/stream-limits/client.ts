@@ -19,10 +19,10 @@ try {
 		const publication = origin.route(path, { hidden: true });
 		// One group per track, never finished, so every group the reader receives stays live.
 		for (let i = 0; i < count; i++) {
-			const group = publication.broadcast.createTrack(String(i)).appendGroup();
+			const group = publication.broadcast.createTrack(String(i)).appendGroup(Moq.Time.Timestamp.unscaled(0n));
 			group.writeFrame({
 				payload: new TextEncoder().encode(String(i)),
-				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+				timestamp: Moq.Time.Timestamp.unscaled(group.start),
 			});
 		}
 		publication.announce();

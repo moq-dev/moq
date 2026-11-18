@@ -191,7 +191,7 @@ The receiver parses the keys inside the Immutable Properties from its value, whi
 It SHOULD read them from the value when needed rather than hold them beside it, as a list of IDs can cost several times the value.
 
 A TRACKS_ADD ({{moql}} Tracks Stream) embeds TRACK_INFO without TRACK_PROPERTIES, so when the extension is negotiated a subscriber MUST NOT skip the Track Stream for a track it learned from a listing.
-Lacking the Version, a TRACKS_ADD cannot mark a {{moqt}} track's timestamps as unchecked ({{timestamps}}).
+Lacking the Version, a TRACKS_ADD cannot say whether the track's Group Streams carry Object Records ({{group}}).
 
 
 # Security Considerations

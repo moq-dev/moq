@@ -183,6 +183,11 @@ impl<T> Producer<T> {
 		self.state.poll_closed(waiter)
 	}
 
+	/// Whether the channel closed.
+	pub fn is_closed(&self) -> bool {
+		self.state.is_closed()
+	}
+
 	/// Whether any consumer handle exists right now.
 	///
 	/// A point-in-time snapshot with no registration; use

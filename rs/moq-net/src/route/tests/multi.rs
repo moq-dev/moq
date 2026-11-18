@@ -1,5 +1,5 @@
-//! The multicast epic's route rule as a test-only prototype, measured against
-//! [`path::Router`] by `bakeoff.rs`. Nothing here ships.
+//! The multicast epic's route rule as a test-only prototype, which
+//! [`relay::Router`](super::super::relay::Router) is checked against. Nothing here ships.
 //!
 //! A route leads to a forwarding node, never to a publisher: an endpoint's claims
 //! belong to the relay it connects to, which announces them under its own Node ID

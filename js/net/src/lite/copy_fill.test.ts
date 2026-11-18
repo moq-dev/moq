@@ -41,12 +41,12 @@ async function peers(alpn: string) {
 	const requests = track.requests();
 	void (async () => {
 		for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
-			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-				if (sequence === 1n) {
+			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+				if (key === 1n) {
 					fill.dropGroups(1n, 2n);
 					continue;
 				}
-				write(fill.accept(sequence), sequence, "old");
+				write(fill.accept(key), key, "old");
 			}
 			fill.close();
 		}
@@ -70,10 +70,10 @@ async function peers(alpn: string) {
 }
 
 // Group `sequence` presents at `sequence` seconds, with its origin in its payload.
-function write(group: ReturnType<Producer["createGroup"]>, sequence: bigint, kind: string): void {
+function write(group: ReturnType<Producer["createGroup"]>, key: bigint, kind: string): void {
 	group.writeFrame({
-		payload: enc.encode(`${kind} ${sequence}`),
-		timestamp: Timestamp.fromMillis(Number(sequence) * 1000),
+		payload: enc.encode(`${kind} ${key}`),
+		timestamp: Timestamp.fromMillis(Number(key) * 1000),
 	});
 	group.finish();
 }
@@ -90,7 +90,7 @@ async function take(reader: Subscriber, count: number): Promise<Map<bigint, stri
 	while (got.size < count) {
 		const group = await reader.recvGroup();
 		if (!group) break;
-		got.set(group.sequence, await payload(group));
+		got.set(group.start, await payload(group));
 	}
 	return got;
 }
@@ -113,7 +113,7 @@ const NARROW: Subscription = { delay: { max: Duration.millis(500) } };
 const WIDE: Subscription = { delay: { max: null }, order: "ascending" };
 
 function populate(track: Producer): void {
-	for (let sequence = 0n; sequence < 5n; sequence++) write(track.createGroup(sequence), sequence, "live");
+	for (let key = 0n; key < 5n; key++) write(track.createGroup(key), key, "live");
 }
 
 // What `take` read, in sequence order.
@@ -121,14 +121,14 @@ function sorted(got: Map<bigint, string>): [bigint, string][] {
 	return [...got].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const ALL = [0n, 1n, 2n, 3n, 4n].map((sequence): [bigint, string] => [sequence, `live ${sequence}`]);
+const ALL = [0n, 1n, 2n, 3n, 4n].map((key): [bigint, string] => [key, `live ${key}`]);
 
 test("copy fill: lite-07 fills below a start resolved from the budget, as far as the reader's own budget reaches", async () => {
 	const peer = await peers(Lite.ALPN_07_WIP);
 	try {
 		populate(peer.track);
 		const narrow = peer.remote.track("video").subscribe(NARROW);
-		expect((await narrow.recvGroup())?.sequence).toBe(3n);
+		expect((await narrow.recvGroup())?.start).toBe(3n);
 		const before = peer.fetches();
 
 		// The copy cannot tell which budget picked its start, so it fills what this one reaches,
@@ -148,7 +148,7 @@ test("copy fill: lite-06 asks nothing below a start resolved from the budget, an
 	try {
 		populate(peer.track);
 		const narrow = peer.remote.track("video").subscribe(NARROW);
-		expect((await narrow.recvGroup())?.sequence).toBe(3n);
+		expect((await narrow.recvGroup())?.start).toBe(3n);
 		const before = peer.fetches();
 
 		// The widened budget has the publisher re-offer them: lite-06 FETCH carries no budget.
@@ -169,17 +169,17 @@ test("copy fill: lite-05 fills below the live edge only what a reader's ranges n
 	try {
 		populate(peer.track);
 		const live = peer.remote.track("video").subscribe(NARROW);
-		expect((await live.recvGroup())?.sequence).toBe(4n);
+		expect((await live.recvGroup())?.start).toBe(4n);
 		const before = peer.fetches();
 
 		// Reaching back to the oldest group names no floor, so the live edge bounds it.
 		const oldest = peer.remote.track("video").subscribe(WIDE);
-		expect((await oldest.recvGroup())?.sequence).toBe(4n);
+		expect((await oldest.recvGroup())?.start).toBe(4n);
 		expect(await idle(clock, oldest)).toBe(true);
 		expect(peer.fetches()).toBe(before);
 
 		// A floor the ranges name is filled.
-		const named = peer.remote.track("video").subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n } }] });
+		const named = peer.remote.track("video").subscribe({ ...WIDE, ranges: [{ start: { time: 0n } }] });
 		expect(sorted(await take(named, 5))).toEqual(ALL);
 		expect(peer.fetches()).toBeGreaterThan(before);
 		live.close();
@@ -199,22 +199,21 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const peer = await peers(alpn);
 		try {
 			const history: Subscription = {
-				ranges: [{ start: { absolute: 0n } }],
+				ranges: [{ start: { time: 0n } }],
 				delay: { max: null },
 				order: "ascending",
 			};
 			const first = peer.remote.track("video").subscribe(history);
-			for (let sequence = 0n; sequence < 4n; sequence++)
-				write(peer.track.createGroup(sequence), sequence, "live");
+			for (let key = 0n; key < 4n; key++) write(peer.track.createGroup(key), key, "live");
 			// Before lite-07 a subscription carries no order and is served newest first, so only
 			// the set of groups is fixed.
-			expect(sorted(await take(first, 4)).map(([sequence]) => sequence)).toEqual([0n, 1n, 2n, 3n]);
+			expect(sorted(await take(first, 4)).map(([key]) => key)).toEqual([0n, 1n, 2n, 3n]);
 
 			// Both caches age out what nobody touched, a prune slice past the window; only the
 			// live edge stays.
 			await clock.advance(DEFAULT_EXPIRY.add(Duration.millis(10_000)));
 			write(peer.track.createGroup(4n), 4n, "live");
-			expect((await first.recvGroup())?.sequence).toBe(4n);
+			expect((await first.recvGroup())?.start).toBe(4n);
 			const before = peer.fetches();
 
 			// The same ranges, so nothing changes upstream: only a fill brings what the copy lost, a
@@ -269,24 +268,24 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 		// A live reader keeps the copy up, and has read past group 0 before it lands. It never
 		// reads again, so the copy it still buffers is all that is left of it.
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
-		expect((await reader.ordered().nextGroup())?.sequence).toBe(1n);
+		expect((await reader.ordered().nextGroup())?.start).toBe(1n);
 		const history = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
 		const group = await history.recvGroup();
-		expect(group?.sequence).toBe(0n);
+		expect(group?.start).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
 		const source = await archived;
 
 		// A reader that has yet to reach the group keeps it downloading once the first leaves.
 		const behind = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
 		group?.close();
 		history.close();
 		source.writeFrame({ payload: enc.encode("old 0 more"), timestamp: Timestamp.fromMillis(1) });
 		const reached = await behind.recvGroup();
-		expect(reached?.sequence).toBe(0n);
+		expect(reached?.start).toBe(0n);
 		expect(dec.decode((await reached?.readFrame())?.payload)).toBe("old 0");
 		expect(dec.decode((await reached?.readFrame())?.payload)).toBe("old 0 more");
 
@@ -336,12 +335,12 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		// A live reader keeps the copy up. It reads in order, so it lets go of what it passes.
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
 		const live = reader.ordered();
-		expect((await live.nextGroup())?.sequence).toBe(1n);
+		expect((await live.nextGroup())?.start).toBe(1n);
 		const history = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
 		const group = await history.recvGroup();
-		expect(group?.sequence).toBe(0n);
+		expect(group?.start).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
 		const source = await archived;
 		expect(source.demand().wanted.peek()).toBeTruthy();
@@ -354,7 +353,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		group?.close();
 		history.close();
 		write(track.createGroup(2n), 2n, "live");
-		expect((await live.nextGroup())?.sequence).toBe(2n);
+		expect((await live.nextGroup())?.start).toBe(2n);
 		await clock.drive(
 			timeout(
 				Duration.millis(2000),
@@ -408,23 +407,23 @@ test("copy fill: a group reset to make room ends", async () => {
 	try {
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
 		const live = await reader.ordered().nextGroup();
-		expect(live?.sequence).toBe(2n);
+		expect(live?.start).toBe(2n);
 		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 2");
 		expect(await live?.readFrame()).toBeUndefined();
 		live?.close();
 		// Two groups, so the fill rides the subscription's ranges.
 		const history = remote
 			.track("video")
-			.subscribe({ ...WIDE, ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
+			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
 		const group = await history.recvGroup();
-		expect(group?.sequence).toBe(0n);
+		expect(group?.start).toBe(0n);
 		expect(dec.decode((await group?.readFrame())?.payload)).toBe("old 0");
 		await archived;
 
 		// The session resets the group's stream to make room, so the publisher drops it on the
 		// subscription the fill rides.
 		const one = await history.recvGroup();
-		expect(one?.sequence).toBe(1n);
+		expect(one?.start).toBe(1n);
 		while (await one?.readFrame());
 		// The live stream has finished, so the archived group's is the only one still open.
 		await clock.advance(Duration.ZERO);
@@ -499,12 +498,12 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		const requests = track.requests();
 		void (async () => {
 			for (let fill = await requestedGroups(requests); fill; fill = await requestedGroups(requests)) {
-				for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
-					if (sequence !== 2n || !archived) {
-						fill.refuseGroups(sequence, sequence + 1n, new StreamError(StreamCode.NotFound));
+				for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
+					if (key !== 2n || !archived) {
+						fill.refuseGroups(key, key + 1n, new StreamError(StreamCode.NotFound));
 						continue;
 					}
-					const group = fill.accept(sequence);
+					const group = fill.accept(key);
 					for (let frame = 0; frame < 5; frame++)
 						group.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
 					group.finish();
@@ -516,9 +515,9 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 		try {
 			// Reads from the oldest group, so a bounded reader widens nothing.
 			const open = remote.track("video").subscribe({ delay: { max: null } });
-			expect((await open.recvGroup())?.sequence).toBe(3n);
+			expect((await open.recvGroup())?.start).toBe(3n);
 			if (!copy) throw new Error("no copy");
-			const tail = hooks.receiveGroup(copy, { sequence: 2n, start: 3 });
+			const tail = hooks.receiveGroup(copy, { start: 2n, offset: 3 });
 			for (const frame of [3, 4])
 				tail.writeFrame({ payload: enc.encode(`c${frame}`), timestamp: Timestamp.fromMillis(2000) });
 			tail.finish();
@@ -526,7 +525,7 @@ test.each([Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const before = fetched.length;
 
 			const bounded = remote.track("video").subscribe({
-				ranges: [{ start: { absolute: 2n }, end: { absolute: 3n } }],
+				ranges: [{ start: { time: 2n }, end: { time: 2n } }],
 				delay: { max: null },
 			});
 			const group = await bounded.recvGroup();

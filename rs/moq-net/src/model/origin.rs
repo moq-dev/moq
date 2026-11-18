@@ -100,16 +100,11 @@ pub struct Config {
 	/// The origin's Node ID: its identity on every wire, appended to broadcast hop chains
 	/// for loop detection and declared as the route identity on moq-lite-07, which also
 	/// names it in the hops of each route it forwards there. Random by
-	/// default, so each process is a fresh identity. Set one only if it is fresh per
-	/// process too: a restarted process numbers its lite-07 sessions from 1 again, so a
-	/// peer that still remembers one of the old process's sessions as closed refuses
-	/// the routes through the new one's session of the same number.
+	/// default, so each process is a fresh identity. One kept across restarts needs a
+	/// wall clock that only moves forward: lite-07 names each run of it by when the
+	/// process started, and a routing peer that remembers a session of a later run as
+	/// closed refuses the session of a run that started before it, logging why.
 	pub node: NonZeroU64,
-
-	/// The key this origin proves to every lite-07 peer, which files the routes it sends
-	/// under it when its grant is scoped. Origins sharing a key fail over as one. `None`
-	/// proves nothing, so such a peer files them under a key of its session alone.
-	pub route_key: Option<super::origin::RouteKey>,
 
 	/// Longest hop path a session using this origin accepts or forwards (default 32).
 	///
@@ -171,7 +166,6 @@ impl Default for Config {
 		let pool = cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY));
 		Self {
 			node: random_id(),
-			route_key: None,
 			max_hops: MAX_HOP_LIMIT,
 			pool,
 			cache_duration: None,
@@ -508,13 +502,13 @@ pub struct RouteInfo {
 	/// Where the route entered this origin; see [`Self::source`]. Never forwarded.
 	pub(crate) source: Source,
 
-	/// The origin node that serves the route, for a route the lite-07 route layer
-	/// selected: a request resolved through it names that node to the next hop.
-	/// `None` for a route this node serves itself, published here or learned from a
-	/// peer that names no node.
-	pub(crate) node: Option<u64>,
+	/// The forwarding node whose claim the route follows, for a route the lite-07 route
+	/// layer serves: a request resolved through it reaches that node's claim. `None`
+	/// for a route this node serves itself, published here or learned over an older
+	/// version.
+	pub(crate) node: Option<crate::route::NodeId>,
 
-	/// Which of the route layer's routes to [`Self::node`] it follows; see [`Lane`].
+	/// How the route layer ranks the route among those of its claim; see [`Lane`].
 	pub(crate) lane: Lane,
 
 	/// The session it arrived on is going away (the peer sent a GOAWAY): it ranks below
@@ -550,23 +544,15 @@ impl RouteInfo {
 	}
 }
 
-/// Which of the lite-07 route layer's routes to a publisher a route follows: one per
-/// prefix covering the claim. Only the narrowest live one is primary, which a reader
-/// here follows, falling back on a wider one only while none is; a request a peer
-/// forwards follows the one it names.
+/// How the lite-07 route layer ranks a route it serves: one per forwarding node claiming
+/// the broadcast that a route reaches. Only the closest is primary, which a reader here
+/// follows; a request a peer forwards follows the one it names.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct Lane {
-	/// How many segments the route's prefix has, absolute.
-	pub depth: u64,
 	pub primary: bool,
-	/// The one the route layer selected for its prefix, ranked ahead of the alternates
-	/// a reader fails over to at once when it goes.
-	pub selected: bool,
-	/// The Node IDs of the origin nodes the route's path crosses: a request from one of
-	/// them never follows it.
-	pub path: std::sync::Arc<[u64]>,
-	/// The lowest priority of a link on the route's path, which ranks the route where a
-	/// session's priority does, or `None` for a route the route layer did not select.
+	/// The lowest priority of a link on the way to the publisher, which ranks the route
+	/// where a session's priority does, or `None` for a route the route layer does not
+	/// serve.
 	pub priority: Option<i8>,
 	/// How many segments the claim's own prefix lacks of the path it entered at, which a
 	/// stream presenting a broader claim at a narrower request reports: 0 for a claim
@@ -578,10 +564,7 @@ pub(crate) struct Lane {
 impl Default for Lane {
 	fn default() -> Self {
 		Self {
-			depth: 0,
 			primary: true,
-			selected: true,
-			path: std::sync::Arc::new([]),
 			priority: None,
 			above: 0,
 		}
@@ -668,10 +651,9 @@ impl RouteInfo {
 		self
 	}
 
-	/// The origin node a route-layer route serves, which a request resolved through it
-	/// names to the next hop.
+	/// The forwarding node whose claim a route-layer route follows.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn with_node(mut self, node: Option<u64>) -> Self {
+	pub(crate) fn with_node(mut self, node: Option<crate::route::NodeId>) -> Self {
 		self.node = node;
 		self
 	}
@@ -793,23 +775,32 @@ impl ConsumerId {
 	}
 }
 
-/// FNV-1a over a requested path and then `bytes`.
+/// FNV-1a 64 of `path`, then `bytes`, from the offset basis `seed`.
 ///
 /// FNV-1a, not the std hasher: its output is fixed across Rust versions and
 /// builds, which matters when nodes run mismatched binaries during a rolling
-/// deploy and still need to agree on the same route. SEED is a custom basis
-/// (any nonzero u64 works, the textbook one is just as arbitrary); FNV_PRIME is
-/// the standard FNV-64 prime and should stay put. Mixing the path in spreads
+/// deploy and still need to agree on the same route. Mixing the path in spreads
 /// equal routes across different paths rather than funneling onto one.
-fn fnv_key(path: &str, bytes: impl IntoIterator<Item = u8>) -> u64 {
-	const SEED: u64 = 0x420C0DECB00B; // 420 C0DEC B00B
+fn fnv(seed: u64, path: &str, bytes: impl IntoIterator<Item = u8>) -> u64 {
 	const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-	let mut hash = SEED;
+	let mut hash = seed;
 	for byte in path.as_bytes().iter().copied().chain(bytes) {
 		hash = (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME);
 	}
 	hash
+}
+
+/// The hash moq-lite-06 and earlier rank by. Its basis is theirs, so a relay on the
+/// previous release picks the same route as this one.
+fn fnv_key(path: &str, bytes: impl IntoIterator<Item = u8>) -> u64 {
+	fnv(0x420C0DECB00B, path, bytes)
+}
+
+/// The draft's Rendezvous Hash: standard FNV-1a 64 of the requested path, then the
+/// instance, which reads the same on every node, so every relay picks the same one.
+fn rendezvous(path: &str, instance: &Instance) -> u64 {
+	fnv(0xcbf2_9ce4_8422_2325, path, instance.as_str().bytes())
 }
 
 /// The hash that spreads a pool's instances over `path`s: the instance, unlike the hop
@@ -890,13 +881,9 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		// ranks below a broader one: a stream presents a broader claim at the request,
 		// where it ties an exact claim for the path.
 		entry.lane.above,
-		// The route layer's narrowest route ahead of a wider one covering the claim. The
-		// wider one serves only between a closing session taking the narrowest away and the
-		// node promoting the next, so a reader fails over then rather than seeing an end.
+		// The route layer's closest claim ahead of another node's of the same broadcast.
 		!entry.lane.primary,
 		entry.draining || !entry.available,
-		// The route layer's selected route ahead of its alternates.
-		!entry.lane.selected,
 		// A lite-07 route ranks by the lowest priority of any link on its path.
 		Reverse(match entry.lane.priority {
 			Some(priority) => entry.priority.min(Priority::new(priority)),
@@ -908,8 +895,9 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		hops,
 		match (entry.node, entry.link == Link::Local && entry.prefix == *path) {
 			(_, true) => (0, 0),
-			// Every node that knows the claim ranks its origin node alike.
-			(Some(node), false) => (fnv_key(path.as_str(), node.to_le_bytes()), 0),
+			// Every node that knows the claim ranks its instance alike, and then the
+			// nodes claiming it: one publisher reaches several over several sessions.
+			(Some(node), false) => (rendezvous(path.as_str(), &entry.instance), node.relay),
 			(None, false) => (
 				instance_key(path.as_str(), &entry.instance),
 				chain_key(path.as_str(), &entry.hops),
@@ -922,7 +910,6 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 /// The key [`route_order`] ranks an entry by: lower wins.
 type RouteOrder = (
 	u8,
-	bool,
 	bool,
 	bool,
 	Reverse<Priority>,
@@ -943,7 +930,7 @@ type RouteMeta = (
 	Instance,
 	u64,
 	Option<crate::auth::Credential>,
-	Option<u64>,
+	Option<crate::route::NodeId>,
 	bool,
 );
 
@@ -1386,8 +1373,8 @@ struct RouteEntry {
 	local: bool,
 	/// The link the entry arrived on, from the handle that inserted it.
 	link: Link,
-	/// The origin node serving the route; see [`RouteInfo::node`].
-	node: Option<u64>,
+	/// The forwarding node whose claim the route follows; see [`RouteInfo::node`].
+	node: Option<crate::route::NodeId>,
 	/// The route layer's route it follows; see [`RouteInfo::lane`].
 	lane: Lane,
 	/// Whether the route ranks last; see [`RouteInfo::draining`]. Local selection state,
@@ -1499,9 +1486,7 @@ impl RouteEntry {
 	/// appears in the chain. Hop 0 identifies nobody, so it is never excluded.
 	fn visible_to(&self, exclude: Option<Hop>) -> bool {
 		match exclude {
-			Some(peer) if peer != Hop::UNKNOWN => {
-				self.via != peer && !self.hops.contains(&peer) && !self.lane.path.contains(&peer.id())
-			}
+			Some(peer) if peer != Hop::UNKNOWN => self.via != peer && !self.hops.contains(&peer),
 			_ => true,
 		}
 	}
@@ -1606,21 +1591,20 @@ pub(crate) enum NodeFilter {
 	Any,
 	/// Only the routes this node serves itself.
 	Own,
-	/// Only the route layer's route toward the origin node `node` whose prefix has
-	/// `depth` segments, absolute.
+	/// Only the route layer's route following the forwarding node `node`'s claim.
 	#[cfg_attr(
 		not(feature = "async"),
 		allow(dead_code, reason = "only the async session names a node")
 	)]
-	Route { node: u64, depth: u64 },
+	Route { node: crate::route::NodeId },
 }
 
 impl NodeFilter {
-	fn admits(self, node: Option<u64>, lane: &Lane) -> bool {
+	fn admits(self, node: Option<crate::route::NodeId>) -> bool {
 		match self {
 			Self::Any => true,
 			Self::Own => node.is_none(),
-			Self::Route { node: id, depth } => node == Some(id) && lane.depth == depth,
+			Self::Route { node: id } => node == Some(id),
 		}
 	}
 }
@@ -1631,7 +1615,7 @@ impl Horizon {
 		self.admits_link(entry.link)
 			&& entry.visible_to(self.exclude)
 			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
-			&& self.node.admits(entry.node, &entry.lane)
+			&& self.node.admits(entry.node)
 	}
 
 	/// Whether routes arriving on `link` may be observed through this horizon.
@@ -1947,16 +1931,6 @@ impl Mounted {
 		self.mount.name(path)
 	}
 
-	/// Whether the absolute, handle-side `path` lies at or beneath the mount point.
-	pub fn holds(&self, path: &Path) -> bool {
-		path.has_prefix(&self.mount.at)
-	}
-
-	/// The absolute, handle-side mount point.
-	pub fn at(&self) -> &Path {
-		&self.mount.at
-	}
-
 	/// How many segments the handle-side `path` lies beneath the mount point: the most a
 	/// claim read through the mount can be above it. A claim covering the whole target, which
 	/// is broader than the mount point as the handle sees it, covers no more than that.
@@ -2163,40 +2137,6 @@ fn hides(heads: &[Path], prefix: &Path) -> bool {
 		.any(|head| prefix.strip_prefix(head).is_some_and(|below| below.is_hidden()))
 }
 
-/// How many sessions withhold an origin's hidden routes from their peer, such as a
-/// moq-lite client before 07, whose peer can't ask for them.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct HiddenWithheld(kio::Shared<usize>);
-
-impl HiddenWithheld {
-	/// Count a session that withholds them, until the returned guard drops.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn hold(&self) -> HiddenWithholding {
-		*self.0.lock() += 1;
-		HiddenWithholding(self.clone())
-	}
-
-	/// Ready while a session withholds them.
-	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0
-			.poll(waiter, |count| match **count {
-				0 => Poll::Pending,
-				_ => Poll::Ready(()),
-			})
-			.map(drop)
-	}
-}
-
-/// A session counted by [`HiddenWithheld::hold`], until dropped.
-#[derive(Debug)]
-pub(crate) struct HiddenWithholding(HiddenWithheld);
-
-impl Drop for HiddenWithholding {
-	fn drop(&mut self) {
-		*self.0.0.lock() -= 1;
-	}
-}
-
 /// What a [`Routes`] yields: how the route covering a prefix changed, and that route.
 #[derive(Clone, Debug)]
 pub struct RouteEvent {
@@ -2315,7 +2255,7 @@ impl Producer {
 		let (tasks, set) = TaskSet::new();
 		let scope = OriginScope::default();
 		let timers = Deadlines::new(Instant::ZERO);
-		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold, config.route_key)));
+		let shared = SendCell::new(kio::Shared::new(OriginState::new(config.update_hold)));
 		let pool = config.pool.clone();
 		let producer = Self {
 			node: config.node,
@@ -2412,6 +2352,12 @@ impl Producer {
 		self
 	}
 
+	/// Whether this handle forwards what it learns; see [`Self::with_proxy`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn proxy(&self) -> bool {
+		self.proxy
+	}
+
 	/// The rank of the link this handle is given to; see [`Self::with_priority`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn priority(&self) -> Priority {
@@ -2431,16 +2377,6 @@ impl Producer {
 		self.consume().route_node()
 	}
 
-	/// The lite-06 hop this node's route identity travels as, once a moq-lite-07
-	/// session created the route node: a relay translating this node's claims for a
-	/// lite-06 peer starts their chain with it. It is this origin's own hop until the
-	/// identity rotates. `None` while no session has, which leaves the node uncreated.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_hop(&self) -> Option<Hop> {
-		let (node, _) = self.shared.lock().route_node.clone()?;
-		Some(crate::route::node::hop(node.declared()))
-	}
-
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
 		let shared = self.shared.lock();
@@ -2450,7 +2386,6 @@ impl Producer {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
 			update_hold: shared.update_hold,
-			route_key: shared.route_key.clone(),
 		}
 	}
 
@@ -2459,16 +2394,10 @@ impl Producer {
 		self.node
 	}
 
-	/// Whether `id`, as a peer declared it, names this origin: its node, or the Node ID
-	/// its moq-lite-07 sessions declare.
+	/// Whether `id`, as a peer declared it, names this origin: its node id, which is also
+	/// the relay its moq-lite-07 Node ID names.
 	pub fn is_own(&self, id: NonZeroU64) -> bool {
-		id == self.node || self.consume().node_id() == Some(id)
-	}
-
-	/// The key sessions prove for this origin.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_key(&self) -> Option<super::origin::RouteKey> {
-		self.shared.lock().route_key.clone()
+		id == self.node
 	}
 
 	// Sessions enforce the policy configured once on the origin.
@@ -2491,7 +2420,7 @@ impl Producer {
 			scope: OriginScope::empty(),
 			max_hops: MAX_HOP_LIMIT,
 			root: Path::default(),
-			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD, None))),
+			shared: SendCell::new(kio::Shared::new(OriginState::new(DEFAULT_UPDATE_HOLD))),
 			pool: cache::Pool::default(),
 			cache_duration: None,
 			stats: stats::Session::default(),
@@ -3887,10 +3816,12 @@ struct OwnClaims {
 	routes: Routes,
 	/// The same routes, less those learned on an upstream link.
 	downstream: Routes,
-	/// The claim fed at each prefix.
-	best: HashMap<Path, crate::route::node::Claim>,
+	/// The claim fed at each prefix: its instance, and whether another node announced it.
+	best: HashMap<Path, (Instance, crate::route::node::Claim, bool)>,
 	/// The instance at each prefix that a route not learned upstream serves.
 	local: HashMap<Path, Instance>,
+	/// Whether the origin forwards. One that does not tells no peer a claim it learned.
+	proxy: bool,
 	node: crate::route::Node,
 }
 
@@ -3918,9 +3849,8 @@ impl kio::Task for FeedOwnClaims {
 	}
 }
 
-/// The driver's task firing the route node's timers on the origin's clock: a doubt
-/// lifting, a dead hop expiring, a hold reaching its deadline. It ends once nothing owns
-/// the origin.
+/// The driver's task firing the route node's timers on the origin's clock: a claim no
+/// route reaches going offline. It ends once nothing owns the origin.
 struct RouteTimer {
 	node: crate::route::Node,
 	deadline: crate::time::Deadline,
@@ -3956,18 +3886,36 @@ fn lock_own(own: &std::sync::Mutex<OwnClaims>) -> std::sync::MutexGuard<'_, OwnC
 
 impl OwnClaims {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let mut changed = Vec::new();
+		let mut open = true;
+		// One change to the table reaches both cursors, so neither is read without the
+		// other: a claim fed between the two would be filed as one that crossed a marked
+		// link, or as one that did not, for no longer than that, and a peer shown the
+		// difference sees the claim lost.
 		loop {
-			if let Poll::Ready(event) = self.downstream.poll_next(waiter) {
+			let mut progressed = false;
+			while open && let Poll::Ready(event) = self.downstream.poll_next(waiter) {
 				match event {
-					Some(event) => self.local(event),
-					None => return Poll::Ready(()),
+					Some(event) => changed.push(self.local(event)),
+					None => open = false,
 				}
-				continue;
+				progressed = true;
 			}
-			match ready!(self.routes.poll_next(waiter)) {
-				Some(event) => self.apply(event),
-				None => return Poll::Ready(()),
+			while open && let Poll::Ready(event) = self.routes.poll_next(waiter) {
+				match event {
+					Some(event) => changed.extend(self.apply(event)),
+					None => open = false,
+				}
+				progressed = true;
 			}
+			if !open || !progressed {
+				break;
+			}
+		}
+		self.feed(changed);
+		match open {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
 		}
 	}
 }
@@ -3976,58 +3924,73 @@ impl OwnClaims {
 	/// Feed the node every change the table already holds, so a stream registered next
 	/// sees them without waiting for the driver.
 	fn catch_up(&mut self) {
+		let mut changed = Vec::new();
 		while let Some(event) = self.downstream.try_next() {
-			self.local(event);
+			changed.push(self.local(event));
 		}
 		while let Some(event) = self.routes.try_next() {
-			self.apply(event);
+			changed.extend(self.apply(event));
 		}
+		self.feed(changed);
 	}
 
-	fn apply(&mut self, event: RouteEvent) {
+	/// The best route at a prefix changed: the prefix whose claim is to be fed again, if
+	/// one is left there.
+	fn apply(&mut self, event: RouteEvent) -> Option<Path> {
+		use crate::route::node::{Attr, Change, Claim};
 		let announce = match event {
 			RouteEvent {
 				kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
 				announce,
 			} => announce,
-			RouteEvent {
-				kind: RouteKind::End | RouteKind::Offline,
-				announce,
-			} => {
-				self.best.remove(&announce.prefix);
-				return self.node.own(announce.prefix, None);
+			RouteEvent { kind, announce } => {
+				if let Some((instance, ..)) = self.best.remove(&announce.prefix) {
+					let change = match kind {
+						RouteKind::End => Change::Ended,
+						_ => Change::Lost,
+					};
+					self.node.own(false, (announce.prefix, instance), change);
+				}
+				return None;
 			}
 		};
 		let route = announce.route;
-		let Some(instance) = route.instance else {
-			return;
-		};
-		let claim = crate::route::node::Claim {
-			instance,
-			epoch: route.epoch,
+		let instance = route.instance?;
+		let claim = Claim {
+			item: Attr {
+				epoch: route.epoch,
+				above: 0,
+			},
 			cost: route.cost.value(),
-			upstream: false,
-			// Only a route published here has crossed no node.
-			learned: !route.hops.is_empty(),
-			above: 0,
+			priority: route.lane.priority.unwrap_or(i8::MAX),
+			draining: route.draining,
+			unavailable: false,
 			// Kept, so the claim that crossed into lite-07 here is still recognized
-			// wherever it leaves for lite-06 again.
-			chain: route.hops,
+			// wherever it leaves for lite-06 again. A hop that names nobody says nothing.
+			chain: route.hops.iter().map(|hop| hop.id()).filter(|id| *id != 0).collect(),
 		};
-		self.best.insert(announce.prefix.clone(), claim);
-		self.feed(announce.prefix);
+		// Only a route published here has crossed no node.
+		let learned = !route.hops.is_empty();
+		let was = self
+			.best
+			.insert(announce.prefix.clone(), (instance.clone(), claim, learned));
+		// Another instance took the prefix: the one it served before is gone.
+		if let Some((was, ..)) = was.filter(|(was, ..)| *was != instance) {
+			self.node.own(false, (announce.prefix.clone(), was), Change::Ended);
+		}
+		Some(announce.prefix)
 	}
 
-	/// The route not learned upstream changed at a prefix: whether the claim there may
-	/// go to an upstream peer follows it.
-	fn local(&mut self, event: RouteEvent) {
+	/// The route not learned upstream changed at a prefix, which is returned: whether
+	/// the claim there may go to an upstream peer follows it.
+	fn local(&mut self, event: RouteEvent) -> Path {
 		match event {
 			RouteEvent {
 				kind: RouteKind::End | RouteKind::Offline,
 				announce,
 			} => {
 				self.local.remove(&announce.prefix);
-				self.feed(announce.prefix);
+				announce.prefix
 			}
 			RouteEvent {
 				kind: RouteKind::Start | RouteKind::Update | RouteKind::Restart,
@@ -4036,22 +3999,25 @@ impl OwnClaims {
 				if let Some(instance) = announce.route.instance {
 					self.local.insert(announce.prefix.clone(), instance);
 				}
-				self.feed(announce.prefix);
+				announce.prefix
 			}
 		}
 	}
 
-	/// Feed the node the claim at `prefix`, marked as learned upstream unless a route
-	/// not learned upstream serves the same instance there.
-	fn feed(&self, prefix: Path) {
-		let Some(claim) = self.best.get(&prefix) else {
-			return;
-		};
-		let claim = crate::route::node::Claim {
-			upstream: self.local.get(&prefix) != Some(&claim.instance),
-			..claim.clone()
-		};
-		self.node.own(prefix, Some(claim));
+	/// Feed the node the claim at each of `prefixes`, marked unless a route not learned
+	/// upstream serves the same instance there, and unless this origin forwards what it
+	/// learned.
+	fn feed(&self, mut prefixes: Vec<Path>) {
+		prefixes.sort();
+		prefixes.dedup();
+		for prefix in prefixes {
+			let Some((instance, claim, learned)) = self.best.get(&prefix) else {
+				continue;
+			};
+			let marked = (*learned && !self.proxy) || self.local.get(&prefix) != Some(instance);
+			let change = crate::route::node::Change::Live(claim.clone());
+			self.node.own(marked, (prefix, instance.clone()), change);
+		}
 	}
 }
 
@@ -4125,7 +4091,6 @@ pub(crate) struct Footprint {
 	cursors: usize,
 	listeners: usize,
 	withdrawn: usize,
-	withheld: usize,
 }
 
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
@@ -4139,7 +4104,6 @@ impl Driver {
 			cursors: shared.cursors.len(),
 			listeners: shared.listeners.len(),
 			withdrawn: shared.withdrawn.len(),
-			withheld: *shared.hidden_withheld.0.read(),
 		}
 	}
 }
@@ -4472,6 +4436,23 @@ impl FrontServeRun {
 	}
 }
 
+/// A front dropped before it ended, as when its origin is torn down, ends the logical tracks it
+/// was serving as closed, rather than leave them to warn as producers dropped unfinished.
+impl Drop for FrontServeRun {
+	fn drop(&mut self) {
+		let close = |logical: &mut Logical| {
+			if let Logical::Accepted(accepted) = std::mem::replace(logical, Logical::Ended) {
+				let _ = accepted.abort(Error::Closed);
+			}
+		};
+		match &mut self.state {
+			FrontRunState::Start(_) => {}
+			FrontRunState::Serve(serve) => serve.tracks.values_mut().for_each(|io| close(&mut io.logical)),
+			FrontRunState::InFlight(in_flight) => in_flight.iter_mut().for_each(|io| close(&mut io.logical)),
+		}
+	}
+}
+
 impl kio::Task for FrontServeRun {
 	type Output = ();
 
@@ -4720,8 +4701,9 @@ impl FrontServe {
 		{
 			pending.selected = entry.instance.clone();
 		}
-		// Only a received route carries a hop chain: a local one needs no discovery.
-		let received = best.is_some_and(|entry| !entry.hops.is_empty());
+		// Only a received route carries a hop chain or a claiming node: a local one needs
+		// no discovery.
+		let received = best.is_some_and(|entry| !entry.hops.is_empty() || entry.node.is_some());
 		let best = best.map(|entry| Candidate {
 			route: entry.id,
 			local: entry.local,
@@ -6356,8 +6338,6 @@ struct OriginState {
 	// See [`Config::update_hold`]. No `Default`: every origin takes it from its
 	// config, so no path silently disables the hold.
 	update_hold: Duration,
-	// See [`Config::route_key`].
-	route_key: Option<super::origin::RouteKey>,
 
 	// The announced routes, keyed by prefix. The table holds one entry per live
 	// advertisement, not one per broadcast consumer.
@@ -6391,9 +6371,6 @@ struct OriginState {
 	listeners: Vec<Listener>,
 	next_listener: u64,
 
-	// The sessions withholding this origin's hidden routes from their peer.
-	hidden_withheld: HiddenWithheld,
-
 	// The route layer node this origin's lite-07 sessions share, and the feeder the
 	// driver owns; see [`Consumer::route_node`]. Weak, since the feeder's cursors hold
 	// this state.
@@ -6401,10 +6378,9 @@ struct OriginState {
 }
 
 impl OriginState {
-	fn new(update_hold: Duration, route_key: Option<super::origin::RouteKey>) -> Self {
+	fn new(update_hold: Duration) -> Self {
 		Self {
 			update_hold,
-			route_key,
 			routes: RouteTable::default(),
 			next_route: 0,
 			next_watch: 0,
@@ -6415,7 +6391,6 @@ impl OriginState {
 			closed: false,
 			listeners: Vec::new(),
 			next_listener: 0,
-			hidden_withheld: HiddenWithheld::default(),
 			route_node: None,
 		}
 	}
@@ -7544,12 +7519,6 @@ impl Consumer {
 		self.node
 	}
 
-	/// The key sessions prove for this origin.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn route_key(&self) -> Option<super::origin::RouteKey> {
-		self.shared.lock().route_key.clone()
-	}
-
 	/// A clone that never serves the given peer its own data: routes whose hop
 	/// chain contains `peer`, or whose announcing session is `peer`, are invisible
 	/// and never resolved from, matching what the announce loop advertises to them.
@@ -7563,16 +7532,25 @@ impl Consumer {
 		self
 	}
 
-	/// The Node ID this origin's moq-lite-07 sessions declare, without creating the route
-	/// node: its identity once created, or the one it will declare. `None` only before a
-	/// node whose hop leaves nothing to derive draws a random one.
-	pub(crate) fn node_id(&self) -> Option<NonZeroU64> {
-		let node = self.shared.lock().route_node.clone();
-		let id = match node {
-			Some((node, _)) => Some(node.declared()),
-			None => crate::route::node::declared_for(self.node),
+	/// The Node ID a moq-lite-07 session declares when it answers its peer from this
+	/// handle and takes what the peer publishes into `subscribe`: this origin's, when it
+	/// forwards, the application linked the session to a cluster peer, and neither handle
+	/// confines the peer to part of the tree. `None` for every other session, which
+	/// exchanges claims and no routes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn node_id(&self, subscribe: &Producer) -> Option<crate::route::NodeId> {
+		let whole = |root: &Path, scope: &OriginScope| {
+			root.is_empty()
+				&& Pattern::subtree("").is_ok_and(|all| scope.allowed.contains(&all))
+				&& scope.excluded.is_empty()
+				&& scope.mounts.is_empty()
 		};
-		id.and_then(NonZeroU64::new)
+		let routing = self.proxy
+			&& subscribe.link() != Link::Local
+			&& self.shared.same_channel(&subscribe.shared)
+			&& whole(&self.root, &self.scope)
+			&& whole(subscribe.root(), &subscribe.scope);
+		routing.then(|| self.route_node().me())
 	}
 
 	/// The route layer node every lite-07 session on this origin shares, created on
@@ -7629,6 +7607,7 @@ impl Consumer {
 			downstream: own(true).routes(),
 			best: HashMap::new(),
 			local: HashMap::new(),
+			proxy: self.proxy,
 			node: node.clone(),
 		};
 		let mut shared = self.shared.lock();
@@ -7809,11 +7788,6 @@ impl Consumer {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn includes_hidden(&self) -> bool {
 		self.hidden.include
-	}
-
-	/// The sessions withholding this origin's hidden routes from their peer.
-	pub(crate) fn hidden_withheld(&self) -> HiddenWithheld {
-		self.shared.read().hidden_withheld.clone()
 	}
 
 	/// The egress stats context this handle was tagged with.
@@ -8716,8 +8690,7 @@ impl Routes {
 	/// than not heard yet. A session joining the scope later, such as a reconnect,
 	/// takes this back until it syncs too; routes published on this origin
 	/// itself never wait. On moq-lite-07 a session syncs only once this origin
-	/// shows every route its peer sent, so a redial waits out the doubt a closed
-	/// session left on that peer.
+	/// shows every claim its peer sent.
 	///
 	/// Synced is relative to the session's peer, never global: a relay answers with
 	/// what it holds without waiting on its own upstreams. Versions that cannot mark
@@ -9030,6 +9003,43 @@ mod tests {
 		"01900000-0000-7000-8000-000000000001".parse().unwrap()
 	}
 
+	/// A session of `node` whose peer forwards nothing and asked for every claim.
+	fn route_stream(node: &crate::route::Node) -> crate::route::node::Stream {
+		use crate::route::relay;
+		let port = relay::Port {
+			cost: 1,
+			priority: 0,
+			upstream: false,
+			role: relay::Role::Scoped(Vec::new()),
+		};
+		let stream = node.connect(1, port).unwrap();
+		let ask = relay::Edit {
+			remove: Vec::new(),
+			add: vec![Path::empty()],
+		};
+		stream.recv(relay::Msg::Ask(ask)).unwrap();
+		stream.flush();
+		stream
+	}
+
+	/// The claims `stream` has queued for its peer: each path, and whether it is live.
+	fn route_changes(stream: &crate::route::node::Stream) -> Vec<(Path, bool)> {
+		use crate::route::relay;
+		std::iter::from_fn(|| stream.try_wire())
+			.filter_map(|msg| match msg {
+				relay::Msg::Announce { changes } => Some(changes),
+				_ => None,
+			})
+			.flatten()
+			.map(|((path, _), change)| (path, matches!(change, relay::Change::Live(_))))
+			.collect()
+	}
+
+	/// The forwarding node of the relay `relay`.
+	fn node_id(relay: u64) -> crate::route::NodeId {
+		crate::route::NodeId { relay, start: 1 }
+	}
+
 	fn hops(ids: &[u64]) -> Hops {
 		let mut list = Hops::new();
 		for &id in ids {
@@ -9138,6 +9148,41 @@ mod tests {
 			assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
 		});
 		assert_eq!(warns, 0, "a clean logical end must not drop an unfinished producer");
+	}
+
+	/// A torn-down origin ends the logical tracks its fronts were serving, rather than warn about
+	/// producers dropped unfinished.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn teardown_ends_the_logical_tracks() {
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
+		let consumer = producer.consume();
+		let source = producer.route("room", RouteOptions::default()).unwrap();
+		let _source_track = source.broadcast().create_track("video", None).unwrap();
+		let waiter = kio::Waiter::noop();
+
+		// The driver runs the front that answers each of these.
+		let mut request = Box::pin(consumer.request("room", None));
+		let front = loop {
+			driver.poll(kio::clock::now(), &waiter).unwrap();
+			if let Some(front) = request.as_mut().now_or_never() {
+				break front.unwrap();
+			}
+			kio::clock::sim::yield_now().await;
+		};
+		let track = front.track("video").unwrap();
+		let mut subscribing = Box::pin(track.subscribe(None));
+		let subscriber = loop {
+			driver.poll(kio::clock::now(), &waiter).unwrap();
+			if let Some(subscriber) = subscribing.as_mut().now_or_never() {
+				break subscriber.unwrap();
+			}
+			kio::clock::sim::yield_now().await;
+		};
+
+		let warns = count_drop_warnings("track::Producer dropped without finish", || drop(driver));
+		assert_eq!(warns, 0, "a torn-down front must not drop an unfinished track");
+		drop(subscriber);
 	}
 
 	#[kio::test]
@@ -10194,15 +10239,16 @@ mod tests {
 	/// newest claim, which a re-price leaves in place.
 	#[kio::test]
 	async fn lite07_ties_match_js() {
-		assert_eq!(fnv_key("pool/job", 0x7au64.to_le_bytes()), 0xc376be7bf47aebbf);
-		assert_eq!(fnv_key("pool/job", 0x8bu64.to_le_bytes()), 0x5813213b6508aaee);
+		let instance = |name: &str| -> Instance { name.parse().unwrap() };
+		assert_eq!(rendezvous("pool/job", &instance("a")), 0x3e128da0fff39252);
+		assert_eq!(rendezvous("pool/job", &instance("b")), 0x3e128ca0fff3909f);
 
 		let producer = origin(1).produce();
 		let claim = |node: u64, name: &str, cost: u64| {
 			RouteInfo::new()
 				.with_instance(name.parse().unwrap(), 0)
 				.with_cost(cost)
-				.with_node(Some(node))
+				.with_node(Some(node_id(node)))
 		};
 		let older = producer.forward("pool", claim(0x7a, "a", 5)).unwrap();
 		let _newer = producer.forward("pool", claim(0x8b, "b", 1)).unwrap();
@@ -10214,16 +10260,21 @@ mod tests {
 				.best_route(&Path::new(path).unwrap(), Horizon::default(), &HashSet::new(), |_| true)
 				.and_then(|entry| entry.node)
 		};
-		assert_eq!(best("pool"), Some(0x8b), "the newer claim keeps a tie a re-price made");
+		assert_eq!(
+			best("pool"),
+			Some(node_id(0x8b)),
+			"the newer claim keeps a tie a re-price made"
+		);
 		assert_eq!(
 			best("pool/job"),
-			Some(0x8b),
-			"the lower node hash wins under the claims"
+			Some(node_id(0x8b)),
+			"the lower instance hash wins under the claims"
 		);
 
-		// A lite-06 route keys on its instance and chain, a lite-07 claim on its node, each on
-		// its own: here the claim's is lower.
-		assert_eq!(instance_key("pool/job", &"b".parse().unwrap()), 0xd16a3821c67a2d25);
+		// A lite-06 route keys on its instance and chain under the older basis, a lite-07
+		// claim on its instance under the standard one, each on its own: here the claim's
+		// is lower.
+		assert_eq!(instance_key("pool/job", &instance("b")), 0xd16a3821c67a2d25);
 		let producer = origin(1).produce();
 		let _claim = producer.forward("pool", claim(0x7a, "a", 1)).unwrap();
 		let legacy = RouteInfo::new()
@@ -10240,7 +10291,7 @@ mod tests {
 				|_| true,
 			)
 			.and_then(|entry| entry.node);
-		assert_eq!(winner, Some(0x7a), "each route keyed on its own");
+		assert_eq!(winner, Some(node_id(0x7a)), "each route keyed on its own");
 	}
 
 	/// Equal-cost advertisers of one prefix share its paths: a set of requested
@@ -10598,7 +10649,10 @@ mod tests {
 		let _native = producer
 			.announce(
 				"room",
-				RouteInfo::new().with_hops(hops(&[10])).with_cost(5).with_node(Some(10)),
+				RouteInfo::new()
+					.with_hops(hops(&[10]))
+					.with_cost(5)
+					.with_node(Some(node_id(10))),
 			)
 			.unwrap();
 		announced.expect_next_active("room").await;
@@ -10609,7 +10663,7 @@ mod tests {
 				RouteInfo::new()
 					.with_hops(hops(&[0, 7, 20]))
 					.with_cost(1)
-					.with_node(Some(20)),
+					.with_node(Some(node_id(20))),
 			)
 			.unwrap();
 		let route = announced.expect_next_active("room").await;
@@ -10722,7 +10776,7 @@ mod tests {
 			};
 			RouteInfo::new()
 				.with_hops(hops(&[node]))
-				.with_node(Some(node))
+				.with_node(Some(node_id(node)))
 				.with_lane(lane)
 				.with_cost(cost)
 		};
@@ -10750,7 +10804,7 @@ mod tests {
 		let route = |node, above, cost| {
 			RouteInfo::new()
 				.with_hops(hops(&[node]))
-				.with_node(Some(node))
+				.with_node(Some(node_id(node)))
 				.with_lane(Lane {
 					above,
 					..Lane::default()
@@ -10782,7 +10836,7 @@ mod tests {
 				"src/a",
 				RouteInfo::new()
 					.with_hops(hops(&[10]))
-					.with_node(Some(10))
+					.with_node(Some(node_id(10)))
 					.with_lane(Lane {
 						above: 1,
 						..Lane::default()
@@ -10828,7 +10882,7 @@ mod tests {
 				RouteInfo::new()
 					.with_instance(instance.clone(), 1)
 					.with_hops(hops(&[10]))
-					.with_node(Some(10))
+					.with_node(Some(node_id(10)))
 					.with_lane(Lane {
 						above: 1,
 						..Lane::default()
@@ -11427,20 +11481,12 @@ mod tests {
 			.route_node();
 		// Nothing polls this test's driver.
 		let _shown = producer.announce("room/alice", RouteInfo::new()).unwrap();
-		let link = crate::route::Link {
-			proxy: true,
-			..Default::default()
-		};
-		let stream = producer
-			.route_node()
-			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
-			.unwrap();
+		let stream = route_stream(&producer.route_node());
 		assert!(
-			matches!(
-				stream.try_wire(),
-				Some(crate::route::node::Output::Route { reach: Some(_), .. })
-			),
-			"the new stream is sent the route to the announced claim"
+			route_changes(&stream)
+				.iter()
+				.any(|(path, live)| path.as_str() == "room/alice" && *live),
+			"the new stream is told the announced claim"
 		);
 	}
 
@@ -11481,20 +11527,13 @@ mod tests {
 					self.locked.store(true, Ordering::SeqCst);
 					return;
 				}
-				self.consumer.route_node().declared();
+				self.consumer.route_node().me();
 				self.reentered.fetch_add(1, Ordering::SeqCst);
 			}
 		}
 
 		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
-		let link = crate::route::Link {
-			proxy: true,
-			..Default::default()
-		};
-		let stream = producer
-			.route_node()
-			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
-			.unwrap();
+		let stream = route_stream(&producer.route_node());
 		let reenter = Arc::new(Reenter {
 			consumer: producer.consume(),
 			reentered: AtomicUsize::new(0),
@@ -11502,8 +11541,8 @@ mod tests {
 		});
 		let waiter = kio::Waiter::new(Waker::from(reenter.clone()));
 		let park = || {
-			while stream.try_output().is_some() {}
-			assert!(stream.poll_output(&waiter).is_pending());
+			while stream.try_wire().is_some() {}
+			assert!(stream.poll_wire(&waiter).is_pending());
 		};
 
 		park();
@@ -16512,32 +16551,23 @@ mod tests {
 	async fn a_route_node_never_keeps_the_driver_running() {
 		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
 		let waiter = kio::Waiter::noop();
-		let link = crate::route::Link {
-			proxy: true,
-			..Default::default()
-		};
 		let consumer = producer.consume();
 		let alice = producer.announce("room/alice", RouteInfo::new()).unwrap();
-		let stream = consumer
-			.route_node()
-			.answer(crate::route::node::Peer { tag: 1, node: 0 }, link, Path::empty())
-			.unwrap();
+		let stream = route_stream(&consumer.route_node());
 		assert!(
 			driver.poll(Instant::now(), &waiter).is_ok(),
 			"the producer owns the origin"
 		);
-		while stream.try_output().is_some() {}
+		while stream.try_wire().is_some() {}
 		drop(alice);
 		drop(producer);
 		assert!(matches!(driver.poll(Instant::now(), &waiter), Err(Error::Closed)));
-		let output = stream.try_wire();
+		let changes = route_changes(&stream);
 		assert!(
-			matches!(
-				&output,
-				Some(crate::route::node::Output::Batch { changes, .. })
-					if changes.iter().any(|(path, claim)| path.as_str() == "room/alice" && claim.is_none())
-			),
-			"the stream is sent the withdrawal: {output:?}"
+			changes
+				.iter()
+				.any(|(path, live)| path.as_str() == "room/alice" && !live),
+			"the stream is told the withdrawal: {changes:?}"
 		);
 	}
 

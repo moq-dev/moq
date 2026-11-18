@@ -105,7 +105,7 @@ type QUICConfig struct {
 	GSO *bool
 	// MTUDiscovery toggles path MTU discovery.
 	MTUDiscovery *bool
-	// CongestionControl picks the congestion control family; nil leaves the choice to the backend.
+	// CongestionControl picks the congestion control algorithm; nil runs BBR v3.
 	CongestionControl *CongestionControl
 	// Qlog is a directory, which must exist, to write qlog traces into.
 	Qlog string

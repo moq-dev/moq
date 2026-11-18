@@ -1,18 +1,11 @@
-import {
-	fromTransport,
-	ProtocolViolation,
-	StreamCode,
-	StreamError,
-	TimestampMismatch,
-	toStreamCode,
-} from "../error.ts";
+import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import { floorAt, type Timescale } from "../time.ts";
 import type { Anchor, Order, Position, Range } from "../track.ts";
-import { UNBOUNDED } from "../util/sequence.ts";
+import { UNBOUNDED } from "../util/key.ts";
 import { lengthLeadingOnes, parts, split } from "../util/varint.ts";
+import { EMPTY } from "../window.ts";
 import * as Duration from "./duration.ts";
 import { decodeNode, decodePin, encodeNode, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
@@ -37,7 +30,7 @@ import {
  * Encode the `Group Start` field shared by SUBSCRIBE and SUBSCRIBE_UPDATE.
  *
  * Lite-06 writes the raw floor (`undefined` and 0 are both group 0). A pre-06 wire
- * encodes the sequence + 1: omitting the floor is 0 (the latest group, where the
+ * encodes the key + 1: omitting the floor is 0 (the latest group, where the
  * publisher starts) and an explicit 0 is 1, replay from the beginning.
  */
 async function encodeStartGroup(w: Writer, version: Version, startGroup?: bigint) {
@@ -136,10 +129,9 @@ interface Span {
 }
 
 /**
- * One end of a lite-07 range: a model {@link Anchor}, except that a time counts in the track's
- * `Timescale` as the peer was told it, or bare units on a scale-less track. The wire has no
- * absolute anchor: a group's start is its time, so `absolute` goes out as a time, an end as the
- * time just before it, and decodes as one.
+ * One end of a lite-07 range: a model {@link Anchor}, or a group by its start (`absolute`), as
+ * the Rust `lite::Anchor` holds. The wire has no absolute anchor: a group's start is its time, so
+ * `absolute` goes out as a time, an end (exclusive) as the time just before it, and decodes as one.
  */
 export type WireAnchor =
 	| { absolute: bigint; relative?: never; time?: never }
@@ -152,24 +144,9 @@ export interface WireRange {
 	end?: WireAnchor;
 }
 
-/**
- * The wire form of `ranges`, with time anchors in `timescale`, the track's as the publisher
- * declared it. Throws {@link TimestampMismatch} for a time anchor on an untimed track.
- */
-export function toWireRanges(ranges: readonly Range[], timescale: Timescale | undefined): WireRange[] {
-	const anchor = (anchor: Anchor | undefined): WireAnchor | undefined => {
-		if (anchor?.time === undefined) return anchor as WireAnchor | undefined;
-		if (timescale === undefined) throw new TimestampMismatch();
-		return { time: BigInt(floorAt(anchor.time, timescale)) };
-	};
-	return ranges.map((range) => {
-		const out: WireRange = {};
-		const start = anchor(range.start);
-		const end = anchor(range.end);
-		if (start) out.start = start;
-		if (end) out.end = end;
-		return out;
-	});
+/** The wire form of model `ranges`: the same anchors, a time being a group start. */
+export function toWireRanges(ranges: readonly Range[]): WireRange[] {
+	return ranges.map((range) => ({ ...range }));
 }
 
 /**
@@ -224,40 +201,37 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 		throw new Error("frame bounds not supported for this version");
 	await w.u53(1);
 	const range: WireRange = {};
-	if (span.startGroup !== undefined) range.start = { absolute: span.startGroup };
-	if (span.endGroup !== undefined) range.end = { absolute: span.endGroup + 1n };
+	if (span.startGroup !== undefined) range.start = { time: span.startGroup };
+	if (span.endGroup !== undefined) range.end = { time: span.endGroup };
 	await encodeRange(w, range);
 }
 
 /**
  * The model ranges a decoded SUBSCRIBE or SUBSCRIBE_UPDATE asks for: its lite-07 list, or the one
- * span an older wire carries, whole groups either way.
+ * span an older wire carries, whole groups either way. Mirrors the Rust `Bounds::new`.
  *
- * A lite-07 time names a group by its key: the wire's group ID is its start time. The JS model
- * still keys groups by sequence, so a time decodes as that absolute key, an end exclusive, on
- * every track; resolving it against frame timestamps waits on the model keying groups by start.
+ * A group ID is a group's start, so an absolute anchor and a time anchor both name one: a time
+ * start resolves to the group containing it. An older wire means its start as the first group
+ * starting at or after it, which the publisher's floor keeps (see `cursorFloor`).
  */
 export function requestedRanges(msg: Span & { ranges?: WireRange[] }): Range[] {
 	if (msg.ranges) {
-		const anchor = (anchor: WireAnchor | undefined, end: boolean): Anchor | undefined => {
-			if (anchor?.time === undefined) return anchor as Anchor | undefined;
-			return { absolute: end ? anchor.time + 1n : anchor.time };
-		};
 		return msg.ranges.map((range) => {
+			// Empty, as group bounds say it: keep its place, covering no group.
+			const start = range.start?.absolute;
+			const end = range.end?.absolute;
+			if (start !== undefined && end !== undefined && end <= start) return { ...EMPTY };
+			if (end === 0n) return { ...EMPTY };
 			const out: Range = {};
-			const start = anchor(range.start, false);
-			let end = anchor(range.end, true);
-			// Ending before its start: keep its place, covering no group, as the Rust publisher does.
-			if (start?.absolute !== undefined && end?.absolute !== undefined && end.absolute < start.absolute)
-				end = { absolute: start.absolute };
-			if (start) out.start = start;
-			if (end) out.end = end;
+			if (range.start) out.start = start === undefined ? (range.start as Anchor) : { time: start };
+			// An absolute end is exclusive; every model end includes its group.
+			if (range.end) out.end = end === undefined ? (range.end as Anchor) : { time: end - 1n };
 			return out;
 		});
 	}
 	const range: Range = {};
-	if (msg.startGroup !== undefined) range.start = { absolute: msg.startGroup };
-	if (msg.endGroup !== undefined) range.end = { absolute: msg.endGroup + 1n };
+	if (msg.startGroup !== undefined) range.start = { time: msg.startGroup };
+	if (msg.endGroup !== undefined) range.end = { time: msg.endGroup };
 	return [range];
 }
 
@@ -304,7 +278,7 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	let floor = true;
 	let live = false;
 	for (const range of ranges) {
-		// A time is the key of the group it names, inclusive as an end.
+		// A time is the start of the group it names, inclusive as an end.
 		const from = range.start?.absolute ?? range.start?.time;
 		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
 		if (from === undefined) floor = false;
@@ -761,10 +735,6 @@ export class Subscribe {
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. Lite-07+. */
 	instance?: Instance.Valid;
-	/** The publisher node that serves the request, 0 for whichever the publisher selects. Lite-07+. */
-	node: bigint;
-	/** How many leading segments of `broadcast` make up the prefix of the route it follows. Lite-07+. */
-	depth: number;
 	track: string;
 	priority: number;
 	/**
@@ -809,8 +779,6 @@ export class Subscribe {
 		id: bigint;
 		broadcast: Path.Valid;
 		instance?: Instance.Valid;
-		node?: bigint;
-		depth?: number;
 		track: string;
 		priority: number;
 		order?: Order;
@@ -825,8 +793,6 @@ export class Subscribe {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
 		this.instance = props.instance;
-		this.node = props.node ?? 0n;
-		this.depth = props.depth ?? 0;
 		this.track = props.track;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
@@ -843,7 +809,7 @@ export class Subscribe {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
 		await encodePin(w, version, this.instance);
-		await encodeNode(w, version, this.node, this.depth);
+		await encodeNode(w, version);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
 
@@ -864,7 +830,7 @@ export class Subscribe {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
 		const instance = await decodePin(r, version);
-		const { node, depth } = await decodeNode(r, version, broadcast);
+		await decodeNode(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
 
@@ -881,8 +847,6 @@ export class Subscribe {
 					id,
 					broadcast,
 					instance,
-					node,
-					depth,
 					track,
 					priority,
 					order,
@@ -1077,7 +1041,7 @@ export class SubscribeStart {
  * producing any groups.
  */
 export class SubscribeFinish {
-	/** The exclusive final group sequence: the first sequence that will never be produced. */
+	/** The exclusive final group key: the first key that will never be produced. */
 	group: bigint;
 	/** The stream error code the track ended with, if it did not end cleanly. Draft-07+ only. */
 	error?: number;
@@ -1144,7 +1108,7 @@ export class SubscribeStarted {
 
 /**
  * A SUBSCRIBE_DROP or SUBSCRIBE_SKIP range: a non-empty `[Group Start, Group End)` on lite-07, an
- * inclusive `Group Start` and `Group End` before. Either way it ends by the reserved sequence
+ * inclusive `Group Start` and `Group End` before. Either way it ends by the reserved key
  * 2^64-1, so it never names that group.
  */
 async function decodeGroups(r: Reader, version: Version): Promise<{ start: bigint; end: bigint }> {
@@ -1169,13 +1133,13 @@ async function encodeGroups(w: Writer, start: bigint, end: bigint, version: Vers
  * Names groups that existed but will not be delivered: aborted or reset, evicted or expired with
  * no copy left, or stale.
  *
- * Draft-03+; publishers send it on Draft-05 and later. Before lite-07 it also names sequences
+ * Draft-03+; publishers send it on Draft-05 and later. Before lite-07 it also names keys
  * declared skipped, which lite-07 names in {@link SubscribeSkip}.
  */
 export class SubscribeDrop {
-	/** The first dropped group sequence. */
+	/** The first dropped group key. */
 	start: bigint;
-	/** One past the last dropped group sequence. */
+	/** One past the last dropped group key. */
 	end: bigint;
 	error: number;
 
@@ -1229,14 +1193,14 @@ export class SubscribeDrop {
 }
 
 /**
- * Names sequences the publisher declared it will never produce (see `Producer.skipGroups`):
+ * Names keys the publisher declared it will never produce (see `Producer.skipGroups`):
  * final, with no error, ending no reader. Lite-07+; earlier versions name them in a
  * {@link SubscribeDrop}.
  */
 export class SubscribeSkip {
-	/** The first skipped group sequence. */
+	/** The first skipped group key. */
 	start: bigint;
-	/** One past the last skipped group sequence. */
+	/** One past the last skipped group key. */
 	end: bigint;
 
 	constructor(props: { start: bigint; end: bigint }) {

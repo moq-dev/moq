@@ -172,8 +172,8 @@ else()
             VERBATIM
         )
     endif()
-    # System libraries the staticlib needs from an external linker. moq-ffi and moq-c share one
-    # dependency tree, so they share rs/moq-c/native-libs/, which says how to regenerate it.
+    # System libraries the staticlib needs from an external linker. moq-ffi and libmoq share one
+    # dependency tree, so they share rs/libmoq/native-libs/, which says how to regenerate it.
     if(APPLE)
         set(_platform apple)
     elseif(WIN32)
@@ -181,7 +181,7 @@ else()
     else()
         set(_platform linux)
     endif()
-    set(_native_libs "${_moq_workspace}/rs/moq-c/native-libs/${_platform}.txt")
+    set(_native_libs "${_moq_workspace}/rs/libmoq/native-libs/${_platform}.txt")
 endif()
 
 file(STRINGS "${_native_libs}" _lines)
