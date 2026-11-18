@@ -32,10 +32,11 @@ pub trait Transport {
 	/// Bind the session's framing, before the first poll.
 	fn bind(&mut self, _config: &Config) {}
 
-	/// Receive the next complete record.
+	/// Receive the next complete record, or refuse what the peer sent instead.
 	///
-	/// An error ends the receive side; the driver does not poll it again.
-	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>>;
+	/// Anything but [`Received::Record`], and any error, ends the receive side; the driver does
+	/// not poll it again.
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Received, Error>>;
 
 	/// Wait for room to queue another record with [`send`](Self::send).
 	fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
@@ -67,6 +68,24 @@ pub trait Transport {
 	fn address(&self) -> moq_net::transport::Address {
 		moq_net::transport::Address::Setup
 	}
+}
+
+/// What a [`Transport`] received: a record, or the peer breaking the framing underneath them.
+///
+/// A refusal closes the connection with a CONNECTION_CLOSE carrying its QUIC transport error,
+/// where an [`Error`] from the transport only resets it.
+#[derive(Debug)]
+pub enum Received {
+	/// One complete record.
+	Record(Bytes),
+	/// A record larger than the session accepts, refused before it was read
+	/// (FRAME_ENCODING_ERROR).
+	Oversized,
+	/// Bytes the transport cannot delimit into records, such as a draft-00 frame of unknown
+	/// type on a byte stream (FRAME_ENCODING_ERROR).
+	Malformed,
+	/// Something other than QMux, such as a WebSocket text message (PROTOCOL_VIOLATION).
+	Violation,
 }
 
 mod stream;

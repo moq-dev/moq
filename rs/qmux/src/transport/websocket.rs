@@ -10,7 +10,7 @@ use futures::{Sink, Stream};
 use kio::clock::{Interval, MissedTickBehavior, Sleep};
 use tokio_tungstenite::tungstenite;
 
-use super::Transport;
+use super::{Received, Transport};
 use crate::ws::KeepAlive;
 use crate::{Config, Error, MAX_FRAME_SIZE};
 
@@ -113,7 +113,7 @@ impl<T: WsStream> Transport for WsTransport<T> {
 		}
 	}
 
-	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Received, Error>> {
 		self.poll_ping(waiter)?;
 
 		let mut cx = waiter.context();
@@ -125,6 +125,13 @@ impl<T: WsStream> Transport for WsTransport<T> {
 			}
 			let message = match message {
 				Some(Ok(message)) => message,
+				// The socket is capped at the record limit, so it refuses a larger message
+				// before buffering it whole; the socket stays writable for the close.
+				Some(Err(tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
+					..
+				}))) => {
+					return Poll::Ready(Ok(Received::Oversized));
+				}
 				// Keep the WebSocket error, so callers can still tell a protocol fault apart.
 				Some(Err(err)) => return Poll::Ready(Err(Error::websocket(err))),
 				None => return Poll::Ready(Err(Error::Closed)),
@@ -132,11 +139,11 @@ impl<T: WsStream> Transport for WsTransport<T> {
 			match message {
 				// The binding makes an empty message a no-op, unlike an empty record.
 				Message::Binary(data) if data.is_empty() => {}
-				Message::Binary(data) if data.len() > self.recv_limit => return Poll::Ready(Err(Error::FrameTooLarge)),
-				Message::Binary(data) => return Poll::Ready(Ok(data)),
+				Message::Binary(data) if data.len() > self.recv_limit => return Poll::Ready(Ok(Received::Oversized)),
+				Message::Binary(data) => return Poll::Ready(Ok(Received::Record(data))),
 				Message::Close(_) => return Poll::Ready(Err(Error::Closed)),
 				// QMux rides binary messages only; text means the peer speaks something else.
-				Message::Text(_) => return Poll::Ready(Err(Error::ProtocolViolation)),
+				Message::Text(_) => return Poll::Ready(Ok(Received::Violation)),
 				// tungstenite queues a Pong reply when it reads a Ping; the next flush sends it.
 				Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
 			}

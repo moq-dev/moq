@@ -1,3 +1,4 @@
+import { TransportCode, TransportError } from "./error.ts";
 import { VarInt } from "./varint.ts";
 
 /** Decide the new receive-window limit to advertise (MAX_DATA / MAX_STREAM_DATA).
@@ -172,7 +173,7 @@ export class Window {
 
 	/** Spend the window up to `end`, which the caller has checked with {@link allows}. */
 	receiveTo(end: bigint): void {
-		if (end > this.#advertised) throw new Error("flow control error");
+		if (end > this.#advertised) throw new TransportError(TransportCode.FLOW_CONTROL_ERROR, "flow control error");
 		if (end > this.#received) this.#received = end;
 	}
 
