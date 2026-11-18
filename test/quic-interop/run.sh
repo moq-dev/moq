@@ -125,7 +125,10 @@ trap 'stop_runner; harness_finish 143; exit 143' TERM
 
 uv venv --quiet --python 3.12 "$HARNESS_RUN/venv"
 uv pip install --quiet --python "$HARNESS_RUN/venv" -r "$DIR/requirements.txt"
-cp "$DIR/sitecustomize.py" "$("$HARNESS_RUN/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')/"
+# A .pth line loads the fix: a sitecustomize would lose to the one Ubuntu's Python ships.
+purelib=$("$HARNESS_RUN/venv/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+cp "$DIR/reap_status.py" "$purelib/"
+echo "import reap_status" >"$purelib/reap_status.pth"
 
 # run_runner ROLE ARGS...: the runner's run.py in its own directory. The runner calls a
 # client that fails every server unsupported unless told not to (-m), which would hide a

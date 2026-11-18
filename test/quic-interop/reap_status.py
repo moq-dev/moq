@@ -1,4 +1,4 @@
-"""Loaded by the runner's Python: fixes a CPython race that fails its pcap checks.
+"""Loaded into the runner's Python by a .pth file: fixes a CPython race that fails its pcap checks.
 
 `Popen.send_signal()` polls before signalling, so when pyshark kills a tshark
 that already exited, the poll reaps it before asyncio's child watcher does. The

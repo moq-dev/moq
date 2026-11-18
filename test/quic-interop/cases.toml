@@ -95,6 +95,13 @@ result = "unsupported"
 why = "quiche's interop client exits 127 for keyupdate."
 
 [[known]]
+client = "quiche"
+server = "moq-quic"
+case = "multiplexing"
+result = "failed"
+why = "quiche's interop client moves on to its next request when stream_send writes only part of one, so a request cut short by its congestion window never finishes; it fails this against msquic, xquic and lsquic on interop.seemann.io too."
+
+[[known]]
 client = "moq-quic"
 server = "quic-go"
 case = "connectionmigration"
