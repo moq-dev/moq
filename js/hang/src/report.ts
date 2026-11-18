@@ -16,7 +16,7 @@ const PRIORITY = -128;
 
 // Deltas compress against the snapshot in their group, and a joiner asks for a fresh group once
 // they outweigh eight snapshots. Matches the Rust CLI's report tracks.
-const REFRESH = 8;
+const REFRESH = { ratio: 8 };
 
 /**
  * One compressed snapshot track, written only while someone subscribes, so an unobserved report
@@ -50,7 +50,7 @@ export class Writer<T, I = T> {
 	 * is aborted with the cause, which its subscribers read.
 	 */
 	update(value: I): void {
-		if (this.#closed || this.track.demand().wanted.peek() === undefined) return;
+		if (this.#closed || !this.track.demand().wanted.peek()) return;
 		try {
 			this.#producer.update(this.#schema.parse(value), Moq.Time.Timestamp.unscaled(this.#key++));
 		} catch (err) {

@@ -26,7 +26,7 @@ use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 #[derive(Clone, uniffi::Record)]
 pub struct MoqJsonSnapshotConfig {
 	/// Encode updates as deltas against the group's snapshot. When off, each update opens a new
-	/// group with a full snapshot. How long a group runs is set by the track's `refresh` ratio
+	/// group with a full snapshot. How long a group runs is set by the track's `refresh.ratio`
 	/// instead.
 	#[uniffi(default = true)]
 	pub deltas: bool,
@@ -114,7 +114,7 @@ mod tests {
 
 /// Publishes a JSON value that consumers see as a single latest state.
 ///
-/// A join that finds more deltas than the track's `refresh` ratio allows gets the value restated
+/// A join that finds more deltas than the track's `refresh.ratio` allows gets the value restated
 /// in a fresh group, by a task this producer runs until it is finished or dropped. That joiner
 /// still reads the cached group first.
 ///
@@ -483,7 +483,7 @@ impl MoqJsonStreamConsumer {
 /// that restates the retained records, so a reader can join at any point and the producer's
 /// memory stays bounded by what it pops or by [`MoqJsonWindowConfig::checkpoint_records`].
 ///
-/// A join that finds the open group's edits outweigh the track's `refresh` ratio gets the window
+/// A join that finds the open group's edits outweigh the track's `refresh.ratio` gets the window
 /// restated in a fresh group, by a task this producer runs until it is finished or dropped.
 ///
 /// Released before its finish, it ends its track with `Dropped`, which readers elsewhere see as

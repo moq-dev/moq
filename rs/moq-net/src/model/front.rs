@@ -2025,7 +2025,7 @@ mod tests {
 				..info()
 			},
 			track::Info {
-				refresh: Some(4),
+				refresh: crate::track::Refresh::default().with_ratio(4),
 				..info()
 			},
 		];

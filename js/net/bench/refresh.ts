@@ -22,7 +22,7 @@ for (const retained of [1, 64, 1024])
 			const broadcastRoute = source.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
 			const producers = Array.from({ length: tracks }, (_, i) =>
-				broadcast.createTrack(`data${i}`, { refresh: 1 }),
+				broadcast.createTrack(`data${i}`, { refresh: { ratio: 1 } }),
 			);
 			const pair = createMockTransportPair(ALPN_07_WIP);
 			const url = new URL("https://localhost/refresh");
@@ -71,8 +71,8 @@ for (const retained of [1, 64, 1024])
 					received.close();
 					const start = performance.now();
 					const joins = Array.from({ length: joined }, () => consumers[0].subscribe());
-					const wanted = producers[0].demand().wanted;
-					while (wanted.peek() !== group.start + 1n) await wanted.changed();
+					const refresh = producers[0].demand().refresh;
+					while (!refresh.peek()) await refresh.changed();
 					if (round > 0) samples.push((performance.now() - start) * 1000);
 					for (const join of joins) join.close();
 				}

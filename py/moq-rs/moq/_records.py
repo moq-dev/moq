@@ -31,6 +31,7 @@ from moq_ffi import (
     MoqSubscription,
     MoqTimestamp,
     MoqTrackInfo,
+    MoqTrackRefresh,
     MoqVideoDecodedFrame,
     MoqVideoPixelFormat,
     MoqVideoSurface,
@@ -300,6 +301,32 @@ def _subscription(subscription: Subscription | None) -> MoqSubscription | None:
 
 
 @dataclass(frozen=True)
+class TrackRefresh:
+    """When a subscriber asks a track's publisher for a new group, mirroring moq-net's ``track::Refresh``.
+
+    A track opting in starts each group with an independent frame (a keyframe or a snapshot),
+    so a new group is something the publisher can make on request; it hears the request
+    through :meth:`TrackDemand.refresh`. ``ratio`` is how many times its first frame a group's
+    later bytes may grow before a joining subscriber asks; zero asks on any join once a frame
+    follows the first, and ``None`` leaves joins to ``interval`` alone. ``interval`` is how long
+    after the newest group arrived a request may ask for another, ``None`` for no wait; it caps
+    how often the publisher makes groups however many subscribers ask.
+
+    A bare ``TrackRefresh()`` asks for nothing.
+    """
+
+    ratio: int | None = None
+    interval: timedelta | None = None
+
+    @classmethod
+    def _from_ffi(cls, refresh: MoqTrackRefresh) -> TrackRefresh:
+        return cls(ratio=refresh.ratio, interval=refresh.interval)
+
+    def _ffi(self) -> MoqTrackRefresh:
+        return MoqTrackRefresh(ratio=self.ratio, interval=self.interval)
+
+
+@dataclass(frozen=True)
 class TrackInfo:
     """Publisher-side track properties, mirroring moq-net's ``track::Info``.
 
@@ -307,8 +334,7 @@ class TrackInfo:
     ties between subscriptions of equal subscriber priority. ``max_age`` is how long a
     superseded group stays fresh: the default zero serves only the live edge, and
     ``None`` sets no publisher limit, leaving only the cache to bound it. ``refresh`` is
-    how many times its first frame a group's later bytes may grow before a joining
-    subscriber asks for a new group, ``None`` to never ask. ``timescale`` is ticks per second:
+    when a subscriber asks for a new group, never by default. ``timescale`` is ticks per second:
     ``None`` means the track is untimed, on both publish and receive.
     ``compression`` compresses each group on the wire to peers that support it, ``None``
     sending frames as written; readers always see the original frames.
@@ -316,7 +342,7 @@ class TrackInfo:
 
     priority: int = 0
     max_age: timedelta | None = timedelta(0)
-    refresh: int | None = None
+    refresh: TrackRefresh = TrackRefresh()
     timescale: int | None = None
     compression: MoqCompression | None = None
 
@@ -324,7 +350,7 @@ class TrackInfo:
         return MoqTrackInfo(
             priority=self.priority,
             max_age=self.max_age,
-            refresh=self.refresh,
+            refresh=self.refresh._ffi(),
             timescale=self.timescale,
             compression=self.compression,
         )
@@ -334,7 +360,7 @@ class TrackInfo:
         return TrackInfo(
             priority=info.priority,
             max_age=info.max_age,
-            refresh=info.refresh,
+            refresh=TrackRefresh._from_ffi(info.refresh),
             timescale=info.timescale,
             compression=info.compression,
         )

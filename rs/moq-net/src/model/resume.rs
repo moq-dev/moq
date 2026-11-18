@@ -369,6 +369,17 @@ impl Consumer {
 		self.state.read().answering().map(|(_, copy)| copy.clone())
 	}
 
+	/// The copy a read goes to first and the generation it serves at (the route's, when
+	/// none), and whether the track ended.
+	pub(super) fn answering(&self) -> (u64, Option<track::Consumer>, bool) {
+		let route = self.state.read();
+		let terminal = route.phase.terminal();
+		match route.answering() {
+			Some((generation, copy)) => (generation, Some(copy.clone()), terminal),
+			None => (route.generation, None, terminal),
+		}
+	}
+
 	/// The copy the front parked, while it serves none and may still serve one again.
 	pub(super) fn parked(&self) -> Option<track::Consumer> {
 		let route = self.state.read();
@@ -508,7 +519,7 @@ impl Consumer {
 	}
 
 	/// Poll for the route state to move past `generation`, or the track to end.
-	fn poll_changed(&self, generation: u64, waiter: &kio::Waiter) -> Poll<()> {
+	pub(super) fn poll_changed(&self, generation: u64, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
 			.poll(waiter, |route| route.moved_past(generation))
 			.map(|_| ())

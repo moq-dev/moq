@@ -164,7 +164,7 @@ async fn an_export_stage_ending_during_drain_waits_for_every_session() {
 		.unwrap();
 	let mut demand = catalog.demand();
 	let wanted = async {
-		while demand.wanted_changed().await?.is_none() {}
+		while !demand.wanted_changed().await? {}
 		moq_net::Result::Ok(())
 	};
 	kio::clock::timeout(TIMEOUT, wanted).await.unwrap().unwrap();

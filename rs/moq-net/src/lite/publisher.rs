@@ -2127,7 +2127,7 @@ impl Request for TrackInfoServe {
 				let info = ready!(consumer.poll_info(waiter))?;
 				writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
 				writer.buffer(&lite::TrackInfo {
-					refresh: None,
+					refresh: crate::track::Refresh::default(),
 					priority: info.priority,
 					max_age: None,
 					timescale: info.timescale,
@@ -4901,7 +4901,7 @@ impl TrackRun {
 			.wanted_group
 			.is_some_and(|wanted| self.track.peek_largest().is_none_or(|largest| wanted > largest.group))
 		{
-			self.track.join();
+			self.track.ask(crate::model::track::Ask::Refresh);
 		}
 		// The steer wakes every in-flight group, so an update that keeps it wakes none.
 		let steer = Steer {
@@ -7681,7 +7681,7 @@ mod serve_group_test {
 		let track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
 			"refresh",
-			track::Info::default().with_refresh(1),
+			track::Info::default().with_refresh(crate::track::Refresh::default().with_ratio(1)),
 		);
 		let subscriber = track.subscribe(None);
 		let (mut run, _, _) = lite_run(Version::Lite07, SinkSession::new(Log::default()), subscriber);
@@ -7702,18 +7702,22 @@ mod serve_group_test {
 			order: Order::Descending,
 		};
 		run.replace(update(Some(0)));
-		assert_eq!(track.demand().wanted(), Some(0), "stale request is not a join");
+		assert_eq!(track.demand().wanted_start(), Some(0), "stale request is not a join");
 		run.replace(update(Some(1)));
-		assert_eq!(track.demand().wanted(), Some(1));
+		assert_eq!(track.demand().wanted_start(), Some(1));
 		let mut group = track.append_next().unwrap();
 		group
 			.write_frame(crate::Timestamp::unscaled(group.start), &b"key"[..])
 			.unwrap();
 		group.finish().unwrap();
 		run.replace(update(Some(1)));
-		assert_eq!(track.demand().wanted(), Some(1), "answered request stays answered");
+		assert_eq!(
+			track.demand().wanted_start(),
+			Some(1),
+			"answered request stays answered"
+		);
 		run.replace(update(Some(2)));
-		assert_eq!(track.demand().wanted(), Some(1), "new hop judges its own ratio");
+		assert_eq!(track.demand().wanted_start(), Some(1), "new hop judges its own ratio");
 	}
 
 	fn write_group(track: &mut track::Producer, key: u64, millis: u64) {
@@ -10591,7 +10595,7 @@ mod tests {
 				.now_or_never()
 				.expect("track requested")
 				.unwrap();
-			assert!(track.demand().wanted().is_some(), "{case}: nobody wants the track");
+			assert!(track.demand().wanted(), "{case}: nobody wants the track");
 			track
 		});
 
@@ -11082,7 +11086,7 @@ mod tests {
 						matches!(serve.state, RequestState::Hold { finished, .. } if finished != blocked),
 						"{case}: TRACK_INFO was not answered as expected"
 					);
-					assert!(track.demand().wanted().is_some(), "{case}: the track was let go");
+					assert!(track.demand().wanted(), "{case}: the track was let go");
 					assert_eq!(
 						publisher.shared.owed.load(Ordering::Relaxed),
 						usize::from(blocked),
@@ -11377,7 +11381,8 @@ mod tests {
 			.now_or_never()
 			.expect("track requested")
 			.unwrap();
-		let track = request.accept(crate::track::Info::timed().with_refresh(1));
+		let track =
+			request.accept(crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)));
 		let mut group = track.create_group(group::Info { start: 1 }).unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(group.key_time(), frame).unwrap();
@@ -11388,7 +11393,7 @@ mod tests {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(run.steer_tx.read().priority, 7, "the update was lost");
-		assert_eq!(track.demand().wanted(), Some(2), "the refresh request was lost");
+		assert_eq!(track.demand().wanted_start(), Some(2), "the refresh request was lost");
 
 		// The asked-for group arrives, over the ratio too. A restated wanted group is now
 		// stale, so it is not another join.
@@ -11403,7 +11408,7 @@ mod tests {
 			panic!("the subscription is not running");
 		};
 		assert_eq!(run.steer_tx.read().priority, 5, "the update was lost");
-		assert_eq!(track.demand().wanted(), Some(2), "a stale wanted group joined");
+		assert_eq!(track.demand().wanted_start(), Some(2), "a stale wanted group joined");
 	}
 
 	/// A lite-07 SUBSCRIBE to `room/video`, served until it runs.

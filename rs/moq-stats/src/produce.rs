@@ -523,9 +523,11 @@ impl<T: Serialize> Snapshot<T> {
 		// A joiner wants a group past the newest, so open this tick's with a snapshot, even of an
 		// unchanged value. Answered once per tick rather than at once: a joiner waits at most one
 		// interval, the same as for any change.
-		if let (Some(wanted), Some(largest)) = (self.track.demand().wanted(), self.largest)
-			&& wanted > largest
-		{
+		if self.largest.is_some()
+			&& matches!(
+				self.track.demand().poll_refresh(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(()))
+			) {
 			self.encoder.reset();
 		}
 		let frame = match self.encoder.update(value) {
@@ -614,7 +616,7 @@ fn info() -> track::Info {
 	track::Info::default()
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_compression(moq_net::track::Compression::Deflate)
-		.with_refresh(8)
+		.with_refresh(moq_net::track::Refresh::default().with_ratio(8))
 		.with_max_age(None)
 }
 
@@ -653,7 +655,7 @@ impl<V: Serialize> Output<V> {
 
 	/// Whether anyone wants the output.
 	fn is_wanted(&self) -> bool {
-		self.snapshot.demand().wanted().is_some()
+		self.snapshot.demand().wanted()
 	}
 
 	/// Publish this drain's entries (`{}` when there are none) and clear them
@@ -1466,7 +1468,7 @@ mod tests {
 		let frame = |n| Frame {
 			entries: vec![(Path::from_static("a"), n)],
 		};
-		let wanted = |track: &track::Producer| track.demand().wanted();
+		let refreshing = |track: &track::Producer| track.demand().poll_refresh(&kio::Waiter::noop()).is_ready();
 
 		// A 7 byte snapshot and nine 7 byte deltas: past eight snapshots.
 		for n in 0..10 {
@@ -1474,7 +1476,7 @@ mod tests {
 		}
 		assert_eq!(snapshot.largest, Some(5_000));
 		let _late = track.subscribe(None);
-		assert_eq!(wanted(&track), Some(5_001), "the join asks for a fresh group");
+		assert!(refreshing(&track), "the join asks for a fresh group");
 
 		// The interval already has its group, so the snapshot waits for the next one.
 		assert!(snapshot.update(&frame(9), stamp(5)).unwrap().is_none());

@@ -1407,7 +1407,7 @@ for (const stop of ["resume", "close", "detach", "track closed", "track replaced
 }
 
 async function recordKeyframes(
-	info: Partial<Moq.Track.Info>,
+	info: Moq.Track.InfoInit,
 	run: (ctx: {
 		encoder: Encoder;
 		track: Moq.Track.Producer;
@@ -1477,7 +1477,7 @@ test("a repeated capture timestamp is dropped rather than failing the track", as
 });
 
 test("a join over the refresh ratio forces a keyframe on the next frame", async () => {
-	const keys = await recordKeyframes({ refresh: 2 }, async ({ track, send }) => {
+	const keys = await recordKeyframes({ refresh: { ratio: 2 } }, async ({ track, send }) => {
 		const watching = track.subscribe();
 		const joined: Moq.Track.Subscriber[] = [];
 		try {
@@ -1503,7 +1503,7 @@ test("a join over the refresh ratio forces a keyframe on the next frame", async 
 });
 
 test("a join that a written group serves forces no keyframe, even one encoded without a subscriber", async () => {
-	const keys = await recordKeyframes({ refresh: 2 }, async ({ encoder, track, send }) => {
+	const keys = await recordKeyframes({ refresh: { ratio: 2 } }, async ({ encoder, track, send }) => {
 		await send(0);
 		encoder.cut();
 		await send(100);

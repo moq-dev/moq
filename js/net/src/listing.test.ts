@@ -6,7 +6,13 @@ import type { Tracks } from "./listing.ts";
 import type { Info } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
-const INFO: Info = { compression: "none", timescale: null, maxAge: null, priority: 0, refresh: null };
+const INFO: Info = {
+	compression: "none",
+	timescale: null,
+	maxAge: null,
+	priority: 0,
+	refresh: { ratio: null, interval: null },
+};
 
 /** Lets queued microtasks and the listing's signal notifications run. */
 function settle(): Promise<void> {
@@ -69,9 +75,9 @@ test("an empty listing syncs at once", async () => {
 
 test("a listed track reports its info", async () => {
 	const broadcast = new BroadcastProducer();
-	broadcast.createTrack("a", { priority: 9, refresh: 4 });
+	broadcast.createTrack("a", { priority: 9, refresh: { ratio: 4 } });
 	const event = await broadcast.consume().tracks().next();
-	expect(event?.kind === "added" && event.info).toMatchObject({ priority: 9, refresh: 4 });
+	expect(event?.kind === "added" && event.info).toMatchObject({ priority: 9, refresh: { ratio: 4, interval: null } });
 });
 
 test("a datagram track is listed until it ends", async () => {

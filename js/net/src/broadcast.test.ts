@@ -210,7 +210,7 @@ test("an info lookup joining a subscription's request is answered after the subs
 	// Flush every pending notification, so only the lookup is left holding demand.
 	subscriber.close();
 	await yieldNow();
-	expect(request.demand().wanted.peek()).toBeUndefined();
+	expect(request.demand().wanted.peek()).toBe(false);
 
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
@@ -709,7 +709,7 @@ test("a pending track info query is answered by its request, and closing rejects
 	const request = await pending;
 	if (!request) throw new Error("expected request");
 	// Nobody subscribes to the queried track itself.
-	expect(request.demand().wanted.peek()).toBeUndefined();
+	expect(request.demand().wanted.peek()).toBe(false);
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
 
