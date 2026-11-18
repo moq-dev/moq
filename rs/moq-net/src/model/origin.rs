@@ -7675,7 +7675,9 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.node(), self.timers.clone());
+		// A relay forwards on every handle (`with_proxy`), and an application on none, so
+		// the creating handle speaks for the origin here, as for `OwnClaims::proxy`.
+		let node = crate::route::Node::origin(self.node(), self.proxy, self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),

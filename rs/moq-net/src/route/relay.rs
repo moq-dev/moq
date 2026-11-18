@@ -37,8 +37,10 @@
 //! withdrawal. A claims message carries its floor even with nothing changed, and a
 //! withdrawal says whether the publisher ended the claim or its announcer lost it. Across
 //! a scoped grant only claims travel: the receiver announces each again under its own
-//! identity with the chain of relays that did so, and refuses one whose chain names it or
-//! would grow past the longest path.
+//! identity. A claim's chain names each relay it entered or left a routing domain by, the
+//! announcer, then each grant's exporter and adopter, and a node takes no claim whose
+//! chain, with it appended, names a relay twice or grows past the longest path: that claim
+//! left a relay's domain and came back.
 //!
 //! Each neighbour asks for a set of prefixes edited in place, as under the path rule: a
 //! routing neighbour forwards for the whole domain, so it asks for the whole tree, and
@@ -113,7 +115,7 @@ pub(crate) struct Hop {
 type Rank = (bool, Reverse<i8>, Metric);
 
 /// How claims of one precedence order, lower first: the rank of the route and the claim
-/// together, then the shorter chain, and the claimant.
+/// together, then the fewer relays that took the claim on its way here, and the claimant.
 type ClaimOrder = (Rank, usize, NodeId);
 
 /// What a route says.
@@ -207,7 +209,8 @@ pub(crate) struct Claim<A> {
 	/// its reader shows it, while the claim may return. Set only on a claim told to an
 	/// endpoint or scoped neighbour, and on one a scoped neighbour's adopter announces.
 	pub unavailable: bool,
-	/// The relays that announced it again across a scoped grant, the first first.
+	/// Each relay it entered or left a routing domain by, the first first: the one that
+	/// announced it, then each grant's exporter and adopter, a relay that is both named once.
 	pub chain: Vec<Id>,
 	/// It crossed a marked link on its way to the node that told it, so it is never told
 	/// over another, as a marked route is never sent: set where a node takes a claim over a
@@ -489,6 +492,10 @@ pub(crate) struct Router<N, I, A> {
 	/// Marked bit, whose route is marked from the start, so no such claim ever crosses
 	/// another marked link while every neighbour still gets each copy whole.
 	me_marked: NodeId,
+	/// Whether it carries claims between its peers, as a relay does: one that does names
+	/// itself in the chain of every claim it takes from, or tells, a peer it exchanges no
+	/// routes with. An application publishing its own claims names itself in no chain.
+	forwards: bool,
 	/// How long the reader shows a lost claim unavailable before offline.
 	debounce: Duration,
 	now: Instant,
@@ -610,6 +617,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		Self {
 			me,
 			me_marked: marked_id(me),
+			forwards: true,
 			debounce,
 			now: Instant::ZERO,
 			sessions: 0,
@@ -662,6 +670,13 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// How this node names itself on a path.
 	pub fn me(&self) -> NodeId {
 		self.me
+	}
+
+	/// Carry no claim between peers, as an application publishing its own does: it then
+	/// names itself in no chain. A node forwards until told this, before any session.
+	pub fn endpoint(&mut self) {
+		debug_assert!(self.peers.is_empty(), "set before any session");
+		self.forwards = false;
 	}
 
 	/// How it names itself as the node announcing what it took over a marked link.
@@ -1968,18 +1983,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			return Err(Error::Malformed);
 		}
 		let (cost, priority, upstream) = (peer.port.cost, peer.port.priority, peer.port.upstream);
-		let scoped = matches!(peer.port.role, Role::Scoped(_));
 		for (broadcast, change) in changes {
 			self.visit();
 			let change = match change {
-				// A claim that already crossed this relay came round a ring of grants, and
-				// one whose chain this relay would carry past the longest path is never
-				// taken, as a route past the metric is never used.
-				Change::Live(claim)
-					if claim.chain.contains(&self.me.relay) || (scoped && claim.chain.len() + 1 >= MAX_HOPS) =>
-				{
-					Change::Lost
-				}
+				Change::Live(claim) if !self.takes(&claim.chain) => Change::Lost,
 				// Unavailable is only ever news of a run this neighbour gave before: one first
 				// seen unavailable, which nothing can serve, is not there until it is
 				// available. A neighbour that moved to it no longer gives the run it gave.
@@ -1999,9 +2006,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					claim.cost = claim.cost.saturating_add(cost);
 					claim.priority = claim.priority.min(priority);
 					claim.marked |= upstream;
-					if scoped {
-						claim.chain.push(self.me.relay);
-					}
+					// The claim enters this node's routing domain here.
+					self.stamp(&mut claim.chain);
 					Change::Live(claim)
 				}
 				change => change,
@@ -2022,6 +2028,24 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 		}
 		Ok(())
+	}
+
+	/// Whether this node takes a claim whose chain is `chain` from a peer it exchanges no
+	/// routes with. One naming this node, or any relay twice, left the routing domain of
+	/// that relay and came back to it, and one this node would carry to the longest path
+	/// is never taken, as a route past the metric is never used.
+	fn takes(&self, chain: &[Id]) -> bool {
+		let mut seen = BTreeSet::from([self.me.relay]);
+		chain.iter().all(|relay| seen.insert(*relay)) && chain.len() + usize::from(self.forwards) < MAX_HOPS
+	}
+
+	/// Name this node at the end of a claim's chain as the claim enters or leaves its
+	/// routing domain, unless it ends the chain already, as a relay that adopted a claim
+	/// across one grant and exports it across the next does.
+	fn stamp(&self, chain: &mut Vec<Id>) {
+		if self.forwards && chain.last() != Some(&self.me.relay) {
+			chain.push(self.me.relay);
+		}
 	}
 
 	fn ungive(&mut self, broadcast: &Broadcast<I>, peer: N) {
@@ -2259,7 +2283,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					)
 				}
 			};
-			let key = (rank, claim.chain.len(), origin);
+			// Counted as the relays that took the claim on its way here: this node's own claim
+			// names it already, and another's lacks the step from here to its announcer.
+			let taken = claim.chain.len() + usize::from(!self.is_self(origin));
+			let key = (rank, taken, origin);
 			if pick.as_ref().is_none_or(|(best, _)| key < *best) {
 				pick = Some((key, claim));
 			}
@@ -2513,6 +2540,13 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 			},
 		};
+		// The claim leaves this node's routing domain here, so the chain names its exporter,
+		// and one that would reach the longest path is told to no one.
+		let mut claim = claim;
+		self.stamp(&mut claim.chain);
+		if claim.chain.len() >= MAX_HOPS {
+			return None;
+		}
 		let by = (path.parts().count() - from.parts().count()) as u64;
 		Some(Told {
 			claim: claim.lowered(by),
@@ -2655,6 +2689,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let Self {
 			me,
 			me_marked: _,
+			forwards,
 			debounce,
 			now,
 			sessions,
@@ -2706,7 +2741,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			.map(|(broadcast, at)| (broadcast, now.saturating_duration_since(*at).min(*debounce)))
 			.collect();
 		let state = (
-			(me, debounce, sessions, peers, routing, fresh, heard, unnamed),
+			(me, forwards, debounce, sessions, peers, routing, fresh, heard, unnamed),
 			(dead, closed, draining, stale, best, marks, known, revs),
 			(sources, ended, dirty, waiting, since, gone, reader.shown(), out),
 		);
@@ -3416,6 +3451,151 @@ mod tests {
 				assert!(well_built(changes), "{msg:?}");
 			}
 		}
+	}
+
+	/// A live claim with `chain`.
+	fn chained(chain: Vec<Id>) -> Change<Run> {
+		let Change::Live(claim) = claim(run(0), 0) else {
+			unreachable!("a live claim");
+		};
+		Change::Live(Claim { chain, ..claim })
+	}
+
+	/// What `peer` was told of each broadcast's chain.
+	fn chains(out: Vec<(usize, Msg<u64, Run>)>, peer: usize) -> BTreeMap<Broadcast<u64>, Vec<Id>> {
+		(out.into_iter())
+			.filter(|(to, _)| *to == peer)
+			.flat_map(|(_, msg)| match msg {
+				Msg::Announce { changes } => changes,
+				_ => Vec::new(),
+			})
+			.filter_map(|(broadcast, change)| match change {
+				Change::Live(claim) => Some((broadcast, claim.chain)),
+				_ => None,
+			})
+			.collect()
+	}
+
+	/// A claim's chain names the relay that announced it and, for each grant it crossed,
+	/// the relay that exported it and the one that adopted it: a relay names itself as a
+	/// claim enters its routing domain and as it leaves, once where it does both.
+	#[test]
+	fn a_chain_names_each_relay_a_claim_entered_or_left_a_domain_by() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Endpoint);
+		open(&mut router, 3, Role::Scoped(vec![p(ROOT)]));
+		open(&mut router, 4, Role::Routing(node(4)));
+		open(&mut router, 5, Role::Scoped(vec![p(ROOT)]));
+		router
+			.recv(
+				2,
+				Msg::Announce {
+					changes: vec![((p("own"), 7), claim(run(0), 0))],
+				},
+			)
+			.unwrap();
+		router
+			.recv(
+				3,
+				Msg::Announce {
+					changes: vec![((p("adopted"), 7), chained(vec![8, 9]))],
+				},
+			)
+			.unwrap();
+		router.recv(4, route(4, 4, 1)).unwrap();
+		router
+			.recv(
+				4,
+				Msg::Claims {
+					origin: node(4),
+					changes: vec![((p("routed"), 7), chained(vec![4]))],
+					floor: 1,
+				},
+			)
+			.unwrap();
+		let own = router.own().1;
+		assert_eq!(own[&(p("own"), 7)].chain, [1], "the announcing relay");
+		assert_eq!(own[&(p("adopted"), 7)].chain, [8, 9, 1], "the adopter");
+		router.drain();
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(5, edit).unwrap();
+		let told = chains(router.drain(), 5);
+		assert_eq!(
+			told,
+			BTreeMap::from([
+				((p("own"), 7), vec![1]),
+				((p("adopted"), 7), vec![8, 9, 1]),
+				((p("routed"), 7), vec![4, 1]),
+			]),
+			"the exporter, once where it announced the claim"
+		);
+	}
+
+	/// A node across a grant takes no claim that crossed it before, in whichever role,
+	/// nor one naming another relay twice: such a claim left that relay's routing domain
+	/// and came back. A relay is named by its Relay, so the same holds where the grant is
+	/// marked and the claim would go under the marked Node ID.
+	#[test]
+	fn a_claim_naming_a_relay_twice_is_not_taken() {
+		for upstream in [false, true] {
+			let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+			let port = Port {
+				upstream,
+				..port(Role::Scoped(vec![p(ROOT)]))
+			};
+			router.connect(2, port).unwrap();
+			router.recv(2, Msg::Edited).unwrap();
+			let refused = [
+				("announced", vec![1, 5, 6]),
+				("exported", vec![4, 1, 6, 7]),
+				("adopted", vec![4, 5, 1, 7]),
+				("revisits", vec![4, 5, 6, 5, 8]),
+			];
+			let changes = (refused.iter().cloned())
+				.chain([("fresh", vec![4, 5, 6])])
+				.map(|(path, chain)| ((p(path), 7), chained(chain)))
+				.collect();
+			router.recv(2, Msg::Announce { changes }).unwrap();
+			let own: Vec<Broadcast<u64>> = (router.own().1.into_keys())
+				.chain(router.own_as(router.me_marked()).1.into_keys())
+				.collect();
+			assert_eq!(own, [(p("fresh"), 7)], "upstream {upstream}");
+		}
+	}
+
+	/// A relay never tells a claim whose chain its own Relay would carry to the longest
+	/// path, which no node could send.
+	#[test]
+	fn a_chain_is_never_told_past_the_longest_path() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Scoped(vec![p(ROOT)]));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		let changes = [("short", MAX_HOPS - 2), ("long", MAX_HOPS - 1)]
+			.map(|(path, len)| ((p(path), 7), chained((100..100 + len as Id - 1).chain([2]).collect())))
+			.to_vec();
+		router
+			.recv(
+				2,
+				Msg::Claims {
+					origin: node(2),
+					changes,
+					floor: 1,
+				},
+			)
+			.unwrap();
+		router.drain();
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(3, edit).unwrap();
+		let told = chains(router.drain(), 3);
+		assert_eq!(told.keys().cloned().collect::<Vec<_>>(), [(p("short"), 7)]);
+		assert_eq!(told[&(p("short"), 7)].len(), MAX_HOPS - 1);
 	}
 
 	/// A message that changes one claim twice is one the rule never sends, so it is

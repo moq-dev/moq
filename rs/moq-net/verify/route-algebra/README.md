@@ -115,12 +115,19 @@ never improves a claim in the real router (`a_grant_never_improves_a_claim`).
   [warmth](https://github.com/moq-dev/moq/pull/8903) argues it separately.
 - **Liveness under churn that never stops.** Convergence needs each epoch to
   last long enough.
-- **The chain as Rust records it.** The claim instance's path names every node
-  that took the claim. Rust's chain names only the receivers across scoped
-  grants, not the relay that exported the claim or the one that announced it,
-  so a node refuses fewer echoes than the algebra does. The router should
-  record the announcing relay first, then each grant's exporter and adopter,
-  and refuse a claim that names it in the role it would take.
+- **The chain where a claim stays inside a domain.** The claim instance's path
+  names every node that took the claim, and each refuses a claim naming it.
+  Rust's chain names the relays a claim entered or left a routing domain by:
+  the announcing relay, then each grant's exporter and adopter, a relay that
+  adopts across one grant and exports across the next once, which is that path
+  without the steps from a node to itself. A relay across a grant refuses a
+  claim whose chain, with it appended, names a relay twice, so it refuses what
+  the algebra refuses at it as adopter and at its exporter. Inside a domain no
+  node checks the chain: a claim that left a domain and came back by a third
+  relay is announced there, as the algebra allows, and a node of that domain
+  the chain names, which the algebra has refuse it, still ranks it below the
+  claim it echoes, and the relay across the next grant it would leave by
+  refuses it.
 - **The neighbour key.** The proof orders equal routes by the neighbour's relay
   and then its start. The prototype orders them by its simulation's node index,
   which equals the relay. The production router must order them by the

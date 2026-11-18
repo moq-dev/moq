@@ -967,6 +967,45 @@ pub(super) fn quiesce(sim: &mut RelaySim) {
 	panic!("never settles");
 }
 
+/// A claim that crosses a grant and comes back over another is refused by the relay it
+/// left by and by the relay that announced it, since its chain names both: only the
+/// adopters named it before, so the exporter took the echo and announced it as its own,
+/// and the announcer kept it once its publisher left, a request there going round both
+/// meshes. Mesh 0-1 grants the claim to mesh 2-3 at 1, and 3 grants it back to `back`
+/// over a dearer grant, so 3 holds 2's copy rather than one of its own.
+#[test]
+fn a_claim_never_comes_back_over_a_grant() {
+	for back in [1, 0] {
+		let mut sim = RelaySim::new(5, relay::debounce(HOP));
+		sim.client(4);
+		sim.publish(4, 100);
+		sim.link(4, 0, 1, Tie::Peer);
+		sim.link(0, 1, 1, Tie::Peer);
+		sim.link(2, 3, 1, Tie::Peer);
+		sim.link(1, 2, 1, Tie::Scoped);
+		sim.link(3, back, 10, Tie::Scoped);
+		sim.claim(4, "live", true);
+		quiesce(&mut sim);
+		let broadcast = (p("live"), 100);
+		let echo = |sim: &RelaySim| sim.router(back).expect("a relay").own().1.contains_key(&broadcast);
+		assert_eq!(
+			sim.chase(3, 100, &p("live")),
+			Some((vec![2, 1, 0, 4], true)),
+			"back {back}"
+		);
+		match back {
+			1 => assert!(!echo(&sim), "the exporter took the echo"),
+			_ => {
+				// Only the announcer's own publisher leaving shows whether it held an echo.
+				sim.auto = false;
+				sim.claim(4, "live", false);
+				sim.deliver(4, 0);
+				assert!(!echo(&sim), "the announcer kept the echo");
+			}
+		}
+	}
+}
+
 /// Two relays that share a draining neighbour and a scoped link each hold the other's
 /// copy of its claim. The copy says it is draining too, so neither prefers it to its own
 /// route and the two never trade places.

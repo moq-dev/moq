@@ -95,7 +95,7 @@ pub(crate) struct Served {
 	pub available: bool,
 	/// The one a reader here follows, and a request naming no node.
 	pub primary: bool,
-	/// The relays that announced it again across a scoped grant or an older version.
+	/// Each relay it entered or left a routing domain by, as [`relay::Claim::chain`].
 	pub chain: Vec<Id>,
 	/// The way to it crossed a marked link, so the origin never offers it to an upstream.
 	pub marked: bool,
@@ -254,10 +254,14 @@ impl Drop for Locked<'_> {
 }
 
 impl Node {
-	/// A node naming itself `me`, dating what it hears by `clock`.
-	pub fn new(me: NodeId, clock: Deadlines) -> Self {
+	/// A node naming itself `me`, dating what it hears by `clock`, that carries claims
+	/// between its peers when it `forwards`, as a relay does.
+	pub fn new(me: NodeId, forwards: bool, clock: Deadlines) -> Self {
 		debug_assert!(me.relay != 0, "a node names a relay");
 		let mut router = Router::new(me, relay::debounce(relay::HOP));
+		if !forwards {
+			router.endpoint();
+		}
 		router.clock(clock.now());
 		router.follow();
 		for (key, upstream) in [(LOCAL, false), (LOCAL_MARKED, true)] {
@@ -295,15 +299,15 @@ impl Node {
 	}
 
 	/// A node for the origin whose node is `relay`, named by it and by when it started,
-	/// which only grows across the restarts of one relay.
-	pub fn origin(relay: std::num::NonZeroU64, clock: Deadlines) -> Self {
+	/// which only grows across the restarts of one relay, that `forwards` as the origin does.
+	pub fn origin(relay: std::num::NonZeroU64, forwards: bool, clock: Deadlines) -> Self {
 		let started = kio::clock::Wall::now().saturating_duration_since(kio::clock::Wall::UNIX_EPOCH);
 		let me = NodeId {
 			relay: relay.get(),
 			start: u64::try_from(started.as_micros()).unwrap_or(u64::MAX),
 			marked: false,
 		};
-		Self::new(me, clock)
+		Self::new(me, forwards, clock)
 	}
 
 	/// Whether `other` is this node, rather than another origin's.

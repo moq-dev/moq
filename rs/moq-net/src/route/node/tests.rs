@@ -13,7 +13,7 @@ fn id(relay: u64) -> NodeId {
 
 fn node() -> (Node, Deadlines) {
 	let clock = Deadlines::new(Instant::now());
-	(Node::new(id(1), clock.clone()), clock)
+	(Node::new(id(1), true, clock.clone()), clock)
 }
 
 /// A link to a neighbour in `role`.

@@ -455,7 +455,11 @@ Another Instance at a path is another claim: the publisher sends its ANNOUNCE_ST
 
 A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) to the claim's cost, and takes the lower of the claim's priority and its own local priority for the session.
 A routing node that receives a claim this way announces it to its routing neighbours as its own, under its marked Node ID when the session is marked or the claim's `Marked` flag is set (see [Routing](#routing)).
-When the sender is itself a routing node, confined to claims by a scoped grant, or the claim arrived over an earlier version, the receiver first appends its own Relay to the claim's chain, and MUST NOT take a claim whose chain names its Relay or would reach 32 Relays.
+A claim's chain names each relay the claim entered or left a routing domain by: a routing node appends its own Relay when it takes a claim from anything but a routing neighbour (a peer it does not exchange routes with, an earlier version, or its own application), and when it sends a claim to a peer it does not exchange routes with, unless the chain already ends with its Relay.
+The chain therefore names the routing node that first announced the claim, then for each scoped grant the claim crossed the relay that sent it and the relay that took it, each once in a row: a relay that takes a claim across one grant and sends it across the next appears once.
+A routing node MUST NOT take a claim whose chain, with its own Relay appended, would name any Relay twice or reach 32 Relays: such a claim left a relay's routing domain and came back to it.
+A routing node sends no peer a claim whose chain its own Relay would carry to 32.
+A Relay names a process whatever identity it announces under, so the chain is the same for a claim announced under a marked Node ID.
 
 ### Floors {#floors}
 Each routing node numbers the changes to the claims it announces with a Revision, starting at 0 for each Node ID.
@@ -1362,8 +1366,8 @@ A bit field: 0x1 (`Unavailable`) when no route reaches the claim from the sender
 The lowest local priority of a session on the way to the claim's publisher, as a u8 with 128 as the midpoint; a publisher's own claim carries 255.
 
 **Chain Count** and **Relay**:
-The claim's chain: the Relay (see [Node ID Parameter](#node-id-parameter)) of each routing node that announced the claim again across a scoped grant or from an earlier version (see [Claims](#claims)), oldest first, and none for a claim nothing announced again.
-More than 31, or a Relay of 0, is a PROTOCOL_VIOLATION: a chain that would reach 32 is never taken (see [Claims](#claims)), so none is sent.
+The claim's chain: the Relay (see [Node ID Parameter](#node-id-parameter)) of each relay the claim entered or left a routing domain by, oldest first (see [Claims](#claims)), and none for a claim no routing node has taken.
+More than 31, or a Relay of 0, is a PROTOCOL_VIOLATION: no routing node sends a chain its Relay would carry to 32 (see [Claims](#claims)).
 
 
 ## ANNOUNCE_END {#announce-end}
@@ -2276,7 +2280,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session. A finished Announce Stream means its endpoint is leaving.
 - ANNOUNCE_REQUEST (0x5) edits a set of prefixes, none at or below another, and ANNOUNCE_OK (0x6) marks where each edit takes effect; a subscriber sends one edit at a time. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints drop the claims within a removed prefix at the ANNOUNCE_OK. SYNCED names the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix.
-- Replaced the Hop ID list with a claim's Cost, `Above`, flags, priority, and chain on ANNOUNCE_START and ANNOUNCE_UPDATE. The chain names the relays that announced the claim again across a scoped grant or from an earlier version, and a relay takes no claim whose chain names it. The 0x1 flag marks a claim no route reaches, which its sender keeps for 800 milliseconds before ending it, the 0x2 flag one behind a draining node, and the 0x4 flag one behind a marked session, which a routing node announces under its marked Node ID, whose route is marked.
+- Replaced the Hop ID list with a claim's Cost, `Above`, flags, priority, and chain on ANNOUNCE_START and ANNOUNCE_UPDATE. The chain names the relays the claim entered or left a routing domain by: the announcing relay, then each scoped grant's sender and receiver. A relay takes no claim whose chain, with it appended, names a relay twice. The 0x1 flag marks a claim no route reaches, which its sender keeps for 800 milliseconds before ending it, the 0x2 flag one behind a draining node, and the 0x4 flag one behind a marked session, which a routing node announces under its marked Node ID, whose route is marked.
 - ANNOUNCE_END carries `Lost`: whether the claim's publisher withdrew it or the sender only lost its way to it.
 - Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay, its Start, and a Marked byte that only a routing node's marked Node ID sets, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Instance. Removed ANNOUNCE_OK's Hop ID.
 - Added ROUTE (0x7) and ROUTE_END (0x8): a routing node's route to another, a path vector of at most 32 hops, each a Node ID and the Session Number that node learned the route on, with a marked bit, a draining bit, a priority, and an additive cost. A node never uses a route whose Path names its relay, and ranks routes by drain, then priority, then cost.
