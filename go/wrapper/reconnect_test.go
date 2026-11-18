@@ -229,15 +229,16 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
+	// Connected once the relay accepted each session, so the drop below redials rather than
+	// ending them as refusals.
+	waitConnects(t, ctx, publisher.Session(), 1)
+	waitConnects(t, ctx, subscriber.Session(), 1)
 	if state := subscriber.Session().State(); !isConnected(state) {
 		t.Fatalf("not serving before any drop: %+v", state)
 	}
 	if version := subscriber.Session().Stats().Version; version == nil || *version == "" {
 		t.Fatal("a live session must report its negotiated version")
 	}
-
-	// Past the 1s healthy bar, so the drop redials rather than ending the sessions.
-	time.Sleep(time.Second)
 
 	// Drop every session and the listener, then bind a replacement on the same
 	// port: a deploy, with an origin the replacement has never seen.

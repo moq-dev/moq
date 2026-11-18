@@ -71,7 +71,8 @@ public final class Client: Sendable {
     }
 
     /// Start a connection and return its session without waiting for the native first dial to succeed.
-    /// Until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+    /// Until the peer has accepted a session's credential or drained a session with a GOAWAY
+    /// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed
     /// session, such as a refused credential, closes the session with its error rather than retrying.
     public func connect(to url: String) async throws -> Session {
         Session(try await ffi.connect(url: url))

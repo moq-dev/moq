@@ -653,8 +653,8 @@ mod tests {
 			.await
 			.expect("the admission outlived the drain deadline");
 		running.await.unwrap().unwrap();
-		// The client may already count the session established (SETUP precedes
-		// auth); either way the refusal ends it.
+		// The paused clock may carry the session past the healthy bar before the admission
+		// ends, which establishes it; either way the refusal ends it.
 		if let Ok(connection) = connecting.await.unwrap() {
 			assert!(connection.closed().await.is_err(), "an abandoned admission is refused");
 		}
@@ -683,10 +683,9 @@ mod tests {
 		let all = moq_auth::Pattern::all;
 		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		admission.grant(consumer);
+		// The relay accepts the session and drains it at once, so the one-shot loop may already
+		// be over: only a GOAWAY ends it cleanly, where a refusal or a close is an error.
 		let connection = connecting.await.unwrap().unwrap();
-		let draining = connection.draining().unwrap();
-		let goaway = kio::wait(|waiter| draining.poll(waiter)).await.unwrap();
-		assert_eq!(goaway.uri(), "");
 		connection.closed().await.unwrap();
 		running.await.unwrap().unwrap();
 	}
