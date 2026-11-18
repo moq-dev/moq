@@ -140,9 +140,10 @@ impl RelaySim {
 				relay: node as Id | generation << 32,
 				start: 1,
 			},
+			// Two starts a generation: the next one is the marked identity's.
 			false => NodeId {
 				relay: node as Id,
-				start: generation + 1,
+				start: 2 * generation + 1,
 			},
 		}
 	}
