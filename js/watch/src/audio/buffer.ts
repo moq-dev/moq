@@ -6,6 +6,15 @@ import type { Clock, Data, End, Init, Latency, Playing, Reading, Received, Reset
 // The stretch's 30 ms processing window, in microseconds. @internal
 export const WINDOW = 30_000;
 
+/**
+ * How long an ordered reader waits for a missing group before giving it up as a gap: what the ring
+ * holds of the delay, plus how far the ring lets audio trail the clock before skipping it, never less
+ * than one stretch window. A group landing any later could no longer play.
+ */
+export function holeWait(held: Duration, bound: Duration): Duration {
+	return held.add(bound.max(Duration.micros(WINDOW)));
+}
+
 // The least move, in milliseconds, of how far the worklet renders ahead of what sounds that is reported.
 const LEAD_STEP = 5;
 

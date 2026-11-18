@@ -2,8 +2,8 @@
  * Replay a recorded arrival trace through the player's consumer and ring on a simulated clock.
  *
  * Every frame is written into its group at the instant the trace says it arrived, and the player's
- * real `Container.Consumer` decides what to deliver, wait for, and skip, at the hole wait, max delay, and
- * clock the decoder gives it. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
+ * real `Container.Consumer` decides what to deliver and skip, at the max delay the decoder gives it,
+ * reading the ordered reader that decides each hole at the budget the decoder gives that. Delivered frames go into the real ring, which carries on through a gap the way the decoder's
  * does: a gap restarts only the codec. One render quantum is read every quantum's worth of that same
  * clock, which is what the AudioWorklet does. A real {@link Sync} resolves the delay from the playout target the decoder
  * registers, measured by that same consumer from the recorded catalog config, and the ring and the
@@ -23,10 +23,9 @@ import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
 import { type Delay, STRETCH, Sync } from "../sync";
-import { Backpressure } from "./buffer";
+import { Backpressure, holeWait } from "./buffer";
 import { frameDuration } from "./config";
 import { maxDelay as audioMaxDelay, bound, ringHold, target } from "./latency";
-import { playable } from "./playhead";
 import { AudioRingBuffer } from "./ring-buffer";
 
 /** An AudioWorklet render quantum, in frames. */
@@ -66,12 +65,6 @@ export interface Options {
 	lookahead?: number;
 	/** The configured stretch, in ms, as the element takes it (default: the element's). */
 	stretch?: number;
-	/**
-	 * The publisher's largest group as the subscription began, which the consumer learns as a wire
-	 * subscriber learns it from the publisher's answer. Omitted, the replay's track names its own: the
-	 * first group to land.
-	 */
-	largest?: number;
 	/** The rendition as the catalog described it: its advertised jitter, delay, and codec. */
 	config: Catalog.AudioConfig;
 	/**
@@ -185,33 +178,6 @@ const micros = (ms: number) => Math.round(ms * 1000);
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /**
- * `track` answering `largest` the way a wire subscriber does once the publisher has answered: first
- * the publisher's largest group as the subscription began, then each newer group as it lands.
- * Everything else is the local subscriber's.
- */
-export function answering(track: Track.Subscriber, largest: bigint): Track.Subscriber {
-	let answered = false;
-	return new Proxy(track, {
-		get(target, prop) {
-			if (prop !== "largest") {
-				const value = Reflect.get(target, prop, target);
-				return typeof value === "function" ? value.bind(target) : value;
-			}
-			return async () => {
-				if (!answered) {
-					answered = true;
-					return { group: largest, frame: 0 };
-				}
-				for (;;) {
-					const next = await target.largest();
-					if (!next || next.group > largest) return next;
-				}
-			};
-		},
-	});
-}
-
-/**
  * Play `trace` in simulated real time, yielding every render quantum from the first arrival to the
  * end of the observation.
  *
@@ -252,15 +218,16 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const maxDelay = new Derived([sync.out.delay, sync.out.maxDelay], (delay, max) =>
 		audioMaxDelay({ delay, maxDelay: max }),
 	);
+	// Fills nobody serves stand in for the recorder's feed: the ordered reader waits for a missing
+	// group as it would for a session's, until the group lands or its budget gives up on it.
+	const requests = track.requests();
 	const subscriber = track.subscribe({ delay: { max: WIRE_MAX_DELAY } });
-	const consumer = new Container.Consumer(
-		options.largest === undefined ? subscriber : answering(subscriber, BigInt(options.largest)),
-		{
-			format: new Container.Legacy.Format("audio"),
-			delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
-			playhead: playable(sync),
-		},
-	);
+	const ordered = track.subscribe({ delay: { min: sync.out.delay.peek() } }).ordered();
+	const consumer = new Container.Consumer(subscriber, {
+		format: new Container.Legacy.Format("audio"),
+		delay: new Derived([sync.out.delay, maxDelay], (min, max) => ({ min, max })),
+		ordered,
+	});
 
 	// Match the decoder: a codec constant until a delivered packet states its own duration.
 	const signals = new Effect();
@@ -287,6 +254,14 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		: undefined;
 	const audio = sync.track({ target: playout, startup });
 	signals.cleanup(() => audio.close());
+	// The ordered reader waits a hole out as the decoder's does. A replay's ring holds the whole delay:
+	// it has no output.
+	signals.run((effect) => {
+		const delay = effect.get(sync.out.delay);
+		const max = holeWait(delay, bound({ delay, maxDelay: effect.get(sync.out.maxDelay), stretch }));
+		ordered.update({ delay: { min: delay, max } });
+	});
+	signals.cleanup(() => requests.close());
 	await settle();
 
 	let delay = sync.out.delay.peek();

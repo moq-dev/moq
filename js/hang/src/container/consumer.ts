@@ -75,6 +75,14 @@ export interface ConsumerProps {
 	 */
 	predecessor?: Consumer;
 	/**
+	 * Read the media in key order from this reader of the same track instead of `track`'s arrival
+	 * order, so it decides every hole: a missing group is a hole once the reader reports it as a gap,
+	 * and never waited for here. Its `delay.max` is then how long a hole is waited for, so size it to
+	 * what the player can still play late. `track` only feeds the arrival estimate, read frame by frame
+	 * as it lands, so give it a `delay.max` reaching as far as lateness can move the estimate.
+	 */
+	ordered?: Moq.Track.Ordered;
+	/**
 	 * The playout clock this reader feeds, such as the player's `Sync` (default: none). A missing
 	 * group whose successor starts at or before the oldest media the clock still plays could only
 	 * arrive too late to play, so it is skipped then rather than waited for: a reader resuming behind
@@ -129,6 +137,7 @@ interface Group {
 	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
 	late: Instant;
 	frames: ReceivedFrame[]; // decode order
+	gap?: boolean; // An ordered reader gave up on groups just below this one.
 	costs: number[]; // What each of frames holds against the max buffer
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
@@ -197,6 +206,10 @@ function maxMicros(delay: Moq.Track.Delay): number {
  */
 export class Consumer {
 	#track: Moq.Track.Subscriber;
+	// The reader that decides every hole, when one does; `#track` then only feeds the estimate.
+	#ordered?: Moq.Track.Ordered;
+	// The ordered reader gave up on groups since the last one it returned.
+	#gap = false;
 	#format: Format;
 	#delay: Getter<Moq.Track.Delay>;
 	#playhead?: Playhead;
@@ -287,6 +300,7 @@ export class Consumer {
 	/** Start consuming the given track, decoding frames with `props.format`. */
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
 		this.#track = track;
+		this.#ordered = props.ordered;
 		this.#format = props.format;
 		this.#delay = getter(props.delay ?? {});
 		this.#playhead = props.playhead;
@@ -301,14 +315,21 @@ export class Consumer {
 		// later raise the largest past it. The start says only once the info or a first group shows the
 		// subscription established. Off the delivery path: a range capped below the largest never
 		// reports one, which reports no backlog rather than stalling delivery.
-		this.#signals.spawn(async () => {
-			await race([this.#track.info().catch(() => undefined), this.#tuned]);
-			await this.#track.start();
-			this.#joined = (await this.#track.largest())?.group;
-		});
-		this.#signals.spawn(this.#run.bind(this));
+		const ordered = this.#ordered;
+		if (ordered) {
+			this.#signals.spawn(this.#runOrdered.bind(this, ordered));
+			this.#signals.spawn(this.#observe.bind(this));
+		} else {
+			this.#signals.spawn(async () => {
+				await race([this.#track.info().catch(() => undefined), this.#tuned]);
+				await this.#track.start();
+				this.#joined = (await this.#track.largest())?.group;
+			});
+			this.#signals.spawn(this.#run.bind(this));
+		}
 		this.#signals.cleanup(() => {
 			this.#track.close();
+			this.#ordered?.close();
 			for (const group of this.#groups) {
 				group.consumer.close();
 			}
@@ -362,37 +383,7 @@ export class Consumer {
 					consumer.close();
 					continue;
 				}
-				const group: Group = {
-					consumer,
-					// When the group landed, not when it was pulled: a full max buffer delays pulls.
-					late: consumer.arrived,
-					frames: [],
-					costs: [],
-					empty: true,
-					media: false,
-					index: 0,
-					charged: 0,
-				};
-				this.#charge(group, GROUP_COST);
-
-				// Insert into #groups based on the group sequence number (ascending).
-				// This is used to cancel old groups.
-				let index = this.#groups.findIndex((other) => other.consumer.start > consumer.start);
-				if (index === -1) index = this.#groups.length;
-				// Each group is late from the earliest arrival among it and the groups past it. A drained
-				// backlog comes in sequence order, not arrival order, so an arrival can lower those below it.
-				const next = this.#groups.at(index);
-				if (next?.late.lt(group.late)) group.late = next.late;
-				for (let i = index - 1; i >= 0 && this.#groups[i].late.gt(group.late); i--)
-					this.#groups[i].late = group.late;
-				this.#groups.splice(index, 0, group);
-				// Group overhead alone can fill the max buffer, past which next() moves on from a stalled head.
-				if (this.#full()) {
-					this.#notify?.();
-					this.#notify = undefined;
-				}
-
-				this.#signals.spawn(this.#watch.bind(this, group));
+				this.#add(consumer);
 			}
 			if (!this.#signals.abort.aborted) {
 				this.#delivered = true;
@@ -401,6 +392,137 @@ export class Consumer {
 			this.#finish(null);
 		} catch (err) {
 			this.#finish(err instanceof Error ? err : new Error(String(err)));
+		}
+	}
+
+	// Read groups in key order from `ordered`, noting each gap it reports on the group after it.
+	async #runOrdered(ordered: Moq.Track.Ordered) {
+		try {
+			for (;;) {
+				// As #run: past the max buffer, later groups wait in the transport's cache.
+				while (this.#full() && this.#groups.length >= 2 && !this.#signals.abort.aborted) await this.#park();
+				if (this.#signals.abort.aborted) break;
+
+				const item = await ordered.nextGroup();
+				if (!item) break;
+				if (item.kind === "gap") {
+					this.#gap = true;
+					continue;
+				}
+				// Delivery starts at the first group: the reader already skipped what is too stale to
+				// play, and waited for the groups below it that its feed owed.
+				if (this.#active === undefined) {
+					this.#tuned.set(true);
+					this.#active = item.group.start;
+					this.#starting = false;
+				}
+				this.#add(item.group, this.#gap);
+				this.#gap = false;
+			}
+			if (!this.#signals.abort.aborted) {
+				this.#delivered = true;
+				this.#settle();
+			}
+			this.#finish(null);
+		} catch (err) {
+			this.#finish(err instanceof Error ? err : new Error(String(err)));
+		}
+	}
+
+	// Buffer a group in sequence order and watch it for frames.
+	#add(consumer: Moq.Group.Consumer, gap = false): void {
+		const group: Group = {
+			consumer,
+			// When the group landed, not when it was pulled: a full max buffer delays pulls.
+			late: consumer.arrived,
+			frames: [],
+			costs: [],
+			gap,
+			empty: true,
+			media: false,
+			index: 0,
+			charged: 0,
+		};
+		this.#charge(group, GROUP_COST);
+
+		// Insert into #groups based on the group sequence number (ascending).
+		// This is used to cancel old groups.
+		let index = this.#groups.findIndex((other) => other.consumer.start > consumer.start);
+		if (index === -1) index = this.#groups.length;
+		// Each group is late from the earliest arrival among it and the groups past it. A drained
+		// backlog comes in sequence order, not arrival order, so an arrival can lower those below it.
+		const next = this.#groups.at(index);
+		if (next?.late.lt(group.late)) group.late = next.late;
+		for (let i = index - 1; i >= 0 && this.#groups[i].late.gt(group.late); i--) this.#groups[i].late = group.late;
+		this.#groups.splice(index, 0, group);
+		// Group overhead alone can fill the max buffer, past which next() moves on from a stalled head.
+		if (this.#full()) {
+			this.#notify?.();
+			this.#notify = undefined;
+		}
+
+		this.#signals.spawn(this.#watch.bind(this, group));
+	}
+
+	// Feed the arrival estimate from every frame of `#track` as it lands, while an ordered reader
+	// delivers: late media that reader gives up on must still move the estimate, or it could never rise.
+	async #observe() {
+		try {
+			for (;;) {
+				const group = await this.#track.recvGroup();
+				if (!group || this.#signals.abort.aborted) return;
+				this.#signals.spawn(this.#observeGroup.bind(this, group));
+			}
+		} catch {
+			// The ordered reader reports how the track ended.
+		}
+	}
+
+	async #observeGroup(group: Moq.Group.Consumer) {
+		let media = false;
+		try {
+			for (;;) {
+				const wire = await group.readFrame();
+				if (!wire || this.#signals.abort.aborted) return;
+				// A payload that fails to decode is the ordered read's to raise.
+				let decoded: Frame[];
+				try {
+					decoded = this.#format.decode(wire.payload, wire.timestamp);
+				} catch {
+					return;
+				}
+				const arrived = (wire.arrived ?? now()).since(Instant.ZERO).asMillis();
+				if (this.#format.kind === "data" && decoded.length === 0) this.#declare(group.start);
+				for (const sample of decoded) {
+					const marker = this.#format.end?.(sample) !== undefined;
+					this.#note(group.start, marker, media, sample.timestamp, arrived);
+					if (!marker) media = true;
+				}
+			}
+		} catch {
+			// A group cut short has no more frames to observe.
+		} finally {
+			group.close();
+		}
+	}
+
+	// Observe one decoded sample of group `sequence` for the arrival estimate: media is observed,
+	// and a marker ahead of any media (`media` false) declares an end.
+	#note(sequence: bigint, marker: boolean, media: boolean, timestamp: Duration, arrived: number): void {
+		// Observed before any gap handling or age budget: a target derived from what survives the
+		// budget would only ever confirm the budget it was cut to.
+		if (!marker) {
+			if (this.#mediaSequence === undefined || sequence > this.#mediaSequence) this.#mediaSequence = sequence;
+			if (this.#declared !== undefined && sequence > this.#declared) {
+				this.#jitter.end();
+				this.#declared = undefined;
+			}
+			this.#jitter.observe(arrived, timestamp.asMillis());
+			const spread = this.#jitter.measured;
+			if (spread !== this.#spread.peek().asMillis()) this.#spread.set(Duration.millis(spread));
+		} else if (!media) {
+			// Only a marker ahead of any media declares an end; one after it is a frame's endpoint.
+			this.#declare(sequence);
 		}
 	}
 
@@ -484,9 +606,8 @@ export class Consumer {
 		return start;
 	}
 
-	// Note an end the publisher declared in `group`, which a later group's first frame resumes from.
-	#declare(group: Group): void {
-		const sequence = group.consumer.start;
+	// Note an end the publisher declared in group `sequence`, which a later group's first frame resumes from.
+	#declare(sequence: bigint): void {
 		if (this.#mediaSequence !== undefined && sequence < this.#mediaSequence) return;
 		if (this.#declared === undefined || sequence > this.#declared) this.#declared = sequence;
 	}
@@ -515,7 +636,7 @@ export class Consumer {
 				return;
 			}
 			group.bare = decoded.length === 0;
-			if (group.bare) this.#declare(group);
+			if (group.bare && !this.#ordered) this.#declare(group.consumer.start);
 		}
 
 		// Decoded payloads are views of the wire payload, which stays allocated until the last of them is
@@ -523,23 +644,8 @@ export class Consumer {
 		let views = 0;
 		for (const sample of decoded) {
 			const marker = this.#format.end?.(sample) !== undefined;
-
-			// Observed here, before any gap handling or age budget: a target derived from
-			// what survives the budget would only ever confirm the budget it was cut to.
-			if (!marker) {
-				if (this.#mediaSequence === undefined || group.consumer.start > this.#mediaSequence)
-					this.#mediaSequence = group.consumer.start;
-				if (this.#declared !== undefined && group.consumer.start > this.#declared) {
-					this.#jitter.end();
-					this.#declared = undefined;
-				}
-				this.#jitter.observe(arrived, sample.timestamp.asMillis());
-				const spread = this.#jitter.measured;
-				if (spread !== this.#spread.peek().asMillis()) this.#spread.set(Duration.millis(spread));
-			} else if (!group.media) {
-				// Only a marker ahead of any media declares an end; one after it is a frame's endpoint.
-				this.#declare(group);
-			}
+			// Observed here, as it comes off the transport, unless #observe sees every arrival instead.
+			if (!this.#ordered) this.#note(group.consumer.start, marker, group.media, sample.timestamp, arrived);
 			const frame: ReceivedFrame = {
 				arrival,
 				payload: sample.payload,
@@ -857,6 +963,7 @@ export class Consumer {
 		this.#error = error;
 		this.#finish(error);
 		this.#track.close(error);
+		this.#ordered?.close(error);
 		this.#notify?.();
 		this.#notify = undefined;
 		// Nothing more is read, so stop the group watchers and release their groups rather than let a
@@ -947,7 +1054,10 @@ export class Consumer {
 					const excluded = next === undefined || next >= head.consumer.start;
 					// The groups past the hole already fill the max buffer, so it can hold none of what would arrive into it.
 					const full = this.#full();
+					// An ordered reader returns a group only once it resolved every key below it.
+					const decided = this.#ordered !== undefined;
 					if (
+						decided ||
 						startup ||
 						empty ||
 						contiguous ||
@@ -958,7 +1068,8 @@ export class Consumer {
 						full ||
 						ended !== undefined
 					) {
-						if (!contiguous && !empty) {
+						// What an ordered reader gives up it reports as a gap; a key it skips without one was never a group.
+						if (!contiguous && !empty && (!decided || head.gap)) {
 							this.#lost = true;
 							if (!startup) {
 								console.warn(
