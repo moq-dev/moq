@@ -50,6 +50,15 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   one that moves to another session at the same rank relanes every
   broadcast its node claims.
 
+Decided 2026-11-18 (maintainer, on
+[moq-dev/moq#9114](https://github.com/moq-dev/moq/pull/9114)): ✅ the origin
+record lives here, in m4 (rejected: moving this quest to m3; a separate m3
+quest for the record alone). It replaces that morning's decision to keep it
+in m3 with the benches. The measured cost above is about 4 µs a write, so
+the worst flap seen on a deployed mesh costs one relay a fraction of a
+second, and [the mesh replay](/quest/m2/multicast/mesh-replay.md) measures
+it on that mesh's graph before its links move to lite-07.
+
 Decisions:
 
 - Covers every route change, not only equal-cost pools. The pool is where
