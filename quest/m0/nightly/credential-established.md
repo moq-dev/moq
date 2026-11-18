@@ -1,48 +1,41 @@
-# [M] A reconnecting client is established by the credential's answer
+# [S] Binding tests drop a session once the client saw it accepted
 
 ## Goal
 
-A reconnecting client (Rust `Reconnect` and `moq_tokio::Connection`, JS
-`Reload`, and every binding through `moq-ffi`) counts a session as established
-once the peer accepts the connection credential, instead of after it stays up
-`Backoff::healthy` (1 s). A close before that answer is a refusal and ends the
-policy, as today. Versions with no acceptance message keep the uptime bar. No
-wire change.
-
 The tests [moq-dev/moq#8817](https://github.com/moq-dev/moq/pull/8817) gave
-real 1 s waits (Go, Python, moq-c), and the OBS tests in draft
+real 1 s waits (Go `go/wrapper/reconnect_test.go`, Python
+`py/moq-rs/tests/test_server.py`, `rs/moq-ffi/src/test.rs`, `rs/libmoq/src/test.rs`),
+and the OBS tests in draft
 [moq-dev/moq#9016](https://github.com/moq-dev/moq/pull/9016), drop the session
-right after it is accepted instead.
+as soon as the client has seen the peer accept its credential, instead of
+waiting out `Backoff::healthy`. No wire change.
 
 ## Plan
 
-Found by the triage of Nightly run
-[44127032469](https://github.com/moq-dev/moq/actions/runs/44127032469)
-(2026-11-17): the OBS output and source tests drop a session the moment it goes
-live, which #8817 now treats as a refusal. #9016 fixes them with real 1 s
-waits; the maintainer chose this quest instead, and #9016 waits on it.
+[moq-dev/moq#9038](https://github.com/moq-dev/moq/pull/9038) made the
+reconnect policy (Rust `Reconnect`, JS `Reload`, every binding through
+`moq-ffi`) count a session as established once the peer accepts the
+connection credential: its SETUP, or on lite-07 the AUTH_OK to the
+connection's own credential. moq-lite 03/04 keep the 1 s uptime bar.
 
-Where acceptance already shows (researched 2026-11-17):
+What is left: a test can drop a session the moment the *server* accepted it,
+but the client counts it only once it has *read* that answer, and a server
+close can overtake it. No binding reports that moment: `Connected` fires when
+the session goes live, before the answer. So the waits stay until the client
+can observe acceptance.
 
-- lite-05/06 and moq-transport: the server sends SETUP only from `ok()`, and
-  `moq-relay` judges the token before `ok()`
-  (`rs/moq-relay/src/connection.rs`), so a refused session never sends it.
-- lite-07: also the AUTH_OK answering each side's empty-token Auth Stream,
-  which carries the grant for the connection credential.
-- lite-01/02: the SERVER_SETUP reply.
-- lite-03/04: nothing. They keep `Backoff::healthy` as the bar.
-- `Tokens::credential` (`rs/moq-net/src/auth/tokens.rs`) already computes this
-  verdict across versions; `js/net/src/connection/tokens.ts`'s `Verdict` is its
-  counterpart. Reuse them rather than reading SETUP again.
+## Waiting
 
-Decided 2026-11-17 (maintainer, /quest-plan):
-
-- Signal: ✅ the existing credential verdict (server SETUP, or AUTH_OK on
-  lite-07) (rejected: a new SETUP_OK message, which duplicates AUTH_OK; 1 s of
-  uptime for every version).
-- ✅ Versions with no acceptance message keep a timeout, `Backoff::healthy`.
-- Update `Handover.tla` and the verify-reconnect skill where `established` is
-  set, and the `Backoff` docs in every binding.
+- Maintainer: how should a binding observe that the peer accepted the session?
+  (a) Recommended: moq-tokio's `Connection` reports Connected, and
+  `established()` resolves, only once the peer accepted the credential (or
+  the session passed `healthy` on moq-lite 03/04), and every binding's
+  `Connected` phase follows. A refused session then never reads as
+  connected, and `established().await` returns the refusal instead of `Ok`.
+  It's a behavior change in every binding, but no API change. (b) Add an
+  `accepted` flag to the state snapshot in every binding, which is new API that only
+  tests need today. (c) Keep the 1 s waits and delete this quest. Check: the
+  answer is recorded in this Plan.
 
 ## Related
 
