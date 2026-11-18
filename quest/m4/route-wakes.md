@@ -30,11 +30,12 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   route layer marks primary; a route neither draining nor unavailable; the
   higher link priority; an identified hop chain before an anonymous one,
   whatever the cost; the cheaper cost; a broadcast published on this origin;
-  the shorter hop chain. The remaining tie goes, on lite-07, to the draft's
-  Rendezvous Hash of the path and the claim's Instance (`rendezvous`), and
-  on older versions to a hash of the Instance and then the chain, lowest
-  first. A join moves only paths the newcomer wins, a leave only paths the
-  leaver was winning.
+  the shorter hop chain; then, on lite-07, the draft's Rendezvous Hash of
+  the path and the claim's Instance (`rendezvous`) and the claimant's
+  relay, or on older versions a hash of the Instance and then of the chain,
+  lowest first; and last the newest entry. A broadcast published here for
+  exactly the path skips both hashes. A join moves only paths the newcomer
+  wins, a leave only paths the leaver was winning.
 - On lite-07 the route layer writes into this table through `route::node`,
   one write per broadcast whose way changed; a change to one route rewrites
   every broadcast behind it, which [route benches](/quest/m3/route-benches.md)
