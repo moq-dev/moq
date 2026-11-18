@@ -14,8 +14,9 @@
 //! grace a passed group is waited for), and while a group still read is read from it or may
 //! continue from it (it holds that group, or may yet get it). Nothing under the bound is
 //! waited for past the reader's budget. The serving copy draining cleanly ends the track
-//! only once nothing it replaced may still deliver below that end. A reader that never asked
-//! for a group keeps no copy.
+//! only once nothing it replaced may still deliver below that end. Until then, a copy that
+//! ran out still hands out a group landing on it late, one still in flight below the end its
+//! session settled. A reader that never asked for a group keeps no copy.
 //!
 //! A new copy is asked from where the reader got to, so it never has the groups below the
 //! reader's local floor that the copies it replaced cached. Lowering that floor asks the
@@ -587,6 +588,9 @@ struct Copy {
 	until: Option<Option<u64>>,
 	/// The group channel ran out.
 	done: Option<Result<()>>,
+	/// How many groups had arrived on the copy when its channel last ran out cleanly: one
+	/// arriving since is still in flight below its end, which a read still open takes.
+	drained: usize,
 	/// When a newer group superseded every group under the bound: the newer copy's first
 	/// group, or the track's end. What the reader still lacks from it is waited for from
 	/// here, for no longer than the reader's budget.
@@ -1441,6 +1445,7 @@ impl Reader {
 			replaced: false,
 			until: None,
 			done: None,
+			drained: 0,
 			since: None,
 			lease: Arc::new(()),
 			feeds: true,
@@ -1675,10 +1680,22 @@ impl Reader {
 			// superseded it a full budget ago.
 			// A fully handed-out bounded copy still backs groups being read, but cannot
 			// supply another one. Keep its recovery lease without polling its empty range.
-			let spent = copy.done.is_some() || copy.end().is_some_and(|end| delivered.covers(groups.0..end));
+			let spent = copy.end().is_some_and(|end| delivered.covers(groups.0..end));
+			// A copy that ran out cleanly still takes a group in flight below its end while the
+			// read stays open, as a cursor still reading it would.
+			let ran_out = match &copy.done {
+				None => false,
+				Some(Ok(())) if !spent && copy.track.poll_arrived(copy.drained, waiter).is_ready() => true,
+				Some(_) => continue,
+			};
 			if spent || copy.expired(budget, waiter) {
 				continue;
 			}
+			if ran_out {
+				copy.done = None;
+			}
+			let mut late = ran_out;
+			let mut arrivals = copy.track.arrived();
 			loop {
 				let copy = &mut self.copies[index];
 				let sub = match copy.poll_ready(groups, waiter) {
@@ -1745,6 +1762,14 @@ impl Reader {
 							Poll::Ready(end) => end,
 							Poll::Pending => Ok(()),
 						});
+						// Counted before the read, so a group landing during it is read again.
+						copy.drained = arrivals;
+						if matches!(copy.done, Some(Ok(()))) && copy.track.poll_arrived(arrivals, waiter).is_ready() {
+							copy.done = None;
+							late = true;
+							arrivals = copy.track.arrived();
+							continue;
+						}
 						break;
 					}
 					Poll::Ready(Err(err)) => {
@@ -1752,6 +1777,12 @@ impl Reader {
 						break;
 					}
 				}
+			}
+			// A late group under the serving copy's resume point is not this copy's to read, and
+			// a backfill that already ran out was let go: ask its route again.
+			let copy = &self.copies[index];
+			if late && !copy.replaced && copy.floor.is_some() && Some(copy.generation) == self.generation {
+				self.resumed.get_or_insert_with(|| (None, Vec::new()));
 			}
 		}
 		if let Some(lowest) = lowest {
@@ -2131,6 +2162,7 @@ impl Reader {
 			since: Some(track.now()),
 			track,
 			done: None,
+			drained: 0,
 			lease: Arc::new(()),
 			feeds: true,
 		};
@@ -6891,6 +6923,66 @@ mod test {
 
 		sub.set_range(..);
 		assert_eq!(drain(&mut sub, false), [2, 6]);
+	}
+
+	/// A serving copy that ran out at its session's settled end still hands out a group in
+	/// flight below that end while a copy it replaced holds the read open, and wakes the read.
+	#[test]
+	fn a_late_group_on_a_drained_serving_copy_is_read() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, false), [0]);
+
+		let b = received_copy();
+		routes.serve(b.consume());
+		// Its first group bounds the replaced copy at 1, which it may still deliver.
+		write(&b, 2);
+		assert_eq!(drain(&mut sub, false), [2]);
+		b.finish_shared().unwrap();
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(
+			sub.poll_recv_group(&waiter).is_pending(),
+			"the replaced copy may still deliver 1"
+		);
+
+		write(&b, 1);
+		assert!(
+			wake.0.load(std::sync::atomic::Ordering::Relaxed),
+			"the late group wakes the read"
+		);
+		assert_eq!(drain(&mut sub, false), [1]);
+	}
+
+	/// A late group under the serving copy's resume point is asked of its route again, once
+	/// the backfill that asked for it ran out and was let go.
+	#[test]
+	fn a_late_group_under_the_resume_point_is_backfilled_again() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 2);
+		a.finish_shared().unwrap();
+		assert_eq!(recv(&mut sub).start, 2);
+
+		// A switch away and back resumes `a` past 2; the backfill below it finds its track
+		// complete and runs out, while `b`'s copies hold the read open.
+		let b = received_copy();
+		routes.serve(b.consume());
+		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		routes.serve(a.consume());
+		assert!(sub.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		// `b` fails, and 1 lands late on `a` before the read looks again.
+		b.abort(Error::Stream(StreamError::Session(SessionError::Cancel)))
+			.unwrap();
+		write(&a, 1);
+		assert_eq!(drain(&mut sub, false), [1]);
 	}
 
 	/// A replacement copy keeps each range where the serving copy resolved it: the floor

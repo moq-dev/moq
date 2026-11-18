@@ -362,6 +362,81 @@ test("a group below the replacement's resume point is backfilled", async () => {
 	}
 });
 
+test("a late group on a drained serving copy is read", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(0n);
+		expect(drain(sub)).toEqual([0n]);
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		// Its first group bounds the replaced copy at 1, which it may still deliver.
+		tb.write(2n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([2n]);
+		tb.producer.finish();
+		const next = sub.recvGroup();
+		expect(await isPending(next)).toBe(true);
+		tb.write(1n);
+		await clock.advance(Duration.ZERO);
+		expect((await next)?.start).toBe(1n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
+test("a late group under the resume point is backfilled again", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		await clock.advance(Duration.ZERO);
+		ta.write(2n);
+		ta.producer.finish();
+		expect(sub.tryRecvGroup()?.start).toBe(2n);
+		// A switch away and back resumes `ta` past 2; the backfill below it finds its track
+		// complete and runs out, while `tb`'s copies hold the read open.
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([]);
+		front.serve(handles[0]);
+		await clock.advance(Duration.ZERO);
+		const next = sub.recvGroup();
+		expect(await isPending(next)).toBe(true);
+		// `tb` fails, and 1 lands late on `ta` before the read looks again.
+		tb.producer.abort(new StreamError(StreamCode.SessionClosed));
+		ta.write(1n);
+		await clock.advance(Duration.ZERO);
+		expect((await next)?.start).toBe(1n);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 // The switch's backfill waits on a fill the finished new route's handler still owes, rather
 // than counting as drained while the fill is out.
 test("a backfill waits on a fill the finished route still owes", async () => {

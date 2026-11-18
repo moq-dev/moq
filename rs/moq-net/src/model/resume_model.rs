@@ -1445,6 +1445,76 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// The serving route ends while a replaced copy holds the read open for a group under
+		// its bound: groups in range still in flight on the ended route land, and are read.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((6, 8)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::End { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// The same for a reader without a range, once the serving copy's first group bounds
+		// the replaced one below the groups still in flight.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(2),
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(11),
+					frames: 1,
+				},
+				Op::End { instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {

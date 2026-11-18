@@ -769,6 +769,9 @@ class TrackState {
 	 */
 	reads?: (key: bigint) => boolean;
 	groups = new Signal<GroupConsumer[]>([]);
+	// How many groups were mirrored in, whatever this sink reads: one arriving after its reader
+	// ran out is still in flight below the end.
+	arrived = 0;
 	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaim cannot
 	// erase a disposition a downstream publisher still has to forward, and as runs so a wide
@@ -1819,6 +1822,7 @@ export class Producer {
 		entry.mirrors.set(sink, dst);
 		if (sink.reads?.(dst.start) === false) hooks.groupReads(dst, false);
 		timelineInsert(sink.timeline, dst);
+		sink.arrived++;
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = max(sink.latest ?? 0n, dst.start);
 		sink.received.set(max(sink.received.peek(), dst.start + 1n));
@@ -4104,6 +4108,7 @@ export class Subscriber {
 			return stop;
 		};
 		hooks.latestKey = (subscriber) => (subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest);
+		hooks.arrived = (subscriber) => (subscriber.#resume ? 0 : subscriber.#state.arrived);
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();

@@ -753,6 +753,8 @@ export const hooks: {
 	tailGrace: (producer: Producer) => Duration;
 	/** Snapshot the latest group key for wire positioning; assigned by `track.ts`. */
 	latestKey: (subscriber: Subscriber) => bigint | undefined;
+	/** How many groups arrived on the subscriber's copy so far; assigned by `track.ts`. */
+	arrived: (subscriber: Subscriber) => number;
 	/**
 	 * The source's declared start, raised to the subscriber's cursor floor, or `"pending"` while
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
@@ -1147,6 +1149,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	latestKey: () => {
+		throw new Error("track.ts not loaded");
+	},
+	arrived: () => {
 		throw new Error("track.ts not loaded");
 	},
 	sourceStart: () => {

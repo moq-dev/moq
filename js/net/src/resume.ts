@@ -346,6 +346,11 @@ interface Copy {
 	/** The group channel ran out: cleanly (`null`) or failed. */
 	done?: Error | null;
 	/**
+	 * How many groups had arrived on the copy when it last ran out cleanly: one arriving since is
+	 * still in flight below its end, which a read still open takes.
+	 */
+	drained?: number;
+	/**
 	 * When a newer group superseded every group under the bound: the newer copy's first group, or
 	 * the track's end. What the reader still lacks from it is waited for from here, for no longer
 	 * than the reader's budget.
@@ -817,6 +822,7 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		if (this.#closed) return { kind: "done" };
 		this.#groupsRead = true;
+		this.#reopen();
 		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -857,6 +863,7 @@ class Reader implements ResumeSource {
 					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
 				} else if (recv.kind === "error") copy.done = recv.error;
 				else if (this.#drained(copy, delivered)) copy.done = null;
+				if (copy.done === null) copy.drained = hooks.arrived(copy.sub);
 				break;
 			}
 		}
@@ -972,6 +979,19 @@ class Reader implements ResumeSource {
 		if (end === undefined || hooks.awaitsFill(copy.sub)) return false;
 		const start = max(this.#shell.cursor.peek().start, copy.floor ?? 0n);
 		return hooks.spent(copy.sub, start, end, delivered);
+	}
+
+	// A copy that ran out cleanly still takes a group in flight below its end while the read stays
+	// open, as a cursor still reading it would. One landing on the serving copy may lie under its
+	// resume point, which is not that copy's to read, and a backfill that already ran out was let
+	// go: ask its route again. Mirrors the Rust `Reader::poll_lowest`.
+	#reopen(): void {
+		const serving = this.#serving();
+		for (const copy of this.#copies) {
+			if (copy.done !== null || hooks.arrived(copy.sub) <= (copy.drained ?? 0)) continue;
+			copy.done = undefined;
+			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
+		}
 	}
 
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is
