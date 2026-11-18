@@ -227,7 +227,11 @@ int main()
 	assert(std::string(EncoderPeakKey("obs_x264", "cbr")) == "bitrate");
 	assert(std::string(EncoderPeakKey("obs_nvenc_h264_tex", "vbr")) == "max_bitrate");
 	assert(std::string(EncoderPeakKey("obs_nvenc_h264_tex", "CBR")) == "bitrate");
-	for (const char *mode : {"CRF", "ABR", "CQP", "ICQ", "QVBR", "lossless", ""}) {
+	// x264's ABR is VBV-capped at its bitrate, so it has a peak that other encoders' ABR does not.
+	assert(std::string(EncoderPeakKey("obs_x264", "ABR")) == "bitrate");
+	assert(std::string(EncoderPeakKey("obs_x264", "VBR")) == "bitrate");
+	assert(!EncoderPeakKey("obs_qsv11_v2", "ABR"));
+	for (const char *mode : {"CRF", "CQP", "ICQ", "QVBR", "lossless", ""}) {
 		assert(!EncoderPeakKey("obs_x264", mode) && !EncoderPeakKey("obs_nvenc_h264_tex", mode));
 	}
 	assert(!EncoderPeakKey("obs_qsv11_v2", "VBR"));

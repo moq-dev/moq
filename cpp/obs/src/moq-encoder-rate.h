@@ -17,8 +17,8 @@ inline std::string Upper(std::string text)
 }
 
 // The setting that holds the hard peak an encoder honors under `rate_control`, or null
-// when it has none (CQP, CRF, ICQ, or a mode that only averages). The peak is what
-// reservations, the catalog, and dynamic bitrate price a rendition at.
+// when it has none (CQP, CRF, ICQ, or an encoder whose peak is not modeled, like QSV and AMF).
+// The peak is what reservations, the catalog, and dynamic bitrate price a rendition at.
 inline const char *EncoderPeakKey(const std::string &id, std::string rate_control)
 {
 	rate_control = Upper(std::move(rate_control));
