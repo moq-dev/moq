@@ -75,7 +75,11 @@ async fn opposite_claims_each_serve_their_nearest() {
 		assert_eq!(shown.cost, cost, "R{i} shows its nearest: {shown:?}");
 		if let Some(near) = near[i] {
 			assert_eq!(shown.instance, instances[near], "R{i}");
-			assert_eq!(reader.tag().as_deref(), Some(["A", "B"][near]), "R{i} reads its nearest");
+			assert_eq!(
+				reader.tag().as_deref(),
+				Some(["A", "B"][near]),
+				"R{i} reads its nearest"
+			);
 		}
 	}
 	let written = feeds.iter().map(Feed::written).max().unwrap();

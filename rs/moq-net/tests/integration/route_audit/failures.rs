@@ -29,7 +29,10 @@ async fn detour(count: usize, r1_r2: u64) {
 	quiesce().await;
 	for (i, reader) in readers.iter_mut().enumerate() {
 		let report = reader.report(since);
-		measured(&format!("ring of {count}, R1-R2 at {r1_r2}, R0-R1 cut, reader R{i}"), &report);
+		measured(
+			&format!("ring of {count}, R1-R2 at {r1_r2}, R0-R1 cut, reader R{i}"),
+			&report,
+		);
 		assert!(report.seamless(), "ring of {count}, R1-R2 at {r1_r2}: R{i}: {report:?}");
 	}
 	assert_eq!(mesh.doubled(feed.written()), [], "ring of {count}, R1-R2 at {r1_r2}");
@@ -158,7 +161,11 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 		if dead.contains(&i) {
 			continue;
 		}
-		let cost = reach.iter().filter_map(|distances| distances[i]).min().map(|cost| cost + 1);
+		let cost = reach
+			.iter()
+			.filter_map(|distances| distances[i])
+			.min()
+			.map(|cost| cost + 1);
 		let shown = shown(&mesh.relays[i]).await;
 		let case = format!("seed {seed:#x}, dead {dead:?}, R{i}");
 		match cost {

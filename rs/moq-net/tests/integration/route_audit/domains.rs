@@ -53,7 +53,10 @@ async fn joined_meshes(ring: bool) {
 		assert!(shown.available, "ring {ring}: R{i}: {shown:?}");
 		assert_eq!(shown.instance, source.route.instance(), "ring {ring}: R{i}");
 		let report = readers[i].report(since);
-		assert!(report.seamless() && report.stall.is_zero(), "ring {ring}: R{i}: {report:?}");
+		assert!(
+			report.seamless() && report.stall.is_zero(),
+			"ring {ring}: R{i}: {report:?}"
+		);
 		let seen = watched[i].seen();
 		assert_eq!(seen, [], "ring {ring}: R{i} settled");
 	}
@@ -138,7 +141,10 @@ async fn an_edge_passes_its_clients_and_its_cores_but_never_core_to_core() {
 
 		for core in [0, 1] {
 			let local = shown_at(&mesh.relays[core], "local").await;
-			assert!(local.is_some_and(|local| local.available), "marked {marked}: C{core} has L");
+			assert!(
+				local.is_some_and(|local| local.available),
+				"marked {marked}: C{core} has L"
+			);
 		}
 		let mut reader = Reader::new(&mesh.relays[2]);
 		kio::clock::sleep(super::CADENCE * 10).await;
@@ -169,7 +175,10 @@ async fn a_leaf_advertises_only_what_its_host_serves() {
 
 		for relay in [0, 1] {
 			let shown = shown_at(&mesh.relays[relay], "cam").await;
-			assert!(shown.is_some_and(|shown| shown.available), "leaf {leaf}: R{relay} has cam");
+			assert!(
+				shown.is_some_and(|shown| shown.available),
+				"leaf {leaf}: R{relay} has cam"
+			);
 		}
 		let mut reader = Reader::new(&mesh.relays[2]);
 		kio::clock::sleep(super::CADENCE * 10).await;

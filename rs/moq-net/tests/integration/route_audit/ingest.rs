@@ -69,7 +69,10 @@ async fn redundant(redundant: Redundant, lost: usize, how: Loss) {
 	quiesce().await;
 	for (i, reader) in readers.iter_mut().enumerate() {
 		let report = reader.report(since);
-		measured(&format!("redundant {redundant:?}, R{lost} lost by {how:?}, reader R{i}"), &report);
+		measured(
+			&format!("redundant {redundant:?}, R{lost} lost by {how:?}, reader R{i}"),
+			&report,
+		);
 		assert!(report.seamless(), "{redundant:?} R{lost} {how:?}: R{i}: {report:?}");
 	}
 	assert_eq!(mesh.doubled(feed.written()), [], "{redundant:?} R{lost} {how:?}");
@@ -111,7 +114,11 @@ async fn an_unsynchronized_pair_restarts_and_splices_nothing() {
 		let mut readers = readers(&mesh).await;
 		let nearest = ["A", "A", "B", "B", "B", "A"];
 		for (i, reader) in readers.iter_mut().enumerate() {
-			assert_eq!(reader.tag().as_deref(), Some(nearest[i]), "{how:?}: R{i} reads its nearest");
+			assert_eq!(
+				reader.tag().as_deref(),
+				Some(nearest[i]),
+				"{how:?}: R{i} reads its nearest"
+			);
 		}
 
 		let since = kio::clock::now();

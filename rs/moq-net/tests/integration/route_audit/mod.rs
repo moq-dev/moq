@@ -271,7 +271,9 @@ impl Feed {
 				for track in &tracks {
 					let mut group = track.create_group(group::Info { start }).unwrap();
 					let frame = payload(tag, key, kio::clock::now());
-					group.write_frame(Timestamp::from_millis(start).unwrap(), frame).unwrap();
+					group
+						.write_frame(Timestamp::from_millis(start).unwrap(), frame)
+						.unwrap();
 					group.finish().unwrap();
 				}
 				key += 1;
@@ -398,7 +400,9 @@ impl Reader {
 		}
 		longest = longest.max(now.saturating_duration_since(last));
 		report.stall = longest.saturating_sub(CADENCE);
-		report.runs.extend(got.iter().filter(|got| got.at >= since).map(|got| got.run));
+		report
+			.runs
+			.extend(got.iter().filter(|got| got.at >= since).map(|got| got.run));
 		for pair in got.windows(2) {
 			let [before, after] = [&pair[0], &pair[1]];
 			if before.run != after.run {
