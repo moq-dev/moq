@@ -328,8 +328,11 @@ type SubscriptionControlOptions = {
 	version: Version;
 	/** The SUBSCRIBE's ranges, which each lite-07 update edits. */
 	live: LiveRanges;
-	/** Apply an update, with every live range by Range ID on lite-07. */
-	apply: (update: SubscribeUpdate, live: { id: bigint; range: WireRange }[]) => void;
+	/**
+	 * Apply an update, with every live range by Range ID on lite-07: the same array as the last
+	 * update's while it left every range live.
+	 */
+	apply: (update: SubscribeUpdate, live: readonly { id: bigint; range: WireRange }[]) => void;
 };
 
 /**
@@ -349,6 +352,9 @@ class SubscriptionControls {
 	#writer: Writer;
 	#live: LiveRanges;
 	#update?: { update: SubscribeUpdate; ids: bigint[] };
+	// The live ranges last applied and their Range IDs, so an update leaving every range live hands
+	// the serving loop the same ids.
+	#applied?: { live: readonly { id: bigint; range: WireRange }[]; ids: bigint[] };
 	// Sticky, first one wins: null once the stream is over, an Error once it failed.
 	#end?: Error | null;
 	#ended: Promise<Error | null>;
@@ -447,8 +453,9 @@ class SubscriptionControls {
 				// Each lite-07 update edits the live ranges, which only the stream's history names.
 				const ranges = live.apply(update);
 				apply(update, ranges);
+				if (this.#applied?.live !== ranges) this.#applied = { live: ranges, ids: ranges.map(({ id }) => id) };
 				// Resolved in full, so the latest one replaces any the loop has yet to take.
-				this.#update = { update, ids: ranges.map(({ id }) => id) };
+				this.#update = { update, ids: this.#applied.ids };
 				this.#changed.update((value) => value + 1);
 			}
 		} catch (err: unknown) {
@@ -1083,6 +1090,16 @@ export class Publisher {
 			const asked = rangesOf(msg);
 			// Where each Range ID sits among the model's ranges, as of the last update applied.
 			let positions = new Map(asked.map((_, index) => [BigInt(index), index]));
+			// The live ranges the last update applied, what they resolved to, and the terms beside
+			// them, so an update leaving every range live costs nothing for them.
+			let applied:
+				| {
+						live: readonly { id: bigint; range: WireRange }[];
+						span: ReturnType<typeof spanOf>;
+						model: track.Subscription;
+						terms: Pick<SubscribeUpdate, "priority" | "order" | "maxDelay" | "minDelay">;
+				  }
+				| undefined;
 			controls = new SubscriptionControls({
 				quic: this.#quic,
 				reader: stream.reader,
@@ -1092,29 +1109,57 @@ export class Publisher {
 				apply: (update, live) => {
 					legacyPriority.set(update.priority);
 					if (wireOf(front).localDatagrams) legacy?.setPriority(update.priority);
+					// Every update restates the wanted group. Past our largest it is a join, which
+					// repeats the pending ask; at or below it the group already exists.
+					const largest = hooks.peekLargest(track).largest?.group;
+					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
+						hooks.joinSubscriber(track);
+					const terms = {
+						priority: update.priority,
+						order: update.order,
+						maxDelay: update.maxDelay,
+						minDelay: update.minDelay,
+					};
+					const delay = {
+						max: servingMaxDelay(update.maxDelay),
+						min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
+					};
+					// Every range still live as last applied: the model's ranges stand, and only the
+					// terms beside them may move.
+					if (applied?.live === live) {
+						Object.assign(update, applied.span);
+						const was = applied.terms;
+						if (
+							was.priority === terms.priority &&
+							was.order === terms.order &&
+							was.maxDelay === terms.maxDelay &&
+							was.minDelay === terms.minDelay
+						)
+							return;
+						applied.model = { ...applied.model, priority: update.priority, order: update.order, delay };
+						applied.terms = terms;
+						track.update(applied.model);
+						return;
+					}
+					let span: ReturnType<typeof spanOf> | undefined;
 					if (hasRanges(this.version)) {
 						const resolved = hooks.servingResolved(track);
 						const ranges = live.map(({ id, range }) => {
 							const index = positions.get(id);
 							return index === undefined ? range : pin(range, resolved[index]);
 						});
-						Object.assign(update, spanOf(this.version, ranges));
+						span = spanOf(this.version, ranges);
+						Object.assign(update, span);
 						positions = new Map(live.map(({ id }, index) => [id, index]));
 					}
-					// Every update restates the wanted group. Past our largest it is a join, which
-					// repeats the pending ask; at or below it the group already exists.
-					const largest = hooks.peekLargest(track).largest?.group;
-					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
-						hooks.joinSubscriber(track);
-					track.update({
+					const model: track.Subscription = {
 						priority: update.priority,
 						order: update.order,
-						delay: {
-							max: servingMaxDelay(update.maxDelay),
-							min: update.minDelay === undefined ? null : Duration.millis(update.minDelay),
-						},
+						delay,
 						ranges: requestedRanges(update),
-					});
+					};
+					track.update(model);
+					if (span) applied = { live, span, model, terms };
 				},
 			});
 			const finished = await this.#runTrack(track, stream.writer, controls, {
@@ -1570,7 +1615,8 @@ export class Publisher {
 							// An update may reach the finished track's history, so it is served again.
 							finished = false;
 							const update = control.update;
-							if (hasRanges(this.version)) {
+							// The same ids as last applied leave every range live, which owes nothing new.
+							if (hasRanges(this.version) && control.ids !== ids) {
 								// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 								const live = new Set(control.ids);
 								unstarted = unstarted.filter((id) => live.has(id));
