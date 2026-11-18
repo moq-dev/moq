@@ -2080,6 +2080,46 @@ async fn a_track_that_never_describes_itself_fails() {
 	}
 }
 
+/// A lone track that only sends a parameter set its transform absorbs still starts the
+/// wait, though no frame comes out; until it reads anything, the export waits unbounded.
+#[tokio::test(start_paused = true)]
+async fn an_absorbed_parameter_set_starts_the_wait() {
+	async fn pending(exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>) -> bool {
+		kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
+			.await
+			.is_err()
+	}
+
+	let mut live = Live::avc3();
+	let video = live.track.name().to_string();
+	wait_for_sps(&mut live);
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
+
+	assert!(
+		pending(&mut exporter).await,
+		"an export that read nothing ended or failed"
+	);
+	tokio::time::advance(std::time::Duration::from_secs(60)).await;
+	assert!(
+		pending(&mut exporter).await,
+		"the wait started before anything was read"
+	);
+
+	// A PPS alone, its group left open: absorbed, since it can't describe the track.
+	live.track.write(annexb_frame(0, &[PPS])).unwrap();
+	assert!(pending(&mut exporter).await, "a chunk or an error from a lone PPS");
+	tokio::time::advance(std::time::Duration::from_secs(29)).await;
+	assert!(pending(&mut exporter).await, "the wait ran out early");
+	tokio::time::advance(std::time::Duration::from_secs(1)).await;
+
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackUndescribed(names)) if *names == [video]),
+		"{err:?}"
+	);
+}
+
 /// An HEVC Main 10 source: the catalog's codec string carries no chroma format or bit
 /// depth, so the track waits for its SPS and declares the depth the SPS states.
 #[tokio::test(start_paused = true)]

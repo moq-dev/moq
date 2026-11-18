@@ -122,7 +122,7 @@ impl<S> Feed<S> {
 /// Whether the init segment went out, which fixes the track set.
 enum Init {
 	/// Fragments cut before the init segment, written right after it in the order they were cut,
-	/// and the [`INIT_WAIT`] deadline, armed at the first frame read.
+	/// and the [`INIT_WAIT`] deadline, armed at the first frame any source reads.
 	Waiting {
 		queued: VecDeque<(String, Fragment)>,
 		deadline: Option<Box<kio::clock::Sleep>>,
@@ -826,7 +826,6 @@ impl<S: Stream> Export<S> {
 			// polling for the SPS/PPS-bearing keyframe instead of parking. Before the init, a
 			// track that holds its share parks instead.
 			let waiting = !self.init.written();
-			let mut read = false;
 			for (name, track) in &mut self.tracks {
 				if track.pending.is_some() || track.buffer.is_closed() || (waiting && track.held >= INIT_SHARE) {
 					continue;
@@ -834,7 +833,6 @@ impl<S: Stream> Export<S> {
 				while let Phase::Reading(subscription) = &mut track.phase {
 					match subscription.source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame { frame, .. })) => {
-							read = true;
 							// A keyframe may carry new parameter sets, so check it still matches.
 							if !track.described() || frame.keyframe {
 								track.describe(name)?;
@@ -893,6 +891,12 @@ impl<S: Stream> Export<S> {
 					}
 					return Poll::Ready(Ok(None));
 				}
+				// Any frame read starts the wait, even a parameter set the source absorbed.
+				let read = self
+					.tracks
+					.values()
+					.filter_map(Fmp4Track::subscription)
+					.any(|sub| sub.source.read());
 				if self.init.poll_expired(read, waiter) {
 					return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 				}
