@@ -38,9 +38,9 @@ for (const protocol of protocols) {
 			// moq-transport carries no subscriber budget, so there the publisher's own limit expires it.
 			const maxAge = protocol.kind === "ietf" && mode === "expires" ? Duration.millis(budget) : null;
 			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge });
-			const write = (sequence: bigint) => {
-				const group = track.createGroup(sequence);
-				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
+			const write = (key: bigint) => {
+				const group = track.createGroup(key);
+				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
 				group.finish();
 			};
 
@@ -158,10 +158,13 @@ for (const protocol of protocols) {
 		// No publisher limit, so the eviction rather than a stale verdict gives the group up: lite-07
 		// closes the stream of a group gone stale instead of resetting it.
 		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-		const write = (sequence: bigint, frames: number) => {
-			const group = track.createGroup(sequence);
+		const write = (key: bigint, frames: number) => {
+			const group = track.createGroup(key);
 			for (let frame = 0; frame < frames; frame++) {
-				group.writeFrame({ payload: new Uint8Array([frame]), timestamp: Timestamp.fromMillis(0) });
+				group.writeFrame({
+					payload: new Uint8Array([frame]),
+					timestamp: Timestamp.fromMillis(Number(key)),
+				});
 			}
 			group.finish();
 		};

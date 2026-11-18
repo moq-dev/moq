@@ -1,5 +1,5 @@
 /**
- * A track's drop set: the sequences its publisher gave up, with why, as runs. Mirrors the Rust
+ * A track's drop set: the keys its publisher gave up, with why, as runs. Mirrors the Rust
  * `TrackState::drops` with its change index.
  *
  * Package-internal: not exported from the entrypoint.
@@ -31,10 +31,10 @@ export class Runs<R extends Run> {
 		return this.#runs.length;
 	}
 
-	/** The run holding `sequence`, if any. */
-	at(sequence: bigint): R | undefined {
-		const run = this.#runs[this.#above(sequence)];
-		return run && run.start <= sequence ? run : undefined;
+	/** The run holding `key`, if any. */
+	at(key: bigint): R | undefined {
+		const run = this.#runs[this.#above(key)];
+		return run && run.start <= key ? run : undefined;
 	}
 
 	/** The runs overlapping `[start, end)`, lowest first. */
@@ -108,13 +108,13 @@ export class Runs<R extends Run> {
 		return { removed, added };
 	}
 
-	// The index of the first run ending past `sequence`.
-	#above(sequence: bigint): number {
+	// The index of the first run ending past `key`.
+	#above(key: bigint): number {
 		let lo = 0;
 		let hi = this.#runs.length;
 		while (lo < hi) {
 			const mid = (lo + hi) >>> 1;
-			if (this.#runs[mid].end <= sequence) lo = mid + 1;
+			if (this.#runs[mid].end <= key) lo = mid + 1;
 			else hi = mid;
 		}
 		return lo;
@@ -125,7 +125,7 @@ export class Runs<R extends Run> {
 const LOG_SLACK = 64;
 
 /**
- * The sequences a track's publisher gave up, with why, shared by the track and every reader of
+ * The keys a track's publisher gave up, with why, shared by the track and every reader of
  * it, plus an index of each run's last change, so a reader folds in only what changed since it
  * last looked.
  */
@@ -159,9 +159,9 @@ export class DropSet {
 		return this.#revision;
 	}
 
-	/** The run holding `sequence`, if any. */
-	at(sequence: bigint): DropRun | undefined {
-		return this.#runs.at(sequence);
+	/** The run holding `key`, if any. */
+	at(key: bigint): DropRun | undefined {
+		return this.#runs.at(key);
 	}
 
 	/** The runs overlapping `[start, end)`, lowest first. */

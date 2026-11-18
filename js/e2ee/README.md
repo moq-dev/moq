@@ -46,8 +46,9 @@ const video = await new Broadcast.Producer(route.broadcast, generation).createTr
 });
 route.announce();
 
-const group = video.appendGroup();
-await group.writeFrame(Time.Timestamp.now(), frame);
+const now = Time.Timestamp.now();
+const group = video.appendGroup(now);
+await group.writeFrame(now, frame);
 group.finish();
 video.finish();
 video.close();

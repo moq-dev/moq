@@ -8,6 +8,11 @@ import { GoAway } from "../../../../js/net/src/ietf/goaway.ts";
 import * as Ietf from "../../../../js/net/src/ietf/index.ts";
 import { Session as Qmux, selectSubprotocol } from "../../../../js/qmux/src/index.ts";
 
+// Append the group after the newest on a scale-less track: its start is the next key.
+function appendNext(track: Moq.Track.Producer): Moq.Group.Producer {
+	return track.appendGroup(Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n));
+}
+
 console.debug = console.error;
 console.info = console.error;
 const [mode, name] = process.argv.slice(2);
@@ -22,8 +27,8 @@ broadcastRoute.announce();
 const markerRoute = origin.route(Moq.Path.from("replacement"), { hidden: true });
 const marker = markerRoute.broadcast;
 const ready = marker.createTrack("ready");
-const markerGroup = ready.appendGroup();
-markerGroup.writeFrame({ payload: new Uint8Array([42]), timestamp: Moq.Time.Timestamp.unscaled(markerGroup.sequence) });
+const markerGroup = appendNext(ready);
+markerGroup.writeFrame({ payload: new Uint8Array([42]), timestamp: Moq.Time.Timestamp.unscaled(markerGroup.start) });
 markerGroup.finish();
 markerRoute.announce();
 
@@ -124,8 +129,8 @@ try {
 	initial = await first.accepted;
 	const demand = video.demand();
 	while (demand.wanted.peek() === undefined) await demand.wanted.changed();
-	const group = video.appendGroup();
-	group.writeFrame({ payload: new Uint8Array(32), timestamp: Moq.Time.Timestamp.unscaled(group.sequence) });
+	const group = appendNext(video);
+	group.writeFrame({ payload: new Uint8Array(32), timestamp: Moq.Time.Timestamp.unscaled(group.start) });
 	group.finish();
 	assert.equal((await commands.next()).value, "first group");
 	await initial.control.writer.u53(GoAway.id);
@@ -136,8 +141,8 @@ try {
 	replacement = await second.accepted;
 	assert.equal((await commands.next()).value, "replacement ready");
 	initial.connection.abort();
-	const next = video.appendGroup();
-	next.writeFrame({ payload: new Uint8Array(32).fill(1), timestamp: Moq.Time.Timestamp.unscaled(next.sequence) });
+	const next = appendNext(video);
+	next.writeFrame({ payload: new Uint8Array(32).fill(1), timestamp: Moq.Time.Timestamp.unscaled(next.start) });
 	next.finish();
 	assert.equal((await commands.next()).value, "done");
 	console.error("js goaway redirect restarted");

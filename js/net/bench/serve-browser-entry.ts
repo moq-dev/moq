@@ -92,7 +92,7 @@ async function measure(protocol: string, groups: number, viewers: number) {
 	}, 0);
 	const start = performance.now();
 	for (let sequence = 0; sequence < groups; sequence++) {
-		const group = track.appendGroup();
+		const group = track.appendGroup(Timestamp.fromMicros(sequence * 2500));
 		for (let frame = 0; frame < 128; frame++)
 			group.writeFrame({
 				payload: new Uint8Array(32),

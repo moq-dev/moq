@@ -90,21 +90,21 @@ test.each([0, 1, 4, 32, 128])("rolling expiration keeps only %i pending gaps", (
 
 test("shuffled arrivals and bulk merges agree with the accounted sequence set", () => {
 	const ledger = new Ledger();
-	const sequences = new Set<number>();
+	const keys = new Set<number>();
 	let seed = 42;
 	for (let i = 0; i < 1024; i++) {
 		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
 		const start = seed % 4096;
 		const end = start + (i < 512 ? 1 : 32);
 		ledger.account(BigInt(start), BigInt(end), at(i));
-		for (let n = start; n < end; n++) sequences.add(n);
+		for (let n = start; n < end; n++) keys.add(n);
 		ledger.expire(at(i), Duration.millis(2000));
 	}
 	const gaps = ledger.gaps(0n, 4128n);
 	for (let i = 0; i < 4128; i++) {
-		const sequence = BigInt(i);
-		expect(ledger.covers(sequence, sequence + 1n)).toBe(sequences.has(i));
-		expect(gaps.some((gap) => gap.start <= sequence && sequence < gap.end)).toBe(!sequences.has(i));
+		const key = BigInt(i);
+		expect(ledger.covers(key, key + 1n)).toBe(keys.has(i));
+		expect(gaps.some((gap) => gap.start <= key && key < gap.end)).toBe(!keys.has(i));
 	}
 	ledger.account(0n, 4128n, at(1024));
 	ledger.expire(at(4000), Duration.millis(2000));

@@ -1183,7 +1183,7 @@ test.each([
 				return () => {};
 			},
 		});
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), reader);
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), reader);
 		expect(touched).toEqual([]);
 	} finally {
 		subscriber.close();
@@ -1401,14 +1401,14 @@ test("a group that beats its track info waits for it", async () => {
 				return typeof value === "function" ? value.bind(target) : value;
 			},
 		});
-		const receiving = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), reader);
+		const receiving = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), reader);
 		await drainReactions();
 		expect(touched).toEqual([]);
 
 		await answerTrackInfo(streams[0], version, 1000);
 		await receiving;
 		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(0n);
+		expect(group?.start).toBe(0n);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([0]));
 	} finally {
 		track.close();
@@ -1472,9 +1472,9 @@ test.each([
 					await w.write(new Uint8Array([1]));
 				});
 		first.write(frame);
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 3n }), first.reader);
 		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(3n);
+		expect(group?.start).toBe(3n);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 
 		first.reset(StreamCode.TooFarBehind);
@@ -1511,7 +1511,7 @@ test("a reset without its code ends the group", async () => {
 
 		const first = handStream(version);
 		first.write(await liteFrame(300, new Uint8Array([1])));
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 3n }), first.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		first.error(new TypeError("Error in input stream"));
@@ -1557,7 +1557,7 @@ test.each([
 		}
 		const lost = handStream(version);
 		lost.write(await liteFrame(0, new Uint8Array([1])));
-		void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), lost.reader);
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		if (order === "after") await respond(request, version, [drop]);
@@ -1609,12 +1609,12 @@ test("a drop during a duplicate wait lets the end give up on a stream that never
 		// The copy still arriving, then a stream of the same group that waits on it.
 		const first = handStream(version);
 		first.write(await liteFrame(0, new Uint8Array([1])));
-		void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), first.reader);
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), first.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		const lost = handStream(version);
 		lost.write(await liteFrame(0, new Uint8Array([1])));
-		void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), lost.reader);
+		void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), lost.reader);
 		await drainReactions();
 
 		await respond(request, version, [
@@ -1654,16 +1654,16 @@ test("a stream whose gap the grace gave up on still holds the end", async () => 
 		await request.reading;
 		await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
 		// Group 2 opens a gap at 1, which the grace gives up on by the time group 3 arrives.
-		for (const sequence of [0n, 2n, 3n]) {
+		for (const key of [0n, 2n, 3n]) {
 			const stream = handStream(version);
 			stream.finish();
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence }), stream.reader);
+			await subscriber.runGroup(new Group({ subscribe: 0n, key: key }), stream.reader);
 			await clock.advance(GRACE.mul(2));
 		}
 
 		const late = handStream(version);
 		late.write(await liteFrame(0, new Uint8Array([1])));
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 1n }), late.reader);
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 1n }), late.reader);
 		await drainReactions();
 		await respond(request, version, [{ finish: new SubscribeFinish(4n) }]);
 		await drainReactions();
@@ -1703,7 +1703,7 @@ test("a stream a stale drop excused stays excused after an update", async () => 
 
 		const slow = handStream(version);
 		slow.write(await liteFrame(0, new Uint8Array([1])));
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), slow.reader);
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), slow.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([1]));
 		await respond(request, version, [{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.Old }) }]);
@@ -1751,7 +1751,7 @@ test("a malformed lite-07 group stream ends only its group", async () => {
 			}),
 		);
 		first.finish();
-		const running = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), first.reader);
+		const running = subscriber.runGroup(new Group({ subscribe: 0n, key: 3n }), first.reader);
 		const group = await track.recvGroup();
 		expect((await group?.readFrame())?.payload).toEqual(zero);
 
@@ -2610,7 +2610,7 @@ test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 		await (await opened(1)).reading;
 		const next = ordered.nextGroup();
 		await subscriber.runGroup(
-			new Group({ subscribe: 0n, sequence: 0n }),
+			new Group({ subscribe: 0n, key: 0n }),
 			new Reader(
 				new ReadableStream({
 					start: (controller) => controller.close(),
@@ -2693,11 +2693,8 @@ test.each(
 		const before = counters.map((counter) => counter.count());
 		expect(before).toHaveLength(3);
 		expect(before.every((count) => count > 0)).toBe(true);
-		for (let sequence = 0n; sequence < 50n; sequence++) {
-			await subscriber.runGroup(
-				new Group({ subscribe: 0n, sequence }),
-				await groupStream(Number(sequence), version),
-			);
+		for (let key = 0n; key < 50n; key++) {
+			await subscriber.runGroup(new Group({ subscribe: 0n, key: key }), await groupStream(Number(key), version));
 			await drainReactions();
 		}
 		// Quiet subscription and demand signals must not retain a listener per received group.
@@ -2728,17 +2725,14 @@ test.each([0, 5, 9000])("a received group numbers its frames from transport offs
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
-		await subscriber.runGroup(
-			new Group({ subscribe: 0n, sequence: 0n, frameStart }),
-			await groupStream(1000, version),
-		);
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n, frameStart }), await groupStream(1000, version));
 		const late = consumer.subscribe();
 		try {
 			for (const reader of [early, late]) {
 				const group = await reader.recvGroup();
 				if (!group) throw new Error("no received group");
-				expect((await group.readFrameSequence())?.sequence).toBe(frameStart);
-				expect(await group.readFrameSequence()).toBeUndefined();
+				expect((await group.readFrameIndex())?.index).toBe(frameStart);
+				expect(await group.readFrameIndex()).toBeUndefined();
 				group.close();
 			}
 		} finally {
@@ -2789,16 +2783,16 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4n }), await groupStream(1000, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 4n }), await groupStream(1000, version));
 		// Starts before the group below it.
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5n }), await groupStream(500, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 5n }), await groupStream(500, version));
 		// Lands below group 5 but starts after it.
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), await groupStream(2000, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 3n }), await groupStream(2000, version));
 		const got = [];
 		for (let i = 0; i < 3; i++) {
 			const group = await track.recvGroup();
 			const frame = await group?.readFrame();
-			got.push([group?.sequence, frame?.payload.length, frame?.timestamp?.value]);
+			got.push([group?.start, frame?.payload.length, frame?.timestamp?.value]);
 		}
 		expect(got).toEqual([
 			[3n, 1, 2000],
@@ -2825,11 +2819,11 @@ test("a lite-07 rewind is refused", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4n }), await groupStream(1000, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 4n }), await groupStream(1000, version));
 		// Starts before the group below it, so its stream is stopped with the refusal.
 		const rewound = await groupStream(500, version);
 		const stop = spyOn(rewound, "stop");
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5n }), rewound);
+		await subscriber.runGroup(new Group({ subscribe: 0n, key: 5n }), rewound);
 		expect(stop.mock.calls[0]?.[0]).toBeInstanceOf(TimestampMismatch);
 	} finally {
 		track.close();
@@ -2888,7 +2882,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2898,7 +2892,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
-		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
+		track.update({ ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
 		await drainReactions();
 		expect(hooks.sourceStart(track)).toBe("pending");
 		// The widened range took the next Range ID.
@@ -2921,7 +2915,7 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 	const subscriber = new Subscriber(quic, version, toHop(1n));
 	type Entry = {
 		track: Producer;
-		tail: { covers(start: bigint, end: bigint): boolean; open(sequence: bigint): { done(): void } };
+		tail: { covers(start: bigint, end: bigint): boolean; open(key: bigint): { done(): void } };
 	};
 	let entry: Entry | undefined;
 	const internal = subscriber as unknown as {
@@ -2949,14 +2943,14 @@ test("a stale drop accounts for its groups for good on lite-07", async () => {
 			for (const chunk of chunks) stream.inbound.enqueue(chunk);
 			await drainReactions();
 		};
-		const old = (sequence: bigint): SubscribeResponse => ({
-			drop: new SubscribeDrop({ start: sequence, end: sequence + 1n, error: StreamCode.Old }),
+		const old = (key: bigint): SubscribeResponse => ({
+			drop: new SubscribeDrop({ start: key, end: key + 1n, error: StreamCode.Old }),
 		});
 		// A group stream's header: the tail accounts for it, and the track holds the group.
-		const arrive = (sequence: bigint) => {
+		const arrive = (key: bigint) => {
 			if (!entry) throw new Error("no subscription");
-			const read = entry.tail.open(sequence);
-			return { group: hooks.receiveGroup(entry.track, { sequence, start: 0 }), read };
+			const read = entry.tail.open(key);
+			return { group: hooks.receiveGroup(entry.track, { start: key, offset: 0 }), read };
 		};
 
 		await send({ start: new SubscribeStart([0n]) });
@@ -3152,7 +3146,7 @@ test("a skip replaces a final drop but not a cached group on lite-07", async () 
 			next.kind !== "idle";
 			next = hooks.tryRecvGroup(reader, true)
 		) {
-			if (next.kind === "group") got.push(next.group.sequence);
+			if (next.kind === "group") got.push(next.group.start);
 			else if (next.kind === "drop") got.push([next.start, next.end, next.skip === true]);
 			else break;
 		}
@@ -3237,14 +3231,11 @@ test.each([
 					controller.close();
 				},
 			});
-			await subscriber.runGroup(
-				new Group({ subscribe: 0n, sequence: 0n }),
-				new Reader(group, undefined, version),
-			);
+			await subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), new Reader(group, undefined, version));
 		} else if (legacy) {
 			// Lite-03 says nothing about which groups are owed, so only a stream still being read is.
 			const group = new ReadableStream<Uint8Array>({ start: frame });
-			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), new Reader(group, undefined, version));
+			void subscriber.runGroup(new Group({ subscribe: 0n, key: 0n }), new Reader(group, undefined, version));
 		}
 		await drainReactions();
 
@@ -3322,7 +3313,7 @@ test("an update whose bound the wire can't carry fails the track", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_05);
 		await (await opened(1)).reading;
-		track.update({ ranges: [{ start: { absolute: 2n ** 62n - 1n } }] });
+		track.update({ ranges: [{ start: { time: 2n ** 62n - 1n } }] });
 		expect(await track.closed).toBeInstanceOf(RangeError);
 	} finally {
 		track.close();

@@ -11,12 +11,13 @@ import { WireRoute } from "../hop.ts";
 // Loaded up front: a session imports it on first use, which takes host turns a Manual clock cannot wait out.
 import "../ietf/connection.ts";
 import { ALPN as IetfALPN } from "../ietf/version.ts";
+import { hooks } from "../internal.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport, manual, textFrame, waitFor } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
-import { Timescale } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { closeUnwanted } from "../util/announce.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
@@ -823,7 +824,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 		const track = remote.track("video").subscribe().ordered();
 
 		try {
-			producer.appendGroup().writeFrame(textFrame("first"));
+			hooks.appendNext(producer).writeFrame(textFrame("first", Timestamp.fromMillis(0)));
 			expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 			if (teardown.goaway) {
@@ -834,8 +835,8 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			}
 
 			fin.hold?.enable();
-			const last = producer.appendGroup();
-			last.writeFrame(textFrame("last"));
+			const last = hooks.appendNext(producer);
+			last.writeFrame(textFrame("last", Timestamp.fromMillis(1)));
 			last.finish();
 			producer.finish();
 			producer.close();
@@ -915,7 +916,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		const track = remote.track("video").subscribe().ordered();
 		try {
 			// The group stays open, so the old session's drain waits out its deadline.
-			producer.appendGroup().writeFrame(textFrame("live"));
+			hooks.appendNext(producer).writeFrame(textFrame("live"));
 			expect(await (await track.nextGroup())?.readString()).toBe("live");
 
 			reload.url.set(new URL("https://example.com/b"));
@@ -977,7 +978,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	const track = remote.track("video").subscribe().ordered();
 	try {
 		// The group stays open, so a graceful close of the predecessor would wait out its deadline.
-		producer.appendGroup().writeFrame(textFrame("live"));
+		hooks.appendNext(producer).writeFrame(textFrame("live"));
 		expect(await (await track.nextGroup())?.readString()).toBe("live");
 
 		const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
@@ -1050,12 +1051,12 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const remote = wireOf(await first.server).consume(Path.from("room"));
 	const track = remote.track("video").subscribe().ordered();
 	try {
-		producer.appendGroup().writeFrame(textFrame("first"));
+		hooks.appendNext(producer).writeFrame(textFrame("first", Timestamp.fromMillis(0)));
 		expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 		fin.hold?.enable();
-		const last = producer.appendGroup();
-		last.writeFrame(textFrame("last"));
+		const last = hooks.appendNext(producer);
+		last.writeFrame(textFrame("last", Timestamp.fromMillis(1)));
 		last.finish();
 		producer.finish();
 		producer.close();

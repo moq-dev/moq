@@ -43,11 +43,11 @@ test.each(["group", "track"] as const)("%s JSON rejects an empty frame without t
 	const subscriber = kind === "track" ? producer.subscribe().ordered() : undefined;
 	const group = kind === "track" ? producer.createGroup(0n) : new GroupProducer(0n);
 	const reader = subscriber ?? group.consume();
-	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.sequence) });
+	group.writeFrame({ payload: new Uint8Array(), timestamp: Timestamp.unscaled(group.start) });
 	for (const value of [null, false, 0, ""])
 		group.writeFrame({
 			payload: new TextEncoder().encode(JSON.stringify(value)),
-			timestamp: Timestamp.unscaled(group.sequence),
+			timestamp: Timestamp.unscaled(group.start),
 		});
 	group.finish();
 	producer.finish();

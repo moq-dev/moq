@@ -170,16 +170,16 @@ try {
 					open.delete(i);
 					continue;
 				}
-				const group = track.appendGroup();
+				const group = track.appendGroup(Moq.Time.Timestamp.unscaled(BigInt(sequence)));
 				open.set(i, { group, sequence });
 				group.writeFrame({
 					payload: new TextEncoder().encode(payload(plan.tracks[i], sequence, 0)),
-					timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+					timestamp: Moq.Time.Timestamp.unscaled(group.start),
 				});
 			} else if (current) {
 				current.group.writeFrame({
 					payload: new TextEncoder().encode(payload(plan.tracks[i], current.sequence, 1)),
-					timestamp: Moq.Time.Timestamp.unscaled(current.group.sequence),
+					timestamp: Moq.Time.Timestamp.unscaled(current.group.start),
 				});
 			}
 		}
