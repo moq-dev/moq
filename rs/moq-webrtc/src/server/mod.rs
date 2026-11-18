@@ -38,6 +38,8 @@ pub struct Response {
 
 impl Response {
 	/// Run the negotiated media session until the peer disconnects, DELETE terminates it, or it errors.
+	/// A WHEP session also ends `Ok` once its broadcast ends cleanly and it has sent the last
+	/// frames, closing the peer connection.
 	pub async fn run(self) -> Result<()> {
 		self.session.run().await
 	}

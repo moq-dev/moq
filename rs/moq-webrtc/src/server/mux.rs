@@ -10,9 +10,10 @@
 //! Routing key: ICE. A session is registered under the local ICE ufrag we mint
 //! for it ([`IceCreds::new`]). The peer's first packets are STUN binding
 //! requests whose USERNAME is `<our-ufrag>:<their-ufrag>`, so we parse the local
-//! ufrag out of the STUN message and look the session up. Once we've seen a
-//! source address we cache `addr -> session`, so subsequent DTLS/RTP/RTCP (which
-//! carry no ufrag) route by address on the fast path.
+//! ufrag out of the STUN message and look the session up. Each binding request
+//! caches `addr -> session`, so subsequent DTLS/RTP/RTCP (which carry no ufrag)
+//! route by address. A binding request always routes by its ufrag, so a peer that
+//! re-offers from the same address moves the address to its new session.
 //!
 //! Backpressure mirrors a UDP socket buffer: each session has a bounded inbox
 //! and a full inbox drops the datagram (WebRTC tolerates loss). A closed inbox
@@ -91,12 +92,15 @@ impl Drop for Registration {
 }
 
 impl Registry {
+	/// The session a datagram from `src` goes to: the one a binding request's `ufrag` names,
+	/// which then holds `src`, or else whichever holds `src`.
 	fn route(&mut self, src: SocketAddr, ufrag: Option<&str>) -> Option<Arc<Entry>> {
-		let entry = self.by_addr.get(&src).cloned().or_else(|| {
-			let entry = self.by_ufrag.get(ufrag?).cloned()?;
+		if let Some(entry) = ufrag.and_then(|ufrag| self.by_ufrag.get(ufrag)) {
+			let entry = entry.clone();
 			self.by_addr.insert(src, entry.clone());
-			Some(entry)
-		})?;
+			return Some(entry);
+		}
+		let entry = self.by_addr.get(&src).cloned()?;
 		if entry.sender.is_closed() {
 			self.by_addr.remove(&src);
 			return None;
@@ -187,12 +191,8 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 		let src = crate::ice::canonical(src);
 		let data = &buf[..len];
 
-		// Cached peers need one routing lock; only a new address parses STUN.
-		let entry = registry.lock().unwrap().route(src, None);
-		let entry = entry.or_else(|| {
-			let ufrag = local_ufrag(data)?;
-			registry.lock().unwrap().route(src, Some(&ufrag))
-		});
+		let ufrag = local_ufrag(data);
+		let entry = registry.lock().unwrap().route(src, ufrag.as_deref());
 		let Some(entry) = entry else {
 			continue;
 		};
@@ -212,6 +212,10 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 /// Extract the local ICE ufrag from a STUN binding request, if `data` is one.
 /// The USERNAME is `<local-ufrag>:<remote-ufrag>`; we route on the local half.
 fn local_ufrag(data: &[u8]) -> Option<String> {
+	// Only STUN starts with 0..=3 (RFC 7983), so media skips the parse.
+	if *data.first()? > 3 {
+		return None;
+	}
 	let msg = StunMessage::parse(data).ok()?;
 	if !msg.is_binding_request() {
 		return None;
@@ -295,6 +299,42 @@ mod tests {
 		let mut registry = mux.registry.lock().unwrap();
 		assert!(registry.route(address_a, None).is_none());
 		assert!(registry.route(address_a, Some(&a.ufrag)).is_none());
+	}
+
+	/// A peer re-offering from the address its old session still holds reaches its new
+	/// session: a binding request routes by the session it names, and moves the address there.
+	#[tokio::test]
+	async fn a_reoffer_from_the_same_address_reaches_its_new_session() {
+		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
+		let port = mux.local_addr().port();
+		let (old, mut old_inbound, _old_registration) = mux.register();
+		let (new, mut new_inbound, _new_registration) = mux.register();
+		let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let recv = async |inbound: &mut Inbound| {
+			kio::clock::timeout(Duration::from_secs(5), inbound.packets.recv())
+				.await
+				.expect("the demux routes the datagram")
+				.expect("session inbox stayed open")
+				.0
+		};
+
+		let request = binding_request(&old);
+		peer.send_to(&request, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
+		assert_eq!(recv(&mut old_inbound).await, request);
+
+		let request = binding_request(&new);
+		peer.send_to(&request, (Ipv4Addr::LOCALHOST, port)).await.unwrap();
+		assert_eq!(recv(&mut new_inbound).await, request);
+
+		// What follows, such as DTLS, carries no ufrag and follows the address to its new session.
+		peer.send_to(&[22, 254, 253], (Ipv4Addr::LOCALHOST, port))
+			.await
+			.unwrap();
+		assert_eq!(recv(&mut new_inbound).await, [22, 254, 253]);
+		assert!(
+			old_inbound.packets.try_recv().is_err(),
+			"the old session kept the address"
+		);
 	}
 
 	/// An IPv4 peer reaching a dual-stack (`[::]`) mux must route to its session

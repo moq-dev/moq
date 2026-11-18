@@ -191,7 +191,8 @@ impl Session {
 		}
 	}
 
-	/// Drive the media session until it fails or the peer disconnects, which is `Ok`.
+	/// Drive the media session until it fails, the peer disconnects, or an egress has sent its
+	/// broadcast's end and closed; the last two are `Ok`.
 	pub async fn run(&mut self) -> Result<()> {
 		let result = self.run_loop().await;
 		// Any end but the peer's DELETE, a disconnect or an offer that never connected
@@ -207,7 +208,7 @@ impl Session {
 		result
 	}
 
-	/// Returns `Ok` only when the peer disconnects.
+	/// Returns `Ok` only when the peer disconnects or an egress closed after its broadcast's end.
 	async fn run_loop(&mut self) -> Result<()> {
 		loop {
 			let remb_at = self.rate.as_ref().and_then(IngestRate::remb_at);
@@ -216,9 +217,10 @@ impl Session {
 				biased;
 
 				// A failed catalog, as every subscription fails once the source's route dies,
-				// means nothing more will flow, so fail rather than idle. A clean end keeps
-				// serving what the pumps still hold. Polled before the writes, which could
-				// otherwise stay ready and starve it; it completes once.
+				// means nothing more will flow, so fail rather than idle. A clean end opens no
+				// more lines, and the pumps serve what they still hold until the writes run dry.
+				// Polled before the writes, which could otherwise stay ready and starve it; it
+				// completes once.
 				ended = async {
 					match self.catalog_end.as_mut() {
 						Some(end) => end.await,
@@ -229,17 +231,29 @@ impl Session {
 					if let Ok(Err(err)) = ended {
 						return Err(err);
 					}
+					if let MediaRole::Egress(source) = &mut self.role {
+						source.end();
+					}
 				}
 
-				Some(req) = async {
+				req = async {
 					match self.writes_rx.as_mut() {
 						Some(rx) => rx.recv().await,
 						None => std::future::pending::<Option<WriteRequest>>().await,
 					}
-				} => {
-					let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
-					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
-				}
+				} => match req {
+					Some(req) => {
+						let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
+						crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
+					}
+					// The catalog ended and every pump has written its last frame, which str0m
+					// already sent: close with an RTCP BYE and a DTLS close_notify, so the peer
+					// learns at once that the broadcast is over, and end once they are out.
+					None => {
+						self.writes_rx = None;
+						self.agent.rtc_mut().close().map_err(Error::rtc)?;
+					}
+				},
 
 				cap = async {
 					match self.rate.as_mut() {
