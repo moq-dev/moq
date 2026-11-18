@@ -227,7 +227,7 @@ An endpoint MUST NOT open a second stream for an advertisement it already mainta
 An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
 
 An update MUST NOT change the first HOP_PATH entry, the original publisher.
-An endpoint whose best path now starts at another publisher withdraws the advertisement and advertises the new path: PUBLISH_NAMESPACE_DONE and a new PUBLISH_NAMESPACE, or NAMESPACE_DONE and a new NAMESPACE on the same stream.
+An endpoint whose best path now starts at another publisher withdraws the advertisement and advertises the new path: it cancels the PUBLISH_NAMESPACE's request stream and sends a new PUBLISH_NAMESPACE on a new one, or sends NAMESPACE_DONE and a new NAMESPACE on the same SUBSCRIBE_NAMESPACE stream.
 A receiver MAY close the session with a PROTOCOL_VIOLATION on an update that changes the first entry, or apply it as an ordinary update.
 
 An update is sent whenever the path an endpoint advertises changes: a different best path, or a different cost along it.
