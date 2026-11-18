@@ -13,6 +13,7 @@ import { Timescale, Timestamp } from "./time.ts";
 import { authoredInfo, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { LIVE, rangesStart } from "./window.ts";
+import { nextGroup, tryNextGroup } from "./ordered.test-util.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -96,7 +97,7 @@ function appendFrozen(producer: TrackProducer, text = "x"): bigint {
 
 function drainOrdered(reader: import("./track.ts").Ordered) {
 	const keys: bigint[] = [];
-	for (let group = reader.tryNextGroup(); group; group = reader.tryNextGroup()) {
+	for (let group = tryNextGroup(reader); group; group = tryNextGroup(reader)) {
 		keys.push(group.start);
 		group.close();
 	}
@@ -132,7 +133,7 @@ test("an ordered owed hole wakes exactly at its wall budget", async () => {
 		expect(drainOrdered(reader)).toEqual([0n]);
 		putGroup(producer, 2n);
 		let resolved = false;
-		const pending = reader.nextGroup().then((group) => {
+		const pending = nextGroup(reader).then((group) => {
 			resolved = true;
 			return group;
 		});
@@ -191,7 +192,7 @@ test("an ordered owed hole follows media time and a lower successor", async () =
 		edge.writeFrame(textFrame("edge", Timestamp.fromMillis(4000)));
 		expect(drainOrdered(reader)).toEqual([]);
 		let resolved = false;
-		const pending = reader.nextGroup().then((group) => {
+		const pending = nextGroup(reader).then((group) => {
 			resolved = true;
 			return group;
 		});
@@ -203,7 +204,7 @@ test("an ordered owed hole follows media time and a lower successor", async () =
 		expect(drainOrdered(reader)).toEqual([]); // Group 3 is still owed.
 		edge.writeFrame(textFrame("within", Timestamp.fromMillis(4999)));
 		expect(drainOrdered(reader)).toEqual([]);
-		const deadline = reader.nextGroup();
+		const deadline = nextGroup(reader);
 		edge.writeFrame(textFrame("deadline", Timestamp.fromMillis(5000)));
 		await settle();
 		expect((await deadline)?.start).toBe(4n);
@@ -228,7 +229,7 @@ test("an ordered owed hole wakes when its ledger gap folds", async () => {
 		putGroup(producer, 3n);
 		opener.abort(new StreamError(StreamCode.Cancel));
 		let resolved = false;
-		const pending = reader.nextGroup().then((group) => {
+		const pending = nextGroup(reader).then((group) => {
 			resolved = true;
 			return group;
 		});
@@ -262,7 +263,7 @@ test("ordered owed holes follow zero, narrowed, unlimited, and publisher budgets
 				putGroup(producer, 1n);
 				expect(drainOrdered(reader)).toEqual([1n, 2n]);
 			} else if (!maxDelay.isZero()) {
-				const pending = reader.nextGroup();
+				const pending = nextGroup(reader);
 				reader.update({ delay: { max: Duration.ZERO } });
 				expect((await pending)?.start).toBe(2n);
 			}
@@ -275,7 +276,7 @@ test("ordered owed holes follow zero, narrowed, unlimited, and publisher budgets
 		putGroup(producer, 0n);
 		putGroup(producer, 2n);
 		expect(drainOrdered(reader)).toEqual([0n]);
-		const pending = reader.nextGroup();
+		const pending = nextGroup(reader);
 		await clock.advance(3_600_050);
 		expect((await pending)?.start).toBe(2n);
 		reader.close();
@@ -799,11 +800,11 @@ test("an ordered reader keeps a group between its ranges until the cursor passes
 		})
 		.ordered();
 	for (const key of [0n, 1n]) producer.createGroup(key).finish();
-	expect(track.tryNextGroup()?.start).toBe(0n);
-	expect(track.tryNextGroup()).toBeUndefined();
+	expect(tryNextGroup(track)?.start).toBe(0n);
+	expect(tryNextGroup(track)).toBeUndefined();
 
 	track.update({ delay: { max: null }, ranges: [{ start: { time: 0n }, end: { time: 3n } }] });
-	expect(track.tryNextGroup()?.start).toBe(1n);
+	expect(tryNextGroup(track)?.start).toBe(1n);
 	track.close();
 	producer.finish();
 	producer.close();
@@ -1020,7 +1021,7 @@ test("a time start resolves on keys alone, before any group's first frame", () =
 		for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) got.push(group.start);
 		expect(got.sort()).toEqual([1000n, 2000n]);
 		const inOrder: bigint[] = [];
-		for (let group = ordered.tryNextGroup(); group; group = ordered.tryNextGroup()) inOrder.push(group.start);
+		for (let group = tryNextGroup(ordered); group; group = tryNextGroup(ordered)) inOrder.push(group.start);
 		expect(inOrder).toEqual([1000n, 2000n]);
 	}
 });
@@ -1099,7 +1100,7 @@ test("nextGroup skips late arrivals", async () => {
 
 	producer.createGroup(5n);
 
-	const first = await track.nextGroup();
+	const first = await nextGroup(track);
 	expect(first?.start).toBe(5n);
 
 	// Late arrivals with sequence <= last returned are skipped.
@@ -1107,7 +1108,7 @@ test("nextGroup skips late arrivals", async () => {
 	producer.createGroup(4n);
 	producer.createGroup(7n);
 
-	const next = await track.nextGroup();
+	const next = await nextGroup(track);
 	expect(next?.start).toBe(7n);
 });
 
@@ -1118,8 +1119,8 @@ test("nextGroup returns buffered groups in sequence", async () => {
 	producer.createGroup(3n);
 	producer.createGroup(5n);
 
-	expect((await track.nextGroup())?.start).toBe(3n);
-	expect((await track.nextGroup())?.start).toBe(5n);
+	expect((await nextGroup(track))?.start).toBe(3n);
+	expect((await nextGroup(track))?.start).toBe(5n);
 });
 
 test.each([false, true])("a reordered tail keeps the group PTS drift verdict (B-frame: %s)", async (reordered) => {
@@ -1199,13 +1200,13 @@ test("the latency budget skips a buffered timeline on either cursor", async () =
 	}
 
 	expect((await arrival.recvGroup())?.start).toBe(2000n);
-	expect((await ordered.nextGroup())?.start).toBe(2000n);
+	expect((await nextGroup(ordered))?.start).toBe(2000n);
 
 	// The budget is the only gate: one that spans the backlog bursts it in order.
 	const replay = producer.subscribe({ delay: { max: Duration.millis(30_000) } }).ordered();
-	expect((await replay.nextGroup())?.start).toBe(0n);
-	expect((await replay.nextGroup())?.start).toBe(1000n);
-	expect((await replay.nextGroup())?.start).toBe(2000n);
+	expect((await nextGroup(replay))?.start).toBe(0n);
+	expect((await nextGroup(replay))?.start).toBe(1000n);
+	expect((await nextGroup(replay))?.start).toBe(2000n);
 });
 
 // A frameless successor is not content, so the next started group bounds the group before
@@ -1288,7 +1289,7 @@ for (const take of ["nextGroup", "tryNextGroup"] as const) {
 
 		// The frame path enters group 0; a direct take then claims group 1.
 		expect((await track.readFrame())?.group).toBe(0n);
-		expect((await track[take]())?.start).toBe(1n);
+		expect((await track[take]())?.group?.start).toBe(1n);
 
 		// The frame path must not resume group 0 behind the cursor: it continues at 2.
 		const next = await track.readFrame();
@@ -1440,19 +1441,19 @@ test("the ordered cursor sheds a stale backlog", async () => {
 	// The whole backlog is already buffered, so no read ever blocks on it: without the
 	// budget here the cursor would replay four seconds of history at 1x and stay behind.
 	const live = producer.subscribe().ordered();
-	expect((await live.nextGroup())?.start).toBe(3000n);
+	expect((await nextGroup(live))?.start).toBe(3000n);
 
 	// Only what is provably too old goes. Group 0 reaches 1s, a full 2s behind the 3s
 	// edge; group 1000 reaches 2s and could still present inside a 1.5s budget.
 	const bounded = producer.subscribe({ delay: { max: Duration.millis(1500) } }).ordered();
-	expect((await bounded.nextGroup())?.start).toBe(1000n);
-	expect((await bounded.nextGroup())?.start).toBe(2000n);
-	expect((await bounded.nextGroup())?.start).toBe(3000n);
+	expect((await nextGroup(bounded))?.start).toBe(1000n);
+	expect((await nextGroup(bounded))?.start).toBe(2000n);
+	expect((await nextGroup(bounded))?.start).toBe(3000n);
 
 	// A budget spanning the history still bursts it in full, gap-free.
 	const replay = producer.subscribe({ delay: { max: Duration.millis(30_000) } }).ordered();
 	for (const key of [0n, 1000n, 2000n, 3000n]) {
-		expect((await replay.nextGroup())?.start).toBe(key);
+		expect((await nextGroup(replay))?.start).toBe(key);
 	}
 });
 
@@ -2208,7 +2209,7 @@ test.each(["arrival", "ordered"] as const)("subscription bounds stay reader-loca
 		ranges: [{ start: { time: 1n }, end: { time: 2n } }],
 	});
 	const ordered = order === "ordered" ? subscriber.ordered() : undefined;
-	const read = () => (ordered ? ordered.nextGroup() : subscriber.recvGroup());
+	const read = () => (ordered ? nextGroup(ordered) : subscriber.recvGroup());
 	try {
 		for (let key = 0n; key < 5n; key++) producer.createGroup(key);
 		expect((await everything.recvGroup())?.start).toBe(0n);
@@ -2368,10 +2369,10 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 	for (let key = 0n; key < 5n; key++) producer.createGroup(key);
 
 	track.withRange({ start: { included: 1n }, end: { excluded: 3n } });
-	expect((await track.nextGroup())?.start).toBe(1n);
-	expect((await track.nextGroup())?.start).toBe(2n);
+	expect((await nextGroup(track))?.start).toBe(1n);
+	expect((await nextGroup(track))?.start).toBe(2n);
 
-	const pending = track.nextGroup();
+	const pending = nextGroup(track);
 	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
 
 	track.withRange({ start: { included: 4n }, end: { excluded: 5n } });
@@ -2535,7 +2536,7 @@ test("the ordered and arrival cursors are independent", async () => {
 	const arrival = producer.subscribe({ delay: { max: Duration.millis(5000) } });
 
 	producer.createGroup(5n);
-	expect((await ordered.nextGroup())?.start).toBe(5n);
+	expect((await nextGroup(ordered))?.start).toBe(5n);
 
 	// A late seq 3 is skipped by the ordered cursor, which has already passed it, but the
 	// arrival cursor has both buffered and still delivers each exactly once.
@@ -2565,8 +2566,8 @@ test("the first group read commits the cursor and refuses the other order", asyn
 	const ordered = inert.ordered();
 	expect(inert.recvGroup()).rejects.toThrow("sequence order");
 	expect(() => inert.ordered()).toThrow("sequence order");
-	expect((await ordered.nextGroup())?.start).toBe(3n);
-	expect((await ordered.nextGroup())?.start).toBe(5n);
+	expect((await nextGroup(ordered))?.start).toBe(3n);
+	expect((await nextGroup(ordered))?.start).toBe(5n);
 });
 
 // Datagrams are a separate cursor on either handle, so reading them must not commit
@@ -2576,7 +2577,7 @@ test("nextGroup returns undefined when track closes", async () => {
 	const track = producer.subscribe().ordered();
 	producer.finish();
 	producer.close();
-	expect(await track.nextGroup()).toBeUndefined();
+	expect(await nextGroup(track)).toBeUndefined();
 });
 
 // A clean close ends a pending ordered read without erasing beyond-cap frames.
@@ -2591,23 +2592,23 @@ test("a closed track still delivers a group parked above the cap once the cap is
 	}
 
 	track.withRange({ end: { excluded: 2n } });
-	expect((await track.nextGroup())?.start).toBe(0n);
-	expect((await track.nextGroup())?.start).toBe(1n);
+	expect((await nextGroup(track))?.start).toBe(0n);
+	expect((await nextGroup(track))?.start).toBe(1n);
 
 	// Group 2 parks while open; a clean close completes the current range.
-	const parked = track.nextGroup();
+	const parked = nextGroup(track);
 	producer.finish();
 	producer.close();
 	expect(await parked).toBeUndefined();
 
 	// Raising the cap after close releases the buffered group, frames intact.
 	track.withRange({ end: { excluded: 3n } });
-	const released = await track.nextGroup();
+	const released = await nextGroup(track);
 	expect(released?.start).toBe(2n);
 	expect(await released?.readString()).toBe("frame-2");
 
 	// Drained and closed: now it's finished.
-	expect(await track.nextGroup()).toBeUndefined();
+	expect(await nextGroup(track)).toBeUndefined();
 });
 
 // 0 is the only encoding for "nothing produced"; an abort declares no boundary at all.
@@ -3027,7 +3028,7 @@ for (const ordered of [false, true]) {
 		const producer = new TrackProducer("test");
 		const subscriber = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
 		const track = ordered ? subscriber.ordered() : subscriber;
-		const receive = () => ("nextGroup" in track ? track.nextGroup() : track.recvGroup());
+		const receive = () => ("nextGroup" in track ? nextGroup(track) : track.recvGroup());
 		try {
 			producer.finishAt({ group: 3n, frame: 0 });
 			const waiting = receive();
@@ -3217,7 +3218,7 @@ test("an abort keeps finished groups for a slow reader, then reports it", async 
 	const boom = new Error("boom");
 	producer.abort(boom);
 
-	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+	for (const next of [() => arrival.recvGroup(), () => nextGroup(ordered)]) {
 		for (let i = 0; i < 2; i++) {
 			const group = await next();
 			expect(group?.start).toBe(BigInt(i));
@@ -3240,7 +3241,7 @@ test("an abort after the declared end settles ends clean", async () => {
 	producer.finishAt({ group: 2n, frame: 0 });
 	producer.abort(new Error("boom"));
 
-	for (const next of [() => arrival.recvGroup(), () => ordered.nextGroup()]) {
+	for (const next of [() => arrival.recvGroup(), () => nextGroup(ordered)]) {
 		expect((await next())?.start).toBe(0n);
 		expect((await next())?.start).toBe(1n);
 		expect(await next()).toBeUndefined();
@@ -3360,7 +3361,7 @@ test("an abort leaves a group already taken readable, then reports the abort", a
 	const arrival = producer.subscribe({ delay: { max: Duration.millis(10_000) } });
 	const ordered = producer.subscribe({ delay: { max: Duration.millis(10_000) } }).ordered();
 	hooks.appendNext(producer).writeFrame(textFrame("held"));
-	const held = [await arrival.recvGroup(), await ordered.nextGroup()];
+	const held = [await arrival.recvGroup(), await nextGroup(ordered)];
 	const boom = new Error("boom");
 	producer.abort(boom);
 
@@ -4968,7 +4969,7 @@ for (const refresh of [undefined, 0]) {
 		const subscriber = producer.subscribe();
 		const ordered = subscriber.ordered();
 		const group = hooks.appendNext(producer);
-		const consumer = await ordered.nextGroup();
+		const consumer = await nextGroup(ordered);
 		if (!consumer) throw new Error("missing group");
 		for (let index = 0; index < 40; index++)
 			group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.unscaled(group.start) });
@@ -4990,7 +4991,7 @@ test("reading a shed frame head requests refresh", async () => {
 	const subscriber = producer.subscribe();
 	const ordered = subscriber.ordered();
 	const group = hooks.appendNext(producer);
-	const consumer = await ordered.nextGroup();
+	const consumer = await nextGroup(ordered);
 	if (!consumer) throw new Error("missing group");
 	const MiB = 1024 * 1024;
 	const frame = group.createFrame({ size: 40 * MiB, timestamp: Timestamp.unscaled(group.start) });
@@ -5025,9 +5026,9 @@ test("a failed track keeps its history", async () => {
 	await expect(arrival.recvGroup()).rejects.toBe(failed);
 
 	const ordered = producer.subscribe(replay).ordered();
-	expect((await ordered.nextGroup())?.start).toBe(0n);
-	expect((await ordered.nextGroup())?.start).toBe(1n);
-	await expect(ordered.nextGroup()).rejects.toBe(failed);
+	expect((await nextGroup(ordered))?.start).toBe(0n);
+	expect((await nextGroup(ordered))?.start).toBe(1n);
+	await expect(nextGroup(ordered)).rejects.toBe(failed);
 
 	// The nonblocking reads end the same way.
 	const polled = producer.subscribe(replay);
@@ -5035,9 +5036,9 @@ test("a failed track keeps its history", async () => {
 	expect(polled.tryRecvGroup()?.start).toBe(1n);
 	expect(() => polled.tryRecvGroup()).toThrow(failed);
 	const polledOrdered = producer.subscribe(replay).ordered();
-	expect(polledOrdered.tryNextGroup()?.start).toBe(0n);
-	expect(polledOrdered.tryNextGroup()?.start).toBe(1n);
-	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
+	expect(tryNextGroup(polledOrdered)?.start).toBe(0n);
+	expect(tryNextGroup(polledOrdered)?.start).toBe(1n);
+	expect(() => tryNextGroup(polledOrdered)).toThrow(failed);
 });
 
 // `fail` ends where `finish` would, after the highest group written, so a late group below it is

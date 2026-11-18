@@ -12,6 +12,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
+import { nextGroup } from "./ordered.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 
@@ -72,7 +73,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscriber = remote.track("video").subscribe();
 	const info = await subscriber.info();
-	const group = await subscriber.ordered().nextGroup();
+	const group = await nextGroup(subscriber.ordered());
 	const frames = [];
 	for (let frame = await group?.readFrame(); frame; frame = await group?.readFrame()) frames.push(frame);
 
@@ -92,7 +93,7 @@ async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 	void (async () => {
 		try {
 			const groups = subscription.ordered();
-			for (let group = await groups.nextGroup(); group; group = await groups.nextGroup()) {
+			for (let group = await nextGroup(groups); group; group = await nextGroup(groups)) {
 				// The same group, so a scale-less frame's key still names it.
 				const out = video.createGroup(group.start);
 				for (let frame = await group.readFrame(); frame; frame = await group.readFrame()) out.writeFrame(frame);
@@ -152,7 +153,7 @@ test("a forwarded untimed track stays untimed", async () => {
 	const remote = wireOf(subscriber).consume(Path.from("test"));
 	const track = remote.track("video").subscribe();
 	expect((await track.info()).timescale).toBeNull();
-	const frame = await (await track.ordered().nextGroup())?.readFrame();
+	const frame = await (await nextGroup(track.ordered()))?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([7]));
 	expect(frame?.timestamp).toEqual(Timestamp.unscaled(0n));
 

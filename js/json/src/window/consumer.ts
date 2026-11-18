@@ -67,8 +67,11 @@ export class Consumer<T> {
 			if (event && this.#at) return { value: event, at: this.#at };
 
 			if (!this.#group) {
-				this.#group = await this.#track.nextGroup();
-				if (!this.#group) return undefined;
+				const item = await this.#track.nextGroup();
+				if (!item) return undefined;
+				// The next group starts with a checkpoint that accounts for what the gap missed.
+				if (item.kind === "gap") continue;
+				this.#group = item.group;
 				this.#codec = this.#decoder.group();
 			}
 

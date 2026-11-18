@@ -24,6 +24,7 @@ import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { type Backoff, pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 import type { Session } from "./session.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -825,7 +826,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 
 		try {
 			hooks.appendNext(producer).writeFrame(textFrame("first", Timestamp.fromMillis(0)));
-			expect(await (await track.nextGroup())?.readString()).toBe("first");
+			expect(await (await nextGroup(track))?.readString()).toBe("first");
 
 			if (teardown.goaway) {
 				const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
@@ -845,7 +846,7 @@ for (const [name, teardown] of Object.entries(teardowns)) {
 			if (teardown.hide) win.dispatchEvent(new Event("pagehide"));
 
 			if (teardown.drains) {
-				expect(await (await track.nextGroup())?.readString()).toBe("last");
+				expect(await (await nextGroup(track))?.readString()).toBe("last");
 				await fin.hold?.reached;
 				// Just short of the close deadline, the session still waits for the FIN.
 				await clock.advance(Duration.millis(999));
@@ -917,7 +918,7 @@ for (const [name, drainEnd] of Object.entries(drainEnds)) {
 		try {
 			// The group stays open, so the old session's drain waits out its deadline.
 			hooks.appendNext(producer).writeFrame(textFrame("live"));
-			expect(await (await track.nextGroup())?.readString()).toBe("live");
+			expect(await (await nextGroup(track))?.readString()).toBe("live");
 
 			reload.url.set(new URL("https://example.com/b"));
 			await waitUntil(() => dials.length === 2 && reload.status.peek() === "connected");
@@ -979,7 +980,7 @@ test("a retired GOAWAY predecessor still closes by its handover cap", async () =
 	try {
 		// The group stays open, so a graceful close of the predecessor would wait out its deadline.
 		hooks.appendNext(producer).writeFrame(textFrame("live"));
-		expect(await (await track.nextGroup())?.readString()).toBe("live");
+		expect(await (await nextGroup(track))?.readString()).toBe("live");
 
 		const stream = await Stream.open(first.quic, { version: Lite.Version.DRAFT_06 });
 		await stream.writer.u53(Lite.StreamId.Goaway);
@@ -1052,7 +1053,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 	const track = remote.track("video").subscribe().ordered();
 	try {
 		hooks.appendNext(producer).writeFrame(textFrame("first", Timestamp.fromMillis(0)));
-		expect(await (await track.nextGroup())?.readString()).toBe("first");
+		expect(await (await nextGroup(track))?.readString()).toBe("first");
 
 		fin.hold?.enable();
 		const last = hooks.appendNext(producer);
@@ -1062,7 +1063,7 @@ test("closing the loop keeps the tokens until the session drains", async () => {
 		producer.close();
 		reload.close();
 
-		expect(await (await track.nextGroup())?.readString()).toBe("last");
+		expect(await (await nextGroup(track))?.readString()).toBe("last");
 		await fin.hold?.reached;
 		await clock.advance(Duration.millis(999));
 		expect(fin.closed).toBe(false);

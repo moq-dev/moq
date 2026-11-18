@@ -99,21 +99,26 @@ export class Consumer<T> {
 				// the sequence space).
 				// Mirrors the Rust consumer. A newer group restarts from a full snapshot, so switching mid-group loses
 				// nothing but stale state.
-				for (let group = this.#track.tryNextGroup(); group; group = this.#track.tryNextGroup()) {
+				for (let item = this.#track.tryNextGroup(); item; item = this.#track.tryNextGroup()) {
+					// A gap needs nothing: the next group restarts from its own snapshot.
+					if (item.kind === "gap") continue;
 					this.#group?.close();
-					this.#group = group;
+					this.#group = item.group;
 					this.#framesRead = 0;
 				}
 			}
 
 			if (!this.#group) {
 				// Advance to the next group with a higher sequence number (skipping late arrivals).
-				const next = await this.#track.nextGroup();
+				const item = await this.#track.nextGroup();
 				if (this.#closed) {
-					next?.close();
+					item?.group?.close();
 					return undefined;
 				}
-				if (!next) return undefined;
+				if (!item) return undefined;
+				// Each group starts from a full snapshot, so a gap needs nothing.
+				if (item.kind === "gap") continue;
+				const next = item.group;
 				this.#group = next;
 				// The next frame is the new group's snapshot, which also restarts the decoder's window.
 				this.#framesRead = 0;

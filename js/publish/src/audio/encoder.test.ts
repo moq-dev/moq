@@ -1360,7 +1360,7 @@ test.each([undefined, "off", "all"] as const)(
 			expect(encoder.out.active.peek()).toBe(true);
 			await push(3);
 
-			const group = await late.ordered().nextGroup();
+			const group = (await late.ordered().nextGroup())?.group;
 			if (!group) throw new Error("expected a group");
 			const frame = await group.readFrame();
 			if (!frame) throw new Error("expected a frame");
@@ -1482,7 +1482,7 @@ test("default audio replays the last second after three seconds without a subscr
 		// The subscription's one second reaches back from the newest frame, 152, to 102.
 		const reader = late.ordered();
 		for (let index = 102; index < 153; index++) {
-			const group = await reader.nextGroup();
+			const group = (await reader.nextGroup())?.group;
 			if (!group) throw new Error("expected buffered group");
 			const frame = await group.readFrame();
 			if (!frame) throw new Error("expected buffered frame");
@@ -1540,7 +1540,7 @@ for (const [name, subscription] of [
 			expect(encoder.out.stats.peek().frames).toBe(7 - FakeAudioEncoder.LAG);
 			await feed.push({ timestamp: Duration.micros(150 * 20_000), channels: [new Float32Array(960)] });
 			await feed.drain();
-			const group = await late.ordered().nextGroup();
+			const group = (await late.ordered().nextGroup())?.group;
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected a replayed frame");
 			expect(Moq.Varint.decode(frame.payload)[0]).toBe(143 * 20_000);
@@ -1759,7 +1759,7 @@ test.each([false, true])("audio retained before a disable is encoded on demand (
 		expect(encoder.out.stats.peek().frames).toBe(4);
 		const reader = late.ordered();
 		for (let index = 0; index < 4; index++) {
-			const group = await reader.nextGroup();
+			const group = (await reader.nextGroup())?.group;
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected retained frame");
 			expect(Moq.Varint.decode(frame.payload)[0]).toBe(index * 20_000);
@@ -1822,7 +1822,7 @@ test("audio retained across a disable and re-enable is served before the break",
 		const reader = late.ordered();
 		const read: [number, number][] = [];
 		while (read.length < 6) {
-			const group = await reader.nextGroup();
+			const group = (await reader.nextGroup())?.group;
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected a frame");
 			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
@@ -1889,7 +1889,7 @@ test("a capture gap inside replayed audio keeps every frame on both sides of it"
 		const reader = late.ordered();
 		const read: [number, number][] = [];
 		while (read.length < 7) {
-			const group = await reader.nextGroup();
+			const group = (await reader.nextGroup())?.group;
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("expected a frame");
 			const [timestamp, payload] = Moq.Varint.decode(frame.payload);

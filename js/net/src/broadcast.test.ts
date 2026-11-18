@@ -10,6 +10,7 @@ import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { wireOf } from "./wire.ts";
+import { nextGroup } from "./ordered.test-util.ts";
 
 // The public API mints consumers internally (Producer.consume, the wire layers); tests act
 // as a wire layer by subclassing, the same way lite's ConsumeBroadcast does.
@@ -430,7 +431,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 
 	// The track already exists, so subscribe resolves immediately (no requested()).
 	const sub1 = broadcast.track("track1").subscribe().ordered();
-	expect((await sub1.nextGroup())?.start).toBe(0n);
+	expect((await nextGroup(sub1))?.start).toBe(0n);
 
 	// No on-demand request was emitted for it.
 	expect(await pendingRequest(broadcast)).toBeUndefined();
@@ -440,7 +441,7 @@ test("subscribe serves a statically inserted track without a request", async () 
 
 	const sub2 = broadcast.track("track2").subscribe().ordered();
 	hooks.appendNext(track2).finish();
-	expect((await sub2.nextGroup())?.start).toBe(0n);
+	expect((await nextGroup(sub2))?.start).toBe(0n);
 });
 
 test("two subscribers to one inserted track each get a full copy", async () => {
@@ -573,7 +574,7 @@ test("a finished track is still served from its cache", async () => {
 		.subscribe({ delay: { max: Duration.millis(5000) } })
 		.ordered();
 	expect(await late.readString()).toBe("last");
-	expect(await late.nextGroup()).toBeUndefined();
+	expect(await nextGroup(late)).toBeUndefined();
 	expect(await broadcast.track("track1").info()).toBeDefined();
 	expect(await pendingRequest(broadcast)).toBeUndefined();
 });

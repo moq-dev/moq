@@ -40,7 +40,7 @@ function reader(track: Track.Producer | Consumer<Value>): Consumer<Value> {
 async function structure(track: Track.Ordered): Promise<number[]> {
 	const counts: number[] = [];
 	for (;;) {
-		const group = await track.nextGroup();
+		const group = (await track.nextGroup())?.group;
 		if (!group) break;
 
 		let frames = 0;
@@ -476,7 +476,7 @@ test("a refresh reuses the newest timestamp", async () => {
 
 	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const timestamps: (number | undefined)[] = [];
-	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
+	for (let group = (await ordered.nextGroup())?.group; group; group = (await ordered.nextGroup())?.group) {
 		const frame = await group.readFrame();
 		timestamps.push(frame?.timestamp?.asMillis());
 		while ((await group.readFrame()) !== undefined) {}
@@ -506,7 +506,7 @@ test("a refresh after older updates waits for a later one", async () => {
 
 	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const restated: [number | undefined, unknown][] = [];
-	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
+	for (let group = (await ordered.nextGroup())?.group; group; group = (await ordered.nextGroup())?.group) {
 		const frame = await group.readFrame();
 		restated.push([frame?.timestamp?.asMillis(), frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
 		while ((await group.readFrame()) !== undefined) {}
@@ -537,7 +537,7 @@ test("a scale-less refresh waits for an update past the open group's key", async
 
 	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const restated: [bigint, unknown][] = [];
-	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
+	for (let group = (await ordered.nextGroup())?.group; group; group = (await ordered.nextGroup())?.group) {
 		const frame = await group.readFrame();
 		restated.push([group.start, frame && JSON.parse(new TextDecoder().decode(frame.payload))]);
 		while ((await group.readFrame()) !== undefined) {}
@@ -679,9 +679,9 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 
 	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
 	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
-	expect((await subscriber.nextGroup())?.start).toBe(0n);
-	expect((await subscriber.nextGroup())?.start).toBe(1n);
-	expect(await subscriber.nextGroup()).toBeUndefined();
+	expect(((await subscriber.nextGroup())?.group)?.start).toBe(0n);
+	expect(((await subscriber.nextGroup())?.group)?.start).toBe(1n);
+	expect((await subscriber.nextGroup())?.group).toBeUndefined();
 
 	// The newest value is readable with no earlier frame to apply it to.
 	expect(await drain(track)).toEqual([{ v: "y".repeat(size) }]);
@@ -744,7 +744,7 @@ test("a scale-less snapshot opens its group at its key, and a delta carries that
 	}, Time.Timestamp.unscaled(9n));
 	producer.finish();
 
-	const group = await track.subscribe().ordered().nextGroup();
+	const group = (await track.subscribe().ordered().nextGroup())?.group;
 	expect(group?.start).toBe(5n);
 	expect((await group?.readFrame())?.timestamp).toEqual(Time.Timestamp.unscaled(5n));
 	expect((await group?.readFrame())?.timestamp).toEqual(Time.Timestamp.unscaled(5n));
@@ -762,7 +762,7 @@ test("a scale-less snapshot at a key not past the newest group is refused", asyn
 
 	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const sequences: bigint[] = [];
-	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) sequences.push(group.start);
+	for (let group = (await ordered.nextGroup())?.group; group; group = (await ordered.nextGroup())?.group) sequences.push(group.start);
 	expect(sequences).toEqual([5n, 8n]);
 	expect(await drain(track)).toEqual([{ n: 1 }]);
 });
@@ -782,7 +782,7 @@ test("a capture timestamp is written on snapshots and deltas alike", async () =>
 	producer.update({ a: 2, b: "x".repeat(64) }, Time.Timestamp.fromMillis(2_000));
 	producer.finish();
 
-	const group = await track.subscribe().ordered().nextGroup();
+	const group = (await track.subscribe().ordered().nextGroup())?.group;
 	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(1_000);
 	expect((await group?.readFrame())?.timestamp?.as(Time.Timescale.MILLI)).toBe(2_000);
 });

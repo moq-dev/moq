@@ -78,7 +78,7 @@ test("a failed write on the very first record still ends the track", async () =>
 
 	// The consumer is handed the group that was already published, and reading it surfaces the
 	// abort. Without ending the track that group stays open and empty, so this read hangs instead.
-	const group = await subscriber.nextGroup();
+	const group = (await subscriber.nextGroup())?.group;
 	expect(group).toBeDefined();
 	await expect(group?.readFrame()).rejects.toThrow(failure);
 });

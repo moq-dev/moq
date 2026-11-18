@@ -61,9 +61,9 @@ test("the whole log rides one group, never rolled", async () => {
 
 	// A single group holds everything, and the consumer reads it all in order.
 	const subscriber = track.subscribe().ordered();
-	const group0 = await subscriber.nextGroup();
+	const group0 = (await subscriber.nextGroup())?.group;
 	expect(group0?.start).toBe(0n);
-	const group1 = await subscriber.nextGroup();
+	const group1 = (await subscriber.nextGroup())?.group;
 	expect(group1).toBeUndefined();
 });
 

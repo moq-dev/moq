@@ -75,13 +75,13 @@ export async function run(): Promise<void> {
 								const ordered = subscribers.map((sub) => sub.ordered());
 								for (let sequence = 0; sequence < retained; sequence++)
 									for (const reader of ordered) {
-										const group = await reader.nextGroup();
+										const group = (await reader.nextGroup())?.group;
 										if (group?.start !== BigInt(sequence)) throw new Error("history missing");
 										await group.readFrame();
 									}
 								sources.push(hooks.appendNext(track));
 								for (const reader of ordered) {
-									const group = await reader.nextGroup();
+									const group = (await reader.nextGroup())?.group;
 									if (!group) throw new Error("live group missing");
 									consumers.push(group);
 								}

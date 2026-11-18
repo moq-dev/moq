@@ -108,7 +108,7 @@ const ietf: Protocol = {
 				flags: IETF_FLAGS,
 			});
 			const done = subscriber.handleGroup(header, new Reader(stream, undefined, IETF_VERSION));
-			return { group: ordered.nextGroup(), done };
+			return { group: ordered.nextGroup().then((item) => item?.group), done };
 		};
 		return { open, close: () => track.close() };
 	},

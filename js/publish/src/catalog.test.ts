@@ -89,7 +89,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 	catalog.serve(track, effect);
 	const subscriber = track.subscribe().ordered();
 
-	const first = await subscriber.nextGroup();
+	const first = (await subscriber.nextGroup())?.group;
 	if (!first) throw new Error("expected the first snapshot");
 	expect(await first?.readJson()).toEqual({ sync: { clock: expect.anything() }, video: { renditions: {} } });
 	expect(first?.done).toBe(true);
@@ -98,7 +98,7 @@ test("catalog producer publishes every update as a snapshot group", async () => 
 		c.scte35 = { splices: [] };
 	});
 
-	const second = await subscriber.nextGroup();
+	const second = (await subscriber.nextGroup())?.group;
 	// Each snapshot opens a group at its timestamp, past the previous one.
 	expect(second?.start).toBeGreaterThan(first.start);
 	expect(await second?.readJson()).toEqual({
@@ -160,7 +160,7 @@ test("catalog producer omits the clock when the page's wall clock is unset", asy
 		const track = new Track.Producer("catalog.json").accept({ timescale: Time.Timescale.MILLI });
 		catalog.serve(track, effect);
 		const subscriber = track.subscribe().ordered();
-		const group = await subscriber.nextGroup();
+		const group = (await subscriber.nextGroup())?.group;
 		expect(await group?.readJson()).toEqual({ video: { renditions: {} } });
 		effect.close();
 	} finally {

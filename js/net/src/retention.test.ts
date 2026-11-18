@@ -10,6 +10,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
+import { nextGroup } from "./ordered.test-util.ts";
 
 // A subscription races its track's `closed` once per frame. These count the listeners left on
 // every Once that is still pending, so a per-frame leak shows up as a slope in frames.
@@ -119,7 +120,7 @@ for (const [name, alpn] of [
 		const group = hooks.appendNext(producer);
 
 		group.writeFrame(frame(0));
-		const consumer = await track.nextGroup();
+		const consumer = await nextGroup(track);
 		if (!consumer) throw new Error("no group");
 		await readFrames(consumer, 1);
 
@@ -142,7 +143,7 @@ for (const [name, alpn] of [
 				const group = hooks.appendNext(producer);
 				group.writeFrame(frame(offset + i));
 				group.finish();
-				const consumer = await track.nextGroup();
+				const consumer = await nextGroup(track);
 				if (!consumer) throw new Error("no group");
 				await readFrames(consumer, 1);
 			}

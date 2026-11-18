@@ -63,6 +63,7 @@ import {
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, Version, versionName } from "./version.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;
@@ -1812,7 +1813,7 @@ test("a grant that shrinks while the subscription sets up refuses it", async () 
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 
 	const track = subscriber.consume(Path.from("room/cam")).track("video").subscribe().ordered();
-	const next = track.nextGroup().catch((err: unknown) => err);
+	const next = nextGroup(track).catch((err: unknown) => err);
 
 	// Parked on TRACK_INFO when the grant shrinks, which ends the TRACK exchange too.
 	await opened(0);
@@ -2579,7 +2580,7 @@ test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await (await opened(1)).reading;
-		const next = ordered.nextGroup();
+		const next = nextGroup(ordered);
 		await subscriber.runGroup(
 			new Group({ subscribe: 0n, key: 0n }),
 			new Reader(
