@@ -22,7 +22,15 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, WireRoute } from "../hop.ts";
-import { datagramTrackInfo, firstEligible, hiddenBelow, hooks, presented, type ReadGroupFrame } from "../internal.ts";
+import {
+	datagramTrackInfo,
+	finalKey,
+	firstEligible,
+	hiddenBelow,
+	hooks,
+	presented,
+	type ReadGroupFrame,
+} from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendPayload } from "../payload.ts";
@@ -1063,9 +1071,11 @@ export class Publisher {
 			}
 
 			// PUBLISH_DONE has no end location: an END_OF_TRACK object is what tells the
-			// subscriber where the track ended.
+			// subscriber where the track ended. A range that stopped short of the end never saw
+			// it, and claiming it would end the subscriber's track early.
 			const final = hooks.subscriberEnd(track);
-			if (!datagramTrack && ended && !publishError && final !== undefined && !streams.terminalSent) {
+			const reached = final !== undefined && (range.end === undefined || range.end.group + 1n >= finalKey(final));
+			if (!datagramTrack && ended && !publishError && final !== undefined && reached && !streams.terminalSent) {
 				await this.#runEndOfTrack({
 					requestId: msg.requestId,
 					final,
