@@ -58,8 +58,11 @@ function setup(wait: number) {
 			requests.close();
 			track.finish();
 			track.close();
-			await reading;
-			installed.close();
+			try {
+				await reading;
+			} finally {
+				installed.close();
+			}
 		},
 	};
 }

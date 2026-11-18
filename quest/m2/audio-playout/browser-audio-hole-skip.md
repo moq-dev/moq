@@ -16,10 +16,10 @@ audio hole, through an ordered reader whose budget is the ring's size
 the container consumer; keep the playhead rule and the separate wait).
 
 [moq-dev/moq#9068](https://github.com/moq-dev/moq/pull/9068) moved browser
-audio onto the ordered reader: `Ordered.nextGroup` returns a `Gap` for each
-group it gives up on, audio reads through a second subscription whose
-budget is what the ring holds plus the stretch bound and the warmup, and
-the audio container consumer plays each `Gap` as its hole. Firefox's
+audio onto the ordered reader: `Ordered.nextItem` returns a gap for each
+half-open range of keys it gives up on, audio reads through a second
+subscription whose budget is what the ring holds plus the stretch bound and
+the warmup, and the audio container consumer plays each gap as its hole. Firefox's
 `after resume` window stays audible.
 
 Its local Chromium measurement, three runs each of the PR, its merge base,
@@ -40,7 +40,8 @@ Work:
   (`js/hang/src/container/consumer.ts`) in ordered mode has nothing that
   passes an active group that opened but never delivers a frame until the
   max buffer fills, which #8799's playhead covered. A trace recorded with
-  `--trace` from a run that starves would replay it.
+  `--trace` holds only the frames that arrived, so replaying such a group
+  also needs the trace to record when each group opens.
 
 ## Related
 

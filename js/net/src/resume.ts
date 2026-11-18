@@ -898,11 +898,11 @@ class Reader implements ResumeSource {
 		return hooks.exhaustedFor(serving.sub, delivered);
 	}
 
-	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
+	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined {
 		this.#delivered = delivered;
 		this.sync();
 		this.#learnEnd();
-		return this.#tryDrop(delivered);
+		return this.#tryDrop(delivered, passing);
 	}
 
 	/**
@@ -911,7 +911,7 @@ class Reader implements ResumeSource {
 	 * is under its bound, so a run there waits until that copy no longer feeds. Mirrors the
 	 * Rust `Reader::poll_drop`.
 	 */
-	#tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
+	#tryDrop(delivered: Delivered, passing = 0n): (Recv & { kind: "drop" }) | undefined {
 		if (this.#closed) return undefined;
 		// Below what the reader handed out or passed, no copy's drop is reported, so each copy's
 		// record folds there, even one that hands out nothing while the reader returns gaps.
@@ -948,7 +948,10 @@ class Reader implements ResumeSource {
 		for (const run of this.#drops) {
 			const end = min(run.end, cursor.end ?? run.end);
 			for (const gap of delivered.gaps(max(run.start, cursor.start), end)) {
-				const [open] = runGaps(feeding, gap.start, gap.end);
+				const [open] =
+					gap.start < passing
+						? [{ start: gap.start, end: min(gap.end, passing) }]
+						: runGaps(feeding, gap.start, gap.end);
 				if (open) {
 					// Report once without marking it delivered: a late fill may still land.
 					this.#drops = removeRun(this.#drops, open.start, open.end);

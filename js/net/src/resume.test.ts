@@ -1890,6 +1890,37 @@ test("a routed read right after an update picks its group under the new preferen
 	}
 });
 
+// The copy reports the owed key it passed to take the group above, and the reader returns that
+// gap before the group, as a direct read of the same track does.
+test("a routed ordered read returns the gap its copy passed to take a group", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(1000) } })
+		.ordered();
+	try {
+		ta.write(4n);
+		expect((await ordered.nextItem())?.group?.start).toBe(4n);
+		ta.write(6n);
+		const held = ordered.nextItem();
+		expect(await isPending(held)).toBe(true);
+		await clock.advance(Duration.millis(1000));
+		expect(await held).toMatchObject({ kind: "gap", start: 5n, end: 6n });
+		expect((await ordered.nextItem())?.group?.start).toBe(6n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		installed.close();
+	}
+});
+
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
 		const clock = new Manual();

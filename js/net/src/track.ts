@@ -984,6 +984,8 @@ let mayLand: (producer: Producer, land: Land) => boolean;
 // Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
 // static block.
 let resubscribe: (producer: Producer) => void;
+// Where a session's live feed starts owing groups, if known: it owes none below.
+let feedFloor: (producer: Producer) => bigint | undefined;
 let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
 // Whether a wire subscription feeds the producer, so it owes every group it has not accounted for.
 let wireFed: (producer: Producer) => boolean;
@@ -1499,10 +1501,14 @@ export class Producer {
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
 		wireFed = (producer) => producer.#wire !== undefined;
+		feedFloor = (producer) => {
+			if (!producer.#wire) return undefined;
+			const feed = producer.#feedStart();
+			return feed === "pending" ? producer.#wire.served?.requested : feed;
+		};
 		owedRuns = (producer, start, end) => {
 			if (!producer.#wire) return [];
-			const feed = producer.#feedStart();
-			const floor = feed === "pending" ? producer.#wire.served?.requested : feed;
+			const floor = feedFloor(producer);
 			return producer.#landing({
 				start: max(start, floor ?? 0n),
 				end,
@@ -4427,6 +4433,9 @@ export class Subscriber {
 		});
 		if (this.#frameGroup) hooks.releaseGroupReader(this.#frameGroup, abort);
 		this.#frameGroup = undefined;
+		// A group an ordered read holds behind a gap is buffered too, so the read ends without it.
+		if (this.#items?.held) hooks.releaseGroupReader(this.#items.held, abort);
+		if (this.#items) this.#items.held = undefined;
 		this.#state.timeline.length = 0;
 		this.#wall.timer?.abort();
 		this.#wall.timer = undefined;
@@ -4718,8 +4727,21 @@ export class Subscriber {
 				this.#queueResumedDrop(recv);
 				continue;
 			}
-			if (recv.kind === "group") this.#handOut(recv.group.start, ordered);
-			else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
+			if (recv.kind === "group") {
+				// Passing the keys below it hands them out as far as #delivered knows, so first take what
+				// the copies gave up there: a session-fed copy reports a key it passed to take this group.
+				if (ordered) {
+					const key = recv.group.start;
+					for (
+						let drop = resume.tryDrop(this.#delivered, key);
+						drop;
+						drop = resume.tryDrop(this.#delivered, key)
+					) {
+						this.#queueResumedDrop(drop);
+					}
+				}
+				this.#handOut(recv.group.start, ordered);
+			} else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
 			return recv;
 		}
 	}
@@ -5008,15 +5030,14 @@ export class Subscriber {
 
 	// The key cursor passes `[start, end)` to hand out the group at `end`. Each key there that the
 	// track owed and no group or drop accounts for was given up, whether the budget convicted it or
-	// the tail's grace folded it, so it is stale. A wire-fed copy owes every key; a local track only
-	// what this reader asked a fill for. Below the first group passed is where the read joined,
-	// which is no gap.
+	// the tail's grace folded it, so it is stale. A wire-fed copy's feed owes every key from where it
+	// starts, and a fill what this reader asked it for. Below the first group passed is where the
+	// read joined, which is no gap.
 	#passOwed(start: bigint, end: bigint, drift: Drift): void {
 		const producer = this.#state.producer;
 		if (start >= end || this.#nextKey === 0n || !this.#dropsSeen || !producer) return;
-		const owed = wireFed(producer)
-			? this.#window.runs(start, end)
-			: [...intersect(this.#asked, start, end), ...intersect(this.#givenUp, start, end)];
+		const owed = [...intersect(this.#asked, start, end), ...intersect(this.#givenUp, start, end)];
+		if (wireFed(producer)) owed.push(...this.#window.runs(max(start, feedFloor(producer) ?? 0n), end));
 		const drops = this.#state.drops;
 		for (const run of owed) {
 			for (const passed of runGaps(drops.overlapping(run.start, run.end), run.start, run.end)) {

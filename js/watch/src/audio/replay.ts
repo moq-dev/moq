@@ -22,7 +22,7 @@ import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
 import { Derived, Effect, Signal } from "@moq/signals";
-import { type Delay, STRETCH, Sync } from "../sync";
+import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
 import { Backpressure, holeWait } from "./buffer";
 import { frameDuration } from "./config";
 import { maxDelay as audioMaxDelay, bound, ringHold, target } from "./latency";
@@ -254,12 +254,13 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		: undefined;
 	const audio = sync.track({ target: playout, startup });
 	signals.cleanup(() => audio.close());
-	// The ordered reader waits a hole out as the decoder's does. A replay's ring holds the whole delay:
-	// it has no output.
+	// The ordered reader waits a hole out as the decoder's does, the warmup included. A replay's ring
+	// holds the whole delay: it has no output.
+	const warmup = Duration.millis(config.warmup ?? 0).min(DELAY_MAX);
 	signals.run((effect) => {
 		const delay = effect.get(sync.out.delay);
 		const max = holeWait(delay, bound({ delay, maxDelay: effect.get(sync.out.maxDelay), stretch }));
-		ordered.update({ delay: { min: delay, max } });
+		ordered.update({ delay: { min: delay.add(warmup), max: max.add(warmup) } });
 	});
 	signals.cleanup(() => requests.close());
 	await settle();

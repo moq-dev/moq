@@ -474,8 +474,11 @@ export interface ResumeSource {
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
 	 */
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
-	/** The next run no copy may still deliver, reported once as a `drop`, without taking a group. */
-	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * The next run no copy may still deliver, reported once as a `drop`, without taking a group.
+	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
+	 */
+	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
 	/**
 	 * Whether the reader's bounded `window` has nothing left to deliver, judged by the serving
 	 * copy against what it and the logical reader (`delivered`) handed out. A copy that may still

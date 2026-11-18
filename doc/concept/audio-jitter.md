@@ -59,8 +59,8 @@ arrived that long ago. A late burst that fills a hole a moment after the group
 past it lands still plays it, and a viewer resuming behind a replayed backlog
 does not hold the live audio for the backlog's oldest group. That reader's
 budget is its own: a second subscription to the same track, read in arrival
-order, observes every frame, so the late groups the reader gives up on are
-still measured. A caller that estimates keeps the budget past the target, which is why
+order, observes every frame its own wider budget receives, so the late groups
+the reader gives up on are still measured. A caller that estimates keeps the budget past the target, which is why
 `moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
 ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it

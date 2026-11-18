@@ -76,7 +76,8 @@ export interface ConsumerProps {
 	predecessor?: Consumer;
 	/**
 	 * Read the media in key order from this reader of the same track instead of `track`'s arrival
-	 * order, so it decides every hole: a missing group is a hole once the reader reports it as a gap,
+	 * order, so it decides every hole. It must be a second subscription, never `track`'s own, which
+	 * keeps reading in arrival order to feed the estimate: a missing group is a hole once the reader reports it as a gap,
 	 * and never waited for here. Its `delay.max` is then how long a hole is waited for, so size it to
 	 * what the player can still play late. `track` only feeds the arrival estimate, read frame by frame
 	 * as it lands, so give it a `delay.max` reaching as far as lateness can move the estimate.
@@ -357,6 +358,11 @@ export class Consumer {
 
 				const consumer = await this.#track.recvGroup();
 				if (!consumer) break;
+				// Closed while the read waited: cleanup already ran, so nothing would release it.
+				if (this.#signals.abort.aborted) {
+					consumer.close();
+					break;
+				}
 
 				// Delivery starts at the floor the ranges name, raised to where the publisher says its feed
 				// starts: it serves nothing below, and resolved a relative start against its own latest
@@ -405,6 +411,11 @@ export class Consumer {
 
 				const item = await ordered.nextItem();
 				if (!item) break;
+				// Closed while the read waited: cleanup already ran, so nothing would release it.
+				if (this.#signals.abort.aborted) {
+					item.group?.close();
+					break;
+				}
 				if (item.kind === "gap") {
 					this.#gap = true;
 					continue;
@@ -1068,8 +1079,9 @@ export class Consumer {
 						full ||
 						ended !== undefined
 					) {
-						// What an ordered reader gives up it reports as a gap; a key it skips without one was never a group.
-						if (!contiguous && !empty && (!decided || head.gap)) {
+						// What an ordered reader gives up it reports as a gap; a key it skips without one was never a
+						// group. A gap an empty group carries still marks the next frame, which follows the loss.
+						if (!contiguous && (decided ? head.gap : !empty)) {
 							this.#lost = true;
 							if (!startup) {
 								console.warn(

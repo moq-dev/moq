@@ -93,6 +93,28 @@ test("nextGroup and tryNextGroup pass the gaps nextItem reports", async () => {
 	expect((await ordered.nextGroup())?.start).toBe(4n);
 });
 
+test("keys below where a session's feed starts are no gap unless a fill owed them", () => {
+	const producer = receivedTrack();
+	hooks.startTrack(producer, { start: 10n });
+	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	// Group 0 comes from history, as a fill would bring it; the feed owes nothing below 10.
+	put(producer, 0n, false);
+	put(producer, 10n, false);
+	expect(items(ordered)).toEqual(["group 0", "group 10"]);
+});
+
+test("a group held behind a gap is not returned once the reader closes", () => {
+	const producer = new TrackProducer("test");
+	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	expect(ordered.tryNextItem()?.group?.start).toBe(0n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 1n, end: 2n });
+	ordered.close();
+	expect(ordered.tryNextItem()).toBeUndefined();
+});
+
 test("a key a local track never produced is no gap", () => {
 	const producer = new TrackProducer("test");
 	const ordered = producer.subscribe({ delay: { max: Duration.secs(1) } }).ordered();
@@ -243,8 +265,8 @@ test("a group held past a gap, under a cap lowered off it, still sees the read e
 	ordered.close();
 	const ended = await Promise.race([
 		pending.then(
-			() => "ended",
-			() => "ended",
+			(item) => (item === undefined ? "ended" : `item ${item.kind}`),
+			(err: Error) => `rejected ${err.message}`,
 		),
 		sleep(Duration.millis(100)).then(() => "hung"),
 	]);
