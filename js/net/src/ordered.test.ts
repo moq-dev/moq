@@ -150,14 +150,15 @@ test("a cached group the seek passes as stale is a gap", () =>
 		expect(items(ordered)).toEqual(["gap 0..1 (old)", "group 1", "group 2"]);
 	}));
 
-test("a late arrival is a gap, told once", () => {
+// Rust reports it Old; JS keeps no record below the read, so its memory stays bounded.
+test("a local track's late arrival is no gap", () => {
 	const producer = new TrackProducer("test");
 	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
 	put(producer, 0n);
 	put(producer, 5n);
 	expect(items(ordered)).toEqual(["group 0", "group 5"]);
 	put(producer, 3n);
-	expect(items(ordered)).toEqual(["gap 3..4 (old)"]);
+	expect(items(ordered)).toEqual([]);
 	put(producer, 6n);
 	expect(items(ordered)).toEqual(["group 6"]);
 });
@@ -251,23 +252,57 @@ test("a stale group passes the owed holes below it as gaps", () =>
 		expect(items(ordered)).toEqual(["gap 1..3 (old)", "group 3"]);
 	}));
 
-test("an ordered read's record folds, so it costs a bounded number of runs", () => {
+test("an ordered read's record holds only what lies ahead of it", () => {
 	const producer = new TrackProducer("test");
 	const sub = producer.subscribe({ delay: { max: null } });
 	const ordered = sub.ordered();
-	// Keyed apart, as audio by timestamp is: each group is a run of its own.
+	// Keyed apart, as audio by timestamp is: each group would be a run of its own.
 	for (let i = 0n; i < 3000n; i++) {
 		put(producer, i * 20n);
 		expect(items(ordered)).toEqual([`group ${i * 20n}`]);
+		expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(1);
 	}
-	// A group landing far below the floor is told as nothing; one above it is still a gap.
-	expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(1024);
+	// Unlike Rust, a group a local track produces below the read is told as nothing.
 	put(producer, 10n);
-	put(producer, 2990n * 20n + 10n);
-	expect(items(ordered)).toEqual([`gap ${2990n * 20n + 10n}..${2990n * 20n + 11n} (old)`]);
+	put(producer, 2998n * 20n + 10n);
+	expect(items(ordered)).toEqual([]);
 });
 
-test("a key-order read draining its drops folds its record, as a resumed reader's copy does", () => {
+// A key-order read, as a route copy is read, folds at each hand-out while the keys it passed
+// still wait to be reported.
+test("a session-fed key-order read folds without losing the keys it passed", () =>
+	withClock((clock) => {
+		const producer = receivedTrack();
+		const sub = producer.subscribe({ delay: { max: Duration.millis(50) } });
+		const read = () => {
+			const out: string[] = [];
+			for (let drop = hooks.tryDrop(sub); drop; drop = hooks.tryDrop(sub))
+				out.push(`drop ${drop.start}..${drop.end}`);
+			const next = hooks.tryNextGroup(sub);
+			if (next.kind === "group") {
+				next.group.close();
+				out.push(`group ${next.group.start}`);
+			}
+			for (let drop = hooks.tryDrop(sub); drop; drop = hooks.tryDrop(sub))
+				out.push(`drop ${drop.start}..${drop.end}`);
+			return out;
+		};
+		put(producer, 0n, false);
+		expect(read()).toEqual(["group 0"]);
+		for (let i = 1n; i <= 100n; i++) {
+			// Group 3i-2 never lands, and 3i-1 turns stale behind 3i: the read passes both to hand
+			// out 3i, and still reports them.
+			put(producer, 3n * i, false);
+			clock.jump(Duration.millis(30));
+			put(producer, 3n * i - 1n, false);
+			clock.jump(Duration.millis(30));
+			expect(read()).toEqual([`group ${3n * i}`, `drop ${3n * i - 2n}..${3n * i}`]);
+		}
+		expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(2);
+		sub.close();
+	}));
+
+test("a key-order read draining its drops folds its record", () => {
 	const producer = new TrackProducer("test");
 	const sub = producer.subscribe({ delay: { max: null } });
 	// Keyed apart with the keys between skipped, so each skip is a run of its own.
@@ -278,7 +313,7 @@ test("a key-order read draining its drops folds its record, as a resumed reader'
 		if (read.kind === "group") read.group.close();
 		while (hooks.tryDrop(sub));
 	}
-	expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(1024);
+	expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(1);
 	sub.close();
 });
 

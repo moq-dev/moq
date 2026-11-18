@@ -2077,6 +2077,43 @@ test("a resumed reader reports a drop once and still serves a late group", async
 	a.close();
 });
 
+// A copy folds its record at where the reader is, so one that only reports drops while the reader
+// returns gaps holds a bounded record however long it plays.
+test("a route copy's record folds while the reader returns only gaps", () => {
+	const copies = new Set<track.Subscriber>();
+	const fold = hooks.fold;
+	hooks.fold = (sub, at) => {
+		copies.add(sub);
+		fold(sub, at);
+	};
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null } })
+		.ordered();
+	try {
+		ta.write(0n);
+		expect(ordered.tryNextGroup()).toMatchObject({ kind: "group" });
+		const cut = new StreamError(StreamCode(70), { message: "cut" });
+		for (let i = 1n; i <= 1000n; i++) {
+			// A drop and a skip apart, so each would be a run of its own in the copy's record.
+			hooks.dropTrackGroups(ta.producer, 2n * i - 1n, 2n * i, { error: cut });
+			ta.producer.skipGroups(2n * i, 2n * i + 1n);
+			expect(ordered.tryNextGroup()).toMatchObject({ kind: "gap", start: 2n * i - 1n, end: 2n * i });
+		}
+		expect(copies.size).toBeGreaterThan(0);
+		for (const sub of copies) expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(4);
+	} finally {
+		hooks.fold = fold;
+		ordered.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
 // A skip of a run the serving copy already dropped replaces the drop, so the resumed reader
 // reports it again, as a skip, and only once. Mirrors Rust.
 test("a resumed reader reports a skip over a reported drop", () => {

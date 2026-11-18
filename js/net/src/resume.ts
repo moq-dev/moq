@@ -913,6 +913,10 @@ class Reader implements ResumeSource {
 	 */
 	#tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined {
 		if (this.#closed) return undefined;
+		// Below what the reader handed out or passed, no copy's drop is reported, so each copy's
+		// record folds there, even one that hands out nothing while the reader returns gaps.
+		const at = delivered.runEnd(0n) ?? 0n;
+		for (const copy of this.#copies) hooks.fold(copy.sub, at);
 		const serving = this.#serving();
 		if (serving) {
 			// A received stale run queued here that a new upstream subscription superseded since is

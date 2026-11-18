@@ -2632,10 +2632,6 @@ type Drift = {
 // the highest key returned, as a group or the end of a gap.
 type Items = { held?: GroupConsumer; gaps: DropRun[]; at: bigint };
 
-// The most runs an ordered read's record keeps before it folds the older half into its floor.
-// Audio keyed by timestamp leaves a run per group, so without it the record grows with playback.
-const RECORD_RUNS = 1024;
-
 // A group that landed after an ordered read passed its key.
 function late(): Hole {
 	return { error: new StreamError(StreamCode.Old, { message: "group landed after the read passed it" }) };
@@ -2791,7 +2787,7 @@ export class Subscriber {
 	#reported = new Runs<Reported>(sameReport);
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
-	// under pool pressure; a key-order read folds once its record passes RECORD_RUNS.
+	// under pool pressure; a key-order read folds at where it is instead (see #fold).
 	#floor = 0n;
 	// A wire publisher reads #reported as what its wire was told, so it never folds.
 	#wired = false;
@@ -3122,6 +3118,7 @@ export class Subscriber {
 		const forgot = this.#delivered.runEnd(0n) ?? 0n;
 		if (forgot > floor) this.#stoppedReading(floor, forgot);
 		if (key >= forgot) this.#stoppedReading(key, key + 1n);
+		if (ordered) this.#fold(forgot);
 	}
 
 	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
@@ -4002,6 +3999,7 @@ export class Subscriber {
 			return subscriber.#peekGroup(ordered);
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
+		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
 		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
@@ -4609,7 +4607,6 @@ export class Subscriber {
 		const [gap] = runGaps(blocked, start, to);
 		if (!gap) return undefined;
 		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped" });
-		this.#fold();
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 	}
 
@@ -4870,6 +4867,7 @@ export class Subscriber {
 				// A group handed out is no gap, even one a drop also named, as a cut group is.
 				if (lowest && lowest.span.start === key) this.#cutGap(items, lowest.index, key, key + 1n);
 				items.at = max(items.at, key + 1n);
+				this.#fold(this.#delivered.runEnd(0n) ?? 0n);
 				return read;
 			}
 			case "done":
@@ -4962,6 +4960,7 @@ export class Subscriber {
 		const forgot = this.#delivered.runEnd(0n) ?? 0n;
 		if (forgot > floor) this.#stoppedReading(floor, forgot);
 		if (!this.#resume) this.#nextKey = max(this.#nextKey, given.end);
+		this.#fold(forgot);
 		return { kind: "gap", start: given.start, end: given.end, error };
 	}
 
@@ -4979,24 +4978,25 @@ export class Subscriber {
 	#settled(start: bigint, end: bigint): void {
 		start = max(start, this.#floor);
 		if (start < end) this.#reported.set(start, end, { start, end, kind: "settled" });
-		this.#fold();
 	}
 
-	// Fold the older half of the record into the floor once it passes RECORD_RUNS, never past
-	// where the read is, so the record costs a bounded number of runs however long it plays. A
-	// group landing below the floor, which no read could take, is then told as nothing. A key-order
-	// read folds, an ordered one or a resumed reader's copy; a wire publisher's record is what its
-	// wire was told, which it keeps.
-	#fold(): void {
-		const runs = this.#reported.all;
-		if (runs.length <= RECORD_RUNS || this.#wired) return;
-		// Where the read is: the keys it handed out or passed, and the items it returned.
-		let at = this.#delivered.runEnd(0n) ?? 0n;
-		if (this.#items) at = min(at, this.#items.at);
-		const floor = min(runs[runs.length - RECORD_RUNS / 2].start, at);
-		if (floor <= this.#floor) return;
-		this.#floor = floor;
-		this.#reported.set(0n, floor);
+	// Fold the record below `at`, where a key-order read is, into the floor, held below every run
+	// still to report there: a run given up and not reported yet, and a gap found and not returned.
+	// The record then holds only what lies ahead of the read, bounded however long it plays. A
+	// session-fed read loses nothing, since every key it passed was handed out or reported; a group
+	// a local track produces below the floor is told as nothing, where Rust, folding only under pool
+	// pressure, would report it Old. A wire publisher's record is what its wire was told, which it
+	// keeps.
+	#fold(at: bigint): void {
+		if (this.#wired) return;
+		if (this.#items) {
+			at = min(at, this.#items.at);
+			for (const gap of this.#items.gaps) at = min(at, gap.start);
+		}
+		for (const run of this.#pending) if (run.end > this.#floor) at = min(at, run.start);
+		if (at <= this.#floor) return;
+		this.#floor = at;
+		this.#reported.set(0n, at);
 	}
 
 	// The key cursor passes `[start, end)` to hand out the group at `end`. Each key there that the
@@ -5370,7 +5370,10 @@ export class Ordered {
 	 * fill could not find, or that landed after the read passed its key. It carries the keys it
 	 * spans and is returned once, after any group the read still owes below it and before the
 	 * next group above it, or when the track ends. Keys the publisher declared skipped were never
-	 * groups, so they are no gap, and nor is a key a local track never produced. Honors the bounds
+	 * groups, so they are no gap, and nor is a key a local track never produced. Unlike Rust, nor
+	 * is a group a local track produces after the read moved past its key: the read keeps no record
+	 * below where it is, so its memory stays bounded. A session-fed track reports such a key at
+	 * the latest when the read passes it. Honors the bounds
 	 * set by {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
 	 * finishes once nothing in them is left to deliver. Later reads return `undefined` immediately
 	 * too; widening the ranges with {@link update} reads on above the last key returned.

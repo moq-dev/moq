@@ -831,6 +831,8 @@ export const hooks: {
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
+	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
+	fold: (subscriber: Subscriber, at: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
@@ -1169,6 +1171,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	forgetPastBudget: () => {
+		throw new Error("track.ts not loaded");
+	},
+	fold: () => {
 		throw new Error("track.ts not loaded");
 	},
 	wire: () => {
