@@ -110,8 +110,9 @@ early, the archive stays live. Empty or unrecognized prefixes are refused.
 
 A time range the served track's cache can't resolve is looked up from the stored
 keys: its start reaches the stored group containing that time, however old, or
-the oldest group the store still holds when the time is older, such as one
-retention pruned; its end stops just past the group containing it. Serving
+the oldest group the store still holds from its first frame when the time is
+older, such as one retention pruned; its end stops just past the group
+containing it. Serving
 history is not paced playback from the beginning, and there is no automatic
 switch from a live broadcast to its archive at the original path.
 
