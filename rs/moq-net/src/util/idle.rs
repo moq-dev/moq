@@ -6,7 +6,8 @@
 //! can answer `Pending` again without walking, and locking, everything it read before.
 //!
 //! Only what notifies can be trusted this way. A change the owner makes itself, which
-//! notifies nothing, has to [`Idle::disarm`] the gate.
+//! notifies nothing, has to [`Idle::disarm`] the gate, or [`Idle::reopen`] it when made
+//! outside the read, so the gates it nests in and the task read again.
 //!
 //! An owner with more than one read keys each by `K`, since one parking says nothing
 //! about another.
