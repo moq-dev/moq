@@ -240,7 +240,9 @@ class SelectionTest(unittest.TestCase):
         self.packages["js/private"] = {"name": "@example/private", "private": True, "scripts": {"build": tsc}}
         self.write()
         calls = self.calls(["js/room/src/index.ts", "js/private/src/index.ts"])
-        self.assertIn(["bun", "run", "--filter=@example/core", "--filter=@example/view", "--elide-lines=0", "build"], calls)
+        self.assertIn(
+            ["bun", "run", "--filter=@example/core", "--filter=@example/view", "--elide-lines=0", "build"], calls
+        )
         self.assertEqual(calls[-1], ["node", "sh/js/dist-imports.test.mjs", "js/room"])
 
     def test_executor_runs_only_selected_package_scripts(self):
