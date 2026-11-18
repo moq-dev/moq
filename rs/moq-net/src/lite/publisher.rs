@@ -1771,7 +1771,7 @@ impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate {
 }
 
 /// A SUBSCRIBE_UPDATE resolved to every live range, by Range ID.
-type LiveUpdate = lite::SubscribeUpdate<Vec<(u64, lite::Range)>>;
+type LiveUpdate = lite::SubscribeUpdate<std::sync::Arc<[(u64, lite::Range)]>>;
 
 /// Serves one request stream: decode the request, resolve its broadcast, drive the
 /// kind's reply, then FIN.
@@ -4921,6 +4921,9 @@ struct TrackRun {
 	// A SUBSCRIBE_UPDATE this track cannot serve, such as a time anchor on a track the
 	// peer was told is untimed, which ends the subscription.
 	refused: Option<Error>,
+	/// The live ranges the last update applied and the model subscription made of them, so
+	/// an update leaving every range live costs nothing for them.
+	applied: Option<(std::sync::Arc<[(u64, lite::Range)]>, crate::track::Subscription)>,
 	// Where delivery starts, which SUBSCRIBE_START reports.
 	start: Start,
 	end_sent: bool,
@@ -4996,6 +4999,7 @@ impl TrackRun {
 			frames: bounds.frames,
 			named: groups.start(),
 			refused: None,
+			applied: None,
 			ctx,
 			track,
 			floor,
@@ -5054,6 +5058,30 @@ impl TrackRun {
 				group.set_priority(crate::priority::group(upd.priority, self.ctx.publisher));
 			}
 		}
+		let delay = crate::track::Delay {
+			min: upd.min_delay,
+			max: upd.max_delay,
+		};
+		// Every range still live as last applied: the model's ranges stand, and only the
+		// preferences beside them may move.
+		if let Some((ranges, model)) = &self.applied
+			&& std::sync::Arc::ptr_eq(ranges, &upd.ranges)
+		{
+			if (model.priority, model.delay, model.order) == (upd.priority, delay, upd.order) {
+				return;
+			}
+			let model = crate::track::Subscription {
+				priority: upd.priority,
+				delay,
+				order: upd.order,
+				..model.clone()
+			};
+			match self.track.update(model.clone()) {
+				Ok(()) => self.applied = Some((upd.ranges, model)),
+				Err(err) => self.refused = Some(err),
+			}
+			return;
+		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
@@ -5066,18 +5094,17 @@ impl TrackRun {
 		let groups = bounds.groups();
 		let (start, end) = (groups.start(), groups.end());
 		// A refusal leaves the model's ranges as they were, so this side keeps them too.
-		if let Err(err) = self.track.update(crate::track::Subscription {
+		let model = crate::track::Subscription {
 			priority: upd.priority,
-			delay: crate::track::Delay {
-				min: upd.min_delay,
-				max: upd.max_delay,
-			},
+			delay,
 			order: upd.order,
 			..groups
-		}) {
+		};
+		if let Err(err) = self.track.update(model.clone()) {
 			self.refused = Some(err);
 			return;
 		}
+		self.applied = Some((upd.ranges.clone(), model));
 		self.named = start;
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
@@ -8130,7 +8157,7 @@ mod serve_group_test {
 			priority: 0,
 			max_delay: Some(Duration::from_secs(3600)),
 			min_delay: None,
-			ranges,
+			ranges: ranges.into(),
 			order: Order::Descending,
 		}
 	}
@@ -8745,7 +8772,7 @@ mod serve_group_test {
 					priority: 0,
 					max_delay: Some(if widen { Duration::from_secs(10) } else { budget }),
 					min_delay: Some(Duration::ZERO),
-					ranges: vec![(0, lite::Range::span(None, 0, None, None))],
+					ranges: [(0, lite::Range::span(None, 0, None, None))].into(),
 					order: Order::Descending,
 				});
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -8786,7 +8813,7 @@ mod serve_group_test {
 				priority: 0,
 				max_delay: Some(max_delay),
 				min_delay: None,
-				ranges: vec![(0, lite::Range::span(None, 0, None, None))],
+				ranges: [(0, lite::Range::span(None, 0, None, None))].into(),
 				order: Order::Descending,
 			};
 

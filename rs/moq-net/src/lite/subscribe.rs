@@ -844,6 +844,9 @@ pub(crate) struct LiveRanges {
 	size: usize,
 	/// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_OK reports.
 	initial: u64,
+	/// The live ranges [`Self::apply`] last returned, until one changes, so an edit that
+	/// changes nothing costs nothing.
+	snapshot: Option<std::sync::Arc<[(u64, Range)]>>,
 }
 
 impl LiveRanges {
@@ -855,6 +858,7 @@ impl LiveRanges {
 			live: Default::default(),
 			size: 0,
 			initial: ranges.len() as u64,
+			snapshot: None,
 		};
 		live.add(ranges.iter().copied());
 		live
@@ -862,6 +866,10 @@ impl LiveRanges {
 
 	fn add(&mut self, ranges: impl IntoIterator<Item = Range>) {
 		let form: Form = self.version.into();
+		let mut ranges = ranges.into_iter().peekable();
+		if ranges.peek().is_some() {
+			self.snapshot = None;
+		}
 		for range in ranges {
 			// One past the varint's reach can't come off the wire, and is refused below.
 			self.size = self.size.saturating_add(range_size(&range, form).unwrap_or(usize::MAX));
@@ -872,6 +880,7 @@ impl LiveRanges {
 
 	fn remove(&mut self, id: u64) -> Option<Range> {
 		let range = self.live.remove(&id)?;
+		self.snapshot = None;
 		self.size = self
 			.size
 			.saturating_sub(range_size(&range, self.version.into()).unwrap_or(usize::MAX));
@@ -884,6 +893,7 @@ impl LiveRanges {
 	}
 
 	/// Every live range with its Range ID, in Range ID order.
+	#[cfg(test)]
 	pub fn numbered(&self) -> Vec<(u64, Range)> {
 		self.iter().map(|(id, range)| (id, *range)).collect()
 	}
@@ -920,8 +930,9 @@ impl LiveRanges {
 		self.initial
 	}
 
-	/// Resolve a received edit, returning every live range with its Range ID.
-	pub fn apply(&mut self, edit: RangeEdit) -> Result<Vec<(u64, Range)>, DecodeError> {
+	/// Resolve a received edit, returning every live range with its Range ID: the same
+	/// snapshot as last time while nothing changed.
+	pub fn apply(&mut self, edit: RangeEdit) -> Result<std::sync::Arc<[(u64, Range)]>, DecodeError> {
 		match edit {
 			RangeEdit::Replace(ranges) if !self.version.has_ranges() => {
 				*self = Self::new(self.version, &ranges);
@@ -943,7 +954,11 @@ impl LiveRanges {
 		if self.size > super::message::MAX_MESSAGE_SIZE {
 			return Err(DecodeError::TooMany);
 		}
-		Ok(self.numbered())
+		let live = &self.live;
+		let snapshot = self
+			.snapshot
+			.get_or_insert_with(|| live.iter().map(|(id, range)| (*id, *range)).collect());
+		Ok(snapshot.clone())
 	}
 
 	/// The edit that keeps the live ranges as they are.
@@ -1740,8 +1755,8 @@ mod test {
 		let resolved: Vec<_> = live
 			.apply(got.ranges)
 			.unwrap()
-			.into_iter()
-			.map(|(_, range)| range)
+			.iter()
+			.map(|(_, range)| *range)
 			.collect();
 		assert_eq!(resolved, msg.ranges);
 	}
@@ -1831,7 +1846,7 @@ mod test {
 			let buf = update.encode_bytes(version).unwrap();
 			let got =
 				crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v)).unwrap();
-			assert_eq!(live.apply(got.ranges).unwrap(), sent.numbered());
+			assert_eq!(*live.apply(got.ranges).unwrap(), *sent.numbered());
 		};
 
 		let edit = |remove: &[u64], add: &[Range]| RangeEdit::Edit {
@@ -1884,6 +1899,31 @@ mod test {
 			}
 		}
 		assert!(refused, "the live ranges are held to one SUBSCRIBE");
+	}
+
+	/// An edit that changes nothing hands back the snapshot it last did, so a stream of empty
+	/// updates copies nothing; one that changes a range takes a fresh one.
+	#[test]
+	fn lite07_an_empty_edit_reuses_the_snapshot() {
+		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
+		let empty = || RangeEdit::Edit {
+			remove: Vec::new(),
+			add: Vec::new(),
+		};
+		let first = live.apply(empty()).unwrap();
+		assert!(std::sync::Arc::ptr_eq(&first, &live.apply(empty()).unwrap()));
+		let range = Range {
+			start: absolute(4, 0),
+			end: None,
+		};
+		let edited = live
+			.apply(RangeEdit::Edit {
+				remove: vec![0],
+				add: vec![range],
+			})
+			.unwrap();
+		assert_eq!(*edited, [(1, range)]);
+		assert!(std::sync::Arc::ptr_eq(&edited, &live.apply(empty()).unwrap()));
 	}
 
 	/// An edit to ranges too large for a SUBSCRIBE is refused before anything changes, so the
