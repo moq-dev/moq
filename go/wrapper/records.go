@@ -81,9 +81,10 @@ type Delay struct {
 	// upstream.
 	Min time.Duration
 	// MinUnstated leaves Min unstated, ignoring it. A decoder starts it as zero and waits a
-	// missing group for Max (an audio decoder plays it as zero and waits only its playout
-	// estimate), while the subscription keeps it unstated, so it never pulls the
-	// aggregate across subscribers to zero.
+	// missing group for Max (an audio decoder floors it at zero and waits only its playout
+	// estimate, which can be larger), while the subscription keeps it unstated, so it never
+	// pulls the aggregate across subscribers to zero, unless a catalog warmup or an audio
+	// decoder's playout delay states one.
 	MinUnstated bool
 	// Max is how far a non-latest group may fall behind the live edge before it is skipped. Zero
 	// skips immediately; a larger value tolerates that much reordering. It caps every range,

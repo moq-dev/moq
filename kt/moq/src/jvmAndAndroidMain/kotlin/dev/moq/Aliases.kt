@@ -219,7 +219,9 @@ typealias Subscription = uniffi.moq.MoqSubscription
  * How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
  * cold join starts, and how long a decoder waits for a missing group, null to leave it unstated (a
  * decoder starts it as zero and waits a missing group for `max`, except an audio decoder, which
- * plays it as zero and waits only its playout estimate), and `max`, null for no subscriber limit,
+ * floors it at zero and waits only its playout estimate, which can be larger; a catalog warmup or
+ * an audio decoder's playout delay still states a `min` to the publisher), and `max`, null for no
+ * subscriber limit,
  * is how far a non-latest group may fall behind before it is skipped. A `min` past `max` starts at
  * `max`.
  */
