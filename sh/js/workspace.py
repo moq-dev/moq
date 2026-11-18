@@ -102,9 +102,30 @@ def selection(root, paths):
     return {
         "packages": {name: packages[name] for name in sorted(selected)},
         "workspaces": [p["directory"] for p in packages.values()],
+        "manifests": {name: p["manifest"] for name, p in packages.items()},
         "inputs": sorted(set().union(*(p["inputs"] for p in packages.values()))),
         "all": fallback,
     }
+
+
+def node_loaded(manifest):
+    """Whether a package ships a plain `tsc` build, which Node must load as published."""
+    build = manifest.get("scripts", {}).get("build", "")
+    return not manifest.get("private") and build.startswith("rm -rf dist && tsc -b ")
+
+
+def runtime_closure(manifests, names):
+    """The workspace packages a consumer of these installs alongside them."""
+    found = set()
+    pending = list(names)
+    while pending:
+        manifest = manifests[pending.pop()]
+        for field in ("dependencies", "peerDependencies"):
+            for dep in manifest.get(field, {}):
+                if dep in manifests and dep not in found:
+                    found.add(dep)
+                    pending.append(dep)
+    return found
 
 
 def unmapped(root, paths):
@@ -233,9 +254,14 @@ def run(action, plan):
             Path(name).unlink()
     scripts("build")
     reports()
-    for name in ("@moq/msf", "@moq/hang"):
-        if name in packages:
-            command("node", "sh/js/dist-imports.test.mjs", packages[name]["directory"] + "/dist")
+    # Node rejects an extensionless relative import that Bun and bundlers accept, and plain `tsc`
+    # rewrites only those ending in `.ts`, so load every published `tsc` build under Node.
+    loaded = [name for name, package in packages.items() if node_loaded(package["manifest"])]
+    if loaded:
+        # The check loads each workspace dependency from its dist, so build the unselected ones.
+        if missing := sorted(runtime_closure(plan["manifests"], loaded) - set(packages)):
+            command("bun", "run", *(f"--filter={name}" for name in missing), "--elide-lines=0", "build")
+        command("node", "sh/js/dist-imports.test.mjs", *(packages[name]["directory"] for name in loaded))
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:
             path = "./" + packages[name]["directory"] + "/dist/index.js"
