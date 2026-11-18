@@ -75,13 +75,18 @@ pub struct Finish {
 
 	/// The 64-bit `mdat` header that covers the media.
 	mdat: Bytes,
+
+	/// Whether a finish cut short left the reserved box a header that skips the fragmented
+	/// `moov`, which must be `free` again before the cut removes the trailing one.
+	reopen: bool,
 }
 
 impl Finish {
 	/// Durably turn the recording in `file` into a regular MP4, so a crash part way leaves a
 	/// file that still plays and that [`repair`] finishes the same way.
 	///
-	/// It cuts the file after the media, appends the `moov`, then overwrites the reserved box,
+	/// It makes a repaired file's reserved box `free` again if a finish cut short left it a
+	/// header, cuts the file after the media, appends the `moov`, then overwrites the reserved box,
 	/// its last 8 bytes before its first 8 and syncing before each step that needs the one
 	/// before on disk. Until the last write the box reads as one a player skips, `free` or a
 	/// kind it does not know, never a broken `mdat` header.
@@ -90,6 +95,10 @@ impl Finish {
 	}
 
 	fn write_to(&self, file: &mut impl Disk) -> std::io::Result<()> {
+		if self.reopen {
+			file.write_at(self.mdat_offset, &FREE[..8])?;
+			file.sync()?;
+		}
 		// Cut before the moov lands where the cut bytes were, which could otherwise mix with it.
 		file.set_len(self.moov_offset)?;
 		file.sync()?;
@@ -316,7 +325,7 @@ pub fn repair<F: Read + Seek>(file: &mut F) -> Result<Option<Finish>> {
 		index.fragment(moof.start, &moof.decode(file)?)?;
 		end = position;
 	}
-	let finish = index.finish(end)?;
+	let mut finish = index.finish(end)?;
 
 	// Each byte is the reserved box's or the mdat header's, whichever reached the disk.
 	let torn = slot
@@ -332,6 +341,7 @@ pub fn repair<F: Read + Seek>(file: &mut F) -> Result<Option<Finish>> {
 	if indexed && slot == finish.mdat {
 		return Ok(None);
 	}
+	finish.reopen = slot[..8] != FREE[..8];
 	if !indexed && end < eof {
 		tracing::warn!(
 			offset = end,
@@ -628,6 +638,7 @@ impl Index {
 			moov: Bytes::from(buf),
 			mdat_offset: self.reserved,
 			mdat: mdat.freeze(),
+			reopen: false,
 		})
 	}
 }
@@ -1522,8 +1533,8 @@ mod tests {
 	}
 
 	/// A crash anywhere in a finish, or in the repair of a recording cut mid-fragment or
-	/// mid-description, leaves a file a player still reads, through the fragmented moov or the
-	/// final one, and that repairs to the same finish.
+	/// mid-description, or in the repair of any of those crashes, leaves a file a player still
+	/// reads, through the fragmented moov or the final one, and that repairs to the same finish.
 	#[tokio::test(start_paused = true)]
 	async fn a_finish_interrupted_anywhere_plays_and_repairs() {
 		let (file, finish) = recorded().await;
@@ -1554,15 +1565,30 @@ mod tests {
 					moov == fragmented || moov == finish.moov,
 					"crash {i} plays a broken moov"
 				);
-				match repair(crashed).unwrap_or_else(|err| panic!("crash {i}: {err}")) {
-					Some(again) => {
-						assert_same(&again, finish, i);
-						let mut fixed = crashed.clone();
-						apply(again, &mut fixed);
-						assert_eq!(&fixed, done, "crash {i}");
+				let Some(again) = repair(crashed).unwrap_or_else(|err| panic!("crash {i}: {err}")) else {
+					assert_eq!(crashed, done, "crash {i} reported finished");
+					continue;
+				};
+				assert_same(&again, finish, i);
+				// The repair can crash too, and that file still plays and repairs the same. Only
+				// a reserved box no longer `free` makes it write what a finish does not.
+				let reserved = finish.mdat_offset as usize;
+				let reopened = crashed[reserved..reserved + 8] != super::FREE[..8];
+				let twice = if reopened { crashes(crashed, &again) } else { Vec::new() };
+				for (j, twice) in twice.iter().enumerate() {
+					let moov = played(twice).unwrap_or_else(|| panic!("crash {i}, {j} left a file no player reads"));
+					assert!(
+						moov == fragmented || moov == finish.moov,
+						"crash {i}, {j} plays a broken moov"
+					);
+					match repair(twice).unwrap_or_else(|err| panic!("crash {i}, {j}: {err}")) {
+						Some(last) => assert_same(&last, finish, i),
+						None => assert_eq!(twice, done, "crash {i}, {j} reported finished"),
 					}
-					None => assert_eq!(crashed, done, "crash {i} reported finished"),
 				}
+				let mut fixed = crashed.clone();
+				apply(again, &mut fixed);
+				assert_eq!(&fixed, done, "crash {i}");
 			}
 		}
 		assert_eq!(kinds(&atoms(&finished)), ["ftyp", "mdat", "moov"]);

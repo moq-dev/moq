@@ -425,6 +425,8 @@ impl Subscribe {
 
 		match mp4.finish()? {
 			Some(trailer) => {
+				// Converting drops the error of a write still in flight, which flushing returns.
+				file.flush().await?;
 				let mut file = file.into_std().await;
 				tokio::task::spawn_blocking(move || trailer.write(&mut file))
 					.await?
