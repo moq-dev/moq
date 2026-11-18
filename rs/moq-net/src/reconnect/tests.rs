@@ -481,7 +481,7 @@ async fn an_early_goaway_establishes_the_session_it_drains() {
 	let Action::Established(established) = next_any(&mut machine).await else {
 		panic!("the drained session was never established");
 	};
-	assert!(established == client, "established another session");
+	assert!(*established == client, "established another session");
 	assert!(matches!(next_any(&mut machine).await, Action::Migrating));
 	assert!(machine.session().is_none(), "the drained session left the live slot");
 	drop(server);
