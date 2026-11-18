@@ -1781,7 +1781,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
 		format: timedLegacy,
-		delay: { max: Duration.millis(10_000) },
+		delay: { min: null, max: Duration.millis(10_000) },
 	});
 
 	// Group A (seq 1_000_000): content ends at 33_333µs.
@@ -1873,7 +1873,7 @@ test("Consumer plays the head once a waited-out gap exceeds the budget (Legacy)"
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
 		format: timedLegacy,
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 
 	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).
@@ -1908,7 +1908,7 @@ test("Consumer waits on a gap within the budget, then plays the head once it exc
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), {
 		format: timedLegacy,
-		delay: { max: Duration.millis(100) },
+		delay: { min: null, max: Duration.millis(100) },
 	});
 
 	// A (seq 1000): one frame, ends at 3000 ticks (33_333µs).

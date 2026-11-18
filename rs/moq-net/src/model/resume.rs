@@ -276,6 +276,12 @@ impl Producer {
 		self.state.read().phase.end().is_some()
 	}
 
+	/// Whether a front may still replace the copy: the track is open, or finished with
+	/// reads still to move off a dying route.
+	pub(super) fn moves(&self) -> bool {
+		self.state.read().phase.moves()
+	}
+
 	/// The track ended: cleanly with `Ok`, or failed for good. A clean end still moves to
 	/// each copy the front serves from until it concludes.
 	pub(super) fn end(&self, result: Result<()>) {

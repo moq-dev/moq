@@ -4288,6 +4288,16 @@ impl Logical {
 }
 
 impl TrackIo {
+	/// Whether anyone reads the track: a reader of the open track, or anything still holding
+	/// a finished one whose reads move with the front, such as a fetch of a group below its
+	/// end. A track that failed or concluded owes its holders nothing.
+	fn read(&self) -> bool {
+		match self.routes.moves() {
+			true => self.weak.is_held(),
+			false => self.weak.is_wanted(),
+		}
+	}
+
 	/// Serve the track from `asked`'s copy, accepting it with that copy's info first.
 	fn splice(&mut self, asked: Asked) {
 		self.ready.wake_by_ref();
@@ -4873,13 +4883,14 @@ impl FrontServe {
 					let delivered = copy.latest_key().is_some();
 					return Some(FrontStep::Ended(name.clone(), *source, result, delivered));
 				}
-				// Watch the demand edge in whichever direction is unmet. Only `Pending`
-				// parks, so an answer steps and the handler looks again, polling anew when
-				// nothing changed. A closed track is unread: it owes one `Unwanted` if
-				// recorded read, and is no edge after.
-				let edge = match io.wanted {
-					true => io.weak.poll_unwanted(waiter).is_ready(),
-					false => matches!(io.weak.poll_wanted(waiter), Poll::Ready(Ok(()))),
+				// Watch the demand edge in whichever direction is unmet (`TrackIo::read`).
+				// Only `Pending` parks, so an answer steps and the handler looks again,
+				// polling anew when nothing changed. Any other closed track is unread: it owes
+				// one `Unwanted` if recorded read, and is no edge after.
+				let edge = match (io.routes.moves(), io.wanted) {
+					(true, wanted) => io.weak.poll_held_changed(waiter, wanted).is_ready(),
+					(false, true) => io.weak.poll_unwanted(waiter).is_ready(),
+					(false, false) => matches!(io.weak.poll_wanted(waiter), Poll::Ready(Ok(()))),
 				};
 				if edge {
 					return Some(FrontStep::Demand(name.clone()));
@@ -5178,11 +5189,12 @@ impl kio::Task for FrontServe {
 						}
 						Action::Forget { track: name } => {
 							// A reader that looked the track up since the machine decided keeps
-							// it. Feed its `Wanted` edge here: the demand poll only sees the
-							// current level, so a reader gone before the next poll would
-							// otherwise leave the track unread with no linger armed.
+							// it, as does one still holding it once it finished. Feed its `Wanted`
+							// edge here: the demand poll only sees the current level, so a reader
+							// gone before the next poll would otherwise leave the track unread
+							// with no linger armed.
 							if let Some(io) = self.tracks.get_mut(&name)
-								&& !io.weak.abort_unwanted(Error::Cancel)
+								&& (!io.weak.abort_unwanted(Error::Cancel) || io.read())
 							{
 								if !io.wanted {
 									io.wanted = true;
@@ -5457,7 +5469,7 @@ impl kio::Task for FrontServe {
 					let Some(io) = self.tracks.get_mut(&name) else { continue };
 					// Read again: the edge may have flipped back since it fired, and the next
 					// wait parks on it.
-					if io.weak.is_wanted() == io.wanted {
+					if io.read() == io.wanted {
 						continue;
 					}
 					io.wanted = !io.wanted;
@@ -15812,6 +15824,47 @@ mod tests {
 			.await
 			.expect("the fetch fails once the replacement refused the track");
 		assert!(res.is_err(), "{res:?}");
+	}
+
+	/// A finished track that something still reads outlives its linger, so a replacement
+	/// route is still asked for it, for a read that has to move off a dying route. Once
+	/// nothing holds it, it lingers and is forgotten as before.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_held_finished_track_outlives_its_linger() {
+		let (producer, _server, _upstream, old, mut subscription) = remote_front().await;
+		drop(old.finish().unwrap());
+		assert!(matches!(next_group(&mut subscription).await, Ok(None)));
+
+		// Held past the linger: a replacement is asked for the track.
+		kio::clock::sleep(Duration::from_secs(60)).await;
+		let newcomer = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.unwrap();
+		let mut handler = newcomer.broadcast().requests();
+		newcomer.announce().unwrap();
+		let request = kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+			.await
+			.expect("the front rerouted the held track")
+			.expect("request");
+		assert_eq!(request.name(), "video");
+		drop(request);
+
+		// Unheld, it is forgotten after the linger: a later route is asked nothing.
+		drop(subscription);
+		kio::clock::sleep(Duration::from_secs(60)).await;
+		drop(newcomer);
+		let third = producer
+			.route("room/alice", RouteOptions::hidden().with_instance(instance(), 0))
+			.unwrap();
+		let mut handler = third.broadcast().requests();
+		third.announce().unwrap();
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), handler.requested_track())
+				.await
+				.is_err(),
+			"an unheld finished track was rerouted after its linger"
+		);
 	}
 
 	/// The newcomer answers "video" with matching metadata but aborts before delivering a

@@ -1,3 +1,5 @@
+import { TransportCode, TransportError } from "./error.ts";
+
 export class VarInt {
 	static readonly MAX = (1n << 62n) - 1n;
 	static readonly MAX_SIZE = 8;
@@ -51,7 +53,7 @@ export class VarInt {
 
 	static decode(buffer: Uint8Array): [VarInt, Uint8Array] {
 		if (buffer.byteLength < 1) {
-			throw new Error("Unexpected end of buffer");
+			throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "Unexpected end of buffer");
 		}
 
 		const view = new DataView(buffer.buffer, buffer.byteOffset);
@@ -68,27 +70,27 @@ export class VarInt {
 				break;
 			case 0b01:
 				if (2 > buffer.length) {
-					throw new Error("Unexpected end of buffer");
+					throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "Unexpected end of buffer");
 				}
 				value = BigInt(view.getUint16(0, false) & 0x3fff);
 				bytesRead = 2;
 				break;
 			case 0b10:
 				if (4 > buffer.length) {
-					throw new Error("Unexpected end of buffer");
+					throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "Unexpected end of buffer");
 				}
 				value = BigInt(view.getUint32(0, false) & 0x3fffffff);
 				bytesRead = 4;
 				break;
 			case 0b11:
 				if (8 > buffer.length) {
-					throw new Error("Unexpected end of buffer");
+					throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "Unexpected end of buffer");
 				}
 				value = view.getBigUint64(0, false) & 0x3fffffffffffffffn;
 				bytesRead = 8;
 				break;
 			default:
-				throw new Error("Invalid VarInt tag");
+				throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "Invalid VarInt tag");
 		}
 
 		const remaining = new Uint8Array(buffer.buffer, buffer.byteOffset + bytesRead, buffer.byteLength - bytesRead);

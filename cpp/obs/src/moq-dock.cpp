@@ -6,6 +6,7 @@
 #include "moq-dial.h"
 #include "moq-spark-data.h"
 #include "moq-encoder-latency.h"
+#include "moq-encoder-rate.h"
 #include "moq-quality-defaults.h"
 #include "moq-settings.h"
 #include "logger.h"
@@ -967,8 +968,7 @@ bool MoQDock::CreateCustomEncoders()
 
 	OBSDataAutoRelease videoSettings = obs_data_create();
 	OBSDataAutoRelease audioSettings = obs_data_create();
-	obs_data_set_int(videoSettings, "bitrate", videoBitrate);
-	obs_data_set_string(videoSettings, "rate_control", "CBR");
+	const bool capped = ApplyEncoderRate(videoId.toStdString(), videoSettings, videoBitrate);
 	obs_data_set_bool(videoSettings, "repeat_headers", true);
 	obs_data_set_int(audioSettings, "bitrate", audioBitrate);
 
@@ -995,8 +995,9 @@ bool MoQDock::CreateCustomEncoders()
 	obs_encoder_set_video(videoEncoder, obs_get_video());
 	obs_encoder_set_audio(audioEncoder, obs_get_audio());
 
-	LOG_INFO("Using dock custom encoders: %s / %s (profile %s, %d kbps)", videoId.toUtf8().constData(),
-		 audioId.toUtf8().constData(), high ? "quality" : "performance", videoBitrate);
+	LOG_INFO("Using dock custom encoders: %s / %s (profile %s, %s %d kbps)", videoId.toUtf8().constData(),
+		 audioId.toUtf8().constData(), high ? "quality" : "performance", capped ? "capped VBR, peak" : "CBR",
+		 videoBitrate);
 
 	QString profileLabel = high ? QStringLiteral("Quality") : QStringLiteral("Performance");
 	if (profile == "auto")
@@ -1004,10 +1005,11 @@ bool MoQDock::CreateCustomEncoders()
 	const char *videoDisplay = obs_encoder_get_display_name(videoId.toUtf8().constData());
 	const char *audioDisplay = obs_encoder_get_display_name(audioId.toUtf8().constData());
 	const QString pathLabel = preferHw ? QStringLiteral("Hardware") : QStringLiteral("Software");
-	publishSummary = QString("Preset %1 · %2\nVideo %3 · %4 · %5 kbps\nAudio %6 · %7 · %8 kbps")
+	publishSummary = QString("Preset %1 · %2\nVideo %3 · %4 · %5 %6 kbps\nAudio %7 · %8 · %9 kbps")
 				 .arg(profileLabel, pathLabel,
 				      codec.isEmpty() ? QStringLiteral("video") : codec.toUpper(),
-				      videoDisplay && *videoDisplay ? QString::fromUtf8(videoDisplay) : videoId)
+				      videoDisplay && *videoDisplay ? QString::fromUtf8(videoDisplay) : videoId,
+				      capped ? QStringLiteral("up to") : QStringLiteral("CBR"))
 				 .arg(videoBitrate)
 				 .arg(audioChoice.isEmpty() ? QStringLiteral("audio") : audioChoice.toUpper(),
 				      audioDisplay && *audioDisplay ? QString::fromUtf8(audioDisplay) : audioId)

@@ -219,9 +219,9 @@ export class Encoder {
 	// discontinuity and re-anchors on.
 	#pipeline: Pipeline | undefined;
 	#encoding = false;
-	// The demand's max delay, past which retained audio is stale to every subscriber, or undefined
-	// for the retention alone. Replayed groups land as fresh arrivals, so only this cut keeps a
-	// rejoining live viewer from receiving all the retained audio before the live edge.
+	// How far back retained audio is replayed (see replayBudget): a live join's min delay, else the max
+	// delay, and for fetches alone the retention. Replayed groups land as fresh arrivals, so only this
+	// cut keeps a rejoining live viewer from receiving all the retained audio before the live edge.
 	#budget: Duration | undefined;
 
 	// The rendition's track and producer, kept across subscriber changes.
@@ -488,8 +488,7 @@ export class Encoder {
 			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
 			const demanded = !!track && effect.get(track.demand().wanted);
 			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
-			const max = track && effect.get(track.subscription)?.delay?.max;
-			this.#budget = max === undefined || max === null ? undefined : max;
+			this.#budget = replayBudget(track && effect.get(track.subscription));
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
 			this.#encoding = !!format && !!track && !fatal && (!onDemand || demanded);
 			effect.set(this.#out.active, enabled && this.#encoding, false);
@@ -1028,6 +1027,20 @@ export function resolve(captured: Format, selected: Codec): Resolved {
 		},
 		frameDuration: frameDuration,
 	};
+}
+
+// How far back a subscription wants retained audio replayed. A live join starts its min delay behind
+// the live edge, which a player states as its playout delay plus the codec's warmup, so that bounds
+// it within the max delay. Any other range, or a live join stating no min (moq-transport, moq-lite
+// before 07), wants all its max delay keeps. Undefined with no subscription, leaving the retention.
+function replayBudget(subscription: Moq.Track.Subscription | undefined): Duration | undefined {
+	const delay = subscription?.delay;
+	if (!delay) return undefined;
+	const max = delay.max ?? undefined;
+	const ranges = subscription.ranges ?? [{}];
+	const live = ranges.length > 0 && ranges.every((range) => range.start?.relative === 0n && range.end === undefined);
+	if (!live || delay.min === null || delay.min === undefined) return max;
+	return max === undefined ? delay.min : delay.min.min(max);
 }
 
 /**

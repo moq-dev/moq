@@ -97,7 +97,8 @@ pub(super) enum Event {
 	},
 	/// A reader arrived on the track.
 	Wanted { track: Arc<str> },
-	/// The last reader left the track.
+	/// The last reader left the track. A finished track is read until nothing holds it,
+	/// such as a fetch still reading a group, which keeps moving off a dying route.
 	Unwanted { track: Arc<str>, now: Instant },
 	/// The armed deadline passed.
 	Deadline { now: Instant },
@@ -239,8 +240,8 @@ pub(super) struct Front {
 	resolved: bool,
 	tracks: BTreeMap<Arc<str>, Track>,
 	parked: BTreeSet<(Instant, Arc<str>)>,
-	/// Immutable track metadata, fixed by the first copy of each track. Every
-	/// source of the broadcast must serve the same content.
+	/// Immutable track metadata, fixed by the first copy of each track until it is
+	/// forgotten. Every source of the broadcast must serve the same content.
 	info: BTreeMap<Arc<str>, track::Info>,
 	/// How long an unread track stays before it is forgotten.
 	linger: Duration,
@@ -330,9 +331,9 @@ impl Front {
 			Event::Resolved { route, result } => self.resolved(route, result, &mut actions),
 			Event::SourceClosed { source } => self.source_closed(source, &mut actions),
 			// A fresh logical track, even under a name served before: an earlier
-			// verdict belonged to that request, and a later one asks afresh. The
-			// broadcast's track metadata is what persists. Unread until a reader
-			// shows up, so a lookup whose reader left early is forgotten too.
+			// verdict and metadata belonged to that request, and a later one asks
+			// afresh. Unread until a reader shows up, so a lookup whose reader left
+			// early is forgotten too.
 			Event::TrackAssigned { track, now } => {
 				self.tracks.insert(
 					track,
@@ -365,8 +366,10 @@ impl Front {
 			Event::Wanted { track } => self.wanted(track, &mut actions),
 			Event::Unwanted { track, now } => self.unwanted(track, now, &mut actions),
 			Event::Deadline { now } => self.deadline(now, &mut actions),
+			// Its metadata goes too, so a peer naming endless tracks grows nothing.
 			Event::Forgotten { track } => {
 				self.tracks.remove(&track);
+				self.info.remove(&track);
 			}
 			Event::Held => {
 				self.held = true;
@@ -2099,8 +2102,11 @@ mod tests {
 			}),
 			&[Action::Forget { track: name("video") }],
 		);
+		assert!(front.info.contains_key(&name("video")));
 		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[]);
 		assert!(!front.tracks.contains_key(&name("video")));
+		// Its metadata goes with it, so endless track names grow nothing.
+		assert!(!front.info.contains_key(&name("video")));
 	}
 
 	/// A reader that looked the track up before the driver could forget it keeps

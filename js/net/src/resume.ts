@@ -1958,8 +1958,10 @@ export class Front {
 					continue;
 				}
 				listing.next ??= read(reader);
-				const result = await race([listing.next, wait().then(() => undefined)]);
-				if (!result) continue;
+				// One flat race: nested, the wait's registrations stay pending whenever the event wins.
+				// What a change or the close settles with is no event, so the loop looks again.
+				const result = await race([listing.next, Signal.race(lister.wanted, this.#changed), closed]);
+				if (typeof result !== "object" || result === null) continue;
 				listing.next = undefined;
 				// The source was replaced as its answer arrived: the new source's listing supersedes it.
 				if (listing.source !== this.#source) continue;

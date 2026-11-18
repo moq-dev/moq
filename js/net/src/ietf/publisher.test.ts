@@ -3239,12 +3239,43 @@ test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DO
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, V22);
 		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
-		expect(done.streamCount).toBe(2n);
-
-		// Only the in-range group was ever served; the other stream marks the track's end.
-		const end = await nextUni(fx.uni);
-		expect(await readEndOfTrack(end)).toBe(2n);
+		// Only the in-range group was ever served: the range stopped short of the track's end,
+		// so no END_OF_TRACK claims it.
+		expect(done.streamCount).toBe(1n);
 		expect(await opens(fx.uni.read(), clock)).toBe(false);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+test("draft-22: a bounded filter that reaches the track's end still sends END_OF_TRACK", async () => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	writeGroup(track, 1); // group 0
+	writeGroup(track, 1); // group 1, the filter's last and the track's
+
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n, endGroup: 1n },
+		}),
+	);
+
+	try {
+		for (let i = 0; i < 2; i++) await readGroup(await nextUni(fx.uni));
+		track.finish();
+		track.close();
+
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		const done = await PublishDone.decode(client.reader, V22);
+		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
+		expect(done.streamCount).toBe(3n);
+		expect(await readEndOfTrack(await nextUni(fx.uni))).toBe(2n);
 	} finally {
 		fx.close();
 		client.close();
@@ -4275,9 +4306,8 @@ test("draft-22: a range update replaces the live subscription bounds", async () 
 		expect(await client.reader.u53()).toBe(PublishDone.id);
 		const done = await PublishDone.decode(client.reader, fx.version);
 		expect(done.statusCode).toBe(TRACK_ENDED_STATUS);
-		expect(done.streamCount).toBe(3n);
-		const end = await nextUni(fx.uni);
-		expect(await readEndOfTrack(end)).toBe(5n);
+		// The range ends at group 3, short of the track's end, so no END_OF_TRACK.
+		expect(done.streamCount).toBe(2n);
 	} finally {
 		client.close();
 		track.finish();

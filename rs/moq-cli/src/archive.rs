@@ -51,6 +51,10 @@ type Instance = (moq_net::Path, moq_net::Instance);
 /// Record every broadcast announced at or under `prefix` into `args.store`, each stream under
 /// `<path>/@<instance>`, until the announcements end.
 ///
+/// A broadcast that fails to record, or whose path cannot be followed, is logged and dropped:
+/// every other broadcast keeps recording, whatever one publisher does. Only the origin
+/// failing, or a task panicking, ends the export.
+///
 /// A wire that carries no instance has its relay mint one per announcement, so each one records
 /// under a key of its own: a restarted export never stitches two streams together.
 pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: ExportArgs) -> anyhow::Result<()> {
@@ -105,7 +109,9 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 			}
 			Some(followed) = following.join_next() => {
 				match followed {
-					Ok(result) => result?,
+					Ok(Ok(())) => {}
+					// One path cannot be followed, which ends only its own recordings.
+					Ok(Err(err)) => tracing::warn!("not recording: {err:#}"),
 					// Aborted once its path went absent.
 					Err(err) if err.is_cancelled() => {}
 					Err(err) => return Err(err).context("follower panicked"),
@@ -120,7 +126,10 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 			}
 			Some(done) = recordings.join_next() => {
 				let (instance, result) = done.context("recording panicked")?;
-				result?;
+				// Recorded again if announced anew meanwhile, which fails or not on its own.
+				if let Err(err) = result {
+					tracing::warn!("recording ended: {err:#}");
+				}
 				if !running.done(&instance) {
 					continue;
 				}
@@ -139,7 +148,8 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 /// Report each instance serving `path` as it comes online or takes over. An instance comes
 /// again after the path went offline, since a return is announced anew.
 ///
-/// Fails when the path cannot be followed or a handler refuses it, as a recording would.
+/// Fails when the path cannot be followed or a handler refuses it, as a recording would;
+/// the export drops the path then, as it drops a failed recording.
 async fn follow(
 	origin: moq_net::origin::Consumer,
 	path: moq_net::Path,
@@ -456,9 +466,87 @@ mod tests {
 		assert!(!files.iter().any(|file| file.starts_with("other")), "{files:?}");
 	}
 
-	/// A handler refusing a listed path fails the export, as a refused recording did.
-	#[tokio::test]
-	async fn a_refused_path_fails_the_export() {
+	/// Publish `path` with one group and announce it, hidden like a broadcast a relay serves.
+	fn publish(
+		origin: &moq_net::origin::Producer,
+		path: &str,
+		timescale: Timescale,
+	) -> (moq_net::origin::Route, moq_net::track::Producer) {
+		let info = track::Info::default()
+			.with_timescale(timescale)
+			.with_max_age(Duration::from_secs(3600));
+		let broadcast = origin.route(path, moq_net::origin::RouteOptions::hidden()).unwrap();
+		let track = broadcast.broadcast().create_track("video", info).unwrap();
+		let mut group = track.create_group(group::Info { start: 0 }).unwrap();
+		group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
+		group.finish().unwrap();
+		broadcast.announce().unwrap();
+		(broadcast, track)
+	}
+
+	/// Wait for `file` under `dir`, which the export writes once it subscribed and the broadcast ended.
+	async fn complete(dir: &std::path::Path, file: String) {
+		kio::clock::timeout(Duration::from_secs(10), async {
+			while !dir.join(&file).exists() {
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{file} is written"));
+	}
+
+	/// End `broadcast` once the export subscribed to its track.
+	async fn finish((broadcast, mut track): (moq_net::origin::Route, moq_net::track::Producer)) {
+		kio::clock::timeout(Duration::from_secs(10), track.subscription_changed())
+			.await
+			.expect("the export subscribes")
+			.unwrap();
+		let _track = track.finish().unwrap();
+		broadcast.broadcast().close();
+	}
+
+	/// A recording that fails, here a track re-added with another timescale than its stored
+	/// one, is dropped alone: the other broadcast records and the export keeps running.
+	#[tokio::test(start_paused = true)]
+	async fn a_failed_recording_leaves_the_others_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ExportArgs {
+			store: Url::from_directory_path(dir.path()).unwrap(),
+			retention: None,
+			retention_grace: None,
+		};
+		let origin = moq_tokio::origin::spawn();
+		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
+
+		// `live/a` already holds a recording whose track has another timescale.
+		let bad = publish(&origin, "live/a", Timescale::MILLI);
+		let stored = dir.path().join(format!("live/a/@{}/video", bad.0.instance()));
+		std::fs::create_dir_all(&stored).unwrap();
+		std::fs::write(
+			stored.join(".info"),
+			moq_archive::Info::new(0, Some(90_000)).unwrap().encode().unwrap(),
+		)
+		.unwrap();
+		let good = publish(&origin, "live/b", Timescale::MILLI);
+		let good_end = format!("live/b/@{}/.end", good.0.instance());
+
+		finish(good).await;
+		complete(dir.path(), good_end).await;
+		assert!(!recording.is_finished(), "one broadcast's failure ended the export");
+
+		// A broadcast announced after the failure records too.
+		let later = publish(&origin, "live/c", Timescale::MILLI);
+		let later_end = format!("live/c/@{}/.end", later.0.instance());
+		finish(later).await;
+		complete(dir.path(), later_end).await;
+		assert!(!recording.is_finished());
+		recording.abort();
+		drop(bad);
+	}
+
+	/// A handler refusing a listed path drops that path, not the export.
+	#[tokio::test(start_paused = true)]
+	async fn a_refused_path_leaves_the_others_recording() {
 		let dir = tempfile::tempdir().unwrap();
 		let args = ExportArgs {
 			store: Url::from_directory_path(dir.path()).unwrap(),
@@ -476,12 +564,45 @@ mod tests {
 			.expect("the export follows the listed path")
 			.unwrap();
 		request.reject(moq_net::Error::NotFound);
-		let result = kio::clock::timeout(Duration::from_secs(10), recording)
+
+		let good = publish(&origin, "live/b", Timescale::MILLI);
+		let good_end = format!("live/b/@{}/.end", good.0.instance());
+		finish(good).await;
+		complete(dir.path(), good_end).await;
+		assert!(!recording.is_finished(), "a refused path ended the export");
+		recording.abort();
+	}
+
+	/// A track aborted with an error code, then its route dropped, ends only its own recording.
+	/// The archive records the abort as an end and returns `Ok`, so this does not reach the
+	/// failure isolation the tests above pin.
+	#[tokio::test(start_paused = true)]
+	async fn an_aborted_track_leaves_the_others_recording() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ExportArgs {
+			store: Url::from_directory_path(dir.path()).unwrap(),
+			retention: None,
+			retention_grace: None,
+		};
+		let origin = moq_tokio::origin::spawn();
+		let recording = tokio::spawn(export(origin.consume(), "live".into(), args));
+
+		let (gone, mut track) = publish(&origin, "live/a", Timescale::MILLI);
+		kio::clock::timeout(Duration::from_secs(10), track.subscription_changed())
 			.await
-			.expect("the export ends")
+			.expect("the export subscribes")
 			.unwrap();
-		let err = result.expect_err("a refused path fails the export");
-		assert!(err.to_string().contains("live/a"), "{err:#}");
+		track.abort(moq_net::Error::Cancel).unwrap();
+		drop(gone);
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		assert!(!recording.is_finished(), "a dropped publisher ended the export");
+
+		let good = publish(&origin, "live/b", Timescale::MILLI);
+		let good_end = format!("live/b/@{}/.end", good.0.instance());
+		finish(good).await;
+		complete(dir.path(), good_end).await;
+		assert!(!recording.is_finished());
+		recording.abort();
 	}
 
 	/// `import archive` republishes a recording `export archive` wrote under the given name and

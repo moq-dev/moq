@@ -46,7 +46,14 @@ class FakeVideoEncoder {
 	// encoder does. Undefined for Annex B.
 	static lengthPrefixed: (codec: string) => number | undefined = () => undefined;
 
+	// How the encoder treats a per-frame quantizer: refuses quantizer mode, as Chrome's software
+	// H.264 does; accepts the mode and ignores the value, as Firefox does; or honors it.
+	static quantizer: "refused" | "ignored" | "honored" = "refused";
+
 	state: CodecState = "unconfigured";
+	// Every config and encode option this instance took, oldest first.
+	configs: VideoEncoderConfig[] = [];
+	options: VideoEncoderEncodeOptions[] = [];
 	#output: VideoEncoderInit["output"];
 	#codec?: string;
 	#error: VideoEncoderInit["error"];
@@ -67,7 +74,9 @@ class FakeVideoEncoder {
 		// Pretend the GPU takes a while, like a real probe under load.
 		await sleep(PROBE);
 
-		const supported = config.codec.startsWith("avc1");
+		const supported =
+			config.codec.startsWith("avc1") &&
+			(config.bitrateMode !== "quantizer" || FakeVideoEncoder.quantizer !== "refused");
 		if (supported)
 			FakeVideoEncoder.accepted.push({ codec: config.codec, width: config.width, height: config.height });
 		return { supported };
@@ -76,9 +85,12 @@ class FakeVideoEncoder {
 	configure(config: VideoEncoderConfig): void {
 		this.state = "configured";
 		this.#codec = config.codec;
+		this.configs.push(config);
 	}
 
-	encode(): void {}
+	encode(_frame: unknown, options: VideoEncoderEncodeOptions): void {
+		this.options.push(options);
+	}
 
 	// Only the probe flushes, so only it sees an output; the live encoder holds every frame.
 	async flush(): Promise<void> {
@@ -91,10 +103,16 @@ class FakeVideoEncoder {
 			data.set([0x26, 0x01], 4);
 		}
 		const description = size === undefined ? undefined : new Uint8Array([1]);
+		// A keyframe that halves every 6 QP when the encoder honors a quantizer.
+		const quantizer = this.options.at(-1)?.avc?.quantizer;
+		const padding =
+			FakeVideoEncoder.quantizer === "honored" && quantizer != null
+				? Math.round(100_000 * 2 ** (-quantizer / 6))
+				: 0;
 		const chunk = {
 			type: "key",
 			timestamp: 0,
-			byteLength: data.byteLength,
+			byteLength: data.byteLength + padding,
 			copyTo: (dest: Uint8Array) => dest.set(data),
 		};
 		this.#output(chunk as never, (codec ? { decoderConfig: { codec, description } } : {}) as never);
@@ -130,6 +148,7 @@ function installFakeVideoEncoder() {
 			FakeVideoEncoder.report = (codec) => codec;
 			FakeVideoEncoder.reorders = () => false;
 			FakeVideoEncoder.lengthPrefixed = () => undefined;
+			FakeVideoEncoder.quantizer = "refused";
 			if (original) {
 				Object.defineProperty(globalThis, "VideoEncoder", original);
 			} else {
@@ -354,6 +373,133 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 		encoder.close();
 		bandwidth.close();
 		sub.close();
+	}
+});
+
+// The encoder runs constant quality under the cap only where the browser honors a per-frame
+// quantizer; one that accepts the mode and ignores the value, as Firefox does, or refuses it, as
+// Chrome's software H.264 does, runs a constant bitrate at the cap instead.
+for (const quantizer of ["honored", "ignored", "refused"] as const) {
+	test(`an encoder that ${quantizer} a per-frame quantizer follows a grant`, async () => {
+		using _videoEncoder = installFakeVideoEncoder();
+		FakeVideoEncoder.quantizer = quantizer;
+
+		const { Fanout } = await import("../fanout");
+		let controller!: ReadableStreamDefaultController<VideoFrame>;
+		const fanout = new Fanout(
+			new ReadableStream<VideoFrame>({
+				start: (c) => {
+					controller = c;
+				},
+			}),
+			{ clone: (frame) => frame, release: () => {} },
+		);
+		const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 60 });
+		const sub = track.subscribe();
+		const rendition = {
+			slot: new Signal(undefined),
+			config: new Signal(undefined),
+			stats: new Signal(undefined),
+			track: new Signal<Moq.Track.Producer | undefined>(track),
+			join: new Signal(undefined),
+			close: () => track.close(),
+		};
+		const capture = {
+			in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) } as never) },
+			out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(fanout) },
+		};
+		const estimate = new Signal<number | undefined>(10_000_000);
+		const bandwidth = new Moq.Bandwidth.Allocator(estimate);
+		const encoder = new Encoder("video", {
+			enabled: true,
+			broadcast: { video: () => rendition, order: new Order(), join: new Signal(undefined) } as never,
+			capture: capture as never,
+			bandwidth,
+		});
+
+		try {
+			await settle();
+			const live = FakeVideoEncoder.instances.find((instance) => instance.state === "configured");
+			if (!live) throw new Error("expected a live video encoder");
+			const cap = encoder.out.resolved.peek()?.bitrate;
+			if (!cap) throw new Error("expected a resolved bitrate");
+
+			const mode = quantizer === "honored" ? "quantizer" : "constant";
+			expect(encoder.out.resolved.peek()?.bitrateMode).toBe(mode);
+			// Quantizer mode reads the budget per frame rather than configuring a bitrate.
+			expect(live.configs.map((config) => config.bitrate)).toEqual([mode === "quantizer" ? undefined : cap]);
+
+			controller.enqueue({ timestamp: 0, close: () => {} } as unknown as VideoFrame);
+			await clock.advance(PROBE);
+			const first = live.options.at(-1);
+			if (mode === "quantizer") expect(first?.avc?.quantizer).toBe(26);
+			else expect(first?.avc).toBeUndefined();
+
+			// A grant below the cap: constant mode reconfigures for it, quantizer mode spends less.
+			estimate.set(200_000);
+			await settle();
+			expect(encoder.out.resolved.peek()?.bitrate).toBe(200_000);
+			if (mode === "quantizer") {
+				expect(live.configs).toHaveLength(1);
+				// The first keyframe, never output by this fake, still fills the smaller bucket, so the
+				// next frame waits rather than overshoot.
+				const skipped = encoder.out.stats.peek().skipped;
+				controller.enqueue({ timestamp: 33_333, close: () => {} } as unknown as VideoFrame);
+				await clock.advance(PROBE);
+				expect(live.options).toHaveLength(1);
+				expect(encoder.out.stats.peek().skipped).toBe(skipped + 1);
+			} else {
+				expect(live.configs.map((config) => config.bitrate)).toEqual([cap, 200_000]);
+			}
+		} finally {
+			encoder.close();
+			fanout.close();
+			bandwidth.close();
+			sub.close();
+		}
+	});
+}
+
+test("a browser that throws on quantizer mode runs a constant bitrate", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	// Safari 26 rejects the enum value instead of reporting it unsupported.
+	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => {
+		if (config.bitrateMode === "quantizer") throw new TypeError("invalid bitrateMode");
+		return { supported: config.codec.startsWith("avc1") };
+	});
+	const encoder = new Encoder("video", {
+		capture: {
+			in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+			out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(undefined) },
+		} as never,
+	});
+	try {
+		await settle();
+		expect(encoder.out.error.peek()).toBeUndefined();
+		expect(encoder.out.resolved.peek()?.bitrateMode).toBe("constant");
+	} finally {
+		encoder.close();
+	}
+});
+
+test("a codec without a constant bitrate is skipped, since a variable one has no peak", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	using probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported:
+			config.codec.startsWith("avc1") && !(config.codec === "avc1.640028" && config.bitrateMode === "constant"),
+	}));
+	const encoder = new Encoder("video", {
+		capture: {
+			in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+			out: { display: new Signal({ width: 640, height: 480 }), frames: new Signal(undefined) },
+		} as never,
+	});
+	try {
+		await settle();
+		expect(encoder.out.resolved.peek()?.codec).toBe("avc1.4D401F");
+		expect(probe.mock.calls.some(([config]) => config.codec === "avc1.640028")).toBe(true);
+	} finally {
+		encoder.close();
 	}
 });
 
@@ -1574,9 +1720,13 @@ test("an unwatched rendition reserves nothing and encodes at its configured bitr
 
 test("a failed video encoder disables only its rendition and recovers on a fresh track", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
+	// Every codec, though not quantizer mode, as Chrome's software H.264.
+	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.bitrateMode !== "quantizer",
+	}));
 	const flush = async () => {
-		for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+		// Enough for a probe: support for the mode, then for a per-frame quantizer, then a flush.
+		for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 	};
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("failure.hang") });
 	const capture = {
@@ -1684,9 +1834,13 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 // and with its own maxima.
 test("a new network broadcast clears a video encoder failure and its maxima", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
+	// Every codec, though not quantizer mode, as Chrome's software H.264.
+	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.bitrateMode !== "quantizer",
+	}));
 	const flush = async () => {
-		for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+		// Enough for a probe: support for the mode, then for a per-frame quantizer, then a flush.
+		for (let i = 0; i < 20; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 	};
 	const name = new Signal(Moq.Path.from("one.hang"));
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name });
@@ -2155,7 +2309,10 @@ test("a refused first ceiling recovers at a smaller size", async () => {
 // covers it and updates the served track in place while the codec string holds. A shrink stays in band.
 test("ceiling growth updates the served track in place", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
-	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
+	// Every codec, though not quantizer mode, as Chrome's software H.264.
+	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.bitrateMode !== "quantizer",
+	}));
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("ceiling.hang") });
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },

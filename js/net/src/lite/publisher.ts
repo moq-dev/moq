@@ -1860,6 +1860,8 @@ export class Publisher {
 				});
 			}
 		} finally {
+			// A group held for the upstream START has no one left to read it.
+			first?.group.close();
 			if (!finished) unsubscribe();
 			// A lite-07 subscriber FINs once it read the finished track's tail, or once it wants
 			// nothing more, even while a reply is still being written. Either way the groups still

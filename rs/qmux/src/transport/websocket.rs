@@ -125,6 +125,11 @@ impl<T: WsStream> Transport for WsTransport<T> {
 			}
 			let message = match message {
 				Some(Ok(message)) => message,
+				// The socket is capped at the record limit, so it refuses a larger message
+				// before buffering it whole; the socket stays writable for the close.
+				Some(Err(tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
+					..
+				}))) => return Poll::Ready(Err(Error::FrameTooLarge)),
 				// Keep the WebSocket error, so callers can still tell a protocol fault apart.
 				Some(Err(err)) => return Poll::Ready(Err(Error::websocket(err))),
 				None => return Poll::Ready(Err(Error::Closed)),

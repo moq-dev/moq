@@ -76,7 +76,8 @@ Video encodes while enabled, so its recent groups wait in the track's cache for
 a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
-that history within the subscribers' max delay ahead of live audio when one arrives. Raw audio keeps up to
+that history a subscriber wants ahead of live audio when one arrives: from a live join's
+min delay (its playout delay plus the codec's warmup), or else within its max delay. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and
@@ -111,6 +112,11 @@ configured bitrate.
 
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
+Where the browser honors a per-frame quantizer (Chrome's VP9 and AV1, and its
+hardware H.264 and HEVC on macOS), it encodes at constant quality under a hard
+peak at that bitrate: a calm or static scene sends a fraction of it, and a busy
+one reaches it while queueing at most about a quarter second at that rate, short
+of a scene cut. Elsewhere it asks the browser for a constant bitrate.
 Codec, resolution, framerate, and bitrate are tunable through
 `el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
 who joins once a group's deltas outweigh twice its keyframe gets a fresh one,

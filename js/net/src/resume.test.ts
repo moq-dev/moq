@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
@@ -3788,6 +3789,55 @@ test("a concluded front's listing keeps its closed source's finishes", async () 
 		expect(await tracks.next()).toMatchObject({ kind: "finished", name: "seq" });
 		expect(await tracks.next()).toBeUndefined();
 	} finally {
+		tracks.close();
+		answer.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
+// Each source event wakes the listing's wait, which must drop the registrations it made on the
+// front's signals instead of leaving a set behind per event.
+test("a front's listing leaves no registration behind per event", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const from = a.consume();
+	const answer = wireOf(from).lister();
+	answer.synced();
+	front.serve(from);
+	const tracks = front.consumer.tracks();
+
+	// Registrations still pending, by signal: one-shot, so one that fired or was disposed is gone.
+	const live = new Map<Signal<unknown>, Set<object>>();
+	const changed = Signal.prototype.changed;
+	const spy = spyOn(Signal.prototype, "changed").mockImplementation(function (
+		this: Signal<unknown>,
+		fn?: (value: unknown) => void,
+	) {
+		const original = changed.bind(this);
+		if (!fn) return original();
+		const entry = {};
+		const pending = live.get(this) ?? new Set();
+		live.set(this, pending);
+		pending.add(entry);
+		const dispose = original((value: unknown) => {
+			pending.delete(entry);
+			fn(value);
+		});
+		return () => {
+			pending.delete(entry);
+			dispose();
+		};
+	} as typeof changed);
+	try {
+		expect(await tracks.next()).toMatchObject({ kind: "synced" });
+		for (let i = 0; i < 20; i++) {
+			answer.add(`track${i}`, { info: INFO });
+			expect(await tracks.next()).toMatchObject({ kind: "added", name: `track${i}` });
+		}
+		expect(Math.max(0, ...[...live.values()].map((pending) => pending.size))).toBeLessThanOrEqual(2);
+	} finally {
+		spy.mockRestore();
 		tracks.close();
 		answer.close();
 		front.consumer.close();
