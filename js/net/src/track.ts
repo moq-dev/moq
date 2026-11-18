@@ -5054,7 +5054,7 @@ export class Subscriber {
 		for (const run of owed) {
 			const settled = givenUp(drops, refused.peek(), run.start, run.end, (drop) =>
 				settles(drop, drift.budget, coverage),
-			).filter((drop) => settles(drop, drift.budget, coverage));
+			).filter((drop) => settles({ ...drop, start: max(drop.start, run.start) }, drift.budget, coverage));
 			for (const passed of runGaps(settled, run.start, run.end)) {
 				this.#giveUp(passed, staleHole(drift.budget));
 			}

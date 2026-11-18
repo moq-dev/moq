@@ -481,7 +481,12 @@ export class Consumer {
 		try {
 			for (;;) {
 				const group = await this.#track.recvGroup();
-				if (!group || this.#signals.abort.aborted) return;
+				if (!group) return;
+				// Closed while the read waited: cleanup already ran, so nothing would release it.
+				if (this.#signals.abort.aborted) {
+					group.close();
+					return;
+				}
 				this.#signals.spawn(this.#observeGroup.bind(this, group));
 			}
 		} catch {

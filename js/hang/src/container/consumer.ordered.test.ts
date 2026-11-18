@@ -86,14 +86,14 @@ test("a hole is waited for as long as the ordered reader waits, then read as a g
 	}
 });
 
-test("a gap reported before an empty group still reads as a gap before the next frame", async () => {
+test("an empty group after a gap never hides it: the reader gives the group up with the gap", async () => {
 	const t = setup(100);
 	try {
 		t.write(0n, 0);
-		t.write(3n, 60);
-		// Group 2 holds nothing, so the gap the reader reports for group 1 rides on an empty group; the
-		// timeline breaking at group 3 still reads as the gap.
+		// Group 2 holds nothing, so the ordered reader, which hands out no group lacking its head, gives
+		// it up with group 1, and the gap rides on group 3.
 		t.track.createGroup(2n).finish();
+		t.write(3n, 60);
 		await t.clock.advance(Duration.millis(100));
 		await flush();
 		expect(t.read()).toEqual(["frame 0", "gap 0+60", "frame 60"]);
