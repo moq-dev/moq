@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kio::clock::Instant;
+use str0m::ice::{StunMessage, TransId};
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 use tokio::net::UdpSocket;
@@ -18,6 +19,12 @@ use super::{Inbound, Socket};
 /// it treats the session as still possible forever, since trickle ICE could add
 /// one. Set above str0m's own exhaustion so a slow but real peer is not clipped.
 const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many of its latest binding requests an establishing agent remembers the
+/// destination of. str0m paces a new check every 50 ms, so this spans the last few
+/// seconds of checks and their retransmits; a response to an older one only fails to
+/// confirm, and the address then waits for its holder to end.
+const CHECKS: usize = 64;
 
 /// Why an [`Agent`] stopped.
 #[derive(Clone, Debug, thiserror::Error)]
@@ -47,6 +54,8 @@ enum Phase {
 	/// ICE has yet to connect; the [`ESTABLISH_TIMEOUT`] runs from `started`.
 	Establishing {
 		started: Instant,
+		/// Where each recent binding request went, newest last, at most [`CHECKS`].
+		checks: VecDeque<(TransId, SocketAddr)>,
 	},
 	Connected,
 	/// The connection ended, for this reason: every later [`Agent::next`] reports it.
@@ -95,7 +104,10 @@ impl Agent {
 			events: VecDeque::new(),
 			timeout: now,
 			outbox: VecDeque::new(),
-			phase: Phase::Establishing { started: now },
+			phase: Phase::Establishing {
+				started: now,
+				checks: VecDeque::new(),
+			},
 			closing: false,
 		};
 		// str0m's ICE has no clock, and asks for no timeout, until its first one. Without
@@ -205,7 +217,7 @@ impl Agent {
 	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` once ICE connected or the connection ended.
 	fn establish(&self) -> Option<Instant> {
 		match &self.phase {
-			Phase::Establishing { started } => Some(started.saturating_add(ESTABLISH_TIMEOUT)),
+			Phase::Establishing { started, .. } => Some(started.saturating_add(ESTABLISH_TIMEOUT)),
 			_ => None,
 		}
 	}
@@ -230,7 +242,19 @@ impl Agent {
 					self.timeout = Instant::from_std(timeout);
 					return;
 				}
-				Output::Transmit(transmit) => self.send(&transmit.contents, transmit.destination),
+				Output::Transmit(transmit) => {
+					// Only a shared socket's route needs to know where checks went.
+					if self.inbound.route.is_some()
+						&& let Phase::Establishing { checks, .. } = &mut self.phase
+						&& let Some(check) = stun(&transmit.contents).filter(|m| m.is_binding_request())
+					{
+						if checks.len() == CHECKS {
+							checks.pop_front();
+						}
+						checks.push_back((check.trans_id(), transmit.destination));
+					}
+					self.send(&transmit.contents, transmit.destination)
+				}
 				Output::Event(event) => {
 					if let str0m::Event::IceConnectionStateChange(state) = &event {
 						tracing::debug!(?state, "ice state");
@@ -279,21 +303,50 @@ impl Agent {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
-		let connecting = matches!(self.phase, Phase::Establishing { .. });
+		let symmetric = match &self.phase {
+			Phase::Establishing { checks, .. } if self.inbound.route.is_some() => is_symmetric(checks, data, src),
+			_ => false,
+		};
 		let result = self
 			.rtc_mut()
 			.handle_input(Input::Receive(Instant::now().into_std(), receive));
 		if let Err(err) = result {
 			self.fail(Error::rtc(err));
 		}
-		// str0m connects only on a path its checks validated, so `src` is the peer's.
-		if connecting
+		if symmetric
 			&& matches!(self.phase, Phase::Connected)
 			&& let Some(route) = &self.inbound.route
 		{
 			route.confirm(src);
 		}
 	}
+}
+
+/// Whether a datagram that connects ICE proves the peer is at `src`, the check RFC 8445
+/// §7.2.5.2.1 asks for and str0m skips: it pairs a response with its check by transaction
+/// ID alone, so a peer could answer its own check from a spoofed source.
+///
+/// A success response proves it when its check went to `src`, since only `src` saw that
+/// transaction ID. A request does too: a controlling agent connects only on a response, and
+/// a controlled one on a request only for that request's own pair, which is valid once a
+/// check sent to `src` was answered.
+fn is_symmetric(checks: &VecDeque<(TransId, SocketAddr)>, data: &[u8], src: SocketAddr) -> bool {
+	let Some(message) = stun(data) else {
+		return false;
+	};
+	if message.is_binding_request() {
+		return true;
+	}
+	let id = message.trans_id();
+	message.is_successful_binding_response() && checks.iter().any(|check| *check == (id, src))
+}
+
+/// Parse a datagram as STUN, which alone starts with 0..=3 (RFC 7983).
+fn stun(data: &[u8]) -> Option<StunMessage<'_>> {
+	if data.first().is_none_or(|first| *first > 3) {
+		return None;
+	}
+	StunMessage::parse(data).ok()
 }
 
 /// Mutable access to an [`Agent`]'s connection, which drains it when dropped.
@@ -413,7 +466,10 @@ mod tests {
 		// Hold the deadline past the handshake's retransmissions, so DTLS
 		// deterministically gives up first.
 		let held = Instant::now().saturating_add(Duration::from_secs(3600));
-		agent.phase = Phase::Establishing { started: held };
+		agent.phase = Phase::Establishing {
+			started: held,
+			checks: VecDeque::new(),
+		};
 
 		let err = loop {
 			match agent.next().await {

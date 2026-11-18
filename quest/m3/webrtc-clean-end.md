@@ -23,19 +23,17 @@ fails any read of a frame it received but its readers had not reached yet
 - WHIP client: `client::whip::dial` keeps the answer's `Location` (resolved
   against the dialed URL, keeping its query token), and after `Session::run`
   returns `Ok` sends the `DELETE` (RFC 9725) before returning.
+- WHIP server: a publisher's close_notify (str0m's `Event::Closed`) is a
+  clean end, like a `DELETE`: the server finishes the broadcast and lingers
+  it. A browser's `pc.close()` sends close_notify without a `DELETE`. Only a
+  peer that vanishes (ICE consent failure, establishment timeout) aborts.
+  Decided on #9049: ✅ both close_notify and `DELETE` end cleanly (rejected:
+  `DELETE` only, which RFC 9725 names but which aborts the broadcast of every
+  publisher that skips it).
 - WHEP client: a WHEP server has no request to end a session with, so the
-  server's close_notify (str0m's `Event::Closed`) is its only clean end.
-  Recommended: an ingest session that sees `Event::Closed` returns as the
-  peer's clean end, and `Client::pull` finishes the sink as `AcceptedSession`
-  does after a `DELETE`.
+  server's close_notify is its only clean end. An ingest session that sees
+  `Event::Closed` returns as the peer's clean end, and `Client::pull`
+  finishes the sink as `AcceptedSession` does after a `DELETE`. The WHIP
+  server's ingest takes the same path.
 
 Public API: none. Wire: the WHIP client sends a `DELETE`.
-
-## Waiting
-
-- Maintainer: whether a WHIP server also reads a publisher's close_notify as
-  a clean end, finishing and lingering the broadcast, or only a `DELETE`. A
-  browser's `pc.close()` sends close_notify without a `DELETE`. Recommended:
-  both, since close_notify is a deliberate end and only a vanished peer
-  should abort; rejected: `DELETE` only, which RFC 9725 names but which
-  aborts the broadcast of every publisher that skips it.

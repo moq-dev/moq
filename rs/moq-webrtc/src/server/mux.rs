@@ -17,10 +17,12 @@
 //! A binding request always routes by its ufrag, but one for an address another
 //! live session holds only claims it: anyone holding a session can sign a request,
 //! and a spoofed source proves nothing. The claim takes the address once the
-//! claimant's own ICE connects on a datagram from it ([`Route::confirm`]), which
-//! needs the answers to its checks (STUN responses go to both sessions meanwhile),
-//! or once the holder ends. So a peer that re-offers from the same address reaches
-//! its new session, and a forged request moves no one's traffic.
+//! claimant's own ICE connects on a datagram from it that proves the peer is there
+//! ([`Route::confirm`]): the answer to a check sent to that address, which only it
+//! saw (STUN responses go to both sessions meanwhile), or once the holder ends. So
+//! a peer that re-offers from the same address reaches its new session, and neither
+//! a forged request nor a session answering its own check from a spoofed source
+//! moves anyone's traffic.
 //!
 //! Backpressure mirrors a UDP socket buffer: each session has a bounded inbox
 //! and a full inbox drops the datagram (WebRTC tolerates loss). A closed inbox
@@ -114,8 +116,8 @@ pub(crate) struct Route {
 }
 
 impl Route {
-	/// Take `src` if this session claimed it: its ICE connected on a datagram from `src`,
-	/// which str0m accepts only for a path its checks validated.
+	/// Take `src` if this session claimed it: its ICE connected on a datagram that proves
+	/// the peer is at `src` (see `ice::agent::is_symmetric`).
 	pub(crate) fn confirm(&self, src: SocketAddr) {
 		let mut registry = self.registry.lock().unwrap();
 		if registry.claims.get(&src).is_some_and(|claim| claim.ufrag == self.ufrag) {
@@ -449,6 +451,135 @@ mod tests {
 			old_inbound.packets.try_recv().is_err(),
 			"the old session kept the address"
 		);
+	}
+
+	/// A session that answers its own check from a victim's address, while the check went to
+	/// the attacker's real one, connects but never takes the victim's address. The same answer
+	/// from the address the check went to, as a peer re-offering from it sends, takes it.
+	#[tokio::test]
+	async fn only_an_answer_from_where_the_check_went_moves_an_address() {
+		assert!(!take_over(true).await, "a spoofed answer moved the victim's address");
+		assert!(take_over(false).await, "a genuine re-offer stayed with the old session");
+	}
+
+	/// Connect a str0m offerer to a new session on a mux where another session holds an
+	/// address, and report whether the new session took it. The offerer's answers to the
+	/// session's checks wait until it nominates, so the session's ICE connects on one of
+	/// them. With `spoof`, the offerer lives elsewhere and sends those answers, and one
+	/// signed request, from the held address; without, it lives at the held address.
+	async fn take_over(spoof: bool) -> bool {
+		use crate::ice::{Agent, Socket};
+		use kio::clock::Instant;
+		use str0m::net::{Protocol, Receive};
+		use str0m::{Candidate, Event, Input, Output};
+
+		let mux = Mux::bind("127.0.0.1:0".parse().unwrap(), &[]).await.unwrap();
+		let local = mux.local_addr();
+		let real = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let real_addr = real.local_addr().unwrap();
+		// Kept open so checks sent to the victim land somewhere.
+		let victim_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let held = if spoof {
+			victim_socket.local_addr().unwrap()
+		} else {
+			real_addr
+		};
+
+		let (victim, _victim_inbound, _victim_registration) = mux.register();
+		let deliver = |data: &[u8], src: SocketAddr| {
+			let targets = mux.registry.lock().unwrap().route(src, &Datagram::parse(data));
+			for entry in targets.into_iter().flatten() {
+				let _ = entry.sender.try_send((data.to_vec(), src));
+			}
+		};
+		deliver(&binding_request(&victim), held);
+
+		let now = Instant::now().into_std();
+		let (creds, inbound, _registration) = mux.register();
+		let ufrag = creds.ufrag.clone();
+		let mut answerer = crate::session::rtc_config()
+			.unwrap()
+			.set_local_ice_credentials(creds)
+			.build(now);
+		answerer.add_local_candidate(Candidate::host(local, "udp").unwrap());
+		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		offerer.add_local_candidate(Candidate::host(real_addr, "udp").unwrap());
+		let mut api = offerer.sdp_api();
+		api.add_media(
+			str0m::media::MediaKind::Audio,
+			str0m::media::Direction::RecvOnly,
+			None,
+			None,
+			None,
+		);
+		let (offer, pending) = api.apply().unwrap();
+		let answer = answerer.sdp_api().accept_offer(offer).unwrap();
+		offerer.sdp_api().accept_answer(pending, answer).unwrap();
+		let mut agent = Agent::new(answerer, Socket::new(mux.socket(), vec![local], inbound).unwrap()).unwrap();
+
+		let mut claimed = !spoof;
+		let mut nominated = false;
+		let mut answers: Vec<Vec<u8>> = Vec::new();
+		let mut buf = vec![0u8; 2048];
+		let connect = async {
+			loop {
+				let timeout = loop {
+					match offerer.poll_output().unwrap() {
+						Output::Timeout(timeout) => break timeout,
+						Output::Event(_) => {}
+						Output::Transmit(transmit) => {
+							let data = transmit.contents.to_vec();
+							let Ok(message) = StunMessage::parse(&data) else {
+								continue;
+							};
+							if message.is_binding_request() {
+								if !claimed {
+									deliver(&data, held);
+									claimed = true;
+								}
+								nominated |= message.use_candidate();
+								deliver(&data, real_addr);
+								if nominated {
+									for answer in answers.drain(..) {
+										deliver(&answer, held);
+									}
+								}
+							} else if nominated {
+								deliver(&data, held);
+							} else {
+								answers.push(data);
+							}
+						}
+					}
+				};
+				tokio::select! {
+					received = real.recv_from(&mut buf) => {
+						let (len, src) = received.unwrap();
+						let now = Instant::now().into_std();
+						if let Ok(receive) = Receive::new(Protocol::Udp, src, real_addr, &buf[..len]) {
+							offerer.handle_input(Input::Receive(now, receive)).unwrap();
+						}
+					}
+					_ = kio::clock::sleep_until(Instant::from_std(timeout)) => {
+						offerer.handle_input(Input::Timeout(Instant::now().into_std())).unwrap();
+					}
+					event = agent.next() => {
+						if let Event::IceConnectionStateChange(state) = event.unwrap()
+							&& state.is_connected()
+						{
+							return;
+						}
+					}
+				}
+			}
+		};
+		kio::clock::timeout(Duration::from_secs(10), connect)
+			.await
+			.expect("the session's ICE connects");
+		assert!(nominated, "ICE connected before the offerer nominated");
+
+		let registry = mux.registry.lock().unwrap();
+		registry.by_addr.get(&held).is_some_and(|entry| entry.ufrag == ufrag)
 	}
 
 	/// A claimant takes the address once its holder ends, confirmed or not.
