@@ -1582,20 +1582,22 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			}
 			self.out.push((peer, Msg::Synced(Path::empty())));
 		}
-		let peers: Vec<N> = self.routing.iter().copied().collect();
-		while let Some(origin) = self.stale.pop_first() {
-			for &peer in &peers {
-				self.advertise_to(origin, peer);
-			}
-		}
+		self.advertise_stale(None);
 	}
 
-	/// Send what changed of `origin`'s route to every routing neighbour now, rather than at
-	/// the next drain.
-	fn advertise_now(&mut self, origin: NodeId) {
-		if self.stale.remove(&origin) {
-			let peers: Vec<N> = self.routing.iter().copied().collect();
-			for peer in peers {
+	/// Send each route that changed, but `except`'s, to every routing neighbour now, rather
+	/// than at the next drain.
+	fn advertise_stale(&mut self, except: Option<NodeId>) {
+		let stale: Vec<NodeId> = (self.stale.iter().copied())
+			.filter(|origin| Some(*origin) != except)
+			.collect();
+		if stale.is_empty() {
+			return;
+		}
+		let peers: Vec<N> = self.routing.iter().copied().collect();
+		for origin in stale {
+			self.stale.remove(&origin);
+			for &peer in &peers {
 				self.advertise_to(origin, peer);
 			}
 		}
@@ -1742,6 +1744,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// Apply `changes` to this node's view of `origin` and pass them, with its floor, to
 	/// every neighbour it offers `origin` to.
 	fn publish(&mut self, origin: NodeId, changes: Vec<(Broadcast<I>, Change<A>)>) {
+		// A withdrawal goes after every other route that started before it, so a claim
+		// moving to another node, such as this node's other identity, arrives before it
+		// leaves, at every hop it is forwarded. `origin`'s own route stays for the drain:
+		// its floor already moved, so one that starts now would bring the change twice.
+		let withdraws = (changes.iter()).any(|(_, change)| !matches!(change, Change::Live(_)));
+		if withdraws && self.sent_to.contains_key(&origin) {
+			self.advertise_stale(Some(origin));
+		}
 		let own = self.is_self(origin);
 		let known = self.known.entry(origin).or_default();
 		let floor = known.floor;
@@ -2016,10 +2026,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				}
 				self.revise(owner, broadcast.clone(), Change::Live(claim));
 				// A claim that moved between the identities leaves the old one after the new
-				// one holds it, and after a routing neighbour hears the new one's route, which
-				// a first claim only marks stale: else the neighbour sees it gone between them.
+				// one holds it, and `publish` sends the new one's route first.
 				if let Some(old) = filed.filter(|old| *old != owner) {
-					self.advertise_now(owner);
 					self.revise(old, broadcast, Change::Lost);
 				}
 			}
@@ -3788,6 +3796,71 @@ mod tests {
 		};
 		assert!(routed < left, "the old identity left first: {out:?}");
 		assert!(router.own_as(me_marked).1.contains_key(&broadcast));
+	}
+
+	/// A route that starts in the same batch as another node's withdrawal is forwarded
+	/// ahead of it, as a claim moving between a node's two identities needs at each hop.
+	#[test]
+	fn a_route_started_before_a_withdrawal_is_forwarded_before_it() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.drain();
+
+		let route = |origin: Id| Msg::Route {
+			origin: node(origin),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(origin),
+						session: 0,
+					},
+					Hop {
+						node: node(2),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		let broadcast = (p("live"), 7);
+		let claims = |origin: Id, change, floor| Msg::Claims {
+			origin: node(origin),
+			changes: vec![(broadcast.clone(), change)],
+			floor,
+		};
+		router.recv(2, route(2)).unwrap();
+		router.recv(2, claims(2, live(0), 1)).unwrap();
+		router.drain();
+
+		router.recv(2, route(20)).unwrap();
+		router.recv(2, claims(20, live(0), 1)).unwrap();
+		router.recv(2, claims(2, Change::Lost, 2)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 3)
+			.map(|(_, msg)| msg)
+			.collect();
+		let routed = out
+			.iter()
+			.position(|msg| matches!(msg, Msg::Route { origin, offer: Some(_) } if *origin == node(20)));
+		let left = out.iter().position(|msg| {
+			matches!(msg, Msg::Claims { origin, changes, .. }
+				if *origin == node(2) && changes.iter().any(|(_, change)| *change == Change::Lost))
+		});
+		let (Some(routed), Some(left)) = (routed, left) else {
+			panic!("the move was not forwarded: {out:?}");
+		};
+		assert!(routed < left, "the withdrawal went first: {out:?}");
+		assert!(
+			out[routed..left].iter().any(
+				|msg| matches!(msg, Msg::Claims { origin, changes, .. } if *origin == node(20) && !changes.is_empty())
+			),
+			"the new route came without its claim: {out:?}"
+		);
 	}
 
 	/// A route that turns marked at the same rank re-tells a scoped neighbour each claim

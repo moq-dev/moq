@@ -908,6 +908,10 @@ const UNAVAILABLE: [(&str, &str); 5] = [
 /// two ends of one grant to each other for a moment, each on the copy of the claim that
 /// came the other way round (`home_dies`); the adopter's unavailable is one more message
 /// delivered while that lasts, and it clears in the same round.
+///
+/// And where a claim moves to another node, the router forwards the new node's route
+/// before the old node's withdrawal at every hop, so some readers never see it offline
+/// and never start it again: fewer of each, by as many.
 #[test]
 fn the_router_gives_the_prototypes_answers() {
 	let mut out = Vec::new();
@@ -918,7 +922,11 @@ fn the_router_gives_the_prototypes_answers() {
 		for ((failure, kept), (_, relay)) in kept.iter().zip(&relay) {
 			let (a, b) = (&kept.cost, &relay.cost);
 			let unavailable = UNAVAILABLE.contains(&(failure.as_str(), shape.name));
+			// Each reader that never saw the claim go offline also never started it again.
+			let kept_up = b.sent.starts < a.sent.starts
+				&& a.sent.starts - b.sent.starts == a.sent.offline.saturating_sub(b.sent.offline);
 			let excused = |field: &str| match field {
+				"starts" | "offline" if kept_up => true,
 				"claim_items" if a.sent.claims > b.sent.claims => true,
 				"claim_items" => unavailable,
 				"settle_rounds" => unavailable && b.rounds == a.rounds + 1,
