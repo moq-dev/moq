@@ -20,6 +20,7 @@
 
 mod backend;
 mod backlog;
+mod drift;
 mod encoded;
 mod encoder;
 mod producer;

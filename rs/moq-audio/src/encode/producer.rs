@@ -9,6 +9,7 @@ use moq_mux::container::Frame as MuxFrame;
 use moq_net::Timestamp;
 
 use super::backlog::{Backlog, Raw, Stamp};
+use super::drift::{Drift, Steer};
 use super::encoded::Encoded;
 use super::encoder::{Config, Encoder, Input};
 use crate::resample::{Remix, Resampler};
@@ -87,6 +88,9 @@ pub struct Producer {
 	/// Converts the input layout to the codec's, when they differ.
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
+	/// Steers the resampler onto the input's timestamps, for a capture whose device counts
+	/// samples on a clock of its own.
+	drift: Option<Drift>,
 	track: moq_mux::container::Producer<moq_mux::container::legacy::Wire, hang::catalog::AudioConfig>,
 	pending: Vec<f32>,
 	backlog: Backlog,
@@ -181,14 +185,21 @@ impl Reserved {
 	/// Build the encoder for `input` and register the rendition describing it.
 	///
 	/// Separate from [`encode`](Self::encode), which cannot fail, so a layout the
-	/// codec rejects leaves the track intact to abort with that error.
-	fn register(&mut self, input: Input, options: &Options) -> Result<Registered, Error> {
+	/// codec rejects leaves the track intact to abort with that error. A `drift`
+	/// encode always resamples, so its ratio can follow the input's timestamps.
+	fn register(&mut self, input: Input, options: &Options, drift: Option<Drift>) -> Result<Registered, Error> {
 		let remix = (input.layout != options.config.layout)
 			.then(|| Remix::new(input.layout, options.config.layout))
 			.transpose()?;
 		let encoder = Encoder::new(&options.config)?;
 
-		let resampler = if input.sample_rate == encoder.codec_rate() {
+		let resampler = if drift.is_some() {
+			Some(Resampler::adjustable(
+				input.sample_rate,
+				encoder.codec_rate(),
+				encoder.codec_channels(),
+			)?)
+		} else if input.sample_rate == encoder.codec_rate() {
 			None
 		} else {
 			// Use microsecond precision so 2.5 ms frame_duration (supported by
@@ -219,6 +230,7 @@ impl Reserved {
 			input,
 			remix,
 			resampler,
+			drift,
 			group_samples,
 		})
 	}
@@ -243,6 +255,7 @@ impl Reserved {
 			input: registered.input,
 			remix: registered.remix,
 			resampler: registered.resampler,
+			drift: registered.drift,
 			track: self.track,
 			pending: Vec::new(),
 			group_samples: registered.group_samples,
@@ -268,6 +281,7 @@ struct Registered {
 	input: Input,
 	remix: Option<Remix>,
 	resampler: Option<Resampler>,
+	drift: Option<Drift>,
 	group_samples: u64,
 }
 
@@ -280,8 +294,31 @@ impl Producer {
 		input: Input,
 		options: &Options,
 	) -> Result<Self, Error> {
+		Self::build(broadcast, catalog, input, options, None)
+	}
+
+	/// [`new`](Self::new) for a capture device, whose samples keep its own clock: each frame's
+	/// timestamp is when its first sample was captured on the host's clock, and the encode
+	/// resamples by up to 2000 ppm to stay on it rather than drift from it by the sample count.
+	#[cfg(any(feature = "capture", test))]
+	pub(crate) fn capture<E: CatalogExt>(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
+		input: Input,
+		options: &Options,
+	) -> Result<Self, Error> {
+		Self::build(broadcast, catalog, input, options, Some(Drift::new()))
+	}
+
+	fn build<E: CatalogExt>(
+		broadcast: &mut moq_net::broadcast::Producer,
+		catalog: moq_mux::catalog::Producer<E>,
+		input: Input,
+		options: &Options,
+		drift: Option<Drift>,
+	) -> Result<Self, Error> {
 		let mut reserved = Reserved::new(broadcast, catalog, options)?;
-		match reserved.register(input, options) {
+		match reserved.register(input, options, drift) {
 			Ok(registered) => Ok(reserved.encode(registered)),
 			Err(err) => {
 				// A subscriber may already be waiting on the track; give it the real cause.
@@ -391,6 +428,9 @@ impl Producer {
 		if let Some(resampler) = self.resampler.as_mut() {
 			resampler.reset();
 		}
+		if let Some(drift) = self.drift.as_mut() {
+			drift.restart();
+		}
 	}
 
 	/// Push one [`Frame`] of PCM in the layout declared by [`Input`]. Encodes and
@@ -418,6 +458,11 @@ impl Producer {
 					frame.timestamp
 				))
 			})?;
+		if let Some(anchor) = self.anchor
+			&& !self.steer(anchor, frame)?
+		{
+			return Ok(());
+		}
 		let floor = self.stamped;
 		let anchor = *self.anchor.get_or_insert(Anchor {
 			at: timestamp_us.max(floor),
@@ -439,6 +484,29 @@ impl Producer {
 		self.pending.extend(pcm);
 
 		self.publish_full_frames(anchor)
+	}
+
+	/// Steer a capture's resampler so `frame`'s first sample is stamped when it was captured, or
+	/// re-anchor on it when the stamps jumped further than a ratio can follow. False for a frame
+	/// to drop, whose time the published audio already covers.
+	fn steer(&mut self, anchor: Anchor, frame: &Frame) -> Result<bool, Error> {
+		let (Some(drift), Some(resampler)) = (self.drift.as_mut(), self.resampler.as_mut()) else {
+			return Ok(true);
+		};
+		let channels = self.input.layout.channels() as usize;
+		let bytes = self.input.format.bytes_per_sample() * channels;
+		let frames = (frame.data.len() / bytes.max(1)) as u64;
+		let duration = std::time::Duration::from_micros(frames * 1_000_000 / u64::from(self.input.sample_rate));
+		let codec_rate = f64::from(self.encoder.codec_rate());
+		let offset = (resampler.position() * 1e6 / codec_rate).round() as u64;
+		let pts = Timestamp::from_micros(anchor.at.saturating_add(offset))?;
+		match drift.observe(frame.timestamp, pts, duration) {
+			Steer::Hold => {}
+			Steer::Ratio(relative) => resampler.adjust(relative)?,
+			Steer::Resync => self.reanchor(),
+			Steer::Drop => return Ok(false),
+		}
+		Ok(true)
 	}
 
 	/// Encode and publish every full frame in `pending`, keeping any partial
@@ -914,6 +982,7 @@ mod tests {
 		}
 	}
 
+	use std::task::Poll;
 	use std::time::Duration;
 
 	use super::*;
@@ -2503,6 +2572,139 @@ mod tests {
 			let input = Input::new(rate, crate::Layout::Stereo);
 			let _producer = Producer::new(&mut broadcast, catalog.clone(), input, &options).unwrap();
 			assert_eq!(catalog.snapshot().audio.renditions["audio"].delay, delay, "{rate} Hz");
+		}
+	}
+
+	/// Captured audio for [`capture_offsets`]: a device clock `ppm` fast of the host's, 10 ms
+	/// buffers stamped late by up to `late_us`, and from `jump.0` seconds in, stamps moved by
+	/// `jump.1` microseconds, as a host suspend (forward) or a burst of queued audio (backward).
+	struct Capture {
+		input_rate: u32,
+		codec_rate: u32,
+		ppm: f64,
+		seconds: u64,
+		late_us: u64,
+		jump: Option<(u64, i64)>,
+	}
+
+	/// How far each packet's PTS lands from the host instant its first sample was captured, in
+	/// microseconds, by when that sample was captured, in seconds.
+	///
+	/// The input is a ramp of its own sample index, so each packet's first sample names the input
+	/// sample it holds, whatever was resampled, slipped, or dropped. PCM keeps it exact.
+	async fn capture_offsets(capture: Capture) -> Vec<(f64, f64)> {
+		let input = Input {
+			format: Format::F32,
+			sample_rate: capture.input_rate,
+			layout: Layout::Mono,
+		};
+		let mut config = Config::from_input(super::super::Codec::Pcm, &input);
+		config.sample_rate = capture.codec_rate;
+		let options = Options {
+			track: Some("audio".into()),
+			config,
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = Producer::capture(&mut broadcast, catalog, input, &options).unwrap();
+		let track = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+
+		let device_rate = f64::from(capture.input_rate) * (1.0 + capture.ppm * 1e-6);
+		let captured = |index: f64| {
+			let at = 1.0 + index / device_rate;
+			let jump = capture.jump.filter(|(from, _)| at - 1.0 >= *from as f64);
+			at + jump.map_or(0.0, |(_, by)| by as f64 / 1e6)
+		};
+		let block = capture.input_rate as usize / 100;
+		let total = capture.input_rate as usize * capture.seconds as usize;
+		assert!(total < 1 << 24, "the ramp must stay exact in f32");
+		// A fixed LCG, so the jitter is the same every run.
+		let mut seed = 0x2545_f491_u64;
+		let mut offsets = Vec::new();
+		for start in (0..total).step_by(block) {
+			seed = seed
+				.wrapping_mul(6_364_136_223_846_793_005)
+				.wrapping_add(1_442_695_040_888_963_407);
+			let late = (seed >> 33) % capture.late_us.max(1);
+			let at = (captured(start as f64) * 1e6) as u64 + late;
+			let ramp: Vec<f32> = (start..start + block).map(|index| index as f32).collect();
+			producer.write(&pcm_frame(&ramp, at)).unwrap();
+			while let Some(Some(packet)) = now_or_never(packet(&mut reader)) {
+				let first = captured(f64::from(f32::from_le_bytes(packet.payload[..4].try_into().unwrap())));
+				offsets.push((first, packet.timestamp.as_micros().unwrap() as f64 - first * 1e6));
+			}
+		}
+		offsets
+	}
+
+	/// Poll `future` once, for a reader that must not wait on packets not yet written.
+	fn now_or_never<F: std::future::Future>(future: F) -> Option<F::Output> {
+		let mut future = std::pin::pin!(future);
+		match future
+			.as_mut()
+			.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+		{
+			Poll::Ready(output) => Some(output),
+			Poll::Pending => None,
+		}
+	}
+
+	/// The worst offset from `after` seconds on, against the first packet's, in milliseconds.
+	fn drift(offsets: &[(f64, f64)], after: f64) -> f64 {
+		let start = offsets[0].1;
+		let offsets = offsets.iter().filter(|(at, _)| *at >= after);
+		offsets
+			.map(|(_, offset)| (offset - start).abs() / 1e3)
+			.fold(0.0, f64::max)
+	}
+
+	/// One 20 ms PCM frame: how far captured audio may drift from its video.
+	const FRAME_MS: f64 = 20.0;
+
+	/// A device clock at the 1000 ppm bound, either way, stays within a frame of its capture
+	/// stamps, slipping frames at the codec's rate and resampling onto another. Uncorrected, it
+	/// drifts 30 ms in these 30 s.
+	#[tokio::test]
+	async fn capture_follows_the_device_clock_onto_the_host_clock() {
+		for (input_rate, ppm) in [(48_000, 1000.0), (48_000, -1000.0), (44_100, 1000.0), (44_100, -1000.0)] {
+			let offsets = capture_offsets(Capture {
+				input_rate,
+				codec_rate: 48_000,
+				ppm,
+				seconds: 30,
+				late_us: 2_000,
+				jump: None,
+			})
+			.await;
+			let drift = drift(&offsets, 0.0);
+			assert!(drift < FRAME_MS, "{input_rate} Hz at {ppm} ppm drifted {drift:.2} ms");
+		}
+	}
+
+	/// Stamps that jump further than a ratio can slew put the PTS back on them within a second: a
+	/// suspended host re-anchors so the gap lands in the PTS, and audio queued past its time is
+	/// dropped until the stamps catch up, so the timeline never runs backwards.
+	#[tokio::test]
+	async fn capture_recovers_from_a_jump_in_its_stamps() {
+		for jump in [2_000_000, -500_000] {
+			let offsets = capture_offsets(Capture {
+				input_rate: 48_000,
+				codec_rate: 48_000,
+				ppm: 0.0,
+				seconds: 12,
+				late_us: 2_000,
+				jump: Some((5, jump)),
+			})
+			.await;
+			let recovered = 1.0 + 5.0 + jump.max(0) as f64 / 1e6 + 1.1;
+			let drift = drift(&offsets, recovered);
+			assert!(drift < FRAME_MS, "a {jump} us jump left {drift:.2} ms");
+			let stamps: Vec<f64> = offsets.iter().map(|(at, offset)| at * 1e6 + offset).collect();
+			assert!(stamps.is_sorted(), "a {jump} us jump moved the PTS backwards");
 		}
 	}
 }
