@@ -650,36 +650,40 @@ where
 		timestamp: moq_net::Timestamp,
 		keyframe: bool,
 	) -> crate::Result<Option<super::TimestampRewind>> {
-		let floor = match keyframe {
-			true => self.start,
-			false => self.floor,
-		};
-		if let Some(floor) = floor
-			&& timestamp_lt(timestamp, floor)
-		{
-			return Ok(Some(super::TimestampRewind { timestamp, floor }));
+		if let Some(rewind) = self.below_floor(timestamp, keyframe) {
+			return Ok(Some(rewind));
 		}
 		match keyframe && self.pending_start.is_none() && self.group.is_none() {
-			true => crate::start::rewind(&self.inner, timestamp),
+			true => Ok(crate::start::opens(&self.inner, timestamp)?.err()),
 			false => Ok(None),
 		}
 	}
 
+	/// The rewind for a frame below the start it may not pass: the previous group's for a
+	/// keyframe, the one before its own group's for any other frame.
+	fn below_floor(&self, timestamp: moq_net::Timestamp, keyframe: bool) -> Option<super::TimestampRewind> {
+		let floor = match keyframe {
+			true => self.start,
+			false => self.floor,
+		}?;
+		timestamp_lt(timestamp, floor).then_some(super::TimestampRewind { timestamp, floor })
+	}
+
 	/// Check `timestamp` against the group starts, and open a group for a keyframe.
 	fn prepare(&mut self, timestamp: moq_net::Timestamp, keyframe: bool) -> crate::Result<()> {
-		if let Some(rewind) = self.rewind(timestamp, keyframe)? {
+		if let Some(rewind) = self.below_floor(timestamp, keyframe) {
 			return Err(rewind.into());
 		}
 
 		// A keyframe opens a group keyed by its timestamp, which has to start after every group the
 		// track holds. One that doesn't, such as parameter sets and the picture they precede written
 		// as two keyframes at one timestamp, continues the open group instead. With none open it
-		// rewound, refused above before anything changes.
+		// rewinds, refused before anything changes.
 		let start = match keyframe && self.pending_start.is_none() {
 			true => match (crate::start::opens(&self.inner, timestamp)?, &self.group) {
-				(Some(start), _) => Some(start),
-				(None, Some(_)) => return Ok(()),
-				(None, None) => unreachable!("a start that doesn't pass the newest rewinds"),
+				(Ok(start), _) => Some(start),
+				(Err(_), Some(_)) => return Ok(()),
+				(Err(rewind), None) => return Err(rewind.into()),
 			},
 			false => None,
 		};

@@ -1645,15 +1645,12 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// it is refused.
 		let start = match start_group && self.pending_start.is_none() {
 			true => match (crate::start::opens(&self.track, timestamp)?, &self.group) {
-				(Some(start), _) => Some(start),
-				(None, Some(_)) => {
+				(Ok(start), _) => Some(start),
+				(Err(_), Some(_)) => {
 					start_group = false;
 					None
 				}
-				(None, None) => match crate::start::rewind(&self.track, timestamp)? {
-					Some(rewind) => return Ok(Err(Rewind(rewind.into()))),
-					None => unreachable!("a start that doesn't pass the newest rewinds"),
-				},
+				(Err(rewind), None) => return Ok(Err(Rewind(rewind.into()))),
 			},
 			false => None,
 		};
