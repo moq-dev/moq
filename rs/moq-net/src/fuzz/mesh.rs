@@ -67,7 +67,7 @@ struct Upstream {
 }
 
 /// A claim a closed session left behind, held until the node lets it go.
-struct Left(#[allow(dead_code, reason = "held for its drop, which retracts the claim")] crate::origin::Claim);
+struct Left(crate::origin::Claim);
 
 impl node::Orphan for Left {
 	fn release(self: Box<Self>, ended: bool) {
