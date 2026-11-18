@@ -363,6 +363,62 @@ describe("Signal", () => {
 		}
 	});
 
+	test("a waiter keeps its own baseline when its callback also subscribes mid-batch", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const fn = (v: number) => seen.push(v);
+		signal.changed(fn); // saw 0
+		signal.set(1);
+		const dispose = signal.subscribe(fn); // saw 1
+		signal.set(0);
+
+		await settle();
+		expect(seen).toEqual([0]); // the subscriber only; the waiter saw 0 and keeps waiting
+
+		signal.set(2);
+		await settle();
+		expect(seen).toEqual([0, 2, 2]);
+		dispose();
+	});
+
+	test("a waiter cancelled and registered again during a flush waits for the next change", async () => {
+		const signal = new Signal(0);
+		const fired: number[] = [];
+		const fn = (v: number) => fired.push(v);
+		let cancel = signal.changed(fn);
+		let renewed = false;
+		const dispose = signal.subscribe(() => {
+			if (renewed) return;
+			renewed = true;
+			cancel();
+			cancel = signal.changed(fn);
+		});
+
+		signal.set(1);
+		await settle();
+		expect(fired).toEqual([]);
+
+		signal.set(2);
+		await settle();
+		expect(fired).toEqual([2]);
+		dispose();
+	});
+
+	test("a stale dispose leaves a newer waiter with the same callback", async () => {
+		const signal = new Signal(0);
+		const fired: number[] = [];
+		const fn = (v: number) => fired.push(v);
+		const stale = signal.changed(fn);
+		signal.set(1);
+		await settle();
+		signal.changed(fn);
+		stale();
+
+		signal.set(2);
+		await settle();
+		expect(fired).toEqual([1, 2]);
+	});
+
 	test("any number of subscribers is legitimate", async () => {
 		const signal = new Signal(0);
 		let notified = 0;

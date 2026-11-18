@@ -62,7 +62,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#value: T;
 
 	#subscribers: Set<Subscriber<T>> = new Set();
-	#changed: Set<Subscriber<T>> = new Set();
+	// Each registration carries its own token, so a flush fires only the registration it
+	// snapshotted and a stale dispose leaves a newer registration of the same callback alone.
+	#changed: Map<Subscriber<T>, object> = new Map();
 
 	// Microtask coalescing state
 	#pending = false;
@@ -71,7 +73,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	#oldValue: T | undefined;
 	#hasCapturedOldValue = false;
 	// The value each listener added after the capture saw, which may differ from #oldValue.
-	#seen: Map<Subscriber<T>, T> = new Map();
+	// Kept per listener set, since one callback can be both a subscriber and a waiter.
+	#seenSubscribers: Map<Subscriber<T>, T> = new Map();
+	#seenChanged: Map<Subscriber<T>, T> = new Map();
 	#forceNotify = false;
 
 	/** Marks this as a Signal across package instances. */
@@ -120,7 +124,8 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 			this.#hasCapturedOldValue = false;
 			this.#oldValue = undefined;
 			this.#forceNotify = false;
-			this.#seen.clear();
+			this.#seenSubscribers.clear();
+			this.#seenChanged.clear();
 			return;
 		}
 
@@ -141,10 +146,15 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 		// Listeners that registered mid-batch and the value each saw. Only a captured write records
 		// them, and dropping the capture clears them.
-		let seen: Map<Subscriber<T>, T> | undefined;
-		if (this.#seen.size > 0) {
-			seen = this.#seen;
-			this.#seen = new Map();
+		let seenSubscribers: Map<Subscriber<T>, T> | undefined;
+		if (this.#seenSubscribers.size > 0) {
+			seenSubscribers = this.#seenSubscribers;
+			this.#seenSubscribers = new Map();
+		}
+		let seenChanged: Map<Subscriber<T>, T> | undefined;
+		if (this.#seenChanged.size > 0) {
+			seenChanged = this.#seenChanged;
+			this.#seenChanged = new Map();
 		}
 
 		// A write while nobody listened dropped the capture, so any listener since then saw the
@@ -157,21 +167,21 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 			this.#forceNotify = false;
 		}
 
-		if (!changed && !seen && initial.size === 0) return;
+		if (!changed && !seenSubscribers && !seenChanged && initial.size === 0) return;
 
 		// Every listener gets the batch's net change. One that registered mid-batch also gets a
 		// value set back to the old one, since it saw the middle value.
-		const deliver = (fn: Subscriber<T>) =>
+		const deliver = (fn: Subscriber<T>, seen: Map<Subscriber<T>, T> | undefined) =>
 			changed || (seen?.has(fn) === true && !isEqual(seen.get(fn) as T, value));
 
 		// Snapshotted before any callback runs, so a waiter one registers waits for the next change.
 		// The live set stays in place, so a waiter cancelled during this flush stays cancelled.
-		const waiters = changed || seen ? [...this.#changed] : undefined;
+		const waiters = changed || seenChanged ? [...this.#changed] : undefined;
 
 		for (const fn of this.#subscribers) {
 			if (this.#initial.has(fn)) continue;
 			// A pending watcher is owed its first value whether or not this flush is a change.
-			if (!initial.has(fn) && !deliver(fn)) continue;
+			if (!initial.has(fn) && !deliver(fn, seenSubscribers)) continue;
 			try {
 				fn(value);
 			} catch (error) {
@@ -180,11 +190,12 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		}
 
 		if (!waiters) return;
-		for (const fn of waiters) {
+		for (const [fn, token] of waiters) {
 			// Saw the final value, so it keeps waiting.
-			if (!deliver(fn)) continue;
-			// Cancelled by a callback earlier in this flush.
-			if (!this.#changed.delete(fn)) continue;
+			if (!deliver(fn, seenChanged)) continue;
+			// Cancelled, or cancelled and registered again, by a callback earlier in this flush.
+			if (this.#changed.get(fn) !== token) continue;
+			this.#changed.delete(fn);
 			try {
 				fn(value);
 			} catch (error) {
@@ -213,15 +224,15 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 
 	/** Calls `fn` every time the value changes. Returns a function to unsubscribe. */
 	subscribe(fn: Subscriber<T>): Dispose {
-		this.#see(fn, this.#subscribers);
+		this.#see(fn, this.#subscribers, this.#seenSubscribers);
 		this.#subscribers.add(fn);
 		return () => this.#subscribers.delete(fn);
 	}
 
 	// Records what a listener added mid-batch saw, so the flush can compare against it.
-	// One already in `set` was there before and saw the captured old value.
-	#see(fn: Subscriber<T>, set: Set<Subscriber<T>>): void {
-		if (this.#hasCapturedOldValue && !set.has(fn) && !this.#seen.has(fn)) this.#seen.set(fn, this.#value);
+	// One already in `listeners` was there before and saw the captured old value.
+	#see(fn: Subscriber<T>, listeners: { has(fn: Subscriber<T>): boolean }, seen: Map<Subscriber<T>, T>): void {
+		if (this.#hasCapturedOldValue && !listeners.has(fn) && !seen.has(fn)) seen.set(fn, this.#value);
 	}
 
 	/** Resolves with the value the next time it changes. */
@@ -229,15 +240,23 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 	/** Calls `fn` once the next time the value changes. Returns a function to cancel. */
 	changed(fn: Subscriber<T>): Dispose;
 	changed(fn?: Subscriber<T>): Promise<T> | Dispose {
-		if (fn) {
-			this.#see(fn, this.#changed);
-			this.#changed.add(fn);
-			return () => this.#changed.delete(fn);
-		}
+		if (fn) return this.#wait(fn);
 		return new Promise<T>((resolve) => {
-			this.#see(resolve, this.#changed);
-			this.#changed.add(resolve);
+			this.#wait(resolve);
 		});
+	}
+
+	// Registers a change waiter; adding a registered callback again keeps its registration.
+	#wait(fn: Subscriber<T>): Dispose {
+		this.#see(fn, this.#changed, this.#seenChanged);
+		let token = this.#changed.get(fn);
+		if (!token) {
+			token = {};
+			this.#changed.set(fn, token);
+		}
+		return () => {
+			if (this.#changed.get(fn) === token) this.#changed.delete(fn);
+		};
 	}
 
 	/**
