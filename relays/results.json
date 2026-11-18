@@ -1,6 +1,6 @@
 {
-  "generated": "2026-11-17T17:34:50Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/44137070210",
+  "generated": "2026-11-18T17:07:55Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/44353546791",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",
@@ -99,32 +99,32 @@
       "url": "https://lminiero.it:9000",
       "transport": "WebTransport",
       "required": false,
-      "ok": false,
+      "ok": true,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "FAIL",
+          "status": "PASS",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
+          "reason": "",
           "sub_log": "https_lminiero.it_9000/rust-rust.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-web": {
-          "status": "FAIL",
+          "status": "PASS",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "connected, nothing subscribed",
+          "reason": "",
           "sub_log": "https_lminiero.it_9000/rust-js-web.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
         "rust → js-bun": {
-          "status": "FAIL",
+          "status": "PASS",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "no SUBSCRIBE_OK for catalog.json: error: timed out waiting for data",
+          "reason": "",
           "sub_log": "https_lminiero.it_9000/rust-js-bun.log",
           "pub_log": "https_lminiero.it_9000/pub-rust.log"
         },
@@ -160,16 +160,16 @@
       "url": "moqt://lminiero.it:9000",
       "transport": "QUIC",
       "required": false,
-      "ok": true,
+      "ok": false,
       "versions": [
         "moq-transport-22"
       ],
       "cells": {
         "rust → rust": {
-          "status": "PASS",
+          "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "",
+          "reason": "connected, nothing subscribed: session terminated err=transport: connection error: closed",
           "sub_log": "moqt_lminiero.it_9000/rust-rust.log",
           "pub_log": "moqt_lminiero.it_9000/pub-rust.log"
         }
@@ -539,7 +539,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for 0.avc3, no SUBSCRIBE_OK logged, no objects: track failed; ending the reader track=\"0.avc3\" error=Remote(18)",
+          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
           "sub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/rust-rust.log",
           "pub_log": "moqt_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         }
@@ -581,18 +581,18 @@
           "pub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/pub-rust.log"
         },
         "js-web → rust": {
-          "status": "FAIL",
+          "status": "PASS",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
+          "reason": "",
           "sub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/js-web-rust.log",
           "pub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/pub-js-web.log"
         },
         "js-web → js-web": {
-          "status": "FAIL",
+          "status": "PASS",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE_OK for catalog.json, no objects",
+          "reason": "",
           "sub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/js-web-js-web.log",
           "pub_log": "https_moq-ng.cloudflare.mediaoverquic.com_443/pub-js-web.log"
         },
@@ -1234,6 +1234,88 @@
           "reason": "",
           "sub_log": "moqt_34-72-6-160.sslip.io_443_moq-test/rust-rust.log",
           "pub_log": "moqt_34-72-6-160.sslip.io_443_moq-test/pub-rust.log"
+        }
+      }
+    },
+    {
+      "key": "oracle-relay",
+      "name": "Oracle Relay",
+      "url": "moqt://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443",
+      "transport": "QUIC",
+      "required": false,
+      "ok": true,
+      "versions": [
+        "moq-transport-16"
+      ],
+      "cells": {
+        "rust → rust": {
+          "status": "PASS",
+          "pub_version": "moq-transport-16",
+          "sub_version": "moq-transport-16",
+          "reason": "",
+          "sub_log": "moqt_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/rust-rust.log",
+          "pub_log": "moqt_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-rust.log"
+        }
+      }
+    },
+    {
+      "key": "oracle-relay",
+      "name": "Oracle Relay",
+      "url": "https://interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com:4443",
+      "transport": "WebTransport",
+      "required": false,
+      "ok": false,
+      "versions": [
+        "moq-transport-16"
+      ],
+      "cells": {
+        "rust → rust": {
+          "status": "PASS",
+          "pub_version": "moq-transport-16",
+          "sub_version": "moq-transport-16",
+          "reason": "",
+          "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/rust-rust.log",
+          "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-rust.log"
+        },
+        "rust → js-web": {
+          "status": "FAIL",
+          "pub_version": "moq-transport-16",
+          "sub_version": "moq-transport-16",
+          "reason": "connected, nothing subscribed",
+          "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/rust-js-web.log",
+          "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-rust.log"
+        },
+        "rust → js-bun": {
+          "status": "FAIL",
+          "pub_version": "moq-transport-16",
+          "sub_version": "moq-transport-16",
+          "reason": "connected, nothing subscribed: error: timed out waiting for data",
+          "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/rust-js-bun.log",
+          "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-rust.log"
+        },
+        "js-web → rust": {
+          "status": "FAIL",
+          "pub_version": "moq-transport-16",
+          "sub_version": "moq-transport-16",
+          "reason": "connected, nothing subscribed: session terminated err=transport: session error: connection error: closed",
+          "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/js-web-rust.log",
+          "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-js-web.log"
+        },
+        "js-web → js-web": {
+          "status": "FAIL",
+          "pub_version": "moq-transport-16",
+          "sub_version": "moq-transport-16",
+          "reason": "connected, nothing subscribed",
+          "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/js-web-js-web.log",
+          "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-js-web.log"
+        },
+        "js-web → js-bun": {
+          "status": "FAIL",
+          "pub_version": "moq-transport-16",
+          "sub_version": "moq-transport-16",
+          "reason": "connected, nothing subscribed: error: timed out waiting for data",
+          "sub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/js-web-js-bun.log",
+          "pub_log": "https_interop-k7m2-prestage.ove.us-phoenix-1.oci.oraclecloud.com_4443/pub-js-web.log"
         }
       }
     }

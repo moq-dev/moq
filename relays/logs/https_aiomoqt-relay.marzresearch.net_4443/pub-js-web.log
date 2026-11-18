@@ -1,23 +1,16 @@
-publishing smoke-js-web-4248-10637.hang (fake camera, vite) to https://aiomoqt-relay.marzresearch.net:4443/
+publishing smoke-js-web-4235-23182.hang (fake camera, vite) to https://aiomoqt-relay.marzresearch.net:4443/
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=2
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
-[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
 [page] announced: broadcast=openmoq/ffmpeg/artemis active=true
-[page] announced: broadcast=ci/player-soak/44135630208/aiomoqt-relay/loc active=true
-[page] announced: broadcast=ci/player-soak/44135630208/aiomoqt-relay/cmaf active=true
-[page] announced: broadcast=ci/player-soak/44135630208/aiomoqt-relay/locmaf active=true
-[page] announced: broadcast=ci/player-soak/44135816514/aiomoqt-relay/cmaf active=true
-[page] announced: broadcast=ci/player-soak/44135816514/aiomoqt-relay/loc active=true
-[page] announced: broadcast=ci/player-soak/44135732508/aiomoqt-relay/loc active=true
-[page] announced: broadcast=ci/player-soak/44135732508/aiomoqt-relay/cmaf active=true
-[page] announced: broadcast=smoke-js-web-4248-10637.hang active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k30/cmaf/h264/1080/30/aac/2/msf/catalog/2000/1/0/alt4 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/akamai_cmaf/loc/h264/720/29_97/opus/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/loc/h264/720/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/clock/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=openmoq/aiomoqt/mtt_00/bbb_4k60/loc/h264/1080/60/aac/2 active=true
+[page] announced: broadcast=smoke-js-web-4235-23182.hang active=true
+[page] announced: broadcast=gm/srt/passthrough active=true
 [page] announced: broadcast=gm/abr/cmaf active=true
 [page] announced: broadcast=gm/abr/cymedia active=true
-[page] announced: broadcast=gm/srt/passthrough active=true
-[page] publish ok: broadcast=smoke-js-web-4248-10637.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4248-10637.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4235-23182.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4235-23182.hang track=video
