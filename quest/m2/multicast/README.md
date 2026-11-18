@@ -2,8 +2,8 @@
 
 ## Goal
 
-moq-net gets one routing design, proven and measured before it replaces
-lite-07's route layer. A subscription joins the nearest node already carrying
+moq-net has one routing design, proven and measured, as lite-07's route
+layer. A subscription joins the nearest node already carrying
 the same Instance, so no link carries a group twice, and moves between routes
 of equal Instance without the reader noticing. State and messages grow with
 forwarding nodes and demanded broadcasts, not publishers. There is no leader,
@@ -17,11 +17,33 @@ and a moq-transport node between two of our relays.
 
 ## Plan
 
+Where it stands (2026-11-18). The route layer shipped:
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) put every
+lite-07 session in Rust and `js/net` on `route::relay::Router`, rewrote the
+draft's Routing, made `js/net` an endpoint, and deleted the path rule with
+its holds, doubt, route key, qualified Node IDs, and routes per prefix;
+[moq-dev/moq#9052](https://github.com/moq-dev/moq/pull/9052) made a relay
+wait for a claim's route before answering a request for it; and
+[moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) made the
+test-only route API crate-private, kept adopted claims off upstreams under
+a marked Node ID, and marked the lite-06 churn mitigations. Its proof is
+`rs/moq-net/verify/route-algebra/`, and the quests written against the old
+wire were retargeted or deleted. The lite-07 cut still waits on this epic's
+two children, [the claim chain](/quest/m2/multicast/claim-chain.md) and
+[the uncovered cases](/quest/m2/multicast/accept.md), and on
+[route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
+the lite-06 mitigations. After the cut come warmth's wire
+([cache-aware routing](/quest/m3/cache-routing/README.md)),
+[route benches](/quest/m3/route-benches.md),
+[the proof binding](/quest/m3/route-proof-binding.md),
+[route health](/quest/m3/route-health/README.md), and
+[outbound federation](/quest/m3/cluster-routing/federation.md).
+
 Decided 2026-11-15 (maintainer, /quest-plan), after an audit of the lite-07
 route layer as built, the history of about thirty routing attempts since
 2023, and a survey of the literature.
-[Routes and announces](/quest/m2/cluster-routes/README.md) holds the rule
-this replaces and its measurements.
+The rule this replaced, its contract, and its measurements are in
+`git show 4e73451999:quest/m2/cluster-routes/README.md`.
 
 The maintainer's requirements, which every child is judged against:
 
@@ -52,7 +74,7 @@ The maintainer's requirements, which every child is judged against:
     without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.
 
-What the audit found of today's layer: 6 and 12 hold, and 1 holds with no
+What the audit found of the path rule lite-07 then ran: 6 and 12 hold, and 1 holds with no
 model covering it; 4, 8, and 13 do not hold (16 message types on the announce
 stream and about 57 concepts against lite-06's 5 messages, no cache term in
 any ranking, and a payload stall on live sessions that is never recovered);
@@ -75,7 +97,7 @@ Settled:
    the acceptance fixtures still land: they are the baseline the
    [bake-off](https://github.com/moq-dev/moq/pull/8880) measures against, and one
    announce stream per side is wanted by any design. The quests that only
-   polish holds, doubt, or the path router's indexes wait on the bake-off.
+   polished holds, doubt, or the path router's indexes went with it.
 3. ✅ **A routing node is a node that forwards and is trusted to; claims,
    not routes, cross a trust boundary.** Every CDN relay and every mesh
    device routes under its own Node ID. An endpoint that never forwards (an
@@ -248,20 +270,22 @@ judged the route layer at this plan's end state):
     layer; keeping the plan with a fallback written down now). The audit's
     case was the schedule, three XL quests in series before the freeze on a
     rule re-decided on six days, and that an endpoint must parse a protocol
-    only relays speak. What it leaves is in
-    [the switch](/quest/m2/multicast/switch.md): the public route API and
-    config that would freeze by omission, the half `js/net` implements, what
-    a non-forwarding endpoint must parse, and the moq-cluster draft, which
-    still specifies the warm discount item 5 forbids (now
-    [its own quest](/quest/m2/moq-cluster-draft.md), since third-party
-    relays ship it).
+    only relays speak. What it left went into the switch, which
+    [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) and
+    [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) finished:
+    the public route API and config that would freeze by omission, the half
+    `js/net` implements, and what a non-forwarding endpoint must parse. The
+    moq-cluster draft, which still specifies the warm discount item 5
+    forbids, is [its own quest](/quest/m2/moq-cluster-draft.md), since
+    third-party relays ship it.
 
-The shape those decisions give. The bake-off confirmed or changed each line;
-a further departure is a decision to list in its PR:
+The shape those decisions give, as
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) built it; a
+further departure is a decision to list in its PR:
 
 - **Identity.** A path and an Instance name content, and a request names the
   Instance. A relay holds one upstream subscription per Instance and track,
-  whichever origin node its downstream requests named, so a join stops at the
+  whichever routing node its downstream requests named, so a join stops at the
   first node already carrying it.
 - **Reachability.** One route per announcing relay, offered once it has a
   claim: its path, drain, priority, and cost. A node never uses a route
@@ -282,7 +306,7 @@ a further departure is a decision to list in its PR:
   changed, and a withdrawal says whether the publisher ended the claim or
   its announcer lost it.
 - **Boundaries.** The chain of item 3.
-- **Requests.** A request names the origin node its first hop chose, so
+- **Requests.** A request names the routing node its first hop chose, so
   relays that rank differently never loop it, and fails closed.
 
 Lessons from the history that bind every child:
@@ -300,6 +324,6 @@ Lessons from the history that bind every child:
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the rule this replaces, its contract, and its measurements
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - the path rule this replaced, and the acceptance fixtures the cut still waits on
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - implements the warmth pick
 - [Route health](/quest/m3/route-health/README.md) - the metadata-only secondary

@@ -10,6 +10,8 @@ with a number that says why.
 
 Found by [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) and
 proposed by [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053).
+The origin rewrite below is what survived of the route fan-out quest, whose
+other findings were the old path router's indexes and doubts.
 
 Decided 2026-11-18 (maintainer, on
 [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053#issuecomment-6975349236)):
@@ -27,7 +29,14 @@ multicast epic the cut waits on.
   - an edit swapping one prefix for another tells again the claims both
     cover;
   - a relay whose only route closes ends its subscriptions while the claim
-    stays shown.
+    stays shown;
+  - a change to a route rewrites every claim behind it into the origin:
+    `route::node` `State::flush` relanes each broadcast the route's node
+    claims, and `Served` carries the cost, so a re-price is one origin
+    write per broadcast, each waking the fronts below it. Recommended: one
+    shared record per route in the origin that its broadcasts refer to,
+    built with [route wakes](/quest/m4/route-wakes.md), which owns the
+    fronts' side.
 - [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) sends a
   whole copy of a node's claims wherever its filtered copy used to go
   (`withheld` is gone), so a claim moving between a node's two identities
@@ -40,4 +49,3 @@ which lands before the lite-07 cut.
 ## Related
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer these measure
-- [What the route switch left](/quest/m2/multicast/switch.md) - where these came from

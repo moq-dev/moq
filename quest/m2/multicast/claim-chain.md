@@ -39,4 +39,3 @@ Public API: none. Wire: what a lite-07 claim's chain carries.
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the epic, which the lite-07 cut waits on
 - [Proof binding](/quest/m3/route-proof-binding.md) - the rest, which follows the cut
-- [What the route switch left](/quest/m2/multicast/switch.md) - where this came from

@@ -46,7 +46,3 @@ The work:
 
 Public API: none. Wire: none, unless the audit finds the binding departs from
 -01 in a way a -01 peer cannot read.
-
-## Related
-
-- [What the route switch left](/quest/m2/multicast/switch.md) - where the retirement was first planned

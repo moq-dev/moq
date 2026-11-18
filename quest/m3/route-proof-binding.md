@@ -52,4 +52,3 @@ Public API: none. Wire: none.
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer it proves
 - [Claim chain](/quest/m2/multicast/claim-chain.md) - the wire half, before the cut
-- [What the route switch left](/quest/m2/multicast/switch.md) - where these came from
