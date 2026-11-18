@@ -490,6 +490,8 @@ mod tests {
 			let request = requests.requested_track().await.unwrap();
 			assert_eq!(request.name(), name);
 			let mut serving = Box::pin(rung::serve(ladder.rung(name).unwrap(), request));
+			// The source track is local, so its timescale is known and this poll accepts the track.
+			assert!(futures::poll!(&mut serving).is_pending());
 			subscribers.push((name, subscribing.await.unwrap().ordered()));
 			// With demand present and no source group, this poll attaches the rung
 			// to the shared feed before parking. No startup sleep can guarantee that.
@@ -2065,13 +2067,12 @@ mod tests {
 		}
 	}
 
-	/// A source keyed finer than microseconds maps several of its starts to each output start.
-	/// A cold fetch of an output group still transcodes the source group live serves there,
-	/// rather than asking for the lowest start that maps to it and dropping a group that exists.
+	/// A source keyed finer than microseconds keeps its keys on every rung, so a cold fetch of an
+	/// output group transcodes the source group live serves there, rather than a group whose key
+	/// lost the source's precision.
 	#[tokio::test]
 	async fn a_finer_source_fetches_the_group_live_serves() {
-		// Each group starts a nanosecond past its first frame, which the output's microseconds
-		// can't name: the inverse of the output start is a start the source never used.
+		// Each group starts a nanosecond past its first frame, which microseconds can't name.
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(moq_net::Timescale::NANO);
 		let source = source_broadcast_keyed(2, 5, info, |_, first| first * 1_000 + 1);
 		let config = Config {
@@ -2097,7 +2098,14 @@ mod tests {
 				snapshot.video.renditions.contains_key("video/120p")
 			})
 			.await;
-			(consumer.track("video/120p").unwrap(), transcoder)
+			let rung = consumer.track("video/120p").unwrap();
+			let info = rung.info().await.unwrap();
+			assert_eq!(
+				info.timescale,
+				Some(moq_net::Timescale::NANO),
+				"the rung keeps its source's keys"
+			);
+			(rung, transcoder)
 		};
 		let timestamps = |mut group: moq_net::group::Consumer| async move {
 			let mut timestamps = Vec::new();
@@ -2109,7 +2117,7 @@ mod tests {
 		};
 		let expected = |sequence: u64| -> Vec<u128> { (0..5).map(|i| (sequence * 5 + i) as u128 * 33_333).collect() };
 
-		// The live loop serves the latest source group, at its first frame's microsecond.
+		// The live loop serves the latest source group, at its key.
 		let (rung, live) = instance().await;
 		let mut subscriber = rung
 			.subscribe(moq_net::track::Subscription::default().with_ranges([moq_net::track::Range::live()]))
@@ -2122,15 +2130,15 @@ mod tests {
 			}
 		};
 		let served = timestamps(group).await;
-		assert_eq!(served, (166_665, expected(1)));
+		assert_eq!(served, (166_665_001, expected(1)));
 		live.abort();
 
 		// A fresh instance has neither group cached, so each fetch fills from the source.
 		let (rung, cold) = instance().await;
-		let fetched = timestamps(rung.fetch_group(166_665, None).await.unwrap()).await;
+		let fetched = timestamps(rung.fetch_group(166_665_001, None).await.unwrap()).await;
 		assert_eq!(fetched, served, "a cold fetch serves what live served at the same key");
-		let first = timestamps(rung.fetch_group(0, None).await.unwrap()).await;
-		assert_eq!(first, (0, expected(0)));
+		let first = timestamps(rung.fetch_group(1, None).await.unwrap()).await;
+		assert_eq!(first, (1, expected(0)));
 		cold.abort();
 	}
 

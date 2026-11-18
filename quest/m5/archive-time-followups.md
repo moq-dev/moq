@@ -38,12 +38,6 @@ Also, from [moq-dev/moq#7310](https://github.com/moq-dev/moq/pull/7310)'s follow
 - A time end walks the history one fill round trip per group. Measure a
   long range against the in-memory store; if DVR seeks need it, look the
   end up as well. Otherwise record the cost in the `FillLookup` docs.
-- moq-transcode finds a cold source group keyed finer than microseconds by a
-  `Time` lookup (`source_group` in `rs/moq-transcode/src/rung.rs`), and drops
-  the output group when the answer starts below the run. A silent fallback
-  therefore drops a group the archive holds, for that rung's lifetime. With
-  the refusal, the lookup's subscription error refuses the group instead, so
-  a later reader retries it. Add a transcode test over a failing lookup.
 
 Tests: a failing GET and a malformed object each fail the subscription with
 the typed error; a handler registered after a group started still resolves
