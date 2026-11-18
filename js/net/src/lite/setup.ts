@@ -31,12 +31,14 @@ const PARAM_IMPLEMENTATION = 0x6n;
 /** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
 const PARAM_TOKEN = 0x7n;
 
-/** Check a lite-07 Node ID parameter: a non-zero id, the node's start, and nothing after. */
+/** Check a lite-07 Node ID parameter: a non-zero id, the node's start, a Marked of 0, since a
+ * session's node is never a marked identity, and nothing after. */
 async function checkNode(value: Uint8Array, version: Version): Promise<void> {
 	const r = new Reader(undefined, value, version);
 	const relay = await r.u62();
 	await r.u62();
-	if (relay === 0n || !(await r.done())) throw new Error("setup Node ID is malformed");
+	const marked = await r.bool();
+	if (relay === 0n || marked || !(await r.done())) throw new Error("setup Node ID is malformed");
 }
 
 /** SETUP only carries negotiation parameters, so it gets a far smaller cap than other messages. */

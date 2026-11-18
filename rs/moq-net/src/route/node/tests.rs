@@ -4,7 +4,11 @@ use super::*;
 use crate::route::relay::{Edit, Hop, Offer, Role};
 
 fn id(relay: u64) -> NodeId {
-	NodeId { relay, start: 1 }
+	NodeId {
+		relay,
+		start: 1,
+		marked: false,
+	}
 }
 
 fn node() -> (Node, Deadlines) {
@@ -54,6 +58,7 @@ fn live(epoch: u64) -> Change {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	})
 }
 
@@ -191,6 +196,7 @@ fn only_the_closest_newest_copy_is_served() {
 			priority: i8::MAX,
 			draining: false,
 			unavailable: false,
+			marked: false,
 			chain: Vec::new(),
 		})
 	};
@@ -343,6 +349,7 @@ fn an_unavailable_routed_claim_takes_no_request() {
 				priority: i8::MAX,
 				draining: false,
 				unavailable,
+				marked: false,
 				chain: Vec::new(),
 			}),
 		)],

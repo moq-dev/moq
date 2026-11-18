@@ -463,6 +463,7 @@ fn announce_claim(chain: &[u64]) -> crate::route::node::Claim {
 		draining: false,
 		unavailable: false,
 		chain: chain.to_vec(),
+		marked: false,
 	}
 }
 
@@ -605,7 +606,11 @@ fn route_clock() -> kio::clock::Deadlines {
 
 /// The forwarding node of the relay `relay`.
 fn route_id(relay: u64) -> crate::route::NodeId {
-	crate::route::NodeId { relay, start: 1 }
+	crate::route::NodeId {
+		relay,
+		start: 1,
+		marked: false,
+	}
 }
 
 /// A link to a neighbour in `role`.
@@ -632,6 +637,7 @@ fn route_claim(epoch: u64, cost: u64) -> crate::route::node::Claim {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	}
 }
 
@@ -1824,10 +1830,10 @@ const TYPED_LITE_SEEDS: &[(u8, &[u8])] = &[
 	(30, &[7, 0, 0, 0, 0, 0, 0, 0]),
 	(27, &[0, 3, 0, 0, 0]),
 	// ROUTE, ROUTE_END, DEAD, DRAIN, ANNOUNCE_FLOOR, ANNOUNCE_REQUEST, ANNOUNCE_OK.
-	(5, &[7, 7, 1, 7, 1, 0, 0, 0x80, 1]),
+	(5, &[7, 8, 1, 7, 1, 0, 0, 0, 0x80, 1]),
 	(5, &[8, 1, 0]),
-	(5, &[9, 5, 7, 1, 2, 9, 1]),
-	(5, &[10, 2, 7, 1]),
+	(5, &[9, 7, 7, 1, 0, 2, 9, 1, 0]),
+	(5, &[10, 3, 7, 1, 0]),
 	(5, &[3, 2, 0, 1]),
 	(5, &[5, 4, 0, 1, 0, 0]),
 	(5, &[6, 0]),

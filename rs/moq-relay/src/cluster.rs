@@ -4130,7 +4130,7 @@ mod tests {
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "from-node");
 		// The dialer marks what the peer forwards: it entered at `node`, not here.
-		assert_eq!(update.route.source(), origin::Source::Peer(node.origin.node().get()));
+		assert_eq!(update.route.entered_from(), Some(node.origin.node().get()));
 
 		let _from_fp = fingerprint
 			.origin
@@ -4144,10 +4144,7 @@ mod tests {
 				.expect("origin closed");
 			if update.prefix.as_str() == "from-fingerprint" {
 				// The acceptor marks a LAN peer the same way.
-				assert_eq!(
-					update.route.source(),
-					origin::Source::Peer(fingerprint.origin.node().get())
-				);
+				assert_eq!(update.route.entered_from(), Some(fingerprint.origin.node().get()));
 				break;
 			}
 		}
@@ -4156,7 +4153,7 @@ mod tests {
 		let mut local = node.origin.consume().local().routes();
 		let update = try_next_announced(&mut local).expect("from-node is local");
 		assert_eq!(update.prefix.as_str(), "from-node");
-		assert_eq!(update.route.source(), origin::Source::Local);
+		assert_eq!(update.route.entered_from(), None);
 		assert!(
 			try_next_announced(&mut local).is_none(),
 			"a peer's broadcast is not local"
@@ -4677,9 +4674,9 @@ mod tests {
 		let mut announced = cluster.origin.consume().routes();
 		let forwarded = try_next_announced(&mut announced).expect("forwarded");
 		assert_eq!(forwarded.prefix.as_str(), "forwarded");
-		assert!(matches!(forwarded.route.source(), origin::Source::Peer(_)));
+		assert!(forwarded.route.entered_from().is_some());
 		let ingest = try_next_announced(&mut announced).expect("ingest");
-		assert_eq!(ingest.route.source(), origin::Source::Local);
+		assert_eq!(ingest.route.entered_from(), None);
 
 		let mut local = cluster.origin.consume().local().routes();
 		assert_eq!(

@@ -134,7 +134,8 @@ pub struct Config {
 	/// leaving each track's own window in force.
 	pub cache_duration: Option<Duration>,
 
-	/// How long an announce cursor holds a changed route before delivering it.
+	/// How long an announce cursor holds a changed route before delivering it: a
+	/// [`lite06_churn`] mitigation.
 	///
 	/// A new route, a removed one, and another instance are delivered at once; only an
 	/// update waits, and a newer change during the wait replaces it. When a publisher
@@ -149,16 +150,26 @@ pub struct Config {
 	/// a retraction, an announcement from the same publisher (first hop, instance and
 	/// epoch) on a strictly worse route waits. A republish ranks the same and a restart
 	/// carries a new instance or epoch, so neither waits. Zero disables this too.
-	pub update_hold: Duration,
+	pub(crate) update_hold: Duration,
 }
 
-/// The default [`Config::update_hold`].
-pub(super) const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+/// Lite-06 churn: the mitigations an announce cursor applies while a withdrawal hunts
+/// through a lite-06 mesh's hop-chain paths, which go with lite-06. They are the update
+/// hold and the retraction quarantine ([`Config::update_hold`]) and the same-clock dedup
+/// of a retraction's queue entry ([`Routes::quarantine`]). The cursor every version
+/// shares applies them; each site names this module, so deleting it finds them all.
+pub(super) mod lite06_churn {
+	use std::time::Duration;
 
-/// How long a cursor holds back a stale path to a prefix it retracted; see
-/// [`Config::update_hold`]. Path hunting after a withdrawal settles within it on
-/// random meshes with links of up to 250 ms.
-const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
+	/// The default [`Config::update_hold`](super::Config::update_hold).
+	pub(crate) const DEFAULT_UPDATE_HOLD: Duration = Duration::from_millis(300);
+
+	/// How long a cursor holds back a stale path to a prefix it retracted; see
+	/// [`Config::update_hold`](super::Config::update_hold). Path hunting after a
+	/// withdrawal settles within it on random meshes with links of up to 250 ms.
+	pub(super) const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
+}
+use lite06_churn::{DEFAULT_UPDATE_HOLD, RETRACT_QUARANTINE};
 
 impl Default for Config {
 	/// A fresh random node with no byte target and the default idle expiry.
@@ -181,6 +192,23 @@ impl Config {
 			node,
 			..Self::default()
 		}
+	}
+
+	/// Hold route updates for `hold` rather than the default; see the field's notes.
+	///
+	/// Behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn with_update_hold(mut self, hold: Duration) -> Self {
+		self.update_hold = hold;
+		self
+	}
+
+	/// How long announce cursors hold a changed route; see [`Self::with_update_hold`].
+	///
+	/// Behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn update_hold(&self) -> Duration {
+		self.update_hold
 	}
 }
 
@@ -522,6 +550,12 @@ pub struct RouteInfo {
 
 	/// Whether a usable path reaches the route's origin; see [`Self::available`].
 	pub(crate) available: bool,
+
+	/// The lite-07 route layer reached it across a marked link, though the session it
+	/// arrived on is not one: it is hidden from an upstream reader, as a route learned on
+	/// a [`Link::Upstream`] handle is, so this origin never carries it between two
+	/// upstreams. Local, like [`Self::via`]: never forwarded.
+	pub(crate) marked: bool,
 }
 
 impl RouteInfo {
@@ -540,6 +574,7 @@ impl RouteInfo {
 			lane: Lane::default(),
 			draining: false,
 			available: true,
+			marked: false,
 		}
 	}
 }
@@ -577,7 +612,7 @@ impl Default for Lane {
 /// client and a peer relay each append one hop. The origin records it from the
 /// handle that announced the route; see [`Producer::with_link`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Source {
+pub(crate) enum Source {
 	/// Announced on this origin: by an in-process producer or a client session.
 	#[default]
 	Local,
@@ -679,6 +714,13 @@ impl RouteInfo {
 		self
 	}
 
+	/// Hide the route from upstream readers, or not; see [`Self::marked`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn with_marked(mut self, marked: bool) -> Self {
+		self.marked = marked;
+		self
+	}
+
 	/// Whether this route passed through an anonymous hop.
 	///
 	/// True when the chain holds a 0 anywhere, including Lite03 hop-count
@@ -692,8 +734,21 @@ impl RouteInfo {
 	}
 
 	/// Where the route entered this origin.
-	pub fn source(&self) -> Source {
+	#[cfg(test)]
+	pub(crate) fn source(&self) -> Source {
 		self.source
+	}
+
+	/// The hop id of the session the route entered this origin from, 0 when that session
+	/// named none, or `None` for a route announced here.
+	///
+	/// Behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn entered_from(&self) -> Option<u64> {
+		match self.source {
+			Source::Local => None,
+			Source::Peer(hop) => Some(hop),
+		}
 	}
 }
 
@@ -1338,6 +1393,7 @@ impl OriginConsumerState {
 				draining: false,
 				available: meta.7,
 				lane: Lane::default(),
+				marked: false,
 			},
 		};
 		(RouteEvent { kind, announce }, owed)
@@ -1373,6 +1429,8 @@ struct RouteEntry {
 	local: bool,
 	/// The link the entry arrived on, from the handle that inserted it.
 	link: Link,
+	/// The route crossed a marked link before it; see [`RouteInfo::marked`].
+	marked: bool,
 	/// The forwarding node whose claim the route follows; see [`RouteInfo::node`].
 	node: Option<crate::route::NodeId>,
 	/// The route layer's route it follows; see [`RouteInfo::lane`].
@@ -1568,7 +1626,7 @@ struct Horizon {
 	/// hidden. `Some(UNKNOWN)` marks an anonymous peer: no hop is excluded, but
 	/// local-only broadcasts are not advertised. `None` is a local reader.
 	exclude: Option<Hop>,
-	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
+	/// Hide the routes that entered from a cluster peer ([`Consumer::local_view`]).
 	local: bool,
 	/// Hide the routes learned on an upstream link, because this reader is one
 	/// ([`Link::Upstream`]): a relay never transits between two upstreams.
@@ -1613,6 +1671,7 @@ impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
 		self.admits_link(entry.link)
+			&& !(self.upstream && entry.marked)
 			&& entry.visible_to(self.exclude)
 			&& self.max_hops.is_none_or(|max| entry.hops.len() < max.get())
 			&& self.node.admits(entry.node)
@@ -1655,8 +1714,7 @@ pub enum Link {
 	/// Here: an in-process producer or a client session.
 	#[default]
 	Local,
-	/// A cluster peer: every route it announces reports [`Source::Peer`], and
-	/// [`Consumer::local`] hides it.
+	/// A cluster peer: the routes it announces entered from a peer, not here.
 	Peer,
 	/// An upstream peer: a [`Self::Peer`] whose routes are never offered to another
 	/// upstream, so this origin never carries traffic between two upstreams.
@@ -3010,6 +3068,7 @@ impl Announcing {
 				via,
 				local: self.local,
 				link: self.link,
+				marked: route.marked,
 				node: route.node,
 				lane: route.lane.clone(),
 				draining: route.draining,
@@ -3639,6 +3698,7 @@ impl AnnounceProducer {
 			entry.lane = route.lane.clone();
 			entry.draining = route.draining;
 			entry.available = route.available;
+			entry.marked = route.marked;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
 			shared.sync_route(prefix, &claim, Gone::End);
@@ -3701,6 +3761,7 @@ impl AnnounceProducer {
 			lane: entry.lane.clone(),
 			draining: entry.draining,
 			available: entry.available,
+			marked: entry.marked,
 		})
 	}
 
@@ -3968,6 +4029,7 @@ impl OwnClaims {
 			// Kept, so the claim that crossed into lite-07 here is still recognized
 			// wherever it leaves for lite-06 again. A hop that names nobody says nothing.
 			chain: route.hops.iter().map(|hop| hop.id()).filter(|id| *id != 0).collect(),
+			marked: false,
 		};
 		// Only a route published here has crossed no node.
 		let learned = !route.hops.is_empty();
@@ -7739,7 +7801,16 @@ impl Consumer {
 	///
 	/// On a relay, this is what the relay ingests itself, from clients and
 	/// in-process producers, as opposed to what its cluster peers forward.
-	pub fn local(mut self) -> Self {
+	///
+	/// Public only behind the `test-support` feature: a test's door, not an API.
+	#[cfg(feature = "test-support")]
+	pub fn local(self) -> Self {
+		self.local_view()
+	}
+
+	/// See [`Self::local`].
+	#[cfg_attr(not(test), allow(dead_code, reason = "only tests read the local view"))]
+	pub(crate) fn local_view(mut self) -> Self {
 		self.horizon.local = true;
 		self
 	}
@@ -8497,8 +8568,9 @@ impl Routes {
 		}
 	}
 
-	/// Start a retraction's quarantine. A delivered announcement leaves it to
-	/// expire: later ones for the prefix are updates, which it never holds.
+	/// Start a retraction's quarantine, a [`lite06_churn`] mitigation. A delivered
+	/// announcement leaves it to expire: later ones for the prefix are updates, which it
+	/// never holds.
 	fn quarantine(&mut self, event: &RouteEvent, now: Instant) {
 		let RouteEvent {
 			kind: RouteKind::End | RouteKind::Offline,
@@ -8533,8 +8605,9 @@ impl Routes {
 			rank: (update.route.cost, update.route.hops.len()),
 		};
 		let replaced = self.retracted.insert(update.prefix.clone(), quarantine);
-		// A prefix retracted again at the same reading is already queued, so churn
-		// between clock readings can't grow the queue past one entry per prefix.
+		// Lite-06 churn (see [`lite06_churn`]): a prefix retracted again at the same
+		// reading is already queued, so churn between clock readings can't grow the queue
+		// past one entry per prefix.
 		if !replaced.is_some_and(|q| q.held == Held::Anchoring(now)) {
 			self.anchoring.push_back((now, update.prefix.clone()));
 		}
@@ -9049,7 +9122,11 @@ mod tests {
 
 	/// The forwarding node of the relay `relay`.
 	fn node_id(relay: u64) -> crate::route::NodeId {
-		crate::route::NodeId { relay, start: 1 }
+		crate::route::NodeId {
+			relay,
+			start: 1,
+			marked: false,
+		}
 	}
 
 	fn hops(ids: &[u64]) -> Hops {
@@ -9402,7 +9479,7 @@ mod tests {
 
 		// A local view never waits on a peer's routes.
 		let _peer = producer.clone().with_link(Link::Peer).snapshot("room");
-		assert!(producer.consume().local().routes().is_synced());
+		assert!(producer.consume().local_view().routes().is_synced());
 		assert!(!producer.consume().routes().is_synced());
 	}
 
@@ -13231,7 +13308,7 @@ mod tests {
 	async fn local_view_hides_peer_routes() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().with_link(Link::Peer);
-		let mut local = producer.consume().local().routes();
+		let mut local = producer.consume().local_view().routes();
 
 		let _forwarded = peer
 			.forward("remote", RouteInfo::new().with_hops(hops(&[7])).with_via(origin(7)))
@@ -13258,7 +13335,7 @@ mod tests {
 		// while the full view queues the request on the peer's route.
 		let err = producer
 			.consume()
-			.local()
+			.local_view()
 			.request("remote/alice", None)
 			.now_or_never()
 			.expect("unroutable")
@@ -17140,7 +17217,7 @@ mod tests {
 			.consume()
 			.scope("project", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
 			.unwrap()
-			.local()
+			.local_view()
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
@@ -17152,7 +17229,7 @@ mod tests {
 		let resolved = consumer.request("cam.chat", None).await.unwrap();
 		let original = producer
 			.consume()
-			.local()
+			.local_view()
 			.request("project/cam.chat", None)
 			.await
 			.unwrap();

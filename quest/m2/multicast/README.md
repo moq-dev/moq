@@ -252,7 +252,9 @@ judged the route layer at this plan's end state):
     [the switch](/quest/m2/multicast/switch.md): the public route API and
     config that would freeze by omission, the half `js/net` implements, what
     a non-forwarding endpoint must parse, and the moq-cluster draft, which
-    still specifies the warm discount item 5 forbids.
+    still specifies the warm discount item 5 forbids (now
+    [its own quest](/quest/m2/moq-cluster-draft.md), since third-party
+    relays ship it).
 
 The shape those decisions give. The bake-off confirmed or changed each line;
 a further departure is a decision to list in its PR:

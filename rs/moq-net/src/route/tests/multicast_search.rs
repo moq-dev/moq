@@ -478,7 +478,10 @@ impl Search<'_> {
 				}
 			}
 			for origin in router.routes() {
-				let current = (0..self.relays).any(|other| sim.router(other).expect("a relay").me() == origin);
+				let current = (0..self.relays).any(|other| {
+					let router = sim.router(other).expect("a relay");
+					router.me() == origin || router.me_marked() == origin
+				});
 				if !current {
 					return Err(format!("node {node} holds a route to {origin:?}, which is gone"));
 				}

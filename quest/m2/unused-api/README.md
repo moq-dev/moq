@@ -32,7 +32,8 @@ into moq-ffi.
 
 Not part of the sweep, because each has its own quest: socket endpoints
 ([removed for Kixel](https://github.com/moq-dev/moq/pull/9029)), the public
-route API ([the route switch](/quest/m2/multicast/switch.md)).
+route API (made crate-private by
+[moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053)).
 
 Public API: each child lists what leaves. Wire: none.
 

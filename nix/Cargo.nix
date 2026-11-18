@@ -20106,11 +20106,6 @@ rec {
             packageId = "rangemap";
           }
           {
-            name = "rind";
-            packageId = "rind";
-            features = [ "wipe" ];
-          }
-          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" ];

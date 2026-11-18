@@ -9,7 +9,13 @@
 //! learned over a marked link to another marked link. It ranks routes by drain, then the
 //! lowest priority on the path, then the summed cost, each link adding at least 1, so
 //! extending a route never improves it. Among equal ranks it takes one with no marked link
-//! on its path, which it may send to more neighbours, and then stays on its next hop.
+//! on its path, which it may send to more neighbours, and then stays on its next hop. A
+//! claim a node takes over a marked link, or one told it marked across a scoped grant, it
+//! announces under its marked Node ID, the same relay and start with the Marked bit set,
+//! whose route is marked from the start: the mark then keeps the claim off every other
+//! marked link, while each copy of a node's claims stays whole. The marked Node ID holds
+//! no session, so it files no session floor, and a path names it only as its first hop,
+//! followed by the node itself; that hop counts toward [`MAX_HOPS`] like any other.
 //!
 //! A closed session is named once per neighbour in a fixed-size [`Msg::Dead`], which ends
 //! every route its sender offered through it until the sender offers it again or ends
@@ -78,6 +84,21 @@ use super::{Error, Event, Id, Item, Key, MAX_HOPS, Metric, Rev, Shown};
 pub(crate) struct NodeId {
 	pub relay: Id,
 	pub start: u64,
+	/// The node's marked identity, which it announces what crossed a marked link under:
+	/// the same process at the same start, holding no session of its own, so it names
+	/// no start of any relay.
+	pub marked: bool,
+}
+
+impl NodeId {
+	/// The node `relay` names itself at `start`.
+	pub fn new(relay: Id, start: u64) -> Self {
+		Self {
+			relay,
+			start,
+			marked: false,
+		}
+	}
 }
 
 /// One node on a route's path, and the session it learned the route on. The forwarding
@@ -116,9 +137,38 @@ impl Offer {
 	}
 }
 
+/// The Node ID a node announces what it took over a marked link under.
+fn marked_id(me: NodeId) -> NodeId {
+	NodeId { marked: true, ..me }
+}
+
 /// Whether `path` crosses any start of `relay`.
 fn names(path: &[Hop], relay: Id) -> bool {
 	path.iter().any(|hop| hop.node.relay == relay)
+}
+
+/// Whether a path names a marked identity only as the node it leads to, and then next
+/// the node itself, unmarked, as its route begins: the identity holds no session.
+fn marked_well(path: &[Hop]) -> bool {
+	let rest = match path {
+		[first, second, rest @ ..] if first.node.marked => {
+			let own = Hop {
+				node: NodeId {
+					marked: false,
+					..first.node
+				},
+				session: 0,
+			};
+			if *second != own {
+				return false;
+			}
+			rest
+		}
+		[first, ..] if first.node.marked => return false,
+		[_, rest @ ..] => rest,
+		[] => path,
+	};
+	!rest.iter().any(|hop| hop.node.marked)
 }
 
 /// The pairs of relays a path joins, each with where its session stands in the pair's
@@ -159,6 +209,10 @@ pub(crate) struct Claim<A> {
 	pub unavailable: bool,
 	/// The relays that announced it again across a scoped grant, the first first.
 	pub chain: Vec<Id>,
+	/// It crossed a marked link on its way to the node that told it, so it is never told
+	/// over another, as a marked route is never sent: set where a node takes a claim over a
+	/// marked link, and kept wherever the claim travels from there.
+	pub marked: bool,
 }
 
 impl<A: Item> Claim<A> {
@@ -431,6 +485,10 @@ pub(crate) struct Kept {
 #[derive(Clone)]
 pub(crate) struct Router<N, I, A> {
 	me: NodeId,
+	/// The Node ID it announces the claims it took over a marked link under: `me` with the
+	/// Marked bit, whose route is marked from the start, so no such claim ever crosses
+	/// another marked link while every neighbour still gets each copy whole.
+	me_marked: NodeId,
 	/// How long the reader shows a lost claim unavailable before offline.
 	debounce: Duration,
 	now: Instant,
@@ -459,15 +517,17 @@ pub(crate) struct Router<N, I, A> {
 	/// Forwarding nodes whose route changed since the neighbours were last told.
 	stale: BTreeSet<NodeId>,
 	best: BTreeMap<NodeId, Best<N>>,
+	/// The forwarding nodes whose last selected route was marked, kept while no route
+	/// reaches them and their claims stay known, so the claims keep the mark.
+	marks: BTreeSet<NodeId>,
 	/// The sent routes, live, whose path holds each hop.
 	tx_hops: BTreeMap<Hop, BTreeMap<N, BTreeSet<NodeId>>>,
 	/// The neighbours sent a route to each forwarding node, ended or not.
 	sent_to: BTreeMap<NodeId, BTreeSet<N>>,
 	known: BTreeMap<NodeId, Known<I, A>>,
-	/// This node's revision of its own claims.
-	rev: Rev,
-	/// It has announced a claim, so it offers a route to itself.
-	announced: bool,
+	/// The revision of each of its identities' claims, from the first claim it announced
+	/// under it, when it begins to offer a route to it.
+	revs: BTreeMap<NodeId, Rev>,
 	/// Per broadcast, the claims each endpoint or scoped neighbour gave this node.
 	givers: BTreeMap<Broadcast<I>, BTreeMap<N, Claim<A>>>,
 	/// The neighbour behind each of this node's own claims.
@@ -500,9 +560,9 @@ pub(crate) struct Router<N, I, A> {
 	/// Routes, claims, hops, and neighbours visited, for per-change work checks.
 	#[cfg(test)]
 	work: std::cell::Cell<usize>,
-	/// This node's own claims at each revision, for the search's truth.
+	/// Each identity's claims at each revision, for the search's truth.
 	#[cfg(test)]
-	history: Vec<Claims<I, A>>,
+	history: BTreeMap<NodeId, Vec<Claims<I, A>>>,
 	/// How many copies of a forwarding node's claims this node dropped.
 	#[cfg(test)]
 	forgets: u32,
@@ -546,8 +606,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// A node with no sessions, naming itself `me`, whose reader waits `debounce` before
 	/// showing a lost claim offline.
 	pub fn new(me: NodeId, debounce: Duration) -> Self {
+		debug_assert!(!me.marked, "a node names itself unmarked");
 		Self {
 			me,
+			me_marked: marked_id(me),
 			debounce,
 			now: Instant::ZERO,
 			sessions: 0,
@@ -564,11 +626,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			draining: BTreeSet::new(),
 			stale: BTreeSet::new(),
 			best: BTreeMap::new(),
+			marks: BTreeSet::new(),
 			tx_hops: BTreeMap::new(),
 			sent_to: BTreeMap::new(),
 			known: BTreeMap::new(),
-			rev: 0,
-			announced: false,
+			revs: BTreeMap::new(),
 			givers: BTreeMap::new(),
 			sources: BTreeMap::new(),
 			claimants: BTreeMap::new(),
@@ -587,7 +649,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			#[cfg(test)]
 			work: std::cell::Cell::new(0),
 			#[cfg(test)]
-			history: vec![BTreeMap::new()],
+			history: [me, marked_id(me)].map(|id| (id, vec![BTreeMap::new()])).into(),
 			#[cfg(test)]
 			forgets: 0,
 			#[cfg(test)]
@@ -600,6 +662,22 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// How this node names itself on a path.
 	pub fn me(&self) -> NodeId {
 		self.me
+	}
+
+	/// How it names itself as the node announcing what it took over a marked link.
+	#[cfg(test)]
+	pub fn me_marked(&self) -> NodeId {
+		self.me_marked
+	}
+
+	/// Whether `origin` is one of this node's own identities.
+	fn is_self(&self, origin: NodeId) -> bool {
+		origin == self.me || origin == self.me_marked
+	}
+
+	/// The identities this node offers a route to: those it announced a claim under.
+	fn announcing(&self) -> Vec<NodeId> {
+		self.revs.keys().copied().collect()
 	}
 
 	/// What to send, with every route as it stands now: a burst of input is read first.
@@ -1095,8 +1173,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn route(&mut self, from: N, origin: NodeId, offer: Option<Offer>) -> Result<(), Error> {
 		self.visit();
 		if mutated!(self, Chatter) {
-			self.stale
-				.extend(self.best.keys().copied().chain(self.announced.then_some(self.me)));
+			let origins: Vec<NodeId> = self.best.keys().copied().chain(self.announcing()).collect();
+			self.stale.extend(origins);
 		}
 		let sender = self.peers[&from].routing().expect("a routing neighbour");
 		match offer {
@@ -1112,7 +1190,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					}) || path.last().map(|hop| hop.node) != Some(sender)
 					|| path.len() > MAX_HOPS
 					|| names(path, self.me.relay)
-					|| !built
+					|| !built || !marked_well(path)
 				{
 					return Err(Error::Malformed);
 				}
@@ -1228,6 +1306,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				self.forgets += 1;
 			}
 		}
+		// Its claims kept their mark as they went; nothing else reads it.
+		self.marks.remove(&origin);
 		for peer in self.sent_to.remove(&origin).into_iter().flatten() {
 			self.visit();
 			let sent = (self.peers.get_mut(&peer)).and_then(|state| state.sent.remove(&origin));
@@ -1456,6 +1536,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		let flipped = was.is_some() != pick.is_some();
 		let moved = was.map(|best| best.offer.rank()) != pick.as_ref().map(|best| best.offer.rank());
+		// Every claim shown through the route carries its mark, whatever the rank.
+		let remarked = (was.zip(pick.as_ref())).is_some_and(|(was, pick)| was.offer.marked != pick.offer.marked);
+		match &pick {
+			Some(best) if best.offer.marked => _ = self.marks.insert(origin),
+			Some(_) => _ = self.marks.remove(&origin),
+			None if !self.known.contains_key(&origin) => _ = self.marks.remove(&origin),
+			None => {}
+		}
 		match pick {
 			Some(best) => self.best.insert(origin, best),
 			None => self.best.remove(&origin),
@@ -1465,7 +1553,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		// Whether its claims are reachable follows the route, and so does the rank of each
 		// that the rank reaches.
-		if flipped && let Some(known) = self.known.get(&origin) {
+		if (flipped || remarked)
+			&& let Some(known) = self.known.get(&origin)
+		{
 			self.count(known.items.len());
 			self.dirty.extend(known.items.keys().cloned());
 		} else if moved && let Some(ranked) = self.ranked.get(&origin) {
@@ -1479,17 +1569,37 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	fn offer_for(&self, origin: NodeId, peer: N) -> Option<Offer> {
 		let to = self.peers.get(&peer)?;
 		let to_id = to.routing()?;
-		if origin == self.me {
-			// Nothing routes to a node that announces nothing.
-			return self.announced.then(|| Offer {
-				path: Arc::new([Hop {
-					node: self.me,
-					session: 0,
-				}]),
+		if self.is_self(origin) {
+			// Nothing routes to an identity that announces nothing.
+			if !self.revs.contains_key(&origin) {
+				return None;
+			}
+			let me = Hop {
+				node: self.me,
+				session: 0,
+			};
+			// The marked identity's route leads through this node, as if learned on a
+			// marked link, and is never sent over another.
+			let marked = origin == self.me_marked;
+			if marked && to.port.upstream {
+				return None;
+			}
+			let path: Arc<[Hop]> = match marked {
+				true => Arc::new([
+					Hop {
+						node: self.me_marked,
+						session: 0,
+					},
+					me,
+				]),
+				false => Arc::new([me]),
+			};
+			return Some(Offer {
+				path,
 				draining: false,
 				priority: i8::MAX,
 				cost: 0,
-				marked: false,
+				marked,
 			});
 		}
 		let best = self.best.get(&origin)?;
@@ -1513,16 +1623,27 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// asked of every route.
 	fn advertise(&mut self) {
 		for peer in std::mem::take(&mut self.fresh) {
-			let origins: BTreeSet<NodeId> = (self.best.keys().copied())
-				.chain(self.announced.then_some(self.me))
-				.collect();
+			let origins: BTreeSet<NodeId> = (self.best.keys().copied()).chain(self.announcing()).collect();
 			for origin in origins {
 				self.advertise_to(origin, peer);
 			}
 			self.out.push((peer, Msg::Synced(Path::empty())));
 		}
+		self.advertise_stale(None);
+	}
+
+	/// Send each route that changed, but `except`'s, to every routing neighbour now, rather
+	/// than at the next drain.
+	fn advertise_stale(&mut self, except: Option<NodeId>) {
+		let stale: Vec<NodeId> = (self.stale.iter().copied())
+			.filter(|origin| Some(*origin) != except)
+			.collect();
+		if stale.is_empty() {
+			return;
+		}
 		let peers: Vec<N> = self.routing.iter().copied().collect();
-		while let Some(origin) = self.stale.pop_first() {
+		for origin in stale {
+			self.stale.remove(&origin);
 			for &peer in &peers {
 				self.advertise_to(origin, peer);
 			}
@@ -1569,7 +1690,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		if started && let Some(known) = self.known.get(&origin) {
 			self.count(known.items.len());
 			let changes = (known.items.iter())
-				.filter(|(broadcast, _)| !self.withheld(peer, origin, broadcast))
 				.map(|(broadcast, claim)| (broadcast.clone(), Change::Live(claim.clone())))
 				.collect();
 			let floor = known.floor;
@@ -1668,6 +1788,25 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// Apply `changes` to this node's view of `origin` and pass them, with its floor, to
 	/// every neighbour it offers `origin` to.
 	fn publish(&mut self, origin: NodeId, changes: Vec<(Broadcast<I>, Change<A>)>) {
+		// A withdrawal goes after every other route that started before it, so a claim
+		// moving to another node, such as this node's other identity, arrives before it
+		// leaves, at every hop it is forwarded. `origin`'s own route stays for the drain:
+		// its floor already moved, so one that starts now would bring the change twice.
+		let withdraws = (changes.iter()).any(|(_, change)| !matches!(change, Change::Live(_)));
+		if withdraws && self.sent_to.contains_key(&origin) {
+			self.advertise_stale(Some(origin));
+		}
+		// A neighbour that holds `origin`'s route hears what changed of it before another
+		// claim of it: an upstream loses a route that turned marked, and any other neighbour
+		// hears the mark, so neither passes the claim on as unmarked. Only a start brings
+		// claims, and a neighbour that holds the route gets no start, so this can go now.
+		if self.stale.contains(&origin) {
+			let held: Vec<N> = self.sent_to.get(&origin).into_iter().flatten().copied().collect();
+			for peer in held {
+				self.advertise_to(origin, peer);
+			}
+		}
+		let own = self.is_self(origin);
 		let known = self.known.entry(origin).or_default();
 		let floor = known.floor;
 		let mut claimed = Vec::new();
@@ -1685,7 +1824,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					if let Some(claim) = known.items.remove(broadcast) {
 						unclaimed.push(broadcast.clone());
 						// `restate` keeps its own claim's source.
-						if *change == Change::Lost && origin != self.me {
+						if *change == Change::Lost && !own {
 							lost.push((broadcast.clone(), claim));
 						}
 					}
@@ -1708,24 +1847,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		// Even with nothing changed: the floor alone outranks an older copy elsewhere.
 		for &peer in self.sent_to.get(&origin).into_iter().flatten() {
 			self.visit();
-			// A claim withheld from it is lost to it, if it was ever told.
-			let changes = (changes.iter().cloned())
-				.map(|(broadcast, change)| match self.withheld(peer, origin, &broadcast) {
-					true => (broadcast, Change::Lost),
-					false => (broadcast, change),
-				})
-				.collect();
+			let changes = changes.clone();
 			self.out.push((peer, Msg::Claims { origin, changes, floor }));
 		}
-	}
-
-	/// Whether `peer` is never told `origin`'s claim of `broadcast`: this node's own, which
-	/// reached it over a marked link, when `peer`'s is marked too. A neighbour gave it as
-	/// a claim and not a route, so the mark the route would carry is kept here.
-	fn withheld(&self, peer: N, origin: NodeId, broadcast: &Broadcast<I>) -> bool {
-		origin == self.me
-			&& self.peers.get(&peer).is_some_and(|peer| peer.port.upstream)
-			&& self.crossed_mark(origin, broadcast)
 	}
 
 	fn claim(&mut self, broadcast: &Broadcast<I>, origin: NodeId) {
@@ -1749,8 +1873,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	/// `claimant` lost its claim of `broadcast`, which `source` gave this node if its own.
 	fn drop_claim(&mut self, broadcast: Broadcast<I>, claimant: NodeId, claim: Claim<A>, source: Option<N>) {
+		// It keeps the mark of the route it came on, which no neighbour it is shown to
+		// knows of.
+		let routed = !self.is_self(claimant) && self.marks.contains(&claimant);
 		let claim = Claim {
 			unavailable: true,
+			marked: claim.marked || routed,
 			..claim
 		};
 		let gone = Gone {
@@ -1839,7 +1967,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		if !well_built(&changes) {
 			return Err(Error::Malformed);
 		}
-		let (cost, priority) = (peer.port.cost, peer.port.priority);
+		let (cost, priority, upstream) = (peer.port.cost, peer.port.priority, peer.port.upstream);
 		let scoped = matches!(peer.port.role, Role::Scoped(_));
 		for (broadcast, change) in changes {
 			self.visit();
@@ -1870,6 +1998,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					// never decides whether it can serve.
 					claim.cost = claim.cost.saturating_add(cost);
 					claim.priority = claim.priority.min(priority);
+					claim.marked |= upstream;
 					if scoped {
 						claim.chain.push(self.me.relay);
 					}
@@ -1905,7 +2034,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	}
 
 	/// Announce the cheapest claim any neighbour gave this node for `broadcast`, or
-	/// withdraw it for `cause` when none is left.
+	/// withdraw it for `cause` when none is left. One that crossed a marked link goes under
+	/// the marked identity, and moves between the two as its source does.
 	fn restate(&mut self, broadcast: Broadcast<I>, cause: Change<A>) {
 		let cheapest = (self.givers.get(&broadcast).into_iter().flatten())
 			.map(|(&peer, claim)| {
@@ -1923,45 +2053,65 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					claim.draining,
 					Reverse(claim.priority),
 					claim.cost,
+					// Among equal ranks one that crossed no marked link, which more
+					// neighbours may be told, as a route is chosen.
+					claim.marked,
 					claim.chain.len(),
 					*peer,
 				)
 			});
-		let me = self.me;
-		let was = self.known.get(&me).and_then(|known| known.items.get(&broadcast));
-		let change = match cheapest {
+		let filed = [self.me, self.me_marked].into_iter().find(|id| {
+			self.known
+				.get(id)
+				.is_some_and(|known| known.items.contains_key(&broadcast))
+		});
+		match cheapest {
 			Some((claim, peer)) => {
-				let crossed = self.crossed_mark(me, &broadcast);
 				self.sources.insert(broadcast.clone(), peer);
-				// A source across the mark changes which neighbours are told the claim.
-				if was == Some(&claim) && crossed == self.crossed_mark(me, &broadcast) {
+				let owner = match claim.marked {
+					true => self.me_marked,
+					false => self.me,
+				};
+				let was = filed.and_then(|id| self.known[&id].items.get(&broadcast));
+				if filed == Some(owner) && was == Some(&claim) {
 					// The source alone moved, which a scoped neighbour must hear of.
 					self.dirty.insert(broadcast);
 					return;
 				}
-				Change::Live(claim)
+				self.revise(owner, broadcast.clone(), Change::Live(claim));
+				// A claim that moved between the identities leaves the old one after the new
+				// one holds it, and `publish` sends the new one's route first.
+				if let Some(old) = filed.filter(|old| *old != owner) {
+					self.revise(old, broadcast, Change::Lost);
+				}
 			}
 			None => {
 				let source = self.sources.remove(&broadcast);
-				let Some(was) = was.cloned() else {
+				let Some(old) = filed else {
 					return;
 				};
 				if cause == Change::Lost {
-					self.drop_claim(broadcast.clone(), me, was, source);
+					let was = self.known[&old].items[&broadcast].clone();
+					self.drop_claim(broadcast.clone(), old, was, source);
 				}
-				cause
+				self.revise(old, broadcast, cause);
 			}
-		};
-		self.rev += 1;
-		self.known.entry(me).or_default().floor = self.rev;
-		if !self.announced {
-			// Its first claim: the route starts, and brings the claim with it.
-			self.announced = true;
-			self.stale.insert(me);
 		}
-		self.publish(me, vec![(broadcast, change)]);
+	}
+
+	/// Change the claims this node announces under its identity `id`, at a new revision.
+	fn revise(&mut self, id: NodeId, broadcast: Broadcast<I>, change: Change<A>) {
+		let rev = self.revs.get(&id).copied();
+		if rev.is_none() {
+			// Its first claim: the route starts, and brings the claim with it.
+			self.stale.insert(id);
+		}
+		let rev = rev.unwrap_or_default() + 1;
+		self.revs.insert(id, rev);
+		self.known.entry(id).or_default().floor = rev;
+		self.publish(id, vec![(broadcast, change)]);
 		#[cfg(test)]
-		self.history.push(self.known[&me].items.clone());
+		self.history.entry(id).or_default().push(self.known[&id].items.clone());
 	}
 
 	// --- Requests ---
@@ -1977,7 +2127,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	/// Where a request for `broadcast` naming `origin` goes from here. `None` fails it.
 	pub fn step(&self, origin: NodeId, (path, instance): &Broadcast<I>) -> Option<Next<N>> {
-		match origin == self.me {
+		match self.is_self(origin) {
 			// As `pick`, the claim at the most specific path covering it that the reader
 			// shows: the neighbour behind it if it is this node's own, available, and of the
 			// best precedence there, and closed while it is unavailable, lost, outranked,
@@ -1986,7 +2136,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				let from = (ancestors(path).rev()).find(|above| self.reader.get(instance.clone(), above).is_some())?;
 				let claim = (from, instance.clone());
 				let source = *self.sources.get(&claim)?;
-				let own = self.known.get(&self.me)?.items.get(&claim)?;
+				let own = self.known.get(&origin)?.items.get(&claim)?;
 				// Only a claim of the best precedence there may serve, reachable or not, as
 				// in `closest`; among those, this node's own serves whatever its rank.
 				let best = (self.claims_of(&claim)).map(|(_, claim)| precedence(&claim.item)).min();
@@ -2028,7 +2178,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			// the same claimant, so none ranks ahead here: the reader takes the cheapest,
 			// and the newest of those, so a peer that reconnects serves the moment its
 			// new session gives the claim.
-			if origin == self.me {
+			if self.is_self(origin) {
 				for (peer, given) in self.givers.get(broadcast).into_iter().flatten() {
 					self.visit();
 					if precedence(&given.item) != precedence(&claim.item) || given.unavailable {
@@ -2055,6 +2205,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						cost: claim.cost.saturating_add(route.offer.cost),
 						priority: claim.priority.min(route.offer.priority),
 						draining: claim.draining || route.offer.draining,
+						marked: claim.marked || route.offer.marked,
 						..claim.clone()
 					},
 					closest: closest == Some(origin) && best == Some(route.via),
@@ -2064,15 +2215,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		ways
 	}
 
-	/// Whether `origin`'s claim of `broadcast` reached this node over a marked link: its
-	/// route crossed one, or a marked neighbour gave this node its own.
+	/// Whether `origin`'s claim of `broadcast` crossed a marked link on its way here: the
+	/// claim says so, as one a node took over a marked link does wherever it travels, or
+	/// the route to another node's claim crossed one.
 	fn crossed_mark(&self, origin: NodeId, broadcast: &Broadcast<I>) -> bool {
-		match origin == self.me {
-			true => (self.sources.get(broadcast))
-				.and_then(|source| self.peers.get(source))
-				.is_some_and(|source| source.port.upstream),
-			false => self.best.get(&origin).is_some_and(|best| best.offer.marked),
-		}
+		let claim = (self.known.get(&origin))
+			.and_then(|known| known.items.get(broadcast))
+			.is_some_and(|claim| claim.marked);
+		claim || (!self.is_self(origin) && self.marks.contains(&origin))
 	}
 
 	/// The claim of `broadcast` a request takes from here, with its claimant: among the
@@ -2095,7 +2245,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			if claim.unavailable {
 				continue;
 			}
-			let rank = match origin == self.me {
+			let rank = match self.is_self(origin) {
 				true => claim.rank(),
 				false => {
 					let Some(best) = self.best.get(&origin) else {
@@ -2325,12 +2475,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let broadcast = (from.clone(), instance.clone());
 		let marked = self.peers[&peer].port.upstream;
 		let source = |origin: NodeId| {
-			(origin == self.me && self.sources.get(&broadcast) == Some(&peer))
+			(self.is_self(origin) && self.sources.get(&broadcast) == Some(&peer))
 				|| (marked && self.crossed_mark(origin, &broadcast))
 		};
 		let claim = match self.closest(&broadcast) {
 			Some((origin, _)) if source(origin) => return None,
-			Some((origin, claim)) if origin == self.me => claim.clone(),
+			Some((origin, claim)) if self.is_self(origin) => claim.clone(),
 			Some((origin, claim)) => {
 				let route = &self.best[&origin].offer;
 				Claim {
@@ -2340,6 +2490,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 					draining: claim.draining || route.draining,
 					unavailable: false,
 					chain: claim.chain.clone(),
+					marked: claim.marked || route.marked,
 				}
 			}
 			None => match self
@@ -2347,17 +2498,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				.min_by_key(|(origin, claim)| (precedence(&claim.item), *origin))
 			{
 				Some((origin, _)) if source(origin) => return None,
-				Some((_, claim)) => Claim {
+				Some((origin, claim)) => Claim {
 					unavailable: true,
+					marked: self.crossed_mark(origin, &broadcast),
 					..claim.clone()
 				},
 				// Lost, and waiting out the debounce: what it showed, to every asker alike.
 				None => {
 					let gone = self.gone.get(from)?.get(instance)?;
-					let crossed = (gone.source.as_ref())
-						.and_then(|source| self.peers.get(source))
-						.is_some_and(|source| marked && source.port.upstream);
-					if gone.source == Some(peer) || crossed {
+					if gone.source == Some(peer) || (marked && gone.claim.marked) {
 						return None;
 					}
 					gone.claim.clone()
@@ -2445,9 +2594,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.checked = false;
 	}
 
-	/// This node's own claims at each revision, the first empty.
-	pub fn history(&self) -> &[Claims<I, A>] {
-		&self.history
+	/// The claims this node announced under its identity `id` at each revision, the first
+	/// empty.
+	pub fn history(&self, id: NodeId) -> Option<&[Claims<I, A>]> {
+		self.history.get(&id).map(Vec::as_slice)
 	}
 
 	/// How many copies of a forwarding node's claims this node dropped, after each of which
@@ -2466,15 +2616,25 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		self.best.keys().copied().collect()
 	}
 
-	/// Whether it offers a route to itself: it has announced a claim.
+	/// Whether it offers a route to itself: it has announced a claim under its own Node ID.
 	pub fn announced(&self) -> bool {
-		self.announced
+		self.revs.contains_key(&self.me)
 	}
 
-	/// This node's revision of its own claims, and each of its claims as it stands.
+	/// This node's revision of the claims it announces under its own Node ID, and each of
+	/// them as it stands.
 	pub fn own(&self) -> (Rev, Claims<I, A>) {
-		let items = self.known.get(&self.me).map(|known| known.items.clone());
-		(self.rev, items.unwrap_or_default())
+		self.own_as(self.me)
+	}
+
+	/// Of the claims it announces under its identity `id`, the revision and each as it
+	/// stands.
+	pub fn own_as(&self, id: NodeId) -> (Rev, Claims<I, A>) {
+		let items = self.known.get(&id).map(|known| known.items.clone());
+		(
+			self.revs.get(&id).copied().unwrap_or_default(),
+			items.unwrap_or_default(),
+		)
 	}
 
 	/// Every copy of a forwarding node's claims this node holds, with its floor: each
@@ -2483,7 +2643,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let heard = (self.heard.iter())
 			.flat_map(|(origin, offers)| offers.values().map(move |heard| (*origin, heard.floor, &heard.items)));
 		let known = (self.known.iter())
-			.filter(|(origin, _)| **origin != self.me)
+			.filter(|(origin, _)| !self.is_self(**origin))
 			.map(|(origin, known)| (*origin, known.floor, &known.items));
 		heard.chain(known).collect()
 	}
@@ -2494,6 +2654,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	pub fn fingerprint(&self, hasher: &mut impl std::hash::Hasher) {
 		let Self {
 			me,
+			me_marked: _,
 			debounce,
 			now,
 			sessions,
@@ -2510,11 +2671,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			draining,
 			stale,
 			best,
+			marks,
 			tx_hops: _,
 			sent_to: _,
 			known,
-			rev,
-			announced,
+			revs,
 			givers: _,
 			sources,
 			claimants: _,
@@ -2546,7 +2707,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			.collect();
 		let state = (
 			(me, debounce, sessions, peers, routing, fresh, heard, unnamed),
-			(dead, closed, draining, stale, best, known, rev, announced),
+			(dead, closed, draining, stale, best, marks, known, revs),
 			(sources, ended, dirty, waiting, since, gone, reader.shown(), out),
 		);
 		super::digest(hasher, &state);
@@ -2654,6 +2815,23 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			let shown = self.reader.get(instance.clone(), path);
 			assert!(shown.is_some_and(|shown| !shown.available), "unavailable since");
 		}
+		for (origin, best) in &self.best {
+			assert_eq!(self.marks.contains(origin), best.offer.marked, "marks");
+		}
+		// A claim is marked exactly when it is filed under the marked identity, whose route
+		// is marked, so a marked claim never travels on an unmarked route.
+		for (id, marked) in [(self.me, false), (self.me_marked, true)] {
+			let items = self.known.get(&id).into_iter().flat_map(|known| known.items.values());
+			for claim in items {
+				assert_eq!(claim.marked, marked, "a claim under the wrong identity");
+			}
+		}
+		for origin in &self.marks {
+			assert!(
+				self.best.contains_key(origin) || self.known.contains_key(origin),
+				"marks"
+			);
+		}
 		assert!(self.dirty.is_empty(), "refreshed");
 	}
 }
@@ -2679,7 +2857,11 @@ mod tests {
 	}
 
 	fn node(relay: Id) -> NodeId {
-		NodeId { relay, start: 1 }
+		NodeId {
+			relay,
+			start: 1,
+			marked: false,
+		}
 	}
 
 	fn port(role: Role) -> Port {
@@ -2726,6 +2908,7 @@ mod tests {
 			draining: false,
 			unavailable: false,
 			chain: Vec::new(),
+			marked: false,
 		})
 	}
 
@@ -2791,6 +2974,7 @@ mod tests {
 			draining: false,
 			unavailable: false,
 			chain: Vec::new(),
+			marked: false,
 		})
 	}
 
@@ -3210,6 +3394,7 @@ mod tests {
 		let chained = |len: usize| {
 			Change::Live(Claim {
 				chain: (100..100 + len as Id).collect(),
+				marked: false,
 				..match live(0) {
 					Change::Live(claim) => claim,
 					_ => unreachable!(),
@@ -3367,9 +3552,10 @@ mod tests {
 			changes: vec![(room.clone(), live(0))],
 		};
 		router.recv(2, announce).unwrap();
-		let me = router.me();
-		assert!(!router.admits(3, me, &room));
-		assert!(router.admits(4, me, &room));
+		// A claim taken over a marked link is filed under the marked identity.
+		let marked_me = marked_id(router.me());
+		assert!(!router.admits(3, marked_me, &room));
+		assert!(router.admits(4, marked_me, &room));
 	}
 
 	/// What a neighbour holds of what this node sent it: each route with its origin's
@@ -3748,7 +3934,11 @@ mod tests {
 		assert_eq!(router.recv(2, route), Err(Error::Malformed));
 		// Through this relay.
 		let me = Hop {
-			node: NodeId { relay: 1, start: 0 },
+			node: NodeId {
+				relay: 1,
+				start: 0,
+				marked: false,
+			},
 			session: 3,
 		};
 		let route = Msg::Route {
@@ -3788,7 +3978,11 @@ mod tests {
 	fn a_start_that_went_back_is_refused() {
 		let mut router = relay(1);
 		open(&mut router, 2, Role::Routing(node(2)));
-		let started = |start| NodeId { relay: 7, start };
+		let started = |start| NodeId {
+			relay: 7,
+			start,
+			marked: false,
+		};
 		let origin = Hop {
 			node: node(5),
 			session: 0,
@@ -4071,5 +4265,663 @@ mod tests {
 		let told: Vec<&Msg<u64, u64>> = (out.iter()).filter(|(to, _)| *to == 3).map(|(_, msg)| msg).collect();
 		assert_eq!(told, [&Msg::Edited, &Msg::Synced(p("other"))]);
 		assert_eq!(router.kept().told, 0);
+	}
+
+	/// A claim moving to an identity that never announced reaches a routing neighbour
+	/// under the new identity before it leaves the old one.
+	#[test]
+	fn a_claim_moving_identity_is_routed_before_it_leaves() {
+		let mut router = relay(1);
+		router
+			.connect(
+				2,
+				Port {
+					upstream: true,
+					..port(Role::Endpoint)
+				},
+			)
+			.unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		open(&mut router, 3, Role::Routing(node(3)));
+		open(&mut router, 5, Role::Endpoint);
+		router.drain();
+
+		let broadcast = (p("live"), 7);
+		let give = |change| Msg::Announce {
+			changes: vec![(broadcast.clone(), change)],
+		};
+		router.recv(5, give(live(0))).unwrap();
+		router.recv(2, give(live(0))).unwrap();
+		router.drain();
+		assert!(
+			router.own().1.contains_key(&broadcast),
+			"the unmarked giver is preferred"
+		);
+
+		router.recv(5, give(Change::Lost)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 3)
+			.map(|(_, msg)| msg)
+			.collect();
+		let me = router.me();
+		let me_marked = router.me_marked();
+		let routed = out
+			.iter()
+			.position(|msg| matches!(msg, Msg::Route { origin, offer: Some(_) } if *origin == me_marked));
+		let left = out.iter().position(|msg| {
+			matches!(msg, Msg::Claims { origin, changes, .. }
+				if *origin == me && changes.iter().any(|(_, change)| *change == Change::Lost))
+		});
+		let (Some(routed), Some(left)) = (routed, left) else {
+			panic!("the move was not told: {out:?}");
+		};
+		assert!(routed < left, "the old identity left first: {out:?}");
+		assert!(router.own_as(me_marked).1.contains_key(&broadcast));
+	}
+
+	/// A route that starts in the same batch as another node's withdrawal is forwarded
+	/// ahead of it, as a claim moving between a node's two identities needs at each hop.
+	#[test]
+	fn a_route_started_before_a_withdrawal_is_forwarded_before_it() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Routing(node(3)));
+		router.drain();
+
+		let route = |origin: Id| Msg::Route {
+			origin: node(origin),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(origin),
+						session: 0,
+					},
+					Hop {
+						node: node(2),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		let broadcast = (p("live"), 7);
+		let claims = |origin: Id, change, floor| Msg::Claims {
+			origin: node(origin),
+			changes: vec![(broadcast.clone(), change)],
+			floor,
+		};
+		router.recv(2, route(2)).unwrap();
+		router.recv(2, claims(2, live(0), 1)).unwrap();
+		router.drain();
+
+		router.recv(2, route(20)).unwrap();
+		router.recv(2, claims(20, live(0), 1)).unwrap();
+		router.recv(2, claims(2, Change::Lost, 2)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 3)
+			.map(|(_, msg)| msg)
+			.collect();
+		let routed = out
+			.iter()
+			.position(|msg| matches!(msg, Msg::Route { origin, offer: Some(_) } if *origin == node(20)));
+		let left = out.iter().position(|msg| {
+			matches!(msg, Msg::Claims { origin, changes, .. }
+				if *origin == node(2) && changes.iter().any(|(_, change)| *change == Change::Lost))
+		});
+		let (Some(routed), Some(left)) = (routed, left) else {
+			panic!("the move was not forwarded: {out:?}");
+		};
+		assert!(routed < left, "the withdrawal went first: {out:?}");
+		assert!(
+			out[routed..left].iter().any(
+				|msg| matches!(msg, Msg::Claims { origin, changes, .. } if *origin == node(20) && !changes.is_empty())
+			),
+			"the new route came without its claim: {out:?}"
+		);
+	}
+
+	/// A route that turns marked ends at an upstream before the upstream hears another
+	/// claim of it.
+	#[test]
+	fn a_route_turning_marked_ends_at_an_upstream_before_its_claims() {
+		let mut router = relay(1);
+		let upstream = |router: &mut Relay, peer: usize| {
+			router
+				.connect(
+					peer,
+					Port {
+						upstream: true,
+						..port(Role::Routing(node(peer as Id)))
+					},
+				)
+				.unwrap();
+			router.recv(peer, Msg::Edited).unwrap();
+			router
+				.edit(
+					peer,
+					Edit {
+						remove: Vec::new(),
+						add: vec![p(ROOT)],
+					},
+				)
+				.unwrap();
+		};
+		open(&mut router, 3, Role::Routing(node(3)));
+		upstream(&mut router, 4);
+		upstream(&mut router, 6);
+		router.drain();
+
+		let route = |via: Id| Msg::Route {
+			origin: node(9),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(9),
+						session: 0,
+					},
+					Hop {
+						node: node(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		let claims = |broadcast: (Path, u64), floor| Msg::Claims {
+			origin: node(9),
+			changes: vec![(broadcast, live(0))],
+			floor,
+		};
+		router.recv(3, route(3)).unwrap();
+		router.recv(4, route(4)).unwrap();
+		router.recv(3, claims((p("live"), 7), 1)).unwrap();
+		let out = router.drain();
+		assert!(
+			(out.iter()).any(|(to, msg)| *to == 6 && matches!(msg, Msg::Route { offer: Some(_), .. })),
+			"the unmarked route reaches the other upstream: {out:?}"
+		);
+
+		router
+			.recv(
+				3,
+				Msg::Route {
+					origin: node(9),
+					offer: None,
+				},
+			)
+			.unwrap();
+		router.recv(4, claims((p("more"), 7), 2)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 6)
+			.map(|(_, msg)| msg)
+			.collect();
+		let ended = out
+			.iter()
+			.position(|msg| matches!(msg, Msg::Route { origin, offer: None } if *origin == node(9)));
+		let told = out.iter().position(
+			|msg| matches!(msg, Msg::Claims { origin, changes, .. } if *origin == node(9) && !changes.is_empty()),
+		);
+		assert!(ended.is_some(), "the marked route stays at the upstream: {out:?}");
+		assert!(
+			told.is_none_or(|told| told > ended.unwrap()),
+			"told a claim first: {out:?}"
+		);
+	}
+
+	/// A neighbour that keeps a route that turned marked hears the mark before another
+	/// claim of it, so it never passes the claim to its own upstream as unmarked.
+	#[test]
+	fn a_route_turning_marked_is_remarked_before_its_claims() {
+		let mut router = relay(1);
+		open(&mut router, 3, Role::Routing(node(3)));
+		open(&mut router, 5, Role::Routing(node(5)));
+		router
+			.connect(
+				4,
+				Port {
+					upstream: true,
+					..port(Role::Routing(node(4)))
+				},
+			)
+			.unwrap();
+		router.recv(4, Msg::Edited).unwrap();
+		router
+			.edit(
+				4,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		router.drain();
+
+		let route = |via: Id| Msg::Route {
+			origin: node(9),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(9),
+						session: 0,
+					},
+					Hop {
+						node: node(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		let claims = |broadcast: (Path, u64), floor| Msg::Claims {
+			origin: node(9),
+			changes: vec![(broadcast, live(0))],
+			floor,
+		};
+		router.recv(3, route(3)).unwrap();
+		router.recv(4, route(4)).unwrap();
+		router.recv(3, claims((p("live"), 7), 1)).unwrap();
+		router.drain();
+
+		router
+			.recv(
+				3,
+				Msg::Route {
+					origin: node(9),
+					offer: None,
+				},
+			)
+			.unwrap();
+		router.recv(4, claims((p("more"), 7), 2)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 5)
+			.map(|(_, msg)| msg)
+			.collect();
+		let remarked = out.iter().position(
+			|msg| matches!(msg, Msg::Route { origin, offer: Some(offer) } if *origin == node(9) && offer.marked),
+		);
+		let told = out.iter().position(
+			|msg| matches!(msg, Msg::Claims { origin, changes, .. } if *origin == node(9) && !changes.is_empty()),
+		);
+		let (Some(remarked), Some(told)) = (remarked, told) else {
+			panic!("the change was not told: {out:?}");
+		};
+		assert!(remarked < told, "told a claim before the mark: {out:?}");
+	}
+
+	/// A marked route that stops reaching its node leaves the node's claims marked, so an
+	/// upstream is not told them, even unavailable.
+	#[test]
+	fn claims_keep_their_mark_once_no_route_reaches_them() {
+		let mut router = relay(1);
+		let upstream = |role| Port {
+			upstream: true,
+			..port(role)
+		};
+		router.connect(4, upstream(Role::Routing(node(4)))).unwrap();
+		router.recv(4, Msg::Edited).unwrap();
+		router.connect(6, upstream(Role::Scoped(vec![p(ROOT)]))).unwrap();
+		router.recv(6, Msg::Edited).unwrap();
+		router
+			.edit(
+				6,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		router.drain();
+
+		let sender = Hop {
+			node: node(4),
+			session: 1,
+		};
+		let route = Msg::Route {
+			origin: node(9),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(9),
+						session: 0,
+					},
+					sender,
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		router.recv(4, route).unwrap();
+		let claims = Msg::Claims {
+			origin: node(9),
+			changes: vec![((p("live"), 7), live(0))],
+			floor: 1,
+		};
+		router.recv(4, claims).unwrap();
+		router
+			.recv(
+				4,
+				Msg::Dead {
+					hop: sender,
+					far: node(9),
+				},
+			)
+			.unwrap();
+		let out = router.drain();
+		let told: Vec<_> = (out.iter())
+			.filter(|(to, msg)| *to == 6 && matches!(msg, Msg::Announce { changes } if !changes.is_empty()))
+			.collect();
+		assert!(told.is_empty(), "the upstream was told the claim: {told:?}");
+	}
+
+	/// A path names a marked Node ID only as the node it leads to, followed by that node
+	/// itself, unmarked, at session 0; anything else is refused. The marked hop counts
+	/// toward the longest path like any other.
+	#[test]
+	fn a_marked_node_id_leads_a_path_and_counts_as_a_hop() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		let marked = NodeId {
+			marked: true,
+			..node(5)
+		};
+		let hop = |node: NodeId, session| Hop { node, session };
+		let offer = |path: Vec<Hop>| Offer {
+			path: path.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost: 1,
+			marked: true,
+		};
+		let send = |router: &mut Relay, origin: NodeId, path: Vec<Hop>| {
+			router.recv(
+				2,
+				Msg::Route {
+					origin,
+					offer: Some(offer(path)),
+				},
+			)
+		};
+		let sender = hop(node(2), 1);
+		// Alone, followed by another node, by itself at a session, or past the first hop.
+		for path in [
+			vec![hop(marked, 0), sender],
+			vec![hop(marked, 0), hop(node(6), 0), sender],
+			vec![hop(marked, 0), hop(node(5), 3), sender],
+		] {
+			assert_eq!(
+				send(&mut router, marked, path.clone()),
+				Err(Error::Malformed),
+				"{path:?}"
+			);
+		}
+		assert_eq!(
+			send(&mut router, node(5), vec![hop(node(5), 0), hop(marked, 0), sender]),
+			Err(Error::Malformed)
+		);
+		send(&mut router, marked, vec![hop(marked, 0), hop(node(5), 0), sender]).unwrap();
+		assert!(router.best(marked).is_some());
+
+		// Through relays 10 and up, as long as the path may be, the marked hop included,
+		// it is heard and never used, as any route at the longest path.
+		let through = |len: usize| {
+			let mut path = vec![hop(marked, 0), hop(node(5), 0)];
+			path.extend((10..).take(len - 3).map(|relay| hop(node(relay), 1)));
+			path.push(sender);
+			path
+		};
+		send(&mut router, marked, through(MAX_HOPS - 1)).unwrap();
+		assert!(router.best(marked).is_some(), "one hop short of the longest path");
+		send(&mut router, marked, through(MAX_HOPS)).unwrap();
+		assert!(
+			router.best(marked).is_none(),
+			"the marked hop counts toward the longest path"
+		);
+		assert_eq!(send(&mut router, marked, through(MAX_HOPS + 1)), Err(Error::Malformed));
+	}
+
+	/// A route that turns marked at the same rank re-tells a scoped neighbour each claim
+	/// it reaches, now marked.
+	#[test]
+	fn a_route_turning_marked_at_equal_rank_retells_its_claims() {
+		let mut router = relay(1);
+		open(&mut router, 3, Role::Routing(node(3)));
+		router
+			.connect(
+				4,
+				Port {
+					upstream: true,
+					..port(Role::Routing(node(4)))
+				},
+			)
+			.unwrap();
+		router.recv(4, Msg::Edited).unwrap();
+		router
+			.edit(
+				4,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		open(&mut router, 5, Role::Scoped(vec![p(ROOT)]));
+		router
+			.edit(
+				5,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		router.drain();
+
+		let route = |via: Id| Msg::Route {
+			origin: node(9),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(9),
+						session: 0,
+					},
+					Hop {
+						node: node(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		router.recv(3, route(3)).unwrap();
+		router.recv(4, route(4)).unwrap();
+		let broadcast = (p("live"), 7);
+		let claims = Msg::Claims {
+			origin: node(9),
+			changes: vec![(broadcast.clone(), live(0))],
+			floor: 1,
+		};
+		router.recv(3, claims).unwrap();
+		let told = |out: Vec<(usize, Msg<u64, u64>)>| {
+			(out.into_iter()).find_map(|(to, msg)| match msg {
+				Msg::Announce { changes } if to == 5 => (changes.into_iter())
+					.find(|(told, _)| told.0 == broadcast.0)
+					.and_then(|(_, change)| match change {
+						Change::Live(claim) => Some(claim),
+						_ => None,
+					}),
+				_ => None,
+			})
+		};
+		let first = told(router.drain()).expect("the scoped neighbour is told the claim");
+		assert!(!first.marked, "the unmarked route is preferred");
+
+		router
+			.recv(
+				3,
+				Msg::Route {
+					origin: node(9),
+					offer: None,
+				},
+			)
+			.unwrap();
+		let again = told(router.drain()).expect("the scoped neighbour is told the claim again");
+		assert!(again.marked, "now reached over a marked link");
+	}
+
+	/// A claim taken over a marked link goes under the node's marked identity, whose route
+	/// is marked: an unmarked routing neighbour gets the route with the claim, a marked one
+	/// neither, and the node's own copy stays whole for every neighbour. A scoped neighbour
+	/// is told the claim with its mark, and files it under its own marked identity.
+	#[test]
+	fn a_claim_taken_over_a_marked_link_goes_under_the_marked_identity() {
+		let mut router = relay(1);
+		let marked = Port {
+			upstream: true,
+			..port(Role::Endpoint)
+		};
+		router.connect(2, marked.clone()).unwrap();
+		router.recv(2, Msg::Edited).unwrap();
+		open(&mut router, 3, Role::Routing(node(3)));
+		router
+			.connect(
+				4,
+				Port {
+					role: Role::Routing(node(4)),
+					..marked
+				},
+			)
+			.unwrap();
+		router.recv(4, Msg::Edited).unwrap();
+		router
+			.edit(
+				4,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		open(&mut router, 5, Role::Scoped(vec![p(ROOT)]));
+		router
+			.edit(
+				5,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		router.drain();
+
+		let local = Msg::Announce {
+			changes: vec![((p("local"), 8), live(0))],
+		};
+		router.recv(5, local).unwrap();
+		router.drain();
+		let upstream = Msg::Announce {
+			changes: vec![((p("live"), 7), live(0))],
+		};
+		router.recv(2, upstream).unwrap();
+		let out = router.drain();
+
+		let me_marked = router.me_marked();
+		assert_ne!(me_marked, router.me());
+		assert!(
+			!router.own().1.contains_key(&(p("live"), 7)),
+			"filed under the node's own ID"
+		);
+		assert!(router.own().1.contains_key(&(p("local"), 8)));
+		let (_, marked_claims) = router.own_as(me_marked);
+		assert!(marked_claims[&(p("live"), 7)].marked);
+
+		let to = |peer: usize| -> Vec<&Msg<u64, u64>> {
+			(out.iter()).filter(|(to, _)| *to == peer).map(|(_, msg)| msg).collect()
+		};
+		let routed = |msgs: &[&Msg<u64, u64>]| {
+			msgs.iter()
+				.any(|msg| matches!(msg, Msg::Route { origin, offer: Some(_) } if *origin == me_marked))
+		};
+		let unmarked = to(3);
+		assert!(
+			routed(&unmarked),
+			"an unmarked neighbour is offered the marked identity: {unmarked:?}"
+		);
+		let offer = unmarked.iter().find_map(|msg| match msg {
+			Msg::Route {
+				origin,
+				offer: Some(offer),
+			} if *origin == me_marked => Some(offer),
+			_ => None,
+		});
+		assert!(offer.expect("the route").marked, "the route is marked from the start");
+		let upstream = to(4);
+		assert!(!routed(&upstream), "a marked neighbour is offered it: {upstream:?}");
+		assert!(
+			!upstream
+				.iter()
+				.any(|msg| matches!(msg, Msg::Claims { changes, .. } if !changes.is_empty())),
+			"a marked neighbour heard a claim: {upstream:?}"
+		);
+		let scoped = to(5);
+		let told = scoped.iter().find_map(|msg| match msg {
+			Msg::Announce { changes } => changes.iter().find(|((path, _), _)| *path == p("live")),
+			_ => None,
+		});
+		let Some((_, Change::Live(told))) = told else {
+			panic!("the scoped neighbour was not told the claim: {scoped:?}");
+		};
+		assert!(told.marked, "the scoped neighbour is told the mark");
+
+		// Across the grant, the claim lands under the receiver's marked identity, never
+		// offered to its own marked neighbour.
+		let mut far = relay(10);
+		open(&mut far, 11, Role::Scoped(vec![p(ROOT)]));
+		far.connect(
+			12,
+			Port {
+				upstream: true,
+				..port(Role::Routing(node(12)))
+			},
+		)
+		.unwrap();
+		far.recv(12, Msg::Edited).unwrap();
+		far.edit(
+			12,
+			Edit {
+				remove: Vec::new(),
+				add: vec![p(ROOT)],
+			},
+		)
+		.unwrap();
+		far.drain();
+		let changes = vec![((p("live"), 7), Change::Live(told.clone()))];
+		far.recv(11, Msg::Announce { changes }).unwrap();
+		let out = far.drain();
+		assert!(far.own().1.is_empty());
+		assert!(far.own_as(far.me_marked()).1.contains_key(&(p("live"), 7)));
+		assert!(
+			!out.iter()
+				.any(|(to, msg)| *to == 12 && matches!(msg, Msg::Route { offer: Some(_), .. } | Msg::Claims { .. })),
+			"a marked neighbour heard of it: {out:?}"
+		);
 	}
 }

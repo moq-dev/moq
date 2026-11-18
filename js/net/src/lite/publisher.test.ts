@@ -4145,11 +4145,12 @@ test("a lite-07 request naming a node is served here", async () => {
 	const named = await Writer.collect(version, async (w) => {
 		await w.u53(3);
 		await w.string("cam");
-		// No instance pinned, then Node ID 7 with its start.
+		// No instance pinned, then Node ID 7 with its start, marked: a node's marked identity.
 		await w.u53(0);
 		await w.bool(false);
 		await w.u62(7n);
 		await w.u62(9n);
+		await w.bool(true);
 		await w.string("video");
 	});
 	// The message's own size prefix, then its body.

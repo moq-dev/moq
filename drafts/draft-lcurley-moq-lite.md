@@ -446,6 +446,7 @@ An edit that empties the set drops every route on the stream, and every claim un
 On a session that does not exchange routes, a publisher sends the claims its own requests would resolve, and nothing of how it reaches them.
 For each path and Instance its peer's prefixes present, it sends at most one claim: the one it would serve a request there from (see [Resolution](#resolution)), and never one it learned from that peer.
 The claim carries the publisher's cost to it, the lowest priority and any drain on the way, and its chain (see [ANNOUNCE_START](#announce-start)).
+It sets the claim's `Marked` flag when a marked session lies on the way to it, and never sends such a claim over a marked session.
 
 When the publisher's way to a claim changes, it sends an ANNOUNCE_UPDATE.
 While it has no way to a claim it still holds, it sets the claim's `Unavailable` flag rather than withdrawing it, and fails requests for it with UNROUTABLE; it sends an ANNOUNCE_END with `Lost` once it has shown the claim unavailable for 800 milliseconds.
@@ -453,7 +454,7 @@ A receiver takes `Unavailable` only as a change to a claim it already holds at t
 Another Instance at a path is another claim: the publisher sends its ANNOUNCE_START before the ANNOUNCE_END of the one it replaces, so the subscriber sees the broadcast restart rather than go.
 
 A receiver adds the session's link cost (see [Cost Parameter](#cost-parameter)) to the claim's cost, and takes the lower of the claim's priority and its own local priority for the session.
-A routing node that receives a claim this way announces it to its routing neighbours as its own (see [Routing](#routing)).
+A routing node that receives a claim this way announces it to its routing neighbours as its own, under its marked Node ID when the session is marked or the claim's `Marked` flag is set (see [Routing](#routing)).
 When the sender is itself a routing node, confined to claims by a scoped grant, or the claim arrived over an earlier version, the receiver first appends its own Relay to the claim's chain, and MUST NOT take a claim whose chain names its Relay or would reach 32 Relays.
 
 ### Floors {#floors}
@@ -489,7 +490,7 @@ SUBSCRIBE, FETCH, and TRACK resolve a hidden path exactly as any other.
 Routing nodes route to each other by path vector.
 A route leads to a routing node that announces claims, never to a publisher: the claims of an endpoint belong to the routing node it connects to, which announces them under its own Node ID and Revision (see [Floors](#floors)).
 
-A routing node names itself with a Node ID: a non-zero identifier of the relay and its Start, a number that is higher each time the relay's process starts, such as its start time.
+A routing node names itself with a Node ID: a non-zero identifier of the relay and its Start, a number that is higher each time the relay's process starts, such as its start time, with Marked clear.
 A Node ID is declared, not proven.
 Two endpoints exchange routes when both send the [Node ID Parameter](#node-id-parameter); each MUST close the session with UNAUTHORIZED when either's grant (see [AUTH_OK](#auth-ok)) covers less than every path, so a peer confined to part of the tree sends claims alone.
 
@@ -502,6 +503,9 @@ A Path has at most 32 hops, and a route whose cost would overflow 64 bits is nev
 A node never uses a route whose Path names its own relay, at any Start.
 It sends a neighbour its selected route to each routing node, except back over the session it learned the route on, to a neighbour already on the Path, or, when the route is marked, to a neighbour on a marked session.
 A node MAY mark a session, such as one to an upstream it only reads from: a route is marked when it arrived on a marked session or with its marked flag set.
+A routing node announces each claim it takes over a marked session, or with its `Marked` flag set (see [Claims](#claims)), under its marked Node ID: its own Relay and Start with Marked set, which names the same process and holds no session.
+Its route to that Node ID is marked, at cost 0, with a Path of two hops, the marked Node ID and then its own, each with Session Number 0; the marked hop counts toward the 32 like any other.
+So no such claim crosses a second marked session, and every copy of a node's claims stays whole (see [Floors](#floors)).
 
 A route is draining when a node on its Path sent a GOAWAY, as its draining flag or a [DRAIN](#drain) says.
 Its priority is the lowest local priority of a session on its Path: a receiver takes the lower of the priority the route carries and its own local priority for the session, and a node's route to itself carries the highest.
@@ -510,7 +514,7 @@ Extending a route never clears its drain, never raises its priority, and always 
 Among routes of equal rank a node selects one that is not marked, then the one through the neighbour it already uses.
 A node selects at once: there is no hold, and no timer between routing nodes.
 
-A receiver MUST close the session with a PROTOCOL_VIOLATION on a ROUTE whose Path does not begin with a hop of Session Number 0, does not end with the sender's Node ID, names the receiver's relay, or has one hop and a cost other than 0.
+A receiver MUST close the session with a PROTOCOL_VIOLATION on a ROUTE whose Path does not begin with a hop of Session Number 0, does not end with the sender's Node ID, names the receiver's relay, has one hop and a cost other than 0, names a marked Node ID past its first hop, or begins with a marked Node ID not followed by the same Relay and Start, unmarked, with Session Number 0.
 
 A SUBSCRIBE, FETCH, TRACK, TRACKS, or DATAGRAMS request names the routing node that announces the claim serving it.
 A subscriber that names none lets the publisher select one (see [Resolution](#resolution)), and a relay forwarding a request names the node it selected or was given.
@@ -1061,6 +1065,7 @@ The Node ID Parameter declares that the sender is a routing node, and the Node I
 Node ID {
   Relay (i),
   Start (i),
+  Marked (8),
 }
 ~~~
 
@@ -1070,6 +1075,10 @@ A receiver MUST close the session with a PROTOCOL_VIOLATION if it is 0.
 
 **Start**:
 Which start of the relay's process this is, higher than every earlier one.
+
+**Marked**:
+1 for a routing node's marked Node ID (see [Routing](#routing)), which names the same process as its Relay and Start and holds no session, else 0.
+A receiver MUST close the session with a PROTOCOL_VIOLATION on any other value, and on a marked Node ID anywhere but the first hop of a [ROUTE](#route)'s Path or a request's Node: in SETUP, in another hop, or in a [DEAD](#dead) or [DRAIN](#drain).
 
 A Node ID appears in this form wherever a message carries one.
 A receiver that receives its own Relay has reached itself, such as a relay dialing an address of its own, and SHOULD close the session.
@@ -1347,7 +1356,7 @@ The claims of one tier are those of the winning prefix shown at the winning dept
 A relay forwards a claim's Above unchanged, adding the distance when it shows the claim at a narrower prefix than the one it learned it at.
 
 **Flags**:
-A bit field: 0x1 (`Unavailable`) when no route reaches the claim from the sender (see [Claims](#claims)), and 0x2 when a node on the way to the claim is draining.
+A bit field: 0x1 (`Unavailable`) when no route reaches the claim from the sender (see [Claims](#claims)), 0x2 when a node on the way to the claim is draining, and 0x4 (`Marked`) when a marked session lies on the way to it (see [Routing](#routing)).
 
 **Priority**:
 The lowest local priority of a session on the way to the claim's publisher, as a u8 with 128 as the midpoint; a publisher's own claim carries 255.
@@ -1598,7 +1607,7 @@ A publisher MUST refuse a request with UNROUTABLE when no claim of that Instance
 A relay fills in the Instance and Minted of the claim it resolved when forwarding a request upstream; TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry them the same way.
 
 **Node**:
-The routing node that announces the claim serving the request (see [Routing](#routing)): its Relay, followed by its Start unless the Relay is 0, which names none and leaves the publisher to select one.
+The routing node that announces the claim serving the request (see [Routing](#routing)), as a [Node ID](#node-id-parameter) that may be marked: its Relay, followed by its Start and Marked unless the Relay is 0, which names none and leaves the publisher to select one.
 An endpoint that is no routing node names none, and serves a request itself whichever node it names.
 TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry it the same way.
 
@@ -1606,6 +1615,7 @@ TRACKS, SUBSCRIBE, FETCH, and DATAGRAMS carry it the same way.
 Node {
   Relay (i),
   [Start (i)],
+  [Marked (8)],
 }
 ~~~
 
@@ -2266,9 +2276,9 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live claim's suffix.
 - Replaced the bidirectional Announce Stream (0x1) with one unidirectional Announce Stream (0x3) per endpoint, carrying everything it says about discovery and routing in order, so none of it overtakes the rest. A second Announce Stream, or one that is reset, closes the session. A finished Announce Stream means its endpoint is leaving.
 - ANNOUNCE_REQUEST (0x5) edits a set of prefixes, none at or below another, and ANNOUNCE_OK (0x6) marks where each edit takes effect; a subscriber sends one edit at a time. An edit too large for one message continues over several ANNOUNCE_REQUESTs, each but the last with `More` set, and takes effect whole. Both endpoints drop the claims within a removed prefix at the ANNOUNCE_OK. SYNCED names the requested prefix by its Prefix ID, and every claim's path is relative to the session rather than to its requested prefix.
-- Replaced the Hop ID list with a claim's Cost, `Above`, flags, priority, and chain on ANNOUNCE_START and ANNOUNCE_UPDATE. The chain names the relays that announced the claim again across a scoped grant or from an earlier version, and a relay takes no claim whose chain names it. The 0x1 flag marks a claim no route reaches, which its sender keeps for 800 milliseconds before ending it, and the 0x2 flag one behind a draining node.
+- Replaced the Hop ID list with a claim's Cost, `Above`, flags, priority, and chain on ANNOUNCE_START and ANNOUNCE_UPDATE. The chain names the relays that announced the claim again across a scoped grant or from an earlier version, and a relay takes no claim whose chain names it. The 0x1 flag marks a claim no route reaches, which its sender keeps for 800 milliseconds before ending it, the 0x2 flag one behind a draining node, and the 0x4 flag one behind a marked session, which a routing node announces under its marked Node ID, whose route is marked.
 - ANNOUNCE_END carries `Lost`: whether the claim's publisher withdrew it or the sender only lost its way to it.
-- Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay and its Start, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Instance. Removed ANNOUNCE_OK's Hop ID.
+- Replaced the SETUP Hop parameter (0x5) with a [Node ID parameter](#node-id-parameter), a Relay, its Start, and a Marked byte that only a routing node's marked Node ID sets, which only a routing node sends. Two routing nodes exchange routes; every other session carries claims alone, one per path and Instance. Removed ANNOUNCE_OK's Hop ID.
 - Added ROUTE (0x7) and ROUTE_END (0x8): a routing node's route to another, a path vector of at most 32 hops, each a Node ID and the Session Number that node learned the route on, with a marked bit, a draining bit, a priority, and an additive cost. A node never uses a route whose Path names its relay, and ranks routes by drain, then priority, then cost.
 - Added DEAD (0x9): a node that loses a session names that hop once to each neighbour it sent a route through it, which ends those routes. A node never uses a route through a session at or below the highest it knows closed between the same two relays.
 - Added DRAIN (0xA): names a node that sent a GOAWAY once per neighbour, and every route through it ranks draining.
