@@ -2,8 +2,10 @@
 //!
 //! A [`Front`] is one path served through a spliced broadcast: it picks the
 //! source it serves from and splices each logical track from that source's
-//! copy, re-splicing when the source is replaced and refusing what a source
-//! will not serve. Everything here is plain data: [`Front::step`] takes one
+//! copy, refusing what the source will not serve. A front serves one source for
+//! its life: when that source ends or another route becomes best, the front
+//! ends and bounces the path's announcement rather than splicing in a source
+//! that may be another broadcast under the same path and group numbers. Everything here is plain data: [`Front::step`] takes one
 //! [`Event`] and returns the [`Action`]s to perform, without locks or waiters.
 //! The origin's driver task feeds events from the world (the route table, the
 //! sources, the tracks, the clock) and executes the actions; see
@@ -122,6 +124,11 @@ pub(super) enum Action {
 	Abort { track: Arc<str>, err: Error },
 	/// Arm (or clear) the deadline the front wants to be woken at.
 	Arm { at: Option<Instant> },
+	/// Re-announce the path to its announce consumers, a retraction then the
+	/// route again. Precedes the [`Action::End`] of a front that served while a
+	/// route may still serve the path: the table alone shows those consumers no
+	/// change, so nothing else tells them the broadcast they hold has ended.
+	Bounce,
 	/// The front is over: reject the parked requesters with `err`, leave each
 	/// read track to end with the copy it is spliced from or still waiting on,
 	/// abort the rest with `err`, and drop every source.
@@ -135,17 +142,17 @@ pub(super) enum Identity {
 	/// covering route, and whoever serves it fixes the identity.
 	Undetermined,
 	/// The first source was a broadcast published on this origin. A newer local
-	/// publisher takes over while the incumbent is live; once the incumbent is
-	/// closing the front ends instead, so a newcomer gets a fresh broadcast
-	/// rather than being spliced into one that is over.
+	/// publisher ends the front, so the newcomer gets a fresh broadcast rather
+	/// than being spliced into the incumbent's.
 	Local,
 	/// The serving route's first hop was absent or [`Hop::UNKNOWN`], which
 	/// identifies nobody: the front cannot resume through any other route, so
 	/// its source ending, `route` leaving the table, or `route` gaining a first
 	/// hop ends it.
 	Anonymous { route: u64 },
-	/// The first hop of the serving route. Routes sharing it are the same
-	/// origin reached another way and safe to resume through.
+	/// The first hop of the serving route. Routes sharing it are the same origin
+	/// reached another way, so they qualify while the first request resolves;
+	/// once a source serves, any route change still ends the front.
 	Publisher(Hop),
 }
 
@@ -352,27 +359,38 @@ impl Front {
 			Some(candidate) if Some(candidate.route) == serving_route => {
 				self.upstream = None;
 			}
-			// Already asking through it.
-			Some(candidate) if self.upstream == Some(candidate.route) => {}
-			// A local newcomer must not be spliced into a broadcast whose
-			// publisher is on the way out: end, and a fresh front serves it.
-			Some(candidate) if candidate.local && self.identity == Identity::Local && serving_closing => {
+			// Another route is now best. It may carry another broadcast under the same
+			// path and group numbers (a local newcomer, a publisher back with its
+			// numbering restarted), so it is never spliced into this one. Keeping the
+			// old source instead would read through a route other than the one this
+			// relay advertises. The front ends, and readers re-request through the
+			// table's choice.
+			Some(_) if self.serving.is_some() => {
+				actions.push(Action::Bounce);
 				self.end(Error::Dropped, actions);
 			}
+			// Already asking through it.
+			Some(candidate) if self.upstream == Some(candidate.route) => {}
 			// A better (or replacement) qualifying route: request through it.
 			Some(candidate) => {
 				self.upstream = Some(candidate.route);
 				actions.push(Action::Request { route: candidate.route });
 			}
 			// Nothing qualifies: the front is over, even with a live source. Its
-			// route left the table and nothing with the same content replaced it,
-			// so it serves nobody new; a later announcement gets a fresh front.
+			// route left the table or now names another publisher, and nothing with
+			// the same content replaced it, so it serves nobody new; a later
+			// announcement gets a fresh front. A route still at the path (renamed in
+			// place) shows the announce cursors only an update, so a front that
+			// served bounces it like any other end.
 			None => {
 				self.upstream = None;
 				let err = match self.identity {
 					Identity::Undetermined => self.last_err.take().unwrap_or(Error::Unroutable),
 					_ => self.last_err.take().unwrap_or(Error::Dropped),
 				};
+				if self.resolved {
+					actions.push(Action::Bounce);
+				}
 				self.end(err, actions);
 			}
 		}
@@ -462,8 +480,7 @@ impl Front {
 			return;
 		}
 		// A standing route can outlive the source it produced. Asking it again
-		// would re-request the broadcast that just ended; another route to the
-		// same publisher may still resume it.
+		// would re-request the broadcast that just ended.
 		self.refused.insert(route);
 		self.serving = None;
 		self.serving_closing = false;
@@ -476,12 +493,11 @@ impl Front {
 			}
 		}
 		self.last_err = Some(Error::Dropped);
-		match self.identity {
-			// A local publisher ending ends its broadcast; a newcomer at the
-			// path gets a fresh one. An anonymous source can never be resumed.
-			Identity::Local | Identity::Anonymous { .. } | Identity::Undetermined => self.end(Error::Dropped, actions),
-			Identity::Publisher(_) => actions.push(Action::Reselect),
-		}
+		// The source's broadcast is over. Another route, even to the same publisher,
+		// may carry a different broadcast under the same path and group numbers, so
+		// nothing resumes it: the front ends and a newcomer gets a fresh one.
+		actions.push(Action::Bounce);
+		self.end(Error::Dropped, actions);
 	}
 
 	fn track_info(
@@ -555,11 +571,21 @@ impl Front {
 				track.ended = true;
 				actions.push(Action::Finish { track: name });
 			}
-			// Died mid-serve after delivering: normal failover, re-splice from
-			// the serving source at the first missing group.
-			Err(_) if delivered => {
+			// Died mid-serve after delivering from a broadcast published here: the
+			// source is that one broadcast, so re-splice from it at the first missing
+			// group, as for a track its publisher re-created.
+			Err(_) if delivered && self.identity == Identity::Local => {
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
+			}
+			// Died mid-serve after delivering from a peer. Asking the source again
+			// could reach another broadcast under the same path (the peer's front may
+			// have ended and a fresh one taken over), so the track ends with the error
+			// instead of re-splicing, and a returning reader is not re-spliced either.
+			Err(err) if delivered => {
+				track.state = TrackState::Idle;
+				track.ended = true;
+				actions.push(Action::Abort { track: name, err });
 			}
 			// Died before producing anything: a refusal.
 			Err(err) => self.refuse(name, source, closing, err, actions),
@@ -827,46 +853,34 @@ mod tests {
 		);
 	}
 
+	/// A better route to the same publisher is never spliced in, since it may carry
+	/// another broadcast under the same group numbers: the front ends instead.
 	#[test]
-	fn better_route_takes_over_and_resplices() {
+	fn a_better_route_ends_the_front() {
 		let mut front = serving(remote(1, 10), 100);
 		assert_actions(
 			front.step(Event::Selected {
 				best: Some(remote(2, 10)),
 				serving_closing: false,
 			}),
-			&[Action::Request { route: 2 }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 2,
-				result: Ok(200),
-			}),
-			&[
-				Action::Detach { source: 100 },
-				Action::Query {
-					track: name("video"),
-					source: 200,
-				},
-			],
-		);
-		assert_eq!(front.serving, Some((200, 2)));
 	}
 
 	#[test]
 	fn a_stale_resolution_is_let_go() {
-		let mut front = serving(remote(1, 10), 100);
+		let mut front = Front::new(LINGER);
 		front.step(Event::Selected {
 			best: Some(remote(2, 10)),
 			serving_closing: false,
 		});
-		// The table moved back before the request landed.
+		// The table moved on before the request landed.
 		assert_actions(
 			front.step(Event::Selected {
 				best: Some(remote(1, 10)),
 				serving_closing: false,
 			}),
-			&[],
+			&[Action::Request { route: 1 }],
 		);
 		assert_actions(
 			front.step(Event::Resolved {
@@ -877,31 +891,20 @@ mod tests {
 		);
 	}
 
+	/// A source closing ends the front, even with another route to its publisher:
+	/// nothing resumes a broadcast through another source.
 	#[test]
-	fn dead_source_reselects_through_the_same_publisher() {
+	fn a_dead_source_ends_the_front() {
 		let mut front = serving(remote(1, 10), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach { source: 100 },
+				Action::Bounce,
+				Action::End { err: Error::Dropped },
+			],
 		);
-		assert!(front.refused_routes().contains(&1));
-		assert_actions(
-			front.step(Event::Selected {
-				best: Some(remote(3, 10)),
-				serving_closing: false,
-			}),
-			&[Action::Request { route: 3 }],
-		);
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 3,
-				result: Ok(300),
-			}),
-			&[Action::Query {
-				track: name("video"),
-				source: 300,
-			}],
-		);
+		assert!(front.ended());
 	}
 
 	/// A live source does not keep a front alive once its route is gone: nothing
@@ -914,7 +917,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -940,20 +943,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
-		);
-	}
-
-	#[test]
-	fn dead_source_with_no_replacement_ends() {
-		let mut front = serving(remote(1, 10), 100);
-		front.step(Event::SourceClosed { source: 100 });
-		assert_actions(
-			front.step(Event::Selected {
-				best: None,
-				serving_closing: false,
-			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -968,7 +958,11 @@ mod tests {
 		assert_eq!(front.pin(), Pin::Route(1));
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[
+				Action::Detach { source: 100 },
+				Action::Bounce,
+				Action::End { err: Error::Dropped },
+			],
 		);
 	}
 
@@ -989,27 +983,6 @@ mod tests {
 			}),
 			&[Action::End { err: Error::NotFound }],
 		);
-	}
-
-	#[test]
-	fn standing_refusal_while_serving_skips_the_refuser() {
-		let mut front = serving(remote(1, 10), 100);
-		front.step(Event::Selected {
-			best: Some(remote(2, 10)),
-			serving_closing: false,
-		});
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 2,
-				result: Err(Refusal {
-					err: Error::NotFound,
-					standing: true,
-				}),
-			}),
-			&[Action::Reselect],
-		);
-		assert!(front.refused_routes().contains(&2));
-		assert_eq!(front.serving, Some((100, 1)));
 	}
 
 	#[test]
@@ -1074,75 +1047,35 @@ mod tests {
 			&[],
 		);
 		assert!(front.tracks[&name("audio")].refused.is_empty());
-		// The replacement is asked afresh.
-		front.step(Event::SourceClosed { source: 100 });
-		front.step(Event::Selected {
-			best: Some(remote(2, 10)),
-			serving_closing: false,
-		});
-		let actions = front.step(Event::Resolved {
-			route: 2,
-			result: Ok(200),
-		});
-		assert!(
-			actions
-				.iter()
-				.any(|action| matches!(action, Action::Query { track, source: 200 } if track.as_ref() == "audio"))
-		);
 	}
 
-	/// The serving copy detaches while still open, because its source closed or a
-	/// better route replaced it, and the replacement refuses the track: the detached
-	/// copy's end, not the refusal, ends it.
+	/// A peer's copy dying after delivering ends the track: asking the peer again could
+	/// reach another broadcast under the same path. A returning reader is not
+	/// re-spliced either.
 	#[test]
-	fn a_refusal_waits_for_the_detached_copy() {
-		for (closed, end, expected) in [true, false].into_iter().flat_map(|closed| {
-			[
-				(closed, Ok(()), Action::Finish { track: name("video") }),
-				(
-					closed,
-					Err(Error::Dropped),
-					Action::Abort {
-						track: name("video"),
-						err: Error::Unroutable,
-					},
-				),
-			]
-		}) {
-			let mut front = serving(remote(1, 10), 100);
-			if closed {
-				front.step(Event::SourceClosed { source: 100 });
-			}
-			front.step(Event::Selected {
-				best: Some(remote(2, 10)),
-				serving_closing: false,
-			});
-			front.step(Event::Resolved {
-				route: 2,
-				result: Ok(200),
-			});
-			assert_actions(
-				front.step(Event::TrackInfo {
-					track: name("video"),
-					source: 200,
-					closing: false,
-					result: Err(Error::Unroutable),
-				}),
-				&[],
-			);
-			assert_actions(
-				front.step(Event::Drained {
-					track: name("video"),
-					result: end,
-				}),
-				&[expected],
-			);
-		}
-	}
-
-	#[test]
-	fn a_copy_dying_after_delivering_resplices() {
+	fn a_peer_copy_dying_after_delivering_ends_the_track() {
 		let mut front = serving(remote(1, 10), 100);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Dropped),
+				delivered: true,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Dropped,
+			}],
+		);
+		assert_actions(front.step(Event::Used { track: name("video") }), &[]);
+	}
+
+	/// A local copy dying after delivering re-splices: the source is the one broadcast
+	/// published here, as when its publisher re-creates the track.
+	#[test]
+	fn a_local_copy_dying_after_delivering_resplices() {
+		let mut front = serving(local(1), 100);
 		assert_actions(
 			front.step(Event::TrackEnded {
 				track: name("video"),
@@ -1188,35 +1121,6 @@ mod tests {
 				delivered: true,
 			}),
 			&[Action::Finish { track: name("video") }],
-		);
-	}
-
-	#[test]
-	fn incompatible_copy_is_refused() {
-		let mut front = serving(remote(1, 10), 100);
-		front.step(Event::Selected {
-			best: Some(remote(2, 10)),
-			serving_closing: false,
-		});
-		front.step(Event::Resolved {
-			route: 2,
-			result: Ok(200),
-		});
-		let other = track::Info {
-			max_age: Duration::from_secs(1),
-			..track::Info::default()
-		};
-		assert_actions(
-			front.step(Event::TrackInfo {
-				track: name("video"),
-				source: 200,
-				closing: false,
-				result: Ok(other),
-			}),
-			&[Action::Abort {
-				track: name("video"),
-				err: Error::Unsupported,
-			}],
 		);
 	}
 
@@ -1300,18 +1204,6 @@ mod tests {
 		assert_actions(
 			front.step(Event::Used { track: name("video") }),
 			&[Action::Arm { at: None }],
-		);
-		// A replacement source does not re-splice it either.
-		front.step(Event::Selected {
-			best: Some(remote(2, 10)),
-			serving_closing: false,
-		});
-		assert_actions(
-			front.step(Event::Resolved {
-				route: 2,
-				result: Ok(200),
-			}),
-			&[Action::Detach { source: 100 }],
 		);
 		let t1 = t0 + LINGER;
 		front.step(Event::Unused {
@@ -1404,8 +1296,10 @@ mod tests {
 		);
 	}
 
+	/// A local newcomer is a new broadcast: the front ends so a fresh one serves it,
+	/// rather than splicing it into the incumbent's tracks.
 	#[test]
-	fn local_newcomer_takes_over_a_live_incumbent() {
+	fn a_local_newcomer_ends_the_front() {
 		let mut front = serving(local(1), 100);
 		assert_eq!(front.identity, Identity::Local);
 		assert_eq!(front.pin(), Pin::Local);
@@ -1414,7 +1308,7 @@ mod tests {
 				best: Some(local(2)),
 				serving_closing: false,
 			}),
-			&[Action::Request { route: 2 }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -1426,7 +1320,7 @@ mod tests {
 				best: Some(local(2)),
 				serving_closing: true,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -1435,7 +1329,11 @@ mod tests {
 		let mut front = serving(local(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[
+				Action::Detach { source: 100 },
+				Action::Bounce,
+				Action::End { err: Error::Dropped },
+			],
 		);
 	}
 

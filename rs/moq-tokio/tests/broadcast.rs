@@ -979,13 +979,15 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 	payloads
 }
 
-/// A path stays routed across two publisher sessions announcing it.
+/// A path stays routed across two publisher sessions announcing it, and a
+/// subscription never rides from one to the other.
 ///
 /// The client connects to two servers announcing the same route. The preferred
-/// (cheaper) route serves the track; when that session dies, the broadcast
-/// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: both routes name the same first hop, so they are the same
-/// origin reached different ways and the subscription rides the failover.
+/// (cheaper) route serves the track. When that session dies, the broadcast ends
+/// rather than splice the standby's copy in, even though both routes name the
+/// same first hop: the publisher may have re-created the broadcast with its
+/// group numbers starting over. The path bounces, and a fresh request reads the
+/// standby.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_migration() {
@@ -1110,13 +1112,41 @@ async fn broadcast_route_migration() {
 		.expect("subscribe failed");
 	assert_eq!(read_payloads(&mut sub, 1).await, ["a1"]);
 
-	// Kill the serving session. Both routes name the same first hop, so the
-	// broadcast re-splices through the standby at the group boundary and the
-	// SAME subscription carries B's continuation.
+	// Kill the serving session. The old subscription ends without any of B's
+	// groups, and a fresh request resolves through the standby.
 	drop(session_a);
+	let end = tokio::time::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.expect("the old subscription ends");
+	assert!(
+		!matches!(end, Ok(Some(_))),
+		"the standby was spliced into the old subscription"
+	);
+	let fresh = tokio::time::timeout(TIMEOUT, async {
+		loop {
+			if let Ok(fresh) = sub_consumer.request_broadcast("test").await
+				&& !fresh.is_clone(&broadcast)
+			{
+				return fresh;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("a fresh request resolves through the standby");
+	let mut sub = fresh
+		.track("video")
+		.unwrap()
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_start(moq_net::track::Position::group(2))
+				.with_max_age(Duration::from_secs(10)),
+		)
+		.await
+		.expect("subscribe failed");
 	assert_eq!(read_payloads(&mut sub, 2).await, ["b2", "b3"]);
 
-	// The new subscription is live: what B produces from here on flows through it.
+	// The fresh subscription is live: what B produces from here on flows through it.
 	{
 		let mut group = standby_track
 			.create_group(moq_net::group::Info { sequence: 4 })
@@ -1126,11 +1156,12 @@ async fn broadcast_route_migration() {
 	}
 	assert_eq!(read_payloads(&mut sub, 1).await, ["b4"]);
 
-	// The path was never retracted across the swap: any events delivered are
-	// active metadata updates (the standby's chain taking over).
+	// The path may have bounced across the swap, but it ends announced.
+	let mut active = true;
 	while let Some(update) = announcements.try_next() {
-		assert!(update.kind.is_active(), "failover must not retract the route");
+		active = update.kind.is_active();
 	}
+	assert!(active, "the failover left the route retracted");
 
 	handle_a.await.expect("server a panicked").expect("server a failed");
 	drop(_session_b);
