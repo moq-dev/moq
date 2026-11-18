@@ -851,6 +851,8 @@ struct Source {
 /// fetch per start: the group holding the run's last start is the newest starting in or before
 /// it, so it is the one asked for, and the run holds a group only if it starts there. A source
 /// with two groups inside one output start gives that start to whichever path writes it first.
+/// A lookup its handler can't answer falls back to the groups held, so it reads as a miss too:
+/// `FillLookup` has no refusal yet.
 async fn source_group(
 	track: &moq_net::track::Consumer,
 	starts: std::ops::RangeInclusive<u64>,
