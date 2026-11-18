@@ -501,7 +501,8 @@ impl Subscribe {
 	/// Write the selected TS media to a writer after resolving its route.
 	pub(super) async fn write_ts(self, mut stdout: impl tokio::io::AsyncWrite + Unpin) -> anyhow::Result<()> {
 		// TS emits PAT/PMT then a continuous PES stream (re-emitting PAT/PMT at
-		// keyframes for tune-in). Avc3/Hev1 sources pass through as Annex-B; AAC
+		// keyframes for tune-in). Annex-B sources (no description) pass through;
+		// length-prefixed ones are rewritten to Annex-B; AAC
 		// is re-framed as ADTS. `fragment_duration` does not apply to TS. The catalog stream
 		// selects the `mpegts` catalog extension so undecoded elementary streams
 		// (SCTE-35, teletext, DVB AC-3, ...) are re-emitted verbatim on their PIDs.

@@ -973,7 +973,8 @@ type Probe = {
 	// The config the browser accepted and encoded a probe frame with. Its bitrate is the ceiling,
 	// before any bandwidth grant.
 	config: VideoEncoderConfig & { framerate: number; bitrate: number };
-	// The codec string the encoder reported for it, which the catalog advertises.
+	// The codec string the encoder reported for it, as the catalog advertises it: `avc3`/`hev1` for
+	// Annex B.
 	reported: string;
 };
 
@@ -1102,7 +1103,17 @@ async function probeEncoder(
 	if (requestsAnnexB(config.codec) && (described || !(first && startsWithStartCode(first)))) {
 		return { refused: "its encoder ignored the requested Annex B format" };
 	}
-	return { reported };
+	return { reported: requestsAnnexB(config.codec) ? inBand(reported) : reported };
+}
+
+// The codec string for Annex B output, which carries its parameter sets in band: `avc3`/`hev1`
+// rather than the `avc1`/`hvc1` an encoder reports, which would say they live in a description the
+// catalog doesn't carry. Only the catalog changes: Safari refuses `avc3` as an encoder string, and the
+// watcher opens an `avc3` rendition as `avc1` where it must.
+function inBand(codec: string): string {
+	if (codec.startsWith("avc1.")) return `avc3.${codec.slice(5)}`;
+	if (codec.startsWith("hvc1.")) return `hev1.${codec.slice(5)}`;
+	return codec;
 }
 
 // The codecs the probe configures for Annex B output.

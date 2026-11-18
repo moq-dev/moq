@@ -1022,9 +1022,13 @@ pub(crate) fn synthesize_video_trak(
 		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
 			let avcc = mp4_atom::Avcc::decode_body(&mut cursor).map_err(Error::mp4)?;
-			// Empty parameter-set lists are the in-band sample entry. A record that
-			// still carries them, including one built from the first keyframe, stays avc1.
-			if h264.inline && avcc.sequence_parameter_sets.is_empty() && avcc.picture_parameter_sets.is_empty() {
+			// avc3 when the samples may still carry parameter sets: a catalog record
+			// passes the samples through as they are, and empty lists are the in-band
+			// entry. A record built from the first keyframe strips them from the
+			// samples, so it stays avc1.
+			let catalog_record = config.description.as_ref().is_some_and(|d| !d.is_empty());
+			let empty = avcc.sequence_parameter_sets.is_empty() && avcc.picture_parameter_sets.is_empty();
+			if h264.inline && (catalog_record || empty) {
 				mp4_atom::Codec::from(mp4_atom::Avc3 {
 					visual,
 					avcc,

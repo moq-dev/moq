@@ -6,9 +6,11 @@
 //! Frames arrive via [`decode`](Import::decode).
 //!
 //! The codec config comes from exactly one of two places: an avcC handed to
-//! [`initialize`](Import::initialize) (the "avc1" shape), or the SPS the splitter
-//! packages into the first keyframe (the "avc3" shape, scanned out of the frame
-//! here). A keyframe that can't be configured from either is an error;
+//! [`initialize`](Import::initialize), for length-prefixed frames, or the SPS the
+//! splitter packages into the first Annex-B keyframe (scanned out of the frame
+//! here). The codec string says where the parameter sets live, never the
+//! framing: Annex-B is always avc3, and an avcC is avc3 when its first keyframe
+//! repeats an SPS in band and avc1 otherwise. A keyframe that can't be configured from either is an error;
 //! non-keyframes before the first config are tolerated (mid-stream joins).
 
 use bytes::Bytes;
@@ -24,8 +26,9 @@ use crate::container::Frame;
 /// Build it with [`new`](Self::new), passing the track producer and the
 /// [`catalog::Reserved`](crate::catalog::Reserved) it reserves its rendition from.
 /// Feed it frames a [`Split`](super::Split) produced via [`decode`](Self::decode).
-/// The catalog rendition fills in lazily once the codec config is known (avcC via
-/// [`initialize`](Self::initialize) for avc1, the first SPS for avc3).
+/// The catalog rendition fills in lazily once the codec config is known (at the
+/// first keyframe after an avcC via [`initialize`](Self::initialize), or the first
+/// Annex-B SPS).
 pub struct Import {
 	/// The NALU length size for the avc1 shape, whose codec config is out-of-band (avcC), so
 	/// keyframes are not scanned for an inline SPS. `None` for Annex-B.
@@ -33,6 +36,9 @@ pub struct Import {
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
+	/// The avcC's config, held until the first keyframe says whether the stream also repeats its
+	/// parameter sets in band (avc3) or keeps them in the record only (avc1).
+	pending: Option<hang::catalog::VideoConfig>,
 }
 
 impl Import {
@@ -56,6 +62,7 @@ impl Import {
 			track,
 			catalog,
 			last_sps: None,
+			pending: None,
 		};
 		if let Some(config) = import.catalog.initial_config() {
 			import.apply_config(config)?;
@@ -65,11 +72,12 @@ impl Import {
 
 	/// Resolve the codec config from the codec's leading bytes.
 	///
-	/// - **avc1** (no leading start code): parsed as an `AVCDecoderConfigurationRecord`,
+	/// - **avcC** (no leading start code): parsed as an `AVCDecoderConfigurationRecord`,
 	///   which resolves the config and is stored as the catalog `description`. Required
-	///   for avc1.
-	/// - **avc3** (leading start code): parsed as Annex-B; any SPS resolves the config.
-	///   Optional, since avc3 also self-initializes from the first keyframe.
+	///   for length-prefixed frames. The rendition publishes at the first keyframe, as avc3
+	///   when that keyframe repeats an SPS in band and avc1 otherwise.
+	/// - **Annex-B** (leading start code): any SPS resolves the config, as avc3.
+	///   Optional, since Annex-B also self-initializes from the first keyframe.
 	///
 	/// Takes a read-only slice: the dispatcher-owned [`Split`](super::Split) is what
 	/// consumes the stream (and reads the same avcC for the NALU length size). The
@@ -83,13 +91,11 @@ impl Import {
 	}
 
 	fn initialize_avc1(&mut self, avcc_bytes: &[u8]) -> Result<()> {
-		// Only switch to avc1 mode once the avcC actually parses, so a parse failure leaves the
-		// importer in avc3 mode where inline-SPS keyframes still self-initialize.
+		// Only switch to length-prefixed mode once the avcC actually parses, so a parse failure
+		// leaves the importer in Annex-B mode where inline-SPS keyframes still self-initialize.
 		let config = config_from_avcc(avcc_bytes)?;
-		// A new record starts a new coded sequence, whose HDR metadata the samples will carry.
-		self.catalog.hdr(&mut self.track, Default::default(), true)?;
 		self.length_size = Some(super::Avcc::parse(avcc_bytes)?.length_size);
-		self.apply_config(config)?;
+		self.pending = Some(config);
 		Ok(())
 	}
 
@@ -268,8 +274,21 @@ impl Import {
 		let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
 		// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
 		// first, so a keyframe that also configures publishes once.
-		let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+		// So does a new record, held for this keyframe.
+		let pending = self.pending.take();
+		let sequence = pending.is_some() || sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
 		self.catalog.hdr(&mut self.track, hdr, sequence)?;
+		if let Some(mut config) = pending {
+			// The record's parameter sets seed every keyframe; one repeated in band means a
+			// keyframe may also change them, which only the in-band codec string allows.
+			if let Some(length_size) = self.length_size
+				&& has_sps(&frame.payload, length_size)
+				&& let hang::catalog::VideoCodec::H264(codec) = &mut config.codec
+			{
+				codec.inline = true;
+			}
+			self.apply_config(config)?;
+		}
 		if let Some(sps) = sps {
 			self.configure_from_sps(&sps)?;
 		}
@@ -284,7 +303,7 @@ impl Import {
 }
 
 /// The catalog config a stream's codec bytes describe, resolved without publishing anything: an
-/// `AVCDecoderConfigurationRecord` (the avc1 shape) or Annex-B carrying an inline SPS (avc3).
+/// `AVCDecoderConfigurationRecord` (avc1) or Annex-B carrying an inline SPS (avc3).
 ///
 /// The video counterpart of [`opus::config`](crate::codec::opus::config), for a caller holding the
 /// bytes but no track: a publisher that wants its catalog rendition to say what its encoder really
@@ -336,6 +355,12 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 		vui.apply(&mut config);
 	}
 	Ok(config)
+}
+
+/// Whether a length-prefixed access unit carries an SPS in band.
+fn has_sps(payload: &[u8], length_size: usize) -> bool {
+	crate::codec::annexb::length_prefixed_nals(payload, length_size)
+		.is_ok_and(|nals| nals.map_while(|nal| nal.ok()).any(is_sps))
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -542,8 +567,9 @@ mod tests {
 		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
 		assert!(color().mastering.is_some());
 
-		// The new avcC is a new description, so it publishes a new track.
+		// The new avcC is a new description, so its next keyframe publishes a new track.
 		import.initialize(&avcc(SPS_BT709)).unwrap();
+		import.decode([idr_frame(33)]).unwrap();
 		assert_eq!(import.name(), "video/1");
 		let color = || catalog.snapshot().video.renditions["video/1"].color.clone().unwrap();
 		assert_eq!(color().primaries, Some(1));
@@ -599,6 +625,7 @@ mod tests {
 		let avcc =
 			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
 		import.initialize(&avcc).unwrap();
+		import.decode([idr_frame(0)]).unwrap();
 
 		let color = catalog.snapshot().video.renditions["video"]
 			.color
@@ -686,16 +713,57 @@ mod tests {
 		let buf = bytes::BytesMut::from(avcc.as_slice());
 		import.initialize(&buf).expect("initialize avc1");
 		assert_eq!(buf.len(), avcc.len(), "initialize must not consume the buffer");
+		assert!(
+			catalog.snapshot().video.renditions.is_empty(),
+			"the first keyframe decides where the parameter sets live"
+		);
+		import.decode([idr_frame(0)]).unwrap();
 
 		let snapshot = catalog.snapshot();
 		let cfg = snapshot.video.renditions.get("video").expect("rendition");
 		let hang::catalog::VideoCodec::H264(h264) = &cfg.codec else {
 			panic!("expected H.264 codec")
 		};
-		assert!(!h264.inline, "avc1 source should land as inline=false");
+		assert!(!h264.inline, "parameter sets only in the avcC land as avc1");
 		assert_eq!(h264.profile, 0x42);
 		assert_eq!(h264.level, 0x1f);
 		assert_eq!(cfg.description.as_ref().expect("description").as_ref(), avcc.as_slice());
+	}
+
+	/// A length-prefixed IDR slice at `ms`, carrying no parameter sets.
+	fn idr_frame(ms: u64) -> Frame {
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let mut au = (idr.len() as u32).to_be_bytes().to_vec();
+		au.extend_from_slice(idr);
+		crate::codec::h264::avc1_frame(au, 4, moq_net::Timestamp::from_millis(ms).unwrap()).unwrap()
+	}
+
+	/// An avcC stream whose keyframes repeat the SPS in band lands as avc3, since a keyframe
+	/// may change parameter sets the record would otherwise fix; the record still frames it.
+	#[tokio::test(start_paused = true)]
+	async fn avcc_with_in_band_parameter_sets_lands_as_avc3() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+		let avcc =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&avcc).unwrap();
+
+		let mut au = Vec::new();
+		for nal in [SPS_BT709, PPS, &[0x65, 0x88, 0x84, 0x21][..]] {
+			au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			au.extend_from_slice(nal);
+		}
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		import
+			.decode([crate::codec::h264::avc1_frame(au, 4, pts).unwrap()])
+			.unwrap();
+
+		let snapshot = catalog.snapshot();
+		let cfg = &snapshot.video.renditions["video"];
+		assert_eq!(cfg.codec.to_string().get(..4), Some("avc3"));
+		assert_eq!(cfg.description.as_deref(), Some(avcc.as_ref()));
 	}
 
 	/// An avc3 stream self-initializes: the config is resolved from the SPS the
