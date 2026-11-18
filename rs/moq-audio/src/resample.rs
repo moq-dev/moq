@@ -99,14 +99,9 @@ impl Resampler {
 			true => Slip::new(chunk_frames, channels as usize, FixedAsync::Input)
 				.map(|slip| Box::new(slip) as _)
 				.map_err(BackendError::from),
-			// The bound applies both ways, and the slowest ratio is its reciprocal.
-			false => Self::sinc(
-				input_rate,
-				output_rate,
-				channels,
-				chunk_frames,
-				1.0 / (1.0 - MAX_ADJUST),
-			),
+			// Rubato accepts `1 / max..=max`. Doubled so a ratio at either clamp, such as
+			// `1.0 - MAX_ADJUST`, stays inside after rounding.
+			false => Self::sinc(input_rate, output_rate, channels, chunk_frames, 1.0 + 2.0 * MAX_ADJUST),
 		};
 		Self::wrap(resampler, input_rate, output_rate, channels, chunk_frames).map_err(BackendError::into_public)
 	}
@@ -718,6 +713,11 @@ mod tests {
 			(48_000, 1.0),
 			(44_100, 0.999),
 			(44_100, 1.002),
+			// The drift loop's clamps, which both backends must accept.
+			(48_000, 1.0 - MAX_ADJUST),
+			(48_000, 1.0 + MAX_ADJUST),
+			(44_100, 1.0 - MAX_ADJUST),
+			(44_100, 1.0 + MAX_ADJUST),
 		] {
 			let mut r = Resampler::adjustable(input_rate, 48_000, 1).unwrap();
 			r.adjust(relative).unwrap();
