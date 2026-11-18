@@ -1,6 +1,8 @@
-//! One track's object keys, listed once and extended after its newest key.
+//! One track's object keys, listed once, extended after its newest key, and listed whole again
+//! to drop what the store pruned.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use futures::TryStreamExt;
 use moq_net::Timescale;
@@ -26,41 +28,74 @@ pub(super) struct Listed {
 }
 
 /// A track's stored objects, by where each starts.
+///
+/// Retention deletes objects that a listing after the newest key never sees, so the whole
+/// directory is listed again once the objects added since its last whole listing outnumber the
+/// ones that listing found, and whenever a read finds one gone. The index then holds at most
+/// about twice what the store retains, for one listed key per added object.
 pub(super) struct Index {
 	pub dir: Path,
 	pub timescale: Option<Timescale>,
 	/// Each object's key. A group's sequence is its start, so these sort by time too.
 	objects: BTreeMap<Start, Path>,
+	/// `.info`, which a listing of the whole directory starts after.
+	origin: Path,
 	/// The newest key listed, which the next listing starts after.
 	cursor: Path,
+	/// How many objects the last whole listing left, and how many listings added since.
+	listed: usize,
+	added: usize,
 }
 
 impl Index {
 	pub fn new(dir: Path, info: &Info) -> Result<Self> {
-		let cursor = crate::path::push(&dir, layout::TRACK_INFO)?;
+		let origin = crate::path::push(&dir, layout::TRACK_INFO)?;
 		Ok(Self {
 			dir,
 			timescale: super::track::timescale(info)?,
 			objects: BTreeMap::new(),
-			cursor,
+			cursor: origin.clone(),
+			origin,
+			listed: 0,
+			added: 0,
 		})
+	}
+
+	/// How many objects it holds.
+	#[cfg(test)]
+	pub fn len(&self) -> usize {
+		self.objects.len()
 	}
 
 	pub fn timed(&self) -> bool {
 		self.timescale.is_some()
 	}
 
-	/// The newest key listed, for the next listing to start after.
-	pub fn cursor(&self) -> &Path {
-		&self.cursor
-	}
-
-	/// Take in the objects a listing after [`Self::cursor`] found.
-	pub fn extend(&mut self, objects: &[Listing]) {
+	/// Take in the objects new since the cursor that a listing found.
+	fn extend(&mut self, objects: &[Listing]) {
 		for (start, path) in objects {
 			self.objects.insert(*start, path.clone());
 			self.cursor = path.clone();
 		}
+		self.added += objects.len();
+	}
+
+	/// The newest start indexed when the next refresh should list the whole directory, which
+	/// [`Self::retain`] then reconciles up to.
+	fn due(&self) -> Option<Start> {
+		if self.added <= self.listed {
+			return None;
+		}
+		self.objects.last_key_value().map(|(start, _)| *start)
+	}
+
+	/// Drop the objects up to `through`, all indexed before the listing that `found` began, that it
+	/// no longer holds: the store pruned them. Later objects were listed since.
+	fn retain(&mut self, through: Start, found: &[Listing]) {
+		self.objects
+			.retain(|start, _| *start > through || found.binary_search_by_key(start, |(start, _)| *start).is_ok());
+		self.listed = self.objects.len();
+		self.added = 0;
 	}
 
 	/// The newest object, which holds the newest stored sequence.
@@ -123,11 +158,53 @@ impl Index {
 		};
 		Some((*start, path.clone()))
 	}
+}
 
-	/// Forget an object the store no longer has, such as one a DVR pruned.
-	pub fn forget(&mut self, start: Start) {
-		self.objects.remove(&start);
+/// Take in the objects new since `index`'s cursor and return them, with the track's `end` when
+/// `end` is set. When the index is due, the listing covers the whole directory, dropping what
+/// the store pruned.
+pub(super) async fn refresh<S: ObjectStore>(store: &S, index: &Mutex<Index>, end: bool) -> Result<Listed> {
+	let (dir, from, cursor, through) = {
+		let index = index.lock().unwrap();
+		let through = index.due();
+		let from = match through {
+			Some(_) => index.origin.clone(),
+			None => index.cursor.clone(),
+		};
+		(index.dir.clone(), from, index.cursor.clone(), through)
+	};
+	let mut listed = list(store, &dir, &from, end).await?;
+	let mut index = index.lock().unwrap();
+	if let Some(through) = through {
+		index.retain(through, &listed.objects);
+		listed.objects.retain(|(_, path)| *path > cursor);
 	}
+	index.extend(&listed.objects);
+	// The first listing starts at the origin too.
+	if from == index.origin {
+		index.listed = index.objects.len();
+		index.added = 0;
+	}
+	Ok(listed)
+}
+
+/// Drop the object starting at `missing`, which a read found gone, and with it every other
+/// object the store pruned, by listing the whole directory. Lists nothing when another read
+/// dropped it already.
+pub(super) async fn pruned<S: ObjectStore>(store: &S, index: &Mutex<Index>, missing: Start) -> Result<()> {
+	let (dir, from, through) = {
+		let mut index = index.lock().unwrap();
+		if index.objects.remove(&missing).is_none() {
+			return Ok(());
+		}
+		let Some((through, _)) = index.objects.last_key_value() else {
+			return Ok(());
+		};
+		(index.dir.clone(), index.origin.clone(), *through)
+	};
+	let listed = list(store, &dir, &from, false).await?;
+	index.lock().unwrap().retain(through, &listed.objects);
+	Ok(())
 }
 
 /// List a track's directory after `cursor`, refusing anything the layout does not name, and

@@ -102,14 +102,18 @@ like any other broadcast; it does not look in object storage on a cache miss.
 Each track starts live at its newest stored group and serves older groups
 from storage when requested by their start. It advertises no max age, so the
 source's live max age cannot make archived history stale. A growing recording is
-periodically listed for new tracks and objects. Once `.end` appears, refreshing
+periodically listed for new tracks and objects, and each track is listed whole
+again as it grows, or once a read finds an object gone, so a server attached to
+a pruned recording tracks what the store retains. Once `.end` appears, refreshing
 stops and tracks end as recorded; without it, including when a recorder stopped
 early, the archive stays live. Empty or unrecognized prefixes are refused.
 
-Serving history is not paced playback from the beginning. Time ranges currently
-resolve against the served track's cache, not the archive's stored keys, so they
-cannot reliably seek old stored content. There is no automatic switch from a
-live broadcast to its archive at the original path.
+A time range the served track's cache can't resolve is looked up from the stored
+keys: its start reaches the stored group containing that time, however old, or
+the oldest group the store still holds when the time is older, such as one
+retention pruned; its end stops just past the group containing it. Serving
+history is not paced playback from the beginning, and there is no automatic
+switch from a live broadcast to its archive at the original path.
 
 The archived catalog is an ordinary track. [HLS](/bin/hls) serves a recording
 from its media tracks, numbered on the catalog's `sync.interval`, just as
