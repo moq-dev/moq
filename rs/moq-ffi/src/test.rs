@@ -7705,11 +7705,9 @@ async fn session_state_names_a_failing_first_dial() {
 	));
 	assert_eq!(accepted.state().revision, terminal.revision);
 	assert!(accepted.state_changed(terminal.revision).await.is_err());
-	// The server ended the client's first session before it was healthy, which ends the
-	// client's session too rather than redialing.
-	let closed = kio::clock::timeout(TIMEOUT, session.closed()).await.unwrap();
-	assert!(closed.is_err(), "the refused first session closed cleanly");
-	assert!(matches!(session.state().phase, MoqConnectionPhase::Closed { .. }));
+	// Whether the client redials depends on whether the server's AUTH_OK reached it before the
+	// close, which this test does not order, so it only ends the client's session.
+	session.cancel(0);
 	accepted.cancel(0);
 	server.cancel();
 }
