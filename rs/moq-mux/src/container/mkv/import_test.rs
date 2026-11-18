@@ -2147,3 +2147,90 @@ fn repeated_reinit_keeps_flat_state() {
 		assert!(snapshot.audio.renditions.is_empty(), "{label}");
 	}
 }
+
+/// An avcC or hvcC track whose first keyframe repeats its SPS in band lands as `avc3`/`hev1`; one
+/// whose keyframe doesn't stays `avc1`/`hvc1`. The keyframe decides even when it streams in a byte
+/// at a time behind an earlier audio block.
+#[test]
+fn keyframe_decides_where_parameter_sets_live() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+
+	let avcc = h264::build_avcc(
+		&[Bytes::from_static(h264::fixtures::SPS_IPB)],
+		&[Bytes::from_static(h264::fixtures::PPS)],
+	)
+	.unwrap();
+	let hvcc = h265::build_hvcc(
+		&[Bytes::from_static(h265::fixtures::VPS)],
+		&[Bytes::from_static(h265::fixtures::SPS_NVENC)],
+		&[Bytes::from_static(h265::fixtures::PPS)],
+	)
+	.unwrap();
+	let prefixed = |nals: &[&[u8]]| -> Vec<u8> {
+		nals.iter()
+			.flat_map(|nal| [&(nal.len() as u32).to_be_bytes()[..], nal].concat())
+			.collect()
+	};
+	let h264_idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+	let h265_idr: &[u8] = &[0x26, 0x01, 0xaf, 0x10];
+
+	for (codec_id, private, sps, idr) in [
+		("V_MPEG4/ISO/AVC", avcc, h264::fixtures::SPS_IPB, h264_idr),
+		("V_MPEGH/ISO/HEVC", hvcc, h265::fixtures::SPS_NVENC, h265_idr),
+	] {
+		for in_band in [false, true] {
+			let keyframe = match in_band {
+				true => prefixed(&[sps, idr]),
+				false => prefixed(&[idr]),
+			};
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![
+					track_entry_audio_opus(1, 48_000.0, 2),
+					MatroskaSpec::TrackEntry(Master::Full(vec![
+						MatroskaSpec::TrackNumber(2),
+						MatroskaSpec::TrackUID(2),
+						MatroskaSpec::TrackType(1),
+						MatroskaSpec::CodecID(codec_id.into()),
+						MatroskaSpec::CodecPrivate(private.to_vec()),
+					])),
+				])
+				.cluster(0, || {
+					vec![
+						simple_block(1, 0, true, &[0xfc, 0x00]),
+						simple_block(2, 0, true, &keyframe),
+					]
+				})
+				.segment_end()
+				.build();
+
+			for chunk in [1, data.len()] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+				let mut mkv = crate::container::mkv::Import::new(broadcast, catalog.reserve());
+				for chunk in data.chunks(chunk) {
+					mkv.decode(chunk).unwrap();
+				}
+				let snapshot = catalog.snapshot();
+				assert_eq!(snapshot.audio.renditions.len(), 1);
+				let config = snapshot
+					.video
+					.renditions
+					.values()
+					.next()
+					.expect("the keyframe publishes the record");
+				let detected = match &config.codec {
+					VideoCodec::H264(codec) => codec.inline,
+					VideoCodec::H265(codec) => codec.in_band,
+					other => panic!("{other:?}"),
+				};
+				assert_eq!(detected, in_band, "{codec_id} {}", config.codec);
+				assert_eq!(config.description.as_deref(), Some(private.as_ref()));
+				let _finished = mkv.finish().unwrap();
+			}
+		}
+	}
+}

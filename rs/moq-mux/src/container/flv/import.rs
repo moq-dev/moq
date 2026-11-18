@@ -91,6 +91,9 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// Demuxed video tracks keyed by RTMP track id (legacy / single-track tags use
 	/// [`DEFAULT_TRACK_ID`]).
 	video: BTreeMap<u8, VideoStream>,
+	/// H.264/H.265 records held for their track's next keyframe, which decides whether the
+	/// parameter sets also ride in band.
+	records: BTreeMap<u8, VideoConfig>,
 	/// Demuxed audio tracks keyed by RTMP track id.
 	audio: BTreeMap<u8, AudioStream>,
 
@@ -125,6 +128,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			header_seen: false,
 			dropped_metadata: 0,
 			video: BTreeMap::new(),
+			records: BTreeMap::new(),
 			audio: BTreeMap::new(),
 			input: crate::container::Input::Open,
 		}
@@ -238,7 +242,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let data = &body[5..];
 
 		match avc_packet_type {
-			AVC_SEQUENCE_HEADER => self.init_video(DEFAULT_TRACK_ID, crate::codec::h264::config(data)?),
+			AVC_SEQUENCE_HEADER => self.hold_record(DEFAULT_TRACK_ID, crate::codec::h264::config(data)?),
 			AVC_NALU => self.write_video(
 				DEFAULT_TRACK_ID,
 				data,
@@ -311,8 +315,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		match packet_type {
 			VIDEO_PACKET_SEQUENCE_START => {
 				let config = match fourcc {
-					b"avc1" => crate::codec::h264::config(payload)?,
-					b"hvc1" => crate::codec::h265::config_from_hvcc(payload)?,
+					b"avc1" => return self.hold_record(track_id, crate::codec::h264::config(payload)?),
+					b"hvc1" => return self.hold_record(track_id, crate::codec::h265::config_from_hvcc(payload)?),
 					b"av01" => crate::codec::av1::config_from_av1c(payload)?,
 					// VP9 carries its config in band; the SequenceStart vpcC is
 					// redundant with the key-frame header we configure from.
@@ -494,6 +498,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				composition_time_ms: composition_time,
 			});
 		}
+		if keyframe {
+			self.resolve_record(track_id, data)?;
+		}
 		if !self.video.contains_key(&track_id) {
 			tracing::debug!("video frame before sequence header, dropping");
 			return Ok(());
@@ -503,7 +510,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
-		self.initial_reservation = None;
+		self.release();
 		let stream = self.video.get_mut(&track_id).expect("checked above");
 		let result = match stream.track.write(Frame {
 			timestamp,
@@ -528,7 +535,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let timestamp = self.refuse(shifted)?;
 		// A media frame means every sequence header has arrived (FLV sends config before data), so
 		// the track set is declared; release the reservation to publish.
-		self.initial_reservation = None;
+		self.release();
 		let stream = self.audio.get_mut(&track_id).expect("checked above");
 		let result = stream
 			.track
@@ -545,6 +552,31 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Refuse all later input when publishing failed, so the caller can tell it from a bad tag.
 	fn refuse<T>(&mut self, result: crate::Result<T>) -> crate::Result<T> {
 		result.inspect_err(|err| self.input = crate::container::Input::Refused(err.clone()))
+	}
+
+	/// Hold an H.264/H.265 sequence header until the track's next keyframe, whose bytes say whether
+	/// it repeats the parameter sets in band. Earlier frames continue the current config.
+	fn hold_record(&mut self, track_id: u8, config: VideoConfig) -> crate::Result<()> {
+		self.records.insert(track_id, config);
+		Ok(())
+	}
+
+	/// Publish the record held for `track_id` once a keyframe arrives.
+	fn resolve_record(&mut self, track_id: u8, keyframe: &[u8]) -> crate::Result<()> {
+		let Some(mut config) = self.records.remove(&track_id) else {
+			return Ok(());
+		};
+		let detected = crate::codec::video::detect_in_band(&mut config, keyframe);
+		self.refuse(detected)?;
+		self.init_video(track_id, config)
+	}
+
+	/// Release the initial reservation once a media frame anchors the clock, unless a held record
+	/// still waits for its keyframe: the first catalog lists every track the sequence headers declared.
+	fn release(&mut self) {
+		if self.records.is_empty() {
+			self.initial_reservation = None;
+		}
 	}
 
 	/// (Re)build the video track `track_id` for `config`, unless it matches the current one.
@@ -663,9 +695,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		// No input follows, so the buffer that waited for the rest of a tag is done.
 		self.buffer = BytesMut::new();
-		// No frame follows to anchor the clock, so publish the declared track set now.
-		self.initial_reservation = None;
+		// No frame follows to anchor the clock, so publish the declared track set now, with a track
+		// whose record no keyframe followed as the record stands. A record replacing a live track's
+		// config has no frame to carry, so that track keeps its own.
 		let mut result = Ok(());
+		for (track_id, config) in std::mem::take(&mut self.records) {
+			if !self.video.contains_key(&track_id) {
+				result = result.and_then(|()| self.init_video(track_id, config));
+			}
+		}
+		self.initial_reservation = None;
 		for stream in self.video.values_mut() {
 			result = result.and(stream.track.end());
 		}

@@ -8,6 +8,29 @@
 
 use crate::catalog::VideoHint;
 
+/// Mark an H.264 or H.265 config in band when the first keyframe after its record repeats an SPS.
+///
+/// The record's parameter sets seed every keyframe; one repeated in band means a keyframe may
+/// also change them, which only the `avc3`/`hev1` codec string allows. `keyframe` is
+/// length-prefixed by the record's length size. A config without a record is left alone.
+pub(crate) fn detect_in_band(config: &mut hang::catalog::VideoConfig, keyframe: &[u8]) -> crate::Result<()> {
+	let Some(record) = config.description.as_deref() else {
+		return Ok(());
+	};
+	match &mut config.codec {
+		hang::catalog::VideoCodec::H264(codec) => {
+			let length_size = super::h264::Avcc::parse(record)?.length_size;
+			codec.inline |= super::h264::has_sps(keyframe, length_size);
+		}
+		hang::catalog::VideoCodec::H265(codec) => {
+			let length_size = super::h265::Hvcc::parse(record)?.length_size;
+			codec.in_band |= super::h265::has_sps(keyframe, length_size);
+		}
+		_ => {}
+	}
+	Ok(())
+}
+
 /// The predefined sample aspects shared by H.264 and H.265 (their VUI Table E-1).
 pub(super) fn sample_aspect(idc: u8) -> Option<(u32, u32)> {
 	Some(match idc {

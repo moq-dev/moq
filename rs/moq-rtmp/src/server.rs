@@ -2208,6 +2208,11 @@ mod tests {
 		)
 		.unwrap();
 		publisher.push(flv::TAG_VIDEO, 0, &vseq).unwrap();
+		// The track is minted at the first keyframe, which says where the parameter sets live.
+		let keyframe = [
+			0x17, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x65, 0x88, 0x84, 0x21, 0x00,
+		];
+		publisher.push(flv::TAG_VIDEO, 0, &keyframe).unwrap();
 
 		let consumer = origin.consume();
 		let broadcast = consumer

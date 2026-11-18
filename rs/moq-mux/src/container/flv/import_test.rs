@@ -459,6 +459,17 @@ async fn import_multitrack_video_many_codecs() {
 	);
 	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
 
+	// A record publishes at its track's first keyframe.
+	let idr = vec![0, 0, 0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let frames = multitrack_video_body(
+		super::FRAME_TYPE_KEY,
+		super::MULTITRACK_MANY_TRACKS_MANY_CODECS,
+		super::VIDEO_PACKET_CODED_FRAMES,
+		None,
+		&[(0, *b"avc1", idr.clone()), (1, *b"avc1", idr)],
+	);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &frames);
+
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
@@ -466,6 +477,82 @@ async fn import_multitrack_video_many_codecs() {
 	let _finished = importer.finish().unwrap();
 
 	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
+}
+
+/// FLV video tags: an AVC sequence header carrying `avcc()`, then one keyframe of `nalus`.
+fn avc_session(nalus: &[u8]) -> (Vec<u8>, Vec<u8>) {
+	let mut headers = flv_header(0x05);
+	let mut vseq = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	vseq.extend_from_slice(&avcc());
+	write_tag(&mut headers, super::TAG_VIDEO, 0, &vseq);
+	let mut aseq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+	aseq.extend_from_slice(&ASC);
+	write_tag(&mut headers, super::TAG_AUDIO, 0, &aseq);
+
+	let mut keyframe = Vec::new();
+	let mut vframe = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_NALU,
+		0,
+		0,
+		0,
+	];
+	vframe.extend_from_slice(nalus);
+	write_tag(&mut keyframe, super::TAG_VIDEO, 0, &vframe);
+	(headers, keyframe)
+}
+
+/// An avcC whose keyframes repeat the SPS in band lands as `avc3`; one whose keyframes don't stays
+/// `avc1`. The record holds the catalog until the keyframe, even past an earlier audio frame.
+#[tokio::test(start_paused = true)]
+async fn avc_keyframe_decides_where_parameter_sets_live() {
+	let idr = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let mut in_band = vec![0, 0, 0, 4, 0x67, 0x42, 0xc0, 0x1f];
+	in_band.extend_from_slice(&idr);
+
+	for (nalus, inline) in [(idr.to_vec(), false), (in_band, true)] {
+		let (headers, keyframe) = avc_session(&nalus);
+		let mut audio = Vec::new();
+		write_tag(
+			&mut audio,
+			super::TAG_AUDIO,
+			0,
+			&[super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0xde, 0xad],
+		);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+		let mut importer = Import::new(broadcast, catalog.reserve());
+
+		importer.decode(&headers).unwrap();
+		importer.decode(&audio).unwrap();
+		assert_eq!(
+			clocks.drain(),
+			vec![],
+			"the record withholds the catalog until its keyframe"
+		);
+
+		importer.decode(&keyframe).unwrap();
+		assert!(!clocks.drain().is_empty(), "the keyframe publishes the catalog");
+		let _finished = importer.finish().unwrap();
+
+		let snap = catalog.snapshot();
+		assert_eq!(snap.audio.renditions.len(), 1);
+		let video = snap.video.renditions.values().next().expect("a video rendition");
+		let VideoCodec::H264(codec) = &video.codec else {
+			panic!("{:?}", video.codec);
+		};
+		assert_eq!(codec.inline, inline, "{}", video.codec);
+		assert_eq!(video.description.as_deref(), Some(avcc().as_slice()));
+	}
 }
 
 /// A publisher that keeps changing its audio and video config replaces each track under a fresh

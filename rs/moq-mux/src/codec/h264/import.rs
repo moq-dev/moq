@@ -279,14 +279,7 @@ impl Import {
 		let sequence = pending.is_some() || sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
 		self.catalog.hdr(&mut self.track, hdr, sequence)?;
 		if let Some(mut config) = pending {
-			// The record's parameter sets seed every keyframe; one repeated in band means a
-			// keyframe may also change them, which only the in-band codec string allows.
-			if let Some(length_size) = self.length_size
-				&& has_sps(&frame.payload, length_size)
-				&& let hang::catalog::VideoCodec::H264(codec) = &mut config.codec
-			{
-				codec.inline = true;
-			}
+			crate::codec::video::detect_in_band(&mut config, &frame.payload)?;
 			self.apply_config(config)?;
 		}
 		if let Some(sps) = sps {
@@ -358,7 +351,7 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 }
 
 /// Whether a length-prefixed access unit carries an SPS in band.
-fn has_sps(payload: &[u8], length_size: usize) -> bool {
+pub(crate) fn has_sps(payload: &[u8], length_size: usize) -> bool {
 	crate::codec::annexb::length_prefixed_nals(payload, length_size)
 		.is_ok_and(|nals| nals.map_while(|nal| nal.ok()).any(is_sps))
 }
