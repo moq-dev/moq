@@ -18,7 +18,7 @@ import type { Demand } from "./track.ts";
 /**
  * One demanded track's claim, snapshotted for {@link allocate}.
  *
- * `id` is the allocator's, not the track's sequence: two reservations of the
+ * `id` is the allocator's, not the track's key: two reservations of the
  * same track are still two claims.
  */
 export interface Want {

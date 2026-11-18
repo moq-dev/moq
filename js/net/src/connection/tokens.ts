@@ -258,7 +258,7 @@ export class Verdict {
 	// Why the loop ended, which answers a set no session will.
 	#closed?: Error;
 	// Why the loop stopped retrying its URL, such as a refused first dial: no session will answer
-	// until a new sequence dials, so a waiting set fails with it, but it is no verdict to latch.
+	// until a new key dials, so a waiting set fails with it, but it is no verdict to latch.
 	#gaveUp?: Error;
 	// Bumped whenever an input changes, so a waiting answer looks again.
 	#epoch = new Signal(0);

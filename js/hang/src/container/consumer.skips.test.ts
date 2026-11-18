@@ -197,10 +197,9 @@ test("a blocking group is kept until its successor starts a budget behind the ne
 		format: new Format("data"),
 		delay: { max: Duration.millis(150) },
 	});
-	const sent = Time.Timestamp.now();
 	const write = (sequence: bigint, timestamp: number) => {
 		const group = track.createGroup(sequence);
-		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: sent });
+		group.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.fromMicros(timestamp) });
 		return group;
 	};
 	try {
@@ -236,15 +235,14 @@ test("a blocking group ages out past an unstamped successor", async () => {
 		format: new Format("data"),
 		delay: { max: Duration.millis(150) },
 	});
-	const sent = Time.Timestamp.now();
 	try {
 		const blocking = track.createGroup(0n);
-		blocking.writeFrame({ payload: Varint.encode(0), timestamp: sent });
+		blocking.writeFrame({ payload: Varint.encode(0), timestamp: Time.Timestamp.fromMicros(0) });
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 0n });
 		track.createGroup(1n).finish();
 		const later = track.createGroup(2n);
 		for (const timestamp of [1_000_000, 2_000_000])
-			later.writeFrame({ payload: Varint.encode(timestamp), timestamp: sent });
+			later.writeFrame({ payload: Varint.encode(timestamp), timestamp: Time.Timestamp.fromMicros(timestamp) });
 		await flush();
 		expect(await consumer.next()).toMatchObject({ kind: "gap" });
 		expect(await consumer.next()).toMatchObject({ kind: "frame", group: 2n });

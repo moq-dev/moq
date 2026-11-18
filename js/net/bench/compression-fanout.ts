@@ -19,12 +19,12 @@ export function fanout() {
 				const tracks = Array.from({ length: publishers }, () =>
 					new Track("bench").accept({ compression: "deflate" }),
 				);
-				const groups: Group[] = tracks.map((track) => track.appendGroup());
+				const groups: Group[] = tracks.map((track) => hooks.appendNext(track));
 				const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
 				let started = performance.now();
 				for (const group of groups) {
 					for (let index = 0; index < frames; index++)
-						group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+						group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 					group.finish();
 				}
 				publish += performance.now() - started;
@@ -78,16 +78,16 @@ export function tails() {
 					const tracks = Array.from({ length: publishers }, () =>
 						new Track("tail").accept({ compression: compress ? "deflate" : "none" }),
 					);
-					const groups = tracks.map((track) => track.appendGroup());
+					const groups = tracks.map((track) => hooks.appendNext(track));
 					const consumers = groups.map((group) => Array.from({ length: readers }, () => group.consume()));
 					const started = performance.now();
 					for (let index = 0; index < frames; index++) {
 						for (const [publisher, group] of groups.entries()) {
-							group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.sequence) });
+							group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 							for (const consumer of consumers[publisher]) {
-								const frame = consumer.tryReadFrameSequence();
+								const frame = consumer.tryReadFrameIndex();
 								if (
-									frame?.sequence !== index ||
+									frame?.index !== index ||
 									frame.payload.length !== frame_bytes ||
 									frame.payload[0] !== 42
 								)

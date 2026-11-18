@@ -45,7 +45,7 @@ try {
 		assert(group, "publisher ended before its past range existed");
 		while (await group.readFrame()) {}
 		group.close();
-		if (group.sequence >= 8n) break;
+		if (group.start >= 8n) break;
 	}
 	const history = await connect();
 	const broadcast = wireOf(history).consume(path);
@@ -55,7 +55,7 @@ try {
 			[0n, 5n, [0n, 2n, 4n]],
 		] as const) {
 			const reader = broadcast.track("test").subscribe({
-				ranges: [{ ...(start === 0n ? {} : { start: { absolute: start } }), end: { absolute: end } }],
+				ranges: [{ ...(start === 0n ? {} : { start: { time: start } }), end: { time: end - 1n } }],
 				delay: { max: null },
 				order: "ascending",
 			});
@@ -63,7 +63,7 @@ try {
 				const seen: bigint[] = [];
 				const ordered = reader.ordered();
 				for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
-					seen.push(group.sequence);
+					seen.push(group.start);
 					try {
 						for (const size of [1024, 513, 513]) {
 							const frame = await group.readFrame();

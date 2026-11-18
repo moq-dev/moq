@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -228,7 +229,7 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 		expect(upstream.client.sendStreams.bidi.length).toBe(before);
 		try {
 			datagrams.insert({ sequence: 4n, timestamp: Timestamp.fromMillis(9), payload: Uint8Array.of(7) });
-			const group = track.appendGroup();
+			const group = hooks.appendNext(track);
 			group.writeFrame({ timestamp: Timestamp.fromMillis(10), payload: Uint8Array.of(8) });
 			group.finish();
 			const received = await reader.recv();

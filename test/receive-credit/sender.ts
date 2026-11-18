@@ -67,24 +67,24 @@ try {
 		// Bun yields a trailing empty line at EOF.
 		if (command === "") continue;
 		if (command === "low") {
-			partial = low.appendGroup();
+			partial = low.appendGroup(Moq.Time.Timestamp.unscaled((low.largest()?.group ?? -1n) + 1n));
 			// A whole frame can return credit at each sealed segment and finish before `high`
 			// reaches stdin. Keep this prefix unsealed until the receiver evicts its stream.
 			partial
-				.createFrame({ size: 2 * window, timestamp: Moq.Time.Timestamp.unscaled(partial.sequence) })
+				.createFrame({ size: 2 * window, timestamp: Moq.Time.Timestamp.unscaled(partial.start) })
 				.write(new Uint8Array((window * 3) / 4).fill(1));
 		} else if (command === "high") {
-			const group = high.appendGroup();
+			const group = high.appendGroup(Moq.Time.Timestamp.unscaled((high.largest()?.group ?? -1n) + 1n));
 			group.writeFrame({
 				payload: new Uint8Array(window / 2).fill(2),
-				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+				timestamp: Moq.Time.Timestamp.unscaled(group.start),
 			});
 			group.finish();
 		} else if (command === "after") {
-			const group = low.appendGroup();
+			const group = low.appendGroup(Moq.Time.Timestamp.unscaled((low.largest()?.group ?? -1n) + 1n));
 			group.writeFrame({
 				payload: new TextEncoder().encode("after"),
-				timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+				timestamp: Moq.Time.Timestamp.unscaled(group.start),
 			});
 			group.finish();
 		} else {

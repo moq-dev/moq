@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -20,7 +21,7 @@ async function received(reader: TrackSubscriber, count: number): Promise<bigint[
 	while (got.length < count) {
 		const group = await reader.recvGroup();
 		if (!group) throw new Error("the track ended");
-		got.push(group.sequence);
+		got.push(group.start);
 	}
 	return got.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
@@ -32,9 +33,9 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
 	// One group per second, so a budget picks how far back a reader reaches.
-	for (let sequence = 0; sequence < 10; sequence++) {
-		const group = producer.appendGroup();
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(sequence * 1000) });
+	for (let key = 0; key < 10; key++) {
+		const group = hooks.appendNext(producer);
+		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(key * 1000) });
 		group.finish();
 	}
 
@@ -73,9 +74,9 @@ for (const [version, alpn] of [
 		const publication = origin.route(Path.from("room"));
 		const broadcast = publication.broadcast;
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-		const write = (sequence: number, millis: number) => {
-			const group = producer.createGroup(BigInt(sequence));
-			group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+		const write = (key: number, millis: number) => {
+			const group = producer.createGroup(BigInt(key));
+			group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 			group.finish();
 		};
 		write(0, 0);
@@ -89,13 +90,13 @@ for (const [version, alpn] of [
 		expect(await received(reader, 1)).toEqual([0n]);
 		// Groups 1 and 2 reach 2s and 3s, at least 1.5s behind the 6s edge, so they are reported
 		// stale after SUBSCRIBE_START.
-		for (const [sequence, millis] of [
+		for (const [key, millis] of [
 			[1, 1000],
 			[2, 2000],
 			[3, 3000],
 			[4, 6000],
 		]) {
-			write(sequence, millis);
+			write(key, millis);
 		}
 		expect(await received(reader, 2)).toEqual([3n, 4n]);
 
@@ -123,9 +124,9 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 	const publication = origin.route(Path.from("room"));
 	const broadcast = publication.broadcast;
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	const write = (sequence: number, millis: number) => {
-		const group = producer.createGroup(BigInt(sequence));
-		group.writeFrame({ payload: new Uint8Array([sequence]), timestamp: Timestamp.fromMillis(millis) });
+	const write = (key: number, millis: number) => {
+		const group = producer.createGroup(BigInt(key));
+		group.writeFrame({ payload: new Uint8Array([key]), timestamp: Timestamp.fromMillis(millis) });
 		group.finish();
 	};
 	write(0, 0);
@@ -135,17 +136,17 @@ test("a widening recovers the stale groups for a bounded lite-07 reader", async 
 		accept({ transport: pair.server, url, version: Version.DRAFT_07, publish: origin.consume() }),
 	]);
 	const remote = wireOf(client).consume(Path.from("room"));
-	const ranges = [{ start: { absolute: 0n }, end: { absolute: 5n } }];
+	const ranges = [{ start: { time: 0n }, end: { time: 4n } }];
 	const reader = remote.track("video").subscribe({ delay: { max: Duration.millis(1500) }, ranges });
 	expect(await received(reader, 1)).toEqual([0n]);
 	// Groups 1 and 2 are reported stale after SUBSCRIBE_START.
-	for (const [sequence, millis] of [
+	for (const [key, millis] of [
 		[1, 1000],
 		[2, 2000],
 		[3, 3000],
 		[4, 6000],
 	]) {
-		write(sequence, millis);
+		write(key, millis);
 	}
 	expect(await received(reader, 2)).toEqual([3n, 4n]);
 

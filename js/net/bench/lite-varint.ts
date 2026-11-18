@@ -59,7 +59,7 @@ const audio = frames(
 
 const group: Sample = {
 	name: "Group",
-	encode: (w, version) => new Group({ subscribe: 3n, sequence: 1_234n }).encode(w, version),
+	encode: (w, version) => new Group({ subscribe: 3n, key: 1_234n }).encode(w, version),
 	decode: (r, version) => Group.decode(r, version),
 };
 

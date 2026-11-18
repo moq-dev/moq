@@ -3,7 +3,7 @@
  *
  * @module
  */
-import type { Group as NetGroup, Track as NetTrack } from "@moq/net";
+import { type Group as NetGroup, type Track as NetTrack, Time } from "@moq/net";
 import { checkGroup } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import * as Group from "./group.ts";
@@ -15,8 +15,8 @@ import { Terminal } from "./terminal.ts";
 /**
  * Exclusive producer for one physical track.
  *
- * Owns the grouped-frame key and sequence namespace. Sequences are
- * allocated monotonically; reuse and exhaustion are refused before encryption. Every write
+ * Owns the grouped-frame key and group start namespace. Starts are allocated monotonically;
+ * reuse and exhaustion are refused before encryption. Every write
  * on the track and its groups runs through one serial pump, so net writes land in call order.
  */
 export class Producer {
@@ -44,22 +44,36 @@ export class Producer {
 		return this.#inner.closed;
 	}
 
-	/** Allocate the next sequence and start a group there; throws {@link Failure} `identity` past `2^53-1`. */
-	appendGroup(): Group.Producer {
-		return this.createGroup(this.#next);
+	/**
+	 * Start a group at `start`, after every group this track holds, as
+	 * {@link NetTrack.Producer.appendGroup} does: a timed track converts `start` into its
+	 * timescale, rounding down. `start` must be above every start this track allocated.
+	 *
+	 * Throws {@link Failure} `reuse` if its start was already allocated, `identity` if it exceeds
+	 * `2^53-1`, or a net error.
+	 */
+	appendGroup(start: Time.Timestamp): Group.Producer {
+		this.#writable();
+		// Converted before allocating, so a refused start allocates nothing.
+		const key = keyOf(start, this.#writer.track.timescale);
+		this.#reserve(key);
+		const inner = this.#inner.appendGroup(start);
+		this.#next = key + 1n;
+		return Group.Producer.make(inner, this.#writer);
 	}
 
 	/**
-	 * Start a group at an explicit sequence, which must be at or above the next unallocated one.
+	 * Start a group at `start`, in the track's timescale, which must be at or above the next
+	 * unallocated one, as {@link NetTrack.Producer.createGroup} does.
 	 *
-	 * Throws {@link Failure} `reuse` if `sequence` was already allocated, `identity` if it
-	 * exceeds `2^53-1`, or a net error.
+	 * Throws {@link Failure} `reuse` if `start` was already allocated, `identity` if it exceeds
+	 * `2^53-1`, or a net error.
 	 */
-	createGroup(sequence: bigint): Group.Producer {
+	createGroup(start: bigint): Group.Producer {
 		this.#writable();
-		this.#reserve(sequence);
-		this.#next = sequence + 1n;
-		const inner = this.#inner.createGroup(sequence);
+		this.#reserve(start);
+		this.#next = start + 1n;
+		const inner = this.#inner.createGroup(start);
 		return Group.Producer.make(inner, this.#writer);
 	}
 
@@ -99,11 +113,18 @@ export class Producer {
 		if (this.#finished || this.#writer.closed) throw this.#writer.aborted ?? new Error("track is closed");
 	}
 
-	// Refuse a sequence this track already allocated or cannot represent.
-	#reserve(sequence: bigint): void {
-		checkGroup(sequence);
-		if (sequence < this.#next) throw new Failure("reuse");
+	// Refuse a start this track already allocated or cannot represent.
+	#reserve(start: bigint): void {
+		checkGroup(start);
+		if (start < this.#next) throw new Failure("reuse");
 	}
+}
+
+// `start` as a group start on a track of `scale`: its value there, rounded down, or the key of an
+// unscaled timestamp on a scale-less track. A mismatch is the net track's to refuse.
+function keyOf(start: Time.Timestamp, scale: Time.Timescale | null): bigint {
+	if (scale == null || start.scale === undefined) return start.key ?? BigInt(Math.floor(start.value));
+	return BigInt(Time.floorAt(start, scale));
 }
 
 /**

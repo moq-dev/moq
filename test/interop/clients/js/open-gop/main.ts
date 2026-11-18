@@ -65,7 +65,7 @@ window.runRecovery = async (packets) => {
 	const track = route.broadcast.createTrack("video", { timescale: Moq.Time.Timescale.MICRO, maxAge: null });
 	let group: Moq.Group.Producer | undefined;
 	for (const packet of packets) {
-		if (group?.sequence !== BigInt(packet.group)) {
+		if (group?.start !== BigInt(packet.group)) {
 			group?.finish();
 			group = track.createGroup(BigInt(packet.group));
 		}

@@ -185,7 +185,7 @@ function ptsContiguous(end: number | undefined, nextStart: number | undefined): 
 function continues(prev: Group, next: Group | undefined): next is Group {
 	if (next === undefined) return false;
 	return (
-		next.consumer.sequence === prev.consumer.sequence + 1n ||
+		next.consumer.start === prev.consumer.start + 1n ||
 		ptsContiguous(prev.end, next.frames.at(0)?.timestamp.asMicros())
 	);
 }
@@ -355,16 +355,16 @@ export class Consumer {
 					const floor = this.#track.floor();
 					const served = await this.#track.start();
 					const start = served !== undefined && (floor === undefined || served > floor) ? served : floor;
-					this.#active = this.#startAt(start) ?? consumer.sequence;
+					this.#active = this.#startAt(start) ?? consumer.start;
 				}
 
 				// A group below the cursor is never delivered: what lies below is already covered by the
 				// gap that moved the cursor, or was never read. Mirrors Rust's consumer. While the start
 				// still waits for a group covering its reach, it starts at the lowest that arrived.
-				if (!this.#starting && consumer.sequence < this.#active) {
+				if (!this.#starting && consumer.start < this.#active) {
 					// Its frames go unobserved, so the estimator learns when backlog arrived: a join's
 					// intervals count only once it has. One produced since, such as an outage's, is no backlog.
-					if (this.#joined !== undefined && consumer.sequence <= this.#joined) {
+					if (this.#joined !== undefined && consumer.start <= this.#joined) {
 						this.#jitter.backlog(consumer.arrived.since(Instant.ZERO).asMillis());
 					}
 					consumer.close();
@@ -385,7 +385,7 @@ export class Consumer {
 
 				// Insert into #groups based on the group sequence number (ascending).
 				// This is used to cancel old groups.
-				let index = this.#groups.findIndex((other) => other.consumer.sequence > consumer.sequence);
+				let index = this.#groups.findIndex((other) => other.consumer.start > consumer.start);
 				if (index === -1) index = this.#groups.length;
 				// Each group is late from the earliest arrival among it and the groups past it. A drained
 				// backlog comes in sequence order, not arrival order, so an arrival can lower those below it.
@@ -466,7 +466,7 @@ export class Consumer {
 					if (!wire) break;
 					this.#decode(group, wire);
 					decoded = true;
-					if (group.consumer.sequence !== this.#active) ahead = true;
+					if (group.consumer.start !== this.#active) ahead = true;
 				}
 			}
 			if (!decoded) return;
@@ -494,7 +494,7 @@ export class Consumer {
 
 	// Note an end the publisher declared in `group`, which a later group's first frame resumes from.
 	#declare(group: Group): void {
-		const sequence = group.consumer.sequence;
+		const sequence = group.consumer.start;
 		if (this.#mediaSequence !== undefined && sequence < this.#mediaSequence) return;
 		if (this.#declared === undefined || sequence > this.#declared) this.#declared = sequence;
 	}
@@ -535,9 +535,9 @@ export class Consumer {
 			// Observed here, before any gap handling or age budget: a target derived from
 			// what survives the budget would only ever confirm the budget it was cut to.
 			if (!marker) {
-				if (this.#mediaSequence === undefined || group.consumer.sequence > this.#mediaSequence)
-					this.#mediaSequence = group.consumer.sequence;
-				if (this.#declared !== undefined && group.consumer.sequence > this.#declared) {
+				if (this.#mediaSequence === undefined || group.consumer.start > this.#mediaSequence)
+					this.#mediaSequence = group.consumer.start;
+				if (this.#declared !== undefined && group.consumer.start > this.#declared) {
 					this.#jitter.end();
 					this.#declared = undefined;
 				}
@@ -616,7 +616,7 @@ export class Consumer {
 		if (this.#active === undefined) return false;
 
 		let skipped = 0;
-		const start = this.#groups[0]?.consumer.sequence;
+		const start = this.#groups[0]?.consumer.start;
 		// The span left after each further skip, computed once the first skip shows more may follow.
 		let spans: Spans | undefined;
 		// The index of the first stamped group past the head, kept across skips so a run of unstamped
@@ -680,7 +680,7 @@ export class Consumer {
 
 			this.#groups.shift();
 			stamped--;
-			this.#pass(first, this.#groups[0]?.consumer.sequence);
+			this.#pass(first, this.#groups[0]?.consumer.start);
 
 			const next = this.#groups[0];
 			const nextStart = next?.frames.at(0)?.timestamp.asMicros() ?? next?.end;
@@ -692,7 +692,7 @@ export class Consumer {
 			// or still-open group may have lost its tail.
 			const ended = this.#ended(first);
 			const truncated = ended instanceof Error;
-			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1n;
+			const adjacent = next?.consumer.start === first.consumer.start + 1n;
 			const continued = (ended === null && adjacent) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
 			if (marker || discarded || truncated || !continued) this.#lost = true;
 			skipped++;
@@ -742,7 +742,7 @@ export class Consumer {
 		if (this.#active === undefined) return false;
 
 		const active = this.#groups[0];
-		if (!active || active.consumer.sequence !== this.#active) return false;
+		if (!active || active.consumer.start !== this.#active) return false;
 		if (this.#ended(active) !== undefined || active.frames.length > 0 || active.end === undefined) return false;
 
 		const next = this.#groups[1];
@@ -750,8 +750,8 @@ export class Consumer {
 		if (!next || nextStart === undefined || active.end < nextStart) return false;
 
 		this.#groups.shift();
-		console.warn(`skipping covered group: ${active.consumer.sequence} -> ${next.consumer.sequence}`);
-		this.#pass(active, next.consumer.sequence);
+		console.warn(`skipping covered group: ${active.consumer.start} -> ${next.consumer.start}`);
+		this.#pass(active, next.consumer.start);
 
 		this.#discard(active);
 		this.#updateBuffered();
@@ -768,7 +768,7 @@ export class Consumer {
 		if (this.#active === undefined || !this.#full()) return false;
 
 		const head = this.#groups[0];
-		if (!head || head.consumer.sequence !== this.#active) return false;
+		if (!head || head.consumer.start !== this.#active) return false;
 		if (head.fault || head.frames.length > 0 || this.#ended(head) !== undefined) return false;
 
 		const next = this.#groups[1];
@@ -776,14 +776,14 @@ export class Consumer {
 
 		this.#groups.shift();
 		console.warn(
-			`skipping a stalled group past the max buffer: track=${this.#track.name} ${head.consumer.sequence} -> ${next.consumer.sequence}`,
+			`skipping a stalled group past the max buffer: track=${this.#track.name} ${head.consumer.start} -> ${next.consumer.start}`,
 		);
 		// Still open, so its tail is lost unless the next group picks up where it ended, which nothing
 		// proves before its start is read. A marker group stops the timeline, so moving past one loses it.
 		const nextStart = next.frames.at(0)?.timestamp.asMicros();
 		const marker = !head.empty && !head.media;
 		if (marker || !ptsContiguous(head.end ?? this.#presentedEnd, nextStart)) this.#lost = true;
-		this.#pass(head, next.consumer.sequence);
+		this.#pass(head, next.consumer.start);
 
 		this.#discard(head);
 		this.#updateBuffered();
@@ -848,7 +848,7 @@ export class Consumer {
 		const start = this.#start;
 		if (
 			start !== undefined &&
-			group.consumer.sequence > start.group &&
+			group.consumer.start > start.group &&
 			group.minMedia !== undefined &&
 			group.minMedia < start.timestamp
 		) {
@@ -895,7 +895,7 @@ export class Consumer {
 			if (this.#error) throw this.#error;
 
 			const ended = this.#closed.peek();
-			if (this.#groups[0]?.consumer.sequence === this.#active || this.#groups.length === 0) {
+			if (this.#groups[0]?.consumer.start === this.#active || this.#groups.length === 0) {
 				this.#hole = undefined;
 			}
 			if (this.#groups.length === 0) {
@@ -931,11 +931,15 @@ export class Consumer {
 			// playout clock reaches where the first group past it begins, nothing missing can still play.
 			if (starting === undefined && this.#active !== undefined && this.#groups.length > 0) {
 				const head = this.#groups[0];
-				if (head.consumer.sequence > this.#active) {
+				if (head.consumer.start > this.#active) {
 					this.#hole = head.late;
 					// Joining at the first arrival leaves no hole to wait for; a floor does.
 					const startup = this.#start === undefined && !this.#floored;
-					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp.asMicros());
+					// The publisher declares the starts it never produced, so a run it skipped holds no group
+					// to wait for or lose, as in Rust's `poll_continues`.
+					const contiguous =
+						this.#track.isSkipped(this.#active, head.consumer.start) ||
+						ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp.asMicros());
 					const empty = head.empty && head.consumer.done;
 					const wait = this.#holeWait(this.#delay.peek(), this.#wait.peek());
 					const bound = this.#bound();
@@ -948,7 +952,7 @@ export class Consumer {
 					const passed = this.#passed(bound) === 0;
 					// The ranges ask for nothing in between, so nothing there is owed.
 					const next = this.#track.nextInRange(this.#active);
-					const excluded = next === undefined || next >= head.consumer.sequence;
+					const excluded = next === undefined || next >= head.consumer.start;
 					// The groups past the hole already fill the max buffer, so it can hold none of what would arrive into it.
 					const full = this.#full();
 					if (
@@ -966,24 +970,19 @@ export class Consumer {
 							this.#lost = true;
 							if (!startup) {
 								console.warn(
-									`skipping missing groups: track=${this.#track.name} ${this.#active} -> ${head.consumer.sequence}`,
+									`skipping missing groups: track=${this.#track.name} ${this.#active} -> ${head.consumer.start}`,
 								);
 							}
 						}
-						this.#active = head.consumer.sequence;
+						this.#active = head.consumer.start;
 						this.#hole = undefined;
 					}
 				}
 			}
 
 			const head = this.#groups.at(0);
-			if (
-				starting === undefined &&
-				head &&
-				this.#active !== undefined &&
-				head.consumer.sequence <= this.#active
-			) {
-				const seq = head.consumer.sequence;
+			if (starting === undefined && head && this.#active !== undefined && head.consumer.start <= this.#active) {
+				const seq = head.consumer.start;
 				const frame = head.frames.shift();
 				if (frame) {
 					this.#refund(head, head.costs.shift() ?? 0);
@@ -1035,7 +1034,7 @@ export class Consumer {
 						// PTS gap is different: an intermediate group may still be in transit, so fall back to
 						// +1 there (the promotion guard above fixes it up once a continuous group arrives).
 						const next = this.#groups.at(0);
-						this.#pass(head, continues(head, next) ? next.consumer.sequence : seq + 1n);
+						this.#pass(head, continues(head, next) ? next.consumer.start : seq + 1n);
 					}
 					head.consumer.close();
 					this.#release(head);
@@ -1146,7 +1145,7 @@ export class Consumer {
 		const covered =
 			target !== undefined && this.#groups.some((group) => group.start !== undefined && group.start <= target);
 		// Nothing earlier can arrive or be held.
-		const lowest = this.#groups[0].consumer.sequence === 0n;
+		const lowest = this.#groups[0].consumer.start === 0n;
 		// Wall time: the newest group landed a whole reach ago.
 		const elapsed = now().since(this.#anchor).asMicros() >= reach;
 		if (ended || this.#full() || target === undefined || covered || lowest || elapsed) {
@@ -1160,7 +1159,7 @@ export class Consumer {
 	// The start's wait ended: delivery starts at the lowest group that arrived, as Rust's.
 	#started(): void {
 		this.#starting = false;
-		this.#active = this.#groups[0]?.consumer.sequence ?? this.#active;
+		this.#active = this.#groups[0]?.consumer.start ?? this.#active;
 	}
 
 	// The point the start reaches back to: the live edge (the newest content) less `reach`. Undefined
@@ -1227,7 +1226,7 @@ export class Consumer {
 			const first = group.frames.at(0);
 			if (!first || group.latest === undefined) continue;
 
-			const contiguous = prev?.consumer.done && prev.consumer.sequence + 1n === group.consumer.sequence;
+			const contiguous = prev?.consumer.done && prev.consumer.start + 1n === group.consumer.start;
 			if (start !== undefined && (end >= first.timestamp.asMicros() || contiguous)) {
 				end = Math.max(end, group.latest);
 			} else {

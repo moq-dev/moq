@@ -24,7 +24,7 @@ export interface Counted {
  * The group streams a subscription has received, so its end can wait for the ones still owed.
  *
  * A publisher ends a subscription before every group stream it opened has necessarily
- * arrived. This records which sequences are accounted for (a stream's header arrived, or
+ * arrived. This records which keys are accounted for (a stream's header arrived, or
  * the publisher dropped them) and how many streams are still being read, and {@link settle}
  * waits on them.
  *
@@ -34,7 +34,7 @@ export interface Counted {
  * @internal
  */
 export class Tail {
-	// The sequences accounted for, whose gaps fold once the grace stops waiting for them.
+	// The keys accounted for, whose gaps fold once the grace stops waiting for them.
 	#ledger = new Ledger();
 	// Group streams whose header arrived, and those still being read and holding the end.
 	#streams = 0;
@@ -44,7 +44,7 @@ export class Tail {
 	#excused = new Set<object>();
 	#changed = new Signal(0);
 	#grace: () => Duration;
-	// Sequences a drop named, so a stream whose header the drop overtook can be told from one
+	// Keys a drop named, so a stream whose header the drop overtook can be told from one
 	// whose gap the grace gave up on.
 	#dropped: Run[] = [];
 
@@ -63,10 +63,10 @@ export class Tail {
 	}
 
 	/** Record a group stream whose header arrived, held until it is read to its end. */
-	open(sequence: bigint): Counted {
+	open(key: bigint): Counted {
 		this.#streams += 1;
 		this.#active += 1;
-		this.#account(sequence, sequence + 1n);
+		this.#account(key, key + 1n);
 
 		let state: "held" | "excused" | "done" = "held";
 		const token = {};
@@ -125,7 +125,7 @@ export class Tail {
 		this.#bump();
 	}
 
-	/** Record sequences `[start, end)` as accounted for without a stream: dropped, or a datagram. */
+	/** Record keys `[start, end)` as accounted for without a stream: dropped, or a datagram. */
 	account(start: bigint, end: bigint): void {
 		this.#account(start, end);
 	}
@@ -136,10 +136,10 @@ export class Tail {
 		this.#account(start, end);
 	}
 
-	/** Whether a drop named `sequence`. */
-	dropped(sequence: bigint): boolean {
-		const run = this.#dropped[runsFrom(this.#dropped, sequence)];
-		return run !== undefined && run.start <= sequence;
+	/** Whether a drop named `key`. */
+	dropped(key: bigint): boolean {
+		const run = this.#dropped[runsFrom(this.#dropped, key)];
+		return run !== undefined && run.start <= key;
 	}
 
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
@@ -162,7 +162,7 @@ export class Tail {
 		return this.#changed;
 	}
 
-	/** Whether every sequence in `[start, end)` is accounted for. */
+	/** Whether every key in `[start, end)` is accounted for. */
 	covers(start: bigint, end: bigint): boolean {
 		return this.#ledger.covers(start, end);
 	}
