@@ -243,7 +243,10 @@ export class Transcode {
 	}
 
 	#run(effect: Effect): void {
-		const config = effect.get(this.in.config);
+		let config = effect.get(this.in.config);
+		// Quantizer mode needs a QP with every frame, which the rendition's own control supplies; the
+		// preview lets the browser's rate control aim at the same budget instead.
+		if (config?.bitrateMode === "quantizer") config = { ...config, bitrateMode: "variable" };
 		const active = this.#active;
 		if (!config) {
 			active?.effect.close();
