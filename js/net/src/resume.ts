@@ -350,13 +350,12 @@ interface Copy {
 	 * groups the newer one may never have.
 	 */
 	until?: bigint | null;
-	/** The group channel ran out: cleanly (`null`) or failed. */
-	done?: Error | null;
 	/**
-	 * How many groups had arrived on the copy when it last ran out cleanly: one arriving since is
-	 * still in flight below its end, which a read still open takes.
+	 * The group channel ran out: failed, or cleanly with how many groups had arrived on the copy
+	 * by then, since one arriving later is still in flight below its end, which a read still open
+	 * takes.
 	 */
-	drained?: number;
+	done?: Error | number;
 	/**
 	 * When a newer group superseded every group under the bound: the newer copy's first group, or
 	 * the track's end. What the reader still lacks from it is waited for from here, for no longer
@@ -866,11 +865,11 @@ class Reader implements ResumeSource {
 				// Drained: the track ended as the copy did, which is not cleanly when its
 				// session went away short of the declared end.
 				if (recv.kind === "done") {
-					copy.done = copy.sub.closed.peek() ?? null;
-					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
+					const closed = copy.sub.closed.peek();
+					copy.done = closed instanceof Error ? closed : hooks.arrived(copy.sub);
+					if (!(closed instanceof Error) && hooks.subscriberEnd(copy.sub)) this.#settled = true;
 				} else if (recv.kind === "error") copy.done = recv.error;
-				else if (this.#drained(copy, delivered)) copy.done = null;
-				if (copy.done === null) copy.drained = hooks.arrived(copy.sub);
+				else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
 				break;
 			}
 		}
@@ -880,7 +879,7 @@ class Reader implements ResumeSource {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
-		return this.#end((copy) => copy.done);
+		return this.#end((copy) => (typeof copy.done === "number" ? null : copy.done));
 	}
 
 	/**
@@ -995,7 +994,7 @@ class Reader implements ResumeSource {
 	#reopen(): void {
 		const serving = this.#serving();
 		for (const copy of this.#copies) {
-			if (copy.done !== null || hooks.arrived(copy.sub) <= (copy.drained ?? 0)) continue;
+			if (typeof copy.done !== "number" || hooks.arrived(copy.sub) <= copy.done) continue;
 			copy.done = undefined;
 			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
 		}

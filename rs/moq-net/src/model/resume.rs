@@ -597,11 +597,10 @@ struct Copy {
 	/// Bounded once the newer copy delivered its first group: nothing past this group is
 	/// taken from it. Unset while it may still feed a group the newer copy never has.
 	until: Option<Option<u64>>,
-	/// The group channel ran out.
-	done: Option<Result<()>>,
-	/// How many groups had arrived on the copy when its channel last ran out cleanly: one
-	/// arriving since is still in flight below its end, which a read still open takes.
-	drained: usize,
+	/// The group channel ran out: cleanly with how many groups had arrived on the copy by
+	/// then, since one arriving later is still in flight below its end, which a read still
+	/// open takes.
+	done: Option<Result<usize>>,
 	/// When a newer group superseded every group under the bound: the newer copy's first
 	/// group, or the track's end. What the reader still lacks from it is waited for from
 	/// here, for no longer than the reader's budget.
@@ -669,7 +668,7 @@ impl Copy {
 	/// bounds may hold a group the new ones admit, and runs out again at once otherwise. A
 	/// copy that failed stays failed.
 	fn reopen(&mut self) {
-		if matches!(self.done, Some(Ok(()))) {
+		if matches!(self.done, Some(Ok(_))) {
 			self.done = None;
 		}
 	}
@@ -1126,7 +1125,7 @@ impl Subscriber {
 			.copies
 			.last()
 			.filter(|copy| Some(copy.generation) == reader.generation)?;
-		if !matches!(serving.done, Some(Ok(())))
+		if !matches!(serving.done, Some(Ok(_)))
 			|| !matches!(serving.track.poll_complete(&kio::Waiter::noop()), Poll::Ready(Ok(())))
 		{
 			return None;
@@ -1456,7 +1455,6 @@ impl Reader {
 			replaced: false,
 			until: None,
 			done: None,
-			drained: 0,
 			since: None,
 			lease: Arc::new(()),
 			feeds: true,
@@ -1560,7 +1558,7 @@ impl Reader {
 		else {
 			return false;
 		};
-		if !matches!(serving.done, Some(Ok(()))) {
+		if !matches!(serving.done, Some(Ok(_))) {
 			return false;
 		}
 		let until = match self
@@ -1696,7 +1694,7 @@ impl Reader {
 			// read stays open, as a cursor still reading it would.
 			let ran_out = match &copy.done {
 				None => false,
-				Some(Ok(())) if !spent && copy.track.poll_arrived(copy.drained, waiter).is_ready() => true,
+				Some(Ok(drained)) if !spent && copy.track.poll_arrived(*drained, waiter).is_ready() => true,
 				Some(_) => continue,
 			};
 			if spent || copy.expired(budget, waiter) {
@@ -1769,13 +1767,12 @@ impl Reader {
 					// Drained: the track ended as the copy did, which is not cleanly when
 					// its session went away short of the declared end.
 					Poll::Ready(Ok(None)) => {
-						copy.done = Some(match copy.track.poll_complete(&kio::Waiter::noop()) {
-							Poll::Ready(end) => end,
-							Poll::Pending => Ok(()),
-						});
 						// Counted before the read, so a group landing during it is read again.
-						copy.drained = arrivals;
-						if matches!(copy.done, Some(Ok(()))) && copy.track.poll_arrived(arrivals, waiter).is_ready() {
+						copy.done = Some(match copy.track.poll_complete(&kio::Waiter::noop()) {
+							Poll::Ready(end) => end.map(|()| arrivals),
+							Poll::Pending => Ok(arrivals),
+						});
+						if matches!(copy.done, Some(Ok(_))) && copy.track.poll_arrived(arrivals, waiter).is_ready() {
 							copy.done = None;
 							late = true;
 							arrivals = copy.track.arrived();
@@ -1809,7 +1806,7 @@ impl Reader {
 		if !parks && !waits && self.exhausted(&[delivered], waiter) {
 			return Some(Poll::Ready(Ok(None)));
 		}
-		match self.poll_end(waiter, |copy| copy.done.clone()) {
+		match self.poll_end(waiter, |copy| copy.done.clone().map(|done| done.map(|_| ()))) {
 			// The serving copy drained, but a copy it replaced may still deliver a group below
 			// its end: the track ends once that copy has.
 			Some(Poll::Ready(Ok(None))) if drained && waits => Some(Poll::Pending),
@@ -2173,7 +2170,6 @@ impl Reader {
 			since: Some(track.now()),
 			track,
 			done: None,
-			drained: 0,
 			lease: Arc::new(()),
 			feeds: true,
 		};

@@ -40,13 +40,13 @@ Follow Reading a failure in `rs/moq-net/verify/README.md`. Replay the path as a 
 
 ## Coverage
 
-Sync commit: `4f4bdfabae21cc91344eee59d92f1f328cc979ac`. Run `git log 4f4bdfabae.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
+Sync commit: `8c939bc9d05e5e882fb4e042a9efbf2db227b721`, plus [moq-dev/moq#9103](https://github.com/moq-dev/moq/pull/9103), which reads a group landing late on a drained copy. Run `git log 8c939bc9d0.. -- rs/moq-net/src/model/resume.rs rs/moq-net/src/model/track.rs` to see what changed since. Follow Coverage in `rs/moq-net/verify/README.md` after a change to a covered function.
 
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/model/resume.rs` `Reader::sync` (reuse of a route's copy, new copy at `newest`) | `Sync`, `Serve` |
 | `rs/moq-net/src/model/resume.rs` `Reader::backfill`, `backfill_gaps` | `Backfill`, `BackfillGaps` |
-| `rs/moq-net/src/model/resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `observe`, `Copy::drained` | `Poll`, `Pass`, `Scan`, `Peek`, `Deliverable`, `Take` |
+| `rs/moq-net/src/model/resume.rs` `Reader::poll_lowest`, `deliverable`, `take`, `observe`, `Copy::done` | `Poll`, `Pass`, `Scan`, `Peek`, `Deliverable`, `Take` |
 | `rs/moq-net/src/model/resume.rs` `Reader::bound_at_end`, `let_go`, `Copy::retains` | `BoundAtEnd`, `LetGo`, `Retains` |
 | `rs/moq-net/src/model/resume.rs` `Reader::poll_end` | `PollEnd` |
 | `rs/moq-net/src/model/resume.rs` `Producer::splice`, `serve_from`, `Producer::end`, `Phase::Finished` | `Serve`, `FrontFinish`, `FrontFail` |
