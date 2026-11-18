@@ -577,6 +577,8 @@ async fn capture_loop<S: CaptureSource>(
 		// The camera's skips already accounted for, from its first read on: frames it replaced
 		// while this encoder was still opening are startup, not frames the encoder fell behind on.
 		let mut reported = None;
+		// An encode released mid-call leaves the encoder refusing every later call, so it can't drain.
+		let mut cancelled = false;
 
 		loop {
 			// Race the next frame against demand, so an on-demand capture releases the
@@ -624,6 +626,7 @@ async fn capture_loop<S: CaptureSource>(
 			}
 			// Released mid-encode, the encoder refuses the next call, so the release below drops it.
 			if wait_capture(&demand, on_demand, producer.write(frame)).await?.is_none() {
+				cancelled = true;
 				break;
 			}
 			// A frame whose decoder identity differs from the probed one (a reopen onto another
@@ -647,9 +650,20 @@ async fn capture_loop<S: CaptureSource>(
 		}
 		// Drop the camera (LED off) and encoder before opening another. The shared clock keeps
 		// advancing while capture is stopped, so mark the break before waiting for demand again,
-		// so the next timestamp does not stretch the previous frame across the gap.
+		// so the next timestamp does not stretch the previous frame across the gap. A backend
+		// that pipelines (Media Foundation, MediaCodec) still holds the last frames, so drain them
+		// into the track first, unless a cancelled encode left the encoder refusing calls.
 		drop(camera);
-		producer.release()?;
+		let stopped = match cancelled {
+			true => producer.release(),
+			false => producer.discontinuity().await,
+		};
+		// The drained frames can move the rendition to a new track, as any written frame can.
+		if producer.demand().name() != demand.name() {
+			demand = producer.demand();
+			tracing::info!(track = %demand.name(), "capture moved to a new track");
+		}
+		stopped?;
 		tracing::info!("capture stopped; released source");
 	}
 }
@@ -744,6 +758,11 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: Wall) -> Self {
+				Self::start_on(behind, wall, encoder::Kind::Software).await
+			}
+
+			/// [`start`](Self::start), capturing through the encoder `kind`.
+			async fn start_on(behind: Duration, wall: Wall, kind: encoder::Kind) -> Self {
 				let time = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 				time.advance(behind).unwrap();
 				let epoch = kio::clock::now()
@@ -776,7 +795,7 @@ mod tests {
 					let mut source = Opens(rx);
 					// Each subscription opens the camera, so a fixture can idle and restart it.
 					let options = Capture {
-						kind: encoder::Kind::Software,
+						kind,
 						on_demand: true,
 						..Capture::default()
 					};
@@ -1050,6 +1069,41 @@ mod tests {
 						"the {idle:?} idle gap collapsed to {}us",
 						after - before
 					);
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// A frame that only the drain at a source end returns can still move the rendition to a
+		/// new track, and capture follows it there rather than watching the ended one.
+		#[tokio::test]
+		async fn a_drained_frame_that_moves_the_track_is_followed() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let kind = encoder::Kind::Named(crate::encode::backend::probe::PIPELINED.into());
+					let fixture = Fixture::start_on(Duration::from_secs(1), kio::clock::wall(), kind).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					camera.push_native(surface(), us(0));
+					camera.close();
+					read(&mut track).await;
+
+					// Reopened four times the size, its one frame comes out of the drain alone.
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
+					let camera = fixture.camera_sized(640, 480);
+					camera.push_native(surface_sized(640, 480), us(40_000));
+					camera.close();
+					while track.read().await.unwrap().is_some() {}
+
+					let mut moved = fixture.subscribe().await;
+					let first = read(&mut moved).await;
+					// A viewer of the new track opens the camera again.
+					fixture.time.advance(Duration::from_millis(40)).unwrap();
+					let camera = fixture.camera_sized(640, 480);
+					camera.push_native(surface_sized(640, 480), us(80_000));
+					camera.close();
+					let second = read_new(&mut moved, &[first]).await;
+					assert!(second > first, "the new track carries the reopened camera");
 					fixture.finish().await;
 				})
 				.await
@@ -1642,6 +1696,61 @@ mod tests {
 			tokio::select! {
 				res = &mut run => panic!("the capture ended: {res:?}"),
 				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
+			}
+		}
+
+		/// A camera that ends drains the encoder into the track before dropping it, so the
+		/// frame a pipelining backend still holds is published rather than lost.
+		#[tokio::test]
+		async fn a_source_end_publishes_the_frames_the_encoder_holds() {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let track = broadcast
+				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let rendition = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
+			let mut producer = producer(track, &catalog, rendition, moq_net::bandwidth::Allocator::unlimited()).await;
+			let snapshot = catalog.snapshot();
+			let container =
+				moq_mux::catalog::hang::Container::try_from(snapshot.video.renditions.get("video").unwrap()).unwrap();
+			let subscriber = broadcast
+				.consume()
+				.track("video")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+				)
+				.await
+				.unwrap();
+			let mut published = moq_mux::container::Consumer::new(subscriber, container);
+
+			let (camera, stream) = camera();
+			let mut source = Streams::new([stream]);
+			let opens = source.opens.clone();
+			let options = Capture {
+				kind: encoder::Kind::Named(probe::PIPELINED.into()),
+				..Capture::default()
+			};
+			let clock = catalog.clock();
+			let state = starting();
+			let run = capture_loop(&mut producer, &mut source, &options, &clock, &state);
+
+			// Held back by one, the only frame reaches the track through the drain alone.
+			camera.push_native(surface(), us(0));
+			camera.close();
+			// The loop reopening the camera has handled the end.
+			tokio::select! {
+				res = run => panic!("the capture ended: {res:?}"),
+				() = until(|| opens.load(Ordering::SeqCst) == 2) => {}
+			}
+			let _finished = producer.finish().await.unwrap();
+			loop {
+				match published.read().await.unwrap() {
+					Some(moq_mux::container::Read::Frame { .. }) => break,
+					Some(_) => {}
+					None => panic!("the encoder's last frame was never published"),
+				}
 			}
 		}
 	}
