@@ -370,8 +370,8 @@ export class Decoder {
 	// estimate rising one bucket at a time. The container
 	// consumer drops aged media at the same max delay, since it observes each frame before applying
 	// it, and carves out the warmup the subscription adds once it has warmed, as Rust's does. It waits
-	// on a missing group only for the delay plus the lookahead: past that the group would play late,
-	// and a reordered backlog's holes waited out to the max would read as jitter to the estimator.
+	// on a missing group only for the delay, its min: past that the group would play late, and a
+	// reordered backlog's holes waited out to the max would read as jitter to the estimator.
 	// See doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const budget = this.#budget(effect);
@@ -951,7 +951,6 @@ export class Decoder {
 		const consumer = new Container.Consumer(sub, {
 			format,
 			delay: this.#delay,
-			wait: this.sync.out.maxDelay,
 			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
 			playhead: playable(this.sync, this.#output),

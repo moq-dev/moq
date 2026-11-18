@@ -46,8 +46,8 @@ Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
 group is observed when the stall clears. A missing group, one that has delivered
-no frame, is waited for only the playout delay plus any lookahead, since past that
-it would play late: a reordered backlog's holes waited out to the whole budget
+no frame, is waited for only the playout delay, the subscription's `delay.min`,
+since past that it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
 jitter. The browser player waits less still, only until the group past the hole
 trails its clock by the stretch threshold, past which the ring would skip the

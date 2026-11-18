@@ -37,8 +37,8 @@ export async function readFinish(
 			if (!format) throw new Error("unsupported finish media container");
 			const subscription = broadcast
 				.track(Catalog.track(name, config))
-				.subscribe({ delay: { max: maxDelay }, ranges: [{ start: { time: 0n } }] });
-			const media = new Container.Consumer(subscription, { format, delay: { max: maxDelay } });
+				.subscribe({ delay: { min: null, max: maxDelay }, ranges: [{ start: { time: 0n } }] });
+			const media = new Container.Consumer(subscription, { format, delay: { min: null, max: maxDelay } });
 			let count = 0;
 			try {
 				for (;;) {
