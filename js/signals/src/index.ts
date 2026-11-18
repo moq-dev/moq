@@ -164,12 +164,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		const deliver = (fn: Subscriber<T>) =>
 			changed || (seen?.has(fn) === true && !isEqual(seen.get(fn) as T, value));
 
-		// Detached before any callback runs, so a waiter one registers waits for the next change.
-		let waiters: Set<Subscriber<T>> | undefined;
-		if (changed || seen) {
-			waiters = this.#changed;
-			this.#changed = new Set();
-		}
+		// Snapshotted before any callback runs, so a waiter one registers waits for the next change.
+		// The live set stays in place, so a waiter cancelled during this flush stays cancelled.
+		const waiters = changed || seen ? [...this.#changed] : undefined;
 
 		for (const fn of this.#subscribers) {
 			if (this.#initial.has(fn)) continue;
@@ -185,10 +182,9 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		if (!waiters) return;
 		for (const fn of waiters) {
 			// Saw the final value, so it keeps waiting.
-			if (!deliver(fn)) {
-				this.#changed.add(fn);
-				continue;
-			}
+			if (!deliver(fn)) continue;
+			// Cancelled by a callback earlier in this flush.
+			if (!this.#changed.delete(fn)) continue;
 			try {
 				fn(value);
 			} catch (error) {

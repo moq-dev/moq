@@ -342,6 +342,27 @@ describe("Signal", () => {
 		dispose();
 	});
 
+	test("a waiter cancelled during a flush stays cancelled", async () => {
+		for (const back of [0, 3]) {
+			const signal = new Signal(0);
+			const keep = signal.subscribe(() => {});
+			signal.set(1);
+			let cancel = () => {};
+			// Sees 1, so the flush reaches it even when the value goes back to 0.
+			const sub = signal.subscribe(() => cancel());
+			signal.set(back);
+			const fired: number[] = [];
+			cancel = signal.changed((v) => fired.push(v));
+			await settle();
+
+			signal.set(2);
+			await settle();
+			expect(fired).toEqual([]);
+			keep();
+			sub();
+		}
+	});
+
 	test("any number of subscribers is legitimate", async () => {
 		const signal = new Signal(0);
 		let notified = 0;
