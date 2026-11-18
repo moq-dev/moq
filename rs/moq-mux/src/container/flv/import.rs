@@ -93,7 +93,7 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	video: BTreeMap<u8, VideoStream>,
 	/// H.264/H.265 records held for their track's next keyframe, which decides whether the
 	/// parameter sets also ride in band.
-	records: BTreeMap<u8, VideoConfig>,
+	records: BTreeMap<u8, Record>,
 	/// Demuxed audio tracks keyed by RTMP track id.
 	audio: BTreeMap<u8, AudioStream>,
 
@@ -106,6 +106,13 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 struct VideoStream {
 	track: crate::container::Producer<crate::catalog::hang::Container, VideoConfig>,
 	config: VideoConfig,
+}
+
+/// An H.264/H.265 sequence header waiting for its track's next keyframe.
+struct Record {
+	config: VideoConfig,
+	/// A [`seek`](Import::seek) made while it waited, for the track the keyframe mints.
+	seek: Option<u64>,
 }
 
 /// The demuxed audio track plus its current catalog config.
@@ -557,18 +564,28 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Hold an H.264/H.265 sequence header until the track's next keyframe, whose bytes say whether
 	/// it repeats the parameter sets in band. Earlier frames continue the current config.
 	fn hold_record(&mut self, track_id: u8, config: VideoConfig) -> crate::Result<()> {
-		self.records.insert(track_id, config);
+		self.records.insert(track_id, Record { config, seek: None });
 		Ok(())
 	}
 
 	/// Publish the record held for `track_id` once a keyframe arrives.
 	fn resolve_record(&mut self, track_id: u8, keyframe: &[u8]) -> crate::Result<()> {
-		let Some(mut config) = self.records.remove(&track_id) else {
+		let Some(Record { mut config, seek }) = self.records.remove(&track_id) else {
 			return Ok(());
 		};
 		let detected = crate::codec::video::detect_in_band(&mut config, keyframe);
 		self.refuse(detected)?;
-		self.init_video(track_id, config)
+		let before = self.video.get(&track_id).map(|stream| stream.track.name().to_string());
+		self.init_video(track_id, config)?;
+		// A track this record minted missed the seek its predecessor took.
+		if let Some(start) = seek
+			&& let Some(stream) = self.video.get_mut(&track_id)
+			&& before.as_deref() != Some(stream.track.name())
+		{
+			let result = stream.track.seek(start);
+			self.refuse(result)?;
+		}
+		Ok(())
 	}
 
 	/// Release the initial reservation once a media frame anchors the clock, unless a held record
@@ -579,8 +596,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 	}
 
-	/// (Re)build the video track `track_id` for `config`, unless it matches the current one.
+	/// (Re)build the video track `track_id` for `config`, unless it matches the current one. The
+	/// config supersedes any record held for the track.
 	fn init_video(&mut self, track_id: u8, config: VideoConfig) -> crate::Result<()> {
+		self.records.remove(&track_id);
 		let result = self.build_video(track_id, config);
 		self.refuse(result)
 	}
@@ -672,6 +691,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		for stream in self.video.values_mut() {
 			stream.track.seek(start)?;
 		}
+		for record in self.records.values_mut() {
+			record.seek = Some(start);
+		}
 		for stream in self.audio.values_mut() {
 			stream.track.seek(start)?;
 		}
@@ -699,9 +721,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// whose record no keyframe followed as the record stands. A record replacing a live track's
 		// config has no frame to carry, so that track keeps its own.
 		let mut result = Ok(());
-		for (track_id, config) in std::mem::take(&mut self.records) {
+		for (track_id, record) in std::mem::take(&mut self.records) {
 			if !self.video.contains_key(&track_id) {
-				result = result.and_then(|()| self.init_video(track_id, config));
+				result = result.and_then(|()| self.init_video(track_id, record.config));
 			}
 		}
 		self.initial_reservation = None;

@@ -1125,3 +1125,59 @@ async fn an_unmappable_restart_refuses_later_input() {
 		"refused with the cause: {err:?}"
 	);
 }
+
+/// A newer sequence header replaces an AVC record still waiting for its keyframe, so the stale
+/// record never claims the new codec's keyframe.
+#[tokio::test(start_paused = true)]
+async fn a_newer_sequence_header_supersedes_a_held_record() {
+	let (mut out, _) = avc_session(&[]);
+	let mut seq = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_SEQUENCE_START];
+	seq.extend_from_slice(b"av01");
+	seq.extend_from_slice(&AV1C);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+	let mut frame = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES_X];
+	frame.extend_from_slice(b"av01");
+	frame.extend_from_slice(&[0x12, 0x00, 0x34, 0x56]);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &frame);
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.decode(&out).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let codecs: Vec<_> = catalog
+		.snapshot()
+		.video
+		.renditions
+		.into_values()
+		.map(|v| v.codec)
+		.collect();
+	assert!(matches!(codecs[..], [VideoCodec::AV1(_)]), "{codecs:?}");
+}
+
+/// A seek made while a record waits for its keyframe keys the group that keyframe opens.
+#[tokio::test(start_paused = true)]
+async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
+	let (headers, keyframe) = avc_session(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	importer.decode(&headers).unwrap();
+	importer.seek(100).unwrap();
+	importer.decode(&keyframe).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let replay = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+	let mut starts = Vec::new();
+	while let Some(group) = track.recv_group().await.unwrap() {
+		starts.push(group.start);
+	}
+	assert_eq!(starts, [100]);
+}
