@@ -11048,7 +11048,7 @@ impl Subscriber {
 	///
 	/// The request is made now. It is sent once the newest group is old enough, when
 	/// whatever serves this node's copy reads it: the session forwarding it upstream, or a
-	/// local publisher waiting in [`Demand::refresh`]. Concurrent requests coalesce into one,
+	/// local publisher waiting in [`Demand::poll_refresh`]. Concurrent requests coalesce into one,
 	/// and all of them resolve when it is sent. Dropping the future before then withdraws
 	/// this caller's request; one already sent stays sent. It resolves at once when there is
 	/// nothing to send: a track that does not refresh, a ratio the newest group is under, a
@@ -23359,8 +23359,9 @@ mod test {
 			group.finish().unwrap();
 		}
 
+		// A budget below one entry keeps the live group and the one it just demoted.
 		assert!(
-			pool.used() <= 3_000,
+			pool.used() <= 2 * cache::ENTRY_OVERHEAD,
 			"empty-group overhead must stay near the budget: {}",
 			pool.used()
 		);
