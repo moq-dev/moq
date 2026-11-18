@@ -7705,8 +7705,16 @@ async fn session_state_names_a_failing_first_dial() {
 	));
 	assert_eq!(accepted.state().revision, terminal.revision);
 	assert!(accepted.state_changed(terminal.revision).await.is_err());
-	// Whether the client redials depends on whether the server's AUTH_OK reached it before the
-	// close, which this test does not order, so it only ends the client's session.
+	// The client reported the session connected, so the peer had accepted it, and its end is
+	// an outage the client redials rather than a refusal.
+	let dropped = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&session, |phase| matches!(phase, MoqConnectionPhase::Disconnected { .. })),
+	)
+	.await
+	.unwrap()
+	.unwrap();
+	assert_eq!(dropped.connects, 1);
 	session.cancel(0);
 	accepted.cancel(0);
 	server.cancel();
@@ -7796,8 +7804,7 @@ async fn client_reconnects_and_resumes_announcements() {
 		.await
 		.expect("first session timed out")
 		.expect("accept task gone");
-	// Past the 1s healthy bar, so the drop redials rather than ending the session.
-	kio::clock::sleep(Duration::from_secs(1)).await;
+	// Connected means the peer accepted the session, so the drop redials rather than ending it.
 	first.cancel(0);
 
 	let status = kio::clock::timeout(
@@ -8048,9 +8055,8 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		Ok(status) => panic!("no transition was pending, got {status:?}"),
 	}
 
-	// The transition the abandoned call would have eaten, once past the 1s healthy bar so
-	// the session redials rather than ends.
-	kio::clock::sleep(Duration::from_secs(1)).await;
+	// The transition the abandoned call would have eaten: a disconnect, since the session was
+	// accepted and so redials rather than ends.
 	server_session.cancel(0);
 
 	let status = kio::clock::timeout(TIMEOUT, cs.state_changed(status.revision))

@@ -9795,13 +9795,8 @@ fn a_credential_rides_every_reconnect() {
 	let _first = first.accept(moq_net::auth::Grant::all());
 	assert_eq!(answer.recv().0, 0);
 
-	// The server ends the session once it was healthy; the client redials and presents the
-	// token again.
-	#[expect(
-		clippy::disallowed_methods,
-		reason = "the test thread has no runtime; the C API's session ages on the real clock"
-	)]
-	std::thread::sleep(Duration::from_secs(1));
+	// The server ends the session the client saw connected, so accepted; the client redials
+	// and presents the token again.
 	server.admit();
 	let again = server.token();
 	assert_eq!(again.token().as_ref(), b"kept", "the reconnect presents it again");
