@@ -7705,11 +7705,19 @@ async fn session_state_names_a_failing_first_dial() {
 	));
 	assert_eq!(accepted.state().revision, terminal.revision);
 	assert!(accepted.state_changed(terminal.revision).await.is_err());
-	// The server ended the client's first session before it was healthy, which ends the
-	// client's session too rather than redialing.
-	let closed = kio::clock::timeout(TIMEOUT, session.closed()).await.unwrap();
-	assert!(closed.is_err(), "the refused first session closed cleanly");
-	assert!(matches!(session.state().phase, MoqConnectionPhase::Closed { .. }));
+	// The client reported the session connected, so the peer had accepted it, and its end is
+	// an outage the client redials rather than a refusal.
+	let dropped = kio::clock::timeout(
+		TIMEOUT,
+		wait_phase(&session, |phase| {
+			matches!(phase, MoqConnectionPhase::Disconnected { .. })
+		}),
+	)
+	.await
+	.unwrap()
+	.unwrap();
+	assert_eq!(dropped.connects, 1);
+	session.cancel(0);
 	accepted.cancel(0);
 	server.cancel();
 }
@@ -7798,8 +7806,7 @@ async fn client_reconnects_and_resumes_announcements() {
 		.await
 		.expect("first session timed out")
 		.expect("accept task gone");
-	// Past the 1s healthy bar, so the drop redials rather than ending the session.
-	kio::clock::sleep(Duration::from_secs(1)).await;
+	// Connected means the peer accepted the session, so the drop redials rather than ending it.
 	first.cancel(0);
 
 	let status = kio::clock::timeout(
@@ -8050,9 +8057,8 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 		Ok(status) => panic!("no transition was pending, got {status:?}"),
 	}
 
-	// The transition the abandoned call would have eaten, once past the 1s healthy bar so
-	// the session redials rather than ends.
-	kio::clock::sleep(Duration::from_secs(1)).await;
+	// The transition the abandoned call would have eaten: a disconnect, since the session was
+	// accepted and so redials rather than ends.
 	server_session.cancel(0);
 
 	let status = kio::clock::timeout(TIMEOUT, cs.state_changed(status.revision))
@@ -8118,11 +8124,23 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
 
-	// A drop applies at once, so this waits on the follow thread alone, never a timer.
-	video.wait_applied(1_000_000);
+	// A drop applies at once, on the next frame written.
+	video.write(gray_frame(0)).unwrap();
+	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();
 	broadcast.close().unwrap();
+}
+
+/// One mid-gray 320x240 RGBA picture at `micros`.
+fn gray_frame(micros: u64) -> crate::video::MoqVideoFrame {
+	crate::video::MoqVideoFrame {
+		timestamp: crate::media::MoqTimestamp {
+			value: micros,
+			scale: Some(1_000_000),
+		},
+		data: vec![0x80; 320 * 240 * 4],
+	}
 }
 
 fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::video::MoqVideoEncoderOutput) {
@@ -8144,36 +8162,6 @@ fn software_camera(bitrate: u64) -> (crate::video::MoqVideoEncoderInput, crate::
 			kind: MoqVideoEncoderKind::Software,
 		},
 	)
-}
-
-/// Dropping a producer parked in `changed()` must stop the follow thread, not
-/// leak it until the session allocator dies.
-#[tokio::test]
-async fn dropping_a_video_producer_stops_the_rate_follower() {
-	use crate::bandwidth::MoqAllocator;
-
-	let estimate = moq_net::bandwidth::Producer::new();
-	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
-		estimate.consume(),
-	)));
-	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let (input, output) = software_camera(4_000_000);
-	let video = crate::video::MoqVideoProducer::new(
-		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
-		crate::video::MoqVideoProducerOptions {
-			input,
-			output,
-			track: Some("camera".into()),
-			bandwidth: Some(bandwidth),
-			lower: None,
-		},
-	)
-	.unwrap();
-
-	kio::clock::timeout(TIMEOUT, tokio::task::spawn_blocking(move || drop(video)))
-		.await
-		.expect("rate follower did not stop")
-		.expect("drop panicked");
 }
 
 /// `set_bitrate` is the manual ceiling: a later grant cannot retune above it.
@@ -8215,9 +8203,107 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
 		.unwrap();
 	assert_eq!(reservation.rate(), Some(1_000_000));
+	video.write(gray_frame(0)).unwrap();
 	assert_eq!(video.applied_bitrate(), 1_000_000);
 
 	video.finish().unwrap();
+	broadcast.close().unwrap();
+}
+
+/// `finish` releases the producer's claim even while the caller keeps its reservation handle,
+/// so a sibling gets the room back.
+#[tokio::test]
+async fn finish_releases_a_reservation_the_caller_keeps() {
+	use crate::bandwidth::MoqAllocator;
+
+	let estimate = moq_net::bandwidth::Producer::new();
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
+		estimate.consume(),
+	)));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let (input, output) = software_camera(4_000_000);
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::video::MoqVideoProducerOptions {
+			input,
+			output,
+			track: Some("camera".into()),
+			bandwidth: Some(bandwidth.clone()),
+			lower: None,
+		},
+	)
+	.unwrap();
+	let reservation = video.reservation().expect("published against an allocator");
+
+	let consumer = broadcast.consume().unwrap();
+	let _sub = consumer.subscribe_track("camera".into(), None).await.unwrap();
+	let sibling = broadcast.publish_track("sibling".into(), None).unwrap();
+	let _sibling_sub = sibling.consume(None).unwrap();
+	let sibling = bandwidth.reserve(&sibling.demand().unwrap(), 4_000_000);
+	// Video outranks a default track, so its tier takes the whole estimate.
+	assert_eq!(reservation.rate(), Some(4_000_000));
+	assert_eq!(sibling.rate(), Some(0));
+
+	video.finish().unwrap();
+	assert_eq!(sibling.rate(), Some(4_000_000));
+	assert_eq!(reservation.rate(), None);
+	reservation.update(1_000_000);
+
+	broadcast.close().unwrap();
+}
+
+/// The audio producer's claim goes with its `finish` too, whatever handles the caller keeps.
+#[tokio::test]
+async fn audio_finish_releases_a_reservation_the_caller_keeps() {
+	use crate::audio::*;
+	use crate::bandwidth::MoqAllocator;
+
+	let estimate = moq_net::bandwidth::Producer::new();
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(4_000_000)))
+		.unwrap();
+	let bandwidth = std::sync::Arc::new(MoqAllocator::new(moq_net::bandwidth::Allocator::new(
+		estimate.consume(),
+	)));
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let audio = MoqAudioProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqAudioProducerOptions {
+			input: MoqAudioEncoderInput {
+				format: MoqAudioSampleFormat::F32,
+				sample_rate: 48_000,
+				channels: 1,
+			},
+			output: MoqAudioEncoderOutput {
+				codec: MoqAudioCodec::opus(),
+				sample_rate: None,
+				channels: None,
+				bitrate: None,
+				frame_duration: None,
+			},
+			track: Some("microphone".into()),
+			bandwidth: Some(bandwidth.clone()),
+		},
+	)
+	.unwrap();
+	let reservation = audio.reservation().expect("published against an allocator");
+
+	let consumer = broadcast.consume().unwrap();
+	let _sub = consumer.subscribe_track("microphone".into(), None).await.unwrap();
+	let sibling = broadcast.publish_track("sibling".into(), None).unwrap();
+	let _sibling_sub = sibling.consume(None).unwrap();
+	let sibling = bandwidth.reserve(&sibling.demand().unwrap(), 4_000_000);
+	let claimed = reservation.rate().expect("an estimate");
+	assert!(claimed > 0);
+	assert_eq!(sibling.rate(), Some(4_000_000 - claimed));
+
+	audio.finish().unwrap();
+	assert_eq!(sibling.rate(), Some(4_000_000));
+	assert_eq!(reservation.rate(), None);
+
 	broadcast.close().unwrap();
 }
 

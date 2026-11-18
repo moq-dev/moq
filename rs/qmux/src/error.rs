@@ -159,6 +159,19 @@ impl Error {
 	}
 }
 
+impl Error {
+	/// The CONNECTION_CLOSE code a peer earns by causing this error, or `None` when the session
+	/// just resets.
+	pub(crate) fn close_code(&self) -> Option<TransportErrorCode> {
+		match self {
+			Self::FrameTooLarge | Self::FrameEncoding => Some(TransportErrorCode::FRAME_ENCODING_ERROR),
+			Self::FlowControlError => Some(TransportErrorCode::FLOW_CONTROL_ERROR),
+			Self::ProtocolViolation => Some(TransportErrorCode::PROTOCOL_VIOLATION),
+			_ => None,
+		}
+	}
+}
+
 // Hand-written rather than `#[from]`: thiserror's `#[from]` would generate
 // `From<Arc<std::io::Error>>`, but `?` call sites yield a bare `std::io::Error`.
 impl From<std::io::Error> for Error {

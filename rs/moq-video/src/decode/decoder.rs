@@ -139,6 +139,12 @@ impl Conversion {
 	}
 }
 
+/// The most colour switches a decoder waits on. Each one is a keyframe whose
+/// pictures the backend still holds behind earlier ones, so a decoder never needs
+/// more than it holds pictures: at most 16 for H.264 and H.265, and this leaves
+/// room for a hardware pipeline beyond that, as the consumer's arrivals do.
+const SWITCHES: usize = 32;
+
 /// Decodes container payloads (the codec bitstream) into raw [`Frame`]s.
 ///
 /// The bring-your-own-payload layer under [`Consumer`](super::Consumer): use it
@@ -294,13 +300,36 @@ impl Decoder {
 	/// Convert one access unit and hand it to the backend.
 	fn submit(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error> {
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
-		if keyframe
-			&& let Some(color) = super::vui::signalled(self.codec, &access_unit)
-			&& self.switches.back().map_or(self.color, |(_, color)| *color) != color
-		{
-			self.switches.push_back((timestamp, color));
+		let signalled = keyframe
+			.then(|| super::vui::signalled(self.codec, &access_unit))
+			.flatten();
+		// A refused keyframe yields no picture, so its switch would wait for one forever.
+		self.backend.decode(access_unit, timestamp, keyframe)?;
+		if keyframe {
+			self.switch(timestamp, signalled);
 		}
-		self.backend.decode(access_unit, timestamp, keyframe)
+		Ok(())
+	}
+
+	/// Record the space a keyframe at `timestamp` switched to, if it signalled one.
+	fn switch(&mut self, timestamp: Timestamp, signalled: Option<Option<Color>>) {
+		// Nothing decoded before a keyframe presents at or after it, so a switch there was
+		// never going to be reached: only timestamps that run backwards leave one.
+		while self.switches.back().is_some_and(|(at, _)| *at >= timestamp) {
+			self.switches.pop_back();
+		}
+		let Some(color) = signalled else { return };
+		if self.switches.back().map_or(self.color, |(_, color)| *color) == color {
+			return;
+		}
+		// A backend that drops pictures leaves switches no output reaches. The oldest is
+		// applied early rather than kept, so the queue stays bounded.
+		if self.switches.len() == SWITCHES
+			&& let Some((_, color)) = self.switches.pop_front()
+		{
+			self.color = color;
+		}
+		self.switches.push_back((timestamp, color));
 	}
 
 	/// Pop the oldest ready raw frame, or `None` while the decoder holds the rest.
@@ -873,6 +902,48 @@ mod tests {
 		let tail = decoder.flush_all().unwrap();
 		assert_eq!(tail[0].timestamp, second);
 		assert_eq!(tail[0].surface.color(), Some(Color::BT601));
+	}
+
+	/// The colour switches a decoder waits on stay bounded whatever a publisher's
+	/// keyframes signal: spaces that alternate while no picture comes back, and
+	/// keyframe timestamps that run backwards.
+	#[test]
+	fn color_switches_stay_bounded() {
+		let mut catalog = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+			in_band: true,
+			profile_space: 0,
+			profile_idc: 2,
+			profile_compatibility_flags: [0x20, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 0x1e,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		});
+		catalog.coded_width = Some(64);
+		catalog.coded_height = Some(64);
+		let kind = super::Kind::Named(probe::HOLDING_NAME.into());
+		let mut decoder = super::Decoder::new(&catalog, &decode_config(kind)).unwrap();
+		let keyframe = |index: u64| {
+			let sps = match index % 2 {
+				0 => super::super::vui::SPS_HDR10,
+				_ => super::super::vui::SPS_NVENC,
+			};
+			bytes::Bytes::from([&[0, 0, 0, 1], sps].concat())
+		};
+
+		for index in 0..100u64 {
+			let at = Timestamp::from_micros(index * 1_000).unwrap();
+			decoder.decode(&keyframe(index), at, true).unwrap();
+			assert!(decoder.switches.len() <= super::SWITCHES);
+		}
+		assert_eq!(decoder.switches.len(), super::SWITCHES);
+		for index in (0..100u64).rev() {
+			let at = Timestamp::from_micros(index).unwrap();
+			decoder.decode(&keyframe(index), at, true).unwrap();
+			assert!(
+				decoder.switches.len() <= 1,
+				"a switch after a later keyframe stays queued"
+			);
+		}
 	}
 
 	/// A VP9 catalog that declares BT.2020 PQ labels the pictures a backend

@@ -225,6 +225,9 @@ export class Connection implements Session {
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 			// Without AUTH, the server checks a client's credential before its SETUP, which the client reads after going live.
 			awaiting: client && hasSetupStream(version) && !hasAuth(version),
+			// Lite-03/04 have neither, so the peer refuses the credential only by closing the
+			// session. Lite-01/02 answered in the negotiation SETUP already read.
+			silent: client && (version === Version.DRAFT_03 || version === Version.DRAFT_04),
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -595,7 +598,7 @@ export class Connection implements Session {
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
-			this.#auth.accepted();
+			this.#auth.accept();
 			this.#peerRole.set(setup.role);
 			this.#peerImplementation.resolve(setup.implementation);
 		} else {

@@ -378,7 +378,7 @@ pub(crate) fn default_bitrate(size: Size, framerate: FrameRate, codec: Codec) ->
 /// Video encoder. Build one with [`Encoder::new`], submit raw [`Frame`]s via
 /// [`encode`](Self::encode), [`receive`](Self::receive) the resulting
 /// [`Encoded`] access units until it returns `None`, and publish them through a
-/// [`Producer`](super::Producer) built for the same [`Codec`].
+/// [`Publisher`](super::Publisher) built for the same [`Codec`].
 ///
 /// An encoder is bound to the thread that opens it. Use [`Sink`](super::Sink)
 /// when the owner can move between threads.
@@ -475,8 +475,7 @@ impl Encoder {
 	///
 	/// Returns [`Error::BitrateUnsupported`] if this backend can't retune while
 	/// running. That's not fatal: the encoder keeps running at its current rate,
-	/// so a caller driving a control loop should stop adapting rather than stop
-	/// encoding.
+	/// so a caller driving a control loop keeps encoding, and may try again later.
 	pub fn set_bitrate(&mut self, bitrate: moq_net::bandwidth::Rate) -> Result<(), Error> {
 		if bitrate == self.bitrate {
 			return Ok(());
@@ -490,7 +489,7 @@ impl Encoder {
 		Ok(())
 	}
 
-	/// The codec this encoder emits. A [`Producer`](super::Producer) must be
+	/// The codec this encoder emits. A [`Publisher`](super::Publisher) must be
 	/// built for the same codec to publish its packets.
 	pub fn codec(&self) -> Codec {
 		self.codec

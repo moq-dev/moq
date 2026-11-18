@@ -752,9 +752,10 @@ impl<B: Backend> Cluster<B> {
 		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
 		options.transport.stream_buffer = self.window;
-		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
-		options.transport.max_concurrent_uni_streams =
-			self.credit.map(|credit| credit + usize::from(!self.version.is_lite()));
+		// Draft 22 keeps its SETUP stream open beside the groups, and moq-lite-07 the
+		// relay's Announce Stream: neither may take the one grant the groups share.
+		let persistent = !self.version.is_lite() || self.version.as_str() == "moq-lite-07-wip";
+		options.transport.max_concurrent_uni_streams = self.credit.map(|credit| credit + usize::from(persistent));
 		options.client_discovers_all = self.discovers_all;
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(B::origin(&self.relays[relay]).consume().with_hidden(true));

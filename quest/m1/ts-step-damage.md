@@ -1,12 +1,13 @@
-# [M] A TS import survives one stream's timestamp step
+# [M] A lone TS stream's timestamp step is explained before it is handled
 
 ## Goal
 
-A single elementary stream whose PTS jumps alone (a bit error or splicer
-glitch on one audio PID) damages only that stream: the import drops and
-counts the stray packets and keeps running. A data-only program whose PCR
-jumps by more than half a wrap counts the reading as unplaced instead of
-failing the import.
+The source of a single elementary stream whose PTS jumps alone is found and
+reproduced. If it is a real source behavior, such as a muxer or splicer
+resetting one stream, the import handles that behavior where it detects it;
+if it is corruption nobody can explain, such as a bit flip in a PES header,
+the import ends with the cause, as it does today. A data-only program whose
+PCR jumps by more than half a wrap is judged the same way.
 
 ## Plan
 
@@ -35,9 +36,18 @@ raises the floor only when a second packet confirms it (rejected: keeping
 the fatal rewind, which lets one bad packet end a live ingest; re-anchoring
 as `release` did, which shifts good audio against video).
 
-Tests: PCR, H.264, and AAC on one timeline with one AAC packet 30 s ahead,
-then normal packets: `decode` keeps succeeding and counts one damaged
-packet; and a data-only program with a PCR jump past half a wrap.
+Superseded 2026-11-18 (maintainer, /quest-plan of the enum-return audit):
+✅ investigate the root cause first: "We should not try to support random bit
+flips that we don't understand and limp along with broken functionality."
+This replaces the 2026-11-17 design above that drops and counts a lone
+stream's stray packets as damage (rejected now: tolerating an unexplained
+step). [TS unit abort](/quest/m1/ts-unit-abort.md) removes the import's
+damage tolerance; this quest adds back only a step with a known source, as an
+explicit case. If no real source turns up, delete this quest and record why.
+
+Tests: a capture or generator reproducing the step's real source, and the
+import's behavior on it; for unexplained corruption, the import ends with the
+cause.
 
 Public API: none. Wire: none.
 
@@ -45,6 +55,10 @@ Caused by, for the fix PR's `## Caused by`:
 
 - [moq-dev/moq#7898](https://github.com/moq-dev/moq/pull/7898) - made a lone stream's rewind fatal to the import
 - [moq-dev/moq#5967](https://github.com/moq-dev/moq/pull/5967) - PCR unwrap that can go negative on a data-only program
+
+## Required
+
+- [TS unit abort](/quest/m1/ts-unit-abort.md) - removes the import's damage tolerance, so a known step is added back as an explicit case
 
 ## Related
 
