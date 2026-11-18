@@ -941,14 +941,19 @@ impl Publish {
 			let res = crate::ffi::run(async move {
 				tokio::select! {
 					biased;
-					// Ahead of `alive`, so a track that aborted reports why rather than `0`.
+					// The watcher's end first, so a cancelled wait never takes a later request.
+					// A track that aborted still reports why, read without waiting.
+					_ = alive.closed() => match demand.poll_closed(&kio::Waiter::noop()) {
+						std::task::Poll::Ready(Err(moq_net::Error::Dropped)) => Ok(0),
+						std::task::Poll::Ready(Err(err)) => Err(err.into()),
+						_ => Ok(0),
+					},
 					res = demand.refresh() => match res {
 						Ok(()) => Ok(moq_demand::MOQ_DEMAND_REFRESH as i32),
 						// The track ended without an abort, as the watcher reports it.
 						Err(moq_net::Error::Dropped) => Ok(0),
 						Err(err) => Err(err.into()),
 					},
-					_ = alive.closed() => Ok(0),
 				}
 			})
 			.await;

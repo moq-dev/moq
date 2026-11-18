@@ -1943,7 +1943,8 @@ async fn subscriber_refresh_returns_once_sent() {
 }
 
 /// A standalone broadcast drives its own cache pool, so a refresh its track's interval defers
-/// still goes out once the interval passes.
+/// still goes out once the interval passes, even after the broadcast handle drops without a
+/// close and leaves the track to end on its own.
 #[tokio::test]
 async fn standalone_refresh_waits_out_the_interval() {
 	const INTERVAL: Duration = Duration::from_millis(200);
@@ -1958,6 +1959,7 @@ async fn standalone_refresh_waits_out_the_interval() {
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let demand = track.demand().unwrap();
 	let consumer = track.consume(None).unwrap();
+	drop(broadcast);
 	let started = kio::clock::now();
 	track.append_group(us(0)).unwrap().finish().unwrap();
 

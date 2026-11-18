@@ -424,10 +424,7 @@ impl MoqBroadcastProducer {
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let driver = Background::driver(PoolDriver {
-			pool: broadcast.info().pool.clone(),
-			broadcast: broadcast.consume(),
-		});
+		let driver = Background::driver(PoolDriver(broadcast.info().pool.downgrade()));
 		Ok(Arc::new(Self::from_inner(broadcast, driver)?))
 	}
 
@@ -470,12 +467,13 @@ impl MoqBroadcastProducer {
 	}
 }
 
-/// Collects a standalone broadcast's cache pool, which no origin drives, until the broadcast ends,
-/// so its wall-clock deadlines fire.
-struct PoolDriver {
-	pool: moq_net::cache::Pool,
-	broadcast: moq_net::broadcast::Consumer,
-}
+/// Collects a standalone broadcast's cache pool, which no origin drives, so its wall-clock
+/// deadlines fire.
+///
+/// Runs while anything still caches into the pool: the broadcast, a track it released when its
+/// handle dropped without a close, or a reader. Holding it weakly, it ends at the first poll
+/// after the last of them drops, which the pool's periodic sweep bounds.
+struct PoolDriver(moq_net::cache::PoolWeak);
 
 impl moq_net::time::Driver for PoolDriver {
 	fn poll(
@@ -483,10 +481,8 @@ impl moq_net::time::Driver for PoolDriver {
 		now: moq_net::time::Instant,
 		waiter: &kio::Waiter,
 	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
-		if self.broadcast.poll_closed(waiter).is_ready() {
-			return Err(moq_net::Error::Closed);
-		}
-		Ok(self.pool.poll(now, waiter))
+		let pool = self.0.upgrade().ok_or(moq_net::Error::Closed)?;
+		Ok(pool.poll(now, waiter))
 	}
 }
 
