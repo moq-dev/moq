@@ -1482,7 +1482,13 @@ test("default audio replays the last second after three seconds without a subscr
 		// The subscription's one second reaches back from the newest frame, 152, to 102.
 		const reader = late.ordered();
 		for (let index = 102; index < 153; index++) {
-			const group = (await reader.nextGroup())?.group;
+			let item = await reader.nextGroup();
+			// The replay's older groups, past the subscription's second, read as gaps ahead of it.
+			while (item?.kind === "gap") {
+				expect(item.end).toBeLessThanOrEqual(BigInt(index * 20_000));
+				item = await reader.nextGroup();
+			}
+			const group = item?.group;
 			if (!group) throw new Error("expected buffered group");
 			const frame = await group.readFrame();
 			if (!frame) throw new Error("expected buffered frame");
