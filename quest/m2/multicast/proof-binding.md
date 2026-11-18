@@ -29,7 +29,8 @@ against the prototype; proposed by
   its Start plus 1 ([moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053)).
   The route to that identity is the node's own: marked, at cost 0, with the
   Path `[marked identity, node]`. The claim keeps its own cost, the giver's
-  claim cost plus the adopting link's, and no Path of its own. Model both, or
+  claim cost plus the adopting link's, and its own chain, but no route Path
+  of its own. Model both, or
   say why the proof's single identity per node covers them.
 - Move the binding to the router: point `route/tests/algebra.rs` and
   `route/tests/sticky.rs` at the router's own functions for a node's own
