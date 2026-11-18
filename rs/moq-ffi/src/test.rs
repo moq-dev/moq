@@ -1958,17 +1958,24 @@ async fn standalone_refresh_waits_out_the_interval() {
 	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
 	let demand = track.demand().unwrap();
 	let consumer = track.consume(None).unwrap();
-	let started = std::time::Instant::now();
+	let started = kio::clock::now();
 	track.append_group(us(0)).unwrap().finish().unwrap();
 
 	// Separate tasks, so one's timeout never re-polls the other past the deadline.
 	let sent = tokio::spawn(async move { kio::clock::timeout(TIMEOUT, consumer.refresh()).await });
 	let asked = tokio::spawn(async move { kio::clock::timeout(TIMEOUT, demand.refresh()).await });
-	asked.await.unwrap().expect("timed out waiting for the request").unwrap();
+	asked
+		.await
+		.unwrap()
+		.expect("timed out waiting for the request")
+		.unwrap();
 	sent.await.unwrap().expect("timed out waiting for the send").unwrap();
 	let elapsed = started.elapsed();
 	assert!(elapsed >= INTERVAL, "deferred until the interval passed");
-	assert!(elapsed < TIMEOUT / 2, "sent once the interval passed, not on a later poll");
+	assert!(
+		elapsed < TIMEOUT / 2,
+		"sent once the interval passed, not on a later poll"
+	);
 }
 
 #[tokio::test]
