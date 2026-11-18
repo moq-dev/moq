@@ -296,9 +296,13 @@ impl<E: super::Catalog> Passthrough<E> {
 	/// carries no `mpegts` section to list the track in.
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> crate::Result<Self> {
 		let catalog = reserved.producer();
-		if catalog.snapshot().ext.mpegts_mut().is_none() {
+		let mut snapshot = catalog.snapshot();
+		let Some(mpegts) = snapshot.ext.mpegts_mut() else {
 			return Err(crate::Error::NoMpegtsSection);
-		}
+		};
+		// A rate the catalog already records measured this multiplex; the meter confirms,
+		// replaces, or clears it.
+		let measured = mpegts.mux_rate;
 		catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
 		let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video))?;
 		let media = catalog.media_raw(
@@ -330,7 +334,7 @@ impl<E: super::Catalog> Passthrough<E> {
 			written: 0,
 			groups: Groups::Waiting(None),
 			all_random_access: true,
-			mux_rate: Meter::default(),
+			mux_rate: Meter::measured(measured),
 		})
 	}
 

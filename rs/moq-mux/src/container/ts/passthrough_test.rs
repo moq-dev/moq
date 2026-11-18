@@ -887,6 +887,21 @@ async fn a_passthrough_without_a_rate_keeps_the_recorded_one() {
 	assert_eq!(imported.catalog.ext.mpegts.mux_rate, Some(400_000));
 }
 
+/// A rate recorded before the passthrough started is one it measures again, and a variable-rate
+/// multiplex clears it.
+#[tokio::test(start_paused = true)]
+async fn a_vbr_passthrough_clears_a_recorded_rate() {
+	let data = include_bytes!("test_data/scte35/bbb5s.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
+	catalog
+		.mutate(|catalog| catalog.ext.mpegts.mux_rate = Some(400_000))
+		.unwrap();
+	let imported = import_onto(broadcast, catalog, data, data.len(), None).await.unwrap();
+	assert_eq!(imported.catalog.ext.mpegts.mux_rate, None);
+	assert_suffix(data, &imported);
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_overriding_clock_paces_on_its_own_pcrs() {
 	let mut mux = Mux::default();
