@@ -1,5 +1,4 @@
 #![cfg(feature = "async")]
-#![allow(dead_code, reason = "WIP")]
 
 //! The cases a 2026-11-15 audit of lite-07's route layer found neither a model nor a test
 //! for, on real sessions with time mocked (`quest/m2/multicast/accept.md`).
@@ -189,33 +188,26 @@ impl Mesh {
 		distance
 	}
 
-	/// The groups relay `from` sent relay `to`, over every session between them so far.
-	pub fn groups(&self, from: usize, to: usize) -> u64 {
+	/// The groups and frames relay `from` sent relay `to`, over every session between them
+	/// so far.
+	fn carried(&self, from: usize, to: usize) -> (u64, u64) {
 		let tier = Self::tier(from, to);
 		(self.registry.snapshot().traffic().into_iter())
 			.filter(|(row, role, _)| *row == tier && *role == Role::Publisher)
-			.map(|(_, _, traffic)| traffic.groups)
-			.sum()
+			.fold((0, 0), |(groups, frames), (_, _, traffic)| {
+				(groups + traffic.groups, frames + traffic.frames)
+			})
 	}
 
-	/// The frames relay `from` sent relay `to`, over every session between them so far.
-	pub fn frames(&self, from: usize, to: usize) -> u64 {
-		let tier = Self::tier(from, to);
-		(self.registry.snapshot().traffic().into_iter())
-			.filter(|(row, role, _)| *row == tier && *role == Role::Publisher)
-			.map(|(_, _, traffic)| traffic.frames)
-			.sum()
-	}
-
-	/// Every direction of every link that carried more groups than `written`, as
-	/// `(from, to, groups)`: a group crossed it twice.
-	pub fn doubled(&self, written: u64) -> Vec<(usize, usize, u64)> {
+	/// Every direction of every link that carried more groups or frames than `written`, one
+	/// frame to a group, as `(from, to, groups, frames)`: a group crossed it twice.
+	pub fn doubled(&self, written: u64) -> Vec<(usize, usize, u64, u64)> {
 		let mut doubled = Vec::new();
 		for from in 0..self.relays.len() {
 			for to in 0..self.relays.len() {
-				let groups = self.groups(from, to);
-				if groups > written {
-					doubled.push((from, to, groups));
+				let (groups, frames) = self.carried(from, to);
+				if groups.max(frames) > written {
+					doubled.push((from, to, groups, frames));
 				}
 			}
 		}
@@ -347,8 +339,8 @@ impl Reader {
 				let instance = broadcast.info().instance.clone();
 				// From the live edge, and never skipping a group however late.
 				let prefs = track::Subscription::default()
-					.with_delay(track::Delay::default().with_max(Duration::from_secs(std::env::var("AUDIT_BUDGET").map_or(60, |v| v.parse().unwrap()))))
-					.with_ranges([if std::env::var("AUDIT_OLDEST").is_ok() { track::Range::oldest() } else { track::Range::live() }]);
+					.with_delay(track::Delay::default().with_max(Duration::from_secs(60)))
+					.with_ranges([track::Range::live()]);
 				let Ok(mut sub) = broadcast.track(TRACK).unwrap().subscribe(prefs).await else {
 					continue;
 				};
@@ -389,19 +381,18 @@ impl Reader {
 	pub fn report(&mut self, since: kio::clock::Instant) -> Report {
 		let now = kio::clock::now();
 		let got = self.got().to_vec();
-		if std::env::var("AUDIT_DUMP").is_ok() {
-			for g in got.iter().filter(|g| g.at.saturating_add(Duration::from_secs(1)) >= since).take(30) {
-				eprintln!("  got at {:?} run {} key {} tag {} written {:?}", g.at.saturating_duration_since(since), g.run, g.key, g.tag, g.written.saturating_duration_since(kio::clock::Instant::ZERO));
-			}
-		}
 		let mut report = Report::default();
 		let before = got.iter().rev().find(|got| got.at < since);
 		report.runs.extend(before.map(|got| got.run));
+		let first = before.map(|got| got.run);
 		let mut last = before.map_or(since, |got| got.at);
 		let mut longest = Duration::ZERO;
 		for got in got.iter().filter(|got| got.at >= since) {
 			longest = longest.max(got.at.saturating_duration_since(last));
-			report.lag = report.lag.max(got.at.saturating_duration_since(got.written));
+			// A restart reads the new broadcast's backlog, which says nothing of the failure.
+			if first.is_none_or(|run| run == got.run) {
+				report.lag = report.lag.max(got.at.saturating_duration_since(got.written));
+			}
 			last = got.at;
 			report.after += 1;
 		}
@@ -436,7 +427,7 @@ impl Reader {
 pub(super) struct Report {
 	/// The longest it went without a new group, past the cadence.
 	pub stall: Duration,
-	/// The longest a group read since took from its publisher.
+	/// The longest a group read since took from its publisher, within the broadcast it had.
 	pub lag: Duration,
 	/// Frames read since the failure.
 	pub after: usize,

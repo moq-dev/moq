@@ -33,23 +33,6 @@ pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
 	}
 }
 
-struct Labeled<D> {
-	driver: D,
-	label: String,
-}
-
-impl<D: moq_net::time::Driver> moq_net::time::Driver for Labeled<D> {
-	fn poll(
-		&mut self,
-		now: moq_net::time::Instant,
-		waiter: &kio::Waiter,
-	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
-		let span = tracing::info_span!("s", l = %self.label);
-		let _g = span.enter();
-		self.driver.poll(now, waiter)
-	}
-}
-
 struct Controlled<D> {
 	driver: D,
 	polls: Option<Arc<AtomicUsize>>,
@@ -209,8 +192,6 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	client_transport.set_probe(opts.probe);
 	server_transport.set_probe(opts.probe);
 	let transports = (client_transport.clone(), server_transport.clone());
-	let cnode = opts.client_subscribe.as_ref().map(|o| o.node().get()).or(opts.client_publish.as_ref().map(|o| o.node().get())).unwrap_or(0);
-	let snode = opts.server_subscribe.as_ref().map(|o| o.node().get()).or(opts.server_publish.as_ref().map(|o| o.node().get())).unwrap_or(0);
 
 	let mut client = Client::new()
 		.with_stats(opts.client_stats)
@@ -262,7 +243,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.connect(now(), client_transport)
 			.await
 			.expect("client handshake failed");
-		spawn(Labeled { driver, label: format!("{cnode}>{snode}") });
+		spawn(driver);
 		session
 	};
 	let server_fut = async {
@@ -271,7 +252,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.await
 			.expect("server handshake failed");
 		spawn(Controlled {
-			driver: Labeled { driver, label: format!("{snode}>{cnode}") },
+			driver,
 			polls: opts.server_polls,
 			gate: opts.server_gate,
 		});

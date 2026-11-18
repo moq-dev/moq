@@ -88,9 +88,11 @@ async fn a_silent_relay_is_routed_around_as_its_neighbours_notice() {
 	}
 	cut(&x_push);
 	quiesce().await;
-	for (i, reader) in readers.iter_mut().enumerate().skip(1) {
-		let report = reader.report(since);
-		measured(&format!("X silent, noticed {NOTICE:?} apart, reader R{i}"), &report);
+	let reports: Vec<_> = readers.iter_mut().map(|reader| reader.report(since)).collect();
+	for (i, report) in reports.iter().enumerate().skip(1) {
+		measured(&format!("X silent, noticed {NOTICE:?} apart, reader R{i}"), report);
+	}
+	for (i, report) in reports.iter().enumerate().skip(1) {
 		assert!(report.seamless(), "R{i}: {report:?}");
 	}
 	assert_eq!(mesh.doubled(feed.written()), []);
@@ -133,10 +135,6 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 		dead.insert(rng.pick(relays));
 	}
 	let since = kio::clock::now();
-	if std::env::var("AUDIT_DUMP").is_ok() {
-		eprintln!("DBG at failure written {} 1to2 {} 2to1 {}", feed.written(), mesh.groups(1, 2), mesh.groups(2, 1));
-		eprintln!("DBG neighbours of 2: {:?}, of 1: {:?} ingests {ingests:?} dead {dead:?}", mesh.neighbours(2), mesh.neighbours(1));
-	}
 	for &relay in &dead {
 		mesh.kill(relay);
 		if let Some(i) = ingests.iter().position(|ingest| *ingest == relay) {
@@ -175,12 +173,6 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 			None => assert_eq!(shown, None, "{case}: let go"),
 		}
 	}
-	if std::env::var("AUDIT_DUMP").is_ok() {
-		eprintln!("DBG at end written {} 1to2 {} 2to1 {} frames 1to2 {}", feed.written(), mesh.groups(1, 2), mesh.groups(2, 1), mesh.frames(1, 2));
-		for a in 0..relays { for b in 0..relays { let g = mesh.groups(a, b); if g > 0 { eprintln!("DBG link {a}->{b} groups {g} frames {}", mesh.frames(a, b)); } } }
-		eprintln!("DBG neighbours of 2: {:?}, of 1: {:?}", mesh.neighbours(2), mesh.neighbours(1));
-		for i in 0..relays { eprintln!("DBG R{i} dist {:?}", reach.iter().map(|d| d[i]).collect::<Vec<_>>()); }
-	}
 	assert_eq!(mesh.doubled(feed.written()), [], "seed {seed:#x}");
 	worst
 }
@@ -189,7 +181,7 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 /// close the exhaustive check reaches.
 #[kio::test]
 async fn failures_at_one_instant() {
-	for seed in std::env::var("AUDIT_SEED").map_or(0..6, |s| { let s: u64 = s.parse().unwrap(); s..s + 1 }) {
+	for seed in 0..8 {
 		let worst = failures(0x6d6f71 + seed, 12).await;
 		eprintln!("measured failures at one instant, seed {seed}: worst stall {worst:?}");
 	}
