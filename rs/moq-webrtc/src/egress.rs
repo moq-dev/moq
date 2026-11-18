@@ -1348,7 +1348,7 @@ mod tests {
 		drop(writes);
 		let mut demand = low.demand();
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(Duration::from_secs(1), unwanted)

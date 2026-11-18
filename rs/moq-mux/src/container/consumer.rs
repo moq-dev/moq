@@ -3919,7 +3919,7 @@ mod tests {
 			let mut track = source.broadcast().create_track("video", info.clone()).unwrap();
 			source.announce().unwrap();
 			let mut demand = track.demand();
-			while demand.wanted_changed().await.unwrap().is_none() {}
+			while !demand.wanted_changed().await.unwrap() {}
 			if sequence == 1 {
 				assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(0));
 			}
@@ -4766,7 +4766,7 @@ mod tests {
 
 		let read = read_past_frames(&mut consumer).await;
 		assert!(matches!(read, Err(crate::Error::UnknownFormat(_))), "{read:?}");
-		assert!(track.demand().wanted().is_none(), "the ended reader still subscribes");
+		assert!(!track.demand().wanted(), "the ended reader still subscribes");
 		assert!(!malformed_demand.wanted(), "the ended reader still holds its group");
 		assert!(!later.demand().wanted(), "the ended reader still holds a later group");
 	}

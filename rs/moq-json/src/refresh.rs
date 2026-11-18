@@ -6,8 +6,8 @@ use crate::Result;
 
 /// Watches a track's [`Demand`](moq_net::track::Demand) for a group past the largest one written.
 ///
-/// A join judged by the track's [`refresh`](moq_net::track::Info::refresh) ratio asks for the next
-/// free sequence, so a producer restating its value in a new group answers it.
+/// A join or refresh judged by the track's [`refresh`](moq_net::track::Info::refresh) asks for a
+/// group past every one written, so a producer restating its value in a new group answers it.
 pub(crate) struct Refresh {
 	demand: moq_net::track::Demand,
 
@@ -34,23 +34,15 @@ impl Refresh {
 		self.parked.wake();
 	}
 
-	/// Ready once consumers want a group past `largest`, the newest group written, arming `waiter`
-	/// for the next demand change otherwise. Never ready before a group is written (`None`), since
-	/// there is nothing to restate yet. Errors once the track closes.
+	/// Ready once consumers want a group past the newest written, arming `waiter` for the next
+	/// demand change otherwise. Never ready before a group is written (`largest` is `None`),
+	/// since there is nothing to restate yet: that parks for the next write. Errors once the
+	/// track closes.
 	pub fn poll(&mut self, largest: Option<u64>, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		// Drain the changes so `waiter` is armed for the next one; the decision reads the level.
-		loop {
-			match self.demand.poll_wanted_changed(waiter) {
-				Poll::Ready(Ok(_)) => continue,
-				Poll::Ready(Err(err)) => return Poll::Ready(Err(err.into())),
-				Poll::Pending => break,
-			}
+		if largest.is_none() {
+			return self.park(waiter);
 		}
-
-		match (self.demand.wanted(), largest) {
-			(Some(wanted), Some(largest)) if wanted > largest => Poll::Ready(Ok(())),
-			_ => Poll::Pending,
-		}
+		self.demand.poll_refresh(waiter).map_err(Into::into)
 	}
 }
 

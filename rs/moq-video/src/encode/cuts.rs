@@ -3,9 +3,9 @@
 /// One encoder's view of the keyframe asks: decides which frames to cut, coalescing.
 /// Built fresh for every encoder the capture opens.
 ///
-/// A subscriber joining over the track's refresh ratio asks for the group
-/// [`Demand::wanted`](moq_net::track::Demand::wanted) names once it passes the largest
-/// written, which only grows, so joins while the keyframe is still in the encoder ask for the
+/// A subscriber joining over the track's refresh ratio asks for a group past the largest written
+/// ([`Demand::poll_refresh`](moq_net::track::Demand::poll_refresh)), named here by the largest
+/// plus one, which only grows, so joins while the keyframe is still in the encoder ask for the
 /// same group and coalesce into it.
 ///
 /// There is no spacing between cuts: the refresh ratio already rate-limits joins by the bytes

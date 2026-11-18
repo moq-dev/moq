@@ -1515,7 +1515,7 @@ async fn json_demand() {
 	let stream_demand = stream.demand().unwrap();
 	assert_eq!(snapshot_demand.name(), "status");
 	assert_eq!(stream_demand.name(), "events");
-	assert!(!snapshot_demand.wanted().is_some());
+	assert!(!snapshot_demand.wanted());
 
 	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&broadcast.consume().unwrap(), "status".into(), None).unwrap();
 	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await).unwrap();
@@ -1528,7 +1528,7 @@ async fn json_demand() {
 		.await
 		.expect("timed out waiting for the json stream to become used")
 		.unwrap();
-	assert!(snapshot_demand.wanted().is_some());
+	assert!(snapshot_demand.wanted());
 
 	drop(snapshot_consumer);
 	drop(stream_consumer);
@@ -1770,7 +1770,7 @@ async fn json_window_demand() {
 	let producer = MoqJsonWindowProducer::new(&track, config.clone()).unwrap();
 	let demand = producer.demand().unwrap();
 	assert_eq!(demand.name(), "log");
-	assert!(demand.wanted().is_none());
+	assert!(!demand.wanted());
 
 	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
 	kio::clock::timeout(TIMEOUT, demand.until_wanted())
@@ -1921,7 +1921,7 @@ async fn track_request_demand_survives_accept() {
 	let request = dynamic.requested_track().await.unwrap();
 	let demand = request.demand().unwrap();
 	assert_eq!(demand.name(), "events");
-	assert!(demand.wanted().is_some());
+	assert!(demand.wanted());
 	let track = request.accept(None).unwrap();
 	assert!(matches!(request.demand(), Err(MoqError::AlreadyResponded)));
 	let consumer = subscribe.await.unwrap().unwrap();
@@ -2994,7 +2994,7 @@ async fn fill_goes_unwanted_when_the_fetcher_leaves() {
 		.expect("timed out waiting for the abandoned fetch to become unwanted")
 		.unwrap();
 	assert_eq!(wanted, None);
-	assert_eq!(fill.wanted(), None);
+	assert!(!fill.wanted());
 	kio::clock::timeout(TIMEOUT, fill.unwanted(5))
 		.await
 		.expect("an unwanted fill wants none of its groups")
@@ -3050,7 +3050,7 @@ async fn dynamic_track_rejects_fetch_miss() {
 		.expect("timed out waiting for fill")
 		.unwrap();
 	fill.drop_groups(5, 6);
-	assert_eq!(fill.wanted(), None, "the dropped group is answered");
+	assert!(!fill.wanted(), "the dropped group is answered");
 
 	let result = kio::clock::timeout(TIMEOUT, fetch)
 		.await
@@ -10108,7 +10108,7 @@ async fn datagram_demand_is_independent_and_aggregates_priority() {
 	first.set_priority(-5).unwrap();
 	second.set_priority(10).unwrap();
 	assert_eq!(producer.priority().unwrap(), Some(10));
-	assert_eq!(demand.wanted(), None);
+	assert!(!demand.wanted());
 	producer
 		.insert(MoqDatagram {
 			sequence: 7,

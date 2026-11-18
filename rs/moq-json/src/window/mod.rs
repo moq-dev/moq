@@ -700,7 +700,7 @@ mod test {
 	#[test]
 	fn a_joiner_over_the_ratio_gets_a_fresh_header() {
 		let waiter = kio::Waiter::noop();
-		let (mut producer, _track) = producer_on(Config::default(), moq_net::track::Info::default().with_refresh(1));
+		let (mut producer, _track) = producer_on(Config::default(), moq_net::track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)));
 
 		// A 32 byte header and a 16 byte push: under the ratio.
 		producer.push(&rec(0), moq_net::Timestamp::unscaled(0)).unwrap();
@@ -747,7 +747,7 @@ mod test {
 	fn a_refresh_reuses_the_newest_timestamp() {
 		let waiter = kio::Waiter::noop();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)));
 		for n in 0..4 {
 			producer.push(&rec(n), ms(100 + n)).unwrap();
 		}
@@ -774,7 +774,7 @@ mod test {
 	fn a_refresh_after_older_edits_waits_for_a_later_one() {
 		let (waiter, woken) = crate::refresh::flagged();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)));
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
 			producer.push(&rec(n as u64), ms(at)).unwrap();
 		}

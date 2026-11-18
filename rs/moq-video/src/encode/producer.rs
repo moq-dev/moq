@@ -5,7 +5,7 @@
 //! the mode it negotiates, then keeps it open and encodes whether or not anyone is watching, so a
 //! late subscriber can reach the recent past within its `max_delay`. With
 //! `Capture::on_demand` it instead closes the camera between viewers, encoding only while
-//! [`Demand::wanted`](moq_net::track::Demand::wanted) is `Some`: a subscriber is watching.
+//! [`Demand::wanted`](moq_net::track::Demand::wanted): a subscriber is watching.
 //!
 //! Capture advertises [`track::Info::refresh`](moq_net::track::Info::refresh) when its encoder
 //! is sure to honor a cut, and forces a keyframe whenever a joining subscriber asks for a group
@@ -148,14 +148,16 @@ impl Producer {
 		}
 	}
 
-	/// The group a subscriber wants past the largest published, which the next frame should
-	/// open with a keyframe, or `None` while the largest serves.
+	/// The group past the largest published while a subscriber asks for one, which the next
+	/// frame should open with a keyframe, or `None` while the largest serves.
 	#[cfg(feature = "capture")]
 	fn wanted(&self) -> Option<u64> {
 		let track = self.track();
-		let wanted = track.demand().wanted()?;
-		let largest = track.largest().map(|largest| largest.group);
-		largest.is_none_or(|largest| wanted > largest).then_some(wanted)
+		let asked = track.demand().poll_refresh(&kio::Waiter::noop());
+		if !matches!(asked, std::task::Poll::Ready(Ok(()))) {
+			return None;
+		}
+		Some(track.largest().map_or(0, |largest| largest.group.saturating_add(1)))
 	}
 
 	/// Publish one already-encoded frame at its own timestamp: one whole access unit
@@ -690,7 +692,8 @@ fn capture_track<E: CatalogExt>(
 	};
 	// Advertised only when every backend the encoder may open honors a cut, since the info
 	// is fixed before the capture learns which one it got.
-	let refresh = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
+	let ratio = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
+	let refresh = moq_net::track::Refresh::default().with_ratio(ratio);
 	let info = catalog.track_info(hang::catalog::PRIORITY.video).with_refresh(refresh);
 	Ok(broadcast.unique_track(suffix, info)?)
 }
@@ -830,7 +833,7 @@ fn capture_stopped(producer: &mut Producer) -> Result<(), Error> {
 async fn until_capturing(demand: &moq_net::track::Demand, on_demand: bool, run: bool) -> Result<(), moq_net::Error> {
 	let mut demand = demand.clone();
 	loop {
-		let wanted = demand.wanted_changed().await?.is_some();
+		let wanted = demand.wanted_changed().await?;
 		if (wanted || !on_demand) == run {
 			return Ok(());
 		}
@@ -990,7 +993,7 @@ async fn capture_loop<S: CaptureSource>(
 				biased;
 				wanted = watch.wanted_changed() => {
 					let wanted = match wanted {
-						Ok(wanted) => wanted.is_some(),
+						Ok(wanted) => wanted,
 						Err(err) => {
 							log_track_ended(err);
 							return Ok(());
@@ -2062,7 +2065,7 @@ mod tests {
 			steps.extend((1..=10).map(|seed| Step::Frame(noise(seed))));
 			steps.extend([Step::Join, Step::Frame(surface()), Step::Frame(surface())]);
 			let (info, groups) = capture_groups(steps).await;
-			assert_eq!(info.refresh, Some(REFRESH));
+			assert_eq!(info.refresh.ratio, Some(REFRESH));
 
 			let lengths: Vec<_> = groups.iter().map(Vec::len).collect();
 			assert_eq!(lengths, [14, 2], "only the second join cut, at the frame after it");
@@ -2094,7 +2097,7 @@ mod tests {
 					..Capture::default()
 				};
 				let track = capture_track(broadcast.clone(), &catalog, &options).unwrap();
-				assert_eq!(track.info().refresh, refresh);
+				assert_eq!(track.info().refresh.ratio, refresh);
 			}
 		}
 

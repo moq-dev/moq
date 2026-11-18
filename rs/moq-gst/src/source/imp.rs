@@ -3111,7 +3111,7 @@ mod session_tests {
 		// wait is what the assertion below is about.
 		let mut demand = request.demand();
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME
@@ -4353,7 +4353,7 @@ mod session_tests {
 	/// Block until someone reads the publisher's video, or until nobody does once `wanted` is false.
 	fn await_demand(publisher: &Publisher, wanted: bool) {
 		let mut demand = publisher.video.as_ref().unwrap().demand();
-		let changed = async { while demand.wanted_changed().await.expect("the track closed").is_some() != wanted {} };
+		let changed = async { while demand.wanted_changed().await.expect("the track closed") != wanted {} };
 		super::RUNTIME
 			.block_on(async { kio::clock::timeout(Duration::from_secs(10), changed).await })
 			.expect("the demand never changed");
@@ -4859,7 +4859,7 @@ mod session_tests {
 		let mut demand = second.video.as_ref().unwrap().demand();
 		drop(room);
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME

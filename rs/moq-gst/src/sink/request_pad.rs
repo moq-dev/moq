@@ -175,11 +175,13 @@ impl Bandwidth {
 	}
 
 	fn snapshot(&self) -> gst::Structure {
-		let wanted = self.demand.wanted();
-		let mut state = gst::Structure::builder("moq-track-demand").field("wanted", wanted.is_some());
-		if let Some(group) = wanted {
-			state = state.field("group", group);
-		}
+		let refresh = matches!(
+			self.demand.poll_refresh(&kio::Waiter::noop()),
+			std::task::Poll::Ready(Ok(()))
+		);
+		let mut state = gst::Structure::builder("moq-track-demand")
+			.field("wanted", self.demand.wanted())
+			.field("refresh", refresh);
 		if let Some(grant) = &self.grant {
 			state = state.field("probed", grant.probed());
 			if let Some(rate) = grant.peek() {
@@ -440,7 +442,7 @@ impl ObjectImpl for MoqSinkPadImp {
 						"Current subscriber demand and optional bandwidth grant. Null until viewers can \
 						 find the track: a media or text track once a published catalog lists it, opaque \
 						 data once it negotiates. Null again after EOS or a failure. Otherwise a \
-						 moq-track-demand structure with wanted, optional group, and, when \
+						 moq-track-demand structure with wanted, refresh (a new group asked for), and, when \
 						 bandwidth-ceiling is nonzero, probed and optional grant-bps fields",
 					)
 					.read_only()
@@ -773,7 +775,7 @@ mod tests {
 
 		let state = pad.property::<gst::Structure>("track-demand");
 		assert_eq!(state.get::<bool>("wanted"), Ok(false));
-		assert!(!state.has_field("group"));
+		assert_eq!(state.get::<bool>("refresh"), Ok(false));
 		assert!(!state.has_field("grant-bps"), "an unavailable estimate is absent");
 		assert_eq!(state.get::<bool>("probed"), Ok(false));
 
@@ -787,7 +789,7 @@ mod tests {
 		let subscriber = track.subscribe(None);
 		let state = pad.property::<gst::Structure>("track-demand");
 		assert_eq!(state.get::<bool>("wanted"), Ok(true));
-		assert_eq!(state.get::<u64>("group"), Ok(0));
+		assert_eq!(state.get::<bool>("refresh"), Ok(true), "the first group");
 		assert_eq!(state.get::<u64>("grant-bps"), Ok(2_000_000));
 		drop(subscriber);
 	}

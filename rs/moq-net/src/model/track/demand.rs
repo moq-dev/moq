@@ -26,13 +26,13 @@ pub(super) struct Subscriptions {
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
-	/// The lowest group consumers want while no refresh is pending, never lowered. See
-	/// [`super::Demand::wanted`].
+	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
-	/// A join over the track's refresh ratio asked for a group past every key written,
-	/// and no such group has landed yet. Read against `next` rather than stored as a number,
-	/// so a key written without answering it can never leave the ask behind.
-	refresh: bool,
+	/// When a request for a group past every key written takes effect, if one is pending:
+	/// at once, or once the track's refresh interval has passed. Read against `next` rather
+	/// than stored as a number, so a key written without answering it can never leave the
+	/// ask behind.
+	refresh: Option<crate::time::Instant>,
 	/// One past the highest key written, which a pending refresh asks for.
 	next: u64,
 	waiters: kio::WaiterList,
@@ -95,27 +95,39 @@ impl Subscriptions {
 		}
 	}
 
-	/// The lowest group consumers want, whether or not anyone consumes now: the next free
-	/// key while a refresh is pending.
-	pub(super) fn wanted(&self) -> u64 {
-		match self.refresh {
+	/// The lowest group start consumers want at `now`, whether or not anyone consumes: the
+	/// next free key while a due refresh is pending.
+	pub(super) fn wanted(&self, now: crate::time::Instant) -> u64 {
+		match self.refresh.is_some_and(|at| at <= now) {
 			true => self.next.max(self.wanted),
 			false => self.wanted,
 		}
 	}
 
-	/// [`Self::wanted`], arming `waiter` for its next change.
-	pub(super) fn poll_wanted(&mut self, waiter: &kio::Waiter) -> u64 {
-		waiter.register(&mut self.waiters);
-		self.wanted()
+	/// Whether consumers want a group past every key written at `now`: the first group of
+	/// a track, or a due refresh.
+	pub(super) fn asking(&self, now: crate::time::Instant) -> bool {
+		self.wanted(now) >= self.next
 	}
 
-	/// A join over the refresh ratio: ask for a group past every key written. Joins
-	/// while one is pending coalesce into it.
-	pub(super) fn refresh(&mut self) -> kio::WaiterList {
-		if std::mem::replace(&mut self.refresh, true) {
+	/// When a deferred refresh takes effect, if one is pending and not due at `now`.
+	pub(super) fn deferred(&self, now: crate::time::Instant) -> Option<crate::time::Instant> {
+		self.refresh.filter(|at| *at > now)
+	}
+
+	/// Arm `waiter` for the next change to what [`Self::wanted`] reports, except a deferred
+	/// refresh coming due, which the caller arms.
+	pub(super) fn watch(&mut self, waiter: &kio::Waiter) {
+		waiter.register(&mut self.waiters);
+	}
+
+	/// Ask for a group past every key written, taking effect at `at`. Requests while one is
+	/// pending coalesce into it, the earliest taking effect.
+	pub(super) fn refresh(&mut self, at: crate::time::Instant) -> kio::WaiterList {
+		if self.refresh.is_some_and(|pending| pending <= at) {
 			return Default::default();
 		}
+		self.refresh = Some(at);
 		self.waiters.take()
 	}
 
@@ -125,11 +137,11 @@ impl Subscriptions {
 	pub(super) fn wrote(&mut self, key: u64, answers: bool) -> kio::WaiterList {
 		let next = self.next;
 		self.next = next.max(key.saturating_add(1));
-		if !self.refresh || key < next {
+		if self.refresh.is_none() || key < next {
 			return Default::default();
 		}
 		if answers {
-			self.refresh = false;
+			self.refresh = None;
 			self.wanted = self.wanted.max(key);
 		}
 		self.waiters.take()

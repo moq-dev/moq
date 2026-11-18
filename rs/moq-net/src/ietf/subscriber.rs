@@ -779,7 +779,7 @@ impl Target {
 		let Self::Resume(idle) = self else {
 			return None;
 		};
-		let wanted = idle.demand.wanted()?;
+		let wanted = idle.demand.asked()?;
 		let latest = idle.track.latest_key()?;
 		(wanted > latest).then_some(wanted)
 	}
@@ -822,7 +822,7 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 		))
 		// A publisher answering NEW_GROUP_REQUEST refreshes on any join with a delta to skip;
 		// this session carries the request back to it.
-		.with_refresh(properties.dynamic_groups.then_some(0));
+		.with_refresh(track::Refresh::default().with_ratio(properties.dynamic_groups.then_some(0)));
 	info.properties = Some(std::sync::Arc::new(crate::model::object::TrackProperties {
 		version,
 		values: properties.unknown.clone(),
@@ -3910,8 +3910,8 @@ struct Established {
 	/// until the Largest Group reaches it, and joins meanwhile ask for the same group.
 	requested: Option<u64>,
 	dynamic_groups: bool,
-	/// The group the track's consumers want, `None` once nobody does.
-	wanted: Option<u64>,
+	/// Whether the track's consumers want it.
+	wanted: bool,
 	/// The subscriber priority upstream holds, and the one the aggregate now asks for.
 	sent_priority: i8,
 	priority: i8,
@@ -4715,8 +4715,8 @@ impl SubscribeOnce {
 			resuming,
 			fetching,
 			requested: sent.new_group,
-			dynamic_groups: track.info().refresh.is_some(),
-			wanted: None,
+			dynamic_groups: track.info().refresh.enabled(),
+			wanted: false,
 			sent_priority: sent.priority,
 			priority: sent.priority,
 			sent_bounds,
@@ -4818,14 +4818,14 @@ impl SubscribeOnce {
 		loop {
 			match live.demand.poll_wanted_changed(waiter) {
 				Poll::Ready(Ok(next)) => live.wanted = next,
-				Poll::Ready(Err(_)) => live.wanted = None,
+				Poll::Ready(Err(_)) => live.wanted = false,
 				Poll::Pending => break,
 			}
-			if live.wanted.is_none() {
+			if !live.wanted {
 				break;
 			}
 		}
-		if !live.subscribed || live.wanted.is_none() {
+		if !live.subscribed || !live.wanted {
 			return Poll::Ready(ServeEnd::Idle);
 		}
 		let updating = &live.track;
@@ -4854,7 +4854,7 @@ impl SubscribeOnce {
 		if live.unanswered > 0 {
 			return Poll::Pending;
 		}
-		let new_group = live.wanted.filter(|&value| {
+		let new_group = live.demand.poll_asked(waiter).filter(|&value| {
 			live.dynamic_groups
 				&& largest_group(&live.track, live.largest).is_some_and(|largest| value > largest)
 				&& live.requested.is_none_or(|requested| value > requested)

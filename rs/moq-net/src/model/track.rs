@@ -159,18 +159,12 @@ pub struct Info {
 	/// unless a sealed compression declaration makes that fallback unsupported.
 	/// Worth it for small, repetitive payloads like JSON; wasted on media.
 	pub compression: Compression,
-	/// The ratio of a group's bytes after its first frame to the first frame past which a
-	/// joining subscriber asks for a new group, or `None` (the default) to never ask.
+	/// When a reader asks for a new group: on a live join, on a [`Subscriber::refresh`], or
+	/// both. Defaults to never. See [`Refresh`].
 	///
-	/// A track opting in starts each group with an independent frame (a snapshot or a
-	/// keyframe) that the deltas after it build on. A joiner reads the newest group from its
-	/// start, so once the deltas outweigh `refresh` times the first frame, a fresh group is
-	/// cheaper: [`Demand::wanted`] moves past the newest group and the publisher opens one.
-	/// The joiner still receives the cached group while the new one is pending. Every hop judges a join against its own cache, which holds the same group.
-	/// `Some(0)` asks on any join once a delta follows the first frame.
-	///
-	/// On moq-transport, `Some` is advertised as DYNAMIC_GROUPS, which arrives as `Some(0)`.
-	pub refresh: Option<u32>,
+	/// On moq-transport, a track that refreshes at all is advertised as DYNAMIC_GROUPS, which
+	/// arrives as a [`Refresh::ratio`] of `Some(0)`.
+	pub refresh: Refresh,
 	/// The draft a moq-transport publisher spoke and the Track Properties moq-net does not
 	/// interpret, forwarded unchanged. `None` for a track published over moq-lite, which
 	/// therefore carries no moq-transport state.
@@ -210,6 +204,67 @@ impl PartialEq for Info {
 
 impl Eq for Info {}
 
+/// What asks a track for a new group; see [`Refresh`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ask {
+	/// A reader joined at the live edge, judged by the ratio.
+	Join,
+	/// A reader called [`Subscriber::refresh`], or a peer asked for a group past the largest.
+	Refresh,
+	/// A reader of the newest group reached a frame its copy shed, so it cannot decode on.
+	Shed,
+}
+
+/// When a reader of a track asks its publisher for a new group, which TRACK_INFO carries.
+///
+/// A track opting in starts each group with an independent frame (a snapshot or a keyframe)
+/// that the frames after it build on, so a new group is something the publisher can make on
+/// request. A request asks for a group starting past the newest one; every hop judges it
+/// against its own cache, which holds the same group, and requests made while one is pending
+/// coalesce into it. The reader still receives the cached group while the new one is pending.
+///
+/// A live join asks when the newest group outweighs [`ratio`](Self::ratio) (any join
+/// without one). [`Subscriber::refresh`] asks regardless of the ratio on a track with an
+/// [`interval`](Self::interval), and like a join otherwise. Either request waits out the
+/// interval: it takes effect only once the newest group arrived at least that long ago, so
+/// the interval caps how often the publisher makes groups however many readers ask. A
+/// track with no group asks for its first at once. The default asks for nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Refresh {
+	/// The ratio of a group's bytes after its first frame to the first frame past which a
+	/// live join asks for a new group: once the deltas outweigh `ratio` times the first
+	/// frame, a fresh group is cheaper for the joiner. `Some(0)` asks on any join once a delta
+	/// follows the first frame.
+	pub ratio: Option<u32>,
+	/// How long after the newest group arrived a request may ask for another, measured on
+	/// each hop's own clock from when the group reached it (or, at the publisher, was
+	/// created), as expiry measures it. A request made sooner waits until then.
+	///
+	/// Encoded as milliseconds like [`Info::max_age`]; sub-millisecond precision is
+	/// truncated.
+	pub interval: Option<Duration>,
+}
+
+impl Refresh {
+	/// Set the [`ratio`](Self::ratio), returning `self` for chaining.
+	pub fn with_ratio(mut self, ratio: impl Into<Option<u32>>) -> Self {
+		self.ratio = ratio.into();
+		self
+	}
+
+	/// Set the [`interval`](Self::interval), returning `self` for chaining.
+	pub fn with_interval(mut self, interval: impl Into<Option<Duration>>) -> Self {
+		self.interval = interval.into();
+		self
+	}
+
+	/// Whether any request may ask for a new group.
+	pub(crate) fn enabled(&self) -> bool {
+		self.ratio.is_some() || self.interval.is_some()
+	}
+}
+
 /// How a track's frames are compressed, with the values TRACK_INFO's `Compression` field
 /// carries.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -231,7 +286,7 @@ impl Default for Info {
 			max_age: Some(Duration::ZERO),
 			priority: DEFAULT_PRIORITY,
 			compression: Compression::None,
-			refresh: None,
+			refresh: Refresh::default(),
 			properties: None,
 			unchecked: false,
 		}
@@ -273,9 +328,9 @@ impl Info {
 		self.compression != Compression::None
 	}
 
-	/// Set the [`refresh`](Self::refresh) ratio, returning `self` for chaining.
-	pub fn with_refresh(mut self, refresh: impl Into<Option<u32>>) -> Self {
-		self.refresh = refresh.into();
+	/// Set when a reader asks for a new group, returning `self` for chaining.
+	pub fn with_refresh(mut self, refresh: Refresh) -> Self {
+		self.refresh = refresh;
 		self
 	}
 
@@ -1172,50 +1227,54 @@ impl TrackState {
 			.then_some(edge)
 	}
 
-	/// A consumer joined at the live edge: ask for a group past every key written when
-	/// the newest group's bytes after its first frame exceed [`Info::refresh`] times that
-	/// frame.
-	///
-	/// Joins while the request is pending ask for the same group, so they coalesce until
-	/// the publisher creates it. A join under the ratio reads the current group and asks
-	/// for nothing, even while a request is pending.
+	/// Ask for a group past every key written, judged by [`Info::refresh`]: a live join
+	/// only when the newest group outweighs the ratio, and either request only once the
+	/// newest group is at least the interval old. A request made sooner is deferred until
+	/// then, and one made while a request is pending coalesces into it.
 	///
 	/// Takes the read guard to release it before locking the demand, so the two locks
 	/// never nest.
-	fn join(state: kio::Ref<'_, TrackState>) {
-		let Some(ratio) = state.info.as_ref().and_then(|info| info.refresh) else {
+	pub(crate) fn ask(state: kio::Ref<'_, TrackState>, ask: Ask) {
+		let Some(refresh) = state.info.as_ref().map(|info| info.refresh).filter(Refresh::enabled) else {
 			return;
 		};
 		let Some(latest) = state.latest_group else {
 			return;
 		};
-		if !state
-			.lookup
-			.get(&latest)
-			.is_some_and(|slot| slot.serving().over_refresh(ratio))
+		let slot = state.lookup.get(&latest);
+		let ratio = match ask {
+			Ask::Join => refresh.ratio,
+			// The interval alone judges a request on a track that declares one.
+			Ask::Refresh => refresh.ratio.filter(|_| refresh.interval.is_none()),
+			Ask::Shed => None,
+		};
+		if let Some(ratio) = ratio
+			&& !slot.is_some_and(|slot| slot.serving().over_refresh(ratio))
 		{
 			return;
 		}
-		Self::refresh(state);
-	}
-
-	/// A reader of group `key` reached a frame its copy shed: ask for a new group as
-	/// a join over [`Info::refresh`] does, if it is the newest and the track opts in. An
-	/// older group's reader moves on to the groups after it instead.
-	pub(super) fn shed_read(state: kio::Ref<'_, TrackState>, key: u64) {
-		let opted = state.info.as_ref().is_some_and(|info| info.refresh.is_some());
-		if opted && state.latest_group == Some(key) {
-			Self::refresh(state);
-		}
-	}
-
-	/// Ask for a group past every key written, releasing the read guard before
-	/// locking the demand.
-	fn refresh(state: kio::Ref<'_, TrackState>) {
+		let now = state.cache.pool().now_wall();
+		let at = match (refresh.interval, slot) {
+			(Some(interval), Some(slot)) => match slot.arrived.checked_add(interval) {
+				Some(at) => at.max(now),
+				// No instant reaches it.
+				None => return,
+			},
+			_ => now,
+		};
 		let subscriptions = state.subscriptions.clone();
 		drop(state);
-		let mut wakes = subscriptions.lock().refresh();
+		let mut wakes = subscriptions.lock().refresh(at);
 		wakes.wake();
+	}
+
+	/// A reader of group `key` reached a frame its copy shed: ask for a new group if it is
+	/// the newest, regardless of the ratio. An older group's reader moves on to the groups
+	/// after it instead.
+	pub(super) fn shed_read(state: kio::Ref<'_, TrackState>, key: u64) {
+		if state.latest_group == Some(key) {
+			Self::ask(state, Ask::Shed);
+		}
 	}
 
 	/// The starts a first frame of group `key` must fall between: the nearest checked
@@ -5820,7 +5879,7 @@ pub struct Demand {
 	name: Arc<str>,
 	state: kio::ProducerWeak<TrackState>,
 	// The value `poll_wanted_changed` last returned, or `None` before it returned any.
-	prev: Option<Option<u64>>,
+	prev: Option<bool>,
 }
 
 impl Clone for Demand {
@@ -5843,48 +5902,92 @@ impl Demand {
 		&self.name
 	}
 
-	/// The group consumers want: `None` while nobody consumes the open track, and
-	/// `Some(n)` while they want group `n` or later.
-	///
-	/// A publisher opens a group whenever `n` passes its largest. The first consumer of a
-	/// track with no group asks for `Some(0)`, and a join judged by [`Info::refresh`]
-	/// asks for the next free key until a group lands there. `n` never goes back, so once a group reaches it nothing is
-	/// pending until another join asks.
-	pub fn wanted(&self) -> Option<u64> {
-		if !self.is_wanted() {
-			return None;
-		}
-		let wanted = self.subscriptions().lock().wanted();
-		Some(wanted)
-	}
-
-	/// The demand aggregate.
-	fn subscriptions(&self) -> kio::Lock<Subscriptions> {
-		self.state.read().subscriptions.clone()
+	/// Whether anyone consumes the open track: a subscription, query, fetch, or a group one
+	/// of them handed out and a reader has not finished.
+	pub fn wanted(&self) -> bool {
+		self.is_wanted()
 	}
 
 	/// [`wanted`](Self::wanted) once it differs from what this handle last returned:
 	/// immediately on the first call, then on each change. Errors once the track is closed
 	/// or aborted.
 	///
-	/// So `while let Some(n) = demand.wanted_changed().await?` runs while anyone wants the
-	/// track, and `while demand.wanted_changed().await?.is_none()` waits for someone to.
-	/// End a track nobody wants with [`Producer::abort_unwanted`], which keeps it for a
-	/// reader that joined since.
+	/// So `while demand.wanted_changed().await? {}` runs while anyone wants the track, and
+	/// `while !demand.wanted_changed().await? {}` waits for someone to. End a track nobody
+	/// wants with [`Producer::abort_unwanted`], which keeps it for a reader that joined since.
 	#[cfg_attr(feature = "async", kio::wrapper)]
-	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<u64>>> {
+	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
 		let active = match self.poll_state(waiter) {
 			DemandState::Closed => return Poll::Ready(Err(self.abort_reason())),
 			DemandState::Active => true,
 			DemandState::Idle => false,
 		};
-		let wanted = self.subscriptions().lock().poll_wanted(waiter);
-		let next = active.then_some(wanted);
-		if self.prev == Some(next) {
+		if self.prev == Some(active) {
 			return Poll::Pending;
 		}
-		self.prev = Some(next);
-		Poll::Ready(Ok(next))
+		self.prev = Some(active);
+		Poll::Ready(Ok(active))
+	}
+
+	/// Ready while a consumer asks for a new group: the first group of a track with none
+	/// written, or a live join or [`Subscriber::refresh`] judged by [`Info::refresh`], once
+	/// its interval has passed. The next group appended answers it, so a publisher waits
+	/// here, opens a group (a keyframe or a snapshot), and waits again. Errors once the track
+	/// is closed or aborted.
+	#[cfg_attr(feature = "async", kio::wrapper)]
+	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		match self.poll_state(waiter) {
+			DemandState::Closed => return Poll::Ready(Err(self.abort_reason())),
+			DemandState::Idle => return Poll::Pending,
+			DemandState::Active => {}
+		}
+		match self.poll_asked(waiter) {
+			Some(_) => Poll::Ready(Ok(())),
+			None => Poll::Pending,
+		}
+	}
+
+	/// The group start consumers ask for when it is past every key written, whether or not
+	/// anyone consumes now.
+	pub(crate) fn asked(&self) -> Option<u64> {
+		self.check_asked(None)
+	}
+
+	/// [`Self::asked`], arming `waiter` for a change otherwise, including a deferred refresh
+	/// coming due.
+	pub(crate) fn poll_asked(&self, waiter: &kio::Waiter) -> Option<u64> {
+		self.check_asked(Some(waiter))
+	}
+
+	fn check_asked(&self, waiter: Option<&kio::Waiter>) -> Option<u64> {
+		let state = self.state.read();
+		let now = state.cache.pool().now_wall();
+		let cache = state.cache.clone();
+		let subscriptions = state.subscriptions.clone();
+		drop(state);
+		let mut subs = subscriptions.lock();
+		if subs.asking(now) {
+			return Some(subs.wanted(now));
+		}
+		let waiter = waiter?;
+		subs.watch(waiter);
+		let deferred = subs.deferred(now);
+		drop(subs);
+		if let Some(at) = deferred {
+			cache.watch_wall(at, waiter);
+		}
+		None
+	}
+
+	/// The lowest group start consumers want, `None` while nobody consumes: past every key
+	/// written while they ask for a new group.
+	#[cfg(test)]
+	pub(crate) fn wanted_start(&self) -> Option<u64> {
+		if !self.is_wanted() {
+			return None;
+		}
+		let now = self.state.read().cache.pool().now_wall();
+		Some(self.state.read().subscriptions.clone().lock().wanted(now))
 	}
 
 	/// Resolves once the track's outcome is final; see [`Producer::poll_closed`].
@@ -5949,7 +6052,7 @@ impl Demand {
 #[cfg(all(test, feature = "async"))]
 impl Demand {
 	/// Wait until [`Self::wanted`] satisfies `f`, returning it. Errors once the track closes.
-	pub(crate) async fn until(&mut self, f: impl Fn(Option<u64>) -> bool) -> Result<Option<u64>> {
+	pub(crate) async fn until(&mut self, f: impl Fn(bool) -> bool) -> Result<bool> {
 		kio::wait(|waiter| {
 			loop {
 				match self.poll_wanted_changed(waiter) {
@@ -6480,15 +6583,14 @@ impl Consumer {
 		routes.serving()
 	}
 
-	/// Join the instance this handle reads at the live edge; see [`Subscriber::join`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn join(&self) {
+	/// Ask the instance this handle reads for a new group; see [`Subscriber::ask`].
+	fn ask(&self, ask: Ask) {
 		if let Some(serving) = self.serving() {
-			return serving.join();
+			return serving.ask(ask);
 		}
 		self.with_state(|state| {
 			if let Some(state) = state {
-				TrackState::join(state.read());
+				TrackState::ask(state.read(), ask);
 			}
 		});
 	}
@@ -8380,7 +8482,7 @@ impl Cursor {
 		// picks where above it to start, timed or not: delivery skips the cached groups it
 		// already judges stale, on whichever clock convicts them.
 		if subscription.read().joins_live() {
-			TrackState::join(state.read());
+			TrackState::ask(state.read(), Ask::Join);
 		}
 		let (filter, cache) = {
 			let preferences = subscription.read();
@@ -10824,16 +10926,27 @@ impl Subscriber {
 		}
 	}
 
-	/// Join again at the live edge, judged by [`Info::refresh`] like a new subscriber: a
-	/// moq-transport NEW_GROUP_REQUEST. A front's reader joins the copy serving it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn join(&self) {
+	/// Ask the publisher for a group starting after the newest one this node holds, judged
+	/// by the track's [`Refresh`]: at once, once the newest group is old enough, or never on
+	/// a track that does not refresh.
+	///
+	/// The answer arrives like any other group: the first group this subscriber receives
+	/// that starts after the newest held when it was called. A group already on its way when
+	/// the request reached the publisher answers it, so across hops "made after this call"
+	/// is best effort; a reader that needs that puts its own marker in the frame. Requests
+	/// coalesce, so calling it again before the answer asks nothing more.
+	pub fn refresh(&self) {
+		self.ask(Ask::Refresh);
+	}
+
+	/// Ask for a new group as `ask`; a front's reader asks the copy serving it.
+	pub(crate) fn ask(&self, ask: Ask) {
 		match &self.inner {
-			Inner::Plain(cursor) => TrackState::join(cursor.state.read()),
+			Inner::Plain(cursor) => TrackState::ask(cursor.state.read(), ask),
 			Inner::Resume(_, logical) => {
 				let routes = logical.state.read().routes.clone();
 				if let Some(copy) = routes.and_then(|routes| routes.serving()) {
-					copy.join();
+					copy.ask(ask);
 				}
 			}
 		}
@@ -11164,6 +11277,11 @@ impl Ordered {
 	/// borrowing the read cursor.
 	pub fn control(&self) -> Control {
 		self.inner.control()
+	}
+
+	/// Ask for a group newer than the newest held; see [`Subscriber::refresh`].
+	pub fn refresh(&self) {
+		self.inner.refresh();
 	}
 
 	/// This subscriber's current preferences.
@@ -18855,9 +18973,9 @@ mod test {
 		drop(hold);
 		again.write_frame(at(302), &b"c"[..]).unwrap();
 		again.finish().unwrap();
-		assert_eq!(producer.demand().wanted(), Some(0), "not read to its end yet");
+		assert_eq!(producer.demand().wanted_start(), Some(0), "not read to its end yet");
 		assert_eq!(reader.finished().await.unwrap(), 1);
-		assert_eq!(producer.demand().wanted(), None, "the re-offer answered the end");
+		assert_eq!(producer.demand().wanted_start(), None, "the re-offer answered the end");
 	}
 
 	/// A capped reader continues on a copy cut short at the back no earlier than its cap, which
@@ -23420,29 +23538,44 @@ mod test {
 	}
 
 	/// Poll `demand` for a change without waiting.
-	fn wanted_changed(demand: &mut Demand) -> Option<Option<u64>> {
+	fn wanted_changed(demand: &mut Demand) -> Option<bool> {
 		match demand.poll_wanted_changed(&kio::Waiter::noop()) {
 			Poll::Ready(res) => Some(res.unwrap()),
 			Poll::Pending => None,
 		}
 	}
 
-	/// The first consumer of a track with no group wants group 0, and nobody wants it once
+	/// Whether `demand` asks for a new group now.
+	fn refreshing(demand: &Demand) -> bool {
+		match demand.poll_refresh(&kio::Waiter::noop()) {
+			Poll::Ready(res) => {
+				res.unwrap();
+				true
+			}
+			Poll::Pending => false,
+		}
+	}
+
+	/// The first consumer of a track with no group asks for one, and nobody wants it once
 	/// the last one leaves.
 	#[test]
 	fn wanted_follows_the_first_consumer() {
-		let producer = track_producer("test", Info::default().with_refresh(1));
+		let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1)));
 		let mut demand = producer.demand();
-		assert_eq!(demand.wanted(), None);
-		assert_eq!(wanted_changed(&mut demand), Some(None), "the first call reports");
+		assert!(!demand.wanted());
+		assert!(!refreshing(&demand), "nobody asks");
+		assert_eq!(wanted_changed(&mut demand), Some(false), "the first call reports");
 		assert_eq!(wanted_changed(&mut demand), None, "then only changes");
 
 		let subscriber = producer.subscribe(None);
-		assert_eq!(demand.wanted(), Some(0));
-		assert_eq!(wanted_changed(&mut demand), Some(Some(0)));
+		assert!(demand.wanted());
+		assert!(refreshing(&demand), "the first group");
+		assert_eq!(wanted_changed(&mut demand), Some(true));
+		refresh_group(&producer, 0);
+		assert!(!refreshing(&demand), "the group answered it");
 		drop(subscriber);
-		assert_eq!(demand.wanted(), None);
-		assert_eq!(wanted_changed(&mut demand), Some(None));
+		assert!(!demand.wanted());
+		assert_eq!(wanted_changed(&mut demand), Some(false));
 	}
 
 	/// A join reads the newest group, and once its bytes after the first frame exceed the
@@ -23451,10 +23584,10 @@ mod test {
 	#[test]
 	fn a_join_over_the_ratio_wants_a_new_group() {
 		for (delta, wanted) in [(0, 0), (3, 0), (4, 1)] {
-			let producer = track_producer("test", Info::default().with_refresh(1));
+			let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1)));
 			refresh_group(&producer, delta);
 			let mut subscriber = producer.subscribe(None);
-			assert_eq!(producer.demand().wanted(), Some(wanted), "{delta} byte delta");
+			assert_eq!(producer.demand().wanted_start(), Some(wanted), "{delta} byte delta");
 			assert_eq!(subscriber.assert_group().start, 0, "{delta} byte delta");
 		}
 	}
@@ -23470,16 +23603,15 @@ mod test {
 		let mut group = subscriber.assert_group();
 		let other = group.clone();
 		drop(subscriber);
-		assert_eq!(producer.demand().wanted(), Some(0), "the group is read");
+		assert_eq!(producer.demand().wanted_start(), Some(0), "the group is read");
 
 		writing.finish().unwrap();
-		assert_eq!(producer.demand().wanted(), Some(0), "not read to its end yet");
+		assert_eq!(producer.demand().wanted_start(), Some(0), "not read to its end yet");
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
-		assert_eq!(
-			producer.demand().wanted(),
-			None,
+		assert!(
+			!producer.demand().wanted(),
 			"a clone reading the end ends it for all"
 		);
 		drop(other);
@@ -23501,7 +23633,7 @@ mod test {
 		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		assert!(matches!(capped.poll_finished(&waiter), Poll::Ready(Ok(1))));
-		assert_eq!(producer.demand().wanted(), Some(0), "the cap is not the group's end");
+		assert_eq!(producer.demand().wanted_start(), Some(0), "the cap is not the group's end");
 		drop(group);
 		let producer = producer
 			.abort_unwanted(Error::Cancel)
@@ -23512,7 +23644,7 @@ mod test {
 		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		writing.finish().unwrap();
 		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
-		assert_eq!(producer.demand().wanted(), None, "read to the group's end");
+		assert_eq!(producer.demand().wanted_start(), None, "read to the group's end");
 	}
 
 	/// A fetched group keeps its track wanted after the fetch resolved, while it is read.
@@ -23528,9 +23660,9 @@ mod test {
 			.now_or_never()
 			.expect("cached")
 			.unwrap();
-		assert_eq!(producer.demand().wanted(), Some(0));
+		assert_eq!(producer.demand().wanted_start(), Some(0));
 		drop(group);
-		assert_eq!(producer.demand().wanted(), None);
+		assert_eq!(producer.demand().wanted_start(), None);
 	}
 
 	/// Joins while a request is pending ask for the same group, so the publisher hears it
@@ -23538,22 +23670,23 @@ mod test {
 	/// that group asks again.
 	#[test]
 	fn joins_coalesce_until_the_group_lands() {
-		let producer = track_producer("test", Info::default().with_refresh(1));
-		let mut demand = producer.demand();
+		let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1)));
+		let demand = producer.demand();
 		refresh_group(&producer, 4);
 		let _a = producer.subscribe(None);
-		assert_eq!(wanted_changed(&mut demand), Some(Some(1)));
+		assert_eq!(demand.asked(), Some(1));
 		let _b = producer.subscribe(None);
-		assert_eq!(wanted_changed(&mut demand), None, "coalesced");
+		assert_eq!(demand.asked(), Some(1), "coalesced");
 
 		refresh_group(&producer, 0);
-		assert_eq!(wanted_changed(&mut demand), None, "group 1 answers it");
+		assert_eq!(demand.asked(), None, "group 1 answers it");
 		let _c = producer.subscribe(None);
-		assert_eq!(wanted_changed(&mut demand), None, "group 1 is under the ratio");
+		assert_eq!(demand.asked(), None, "group 1 is under the ratio");
 
 		refresh_group(&producer, 4);
 		let _d = producer.subscribe(None);
-		assert_eq!(wanted_changed(&mut demand), Some(Some(3)));
+		assert_eq!(demand.asked(), Some(3));
+		assert!(refreshing(&demand));
 	}
 
 	/// A track without a ratio never asks for a group on a join.
@@ -23562,17 +23695,17 @@ mod test {
 		let producer = track_producer("test", Info::default());
 		refresh_group(&producer, 1000);
 		let _subscriber = producer.subscribe(None);
-		assert_eq!(producer.demand().wanted(), Some(0));
+		assert_eq!(producer.demand().wanted_start(), Some(0));
 	}
 
 	/// Only a join at the live edge counts: a subscription resuming from a fixed group
 	/// already has the newest group's start.
 	#[test]
 	fn a_fixed_start_is_no_join() {
-		let producer = track_producer("test", Info::default().with_refresh(1));
+		let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1)));
 		refresh_group(&producer, 4);
 		let _subscriber = producer.subscribe(Subscription::default().with_range(0..));
-		assert_eq!(producer.demand().wanted(), Some(0));
+		assert_eq!(producer.demand().wanted_start(), Some(0));
 	}
 
 	/// The demand reports the track's closure as its abort reason.
@@ -23585,21 +23718,119 @@ mod test {
 			demand.poll_wanted_changed(&kio::Waiter::noop()),
 			Poll::Ready(Err(Error::Cancel))
 		));
-		assert_eq!(demand.wanted(), None);
+		assert_eq!(demand.wanted_start(), None);
 	}
 
-	/// A NEW_GROUP_REQUEST joins again: under the ratio it asks nothing, over it the group
-	/// past the newest.
+	/// A refresh on a track with only a ratio is judged like a join: under the ratio it asks
+	/// nothing, over it the group past the newest.
 	#[test]
-	fn a_subscriber_joins_again() {
-		let producer = track_producer("test", Info::default().with_refresh(1));
+	fn a_refresh_without_an_interval_is_judged_by_the_ratio() {
+		let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1)));
 		let subscriber = producer.subscribe(None);
 		refresh_group(&producer, 3);
-		subscriber.join();
-		assert_eq!(producer.demand().wanted(), Some(0));
+		subscriber.refresh();
+		assert_eq!(producer.demand().asked(), None);
 		refresh_group(&producer, 4);
-		subscriber.join();
-		assert_eq!(producer.demand().wanted(), Some(2));
+		subscriber.refresh();
+		assert_eq!(producer.demand().asked(), Some(2));
+	}
+
+	/// A track that does not refresh never asks, however a reader asks.
+	#[test]
+	fn a_refresh_without_opting_in_asks_nothing() {
+		let producer = track_producer("test", Info::default());
+		let subscriber = producer.subscribe(None);
+		refresh_group(&producer, 0);
+		subscriber.refresh();
+		elapse(&producer, Duration::from_secs(3600));
+		assert!(!refreshing(&producer.demand()));
+	}
+
+	/// The interval caps how often a one-frame track makes groups: a request asks at once
+	/// when the newest group is old enough, and otherwise waits until it is, then asks once
+	/// however many readers asked meanwhile. A group landing first answers it.
+	#[test]
+	fn an_interval_defers_a_refresh_until_the_newest_group_is_old_enough() {
+		let interval = Duration::from_secs(5);
+		let info = Info::default().with_refresh(Refresh::default().with_interval(interval));
+		let producer = track_producer("test", info);
+		let demand = producer.demand();
+		let subscriber = producer.subscribe(None);
+		elapse(&producer, Duration::ZERO);
+		assert!(refreshing(&demand), "the first group needs no interval");
+		refresh_group(&producer, 0);
+		assert!(!refreshing(&demand));
+
+		elapse(&producer, Duration::from_secs(2));
+		subscriber.refresh();
+		let late = producer.subscribe(None);
+		assert!(!refreshing(&demand), "deferred, not dropped");
+		elapse(&producer, Duration::from_secs(2));
+		assert!(!refreshing(&demand), "still within the interval");
+		elapse(&producer, Duration::from_secs(1));
+		assert!(refreshing(&demand), "due once the newest group is the interval old");
+		assert_eq!(demand.asked(), Some(1), "one group for every request");
+		refresh_group(&producer, 0);
+		assert!(!refreshing(&demand), "the new group answers every request");
+
+		// A request made long after the newest group asks at once.
+		elapse(&producer, Duration::from_secs(60));
+		late.refresh();
+		assert!(refreshing(&demand));
+		refresh_group(&producer, 0);
+
+		// A group landing while a request waits answers it.
+		subscriber.refresh();
+		refresh_group(&producer, 0);
+		elapse(&producer, interval);
+		assert!(!refreshing(&demand), "the landed group answered it");
+	}
+
+	/// A deferred refresh wakes the publisher parked on it once it comes due.
+	#[test]
+	fn a_deferred_refresh_wakes_the_publisher() {
+		let interval = Duration::from_secs(5);
+		let info = Info::default().with_refresh(Refresh::default().with_interval(interval));
+		let producer = track_producer("test", info);
+		let demand = producer.demand();
+		let subscriber = producer.subscribe(None);
+		elapse(&producer, Duration::ZERO);
+		refresh_group(&producer, 0);
+		subscriber.refresh();
+
+		struct Count(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				self.0.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+		let count = Arc::new(Count(std::sync::atomic::AtomicUsize::new(0)));
+		let waiter = kio::Waiter::new(std::task::Waker::from(count.clone()));
+		assert!(demand.poll_refresh(&waiter).is_pending());
+		elapse(&producer, Duration::from_secs(4));
+		assert_eq!(count.0.load(Ordering::SeqCst), 0, "not due yet");
+		elapse(&producer, Duration::from_secs(1));
+		assert!(count.0.load(Ordering::SeqCst) > 0, "woken when due");
+		assert!(demand.poll_refresh(&waiter).is_ready());
+	}
+
+	/// With both, a join must outweigh the ratio, while a refresh needs only the interval.
+	#[test]
+	fn a_refresh_skips_the_ratio_when_an_interval_is_declared() {
+		let refresh = Refresh::default().with_ratio(1).with_interval(Duration::from_secs(1));
+		let producer = track_producer("test", Info::default().with_refresh(refresh));
+		let demand = producer.demand();
+		let subscriber = producer.subscribe(None);
+		elapse(&producer, Duration::ZERO);
+		refresh_group(&producer, 0);
+		elapse(&producer, Duration::from_secs(1));
+		let _join = producer.subscribe(None);
+		assert!(!refreshing(&demand), "a join under the ratio asks nothing");
+		subscriber.refresh();
+		assert!(refreshing(&demand), "a refresh asks");
 	}
 
 	#[test]
@@ -28474,7 +28705,7 @@ mod test {
 				..Default::default()
 			}),
 			"test",
-			Info::default().with_refresh(1_000_000),
+			Info::default().with_refresh(Refresh::default().with_ratio(1_000_000)),
 		);
 		let mut live = producer.append_next().unwrap();
 		for index in 0..1_000 {
@@ -28482,7 +28713,7 @@ mod test {
 				.unwrap();
 		}
 		let _subscriber = producer.subscribe(None);
-		assert_eq!(producer.demand().wanted(), Some(1));
+		assert_eq!(producer.demand().wanted_start(), Some(1));
 	}
 
 	/// A reader that reaches a shed frame of the newest group asks for a new group on a
@@ -28497,7 +28728,7 @@ mod test {
 				..Default::default()
 			}),
 			"test",
-			Info::default().with_refresh(1_000_000),
+			Info::default().with_refresh(Refresh::default().with_ratio(1_000_000)),
 		);
 		// Joined before the group grew, so the join asks for nothing.
 		let _subscriber = producer.subscribe(None);
@@ -28507,15 +28738,15 @@ mod test {
 			live.write_frame(crate::Timestamp::unscaled(live.start), numbered(index))
 				.unwrap();
 		}
-		assert_eq!(producer.demand().wanted(), Some(0), "nothing asked yet");
+		assert_eq!(producer.demand().wanted_start(), Some(0), "nothing asked yet");
 		assert!(matches!(
 			reader.read_frame().now_or_never().unwrap(),
 			Err(Error::Evicted)
 		));
-		assert_eq!(producer.demand().wanted(), Some(1), "the reader asked");
+		assert_eq!(producer.demand().wanted_start(), Some(1), "the reader asked");
 
 		let _joined = producer.subscribe(None);
-		assert_eq!(producer.demand().wanted(), Some(1), "a join asks for the same group");
+		assert_eq!(producer.demand().wanted_start(), Some(1), "a join asks for the same group");
 	}
 
 	/// The frame a read takes right now, as its number in [`numbered`].
@@ -28909,7 +29140,7 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_refused_flight_falls_back_to_refresh() {
-		let producer = track_producer("test", Info::default().with_refresh(1_000_000));
+		let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1_000_000)));
 		let requests = producer.requests();
 		// Joined before the group grew, so the join asks for nothing.
 		let _subscriber = producer.subscribe(None);
@@ -28920,10 +29151,10 @@ mod test {
 				.unwrap();
 		}
 		assert_eq!(read_numbered(&mut late), None, "asks a flight");
-		assert_eq!(producer.demand().wanted(), Some(0), "nothing refreshed yet");
+		assert_eq!(producer.demand().wanted_start(), Some(0), "nothing refreshed yet");
 		asked(&requests).expect("a flight").refuse_groups(0..1, Error::NotFound);
 		assert!(matches!(late.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
-		assert_eq!(producer.demand().wanted(), Some(1), "the reader asked for a new group");
+		assert_eq!(producer.demand().wanted_start(), Some(1), "the reader asked for a new group");
 	}
 
 	/// A rider that falls off its flight's tail never holds the flight's writer back, and

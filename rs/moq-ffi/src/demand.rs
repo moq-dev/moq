@@ -56,13 +56,13 @@ impl MoqTrackDemand {
 impl MoqTrackDemand {
 	/// Wait until some subscriber wants the track.
 	pub(crate) async fn until_wanted(&self) -> Result<(), MoqError> {
-		while self.wanted_changed().await?.is_none() {}
+		while !self.wanted_changed().await? {}
 		Ok(())
 	}
 
 	/// Wait until no subscriber wants the track.
 	pub(crate) async fn until_unwanted(&self) -> Result<(), MoqError> {
-		while self.wanted_changed().await?.is_some() {}
+		while self.wanted_changed().await? {}
 		Ok(())
 	}
 }

@@ -53,7 +53,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		let info = moq_net::track::Info::default()
 			.with_priority(PRIORITY)
 			.with_compression(moq_net::track::Compression::Deflate)
-			.with_refresh(8);
+			.with_refresh(moq_net::track::Refresh::default().with_ratio(8));
 		let track = broadcast.create_track(name, info)?;
 		Ok(Self {
 			track: Some(moq_json::snapshot::Producer::new(track.clone(), Default::default())),
@@ -66,7 +66,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 		if self
 			.track
 			.as_ref()
-			.is_some_and(|track| track.demand().wanted().is_some())
+			.is_some_and(|track| track.demand().wanted())
 		{
 			self.write(value);
 		}
@@ -663,7 +663,7 @@ mod tests {
 		}
 
 		let mut late = track.consume();
-		assert_eq!(track.demand().wanted(), Some(1), "the join asks for a fresh group");
+		assert!(track.demand().poll_refresh(&kio::Waiter::noop()).is_ready(), "the join asks for a fresh group");
 		report.write(&serde_json::json!({ "n": 100 }));
 		assert_eq!(late.largest().await.map(|position| position.group), Some(1));
 	}

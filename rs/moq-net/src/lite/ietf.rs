@@ -851,7 +851,7 @@ mod hop_tests {
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
 			info.max_age = Some(Duration::from_secs(7));
 			info.priority = 9;
-			info.refresh = Some(0);
+			info.refresh = crate::track::Refresh::default().with_ratio(0);
 			let track_properties = draft22(vec![property(0x40, 3)]);
 			info.properties = track_properties.clone();
 			let track = broadcast.broadcast().create_track("video", info).unwrap();
@@ -922,7 +922,7 @@ mod hop_tests {
 			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
 				(info.max_age, info.timescale, info.priority, info.refresh),
-				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, Some(0)),
+				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, crate::track::Refresh::default().with_ratio(0)),
 				"{offer:?}"
 			);
 			match negotiated {
@@ -1026,7 +1026,7 @@ mod hop_tests {
 			e.varint(0x30).unwrap();
 			e.varint(value).unwrap();
 			let mut info = track::Info::timed().with_timescale(Timescale::MILLI);
-			info.refresh = refresh;
+			info.refresh = crate::track::Refresh::default().with_ratio(refresh);
 			info.properties = draft22(vec![Property {
 				id: IMMUTABLE,
 				value: Value::Bytes(sealed.into()),
