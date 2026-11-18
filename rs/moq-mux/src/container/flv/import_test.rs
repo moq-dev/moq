@@ -1229,12 +1229,14 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	importer.decode(&headers).unwrap();
 	importer.decode(&keyframe).unwrap();
 	importer.decode(&video(2, &delta, 33, 0)).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 80, 0)).unwrap();
 	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 100, 0)).unwrap();
 	let old = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 	let mut old = consumer.track(&old).unwrap().subscribe(replay()).await.unwrap();
 
 	importer.decode(&header).unwrap();
-	// Presented before the old track's last group, which would refuse it as a rewind.
+	// Presented before the old track's 80 ms group, the floor a delta is checked against, which
+	// would refuse it as a rewind.
 	importer.decode(&video(2, &delta, 133, -60)).unwrap();
 	importer.seek(200).unwrap();
 	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 200, 0)).unwrap();
