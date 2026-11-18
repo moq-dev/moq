@@ -41,7 +41,10 @@ impl Secret {
 		})?;
 		let hex = contents.strip_suffix(b"\n").unwrap_or(&contents);
 		let mut secret = [0; 32];
-		hex::decode_to_slice(hex, &mut secret).map_err(|_| Error::Invalid(path.to_path_buf()))?;
+		hex::decode_to_slice(hex, &mut secret).map_err(|_| match is_key(path) {
+			true => Error::Inline,
+			false => Error::Invalid(path.to_path_buf()),
+		})?;
 		Ok(Self(secret))
 	}
 
@@ -52,10 +55,25 @@ impl Secret {
 }
 
 /// Whether `path` spells a key, so an error never prints it into a log.
+/// A trailing newline counts: a key read from a file into an environment variable has one.
 fn is_key(path: &Path) -> bool {
 	let mut key = [0; 32];
 	path.to_str()
-		.is_some_and(|path| hex::decode_to_slice(path, &mut key).is_ok())
+		.is_some_and(|path| hex::decode_to_slice(path.trim_end(), &mut key).is_ok())
+}
+
+/// A secret file's path for `Debug`, which prints a key given where its file belongs
+/// as `[redacted]`. `moq-relay` traces the whole resolved config, so a
+/// derived `Debug` over the path would write the key into the log.
+pub struct Redacted<'a>(pub &'a Path);
+
+impl fmt::Debug for Redacted<'_> {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		match is_key(self.0) {
+			true => formatter.write_str("[redacted]"),
+			false => self.0.fmt(formatter),
+		}
+	}
 }
 
 impl From<[u8; 32]> for Secret {
@@ -119,5 +137,17 @@ mod tests {
 		let err = Secret::read(KEY).unwrap_err();
 		assert!(matches!(err, Error::Inline), "{err:?}");
 		assert!(!err.to_string().contains(KEY) && !format!("{err:?}").contains(KEY));
+
+		// With the trailing newline a file's contents carry.
+		let with_newline = format!("{KEY}\n");
+		let err = Secret::read(&with_newline).unwrap_err();
+		assert!(matches!(err, Error::Inline), "{err:?}");
+	}
+
+	/// A config's `Debug` never prints an inline key, nor hides a real path.
+	#[test]
+	fn debug_redacts_an_inline_key_only() {
+		assert_eq!(format!("{:?}", Redacted(Path::new(KEY))), "[redacted]");
+		assert_eq!(format!("{:?}", Redacted(Path::new("secret.key"))), "\"secret.key\"");
 	}
 }

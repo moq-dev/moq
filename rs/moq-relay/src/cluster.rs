@@ -857,7 +857,7 @@ impl Config {
 	}
 
 	/// Refuse a setting that only a dialed peer or API reads, set with none to read it.
-	pub fn check_dials(&self) -> anyhow::Result<()> {
+	pub(crate) fn check_dials(&self) -> anyhow::Result<()> {
 		anyhow::ensure!(
 			self.api.root.is_empty() || self.api.url.is_some(),
 			"--cluster-api-root requires --cluster-api-url"
@@ -918,7 +918,7 @@ impl Config {
 /// so a rack or a home lab meshes with no seed list and no shared rendezvous.
 /// A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
 /// and is never handed [`Config::token`].
-#[derive(usage_rs::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
+#[derive(usage_rs::Args, Clone, serde::Serialize, serde::Deserialize, Default)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde_with::skip_serializing_none]
 #[serde(default, deny_unknown_fields)]
@@ -964,6 +964,17 @@ pub struct LanConfig {
 		setting = "cluster.lan.app"
 	)]
 	pub app: Option<moq_tokio::mdns::App>,
+}
+
+impl std::fmt::Debug for LanConfig {
+	/// Redact an inline key: [`crate::Config::load`] traces the whole resolved config.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("LanConfig")
+			.field("enabled", &self.enabled)
+			.field("secret", &self.secret.as_deref().map(moq_tokio::secret::Redacted))
+			.field("app", &self.app)
+			.finish()
+	}
 }
 
 impl LanConfig {
@@ -2171,6 +2182,10 @@ impl Cluster {
 			// present the new one at once instead of after a backoff.
 			if presented.is_some() && token.read().ok().flatten() != presented {
 				tracing::info!("cluster token rotated; redialing with it");
+				// An attempt that connected starts the backoff over, even when it skips the wait.
+				if connected {
+					redial = Redial::default();
+				}
 				continue;
 			}
 

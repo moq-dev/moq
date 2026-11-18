@@ -8,20 +8,20 @@ longer waits out 30 s.
 
 ## Plan
 
-Port the `main` fix from the PR that finished `relay-config-loud` as a separate
-PR onto `release`, per RELEASE.md, keeping the published API.
+Decided by the maintainer when the PR that finished `relay-config-loud` was
+picked: ✅ backport only the redial backoff reset to `release`, and leave the
+two startup refusals on `main` (rejected: backporting all of it, which would
+let a patch stop a working relay from booting on a config that ran before; no
+backport, which leaves a flapping peer waiting out 30 s on `release`).
+
+Port the backoff reset from that PR as a separate PR onto `release`, per
+RELEASE.md, keeping the published API.
 `rs/moq-relay/src/cluster.rs` `run_remote` on `release` has the same dead
 `Ok(()) if elapsed >= stable_threshold` branch, because `run_remote_once` only
 returns an error. Report whether the attempt connected (any observation with
-`connects > 0`) and pass it to `Redial::next`.
+`connects > 0`) and pass it to `Redial::next`, which starts over at the first
+ceiling when it did, including on the immediate retry after the cluster token
+rotated.
 
-The same PR on `main` also refuses `cluster.api.root` without `cluster.api.url`
-and `cluster.token` with no peer to dial. Those are startup failures for
-configs that ran before, so a patch release should not carry them.
-
-## Waiting
-
-- Maintainer: whether the backport is wanted at all, and whether it carries the
-  two config refusals. Recommend backporting the backoff reset only: a flapping
-  peer is a degraded mesh, while a patch that stops a working relay from
-  booting is a break. Check by this quest's Plan naming the choice.
+Do not port `cluster.api.root` without `cluster.api.url` or `cluster.token`
+with no peer to dial as startup errors: those stay on `main`.
