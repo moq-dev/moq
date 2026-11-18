@@ -4,7 +4,7 @@
 //! Each runs on a ring of six relays with a reader on every relay, the publisher's two
 //! relays opposite each other at `R0` and `R3`.
 
-use super::{Feed, Source, bloat, measured, readers, ring};
+use super::{Feed, Source, bloat, measured, readers, reports, ring};
 use crate::path_routes::{cut, land, lite07, quiesce};
 
 use std::time::Duration;
@@ -67,13 +67,9 @@ async fn redundant(redundant: Redundant, lost: usize, how: Loss) {
 	let since = kio::clock::now();
 	how.apply(&pushes[usize::from(lost == 3)]).await;
 	quiesce().await;
-	for (i, reader) in readers.iter_mut().enumerate() {
-		let report = reader.report(since);
-		measured(
-			&format!("redundant {redundant:?}, R{lost} lost by {how:?}, reader R{i}"),
-			&report,
-		);
-		assert!(report.seamless(), "{redundant:?} R{lost} {how:?}: R{i}: {report:?}");
+	let case = format!("redundant {redundant:?}, R{lost} lost by {how:?}");
+	for (i, report) in reports(&mut readers, since, &case).iter().enumerate() {
+		assert!(report.seamless(), "{case}: R{i}: {report:?}");
 	}
 	assert_eq!(mesh.doubled(feed.written()), [], "{redundant:?} R{lost} {how:?}");
 }
