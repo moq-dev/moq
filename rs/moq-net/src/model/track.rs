@@ -23,7 +23,8 @@ use super::resume::Successor;
 pub use super::subscription::{Position, Subscription};
 
 use std::{
-	collections::{BTreeMap, HashSet, VecDeque},
+	cell::Cell,
+	collections::{BTreeMap, HashSet, VecDeque, vec_deque},
 	ops::{Bound, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
@@ -175,11 +176,12 @@ pub(crate) struct TrackState {
 	// every cached group for each delivery.
 	lookup: BTreeMap<u64, Slot>,
 
-	// Publisher-produced groups in arrival order as (sequence, stamp), walked by
-	// subscriptions; an entry only resolves while its stamp matches the slot's.
-	// Fetched backfill (`insert_group_request`) is deliberately absent: it is
-	// served by sequence, never replayed to arrival-order subscribers.
-	arrival: VecDeque<(u64, u32)>,
+	// Publisher-produced groups in arrival order, walked by subscriptions; an entry
+	// only resolves while its stamp matches the slot's. Fetched backfill
+	// (`insert_group_request`) is deliberately absent: it is served by sequence,
+	// never replayed to arrival-order subscribers. Dead entries are dropped anywhere,
+	// not just at the front, so the protected live edge pins none behind it.
+	arrival: VecDeque<Arrived>,
 
 	// Eviction order under memory pressure as (sequence, stamp): every cached
 	// group except the protected latest. `pay_debt` scans victims from the front;
@@ -201,12 +203,12 @@ pub(crate) struct TrackState {
 	datagrams: VecDeque<Datagram>,
 
 	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
-	// cursor to an index into `datagrams` (mirrors `offset` for groups).
+	// cursor to an index into `datagrams`.
 	datagram_offset: usize,
 
-	// We've popped the front of `arrival` this many times, mapping a subscriber's
-	// absolute cursor to an index.
-	offset: usize,
+	// The position the next entry of `arrival` takes: positions only grow, so a reader's
+	// cursor stays valid as dead entries leave from anywhere.
+	next_arrival: usize,
 
 	// The highest sequence number successfully appended to the track. Shared with
 	// datagrams, so it can run ahead of any cached group.
@@ -290,6 +292,15 @@ struct Slot {
 	protection: Option<cache::Protection>,
 }
 
+/// A publisher-produced group in [`TrackState::arrival`].
+#[derive(Clone, Copy, Debug)]
+struct Arrived {
+	/// Its position in arrival order, which a reader's cursor counts in.
+	at: usize,
+	sequence: u64,
+	stamp: u32,
+}
+
 /// Heap the track keeps per cached group, excluding the group itself
 /// ([`group::CACHE_OVERHEAD`]).
 ///
@@ -298,7 +309,8 @@ struct Slot {
 /// `BTreeMap` node sits between half and fully packed, and a `VecDeque` holds up to
 /// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
 /// derived rather than measured.
-pub(crate) const CACHE_OVERHEAD: u64 = 2 * (size_of::<u64>() + size_of::<Slot>() + 2 * size_of::<(u64, u32)>()) as u64;
+pub(crate) const CACHE_OVERHEAD: u64 =
+	2 * (size_of::<u64>() + size_of::<Slot>() + size_of::<Arrived>() + size_of::<(u64, u32)>()) as u64;
 
 /// The registered subscriptions, aggregated by the producer.
 type Subscriptions = Vec<kio::Consumer<Subscription>>;
@@ -361,16 +373,25 @@ impl TrackState {
 	/// Returns the group and its absolute index so the consumer can advance past it.
 	/// The cached producer rather than a consumer: `consume` reads the clock and can
 	/// take the group's own lock, which the caller does once the track guard is gone.
-	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Producer, usize)>>> {
-		let start = index.saturating_sub(self.offset);
-		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start) {
-			if *sequence >= min_sequence
-				&& let Some(slot) = self.lookup.get(sequence)
-				&& slot.stamp == *stamp
+	///
+	/// Moves `index` past the entries this reader is never handed: dead, aborted, or below
+	/// `min_sequence`, which a lower floor walks again from the reader's last hand-out. So
+	/// a wake walks only what the reader may still be handed, however many stale entries
+	/// arrived.
+	fn poll_recv_group(
+		&self,
+		index: &Cell<usize>,
+		min_sequence: u64,
+	) -> Poll<Result<Option<(group::Producer, usize)>>> {
+		for entry in self.arrivals_from(index.get()) {
+			if entry.sequence >= min_sequence
+				&& let Some(slot) = self.lookup.get(&entry.sequence)
+				&& slot.stamp == entry.stamp
 				&& !slot.group.is_aborted()
 			{
-				return Poll::Ready(Ok(Some((slot.group.clone(), self.offset + i))));
+				return Poll::Ready(Ok(Some((slot.group.clone(), entry.at))));
 			}
+			index.set(entry.at + 1);
 		}
 
 		// TODO once we have drop notifications, check if index == final_sequence.
@@ -747,12 +768,13 @@ impl TrackState {
 
 		self.arrival
 			.front()
-			.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
+			.is_some_and(|entry| !self.is_current(entry.sequence, entry.stamp))
 			|| self
 				.evict
 				.front()
 				.is_some_and(|(sequence, stamp)| !self.is_current(*sequence, *stamp))
 			|| self.evict.len() > 2 * self.lookup.len() + EVICT_SLACK
+			|| self.arrival.len() > 2 * self.lookup.len() + EVICT_SLACK
 	}
 
 	/// Expire an ended track's idle groups, whose closed channel refuses the write
@@ -822,15 +844,15 @@ impl TrackState {
 			}
 		}
 
-		// Trim dead leading arrival entries to advance the subscriber offset. An
-		// entry is dead once its slot is gone or re-stamped by a newer incarnation.
-		while let Some((sequence, stamp)) = self.arrival.front() {
-			if self.lookup.get(sequence).is_some_and(|slot| slot.stamp == *stamp) {
+		// Trim dead leading arrival entries. An entry is dead once its slot is gone or
+		// re-stamped by a newer incarnation.
+		while let Some(entry) = self.arrival.front() {
+			if self.is_current(entry.sequence, entry.stamp) {
 				break;
 			}
 			self.arrival.pop_front();
-			self.offset += 1;
 		}
+		self.compact_arrival();
 
 		// Drop dead leading eviction entries so scans stay over live candidates.
 		while let Some((sequence, stamp)) = self.evict.front() {
@@ -847,6 +869,26 @@ impl TrackState {
 			self.evict
 				.retain(|(sequence, stamp)| lookup.get(sequence).is_some_and(|slot| slot.stamp == *stamp));
 		}
+	}
+
+	/// Drop the dead arrival entries once they clearly outnumber the cached groups, wherever
+	/// they sit: behind a protected live edge, none ever reaches the front. A rebuild drops
+	/// more entries than it keeps, each pushed once, so it costs a constant per push.
+	fn compact_arrival(&mut self) {
+		if self.arrival.len() > 2 * self.lookup.len() + EVICT_SLACK {
+			let lookup = &self.lookup;
+			self.arrival.retain(|entry| {
+				lookup
+					.get(&entry.sequence)
+					.is_some_and(|slot| slot.stamp == entry.stamp)
+			});
+		}
+	}
+
+	/// The arrival entries at or after position `at`.
+	fn arrivals_from(&self, at: usize) -> vec_deque::Iter<'_, Arrived> {
+		let start = self.arrival.partition_point(|entry| entry.at < at);
+		self.arrival.range(start..)
 	}
 
 	/// Whether `(sequence, stamp)` names the currently cached incarnation.
@@ -977,7 +1019,13 @@ impl TrackState {
 			},
 		);
 		if visible {
-			self.arrival.push_back((sequence, stamp));
+			self.arrival.push_back(Arrived {
+				at: self.next_arrival,
+				sequence,
+				stamp,
+			});
+			self.next_arrival += 1;
+			self.compact_arrival();
 		}
 	}
 
@@ -1754,6 +1802,7 @@ impl Producer {
 				subscription,
 				min_sequence,
 				index: 0,
+				served: 0,
 				datagram_index: 0,
 				next_sequence: 0,
 				end_sequence: None,
@@ -2478,9 +2527,9 @@ impl Consumer {
 			ConsumerKind::Plain(state) => {
 				let state = state.read();
 				let mut out = Vec::with_capacity(state.lookup.len());
-				for (sequence, stamp) in state.arrival.iter() {
-					if let Some(slot) = state.lookup.get(sequence)
-						&& slot.stamp == *stamp
+				for entry in state.arrival.iter() {
+					if let Some(slot) = state.lookup.get(&entry.sequence)
+						&& slot.stamp == entry.stamp
 						&& !slot.group.is_aborted()
 					{
 						out.push((slot.group.clone(), slot.visible));
@@ -3058,6 +3107,7 @@ impl Subscribing {
 						subscription: self.subscription.clone(),
 						min_sequence,
 						index: 0,
+						served: 0,
 						datagram_index: 0,
 						next_sequence: 0,
 						end_sequence: None,
@@ -3644,8 +3694,11 @@ struct PlainSubscriber {
 	state: kio::Consumer<TrackState>,
 
 	subscription: kio::Producer<Subscription>,
-	/// Arrival-order cursor used by `recv_group`.
+	/// Arrival-order position `recv_group` walks on from, past what it will never hand out.
 	index: usize,
+	/// One past the last arrival position `recv_group` handed out: a lowered floor walks
+	/// again from here, so a group it had skipped below the old floor is still served.
+	served: usize,
 	/// Arrival-order cursor used by `recv_datagram`, independent of groups.
 	datagram_index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by `start_at`.
@@ -3828,9 +3881,10 @@ impl PlainSubscriber {
 					group
 				}
 				_ => {
-					let Some((producer, found_index)) =
-						ready!(self.poll(waiter, |state| state.poll_recv_group(self.index, self.min_sequence))?)
-					else {
+					let index = Cell::new(self.index);
+					let polled = self.poll(waiter, |state| state.poll_recv_group(&index, self.min_sequence));
+					self.index = index.get();
+					let Some((producer, found_index)) = ready!(polled?) else {
 						// Parked groups survive a finished track: they become deliverable
 						// again if the cap rises, so the stream isn't over while any are held.
 						if self.parked.is_empty() {
@@ -3843,6 +3897,7 @@ impl PlainSubscriber {
 					// group's state lock under the track's.
 					consumer.cache_refresh();
 					self.index = found_index + 1;
+					self.served = self.index;
 
 					// Park a group beyond the cap instead of dropping it, and keep scanning
 					// so an in-range group that arrived behind it still flows.
@@ -4312,7 +4367,12 @@ impl Subscriber {
 	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	pub(crate) fn start_at(&mut self, sequence: u64) {
 		match &mut self.inner {
-			SubscriberKind::Plain(plain) => plain.min_sequence = sequence,
+			SubscriberKind::Plain(plain) => {
+				if sequence < plain.min_sequence {
+					plain.index = plain.served;
+				}
+				plain.min_sequence = sequence;
+			}
 			SubscriberKind::Spliced(spliced) => spliced.start_at(sequence),
 		}
 	}
@@ -4780,13 +4840,18 @@ mod test {
 		state.lookup.len()
 	}
 
+	/// Helper: the position of the first arrival entry still held, or the next one's.
+	fn first_arrival(state: &TrackState) -> usize {
+		state.arrival.front().map_or(state.next_arrival, |entry| entry.at)
+	}
+
 	/// Helper: get the sequence number of the first live group in arrival order.
 	fn first_live_sequence(state: &TrackState) -> u64 {
 		state
 			.arrival
 			.iter()
-			.find(|(sequence, stamp)| state.lookup.get(sequence).is_some_and(|slot| slot.stamp == *stamp))
-			.map(|(sequence, _)| *sequence)
+			.find(|entry| state.is_current(entry.sequence, entry.stamp))
+			.map(|entry| entry.sequence)
 			.unwrap()
 	}
 
@@ -5197,7 +5262,7 @@ mod test {
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 3);
-			assert_eq!(state.offset, 0);
+			assert_eq!(first_arrival(&state), 0);
 		}
 
 		// Advance time past the pool's LRU window.
@@ -5207,13 +5272,13 @@ mod test {
 		producer.append_group().unwrap(); // seq 3
 
 		// Groups 0, 1, 2 are expired but seq 3 (the live edge) is kept. Their arrival
-		// entries no longer resolve, so the leading ones are trimmed and the offset
-		// advances past them.
+		// entries no longer resolve, so the leading ones are trimmed and the queue now
+		// starts at seq 3's position.
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 3);
-			assert_eq!(state.offset, 3);
+			assert_eq!(first_arrival(&state), 3);
 			assert!(!state.lookup.contains_key(&0));
 			assert!(!state.lookup.contains_key(&1));
 			assert!(!state.lookup.contains_key(&2));
@@ -5455,8 +5520,73 @@ mod test {
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
 			assert_eq!(first_live_sequence(&state), 1);
-			assert_eq!(state.offset, 1);
+			assert_eq!(first_arrival(&state), 1);
 		}
+	}
+
+	/// A publisher that jumps far ahead and then keeps publishing below it holds the
+	/// relay to what it caches: the protected high sequence never pins the dead entries
+	/// behind it, and a live reader past them never walks them again.
+	#[tokio::test]
+	async fn a_far_ahead_sequence_pins_nothing_behind_it() {
+		let producer = track_producer("test", None);
+		let high = 1 << 40;
+		// Read from the high sequence on: everything after lands below this reader's floor.
+		let mut subscriber = producer.subscribe(None);
+		subscriber.start_at(high);
+		let waiter = kio::Waiter::noop();
+		producer.create_group(high.into()).unwrap().finish().unwrap();
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the high group is handed out");
+		};
+		assert_eq!(group.sequence, high);
+
+		let n = 4 * EVICT_SLACK as u64;
+		for sequence in 0..n {
+			crate::model::clock::advance(cache::DEFAULT_EXPIRY + Duration::from_secs(1));
+			producer.create_group(sequence.into()).unwrap().finish().unwrap();
+			// Below the reader's floor: never handed out.
+			assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		}
+
+		let (cached, arrivals, next) = {
+			let state = producer.state.read();
+			assert!(state.lookup.contains_key(&high), "the live edge stays");
+			(state.lookup.len(), state.arrival.len(), state.next_arrival)
+		};
+		assert!(
+			arrivals <= 2 * cached + EVICT_SLACK,
+			"{arrivals} arrival entries for {cached} cached groups"
+		);
+		let SubscriberKind::Plain(plain) = &subscriber.inner else {
+			unreachable!()
+		};
+		assert_eq!(plain.index, next, "the reader passed what it is never handed");
+	}
+
+	/// A reader passes a group below its floor, but lowering the floor still serves it,
+	/// and never replays a group it already handed out.
+	#[tokio::test]
+	async fn a_lowered_floor_serves_a_group_the_reader_passed() {
+		let producer = track_producer("test", None);
+		let mut subscriber = producer.subscribe(None);
+		subscriber.start_at(10);
+		let waiter = kio::Waiter::noop();
+
+		producer.create_group(12u64.into()).unwrap().finish().unwrap();
+		producer.create_group(5u64.into()).unwrap().finish().unwrap();
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the in-floor group is handed out");
+		};
+		assert_eq!(group.sequence, 12);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "5 is below the floor");
+
+		subscriber.start_at(0);
+		let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the lowered floor serves the passed group");
+		};
+		assert_eq!(group.sequence, 5);
+		assert!(subscriber.poll_recv_group(&waiter).is_pending(), "12 is not replayed");
 	}
 
 	#[tokio::test]
@@ -5469,7 +5599,7 @@ mod test {
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 3);
-			assert_eq!(state.offset, 0);
+			assert_eq!(first_arrival(&state), 0);
 		}
 	}
 
@@ -7129,7 +7259,7 @@ mod test {
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 2);
-			assert_eq!(state.offset, 0);
+			assert_eq!(first_arrival(&state), 0);
 		}
 
 		// Expire seq 3 as well.
@@ -7139,13 +7269,13 @@ mod test {
 		producer.create_group(group::Info { sequence: 2 }).unwrap();
 
 		// Seq 5 is the live edge (protected) and still resolves at the front of
-		// `arrival`, so nothing is trimmed and the offset stays. Seq 3 expired out of
-		// `lookup`, leaving a hole its arrival entry no longer resolves; seq 2 is
-		// fresh and kept.
+		// `arrival`, so nothing is trimmed and the queue still starts at position 0.
+		// Seq 3 expired out of `lookup`, leaving a hole its arrival entry no longer
+		// resolves; seq 2 is fresh and kept.
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 2);
-			assert_eq!(state.offset, 0);
+			assert_eq!(first_arrival(&state), 0);
 			assert!(state.lookup.contains_key(&5));
 			assert!(!state.lookup.contains_key(&3));
 			assert!(state.lookup.contains_key(&2));
