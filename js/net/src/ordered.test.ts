@@ -253,14 +253,45 @@ test("a stale group passes the owed holes below it as gaps", () =>
 
 test("an ordered read's record folds, so it costs a bounded number of runs", () => {
 	const producer = new TrackProducer("test");
-	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	const sub = producer.subscribe({ delay: { max: null } });
+	const ordered = sub.ordered();
 	// Keyed apart, as audio by timestamp is: each group is a run of its own.
 	for (let i = 0n; i < 3000n; i++) {
 		put(producer, i * 20n);
 		expect(items(ordered)).toEqual([`group ${i * 20n}`]);
 	}
 	// A group landing far below the floor is told as nothing; one above it is still a gap.
+	expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(1024);
 	put(producer, 10n);
 	put(producer, 2990n * 20n + 10n);
 	expect(items(ordered)).toEqual([`gap ${2990n * 20n + 10n}..${2990n * 20n + 11n} (old)`]);
+});
+
+test("a key-order read draining its drops folds its record, as a resumed reader's copy does", () => {
+	const producer = new TrackProducer("test");
+	const sub = producer.subscribe({ delay: { max: null } });
+	// Keyed apart with the keys between skipped, so each skip is a run of its own.
+	for (let i = 0n; i < 3000n; i++) {
+		put(producer, i * 20n);
+		producer.skipGroups(i * 20n + 1n, i * 20n + 20n);
+		const read = hooks.tryNextGroup(sub);
+		if (read.kind === "group") read.group.close();
+		while (hooks.tryDrop(sub));
+	}
+	expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(1024);
+	sub.close();
+});
+
+test("a read returning only gaps keeps its handed-out record compact", () => {
+	const producer = new TrackProducer("test");
+	const sub = producer.subscribe({ delay: { max: null } });
+	const ordered = sub.ordered();
+	put(producer, 0n);
+	expect(items(ordered)).toEqual(["group 0"]);
+	for (let i = 1n; i <= 100n; i++) {
+		producer.skipGroups(i * 20n - 19n, i * 20n);
+		drop(producer, i * 20n, i * 20n + 1n);
+		expect(items(ordered)).toEqual([`gap ${i * 20n}..${i * 20n + 1n} (delivery timeout)`]);
+	}
+	expect(hooks.deliveredRuns(sub)).toBe(1);
 });

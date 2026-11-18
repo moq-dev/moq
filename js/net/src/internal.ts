@@ -825,6 +825,8 @@ export const hooks: {
 	exhaustedFor: (subscriber: Subscriber, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
+	/** How many runs a subscriber's record of what it reported holds. Tests only. */
+	reportedRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
@@ -1176,6 +1178,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reportedRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

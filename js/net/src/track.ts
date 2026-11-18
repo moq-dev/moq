@@ -2791,8 +2791,10 @@ export class Subscriber {
 	#reported = new Runs<Reported>(sameReport);
 	// Everything below was settled for good and folded out of #reported: handed out, told, or
 	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
-	// under pool pressure; an ordered read folds once its record passes RECORD_RUNS.
+	// under pool pressure; a key-order read folds once its record passes RECORD_RUNS.
 	#floor = 0n;
+	// A wire publisher reads #reported as what its wire was told, so it never folds.
+	#wired = false;
 	// What an ordered read owes before its next group; unset before its first read. See #tryItem.
 	#items?: Items;
 	// The group the frame-level helpers are currently draining, acquired through the
@@ -3264,6 +3266,7 @@ export class Subscriber {
 
 	// The publisher's view of this reader's record.
 	#wireRecord(): WireRecord {
+		this.#wired = true;
 		const reported = this.#reported;
 		return {
 			told: (key) => reported.at(key) !== undefined,
@@ -4001,6 +4004,7 @@ export class Subscriber {
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
+		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups
@@ -4605,6 +4609,7 @@ export class Subscriber {
 		const [gap] = runGaps(blocked, start, to);
 		if (!gap) return undefined;
 		this.#reported.set(gap.start, gap.end, { ...gap, kind: hole.skip ? "skip" : "dropped" });
+		this.#fold();
 		return { kind: "drop", ...gap, error: hole.error, skip: hole.skip, stale: hole.stale };
 	}
 
@@ -4848,7 +4853,6 @@ export class Subscriber {
 			// The drop record starts before the first read, so the cursor keeps what it gives up.
 			this.#findGaps(items);
 		}
-		this.#fold(items);
 		const read = this.#readHeld(items);
 		this.#findGaps(items);
 		switch (read.kind) {
@@ -4950,14 +4954,14 @@ export class Subscriber {
 		items.at = max(items.at, given.end);
 		// Told once: no later drop of these keys is a gap again.
 		this.#settled(given.start, given.end);
-		// Passed for good: no group there is handed out after it, whether it lands late here or on
-		// a resumed reader's copy.
-		this.#delivered.addRun(given.start, given.end);
-		if (!this.#resume && this.#nextKey < given.end) {
-			const passed = this.#nextKey;
-			this.#nextKey = given.end;
-			this.#stoppedReading(passed, given.end);
-		}
+		// Passed for good, as a group handed out is: an ordered read never goes back, so no group
+		// below its end is handed out after it, whether it lands late here or on a resumed
+		// reader's copy, and a fill no longer owes it there.
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		this.#delivered.forgetBelow(given.end);
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (!this.#resume) this.#nextKey = max(this.#nextKey, given.end);
 		return { kind: "gap", start: given.start, end: given.end, error };
 	}
 
@@ -4975,15 +4979,21 @@ export class Subscriber {
 	#settled(start: bigint, end: bigint): void {
 		start = max(start, this.#floor);
 		if (start < end) this.#reported.set(start, end, { start, end, kind: "settled" });
+		this.#fold();
 	}
 
 	// Fold the older half of the record into the floor once it passes RECORD_RUNS, never past
 	// where the read is, so the record costs a bounded number of runs however long it plays. A
-	// group landing below the floor, which no read could take, is then told as nothing.
-	#fold(items: Items): void {
+	// group landing below the floor, which no read could take, is then told as nothing. A key-order
+	// read folds, an ordered one or a resumed reader's copy; a wire publisher's record is what its
+	// wire was told, which it keeps.
+	#fold(): void {
 		const runs = this.#reported.all;
-		if (runs.length <= RECORD_RUNS) return;
-		const floor = min(runs[runs.length - RECORD_RUNS / 2].start, items.at);
+		if (runs.length <= RECORD_RUNS || this.#wired) return;
+		// Where the read is: the keys it handed out or passed, and the items it returned.
+		let at = this.#delivered.runEnd(0n) ?? 0n;
+		if (this.#items) at = min(at, this.#items.at);
+		const floor = min(runs[runs.length - RECORD_RUNS / 2].start, at);
 		if (floor <= this.#floor) return;
 		this.#floor = floor;
 		this.#reported.set(0n, floor);
