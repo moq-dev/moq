@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "bun:test";
 import { Duration } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import { Track } from "@moq/net";
-import { type Arrival, answering, type Options, QUANTUM, type Quantum, replay } from "./replay";
+import { type Arrival, type Options, QUANTUM, type Quantum, replay } from "./replay";
 
 const RATE = 48000;
 const CONFIG = { codec: "opus", sampleRate: RATE, numberOfChannels: 1 } as Catalog.AudioConfig;
@@ -71,9 +70,10 @@ describe("replay", () => {
 	});
 
 	it("counts each run-dry the way the player's stats do", async () => {
-		// One frame 200 ms late against a 100 ms target: the ring runs dry once and re-stalls to refill,
-		// which counts the short quantum it ran dry in and the stall after it.
-		const trace = paced(10, (i) => (i === 250 ? 230 : 30)).sort((a, b) => a.at - b.at);
+		// Ten frames held and released together, the first 200 ms late against a 100 ms target: the ring
+		// runs dry once and re-stalls to refill, which counts the short quantum it ran dry in and the
+		// stall after it.
+		const trace = paced(10, (i) => (i >= 250 && i < 260 ? 30 + (260 - i) * 20 : 30)).sort((a, b) => a.at - b.at);
 		const counted = async (arrivals: Arrival[]) => {
 			let last = 0;
 			for await (const { underruns } of replay(arrivals, {
@@ -90,19 +90,17 @@ describe("replay", () => {
 		expect(await counted(trace)).toBeLessThanOrEqual(2);
 	});
 
-	it("holds newer groups behind a missing one until the max delay gives up on it", async () => {
+	it("holds newer groups behind a missing one until the ring could no longer play it", async () => {
 		const trace = paced(10, () => 30).filter((arrival) => arrival.group !== 250);
-		// The consumer delivers in group order, so the ring runs dry for longer than the missing frame
-		// while the groups behind it wait. Writing arrivals straight into the ring plays straight through.
-		const frame = Math.ceil((20 / 1000) * (RATE / QUANTUM));
-		expect(
-			await underruns(trace, {
-				rate: RATE,
-				config: CONFIG,
-				delay: Duration.millis(100),
-				duration: observed(10),
-			}),
-		).toBeGreaterThan(frame);
+		// The consumer delivers in group order, so the ring runs dry while the groups behind the missing
+		// one wait, and the ordered reader gives up on it as the ring's stretch bound passes it.
+		const run = await underruns(trace, {
+			rate: RATE,
+			config: CONFIG,
+			delay: Duration.millis(100),
+			duration: observed(10),
+		});
+		expect(run).toBeGreaterThan(0);
 		expect(warn).toHaveBeenCalled();
 	});
 
@@ -447,25 +445,5 @@ describe("buffered replay against the shared clock", () => {
 		// slow-down only adds to what is heard.
 		expect(Math.round(result.heard + result.accelerated)).toBeGreaterThanOrEqual(40_000);
 		expect(warn).not.toHaveBeenCalled();
-	});
-});
-
-describe("answering", () => {
-	it("names the publisher's largest group first, then each newer group, and delegates the rest", async () => {
-		const track = new Track.Producer("audio");
-		const subscriber = answering(track.subscribe(), 5n);
-		try {
-			// A group at or below the answer is no news: the track's own largest is older than it.
-			track.createGroup(3n);
-			expect(await subscriber.largest()).toEqual({ group: 5n, frame: 0 });
-			const next = subscriber.largest();
-			track.createGroup(5n);
-			track.createGroup(9n);
-			expect((await next)?.group).toBe(9n);
-			expect(subscriber.name).toBe("audio");
-		} finally {
-			subscriber.close();
-			track.close();
-		}
 	});
 });

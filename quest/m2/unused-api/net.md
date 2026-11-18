@@ -82,5 +82,4 @@ Wire: none.
 ## Related
 
 - [Ordered gaps](/quest/m2/outcome-enums/ordered-gaps.md) - splits `Ordered` into `next_group` and the `next_item` this reader uses
-
-- [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - the browser counterpart of the reader moving onto `Gap`
+- [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - grading the browser counterpart, which already reads `Gap`s

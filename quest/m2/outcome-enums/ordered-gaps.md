@@ -26,7 +26,8 @@ points the container reader at `next_item`.
 
 Public API: breaking in moq-net; callers of `next_group` that matched `Item`
 drop the match, and the gap-reading one calls `next_item`. No JS or binding
-change: js/net's ordered reads and moq-ffi already hide gaps. Wire: none.
+change: js/net's `Ordered` already has `nextGroup` and `nextItem`, and moq-ffi
+hides gaps. Wire: none.
 
 ## Related
 

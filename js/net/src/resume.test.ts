@@ -1890,6 +1890,37 @@ test("a routed read right after an update picks its group under the new preferen
 	}
 });
 
+// The copy reports the owed key it passed to take the group above, and the reader returns that
+// gap before the group, as a direct read of the same track does.
+test("a routed ordered read returns the gap its copy passed to take a group", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: Duration.millis(1000) } })
+		.ordered();
+	try {
+		ta.write(4n);
+		expect((await ordered.nextItem())?.group?.start).toBe(4n);
+		ta.write(6n);
+		const held = ordered.nextItem();
+		expect(await isPending(held)).toBe(true);
+		await clock.advance(Duration.millis(1000));
+		expect(await held).toMatchObject({ kind: "gap", start: 5n, end: 6n });
+		expect((await ordered.nextItem())?.group?.start).toBe(6n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		installed.close();
+	}
+});
+
 for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
 		const clock = new Manual();
@@ -2074,6 +2105,43 @@ test("a resumed reader reports a drop once and still serves a late group", async
 	sub.close();
 	front.consumer.close();
 	a.close();
+});
+
+// A copy folds its record at where the reader is, so one that only reports drops while the reader
+// returns gaps holds a bounded record however long it plays.
+test("a route copy's record folds while the reader returns only gaps", () => {
+	const copies = new Set<track.Subscriber>();
+	const fold = hooks.fold;
+	hooks.fold = (sub, at) => {
+		copies.add(sub);
+		fold(sub, at);
+	};
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ delay: { max: null } })
+		.ordered();
+	try {
+		ta.write(0n);
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "group" });
+		const cut = new StreamError(StreamCode(70), { message: "cut" });
+		for (let i = 1n; i <= 1000n; i++) {
+			// A drop and a skip apart, so each would be a run of its own in the copy's record.
+			hooks.dropTrackGroups(ta.producer, 2n * i - 1n, 2n * i, { error: cut });
+			ta.producer.skipGroups(2n * i, 2n * i + 1n);
+			expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 2n * i - 1n, end: 2n * i });
+		}
+		expect(copies.size).toBeGreaterThan(0);
+		for (const sub of copies) expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(4);
+	} finally {
+		hooks.fold = fold;
+		ordered.close();
+		front.consumer.close();
+		a.close();
+	}
 });
 
 // A skip of a run the serving copy already dropped replaces the drop, so the resumed reader
