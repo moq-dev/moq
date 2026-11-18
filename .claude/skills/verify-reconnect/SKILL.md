@@ -45,7 +45,7 @@ Sync commit: `392cdb6d0240e83ebfc4111518ee9cc6cbb6ff09`. Run `git log 392cdb6d02
 | Code | Model |
 | --- | --- |
 | `rs/moq-net/src/reconnect.rs` `Reconnect::poll` (queue, predecessor, phases), `follow` | `Pop`, `Retire`, `IdleClose`, `FollowPred`, `Dial`, `Abandon`, `BackoffEnds`, `LiveEnds`, `ProbeAsk`, `ProbeAbandon` |
-| `rs/moq-net/src/reconnect.rs` `established`, set by `end`, by a GOAWAY or `Session::poll_accepted` in `poll`, and `walk_failed` and `closed` failing fast until it is set | `established`, the session's `accepted`, `Ages`, `EndGoaway`, `LiveEnds`, `Failed`, `Abandon`, `EndClosed` |
+| `rs/moq-net/src/reconnect.rs` `established`, set by `end`, by a GOAWAY or the session's acceptance in `poll`, and `walk_failed` and `closed` failing fast until it is set | `established`, the session's `accepted`, `Ages`, `EndGoaway`, `LiveEnds`, `Failed`, `Abandon`, `EndClosed` |
 | `rs/moq-net/src/reconnect.rs` `connected`, `fallback`, `failed`, `probed` | `Connected`, `Failed`, `ProbeFails`, `ProbeGetsThrough` |
 | `rs/moq-net/src/reconnect.rs` `end`, `closed`, `done`, `Predecessor` | `EndGoaway`, `EndClosed`, `Done`, `Retire`, `IdleClose` |
 | `rs/moq-net/src/reconnect.rs` `Restart::Handoff` | `LiveEnds` and `WaitOut` with `Restart = "handoff"` (`RestartHandoff.cfg`) |

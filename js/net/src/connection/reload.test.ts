@@ -452,9 +452,7 @@ function refusing(refused: string, release: Promise<void>) {
 		dialed.update((jwts) => [...jwts, jwt]);
 		const pair = createMockTransportPair(Lite.ALPN_06);
 		if (jwt === refused) {
-			void release.then(() =>
-				pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" }),
-			);
+			void release.then(() => pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" }));
 		} else {
 			void accept(pair.server, new URL(target));
 		}

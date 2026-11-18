@@ -420,12 +420,9 @@ async fn an_accepted_session_establishes_the_policy() {
 async fn a_silent_version_is_established_by_uptime() {
 	let lite04: crate::Version = "moq-lite-04".parse().unwrap();
 	for healthy in [false, true] {
-		let mut machine = Reconnect::<Url, TestError>::new(
-			config(INITIAL, None),
-			vec![url("tcp://peer:1/")],
-			kio::clock::now(),
-		)
-		.unwrap();
+		let mut machine =
+			Reconnect::<Url, TestError>::new(config(INITIAL, None), vec![url("tcp://peer:1/")], kio::clock::now())
+				.unwrap();
 		assert!(matches!(next(&mut machine).await, Action::Dial(_)));
 		let (client, server, _) = handshake_with(lite04, false).await;
 		machine.connected(kio::clock::now(), client);
@@ -433,7 +430,11 @@ async fn a_silent_version_is_established_by_uptime() {
 		let healthy_bar = Config::default().backoff.healthy;
 		kio::clock::sleep(if healthy { healthy_bar } else { healthy_bar / 2 }).await;
 		assert!(
-			machine.session().expect("live").poll_accepted(&kio::Waiter::noop()).is_pending(),
+			machine
+				.session()
+				.expect("live")
+				.poll_accepted(&kio::Waiter::noop())
+				.is_pending(),
 			"moq-lite-04 has no answer to accept with"
 		);
 		server.abort(Error::Unauthorized);
