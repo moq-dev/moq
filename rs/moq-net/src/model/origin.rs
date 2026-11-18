@@ -605,6 +605,10 @@ pub(crate) struct Lane {
 	/// exactly there. The longer prefix wins, so a claim at 0 outranks every broader one.
 	/// A path has at most 32 segments, so a byte holds it, and the route entry stays small.
 	pub above: u8,
+	/// Which showing of the claim the route layer serves: a new one each time the claim
+	/// is shown again after every copy of it left, so a copy retired late never retires
+	/// the copies a later showing serves. See [`Claim::retire`].
+	pub lifecycle: u64,
 }
 
 impl Default for Lane {
@@ -613,6 +617,7 @@ impl Default for Lane {
 			primary: true,
 			priority: None,
 			above: 0,
+			lifecycle: 0,
 		}
 	}
 }
@@ -3587,9 +3592,9 @@ impl Claim {
 	}
 
 	/// The route layer let go of the claim this follows: every copy of it the table holds,
-	/// each of the same node, instance and epoch, goes with this one under one lock, rather
-	/// than readers seeing the rest in turn as their sessions retract them. They end with
-	/// `ended`, else go offline.
+	/// each of the same node, instance, epoch and [`Lane::lifecycle`], goes with this one
+	/// under one lock, rather than readers seeing the rest in turn as their sessions
+	/// retract them. They end with `ended`, else go offline.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn retire(self, ended: bool) {
 		self.state.announcement.retract(Retract::Retired { ended });
@@ -6513,13 +6518,18 @@ impl OriginState {
 	}
 
 	/// Retire every other copy at its prefix of the claim `entry` follows: the same
-	/// forwarding node, instance and epoch. See [`Claim::retire`].
+	/// forwarding node, instance, epoch and showing ([`Lane::lifecycle`]). See
+	/// [`Claim::retire`].
 	fn retire_copies(&mut self, entry: &RouteEntry) {
 		let Some(node) = entry.node else {
 			return;
 		};
 		for other in self.routes.at_mut(&entry.prefix) {
-			if other.node == Some(node) && other.instance == entry.instance && other.epoch == entry.epoch {
+			if other.node == Some(node)
+				&& other.instance == entry.instance
+				&& other.epoch == entry.epoch
+				&& other.lane.lifecycle == entry.lane.lifecycle
+			{
 				other.retired = true;
 			}
 		}
@@ -13305,6 +13315,36 @@ mod tests {
 			near.retire(ended);
 			let other = announced.expect_next_active("room").await;
 			assert_eq!(other.node, Some(node_id(8)), "ended: {ended}");
+		}
+	}
+
+	/// A copy whose session releases it only after the route layer showed the claim again
+	/// through another session retires its own showing, not the new one.
+	#[kio::test]
+	async fn a_late_retirement_spares_a_later_showing() {
+		for ended in [true, false] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let mut announced = producer.consume().routes();
+			let copy = |cost: u64, lifecycle: u64| {
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[7]))
+					.with_cost(cost)
+					.with_node(Some(node_id(7)))
+					.with_lane(Lane {
+						lifecycle,
+						..Lane::default()
+					})
+			};
+			let old = peer.forward("room", copy(1, 1)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			let _new = peer.forward("room", copy(2, 2)).unwrap();
+			old.retire(ended);
+			let new = announced.expect_next_active("room").await;
+			assert_eq!(new.cost, Cost::from(2), "ended: {ended}");
+			announced.assert_next_wait();
 		}
 	}
 

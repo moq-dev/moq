@@ -821,6 +821,7 @@ impl Routed {
 			priority: Some(served.priority),
 			// A receiver refuses a claim above its path by more than the path's segments.
 			above: u8::try_from(served.attr.above).unwrap_or(u8::MAX),
+			lifecycle: served.lifecycle,
 		};
 		// A claim no route reaches is unavailable: it stays shown, and serves nothing.
 		let route = crate::origin::RouteInfo::new()

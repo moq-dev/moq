@@ -102,6 +102,10 @@ pub(crate) struct Served {
 	/// The node a request through the session names, or `None` when the peer selects:
 	/// it gave this node the claim itself.
 	pub named: Option<NodeId>,
+	/// Which showing of the claim this is: every slot of it shares one, and a claim
+	/// shown again after every slot left gets a new one, so a session still releasing
+	/// the old showing's copy never takes the new one's with it.
+	pub lifecycle: u64,
 }
 
 /// A change to what a session serves into the origin.
@@ -192,6 +196,8 @@ struct State {
 	router: Router<Key, Instance, Attr>,
 	clock: Deadlines,
 	next_key: Key,
+	/// The next [`Served::lifecycle`].
+	next_lifecycle: u64,
 	queues: HashMap<Key, kio::Shared<Outbox>>,
 	/// Each session's own key, by the tag every stream of the session shares.
 	tags: HashMap<u64, Key>,
@@ -296,6 +302,7 @@ impl Node {
 				router,
 				clock,
 				next_key: LOCAL_MARKED + 1,
+				next_lifecycle: 0,
 				queues: HashMap::new(),
 				tags: HashMap::new(),
 				mounts: HashMap::new(),
@@ -752,6 +759,15 @@ impl State {
 		let (path, instance) = broadcast;
 		let shown = self.router.shown().contains_key(&(instance.clone(), path.clone()));
 		let mut wanted: BTreeMap<SlotKey, Served> = BTreeMap::new();
+		// A slot still held keeps its showing; none, and this is a new one.
+		let held = (self.lanes.get(broadcast)).and_then(|slots| slots.values().next());
+		let lifecycle = match held {
+			Some(slot) => slot.served.lifecycle,
+			None => {
+				self.next_lifecycle += 1;
+				self.next_lifecycle
+			}
+		};
 		if shown {
 			for way in self.router.ways(broadcast) {
 				let (session, named) = match way.next {
@@ -772,6 +788,7 @@ impl State {
 					chain: way.claim.chain,
 					marked: way.claim.marked,
 					named,
+					lifecycle,
 				};
 				wanted.insert((way.origin, session), served);
 			}

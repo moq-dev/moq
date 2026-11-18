@@ -425,6 +425,51 @@ fn an_orphan_is_released_once_another_session_serves_the_claim() {
 	assert_eq!(left.load(Ordering::SeqCst), Left::MOVED);
 }
 
+/// A claim another session takes over keeps its showing, and one shown again after the
+/// node let go of it gets a new one, so the origin never retires the new copies with the
+/// old.
+#[test]
+fn a_claim_shown_again_is_a_new_showing() {
+	let lifecycle = |stream: &Stream| {
+		let serves = serves(stream);
+		let [
+			Output::Serve {
+				origin,
+				path,
+				instance,
+				served,
+			},
+		] = serves.as_slice()
+		else {
+			panic!("one claim to serve: {serves:?}");
+		};
+		stream.serving(*origin, &(path.clone(), instance.clone()), true);
+		served.lifecycle
+	};
+	let (node, clock) = node();
+	let room = cast("room");
+	let first = publisher(&node, 1);
+	announce(&first, &room, live(0));
+	let shown = lifecycle(&first);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	first.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(first);
+
+	let second = publisher(&node, 2);
+	announce(&second, &room, live(0));
+	assert_eq!(lifecycle(&second), shown, "taken over, not shown again");
+	assert_eq!(left.load(Ordering::SeqCst), Left::MOVED);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	second.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(second);
+	expire(&node, &clock);
+	assert_eq!(left.load(Ordering::SeqCst), Left::LOST);
+
+	let third = publisher(&node, 3);
+	announce(&third, &room, live(0));
+	assert_ne!(lifecycle(&third), shown, "shown again after the node let go");
+}
+
 /// The origin's own copy of a claim never waits to be served, so a session refusing the
 /// claim still releases the orphan another session left.
 #[test]
