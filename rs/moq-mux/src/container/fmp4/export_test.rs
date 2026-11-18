@@ -2025,71 +2025,59 @@ async fn a_return_resumes_after_its_last_group() {
 	);
 }
 
-/// A source that never sends its parameter sets can't hold the other tracks' media
-/// forever: once their queue passes its bound the export fails, naming the track.
+/// A source that never sends its parameter sets can't make the other tracks' media pile up:
+/// each holds at most its share and leaves the rest to the transport, and the export fails,
+/// naming the track, once the local clock passes the wait. Publisher timestamps play no
+/// part, so frozen ones and an audio group that never closes fail the same way.
 #[tokio::test(start_paused = true)]
 async fn a_track_that_never_describes_itself_fails() {
 	const IDR_ONLY: &[u8] = &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
+	// Two packets a second, so the audio passes its share before the wait runs out.
+	const PACKET: usize = 1 << 20;
+	let share = crate::container::consumer::DEFAULT_MAX_BUFFER;
 
-	let (mut live, mut audio) = live_av();
-	let video = live.track.name().to_string();
-	// The baseline catalog would init before this IDR, which carries no SPS.
-	wait_for_sps(&mut live);
-	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
-	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
+	for (frozen, cut) in [(false, true), (true, true), (false, false)] {
+		let (mut live, mut audio) = live_av();
+		let video = live.track.name().to_string();
+		// The baseline catalog would init before this IDR, which carries no SPS.
+		wait_for_sps(&mut live);
+		live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
+		let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
 
-	// Live audio, one second at a time, until the export gives up on the video.
-	let mut second = 0;
-	let err = loop {
-		assert!(second < 40, "the queue outgrew its bound");
-		write_audio(&mut audio, second * 1_000_000, 50);
-		second += 1;
-		match kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
-			Err(_) => continue,
-			Ok(Ok(chunk)) => panic!("a chunk before the video could be described: {chunk:?}"),
-			Ok(Err(err)) => break err,
+		// Live audio, one second at a time, up to the wait.
+		let mut held = 0;
+		for second in 0..30u64 {
+			for i in 0..2u64 {
+				let at = if frozen { 0 } else { second * 1_000_000 + i * 500_000 };
+				let keyframe = cut || (second == 0 && i == 0);
+				let mut frame = raw_frame(at, OPUS, keyframe);
+				let mut payload = vec![0; PACKET];
+				payload[..OPUS.len()].copy_from_slice(OPUS);
+				frame.payload = payload.into();
+				audio.write(frame).unwrap();
+			}
+			assert!(
+				kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
+					.await
+					.is_err(),
+				"a chunk or an error before the wait ran out (second {second}, frozen {frozen}, cut {cut})"
+			);
+			held = exporter.held();
+			assert!(held <= share + 2 * PACKET, "the export held {held} bytes");
+			tokio::time::advance(std::time::Duration::from_secs(1)).await;
 		}
-	};
-	assert!(
-		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackUndescribed(names)) if *names == [video]),
-		"{err:?}"
-	);
-}
+		assert!(
+			held + 2 * PACKET > share,
+			"the audio never reached its share: {held} bytes"
+		);
 
-/// Audio held in one open group is buffered rather than queued as fragments, and still
-/// counts against the bound while another track waits for its keyframe.
-#[tokio::test(start_paused = true)]
-async fn an_uncut_audio_backlog_is_bounded() {
-	const IDR_ONLY: &[u8] = &[0, 0, 0, 1, 0x65, 0x88, 0x84, 0x21];
-
-	let (mut live, mut audio) = live_av();
-	let video = live.track.name().to_string();
-	wait_for_sps(&mut live);
-	live.track.write(raw_frame(0, IDR_ONLY, true)).unwrap();
-	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
-		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
-
-	// One audio group that never closes, one second at a time.
-	let mut second = 0;
-	let err = loop {
-		assert!(second < 40, "the buffer outgrew the bound");
-		for i in 0..50u64 {
-			audio
-				.write(raw_frame(second * 1_000_000 + i * 20_000, OPUS, second == 0 && i == 0))
-				.unwrap();
-		}
-		second += 1;
-		match kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
-			Err(_) => continue,
-			Ok(Ok(chunk)) => panic!("a chunk before the video could be described: {chunk:?}"),
-			Ok(Err(err)) => break err,
-		}
-	};
-	assert!(
-		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackUndescribed(names)) if *names == [video]),
-		"{err:?}"
-	);
+		let err = error_now(&mut exporter).await;
+		assert!(
+			matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackUndescribed(names)) if *names == [video]),
+			"{err:?}"
+		);
+	}
 }
 
 /// An HEVC Main 10 source: the catalog's codec string carries no chroma format or bit

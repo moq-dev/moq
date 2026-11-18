@@ -1788,7 +1788,7 @@ impl<F: Container> Drop for GroupBuffer<F> {
 const MARKER_COST: usize = std::mem::size_of::<(usize, Timestamp)>();
 
 /// What a buffered frame holds against the max buffer: its payload and its own entry.
-fn frame_cost(frame: &Frame) -> usize {
+pub(crate) fn frame_cost(frame: &Frame) -> usize {
 	std::mem::size_of::<(Frame, Instant, usize)>() + frame.payload.len()
 }
 
