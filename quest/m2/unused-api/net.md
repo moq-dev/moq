@@ -76,4 +76,4 @@ Wire: none.
 
 ## Related
 
-- [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - the browser counterpart of the reader moving onto `Gap`
+- [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - grading the browser counterpart, which already reads `Gap`s
