@@ -253,7 +253,24 @@ impl Drop for Locked<'_> {
 	}
 }
 
+/// Whether a node still exists, without keeping it alive.
+#[cfg(test)]
+pub(crate) struct WeakNode(std::sync::Weak<Mutex<State>>);
+
+#[cfg(test)]
+impl WeakNode {
+	pub fn alive(&self) -> bool {
+		self.0.strong_count() > 0
+	}
+}
+
 impl Node {
+	/// A handle that does not keep this node alive.
+	#[cfg(test)]
+	pub fn downgrade(&self) -> WeakNode {
+		WeakNode(Arc::downgrade(&self.state))
+	}
+
 	/// A node naming itself `me`, dating what it hears by `clock`.
 	pub fn new(me: NodeId, clock: Deadlines) -> Self {
 		debug_assert!(me.relay != 0, "a node names a relay");

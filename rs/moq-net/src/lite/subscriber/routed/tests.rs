@@ -428,6 +428,24 @@ async fn a_closed_session_leaves_its_claims_unavailable() {
 	assert!(!cursor.expect_next_active("room").await.available);
 }
 
+/// What a closed session leaves behind holds the origin, so the origin's teardown lets go
+/// of the node holding it, or the two keep each other alive.
+#[kio::test]
+async fn a_torn_down_origin_lets_go_of_what_closed_sessions_left() {
+	let (subscriber, consumer) = subscriber();
+	let node = subscriber.origin.route_node().downgrade();
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("room")).unwrap();
+	pump(&mut routed, &subscriber);
+	drop(routed);
+	assert!(node.alive(), "the origin keeps what the session left");
+
+	drop((subscriber, consumer));
+	// The origin's driver tears it down once it sees the last owner gone.
+	kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+	assert!(!node.alive(), "the node outlived its origin");
+}
+
 /// Prefixes named `head/0`, `head/1`, ... each padded to about `bytes`.
 fn prefixes(head: &str, count: usize, bytes: usize) -> std::collections::BTreeSet<Path> {
 	(0..count)
