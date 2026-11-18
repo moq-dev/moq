@@ -138,6 +138,9 @@ pub(crate) enum Gone {
 	/// Its publisher withdrew it, as far as this node knows: every copy the origin holds
 	/// ends.
 	Ended,
+	/// Its publisher withdrew this copy, and the reader shows the claim again at once:
+	/// this copy alone ends, and the copies still serving it stay.
+	Withdrawn,
 }
 
 /// A served claim's place in the origin, which outlives the session that served it until
@@ -857,10 +860,13 @@ impl State {
 			return;
 		}
 		// Unshown, every slot leaves at once, so each tells its copy all of them go: the
-		// origin then drops them together rather than showing the rest in turn.
+		// origin then drops them together rather than showing the rest in turn. Shown, the
+		// staying slots share the leaving ones' showing, so a leaving slot speaks only for
+		// its own copy.
 		let gone = match (shown, ended) {
-			(_, true) => Gone::Ended,
+			(false, true) => Gone::Ended,
 			(false, false) => Gone::Lost,
+			(true, true) => Gone::Withdrawn,
 			(true, false) => Gone::Moved,
 		};
 		let leaving: Vec<SlotKey> = (slots.iter())

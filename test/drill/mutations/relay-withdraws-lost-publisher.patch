@@ -60,8 +60,8 @@ diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subs
 +		// MUTATION: a copy let go of without its publisher ending it stays announced.
 +		node::Gone::Moved | node::Gone::Lost => std::mem::forget(claim),
  		node::Gone::Ended => claim.retire(true),
+ 		node::Gone::Withdrawn => claim.withdrawn(),
  	}
- }
 @@ -418,7 +417,7 @@ impl Routed {
  		for ((origin, path, instance), mut served) in self.served.drain() {
  			let unavailable = served.route.route.clone().with_available(false);

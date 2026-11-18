@@ -149,6 +149,7 @@ fn release(claim: crate::origin::Claim, gone: node::Gone) {
 		node::Gone::Moved => drop(claim),
 		node::Gone::Lost => claim.retire(false),
 		node::Gone::Ended => claim.retire(true),
+		node::Gone::Withdrawn => claim.withdrawn(),
 	}
 }
 

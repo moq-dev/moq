@@ -118,6 +118,7 @@ impl Left {
 	/// The node let go of the claim, and every copy with it.
 	const LOST: u8 = 2;
 	const ENDED: u8 = 3;
+	const WITHDRAWN: u8 = 4;
 }
 
 impl Orphan for Left {
@@ -126,6 +127,7 @@ impl Orphan for Left {
 			Gone::Moved => Self::MOVED,
 			Gone::Lost => Self::LOST,
 			Gone::Ended => Self::ENDED,
+			Gone::Withdrawn => Self::WITHDRAWN,
 		};
 		self.0.store(how, Ordering::SeqCst);
 	}
