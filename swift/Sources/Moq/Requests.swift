@@ -18,7 +18,8 @@ public final class TrackRequest: Sendable {
     /// Accept the request as a raw track. `info` fixes the track's timescale,
     /// priority, and cache; omit for defaults.
     public func accept(info: TrackInfo? = nil) throws -> TrackProducer {
-        TrackProducer(try ffi.accept(info: info))
+        try checkTrackInfo(info)
+        return TrackProducer(try ffi.accept(info: info))
     }
 
     /// Watch this track's subscribers, including after accepting it.
