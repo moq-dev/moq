@@ -1009,8 +1009,12 @@ impl Slot {
 /// `BTreeMap` node sits between half and fully packed, and a `VecDeque` holds up to
 /// twice the entries in it. Half of [`cache::ENTRY_OVERHEAD`]; see it for why this is
 /// derived rather than measured.
-pub(super) const CACHE_OVERHEAD: u64 =
-	2 * (2 * size_of::<u64>() + size_of::<Slot>() + size_of::<(u64, Timestamp)>() + 2 * size_of::<(u64, u32)>()) as u64;
+pub(super) const CACHE_OVERHEAD: u64 = 2
+	* (2 * size_of::<u64>()
+		+ size_of::<Slot>()
+		+ size_of::<(u64, Timestamp)>()
+		+ size_of::<Arrived>()
+		+ size_of::<(u64, u32)>()) as u64;
 
 /// Heap the track keeps per run of its drop set: the run and its reason in `drops`, at most
 /// one coalesced run in `dropped`, and its two entries in `drops_changes`. Doubled for half-full `BTreeMap` nodes, as
@@ -13172,8 +13176,8 @@ mod test {
 		producer.append_next().unwrap().finish().unwrap(); // seq 3
 
 		// Groups 0, 1, 2 are expired but seq 3 (the live edge) is kept. Their arrival
-		// entries no longer resolve, so the leading ones are trimmed and the offset
-		// advances past them.
+		// entries no longer resolve, so the leading ones are trimmed and the queue now
+		// starts at seq 3's position.
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 1);
@@ -17081,9 +17085,9 @@ mod test {
 			.unwrap();
 
 		// Seq 5 is the live edge (protected) and still resolves at the front of
-		// `arrival`, so nothing is trimmed and the offset stays. Seq 3 expired out of
-		// `lookup`, leaving a hole its arrival entry no longer resolves; seq 2 is
-		// fresh and kept.
+		// `arrival`, so nothing is trimmed and the queue still starts at position 0.
+		// Seq 3 expired out of `lookup`, leaving a hole its arrival entry no longer
+		// resolves; seq 2 is fresh and kept.
 		{
 			let state = producer.state.read();
 			assert_eq!(live_groups(&state), 2);
