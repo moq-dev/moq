@@ -294,8 +294,12 @@ impl Resampler {
 		// rather than adding a separately rounded pending chunk to a fixed delay.
 		let frames = (self.input_frames as u128 * self.output_rate as u128 + self.input_rate as u128 / 2)
 			/ self.input_rate as u128;
-		let frames = (frames as i128 + self.skew.round() as i128)
-			.checked_sub(self.output_frames as i128)
+		let owed = (frames as i128 + self.skew.round() as i128).checked_sub(self.output_frames as i128);
+		// An adjusted ratio is realized in whole frames, so what was emitted can already be up to a
+		// frame past its integral. A fixed ratio never runs ahead, so there a shortfall is a fault.
+		let adjusted = self.relative != 1.0 || self.skew != 0.0;
+		let frames = owed
+			.map(|owed| if adjusted { owed.max(0) } else { owed })
 			.and_then(|frames| u128::try_from(frames).ok());
 		let wanted = frames
 			.and_then(|frames| usize::try_from(frames).ok())
@@ -700,6 +704,33 @@ mod tests {
 			"expected ~48k samples, got {}",
 			out.len()
 		);
+	}
+
+	/// An adjusted ratio is realized in whole frames, so what was emitted can run up to a frame
+	/// ahead of the ratio's integral. Draining then owes nothing rather than a negative count, and
+	/// the output still matches the input's adjusted duration to within that frame.
+	#[test]
+	fn an_adjusted_slip_drains_what_it_already_emitted() {
+		for (input_rate, relative) in [
+			(48_000, 0.999),
+			(48_000, 0.998_5),
+			(48_000, 1.001),
+			(48_000, 1.0),
+			(44_100, 0.999),
+			(44_100, 1.002),
+		] {
+			let mut r = Resampler::adjustable(input_rate, 48_000, 1).unwrap();
+			r.adjust(relative).unwrap();
+			let input = input_rate as usize / 50;
+			let mut out = r.process(&vec![0.5; input], at(0, u64::from(input_rate))).unwrap();
+			out.extend(r.flush().unwrap());
+			let expected = 960.0 * relative;
+			assert!(
+				(out.len() as f64 - expected).abs() <= 1.0,
+				"{input_rate} Hz at {relative}: {} frames",
+				out.len()
+			);
+		}
 	}
 
 	/// The sinc filter is centred, so the end of a track only reaches the output
