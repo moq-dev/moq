@@ -25,11 +25,15 @@ canary relay by its counters against its neighbours', so a route layer that
 churns or disagrees between releases is invisible to the roll that would
 catch it.
 
+Decided 2026-11-18 (maintainer, on
+[moq-dev/moq#9110](https://github.com/moq-dev/moq/pull/9110)): ✅ it blocks
+the lite-07 cut, under this epic, with
+[the mesh replay](/quest/m2/multicast/mesh-replay.md) that reads these
+(rejected: m3). The release a deployment rolls onto lite-07 then carries
+them.
+
 Agent's choices, for the implementer to revisit:
 
-- m3, as work a downstream deployment waits on. It does not gate the lite-07
-  cut: the fields are additive, and a deployment needs them in the release
-  it rolls onto lite-07 cluster links, which is no earlier than the cut.
 - Count in `rs/moq-net/src/stats.rs` beside `routes_refused`, per label and
   never per broadcast or per node, so the cost and the output stay flat as
   the mesh grows.
@@ -46,4 +50,4 @@ shared role. Wire: none.
 ## Related
 
 - [Route benches](/quest/m3/route-benches.md) - measures the rewrite these count
-- [Real relays replay a mesh and its faults](/quest/m3/mesh-replay.md) - reads these in its report
+- [Real relays replay a mesh and its faults](/quest/m2/multicast/mesh-replay.md) - reads these in its report

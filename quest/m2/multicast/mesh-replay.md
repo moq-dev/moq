@@ -39,11 +39,15 @@ to the tests that exist:
   is measured on a deployed mesh's shape before that mesh's cluster links
   move to lite-07. This quest's report is that measurement.
 
+Decided 2026-11-18 (maintainer, on
+[moq-dev/moq#9110](https://github.com/moq-dev/moq/pull/9110)): ✅ it blocks
+the lite-07 cut, under this epic (rejected: m3, starting now without the cut
+waiting on it). After the cut the lite-07 wire is frozen, so a wire flaw
+found on a real mesh mid-roll would wait for lite-08. A flaw it finds is
+fixed on lite-07-wip, in the quest that owns the code, before the cut.
+
 Agent's choices, for the implementer to revisit:
 
-- m3, as work a downstream deployment waits on. It does not gate the lite-07
-  cut. A flaw it finds in the wire is still fixed before the cut if the cut
-  has not happened.
 - Reuse the drills' shaper for the links and `test/interop/compat.sh`'s
   download of the released relay.
 - The file names relays and links, each link with its cost and whether
@@ -61,7 +65,7 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [A relay counts what its route layer does](/quest/m3/route-counters.md) - the counts the report reads from each relay
+- [A relay counts what its route layer does](/quest/m2/multicast/route-counters.md) - the counts the report reads from each relay
 
 ## Related
 
