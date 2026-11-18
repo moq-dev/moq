@@ -354,6 +354,16 @@ const NAMED_ONLY: &[Candidate] = &[
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
+	#[cfg(feature = "openh264")]
+	Candidate {
+		name: probe::PIPELINED,
+		codecs: &[Codec::H264],
+		open: probe::Pipelined::open,
+		cuts: true,
+		drives: Drives::Own,
+		#[cfg(target_os = "linux")]
+		vulkan: false,
+	},
 ];
 
 #[cfg(not(test))]

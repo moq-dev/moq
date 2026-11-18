@@ -22,6 +22,11 @@ pub(crate) const NAME: &str = "probe";
 /// V4L2 driver that actually behaves that way.
 pub(crate) const NO_CUT: &str = "probe-nocut";
 
+/// OpenH264 held back by one access unit, like Media Foundation and MediaCodec:
+/// a real bitstream a track can publish, whose last frame only a flush returns.
+#[cfg(feature = "openh264")]
+pub(crate) const PIPELINED: &str = "probe-pipelined";
+
 /// What happened to the codec, and where. `open` and `drop` are the pair that
 /// matters: the Windows backend opens a COM apartment in one and closes it in
 /// the other, so they have to land on the same thread.
@@ -157,6 +162,68 @@ impl Backend for Probe {
 			true => NAME,
 			false => NO_CUT,
 		}
+	}
+}
+
+#[cfg(feature = "openh264")]
+pub(crate) struct Pipelined {
+	inner: Box<dyn Backend>,
+	/// The access unit held back by one.
+	held: Option<Encoded>,
+	ready: VecDeque<Encoded>,
+}
+
+#[cfg(feature = "openh264")]
+impl Pipelined {
+	pub(crate) fn open(config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self {
+			inner: super::openh264::Openh264::open(config)?,
+			held: None,
+			ready: VecDeque::new(),
+		}))
+	}
+
+	/// Hold back the newest access unit the codec readied, releasing the one before it.
+	fn hold(&mut self) -> Result<(), Error> {
+		while let Some(encoded) = self.inner.receive()? {
+			self.ready.extend(self.held.replace(encoded));
+		}
+		Ok(())
+	}
+}
+
+#[cfg(feature = "openh264")]
+impl Backend for Pipelined {
+	fn encode(&mut self, frame: &Frame, cut: bool) -> Result<(), Error> {
+		self.inner.encode(frame, cut)?;
+		self.hold()
+	}
+
+	fn receive(&mut self) -> Result<Option<Encoded>, Error> {
+		Ok(self.ready.pop_front())
+	}
+
+	fn flush(&mut self) -> Result<(), Error> {
+		self.inner.flush()?;
+		self.hold()?;
+		self.ready.extend(self.held.take());
+		Ok(())
+	}
+
+	fn set_bitrate(&mut self, bitrate: u64) -> Result<(), Error> {
+		self.inner.set_bitrate(bitrate)
+	}
+
+	fn can_cut(&self) -> bool {
+		self.inner.can_cut()
+	}
+
+	fn name(&self) -> &'static str {
+		PIPELINED
+	}
+
+	fn applied(&self) -> super::super::Applied {
+		self.inner.applied()
 	}
 }
 

@@ -981,6 +981,8 @@ async fn capture_loop<S: CaptureSource>(
 		// The camera's skips already accounted for, from its first read on: frames it replaced
 		// while this encoder was still opening are startup, not frames the encoder fell behind on.
 		let mut reported = None;
+		// An encode released mid-call leaves the sink refusing every later call, so it can't drain.
+		let mut cancelled = false;
 
 		loop {
 			// Race the next frame against demand, so an on-demand capture releases the
@@ -1048,6 +1050,7 @@ async fn capture_loop<S: CaptureSource>(
 				encoder.cut().await?;
 			}
 			if wait_capture(&demand, on_demand, encoder.encode(frame)).await?.is_none() {
+				cancelled = true;
 				break;
 			}
 			while let Some(encoded) = encoder.receive()? {
@@ -1079,12 +1082,29 @@ async fn capture_loop<S: CaptureSource>(
 		if let Some(reported) = reported {
 			producer.report_skipped(camera.skipped() - reported);
 		}
-		// Drop the camera (LED off) and encoder before opening another.
+		// Drop the camera (LED off) and encoder before opening another. A backend that pipelines
+		// (Media Foundation, MediaCodec) still holds the last frames, so drain them into the track
+		// first. The break is marked even when the drain fails: only those frames are lost.
 		drop(camera);
+		let drained = match cancelled {
+			true => Ok(()),
+			false => drain(&mut encoder, producer).await,
+		};
 		drop(encoder);
 		capture_stopped(producer)?;
+		drained?;
 		tracing::info!("capture stopped; released source");
 	}
+}
+
+/// Publish every frame the encoder still holds.
+#[cfg(feature = "capture")]
+async fn drain(encoder: &mut Sink, producer: &mut Producer) -> Result<(), Error> {
+	encoder.flush().await?;
+	while let Some(encoded) = encoder.receive()? {
+		producer.publish(&encoded)?;
+	}
+	Ok(())
 }
 
 #[cfg(feature = "capture")]
@@ -2359,6 +2379,65 @@ mod tests {
 			tokio::select! {
 				res = &mut run => panic!("the capture ended: {res:?}"),
 				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
+			}
+		}
+		/// A camera that ends drains the encoder into the track before dropping it, so the
+		/// frame a pipelining backend still holds is published rather than lost.
+		#[tokio::test]
+		async fn a_source_end_publishes_the_frames_the_encoder_holds() {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let track = broadcast
+				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut rendition = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
+			rendition.kind = encoder::Kind::Software;
+			let probed = rendition.probe().await.unwrap();
+			let container = moq_mux::catalog::hang::Container::try_from(&probed).unwrap();
+			let mut producer = Producer::new(
+				track,
+				catalog.reserve().with_interval(rendition.effective_join()),
+				probed,
+			)
+			.unwrap();
+			let subscriber = broadcast
+				.consume()
+				.track("video")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+				)
+				.await
+				.unwrap();
+			let mut published = moq_mux::container::Consumer::new(subscriber, container);
+
+			let (camera, stream) = camera();
+			let mut source = Streams::new([stream]);
+			let options = Capture {
+				kind: encoder::Kind::Named(probe::PIPELINED.into()),
+				..Capture::default()
+			};
+			let opens = source.opens.clone();
+			let clock = catalog.clock();
+			let state = starting();
+			let run = capture_loop(&mut producer, &mut source, &options, &clock, &state);
+
+			// Held back by one, the only frame reaches the track through the drain alone.
+			camera.push_native(surface(), us(0));
+			camera.close();
+			// The loop reopening the camera has handled the end.
+			tokio::select! {
+				res = run => panic!("the capture ended: {res:?}"),
+				() = until(|| opens.load(Ordering::SeqCst) == 2) => {}
+			}
+			let _finished = producer.finish().unwrap();
+			loop {
+				match published.read().await.unwrap() {
+					Some(moq_mux::container::Read::Frame { .. }) => break,
+					Some(_) => {}
+					None => panic!("the encoder's last frame was never published"),
+				}
 			}
 		}
 	}

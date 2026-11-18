@@ -300,7 +300,9 @@ impl Decoder {
 	/// Convert one access unit and hand it to the backend.
 	fn submit(&mut self, payload: &Bytes, timestamp: Timestamp, keyframe: bool) -> Result<(), Error> {
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
-		let signalled = keyframe.then(|| super::vui::signalled(self.codec, &access_unit)).flatten();
+		let signalled = keyframe
+			.then(|| super::vui::signalled(self.codec, &access_unit))
+			.flatten();
 		// A refused keyframe yields no picture, so its switch would wait for one forever.
 		self.backend.decode(access_unit, timestamp, keyframe)?;
 		if keyframe {
@@ -937,7 +939,10 @@ mod tests {
 		for index in (0..100u64).rev() {
 			let at = Timestamp::from_micros(index).unwrap();
 			decoder.decode(&keyframe(index), at, true).unwrap();
-			assert!(decoder.switches.len() <= 1, "a switch after a later keyframe stays queued");
+			assert!(
+				decoder.switches.len() <= 1,
+				"a switch after a later keyframe stays queued"
+			);
 		}
 	}
 
