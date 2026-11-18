@@ -182,3 +182,21 @@ test("the frame helpers read past a gap", async () => {
 	expect((await ordered.readFrame())?.group).toBe(0n);
 	expect((await ordered.readFrame())?.group).toBe(2n);
 });
+
+test("a local track waits for what it asked a fill for, and reports a gap once the budget gives up", () =>
+	withClock((clock) => {
+		const producer = new TrackProducer("test");
+		const requests = producer.requests();
+		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		put(producer, 0n);
+		put(producer, 2n);
+		expect(items(ordered)).toEqual(["group 0"]);
+		// Group 1 lands late, within the budget, as a group does.
+		put(producer, 1n);
+		expect(items(ordered)).toEqual(["group 1", "group 2"]);
+		put(producer, 4n);
+		expect(items(ordered)).toEqual([]);
+		clock.jump(Duration.millis(50));
+		expect(items(ordered)).toEqual(["gap 3..4 (old)", "group 4"]);
+		requests.close();
+	}));

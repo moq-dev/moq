@@ -4955,17 +4955,21 @@ export class Subscriber {
 		this.#reported.set(start, end, { start, end, kind: "settled" });
 	}
 
-	// The key cursor passes `[start, end)` to hand out the group at `end`. On a wire-fed copy each
-	// key there no group or drop accounts for was owed and given up, whether the budget convicted
-	// it or the tail's grace folded it, so it is stale. Below the first group passed is where the
-	// read joined, which is no gap.
+	// The key cursor passes `[start, end)` to hand out the group at `end`. Each key there that the
+	// track owed and no group or drop accounts for was given up, whether the budget convicted it or
+	// the tail's grace folded it, so it is stale. A wire-fed copy owes every key; a local track only
+	// what this reader asked a fill for. Below the first group passed is where the read joined,
+	// which is no gap.
 	#passOwed(start: bigint, end: bigint, drift: Drift): void {
 		const producer = this.#state.producer;
-		if (start >= end || this.#nextKey === 0n || !this.#dropsSeen || !producer || !wireFed(producer)) return;
+		if (start >= end || this.#nextKey === 0n || !this.#dropsSeen || !producer) return;
+		const owed = wireFed(producer)
+			? this.#window.runs(start, end)
+			: [...intersect(this.#asked, start, end), ...intersect(this.#givenUp, start, end)];
 		const drops = this.#state.drops;
-		for (const run of this.#window.runs(start, end)) {
-			for (const owed of runGaps(drops.overlapping(run.start, run.end), run.start, run.end)) {
-				this.#giveUp(owed, staleHole(drift.budget));
+		for (const run of owed) {
+			for (const passed of runGaps(drops.overlapping(run.start, run.end), run.start, run.end)) {
+				this.#giveUp(passed, staleHole(drift.budget));
 			}
 		}
 	}
