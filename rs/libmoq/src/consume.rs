@@ -995,13 +995,14 @@ impl Consume {
 					biased;
 					// Dropping `refreshing` withdraws a request not yet sent.
 					_ = close => Ok(0),
-					_ = alive.closed() => Ok(0),
+					// Ahead of `alive`, so a track that aborted reports why rather than `0`.
 					res = refreshing => match res {
 						Ok(()) => Ok(sent),
 						// The track ended without an abort.
 						Err(moq_net::Error::Dropped) => Ok(0),
 						Err(err) => Err(err.into()),
 					},
+					_ = alive.closed() => Ok(0),
 				}
 			})
 			.await;

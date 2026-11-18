@@ -417,13 +417,18 @@ impl MoqBroadcastProducer {
 	///
 	/// Use it for local pub/sub via [`consume`](Self::consume). To publish at a path, use
 	/// [`MoqOriginProducer::route`](crate::origin::MoqOriginProducer::route) instead.
+	///
+	/// No origin collects its cache, so it drives its own until it closes: that is what fires a
+	/// refresh deferred by its track's interval.
 	#[uniffi::constructor]
 	pub fn new() -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		Ok(Arc::new(Self::from_inner(
-			moq_net::broadcast::Info::new().produce(),
-			Background::default(),
-		)?))
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let driver = Background::driver(PoolDriver {
+			pool: broadcast.info().pool.clone(),
+			broadcast: broadcast.consume(),
+		});
+		Ok(Arc::new(Self::from_inner(broadcast, driver)?))
 	}
 
 	/// Create a track for arbitrary byte payloads, no codec or container.
@@ -462,6 +467,26 @@ impl MoqBroadcastProducer {
 		};
 		state.driver.check()?;
 		result
+	}
+}
+
+/// Collects a standalone broadcast's cache pool, which no origin drives, until the broadcast ends,
+/// so its wall-clock deadlines fire.
+struct PoolDriver {
+	pool: moq_net::cache::Pool,
+	broadcast: moq_net::broadcast::Consumer,
+}
+
+impl moq_net::time::Driver for PoolDriver {
+	fn poll(
+		&mut self,
+		now: moq_net::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+		if self.broadcast.poll_closed(waiter).is_ready() {
+			return Err(moq_net::Error::Closed);
+		}
+		Ok(self.pool.poll(now, waiter))
 	}
 }
 

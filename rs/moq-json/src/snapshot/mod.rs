@@ -703,6 +703,20 @@ mod test {
 		assert!(matches!(producer.refresh().now_or_never(), Some(Err(_))));
 	}
 
+	/// A refresh waiting for the first update ends once a clone finishes the track.
+	#[test]
+	fn a_refresh_before_the_first_update_ends_with_the_track() {
+		let (producer, _track) = producer_on(
+			cfg(true),
+			moq_net::track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
+		let (waiter, flag) = crate::refresh::flagged();
+		assert!(producer.poll_refresh(&waiter).is_pending());
+		let _finished = producer.clone().finish().unwrap();
+		assert!(flag.take(), "the finish wakes it");
+		assert!(matches!(producer.poll_refresh(&waiter), std::task::Poll::Ready(Err(_))));
+	}
+
 	#[test]
 	fn array_change_is_delta() {
 		let (mut producer, mut track) = producer(cfg(true));

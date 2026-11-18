@@ -618,6 +618,30 @@ test("concurrent refreshes resolve once the request is sent", async () => {
 	}
 });
 
+// A publisher that answers each request as it reads it, within the same batch, still sees the next
+// request a caller makes as soon as the first resolves.
+test("a refresh made right after one is answered still reaches the publisher", async () => {
+	const producer = new TrackProducer("test").accept({ refresh: { interval: Duration.secs(0) } });
+	const subscriber = producer.subscribe();
+	refreshGroup(producer, 0);
+	let answered = 0;
+	const dispose = producer.demand().refresh.subscribe((asking) => {
+		if (!asking) return;
+		answered++;
+		refreshGroup(producer, 0);
+	});
+	try {
+		await subscriber.refresh();
+		const second = watch(subscriber.refresh());
+		for (let i = 0; i < 4 && !second.done; i++) await flush();
+		expect(second).toEqual({ done: true, error: undefined });
+		expect(answered).toBe(2);
+	} finally {
+		dispose();
+		subscriber.close();
+	}
+});
+
 // Aborting the last caller's refresh before it is sent withdraws the request, but not one another
 // caller still waits on, one a join also made, or one already sent.
 test("aborting a refresh withdraws an unsent request", async () => {
@@ -693,6 +717,13 @@ test("a refresh ends with the group or the track", async () => {
 		producer.abort(new Error("gone"));
 		await flush();
 		expect(closed.error).toEqual(new Error("gone"));
+		// A refresh asked after the close rejects too rather than waiting forever.
+		await expect(subscriber.refresh()).rejects.toThrow("gone");
+		const finished = intervalTrack();
+		finished.producer.finish();
+		finished.producer.close();
+		await expect(finished.subscriber.refresh()).rejects.toThrow("closed before the refresh was sent");
+		finished.subscriber.close();
 		subscriber.close();
 	} finally {
 		installed.close();

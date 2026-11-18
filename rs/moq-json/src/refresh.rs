@@ -34,6 +34,12 @@ impl Refresh {
 		self.parked.wake();
 	}
 
+	/// The track ended, which a parked refresh must see: a finished track's demand stays open
+	/// while subscribers drain it, so nothing else wakes it.
+	pub fn ended(&mut self) {
+		self.parked.wake();
+	}
+
 	/// Ready once consumers want a group past the newest written, arming `waiter` for the next
 	/// demand change otherwise. Never ready before a group is written (`largest` is `None`),
 	/// since there is nothing to restate yet: that parks for the next write. Errors once the

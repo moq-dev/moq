@@ -825,6 +825,17 @@ mod test {
 		assert!(matches!(producer.refresh().now_or_never(), Some(Err(_))));
 	}
 
+	/// A refresh waiting for the first push ends once a clone finishes the track.
+	#[test]
+	fn a_refresh_before_the_first_push_ends_with_the_track() {
+		let (producer, _track) = producer(Config::default());
+		let (waiter, flag) = crate::refresh::flagged();
+		assert!(producer.poll_refresh(&waiter).is_pending());
+		let _finished = producer.clone().finish().unwrap();
+		assert!(flag.take(), "the finish wakes it");
+		assert!(matches!(producer.poll_refresh(&waiter), std::task::Poll::Ready(Err(_))));
+	}
+
 	#[test]
 	fn compressed_round_trip_across_rolls() {
 		let mut live = Live::on(

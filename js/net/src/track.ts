@@ -1325,6 +1325,8 @@ export class Producer {
 	// withdraw it. Read against `#received` rather than stored as a key, so a key written
 	// without answering it can never leave the ask behind.
 	#pending?: PendingRefresh;
+	// The last pending refresh {@link #refreshing} notified as due.
+	#announced?: PendingRefresh;
 	// Wakes a deferred refresh once it comes due.
 	#refreshTimer?: { at: Instant; abort: AbortController };
 	#demand: Demand;
@@ -1823,6 +1825,9 @@ export class Producer {
 	// a group answers it. Aborting `signal` before then withdraws this caller's request.
 	#request(signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted) return Promise.reject(signal.reason);
+		// A closed track never sends another request, so the caller ends as a pending one would.
+		const closed = this.#state.closed.peek();
+		if (closed !== undefined) return Promise.reject(closed ?? this.#closedBeforeSent());
 		// A caller joining a request already sent has nothing left to wait for.
 		if (this.#pending?.sent) return Promise.resolve();
 		const at = this.#asks("refresh");
@@ -1885,6 +1890,11 @@ export class Producer {
 		for (const settle of pending?.settles ?? []) settle(err);
 	}
 
+	// What a refresh caller sees when the track closes cleanly before its request is sent.
+	#closedBeforeSent(): Error {
+		return new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed before the refresh was sent` });
+	}
+
 	// When a request as `ask` takes effect, if the track's refresh lets it ask at all.
 	#asks(ask: Ask): Instant | undefined {
 		const refresh = this.#state.info.peek()?.refresh;
@@ -1906,14 +1916,23 @@ export class Producer {
 	// deferred one arms a wakeup to report again when it comes due.
 	#reportWanted(): void {
 		const current = now();
-		const pending = this.#pending?.at;
+		const request = this.#pending;
+		const pending = request?.at;
 		const due = pending?.le(current) === true;
 		const start = due ? max(this.#received, this.#floor) : this.#floor;
 		const asked = start >= this.#received ? start : undefined;
 		const wanted = this.#sinks.size > 0;
 		this.#asked.set(asked);
 		this.#wanted.set(wanted);
-		this.#refreshing.set(wanted && asked !== undefined);
+		const refreshing = wanted && asked !== undefined;
+		// A request due in the batch that ended the last one leaves the level unchanged, so it
+		// notifies anyway: the publisher must read it to send it.
+		if (refreshing && request !== undefined && due && request !== this.#announced) {
+			this.#announced = request;
+			this.#refreshing.set(true, true);
+		} else {
+			this.#refreshing.set(refreshing);
+		}
 
 		const armed = this.#refreshTimer;
 		if (pending !== undefined && !due && armed?.at.eq(pending)) return;
@@ -2770,12 +2789,7 @@ export class Producer {
 		const kept = this.#keptDrops();
 		this.#refreshTimer?.abort.abort();
 		this.#refreshTimer = undefined;
-		this.#endRefresh(
-			abort ??
-				new StreamError(StreamCode.Cancel, {
-					message: `track ${this.name} closed before the refresh was sent`,
-				}),
-		);
+		this.#endRefresh(abort ?? this.#closedBeforeSent());
 		closeTrackState(this.#state, abort);
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)

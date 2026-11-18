@@ -941,13 +941,14 @@ impl Publish {
 			let res = crate::ffi::run(async move {
 				tokio::select! {
 					biased;
-					_ = alive.closed() => Ok(0),
+					// Ahead of `alive`, so a track that aborted reports why rather than `0`.
 					res = demand.refresh() => match res {
 						Ok(()) => Ok(moq_demand::MOQ_DEMAND_REFRESH as i32),
 						// The track ended without an abort, as the watcher reports it.
 						Err(moq_net::Error::Dropped) => Ok(0),
 						Err(err) => Err(err.into()),
 					},
+					_ = alive.closed() => Ok(0),
 				}
 			})
 			.await;
