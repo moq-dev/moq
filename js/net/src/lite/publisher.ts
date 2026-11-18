@@ -1100,7 +1100,7 @@ export class Publisher {
 					// repeats the pending ask; at or below it the group already exists.
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
-						track.refresh();
+						hooks.askSubscriber(track, "refresh");
 					track.update({
 						priority: update.priority,
 						order: update.order,

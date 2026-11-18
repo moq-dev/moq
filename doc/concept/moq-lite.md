@@ -452,10 +452,17 @@ ask behind however many relays.
 A reader can also ask outright with `refresh()` on its track subscriber
 (`Subscriber::refresh` in Rust, `subscriber.refresh()` in TypeScript). On a
 track with an interval only the interval judges it; on a track with only a
-ratio, the ratio does, like a join. The answer is the first group the reader
-receives that starts after the newest it held, which may be a group already on
-its way, so a reader that must see a frame made after its request marks the
-frame itself.
+ratio, the ratio does, like a join. It resolves once the request is sent: after
+any interval wait, when whatever serves the reader's copy reads it. On a relay
+or a remote reader that is the session forwarding it upstream; on a local
+broadcast it is the publisher waiting on its demand. Concurrent requests share
+one, and all of them resolve when it is sent. Dropping the future (Rust) or
+aborting its signal (TypeScript) before then withdraws the request. It resolves
+at once when there is nothing to send, such as a track that does not refresh or
+a group still under the ratio, and when a newer group lands first. The answer is
+the first group the reader receives that starts after the newest it held, which
+may be a group already on its way, so a reader that must see a frame made after
+its request marks the frame itself.
 
 A request does not hold back cached groups: the reader receives the old group
 before the publisher answers. The publisher waits on the track's

@@ -614,6 +614,32 @@ async def test_demand_refresh_waits_for_a_group_request():
     track.finish()
 
 
+async def test_subscriber_refresh_returns_once_sent():
+    """A subscriber's refresh returns once the publisher reads it, and cancelling it withdraws it."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("status", moq.TrackInfo(refresh=moq.TrackRefresh(ratio=0)))
+    demand = track.demand()
+    consumer = track.consume()
+    group = track.append_group(moq.Timestamp.unscaled(0))
+    group.write_frame(b"key", moq.Timestamp.unscaled(0))
+    group.write_frame(b"delta", moq.Timestamp.unscaled(0))
+
+    withdrawn = asyncio.ensure_future(consumer.refresh())
+    await polled()
+    assert not withdrawn.done(), "nothing read it yet"
+    withdrawn.cancel()
+    await polled()
+    asked = asyncio.ensure_future(demand.refresh())
+    await polled()
+    assert not asked.done(), "the cancelled call withdrew its request"
+
+    sent = asyncio.ensure_future(consumer.refresh())
+    await asyncio.wait_for(asked, timeout=5.0)
+    await asyncio.wait_for(sent, timeout=5.0)
+    consumer.cancel()
+    track.finish()
+
+
 def test_track_info_reads_compression_back():
     """A received compression compares equal to the selector and names itself."""
     broadcast = moq.BroadcastProducer()

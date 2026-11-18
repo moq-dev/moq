@@ -476,11 +476,12 @@ test("a subscriber's refresh restates the value once the interval passes", async
 		const subscriber = track.subscribe();
 		for (let n = 0; n <= 3; n++) producer.update({ n }, Time.Timestamp.fromMillis(n * 10));
 
-		subscriber.refresh();
+		const sent = subscriber.refresh();
 		await clock.advance(Duration.secs(4));
 		expect(track.demand().refresh.peek()).toBe(false);
 		await clock.advance(Duration.secs(1));
-		// Restated as soon as it came due, which answered it.
+		// Restated as soon as it came due, which sent and answered it.
+		await sent;
 		expect(track.demand().refresh.peek()).toBe(false);
 		producer.finish();
 		subscriber.close();

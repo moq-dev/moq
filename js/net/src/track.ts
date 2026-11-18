@@ -601,6 +601,16 @@ export interface InfoOptions {
 	signal?: AbortSignal;
 }
 
+/** Options for {@link Subscriber.refresh}. */
+export interface RefreshOptions {
+	/**
+	 * Withdraws this caller's request if it is not sent yet, rejecting with the signal's reason.
+	 * An already-aborted signal rejects before anything is asked, and aborting after it resolves
+	 * has no effect.
+	 */
+	signal?: AbortSignal;
+}
+
 /** Options for {@link Consumer.fetchGroup}. */
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
@@ -1110,6 +1120,61 @@ let ordered_: {
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
 };
 
+// A pending request for a group past every key written. Mirrors the Rust `demand::Pending`.
+interface PendingRefresh {
+	// When it takes effect: at once, or once the track's refresh interval has passed.
+	at: Instant;
+	// {@link Subscriber.refresh} callers waiting for it to be sent. The last to abort before then
+	// withdraws it, unless it is `kept`.
+	callers: number;
+	// A join, a shed read, or a peer asked too, and none of those withdraws.
+	kept: boolean;
+	// Whatever serves the track (an upstream session or the local publisher) read it.
+	sent: boolean;
+	// Settles each waiting caller: resolves it, or rejects it with the track's close.
+	settles: Set<(err?: Error) => void>;
+}
+
+// A getter that reports each value read from it, so a pending refresh is sent once whatever
+// serves the track reads it.
+class Read<T> implements Getter<T> {
+	#source: Getter<T>;
+	#read: (value: T) => void;
+
+	constructor(source: Getter<T>, read: (value: T) => void) {
+		this.#source = source;
+		this.#read = read;
+	}
+
+	peek(): T {
+		const value = this.#source.peek();
+		this.#read(value);
+		return value;
+	}
+
+	changed(): Promise<T>;
+	changed(fn: (value: T) => void): Dispose;
+	changed(fn?: (value: T) => void): Promise<T> | Dispose {
+		if (!fn) {
+			return this.#source.changed().then((value) => {
+				this.#read(value);
+				return value;
+			});
+		}
+		return this.#source.changed((value) => {
+			this.#read(value);
+			fn(value);
+		});
+	}
+
+	subscribe(fn: (value: T) => void): Dispose {
+		return this.#source.subscribe((value) => {
+			this.#read(value);
+			fn(value);
+		});
+	}
+}
+
 // Constructs a Demand from within this module; assigned in the class's static block.
 let makeDemand: (name: string, signals: DemandSignals, state: TrackState) => Demand;
 
@@ -1256,10 +1321,10 @@ export class Producer {
 	#asked = new Signal<bigint | undefined>(undefined);
 	// The lowest group they want while no refresh is pending, never lowered.
 	#floor = 0n;
-	// When a request for a group past every key written takes effect, if one is pending: at
-	// once, or once the refresh interval has passed. Read against `#received` rather than
-	// stored as a key, so a key written without answering it can never leave the ask behind.
-	#refreshAt?: Instant;
+	// A request for a group past every key written, until a group answers it or its callers
+	// withdraw it. Read against `#received` rather than stored as a key, so a key written
+	// without answering it can never leave the ask behind.
+	#pending?: PendingRefresh;
 	// Wakes a deferred refresh once it comes due.
 	#refreshTimer?: { at: Instant; abort: AbortController };
 	#demand: Demand;
@@ -1286,9 +1351,14 @@ export class Producer {
 
 	constructor(name: string) {
 		this.name = name;
+		// Whatever serves the track reading a request sends it.
 		this.#demand = makeDemand(
 			name,
-			{ wanted: this.#wanted, refresh: this.#refreshing, asked: this.#asked },
+			{
+				wanted: this.#wanted,
+				refresh: new Read(this.#refreshing, (asking) => asking && this.#sent()),
+				asked: new Read(this.#asked, (asked) => asked !== undefined && this.#sent()),
+			},
 			this.#state,
 		);
 		this.#fills = new FillState({
@@ -1465,6 +1535,7 @@ export class Producer {
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.askProducer = (producer, ask) => producer.#ask(ask);
+		hooks.requestProducer = (producer, signal) => producer.#request(signal);
 		hooks.endTrack = (producer, end, error) => producer.#endPending(end, error);
 		hooks.tailGrace = (producer) => producer.#grace();
 		hooks.releaseTrack = (producer) => producer.#close(undefined);
@@ -1744,25 +1815,90 @@ export class Producer {
 	// at least the interval old. A request made sooner is deferred until then, and one made
 	// while a request is pending coalesces into it, the earliest taking effect.
 	#ask(ask: Ask): void {
+		const at = this.#asks(ask);
+		if (at !== undefined) this.#pend(at, true);
+	}
+
+	// {@link #ask} for a {@link Subscriber.refresh} caller, resolving once the request is sent or
+	// a group answers it. Aborting `signal` before then withdraws this caller's request.
+	#request(signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		// A caller joining a request already sent has nothing left to wait for.
+		if (this.#pending?.sent) return Promise.resolve();
+		const at = this.#asks("refresh");
+		if (at === undefined) return Promise.resolve();
+		const pending = this.#pend(at, false);
+		return new Promise((resolve, reject) => {
+			const abort = () => {
+				pending.settles.delete(settle);
+				this.#withdraw(pending);
+				reject(signal?.reason);
+			};
+			const settle = (err?: Error) => {
+				signal?.removeEventListener("abort", abort);
+				if (err) reject(err);
+				else resolve();
+			};
+			pending.settles.add(settle);
+			signal?.addEventListener("abort", abort, { once: true });
+		});
+	}
+
+	// Coalesce a request taking effect at `at` into the pending one, the earliest taking effect.
+	#pend(at: Instant, kept: boolean): PendingRefresh {
+		const current = this.#pending;
+		const pending = current ?? { at, callers: 0, kept: false, sent: false, settles: new Set() };
+		this.#pending = pending;
+		pending.kept ||= kept;
+		if (!kept) pending.callers++;
+		// Only a new request, or an earlier one, changes what is asked for.
+		if (current && current.at.le(at)) return pending;
+		pending.at = at;
+		this.#reportWanted();
+		return pending;
+	}
+
+	// A caller of `pending` gave up: the last caller withdraws a request not yet sent, unless
+	// something else that never withdraws asked too.
+	#withdraw(pending: PendingRefresh): void {
+		if (this.#pending !== pending || pending.sent) return;
+		pending.callers--;
+		if (pending.callers > 0 || pending.kept) return;
+		this.#endRefresh();
+		this.#reportWanted();
+	}
+
+	// Whatever serves the track read the group asked for: a due refresh is sent, resolving its
+	// callers.
+	#sent(): void {
+		const pending = this.#pending;
+		if (!pending || pending.sent || !pending.at.le(now())) return;
+		pending.sent = true;
+		for (const settle of pending.settles) settle();
+		pending.settles.clear();
+	}
+
+	// The pending refresh ended, answered or withdrawn, or the track closed with `err`.
+	#endRefresh(err?: Error): void {
+		const pending = this.#pending;
+		this.#pending = undefined;
+		for (const settle of pending?.settles ?? []) settle(err);
+	}
+
+	// When a request as `ask` takes effect, if the track's refresh lets it ask at all.
+	#asks(ask: Ask): Instant | undefined {
 		const refresh = this.#state.info.peek()?.refresh;
 		const latest = this.#state.latest;
-		if (!refresh || !refreshes(refresh) || latest === undefined) return;
+		if (!refresh || !refreshes(refresh) || latest === undefined) return undefined;
 		const entry = this.#cached.get(latest);
 		// The interval alone judges a refresh on a track that declares one, and a shed read
 		// cannot decode on whatever the ratio says.
 		const ratio = ask === "join" || (ask === "refresh" && refresh.interval === null) ? refresh.ratio : null;
-		if (ratio !== null && !(entry && hooks.overRefresh(entry.group, ratio))) return;
+		if (ratio !== null && !(entry && hooks.overRefresh(entry.group, ratio))) return undefined;
 		const current = now();
-		let at = current;
-		if (refresh.interval !== null && entry) {
-			const due = entry.arrived.checkedAdd(refresh.interval);
-			// No instant reaches it.
-			if (due === undefined) return;
-			at = due.max(current);
-		}
-		if (this.#refreshAt?.le(at)) return;
-		this.#refreshAt = at;
-		this.#reportWanted();
+		if (refresh.interval === null || !entry) return current;
+		// `undefined` when no instant reaches it.
+		return entry.arrived.checkedAdd(refresh.interval)?.max(current);
 	}
 
 	// Report the demand: whether anyone subscribes, and the group start asked for while it is
@@ -1770,7 +1906,7 @@ export class Producer {
 	// deferred one arms a wakeup to report again when it comes due.
 	#reportWanted(): void {
 		const current = now();
-		const pending = this.#refreshAt;
+		const pending = this.#pending?.at;
 		const due = pending?.le(current) === true;
 		const start = due ? max(this.#received, this.#floor) : this.#floor;
 		const asked = start >= this.#received ? start : undefined;
@@ -2173,8 +2309,8 @@ export class Producer {
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		this.#advanceLargest({ group: key, frame: 0 });
 		this.#endLargest();
-		if (this.#refreshAt !== undefined && key >= next && answers) {
-			this.#refreshAt = undefined;
+		if (this.#pending && key >= next && answers) {
+			this.#endRefresh();
 			this.#floor = max(this.#floor, key);
 		}
 		// Even unanswered, the first key written ends the ask for the first group.
@@ -2634,6 +2770,9 @@ export class Producer {
 		const kept = this.#keptDrops();
 		this.#refreshTimer?.abort.abort();
 		this.#refreshTimer = undefined;
+		this.#endRefresh(
+			abort ?? new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed before the refresh was sent` }),
+		);
 		closeTrackState(this.#state, abort);
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
 		if (this.#state.outcome.peek() === undefined)
@@ -3985,6 +4124,10 @@ export class Subscriber {
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek()?.at;
 		hooks.subscriberEndError = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.end.peek()?.error;
+		hooks.askSubscriber = (subscriber, ask) => {
+			if (subscriber.#resume) subscriber.#resume.ask(ask);
+			else if (subscriber.#state.producer) hooks.askProducer(subscriber.#state.producer, ask);
+		};
 		hooks.skippedBelow = (subscriber, key) =>
 			subscriber.#resume ? subscriber.#resume.skippedBelow(key) : skippedBelow(subscriber.#state, key);
 		hooks.sourceStart = (subscriber) => {
@@ -5105,19 +5248,29 @@ export class Subscriber {
 
 	/**
 	 * Ask the publisher for a group starting after the newest one this node holds, judged by the
-	 * track's {@link Info.refresh}: at once, once the newest group is old enough, or never on a
-	 * track that does not refresh. Mirrors the Rust `Subscriber::refresh`.
+	 * track's {@link Info.refresh}, resolving once the request is sent. Mirrors the Rust
+	 * `Subscriber::refresh`.
+	 *
+	 * The request is made now. It is sent once the newest group is old enough, when whatever
+	 * serves this node's copy reads it: the session forwarding it upstream, or a local publisher
+	 * watching {@link Demand.refresh}. Concurrent requests coalesce into one, and all of them
+	 * resolve when it is sent. Aborting `options.signal` before then withdraws this caller's
+	 * request and rejects with the signal's reason; one already sent stays sent. It resolves at
+	 * once when there is nothing to send: a track that does not refresh, a ratio the newest group
+	 * is under, a track with no group yet (whose first is already asked for), or a request
+	 * already sent. It also resolves when a newer group lands first, which answers it. It rejects
+	 * if the track closes before then. A resumed reader asks the copy serving it.
 	 *
 	 * The answer arrives like any other group: the first group this subscriber receives that
 	 * starts after the newest held when it was called. A group already on its way when the
 	 * request reached the publisher answers it, so across hops "made after this call" is best
-	 * effort; a reader that needs that puts its own marker in the frame. Requests coalesce, so
-	 * calling it again before the answer asks nothing more. A resumed reader asks the copy
-	 * serving it.
+	 * effort; a reader that needs that puts its own marker in the frame.
 	 */
-	refresh(): void {
-		if (this.#resume) this.#resume.refresh();
-		else if (this.#state.producer) hooks.askProducer(this.#state.producer, "refresh");
+	refresh(options?: RefreshOptions): Promise<void> {
+		if (this.#resume) return this.#resume.refresh(options?.signal);
+		const producer = this.#state.producer;
+		if (options?.signal?.aborted) return Promise.reject(options.signal.reason);
+		return producer ? hooks.requestProducer(producer, options?.signal) : Promise.resolve();
 	}
 
 	/**
@@ -5225,8 +5378,8 @@ export class Ordered {
 	}
 
 	/** Ask for a group newer than the newest held; see {@link Subscriber.refresh}. */
-	refresh(): void {
-		this.#subscriber.refresh();
+	refresh(options?: RefreshOptions): Promise<void> {
+		return this.#subscriber.refresh(options);
 	}
 
 	/** Close the track (optionally with an error), closing any pending groups. Idempotent. */

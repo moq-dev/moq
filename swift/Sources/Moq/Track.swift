@@ -45,6 +45,17 @@ public final class TrackConsumer: AsyncSequence, Sendable {
         try ffi.update(subscription: subscription)
     }
 
+    /// Ask the publisher for a group newer than the newest held, returning once the request
+    /// is sent. Judged by the track's `TrackRefresh`: it is sent once the newest group is old
+    /// enough, when whatever serves the track reads it (the session forwarding it upstream, or
+    /// a local publisher waiting in `TrackDemand.refresh()`). Concurrent calls share one
+    /// request and all return when it is sent. Cancelling the task before then withdraws its
+    /// request. Returns at once when there is nothing to send, or when a newer group lands
+    /// first. The new group arrives through the normal reads, such as `nextGroup`.
+    public func refresh() async throws {
+        try await ffi.refresh()
+    }
+
     /// Cancel all current and future reads.
     public func cancel() {
         ffi.cancel()

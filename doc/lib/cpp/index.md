@@ -241,7 +241,7 @@ Start every subscription from `moq::subscription_defaults()` and change its fiel
 
 ## Track demand
 
-`demand()->wanted()` is whether anyone subscribes, and `wanted_changed()` waits for it to change. `demand()->refresh()` resolves once a subscriber asks for a new group: the first group of a track with none, or a join judged by `TrackInfo::refresh`. Write a group starting with a keyframe or snapshot, which answers it, then wait again. Set `refresh.ratio` to have a joining subscriber ask once the newest group has grown past that many times its first frame, and `refresh.interval` to have a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask.
+`demand()->wanted()` is whether anyone subscribes, and `wanted_changed()` waits for it to change. `demand()->refresh()` resolves once a subscriber asks for a new group: the first group of a track with none, or a join judged by `TrackInfo::refresh`. Write a group starting with a keyframe or snapshot, which answers it, then wait again. Set `refresh.ratio` to have a joining subscriber ask once the newest group has grown past that many times its first frame, and `refresh.interval` to have a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A subscriber asks with `consumer->refresh()`, which resolves once the request is sent (forwarded upstream, or read by a local publisher); cancelling the future first withdraws it.
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 

@@ -482,7 +482,11 @@ class SmokeTest {
                 TrackInfo(maxAge = java.time.Duration.ZERO, refresh = TrackRefresh(ratio = 0u))
             val track = broadcast.publishTrack("status", info)
             val demand = track.demand()
-            track.consume(null).use { demand.refresh() }
+            track.consume(null).use { consumer ->
+                demand.refresh()
+                // A track with no group has nothing more to send: its first is already asked for.
+                consumer.refresh()
+            }
             track.finish()
         }
     }

@@ -720,6 +720,57 @@ func TestTrackDemandRefresh(t *testing.T) {
 	}
 }
 
+// A subscriber's Refresh returns once the publisher reads the request, and a
+// cancelled one returns the context's error.
+func TestTrackConsumerRefresh(t *testing.T) {
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broadcast.Close()
+
+	info := timedInfo()
+	ratio := uint32(0)
+	info.Refresh.Ratio = &ratio
+	track, err := broadcast.PublishTrack("status", info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	demand, err := track.Demand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := track.Consume(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+	// A delta after the first frame puts the group past a ratio of 0.
+	group, err := track.AppendGroup(ts(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, payload := range []string{"key", "delta"} {
+		if err := group.WriteFrame(moq.Frame{Payload: []byte(payload), Timestamp: ts(0)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := consumer.Refresh(newCancelOnWait()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Refresh error = %v, want context.Canceled", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+	sent := make(chan error, 1)
+	go func() { sent <- consumer.Refresh(ctx) }()
+	if err := demand.Refresh(ctx); err != nil {
+		t.Fatalf("demand Refresh error = %v, want the request", err)
+	}
+	if err := <-sent; err != nil {
+		t.Fatalf("Refresh error = %v, want sent", err)
+	}
+}
+
 // A compression survives the record mapping both ways, and nil reads back as none.
 func TestTrackInfoCompression(t *testing.T) {
 	broadcast, err := moq.NewBroadcastProducer()

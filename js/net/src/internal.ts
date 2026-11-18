@@ -480,8 +480,10 @@ export interface Land {
 export interface ResumeSource {
 	/** Observe a serving copy's abort, including delivery failures a resumable reader waits past. */
 	watchError(fn: (error: Error) => void): Dispose;
-	/** Ask the serving copy for a new group; see `Subscriber.refresh`. */
-	refresh(): void;
+	/** Ask the serving copy for a new group as `ask`, a request nobody withdraws. */
+	ask(ask: Ask): void;
+	/** Request a new group from the serving copy; see `Subscriber.refresh`. */
+	refresh(signal?: AbortSignal): Promise<void>;
 	/**
 	 * The next group not in `delivered`, in arrival or sequence order, without waiting. With
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
@@ -704,6 +706,13 @@ export const hooks: {
 	skippedBelow: (subscriber: Subscriber, key: bigint) => bigint;
 	/** Ask a producer for a new group, judged by its {@link Info.refresh}; mirrors the Rust `TrackState::ask`. */
 	askProducer: (producer: Producer, ask: Ask) => void;
+	/**
+	 * {@link askProducer} for a `Subscriber.refresh` caller, resolving once the request is sent.
+	 * Aborting `signal` first withdraws it. Assigned by `track.ts`.
+	 */
+	requestProducer: (producer: Producer, signal?: AbortSignal) => Promise<void>;
+	/** Ask the copy a subscriber reads for a new group as `ask`, a request nobody withdraws. Assigned by `track.ts`. */
+	askSubscriber: (subscriber: Subscriber, ask: Ask) => void;
 
 	/**
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
@@ -1095,6 +1104,12 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	askProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	requestProducer: () => {
+		throw new Error("track.ts not loaded");
+	},
+	askSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberEnd: () => {

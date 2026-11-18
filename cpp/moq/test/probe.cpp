@@ -189,6 +189,8 @@ void track_refresh()
 	CHECK(got.refresh.ratio == uint32_t(0));
 	CHECK(got.refresh.interval == std::chrono::nanoseconds(std::chrono::milliseconds(500)));
 	ok(demand->refresh().get(), "refresh");
+	// A track with no group has nothing more to send: its first is already asked for.
+	ok(consumer->refresh().get(), "subscriber refresh");
 	ok(broadcast->close(), "close refresh broadcast");
 }
 

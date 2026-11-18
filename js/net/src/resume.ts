@@ -52,6 +52,7 @@ import { Delivered } from "./delivered.ts";
 import { NotFound, Retry, retry, SessionError, StreamCode, StreamError, sessionClosed } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import {
+	type Ask,
 	type DropRun,
 	finalKey,
 	type GroupRecover,
@@ -1530,9 +1531,15 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	refresh(): void {
+	ask(ask: Ask): void {
 		this.sync();
-		this.#serving()?.sub.refresh();
+		const serving = this.#serving();
+		if (serving) hooks.askSubscriber(serving.sub, ask);
+	}
+
+	refresh(signal?: AbortSignal): Promise<void> {
+		this.sync();
+		return this.#serving()?.sub.refresh({ signal }) ?? Promise.resolve();
 	}
 
 	fork(options?: track.Subscription): track.Subscriber {

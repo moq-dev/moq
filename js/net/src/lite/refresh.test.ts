@@ -83,3 +83,55 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		installed.close();
 	}
 });
+
+// A reader behind a lite hop: its refresh waits out the interval at its own copy, resolves once the
+// session sends the request, and the publisher hears it.
+test("a refresh resolves once the session sends it upstream", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const source = new Producer();
+	const b = new Producer();
+	const producer = source.route(Path.from("room")).broadcast.createTrack("data", {
+		refresh: { interval: Duration.secs(5) },
+	});
+	const asked = hooks.demandAsked(producer.demand());
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const url = new URL("https://localhost/refresh");
+	const peers: { abort(): void }[] = [];
+	try {
+		peers.push(
+			...(await Promise.all([
+				connect({ url, transport: pair.client, consume: b }),
+				accept({ url, transport: pair.server, publish: source.consume() }),
+			])),
+		);
+		const announcements = b.routes();
+		while ((await announcements.next())?.kind !== "start") {}
+		const remote = (await b.request(Path.from("room")).broadcast()).track("data");
+		const reader = remote.subscribe();
+		const group = hooks.appendNext(producer);
+		group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.start) });
+		group.finish();
+		const received = await reader.recvGroup();
+		if (!received) throw new Error("group missing");
+
+		let sent = false;
+		const refresh = reader.refresh().then(() => {
+			sent = true;
+		});
+		await clock.advance(Duration.secs(4));
+		expect(sent).toBe(false);
+		expect(asked.peek()).toBeUndefined();
+		await clock.advance(Duration.secs(1));
+		await refresh;
+		while (asked.peek() !== 1n) await asked.changed();
+
+		received.close();
+		reader.close();
+	} finally {
+		for (const origin of [b, source]) origin.close();
+		for (const peer of peers) peer.abort();
+		await clock.advance(Duration.nanos(0));
+		installed.close();
+	}
+});

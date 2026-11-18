@@ -244,6 +244,19 @@ void main() {
     },
   );
 
+  test('a subscriber refresh with nothing to send returns at once', () async {
+    final broadcast = BroadcastProducer();
+    final consumer = broadcast
+        .publishTrack(
+          name: 'status',
+          info: TrackInfo(refresh: TrackRefresh(ratio: 0)),
+        )
+        .consume(subscription: null);
+    // A track with no group has nothing more to send: its first is already asked for.
+    await consumer.refresh();
+    broadcast.close();
+  });
+
   test('refresh returns once the first subscriber asks for a group', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(
