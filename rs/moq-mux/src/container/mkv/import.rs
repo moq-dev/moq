@@ -163,8 +163,8 @@ struct MkvTrack {
 
 struct Record {
 	config: VideoConfig,
-	/// The first keyframe's bytes so far, once it opens.
-	keyframe: Option<Vec<u8>>,
+	/// The scan of the first keyframe's bytes so far, once it opens.
+	keyframe: Option<crate::codec::video::InBand>,
 }
 
 enum Media {
@@ -863,7 +863,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					let frame = track.track.open(timestamp, keyframe, frames.duration, size)?;
 					if keyframe && let Some(record) = &mut track.record {
 						// A keyframe a failed block cut short starts over.
-						record.keyframe = Some(Vec::new());
+						record.keyframe = Some(crate::codec::video::InBand::new(&record.config)?);
 					}
 					frames.open.insert(frame)
 				}
@@ -872,11 +872,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			if !bytes.is_empty() {
 				frame.write(bytes)?;
 				if let Some(Record {
-					keyframe: Some(keyframe),
-					..
+					keyframe: Some(scan), ..
 				}) = &mut track.record
 				{
-					keyframe.extend_from_slice(bytes);
+					scan.scan(bytes);
 				}
 			}
 			chunk = rest;
@@ -887,10 +886,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track.track.commit(frame)?;
 			if let Some(Record {
 				mut config,
-				keyframe: Some(keyframe),
+				keyframe: Some(scan),
 			}) = track.record.take_if(|record| record.keyframe.is_some())
 			{
-				crate::codec::video::detect_in_band(&mut config, &keyframe)?;
+				scan.apply(&mut config);
 				track.track.configure(config)?;
 			}
 		}

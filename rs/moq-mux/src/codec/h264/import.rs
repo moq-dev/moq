@@ -95,13 +95,9 @@ impl Import {
 		// Only switch to length-prefixed mode once the avcC actually parses, so a parse failure
 		// leaves the importer in Annex-B mode where inline-SPS keyframes still self-initialize.
 		let config = config_from_avcc(avcc_bytes)?;
-		// A new record starts a coded sequence: frames before its keyframe can't decode against the
-		// open group's, so they wait for that keyframe.
-		if self.catalog.configured() && self.catalog.description() != Some(avcc_bytes) {
-			self.track.cut(None)?;
-		}
 		self.length_size = Some(super::Avcc::parse(avcc_bytes)?.length_size);
-		self.pending = Some(config);
+		// A new record waits for its keyframe; the record already published holds nothing back.
+		self.pending = (self.catalog.description() != Some(avcc_bytes)).then_some(config);
 		Ok(())
 	}
 
@@ -175,11 +171,13 @@ impl Import {
 	}
 
 	/// Publish a held record as it stands: no keyframe follows to say where the parameter sets live.
+	/// It starts a coded sequence, so the last one's in-band HDR metadata goes first.
 	fn publish_pending(&mut self) -> crate::Result<()> {
-		match self.pending.take() {
-			Some(config) => self.apply_config(config),
-			None => Ok(()),
-		}
+		let Some(config) = self.pending.take() else {
+			return Ok(());
+		};
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		self.apply_config(config)
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -271,6 +269,11 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
+			// A delta between a new record and its keyframe decodes against neither, so it never
+			// reaches the open group, whose timestamps it is no part of.
+			if self.pending.is_some() && !frame.keyframe {
+				return Err(crate::container::MissingKeyframe.into());
+			}
 			self.configure(&frame)?;
 
 			if !self.catalog.configured() {
@@ -380,14 +383,9 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	Ok(config)
 }
 
-/// Whether a length-prefixed access unit carries a parameter set (SPS or PPS) in band.
-pub(crate) fn has_parameter_set(payload: &[u8], length_size: usize) -> bool {
-	crate::codec::annexb::length_prefixed_nals(payload, length_size).is_ok_and(|nals| {
-		nals.map_while(|nal| nal.ok()).any(|nal| {
-			nal.first()
-				.is_some_and(|h| matches!(h & 0x1f, NAL_TYPE_SPS | NAL_TYPE_PPS))
-		})
-	})
+/// Whether a NAL unit header names a parameter set (SPS or PPS).
+pub(crate) fn is_parameter_set(header: u8) -> bool {
+	matches!(header & 0x1f, NAL_TYPE_SPS | NAL_TYPE_PPS)
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -601,6 +599,36 @@ mod tests {
 		let color = || catalog.snapshot().video.renditions["video/1"].color.clone().unwrap();
 		assert_eq!(color().primaries, Some(1));
 		assert_eq!((color().mastering, color().content_light), (None, None));
+	}
+
+	/// A new avcC that no keyframe follows still starts a new coded sequence when it publishes at
+	/// finish, so the last one's in-band HDR metadata is dropped.
+	#[tokio::test(start_paused = true)]
+	async fn a_record_published_at_finish_drops_stale_hdr_metadata() {
+		use crate::codec::h264::fixtures::{PPS, SEI_CONTENT_LIGHT, SEI_MASTERING, SPS_BT709, SPS_HDR10};
+
+		let avcc = |sps: &'static [u8]| {
+			crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap()
+		};
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&avcc(SPS_HDR10)).unwrap();
+		let mut au = Vec::new();
+		for nal in [SEI_MASTERING, SEI_CONTENT_LIGHT, &[0x65, 0x88, 0x84, 0x21][..]] {
+			au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			au.extend_from_slice(nal);
+		}
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		import
+			.decode([crate::codec::h264::avc1_frame(au, 4, pts).unwrap()])
+			.unwrap();
+
+		import.initialize(&avcc(SPS_BT709)).unwrap();
+		let _finished = import.finish().unwrap();
+		let snapshot = catalog.snapshot();
+		let color = snapshot.video.renditions["video/1"].color.clone().unwrap();
+		assert_eq!(color.primaries, Some(1));
+		assert_eq!((color.mastering, color.content_light), (None, None));
 	}
 
 	/// Seeding an Annex-B importer with a new SPS starts a new coded sequence, dropping the last

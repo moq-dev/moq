@@ -1186,11 +1186,19 @@ async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
 }
 
 /// A changed sequence header on a live track skips the deltas before its keyframe, which can't
-/// decode against the old record, and a seek in between keys the group that keyframe opens.
+/// decode against the old record and whose timestamps the old track never checks, and a seek in
+/// between keys the group that keyframe opens.
 #[tokio::test(start_paused = true)]
 async fn a_changed_sequence_header_waits_for_its_keyframe() {
-	let video = |frame_type: u8, nalus: &[u8], ms: u32| {
-		let mut body = vec![(frame_type << 4) | super::VIDEO_CODEC_AVC, super::AVC_NALU, 0, 0, 0];
+	let video = |frame_type: u8, nalus: &[u8], ms: u32, cts: i32| {
+		let cts = cts.to_be_bytes();
+		let mut body = vec![
+			(frame_type << 4) | super::VIDEO_CODEC_AVC,
+			super::AVC_NALU,
+			cts[1],
+			cts[2],
+			cts[3],
+		];
 		body.extend_from_slice(nalus);
 		let mut out = Vec::new();
 		write_tag(&mut out, super::TAG_VIDEO, ms, &body);
@@ -1208,7 +1216,7 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	];
 	changed.extend_from_slice(&avcc_level(0x28));
 	let mut header = Vec::new();
-	write_tag(&mut header, super::TAG_VIDEO, 66, &changed);
+	write_tag(&mut header, super::TAG_VIDEO, 133, &changed);
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
@@ -1220,14 +1228,16 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	};
 	importer.decode(&headers).unwrap();
 	importer.decode(&keyframe).unwrap();
-	importer.decode(&video(2, &delta, 33)).unwrap();
+	importer.decode(&video(2, &delta, 33, 0)).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 100, 0)).unwrap();
 	let old = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 	let mut old = consumer.track(&old).unwrap().subscribe(replay()).await.unwrap();
 
 	importer.decode(&header).unwrap();
-	importer.decode(&video(2, &delta, 66)).unwrap();
-	importer.seek(100).unwrap();
-	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 100)).unwrap();
+	// Presented before the old track's last group, which would refuse it as a rewind.
+	importer.decode(&video(2, &delta, 133, -60)).unwrap();
+	importer.seek(200).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 200, 0)).unwrap();
 	let _finished = importer.finish().unwrap();
 
 	let mut deltas = 0;
@@ -1245,5 +1255,5 @@ async fn a_changed_sequence_header_waits_for_its_keyframe() {
 	while let Some(group) = track.recv_group().await.unwrap() {
 		starts.push(group.start);
 	}
-	assert_eq!(starts, [100]);
+	assert_eq!(starts, [200]);
 }

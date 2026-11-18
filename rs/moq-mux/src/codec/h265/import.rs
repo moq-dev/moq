@@ -97,13 +97,9 @@ impl Import {
 		// Only switch to hvc1 mode once the hvcC actually parses, so a parse failure leaves the
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
-		// A new record starts a coded sequence: frames before its keyframe can't decode against the
-		// open group's, so they wait for that keyframe.
-		if self.catalog.configured() && self.catalog.description() != Some(hvcc_bytes) {
-			self.track.cut(None)?;
-		}
 		self.length_size = Some(super::Hvcc::parse(hvcc_bytes)?.length_size);
-		self.pending = Some(config);
+		// A new record waits for its keyframe; the record already published holds nothing back.
+		self.pending = (self.catalog.description() != Some(hvcc_bytes)).then_some(config);
 		Ok(())
 	}
 
@@ -176,11 +172,13 @@ impl Import {
 	}
 
 	/// Publish a held record as it stands: no keyframe follows to say where the parameter sets live.
+	/// It starts a coded sequence, so the last one's in-band HDR metadata goes first.
 	fn publish_pending(&mut self) -> crate::Result<()> {
-		match self.pending.take() {
-			Some(config) => self.apply_config(config),
-			None => Ok(()),
-		}
+		let Some(config) = self.pending.take() else {
+			return Ok(());
+		};
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		self.apply_config(config)
 	}
 
 	/// Abort the track with `err` instead of finishing it cleanly, so subscribers
@@ -271,6 +269,11 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
+			// A delta between a new record and its keyframe decodes against neither, so it never
+			// reaches the open group, whose timestamps it is no part of.
+			if self.pending.is_some() && !frame.keyframe {
+				return Err(crate::container::MissingKeyframe.into());
+			}
 			self.configure(&frame)?;
 
 			// A keyframe we still can't configure (no SPS) is undecodable.
@@ -341,14 +344,9 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	Ok(super::config_from_sps(&sps, true)?)
 }
 
-/// Whether a length-prefixed access unit carries a parameter set (VPS, SPS, or PPS) in band.
-pub(crate) fn has_parameter_set(payload: &[u8], length_size: usize) -> bool {
-	crate::codec::annexb::length_prefixed_nals(payload, length_size).is_ok_and(|nals| {
-		nals.map_while(|nal| nal.ok()).any(|nal| {
-			nal.first()
-				.is_some_and(|h| matches!(NalType::of(*h), NalType::VPS | NalType::SPS | NalType::PPS))
-		})
-	})
+/// Whether a NAL unit header names a parameter set (VPS, SPS, or PPS).
+pub(crate) fn is_parameter_set(header: u8) -> bool {
+	matches!(NalType::of(header), NalType::VPS | NalType::SPS | NalType::PPS)
 }
 
 fn is_sps(nal: &[u8]) -> bool {
