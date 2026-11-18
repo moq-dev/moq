@@ -162,6 +162,12 @@
     "status": "selected"
   },
   {
+    "implementation": "moq-net-media-ts",
+    "role": "client",
+    "image": "ghcr.io/englishm/moq-interop-runner-moq-net-media-ts-client:latest",
+    "status": "not run: image unavailable"
+  },
+  {
     "implementation": "xquic-client",
     "role": "client",
     "image": "ghcr.io/englishm/moq-interop-runner-xquic-client:latest",
