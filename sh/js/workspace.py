@@ -15,6 +15,8 @@ DEPENDENCIES = ("dependencies", "devDependencies", "peerDependencies", "optional
 SOURCES = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs")
 # A string literal climbing out of its directory, like a test reading a shared corpus.
 RELATIVE = re.compile(r"""["'`]((?:\.\./)+[^"'`$?\s]*)""")
+# A `tsc` invocation that emits from a project, however the build script spells it.
+TSC = re.compile(r"(?:^|[\s;&|])tsc\s+-[bp]\s")
 
 
 def inputs(root, directory):
@@ -109,9 +111,9 @@ def selection(root, paths):
 
 
 def node_loaded(manifest):
-    """Whether a package ships a plain `tsc` build, which Node must load as published."""
+    """Whether a published package emits its JS with `tsc` rather than vite, so Node must load it as published."""
     build = manifest.get("scripts", {}).get("build", "")
-    return not manifest.get("private") and build.startswith("rm -rf dist && tsc -b ")
+    return not manifest.get("private") and bool(TSC.search(build)) and "vite build" not in build
 
 
 def runtime_closure(manifests, names):
