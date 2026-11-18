@@ -1094,6 +1094,35 @@ async fn a_seek_finds_objects_retention_replaced_the_index_with() {
 	);
 }
 
+/// A key the store still lists but no longer serves, as a listing that lags its deletes leaves
+/// it, costs a seek one GET: the listing its 404 starts never adds it back, so the lookup moves
+/// on to what the store serves instead of reading it again.
+#[tokio::test(start_paused = true)]
+async fn a_seek_reads_a_listed_but_missing_object_once() {
+	let archive = Archive::new();
+	archive.track("video", 0, true).await;
+	stored(&archive, 0..10).await;
+
+	let broadcast = broadcast::Info::new().produce();
+	let (_indexes, _run) = open(&archive.store, &broadcast, Config::default().with_cache(0)).await;
+	let mock = archive.store.inner().clone();
+	const STALE: &str = "rec/video/0000000000000002000-";
+	mock.hide_gets(STALE);
+	// Room for a second read, which a lookup that relisted it back would take and then wait on.
+	let gate = mock.stall_gets(STALE);
+	gate.add_permits(2);
+	mock.take();
+
+	let range = track::Range {
+		start: at(2_500),
+		end: Some(at(4_500)),
+	};
+	// The newest group the store serves at or before the time, then the range's end.
+	assert_eq!(read_range(&broadcast, "video", range).await, [1_000, 4_000]);
+	let stale = mock.gets().iter().filter(|get| get.contains(STALE)).count();
+	assert_eq!(stale, 1, "the missing object is read once");
+}
+
 /// Recorded through a real DVR producer while a reader stays attached for many rotations: its
 /// index stays about the size of what the store retains, and a seek to the start of time
 /// reaches the oldest group the store holds, as a direct listing finds it.

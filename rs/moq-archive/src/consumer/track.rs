@@ -186,8 +186,9 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, looku
 	loop {
 		match search(shared, index, lookup.time()).await {
 			Search::Found(sequence) => return serve_group(shared, index, Asker::Lookup(lookup), sequence).await,
-			// The index dropped what the store pruned, at least the object found gone, so the
-			// search starts over on what it retains.
+			// The index dropped what the store pruned, at least the object found gone, which no
+			// listing adds back, so the search starts over on what it retains. Each retry drops an
+			// object for good, so the retries are bounded by the objects the store lists.
 			Search::Pruned => {}
 			Search::Unanswered => return,
 		}
