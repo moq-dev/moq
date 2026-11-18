@@ -15,7 +15,7 @@ import { Video } from "@moq/watch";
 
 export default class extends HTMLElement {
 	constructor();
-	attributeChangedCallback(name: "delay" | "lookahead" | "stretch" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "announced" | "buffer" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "delay" | "lookahead" | "stretch" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "video-priority" | "announced" | "buffer" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
 	readonly audio: Audio.Decoder;
 	get backend(): Video.Backend;
 	set backend(value: Video.Backend);
@@ -43,6 +43,7 @@ export default class extends HTMLElement {
 		};
 		video: {
 			backend: Signals.Signal<Video.Backend>;
+			priority: Signals.Signal<number>;
 			target: Signals.Signal<Video.Target | undefined>;
 			visible: Signals.Signal<Video.Visible>;
 		};
@@ -64,7 +65,7 @@ export default class extends HTMLElement {
 	set muted(value: boolean);
 	get name(): Net.Path.Valid;
 	set name(value: string | Net.Path.Valid);
-	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "follow", "announced", "buffer", "delay", "lookahead", "stretch", "catalog-format", "captions", "echo"];
+	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "video-priority", "follow", "announced", "buffer", "delay", "lookahead", "stretch", "catalog-format", "captions", "echo"];
 	get paused(): boolean;
 	set paused(value: boolean);
 	readonly renderer: Video.Renderer;
@@ -80,6 +81,8 @@ export default class extends HTMLElement {
 	get versions(): readonly string[] | undefined;
 	set versions(value: readonly string[] | undefined);
 	readonly video: Video.Decoder;
+	get videoPriority(): number;
+	set videoPriority(value: number);
 	get visible(): Video.Visible;
 	set visible(value: Video.Visible);
 	get volume(): number;

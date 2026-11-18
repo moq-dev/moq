@@ -163,6 +163,64 @@ test("watch mute and volume are independent in either attribute or property orde
 	}
 }, 30_000);
 
+test("watch video priority follows its attribute and property, and refuses a value off the wire range", async () => {
+	const server = await createServer({
+		configFile: false,
+		root: `${import.meta.dir}/watch-ui`,
+		plugins: [worklet()],
+		server: { host: "127.0.0.1", port: 0 },
+	});
+	await server.listen();
+	const browser = await launch();
+	try {
+		const page = await browser.newPage();
+		await page.goto(server.resolvedUrls?.local[0] ?? "");
+		await page.waitForFunction(() => !!customElements.get("moq-watch"));
+		const result = await page.evaluate(async () => {
+			const settle = async () => {
+				for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+			};
+			document.body.insertAdjacentHTML("beforeend", '<moq-watch video-priority="-128"></moq-watch>');
+			const watch = document.body.lastElementChild as MoqWatch;
+			const read = () => ({
+				property: watch.videoPriority,
+				attribute: watch.getAttribute("video-priority"),
+				decoder: watch.video.in.priority.peek(),
+			});
+			await settle();
+			const attribute = read();
+			watch.videoPriority = 127;
+			await settle();
+			const property = read();
+			const refused = [128, -129, 1.5, Number.NaN].map((value) => {
+				try {
+					watch.videoPriority = value;
+					return false;
+				} catch {
+					return true;
+				}
+			});
+			await settle();
+			const kept = read();
+			watch.removeAttribute("video-priority");
+			await settle();
+			const absent = read();
+			watch.remove();
+			watch.signals.close();
+			return { attribute, property, refused, kept, absent };
+		});
+		expect(result.attribute).toEqual({ property: -128, attribute: "-128", decoder: -128 });
+		expect(result.property).toEqual({ property: 127, attribute: "127", decoder: 127 });
+		expect(result.refused).toEqual([true, true, true, true]);
+		expect(result.kept).toEqual(result.property);
+		// Without the attribute, video takes hang's default and reflects it.
+		expect(result.absent).toEqual({ property: 60, attribute: "60", decoder: 60 });
+	} finally {
+		await browser.close();
+		await server.close();
+	}
+}, 30_000);
+
 test("the real gain node uses mute without changing the selected volume", async () => {
 	const server = await createServer({
 		configFile: false,
