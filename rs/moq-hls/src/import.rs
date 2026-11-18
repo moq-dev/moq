@@ -639,6 +639,10 @@ impl TrackState {
 			if segment.map.is_some() {
 				map = segment.map.as_ref();
 			}
+			if is_gap(segment) {
+				self.skip_gap(segment, base, sequence)?;
+				continue;
+			}
 			// m3u8-rs only attaches `EXT-X-MAP` to the segment directly after the tag, so
 			// on every segment but that one this is the map carried down from the prefix.
 			if let Some(map) = map {
@@ -686,6 +690,22 @@ impl TrackState {
 			discontinuity: None,
 		});
 		info!(label = %self.label, "loaded HLS init segment generation");
+		Ok(())
+	}
+
+	/// Pass over an `EXT-X-GAP` entry without requesting it: the source has no media there, so its
+	/// URI is not loaded. Open groups close without an end, as for a skipped sequence, so a reader
+	/// sees the gap rather than a group that seems to run up to the media after it.
+	fn skip_gap(&mut self, segment: &MediaSegment, base: &Url, sequence: u64) -> Result<()> {
+		// A gap keeps its slot in a byte-range chain, so the next implicit offset follows it.
+		if !segment.uri.is_empty() {
+			let url = resolve_uri(base, &segment.uri)?;
+			self.media_range.resolve(url, segment.byte_range.as_ref())?;
+		}
+		if let Some(generation) = self.generation.as_mut() {
+			generation.importer.rejoin()?;
+		}
+		self.next_sequence = Some(sequence + 1);
 		Ok(())
 	}
 
@@ -1268,6 +1288,11 @@ fn sequence_end(playlist: &MediaPlaylist) -> Result<u64> {
 			kind: SequenceKind::Media,
 			value: playlist.media_sequence,
 		})
+}
+
+/// The segment carries `EXT-X-GAP`: its media is missing and its URI must not be loaded.
+fn is_gap(segment: &MediaSegment) -> bool {
+	segment.unknown_tags.iter().any(|tag| tag.tag == "X-GAP")
 }
 
 /// Advance the running discontinuity sequence, rejecting a u64 wrap on absurd input.
@@ -2570,6 +2595,122 @@ mod tests {
 		}
 	}
 
+	/// A live playlist that declares a segment missing (`EXT-X-GAP`, as the exporter lists a grid
+	/// slot no group starts in) is followed past it across reloads: the gap's URI, which answers
+	/// 404, is never requested, the sequence advances over it, and the media after it is delivered
+	/// as a group of its own.
+	#[tokio::test]
+	async fn a_declared_gap_is_skipped_and_the_media_after_it_delivered() {
+		kio::clock::host_time(); // real TCP sockets
+		for cmaf in [false, true] {
+			let dir = temp_dir();
+			let muxer = synth(true);
+			write_synth(&dir, &muxer, "", &[5_000_000, 7_000_000, 9_000_000]);
+			let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
+			// `1.m4s` is the gap: the server has nothing for it.
+			let routes = Arc::new(std::sync::Mutex::new(HashMap::from([
+				("/init.mp4".to_string(), read("init.mp4")),
+				("/0.m4s".to_string(), read("0.m4s")),
+				("/2.m4s".to_string(), read("2.m4s")),
+			])));
+			let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+			let address = listener.local_addr().unwrap();
+			let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+			let server = serve_routes(listener, routes.clone(), requested.clone());
+			let set_playlist = |body: &str| {
+				routes
+					.lock()
+					.unwrap()
+					.insert("/media.m3u8".to_string(), body.as_bytes().to_vec());
+			};
+
+			let head =
+				"#EXTM3U\n#EXT-X-VERSION:8\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\n0.m4s\n";
+			let gap = format!("{head}#EXT-X-GAP\n#EXTINF:2,\n1.m4s\n");
+			set_playlist(head);
+
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut cfg = Config::new(Url::parse(&format!("http://{address}/media.m3u8")).unwrap());
+			cfg.cmaf = cmaf;
+			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			import.init().await.unwrap();
+
+			let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+			let replay = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+			let mut track = consumer
+				.track(&name)
+				.unwrap()
+				.subscribe(replay)
+				.await
+				.unwrap()
+				.ordered();
+
+			// The reload ends on the gap: nothing is fetched for it, and the cursor moves past it.
+			set_playlist(&gap);
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_none(), "cmaf={cmaf}: {:?}", step.failed);
+			assert_eq!(import.video[0].next_sequence, Some(2), "cmaf={cmaf}");
+
+			// The next reload lists the media after it.
+			set_playlist(&format!("{gap}#EXTINF:2,\n2.m4s\n"));
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_none(), "cmaf={cmaf}: {:?}", step.failed);
+			assert_eq!(step.wrote_segments, 1, "cmaf={cmaf}");
+			assert_eq!(import.video[0].next_sequence, Some(3), "cmaf={cmaf}");
+
+			let (groups, terminal) = group_stamps(&mut track);
+			assert!(terminal.is_none(), "cmaf={cmaf}: {terminal:?}");
+			assert_eq!(groups, [5_000_000, 9_000_000], "cmaf={cmaf}");
+			assert!(
+				!requested.lock().unwrap().iter().any(|path| path == "/1.m4s"),
+				"cmaf={cmaf}: the gap was requested"
+			);
+
+			drop(import.finish().unwrap());
+			server.abort();
+			std::fs::remove_dir_all(dir).unwrap();
+		}
+	}
+
+	/// A segment the playlist does not mark as a gap still fails when its URI answers 404.
+	#[tokio::test]
+	async fn an_unmarked_missing_segment_still_fails() {
+		kio::clock::host_time(); // real TCP sockets
+		let dir = temp_dir();
+		let muxer = synth(true);
+		write_synth(&dir, &muxer, "", &[5_000_000]);
+		let head = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2,\n0.m4s\n";
+		let routes = Arc::new(std::sync::Mutex::new(HashMap::from([
+			("/init.mp4".to_string(), std::fs::read(dir.join("init.mp4")).unwrap()),
+			("/0.m4s".to_string(), std::fs::read(dir.join("0.m4s")).unwrap()),
+			("/media.m3u8".to_string(), head.as_bytes().to_vec()),
+		])));
+		let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = serve_routes(listener, routes.clone(), Default::default());
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let cfg = Config::new(Url::parse(&format!("http://{address}/media.m3u8")).unwrap());
+		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
+		import.init().await.unwrap();
+
+		routes.lock().unwrap().insert(
+			"/media.m3u8".to_string(),
+			format!("{head}#EXTINF:2,\n1.m4s\n").into_bytes(),
+		);
+		let step = import.step(OnError::Warn).await.unwrap();
+		assert!(step.failed.is_some(), "a 404 for a listed segment is a failure");
+		assert_eq!(import.video[0].next_sequence, Some(1), "the missing segment is retried");
+
+		drop(import.finish().unwrap());
+		server.abort();
+		std::fs::remove_dir_all(dir).unwrap();
+	}
+
 	const DISCONTINUITY: &str = "#EXT-X-DISCONTINUITY\n";
 
 	/// A timestamp reset under the same init segment is refused as a decode failure, unwrapped or
@@ -2931,6 +3072,42 @@ video.m3u8
 						&body[start..=end],
 					),
 					None => http_response("200 OK", &[], body),
+				};
+				stream.write_all(&response).await.unwrap();
+			}
+		})
+	}
+
+	/// Answer each request from `routes`, which the test may change between reloads, and 404 any
+	/// path it lacks, recording every path requested.
+	fn serve_routes(
+		listener: TcpListener,
+		routes: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
+		requested: Arc<std::sync::Mutex<Vec<String>>>,
+	) -> tokio::task::JoinHandle<()> {
+		tokio::spawn(async move {
+			loop {
+				let (mut stream, _) = listener.accept().await.unwrap();
+				let mut request = Vec::new();
+				loop {
+					let mut chunk = [0; 1024];
+					let read = stream.read(&mut chunk).await.unwrap();
+					if read == 0 {
+						break;
+					}
+					request.extend_from_slice(&chunk[..read]);
+					if request.windows(4).any(|window| window == b"\r\n\r\n") {
+						break;
+					}
+				}
+				let Some(path) = request_path(&request) else {
+					continue;
+				};
+				requested.lock().unwrap().push(path.to_string());
+				let body = routes.lock().unwrap().get(path).cloned();
+				let response = match body {
+					Some(body) => http_response("200 OK", &[], &body),
+					None => http_response("404 Not Found", &[], b""),
 				};
 				stream.write_all(&response).await.unwrap();
 			}

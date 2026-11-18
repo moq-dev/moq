@@ -14,7 +14,7 @@ function isRelative(text: string): boolean {
  * Zod schema for a relative broadcast reference stored in a catalog (a rendition's
  * `broadcast` field, e.g. "./source"). Refuses and normalizes the input the same way the Rust
  * `path::Relative` type does so JS and Rust agree byte-for-byte after deserialization: a
- * leading, trailing, or doubled `/` or a lone `\` refuses the catalog.
+ * leading, trailing, or doubled `/`, a lone `\`, or a lone surrogate refuses the catalog.
  * Resolve it against the catalog broadcast's own path with `Path.tryResolve`, which returns
  * `undefined` for a reference that walks above the root: hang requires rejecting such a catalog.
  */

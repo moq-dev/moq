@@ -16,7 +16,10 @@ export interface Finished<T> {
 	readonly window: T[];
 	/** Absolute index of the oldest retained record; see {@link Producer.offset}. */
 	readonly offset: number;
-	/** Abort the track with an error; see {@link Producer.abort}. */
+	/**
+	 * Mirrors the Rust `window::Finished::abort`, and like it changes nothing a reader sees: every group
+	 * finished, so readers still draining get the rest of the window and its clean end, not `err`.
+	 */
 	abort(err: Error): void;
 }
 
@@ -192,7 +195,10 @@ export class Producer<T> {
 		return this;
 	}
 
-	/** Abort the track with `err`, so readers see the cause rather than a complete window. Idempotent. */
+	/**
+	 * Abort the track with `err`, so readers see the cause rather than a complete window. Idempotent,
+	 * and a no-op after {@link finish}: the window is already complete.
+	 */
 	abort(err: Error): void {
 		this.#close(err);
 	}

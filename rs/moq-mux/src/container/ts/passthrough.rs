@@ -197,8 +197,8 @@ impl<E: super::Catalog> Finished<E> {
 		self.passthrough.track()
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it; see
-	/// [`Passthrough::abort`].
+	/// Abort the track with `err`; see [`Passthrough::abort`]. Readers still draining get the clean end
+	/// instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		self.passthrough.abort(err);
 	}

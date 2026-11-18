@@ -285,6 +285,26 @@ mod test {
 		let _ = Encoder::<Value>::new(config);
 	}
 
+	/// An abort after finish changes nothing a reader sees: every group finished, so one still
+	/// draining gets the rest of the window and the clean end, not the error.
+	#[test]
+	fn aborting_a_finished_window_still_drains() {
+		let (mut producer, track) = producer(Config::default());
+		let mut consumer = consumer(track);
+		producer.push(&rec(0), key()).unwrap();
+		producer.push(&rec(1), key()).unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut next = || match consumer.poll_next(&waiter) {
+			Poll::Ready(next) => next.unwrap().map(|event| event.value),
+			Poll::Pending => panic!("expected a window event or its end"),
+		};
+		assert!(matches!(next(), Some(Event::Push { index: 0, .. })));
+
+		producer.finish().unwrap().abort(moq_net::Error::Cancel).unwrap();
+		assert!(matches!(next(), Some(Event::Push { index: 1, .. })));
+		assert!(next().is_none());
+	}
+
 	fn consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
 		Consumer::new(track, consumer::Config::default())
 	}
