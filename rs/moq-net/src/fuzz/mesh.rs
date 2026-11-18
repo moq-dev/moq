@@ -240,7 +240,11 @@ impl RouteMesh {
 			let route = held.route.with_available(false);
 			held.claim.update(route).unwrap();
 			tally.writes += 1;
-			up.stream.orphan(origin, &(path, instance), Box::new(Left(held.claim, self.released.clone())));
+			up.stream.orphan(
+				origin,
+				&(path, instance),
+				Box::new(Left(held.claim, self.released.clone())),
+			);
 		}
 		drop(up.stream);
 		tally += self.collect();
