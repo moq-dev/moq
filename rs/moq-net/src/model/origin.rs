@@ -3857,14 +3857,19 @@ impl AnnounceProducer {
 			// A peer remains reachable while any of its sessions advertises this
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
-			// invalidate a newer advertisement or miss the last withdrawal.
+			// invalidate a newer advertisement or miss the last withdrawal. A live copy
+			// of the same lite-07 claim, such as one a later showing serves over another
+			// chain, says its claimant still advertises it too.
+			let same_claim = |other: &RouteEntry| {
+				entry.node.is_some() && other.node == entry.node && other.instance == entry.instance
+			};
 			if matches!(how, Retract::Withdrawn | Retract::Retired { ended: true })
 				&& let Some(&peer) = entry.hops.iter().last()
 				&& peer != Hop::UNKNOWN
 				&& !shared
 					.routes
 					.at(prefix)
-					.any(|other| other.live() && other.hops.iter().last() == Some(&peer))
+					.any(|other| other.live() && (other.hops.iter().last() == Some(&peer) || same_claim(other)))
 			{
 				shared.withdrawn.entry(prefix.clone()).or_default().insert(peer);
 				shared.restale(prefix);
@@ -13333,17 +13338,18 @@ mod tests {
 	}
 
 	/// A copy whose session releases it only after the route layer showed the claim again
-	/// through another session retires its own showing, not the new one.
+	/// through another session retires its own showing, not the new one, even when the new
+	/// one's chain passes through the old one's last hop.
 	#[kio::test]
 	async fn a_late_retirement_spares_a_later_showing() {
 		for ended in [true, false] {
 			let producer = origin(1).produce();
 			let peer = producer.clone().with_link(Link::Peer);
 			let mut announced = producer.consume().routes();
-			let copy = |cost: u64, lifecycle: u64| {
+			let copy = |chain: &[u64], cost: u64, lifecycle: u64| {
 				RouteInfo::new()
 					.with_instance(instance(), 0)
-					.with_hops(hops(&[7]))
+					.with_hops(hops(chain))
 					.with_cost(cost)
 					.with_node(Some(node_id(7)))
 					.with_lane(Lane {
@@ -13351,10 +13357,10 @@ mod tests {
 						..Lane::default()
 					})
 			};
-			let old = peer.forward("room", copy(1, 1)).unwrap();
+			let old = peer.forward("room", copy(&[7], 1, 1)).unwrap();
 			announced.expect_next_active("room").await;
 			announced.assert_next_wait();
-			let _new = peer.forward("room", copy(2, 2)).unwrap();
+			let _new = peer.forward("room", copy(&[7, 9], 2, 2)).unwrap();
 			old.retire(ended);
 			let new = announced.expect_next_active("room").await;
 			assert_eq!(new.cost, Cost::from(2), "ended: {ended}");
