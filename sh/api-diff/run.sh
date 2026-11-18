@@ -127,7 +127,7 @@ rust() {
         jq -r '.packages[] | select(.publish != []) |
             "\(.name) \([.targets[].kind[]] | unique | join(",")) \([.targets[] | select(.kind | index("lib") or index("rlib")) | .name][0] // "-") \(.id)"')
     while read -r name kinds lib id; do
-        # A binary or a C library has no Rust API; moq-c and moq-ffi are diffed as FFI.
+        # A binary or a C library has no Rust API; libmoq and moq-ffi are diffed as FFI.
         [[ ",$kinds," == *,lib,* || ",$kinds," == *,rlib,* ]] || continue
         # The sparse index shards names by length: 3/k/kio, ha/ng/hang.
         case ${#name} in

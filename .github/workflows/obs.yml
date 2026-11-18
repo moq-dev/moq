@@ -15,7 +15,7 @@ name: OBS
 # the moq-ffi API it is generated from, and the flake that supplies the
 # toolchain, including uniffi-bindgen-cpp.
 #
-# moq-c's own C fixtures (`just rs c-tests`) run here too. They link libmoq.a
+# libmoq's own C fixtures (`just rs c-tests`) run here too. They link libmoq.a
 # from outside cargo the same way the plugin links moq-ffi, which is too slow
 # for nextest's hang budget, so this job, which already does that kind of link,
 # is where they gate release PRs. They also compile the C doc samples, hence
@@ -23,8 +23,8 @@ name: OBS
 #
 # The manifests and Cargo.lock are in there for the one way a crate the plugin
 # never names can break it: linking a Rust staticlib from outside cargo needs
-# the native libraries in `rs/moq-c/native-libs/*.txt`, which moq-ffi and
-# moq-c share and which are maintained by hand. A dependency that starts
+# the native libraries in `rs/libmoq/native-libs/*.txt`, which moq-ffi and
+# libmoq share and which are maintained by hand. A dependency that starts
 # pulling in a new one leaves that list stale, and every Rust gate stays green,
 # because cargo passes the flag itself and only this job links without it.
 #
@@ -99,5 +99,5 @@ jobs:
       - name: Build
         run: nix develop .#obs --command just obs ci
 
-      - name: moq-c C fixtures
+      - name: libmoq C fixtures
         run: nix develop .#obs --command just rs c-tests

@@ -33,7 +33,7 @@ C++ clients encode it through `moq-ffi` at a 2.5 ms
 frame duration, so the matrix covers the FFI audio path with a non-default codec config.
 Each subscriber decodes every audio rendition with what it already has: moq-audio for Rust (the
 `interop-audio` example, since the CLI has no PCM output), `moq-ffi` for Python,
-Go, and C++, `moq-c` for C, `decodebin` on each `audio_N` pad for GStreamer, and
+Go, and C++, `libmoq` for C, `decodebin` on each `audio_N` pad for GStreamer, and
 `@moq/hang`'s libav WebCodecs fallback under Node and Bun. Each writes the first
 600 ms of PCM and frame timestamps of each rendition, named by its codec, for
 [`tone.py`](tone.py), which requires the
@@ -51,14 +51,6 @@ filter on each channel of the player's audio graph. A negative control then has 
 Rust CLI swap its channels' tones, and every subscriber must refuse every rendition
 as the wrong tone, not fail some other way. `interop.sh` is the one place the tones
 and each publisher's codecs are chosen.
-
-When Python is selected, the in-tree run also connects Python and Rust socket
-endpoints through the relay in both dial directions and both `tcp` and `track`
-protocols. Each direction checks exact frames, empty writes, ordered groups,
-and clean FIN. A stdin drain acknowledgement keeps Rust alive until Python has
-read its entire half. The lane runs only in the normal pass, pinned to lite-07:
-moq-net endpoints speak moq-lite to each other, never moq-transport. Older lite
-hops are outside this lane.
 
 The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
@@ -84,12 +76,6 @@ head with a joining FETCH before draft 22 and a fill from it.
 
 `--tail` runs the FETCH round, the late joins, and the five finite-tail lanes. The
 wire-compat lanes, which swap in released relays and clients, skip them.
-
-Socket lanes cross Rust and native JS in both dial directions under Node and Bun,
-using `tcp` and `track` through the relay. They verify both peers' bytes, FIN, RST,
-rejection, and separate rooted publish grants. Each pins moq-lite-07-wip; moq-net endpoints use lite to talk to each other,
-and older moq-lite hops do not carry hidden endpoints. These lanes
-run in the normal in-tree test when native JS is selected. `just test interop --sockets` runs them alone.
 
 On lite-07, Node and Bun also replace tracks in a claimed broadcast through the
 relay over WebSocket and WebTransport. Pre-connected readers subscribe immediately
@@ -158,7 +144,7 @@ player survive the publication lifecycle. See [Media QA](#media-qa).
 | C++ | `cpp/moq` (+ `rs/moq-ffi`, `find_package(moq-cpp)`) | `cmake` build + install of `cpp/moq` (uniffi-bindgen-cpp), then `cmake` for the client | publish (video + audio) + subscribe |
 | Browser | `js/watch` + `js/publish` | `vite build` + headless Chromium (Playwright) | publish (video + audio) + rendered playback |
 | Native JS | `js/net` + `js/hang` + the npm `@moq/web-transport` polyfill | `node` (tsx) and `bun` | subscribe |
-| C | `rs/moq-c` | `cargo build -p moq-c` + `cc` | subscribe |
+| C | `rs/libmoq` | `cargo build -p libmoq` + `cc` | subscribe |
 | GStreamer | `rs/moq-gst` (`moqsrc`) | `cargo build -p moq-gst` + `gst-launch-1.0` | subscribe |
 
 The browser, native JS, C, and GStreamer clients subscribe only by choice
@@ -205,7 +191,7 @@ Clients that print the grant the relay sent back over AUTH, as an
 their token implies: the Rust CLI (a `moq_net::auth` debug log), the Python,
 Go, and C++ clients (read through moq-ffi before they start), and the native
 JS subscribers. A cell whose grant is missing or wrong fails even when media
-flowed. moq-c's frozen ABI and GStreamer expose no grant, and the browser's
+flowed. libmoq's frozen ABI and GStreamer expose no grant, and the browser's
 shared connection keeps its session private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
@@ -623,7 +609,7 @@ clients/
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version
   js-native/hls.ts        the HLS grid publisher via @moq/hang
-  c/subscribe.c           subscribe via rs/moq-c
+  c/subscribe.c           subscribe via rs/libmoq
 ```
 
 ## CI

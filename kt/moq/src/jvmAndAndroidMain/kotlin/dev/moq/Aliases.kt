@@ -41,8 +41,8 @@ typealias ServerTls = uniffi.moq.MoqServerTls
 typealias QuicConfig = uniffi.moq.MoqQuicConfig
 
 /**
- * The congestion control family for a QUIC connection. Build one with `CongestionControl.delay()`,
- * `loss()`, or `none()`; a new algorithm joins as a new constructor.
+ * The congestion control algorithm for a QUIC connection. Build one with `CongestionControl.bbr()`,
+ * `cubic()`, or `unlimited()`; a new algorithm joins as a new constructor named after it.
  */
 typealias CongestionControl = uniffi.moq.MoqCongestionControl
 

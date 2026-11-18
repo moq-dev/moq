@@ -11,8 +11,7 @@ Corrected 2026-11-12 (/quest-audit): moq-bench leaves the list, since it
 sets `publish = false`; seven crates remain. Corrected 2026-11-16
 (/quest-plan of the pre-cut audit): moq-c leaves it too, since the
 hand-written C API ships as `libmoq`, which has a trusted publisher, and
-`moq-c` stays unpublished for the generated API
-([the C crate's name](/quest/m2/libmoq-name.md)); six remain.
+`moq-c` stays unpublished for the generated API; six remain.
 
 ## Waiting
 

@@ -2163,40 +2163,6 @@ fn hides(heads: &[Path], prefix: &Path) -> bool {
 		.any(|head| prefix.strip_prefix(head).is_some_and(|below| below.is_hidden()))
 }
 
-/// How many sessions withhold an origin's hidden routes from their peer, such as a
-/// moq-lite client before 07, whose peer can't ask for them.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct HiddenWithheld(kio::Shared<usize>);
-
-impl HiddenWithheld {
-	/// Count a session that withholds them, until the returned guard drops.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub fn hold(&self) -> HiddenWithholding {
-		*self.0.lock() += 1;
-		HiddenWithholding(self.clone())
-	}
-
-	/// Ready while a session withholds them.
-	pub fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.0
-			.poll(waiter, |count| match **count {
-				0 => Poll::Pending,
-				_ => Poll::Ready(()),
-			})
-			.map(drop)
-	}
-}
-
-/// A session counted by [`HiddenWithheld::hold`], until dropped.
-#[derive(Debug)]
-pub(crate) struct HiddenWithholding(HiddenWithheld);
-
-impl Drop for HiddenWithholding {
-	fn drop(&mut self) {
-		*self.0.0.lock() -= 1;
-	}
-}
-
 /// What a [`Routes`] yields: how the route covering a prefix changed, and that route.
 #[derive(Clone, Debug)]
 pub struct RouteEvent {
@@ -4125,7 +4091,6 @@ pub(crate) struct Footprint {
 	cursors: usize,
 	listeners: usize,
 	withdrawn: usize,
-	withheld: usize,
 }
 
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
@@ -4139,7 +4104,6 @@ impl Driver {
 			cursors: shared.cursors.len(),
 			listeners: shared.listeners.len(),
 			withdrawn: shared.withdrawn.len(),
-			withheld: *shared.hidden_withheld.0.read(),
 		}
 	}
 }
@@ -4468,6 +4432,23 @@ impl FrontServeRun {
 		Self {
 			state: FrontRunState::Start(task),
 			origin,
+		}
+	}
+}
+
+/// A front dropped before it ended, as when its origin is torn down, ends the logical tracks it
+/// was serving as closed, rather than leave them to warn as producers dropped unfinished.
+impl Drop for FrontServeRun {
+	fn drop(&mut self) {
+		let close = |logical: &mut Logical| {
+			if let Logical::Accepted(accepted) = std::mem::replace(logical, Logical::Ended) {
+				let _ = accepted.abort(Error::Closed);
+			}
+		};
+		match &mut self.state {
+			FrontRunState::Start(_) => {}
+			FrontRunState::Serve(serve) => serve.tracks.values_mut().for_each(|io| close(&mut io.logical)),
+			FrontRunState::InFlight(in_flight) => in_flight.iter_mut().for_each(|io| close(&mut io.logical)),
 		}
 	}
 }
@@ -6391,9 +6372,6 @@ struct OriginState {
 	listeners: Vec<Listener>,
 	next_listener: u64,
 
-	// The sessions withholding this origin's hidden routes from their peer.
-	hidden_withheld: HiddenWithheld,
-
 	// The route layer node this origin's lite-07 sessions share, and the feeder the
 	// driver owns; see [`Consumer::route_node`]. Weak, since the feeder's cursors hold
 	// this state.
@@ -6415,7 +6393,6 @@ impl OriginState {
 			closed: false,
 			listeners: Vec::new(),
 			next_listener: 0,
-			hidden_withheld: HiddenWithheld::default(),
 			route_node: None,
 		}
 	}
@@ -7811,11 +7788,6 @@ impl Consumer {
 		self.hidden.include
 	}
 
-	/// The sessions withholding this origin's hidden routes from their peer.
-	pub(crate) fn hidden_withheld(&self) -> HiddenWithheld {
-		self.shared.read().hidden_withheld.clone()
-	}
-
 	/// The egress stats context this handle was tagged with.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn stats(&self) -> &stats::Session {
@@ -9138,6 +9110,41 @@ mod tests {
 			assert!(subscriber.recv_group().now_or_never().unwrap().unwrap().is_none());
 		});
 		assert_eq!(warns, 0, "a clean logical end must not drop an unfinished producer");
+	}
+
+	/// A torn-down origin ends the logical tracks its fronts were serving, rather than warn about
+	/// producers dropped unfinished.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn teardown_ends_the_logical_tracks() {
+		let (producer, mut driver) = Producer::new(Config::from(origin(1)));
+		let consumer = producer.consume();
+		let source = producer.route("room", RouteOptions::default()).unwrap();
+		let _source_track = source.broadcast().create_track("video", None).unwrap();
+		let waiter = kio::Waiter::noop();
+
+		// The driver runs the front that answers each of these.
+		let mut request = Box::pin(consumer.request("room", None));
+		let front = loop {
+			driver.poll(kio::clock::now(), &waiter).unwrap();
+			if let Some(front) = request.as_mut().now_or_never() {
+				break front.unwrap();
+			}
+			kio::clock::sim::yield_now().await;
+		};
+		let track = front.track("video").unwrap();
+		let mut subscribing = Box::pin(track.subscribe(None));
+		let subscriber = loop {
+			driver.poll(kio::clock::now(), &waiter).unwrap();
+			if let Some(subscriber) = subscribing.as_mut().now_or_never() {
+				break subscriber.unwrap();
+			}
+			kio::clock::sim::yield_now().await;
+		};
+
+		let warns = count_drop_warnings("track::Producer dropped without finish", || drop(driver));
+		assert_eq!(warns, 0, "a torn-down front must not drop an unfinished track");
+		drop(subscriber);
 	}
 
 	#[kio::test]

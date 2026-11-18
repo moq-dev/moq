@@ -5,7 +5,7 @@
 # public registry to catch packaging breakage), this builds every client from
 # the workspace source. It proves the code in the tree interoperates across
 # implementations before anything is published: a relay built from rs/moq-relay,
-# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/moq-c, all
+# clients built from rs/moq-cli, py/, go/, cpp/moq, js/, and rs/libmoq, all
 # talking to each other. There's no apt/brew/npm/PyPI here, just
 # cargo/bun/uv/go/cmake/cc.
 #
@@ -76,7 +76,6 @@ MEDIA_CASES=""
 MEDIA_ENGINES="chromium"
 MEDIA_PUBLISHER="chromium"
 TAIL_ONLY=0
-SOCKET_ONLY=0
 FINISH_ONLY=0
 # The versions the matrix runs on, one pass each. `auto` leaves every client its defaults,
 # except the clients the harness reads a grant from, which offer $AUTH_VERSION alone. Any other
@@ -84,7 +83,7 @@ FINISH_ONLY=0
 VERSIONS="auto"
 IETF_VERSIONS="moq-transport-18,moq-transport-20,moq-transport-22"
 
-# Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
+# Cargo profile for the relay/cli/libmoq builds. Debug compiles faster, which is
 # what an interop test wants; the workload (320x240@30) is trivial either way.
 PROFILE="${INTEROP_PROFILE:-debug}"
 
@@ -131,11 +130,6 @@ while [[ $# -gt 0 ]]; do
             TAIL_ONLY=1
             shift
             ;;
-        --sockets)
-            SOCKET_ONLY=1
-            TAIL_ONLY=1
-            shift
-            ;;
         --versions)
             require_value "$@"
             VERSIONS="$2"
@@ -179,11 +173,6 @@ done
 
 if [[ -n "$MEDIA_CASES" && "$MEDIA" -ne 1 ]]; then
     echo "error: --media-cases requires --media" >&2
-    exit 2
-fi
-
-if [[ "$SOCKET_ONLY" -eq 1 && "$VERSIONS" != auto ]]; then
-    echo "error: --sockets pins moq-lite-07-wip; omit --versions" >&2
     exit 2
 fi
 
@@ -286,7 +275,7 @@ COMPAT=0
 [[ -n "${INTEROP_VERSION:-}" ]] && COMPAT=1
 
 # The clients that print the grant they received as an `auth granted` line. The
-# Python, Go, and C++ clients read it through moq-ffi; moq-c's frozen ABI and
+# Python, Go, and C++ clients read it through moq-ffi; libmoq's frozen ABI and
 # GStreamer expose none, and the browser's shared connection keeps its session private.
 # Grants are checked on $AUTH_VERSION, so only in the `auto` pass.
 prints_grant() {
@@ -469,9 +458,6 @@ media_publisher() {
     esac
 }
 
-# shellcheck source-path=SCRIPTDIR source=socket.sh
-source "$INTEROP_DIR/socket.sh"
-
 # Record every case this run will reach as `not run`, before any build, so one the run
 # never reaches still shows in the report. Mirrors the dispatch at the end of this file.
 plan_cases() {
@@ -482,10 +468,6 @@ plan_cases() {
     fi
     if [[ "$NEGATIVE" -eq 1 ]]; then
         for sub in "${SUB_LIST[@]}"; do record "not run" case="no publisher" publisher=none subscriber="$sub"; done
-        return
-    fi
-    if [[ "$SOCKET_ONLY" -eq 1 ]]; then
-        plan_js_sockets
         return
     fi
     for VERSION in "${VERSION_LIST[@]}"; do plan_pass; done
@@ -524,9 +506,6 @@ plan_pass() {
         done
     fi
     [[ "$FINISH_ONLY" -eq 0 ]] || return 0
-    if needs python; then
-        [[ "$VERSION" != auto ]] || record "not run" case="Python Rust sockets" publisher=python subscriber=rust
-    fi
     for pub in rust js-native-node js-native-bun; do
         [[ "$pub" == rust ]] || needs "$pub" || continue
         for sub in rust js-native-node js-native-bun; do
@@ -556,7 +535,6 @@ plan_pass() {
         fi
     done
     [[ "$VERSION" == auto ]] || return 0
-    plan_js_sockets
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         for version in "${COMPRESS_VERSIONS[@]}"; do
@@ -621,7 +599,7 @@ require_tools() {
         exit 1
     fi
     # Resolve the cargo target dir once (honors a custom CARGO_TARGET_DIR, which
-    # the self-hosted CI runner sets), so the built binaries and moq-c's header
+    # the self-hosted CI runner sets), so the built binaries and libmoq's header
     # are found wherever cargo actually writes them.
     TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
         sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -663,7 +641,7 @@ build_relay_cli() {
         INTEROP_SUB_MOQ="$HARNESS_RUN/bin/moq-sub"
     fi
     if [[ "$build_examples" -eq 1 && "$MEDIA" -eq 0 ]]; then
-        local example args=() examples=(interop-socket interop-tail interop-socket-js interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
+        local example args=() examples=(interop-tail interop-catalog interop-audio interop-hls interop-control interop-goaway interop-goaway-client interop-finish)
         for example in "${examples[@]}"; do args+=(--example "$example"); done
         (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-cli "${args[@]}")
         for example in "${examples[@]}"; do
@@ -811,7 +789,7 @@ prepare_cpp() {
     CPP_INTEROP="$build/client/cpp-interop"
 }
 
-# Build moq-c (the C staticlib + cbindgen header) and compile the C subscriber
+# Build libmoq (the C staticlib + cbindgen header) and compile the C subscriber
 # against it. cargo writes libmoq.a to the profile dir, and build.rs writes
 # moq.h into its OUT_DIR, which only cargo's JSON messages name.
 prepare_c() {
@@ -820,30 +798,30 @@ prepare_c() {
         mark_broken c "no C compiler ($cc) on PATH"
         return
     }
-    echo "building c client (workspace moq-c + cc)..."
+    echo "building c client (workspace libmoq + cc)..."
     local flag=()
     [[ "$PROFILE" == "release" ]] && flag=(--release)
-    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p moq-c --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
-        mark_broken c "cargo build -p moq-c failed"
+    if ! (cd "$WORKSPACE" && cargo build --locked ${flag[@]+"${flag[@]}"} -p libmoq --message-format=json-render-diagnostics) >"$HARNESS_RUN/c-build.json" 2>"$HARNESS_RUN/c-build.log"; then
+        mark_broken c "cargo build -p libmoq failed"
         sed 's/^/        /' "$HARNESS_RUN/c-build.log" >&2 || true
         return
     fi
-    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/moq-c#' |
+    out_dir=$(grep '"reason":"build-script-executed"' "$HARNESS_RUN/c-build.json" | grep -F '/libmoq#' |
         sed -n 's/.*"out_dir":"\([^"]*\)".*/\1/p' | tail -1) || true
     header="$out_dir/include/moq.h"
     lib="$TARGET_BASE/$PROFILE/libmoq.a"
     [[ -f "$header" && -f "$lib" ]] || {
-        mark_broken c "moq-c artifacts missing ($header / $lib)"
+        mark_broken c "libmoq artifacts missing ($header / $lib)"
         return
     }
     harness_stage c/include/moq.h "$header"
     harness_stage c/libmoq.a "$lib"
     # cargo can't inject libmoq.a's native deps into an external link, so read
-    # them from the same list moq-c.pc and CMake use.
+    # them from the same list moq.pc and CMake use.
     local native_libs
     case "$(uname -s)" in
-        Darwin) native_libs="$WORKSPACE/rs/moq-c/native-libs/apple.txt" ;;
-        *) native_libs="$WORKSPACE/rs/moq-c/native-libs/linux.txt" ;;
+        Darwin) native_libs="$WORKSPACE/rs/libmoq/native-libs/apple.txt" ;;
+        *) native_libs="$WORKSPACE/rs/libmoq/native-libs/linux.txt" ;;
     esac
     os_libs=()
     while read -r entry; do
@@ -2614,24 +2592,6 @@ run_hls_grid() {
 }
 
 # This checkout's CLI FETCH and finite track tails in this pass, then the lite drop lanes.
-# Both roles share this lane; Python acknowledges Rust's drain before teardown.
-# Lite only: moq-net endpoints speak moq-lite to each other, never moq-transport.
-run_sockets() {
-    needs python || return 0
-    [[ "$VERSION" == auto ]] || return 0
-    local version=moq-lite-07-wip log="$LOGS/sockets.log" prefix="sockets-$$-$RANDOM"
-    if is_broken python || ! timeout -k 3 "$TIMEOUT" "$PY" "$CLIENTS/python/sockets.py" \
-        "$(token_url --publish "$prefix/**" --subscribe "$prefix/**")" "$prefix" "$version" \
-        "$EXAMPLES/interop-socket" >"$log" 2>&1; then
-        echo "  FAIL  Python/Rust sockets ($version): $log"
-        record fail case="Python Rust sockets" publisher=python subscriber=rust log="$log"
-        overall=1
-        return
-    fi
-    echo "  PASS  Python/Rust sockets ($version), both roles"
-    record pass case="Python Rust sockets" publisher=python subscriber=rust log="$log"
-}
-
 run_tails() {
     local runtime version transport
     echo "=== CLI FETCH close ==="
@@ -2676,7 +2636,6 @@ run_tails() {
     done
     # The compress, compressed catalog, and drop lanes pin their own versions.
     [[ "$VERSION" == auto ]] || return 0
-    run_js_sockets
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         run_replacement_case "$runtime" websocket
@@ -2720,8 +2679,6 @@ elif [[ "$NEGATIVE" -eq 1 ]]; then
     # no data), proving the harness can actually report failure.
     echo "=== negative control: subscribers expect NO data ==="
     run_round "none" "interop-missing-$$-$RANDOM.hang" "" nothing "$(relay_next_line)"
-elif [[ "$SOCKET_ONLY" -eq 1 ]]; then
-    run_js_sockets
 else
     for VERSION in "${VERSION_LIST[@]}"; do
         LOGS="$HARNESS_RUN"
@@ -2735,7 +2692,6 @@ else
             [[ "$TAIL_ONLY" -eq 1 ]] || run_finishes
             if [[ "$FINISH_ONLY" -eq 0 ]]; then
                 run_tails
-                run_sockets
             fi
         fi
     done

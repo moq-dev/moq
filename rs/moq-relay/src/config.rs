@@ -685,6 +685,39 @@ mod tests {
 		assert_eq!(config.quic.max_streams, Some(crate::DEFAULT_MAX_STREAMS));
 	}
 
+	/// The environment picks the congestion controller by algorithm name.
+	#[test]
+	fn congestion_control_from_the_environment() {
+		if !test_env::Env::default()
+			.set("MOQ_QUIC_CONGESTION_CONTROL", "unlimited")
+			.isolate()
+		{
+			return;
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
+		assert_eq!(
+			config.quic.congestion_control,
+			Some(moq_tokio::quic::CongestionControl::Unlimited)
+		);
+	}
+
+	/// A released family name in a file stops the relay, naming the algorithms.
+	#[test]
+	fn congestion_family_in_a_file_refuses_to_boot() {
+		if !test_env::Env::without(&["MOQ_QUIC_CONGESTION_CONTROL"]).isolate() {
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(&path, "[quic]\ncongestion_control = \"delay\"\n").unwrap();
+		let err =
+			Config::parse_and_merge(["moq-relay", path.to_str().unwrap()]).expect_err("a family name must not boot");
+		let err = format!("{err:#}");
+		for name in ["bbr", "cubic", "unlimited"] {
+			assert!(err.contains(name), "{err}");
+		}
+	}
+
 	/// A released `--server-*` spelling stops the relay and names its replacement.
 	///
 	/// Booting anyway is the failure this replaced: those flags land on hidden
@@ -1540,13 +1573,13 @@ ws = false
 			},
 			Case {
 				name: "enum-from-file",
-				toml: "[quic]\ncongestion_control = \"delay\"\n",
+				toml: "[quic]\ncongestion_control = \"cubic\"\n",
 				cli: &[],
 				key: "quic.congestion_control",
 				check: |config| {
 					assert_eq!(
 						config.quic.congestion_control,
-						Some(moq_tokio::quic::CongestionControl::Delay)
+						Some(moq_tokio::quic::CongestionControl::Cubic)
 					)
 				},
 				source: "congestion_control",

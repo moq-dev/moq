@@ -40,8 +40,7 @@ Decided earlier, still standing:
   [Versions](/RELEASE.md#versions),
   [moq-dev/moq#7610](https://github.com/moq-dev/moq/pull/7610)). Amended
   2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
-  hand-written API ships at 0.22 as `libmoq`, not `moq-c`
-  ([its name](/quest/m2/libmoq-name.md)), so the generated package takes
+  hand-written API ships at 0.22 as `libmoq`, not `moq-c`, so the generated package takes
   over no published name and C users rename once, when the API changes.
 - Docs change inline: the consumer quest rewrites `doc/lib/c`, and its Impact
   bullet carries the move for the package's `MIGRATE.md`.
