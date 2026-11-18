@@ -24,7 +24,7 @@ locally against `main`, since its CI report only appears on the cut PR, and
 hand diff the surfaces it cannot see. For each export that is awkward, judge it
 against AGENTS.md's Public API rules: names mirrored across languages, no
 callbacks or 4+ args, misuse unrepresentable, private until a consumer needs
-it. Propose 2-3 shapes with a recommendation, ask the maintainer, and file
+it; and REVIEW.md's "Return what callers use" for every returned enum. Propose 2-3 shapes with a recommendation, ask the maintainer, and file
 each approved change as a quest in m2, which holds the cut until it lands.
 Model items only the built-in sessions use stay private
 ([moq-dev/moq#6747](https://github.com/moq-dev/moq/pull/6747)); this review judges the shape of what ships.
