@@ -725,16 +725,20 @@ pub(super) struct Track {
 	// account drops. Raw codec only: an Extra here would keep this account alive.
 	encoder: Mutex<Option<flate::Encoder>>,
 
-	// What this track's readers' records bill, how many bill anything, and the eviction debt
-	// the track could not pay itself, which those readers pay; see [`Reader`].
+	// What this track's readers' records bill, how many bill anything, the tail ledgers' bills,
+	// and the eviction debt the track could not pay itself, which those readers pay; see
+	// [`Reader`].
 	readers: Readers,
 }
 
 /// What a track's readers bill for their records, and the debt they owe.
 #[derive(Default)]
 struct Readers {
+	// Records only: the mean [`Reader::ends`] compares against, which a tail never skews.
 	bytes: AtomicU64,
 	count: AtomicU64,
+	// Tail ledgers: room for the debt like the records, but never one to end.
+	tails: AtomicU64,
 	debt: AtomicU64,
 }
 
@@ -949,16 +953,28 @@ impl Track {
 		Reader {
 			track: self.clone(),
 			bytes: 0,
+			record: true,
+		}
+	}
+
+	/// Open an empty bill against this account for a subscription's tail ledger: it pays the
+	/// readers' debt by folding, but never ends, since a publisher's drops are final.
+	pub(super) fn tail(self: &Arc<Self>) -> Reader {
+		Reader {
+			track: self.clone(),
+			bytes: 0,
+			record: false,
 		}
 	}
 
 	/// Hand the part of `debt` this track could not pay to its readers, up to what their
-	/// records bill beyond what they already owe.
+	/// records and tails bill beyond what they already owe.
 	pub(super) fn owe_readers(&self, debt: &mut u64) {
 		let readers = &self.readers;
 		let mut shifted = 0;
 		let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |owed| {
-			let room = readers.bytes.load(Ordering::Relaxed).saturating_sub(owed);
+			let billed = readers.bytes.load(Ordering::Relaxed) + readers.tails.load(Ordering::Relaxed);
+			let room = billed.saturating_sub(owed);
 			shifted = room.min(*debt);
 			(shifted > 0).then_some(owed + shifted)
 		});
@@ -1365,11 +1381,15 @@ impl Drop for Charge {
 	}
 }
 
-/// What one reader's record bills to its track's account, and its share of the debt the
-/// track could not pay. Released on drop.
+/// What one reader's record, or one subscription's tail ledger, bills to its track's account,
+/// and its share of the debt the track could not pay. Released on drop.
+///
+/// Only a record can [`Self::ends`]; a tail pays by folding, so it stays out of the mean
+/// that decides which record to end.
 pub(crate) struct Reader {
 	track: Arc<Track>,
 	bytes: u64,
+	record: bool,
 }
 
 impl Reader {
@@ -1380,14 +1400,17 @@ impl Reader {
 			return;
 		}
 		let readers = &self.track.readers;
-		match (self.bytes, bytes) {
-			(0, _) => readers.count.fetch_add(1, Ordering::Relaxed),
-			(_, 0) => readers.count.fetch_sub(1, Ordering::Relaxed),
-			_ => 0,
-		};
+		let billed = if self.record { &readers.bytes } else { &readers.tails };
+		if self.record {
+			match (self.bytes, bytes) {
+				(0, _) => readers.count.fetch_add(1, Ordering::Relaxed),
+				(_, 0) => readers.count.fetch_sub(1, Ordering::Relaxed),
+				_ => 0,
+			};
+		}
 		if bytes > self.bytes {
 			let grown = bytes - self.bytes;
-			readers.bytes.fetch_add(grown, Ordering::Relaxed);
+			billed.fetch_add(grown, Ordering::Relaxed);
 			self.track.pool.add(grown);
 			self.track.written.fetch_add(grown, Ordering::Relaxed);
 			self.bytes = bytes;
@@ -1395,7 +1418,7 @@ impl Reader {
 		} else {
 			// Whatever a record frees pays toward its readers' debt, however it shrank.
 			let shrunk = self.bytes - bytes;
-			readers.bytes.fetch_sub(shrunk, Ordering::Relaxed);
+			billed.fetch_sub(shrunk, Ordering::Relaxed);
 			let _ = readers.debt.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |debt| {
 				(debt > 0).then(|| debt.saturating_sub(shrunk))
 			});
@@ -1422,7 +1445,8 @@ impl Reader {
 	pub(super) fn ends(&self) -> bool {
 		let readers = &self.track.readers;
 		let count = readers.count.load(Ordering::Relaxed);
-		self.bytes > ENTRY_OVERHEAD
+		self.record
+			&& self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
 	}
 }

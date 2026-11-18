@@ -5276,7 +5276,7 @@ impl Producer {
 	/// An empty bill against this track's cache account, for a subscription's tail ledger.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn tail_bill(&self) -> cache::Reader {
-		self.state.read().cache.reader()
+		self.state.read().cache.tail()
 	}
 
 	/// Create a [`Requests`] handle that serves on-demand fetches of uncached

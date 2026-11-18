@@ -70,7 +70,8 @@ impl Tail {
 	}
 
 	/// Follow the copy `track`: wait on its max age and `budget`, and bill the ledger to its
-	/// account.
+	/// account. Call it with no lock on `track`'s state held, as [`Self::account`] and
+	/// [`Self::expire`] must be: billing the ledger can take that lock to settle the debt.
 	pub fn follow(&mut self, track: &track::Producer, budget: Duration) {
 		self.set_grace(track.tail_grace(budget));
 		if self.bill.is_none() {
