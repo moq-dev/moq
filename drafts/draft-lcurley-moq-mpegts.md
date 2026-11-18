@@ -311,7 +311,7 @@ From the first group on, the frames of consecutive groups concatenate to the inp
 A group starts at:
 
 - a packet with `random_access_indicator` set on the video PID of the clock's program (the first PID its PMT declares with a video `stream_type`), or on the clock PID when that program has no video;
-- a PCR on the clock PID with `discontinuity_indicator` set that steps forward ({{m2ts-timestamps}}), since a group MUST NOT contain a PCR discontinuity;
+- a PCR on the clock PID that breaks the count ({{m2ts-timestamps}}), since a group MUST NOT contain a PCR discontinuity;
 - otherwise, the first PCR at least one second of PCR time after the group's start;
 - the frame that would take a group past a size bound the publisher chooses below what a relay caches of one group; frames are never split to meet it.
 
@@ -328,9 +328,10 @@ A PCR gives the time of the byte holding the last bit of its `program_clock_refe
 A byte between two PCRs is placed at the rate between them; a byte past the last PCR of a timebase takes the rate of the interval before it, and one before the first PCR of a timebase takes the rate of the interval after it.
 
 PCRs are unwrapped into a 64-bit count of 27 MHz ticks, and timestamps never decrease.
-A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity.
-A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
-A PCR that steps backwards MUST end the track with an error, flagged or not: a flagged one is a restart, which is new content, so a publisher that carries on publishes it as a new broadcast.
+A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity, unless it exceeds 10 seconds without `discontinuity_indicator`.
+A PCR with `discontinuity_indicator` set whose step is forward by that measure breaks the count and adds its step.
+Any other step, backwards with or without the flag or that unflagged leap forward, breaks the count and is spliced: the count continues from the time the rate before the PCR gives its byte, raised to at least the last frame's.
+At a break, the bytes before the PCR are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
 
 The timeline depends only on the bytes since the publisher's first PCR, so two publishers that start at the same packet of one input publish identical frames.
 
@@ -460,7 +461,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - MPEG-1/2 video and LATM AAC are named among `pesPacket` streams, and the DSM-CC types 0x0A to 0x0D among section-framed `verbatim` ones. A rebuilt PAT lists the network entry when the NIT is carried.
 - MPEG-1/2 video `pesPacket` frames group from one sequence header to the next, rather than one PES per group.
 - A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
-- An `m2ts` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
+- An `m2ts` track unwraps PCRs from its history, clamps extrapolated object times at a forward discontinuity, splices a PCR step back or an unflagged one over 10 seconds forward rather than ending, and cuts a fallback group after one second. `randomAccess` covers every published group; `muxRate` follows the measured source rate.
 - A `tracks` entry is never changed in place: a stream the PMT revises continues under a new name, and one it drops leaves the section. `programDescriptors` follows the PMT; `program`'s `transportStreamId` and `programNumber` do not change.
 - A consumer rebuilding a stream follows the catalog's revisions at the next PMT `version_number`, and carries a stream only while a PMT lists it.
 - `pmtPid` follows a PAT that moves the PMT, and a consumer rebuilding a stream moves the PMT behind a PAT at the next `version_number`.

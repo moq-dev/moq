@@ -137,9 +137,12 @@ are refused rather than reframed. `--pcr-pid` paces on another PID's PCR.
 Each frame is a run of packets that ends at the next PCR on the clock PID or at
 the next group start, stamped with the PCR time of its first byte. A group
 starts at a `random_access_indicator` on the video PID (or the clock PID with
-no video), at a flagged PCR jump forward, after a second without either, or
-where the next frame would take the group past the relay's cache bound. Any
-step back ends the import.
+no video), at a PCR clock break, after a second without either, or where the
+next frame would take the group past the relay's cache bound. A flagged PCR
+jump forward carries its step into the timestamps. A step back, flagged or
+not, or an unflagged one more than 10 s forward, such as a switch between two
+unlocked encoders, is spliced instead: the timestamps carry on from where the
+clock was, and the bytes still go out unchanged, step and all.
 
 `export ts --passthrough` writes each run `--delay` after its time on the
 source clock, so two exporters emit the same bytes. It takes neither
@@ -243,7 +246,7 @@ details each grader and its negative controls.
 | Byte identity from the first group; nothing before PMT and PCR; off-grid junk dropped | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_broadcast_capture_is_byte_identical_from_the_first_group`, `nothing_is_published_before_the_pmt_and_a_pcr`, `leading_junk_does_not_hide_the_grid` | PR |
 | Scrambled input groups and paces like its clear twin | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `a_scrambled_twin_groups_and_paces_the_same` | PR |
 | `randomAccess` false for several programs or video streams | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) `two_programs_on_one_clock_publish_no_random_access`, `two_video_streams_in_one_program_publish_no_random_access` | PR |
-| Clock: wrap, flagged jump, step back refused, 192/204-byte packets refused | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) | PR |
+| Clock: wrap, flagged jump, steps spliced, 192/204-byte packets refused | [`passthrough_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/passthrough_test.rs) | PR |
 | Export releases each run byte-identical on its own PCR, whatever the delivery skew | [`release_test.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-mux/src/container/ts/release_test.rs) `a_capture_is_released_byte_identical_on_its_own_pcr`, `releases_fed_with_different_skew_write_the_same_bytes` | PR |
 
 ### Acquisition and loss

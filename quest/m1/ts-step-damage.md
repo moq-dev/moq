@@ -48,4 +48,4 @@ Caused by, for the fix PR's `## Caused by`:
 
 ## Related
 
-- [moq-dev/moq#9035](https://github.com/moq-dev/moq/pull/9035) - plans `quest/m2/ts-passthrough-splice.md`, which handles a whole-source PCR step on the passthrough lane; this quest is the lone-stream step on the import
+- [moq-dev/moq#9069](https://github.com/moq-dev/moq/pull/9069) - splices a whole-source PCR step on the passthrough lane; this quest is the lone-stream step on the import

@@ -16,6 +16,13 @@ pub(super) const PCR_HZ: u64 = 27_000_000;
 /// PCR ticks: one second.
 const FALLBACK_TICKS: u64 = PCR_HZ;
 
+/// PCR ticks in a microsecond, the unit of an object's timestamp.
+const TICKS_PER_MICRO: u64 = PCR_HZ / 1_000_000;
+
+/// The longest unflagged step forward taken as elapsed time, in PCR ticks: the media-aware
+/// import's [`LEAP`](super::step::LEAP).
+const LEAP_TICKS: u64 = super::step::LEAP.as_secs() * PCR_HZ;
+
 /// The most bytes a group holds before its next object starts another, so a source with sparse
 /// random access points still gives a joiner a group it can take whole.
 pub(super) const GROUP_BYTES_MAX: u64 = 16 * 1024 * 1024;
@@ -68,8 +75,8 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 ///
 /// - a packet with `random_access_indicator` on the video PID, or on the clock PID when the
 ///   program has no video;
-/// - a PCR with `discontinuity_indicator` that jumps forward, since no group may hold a PCR
-///   discontinuity;
+/// - a PCR that breaks the count (see Timestamps): one with `discontinuity_indicator`, or a
+///   step not taken as elapsed time, since no group may hold a PCR discontinuity;
 /// - the first PCR at least one second after the group's start, for a source that never marks
 ///   random access;
 /// - the first object that would take the group past half of what `moq-net` caches of one group,
@@ -98,12 +105,14 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 /// that object places the clock, and otherwise whatever lands it at now on a clock already in use.
 ///
 /// PCRs are unwrapped into a 64-bit count of 27 MHz ticks that never goes back. A step forward of
-/// at most half the 2^33 * 300 tick period adds to the count, across the wrap included. A PCR with
-/// `discontinuity_indicator` whose step is forward by that measure adds the step too, after the
-/// bytes before it are timed at the rate before it, and starts a group behind a break marker. Any
-/// step back ends the import: [`PcrRewind`](crate::Error::PcrRewind) without the flag,
-/// [`PcrRestart`](crate::Error::PcrRestart) with it, since a signalled restart is new content and
-/// needs a new broadcast. The timeline therefore depends only on the bytes since the importer's
+/// at most half the 2^33 * 300 tick period adds to the count, across the wrap included, unless it
+/// is more than 10 s without `discontinuity_indicator`. A PCR with the flag whose step is forward
+/// adds the step too. Every other step, back with or without the flag or that unflagged leap, is
+/// another timeline, such as a switch between two encoders whose clocks were never locked, and is
+/// spliced: the count carries on from the time the rate before the PCR gives it. Either way the
+/// bytes before it are timed at the rate before it, and the next group starts behind a break
+/// marker. The bytes still go out verbatim, so a decoder downstream sees the step as the source
+/// sent it. The timeline therefore depends only on the bytes since the importer's
 /// first PCR and its shift, and two importers of one feed started at the same packet each placing
 /// its own catalog's clock publish identical objects.
 pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
@@ -228,7 +237,7 @@ enum Groups {
 	Writing(Group),
 }
 
-/// The PCRs since the importer's first, or since the last flagged jump.
+/// The PCRs since the importer's first, or since the last break.
 struct Timebase {
 	/// The last PCR, raw.
 	raw: u64,
@@ -460,7 +469,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			}
 			if let Some(raw) = pcr(pkt) {
 				clock = true;
-				start = self.clock(pid, raw, at)?;
+				start = self.clock(raw, at)?;
 				discontinuity = start == Some(Start::Discontinuity);
 			}
 		}
@@ -502,7 +511,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 
 	/// A PCR at `at` on the clock PID: close the object it ends, time everything waiting on it,
 	/// and say whether its packet starts a group.
-	fn clock(&mut self, pid: u16, raw: u64, at: u64) -> crate::Result<Option<Start>> {
+	fn clock(&mut self, raw: u64, at: u64) -> crate::Result<Option<Start>> {
 		let at = at + PCR_OFFSET;
 		self.close_object();
 		let flagged = std::mem::take(&mut self.pending_break);
@@ -529,20 +538,16 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		// A retransmitted break (the same flagged PCR again) declares nothing new.
 		let flagged = flagged && !(timebase.samples.len() == 1 && timebase.raw == raw);
 		let step = (raw + PCR_WRAP - timebase.raw) % PCR_WRAP;
-		if step > PCR_WRAP / 2 {
-			let from = timebase.raw;
-			return Err(match flagged {
-				true => crate::Error::PcrRestart { pid, from, to: raw },
-				false => crate::Error::PcrRewind { pid, from, to: raw },
-			});
-		}
 		let last = timebase.samples.back().expect("a timebase has a sample").ticks;
+		// A step back, or one forward too far to be elapsed time, is another timeline: the
+		// count carries on from where the rate before it puts this PCR, ignoring the step.
+		let spliced = (step > PCR_WRAP / 2 || (!flagged && step > LEAP_TICKS)).then(|| locate(at, &timebase.samples));
 
-		if flagged {
+		if flagged || spliced.is_some() {
 			// No PCR on the old side is coming: what waits on one is timed by the rate before it,
 			// and the new side carries on from there.
 			self.drain_queue()?;
-			let ticks = (last + step).max(self.written);
+			let ticks = spliced.unwrap_or(last + step).max(self.written);
 			// The object before was closed and the queue drained, so both start empty.
 			self.timing = Clock::Seen {
 				timebase: Timebase {
@@ -621,10 +626,18 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	}
 
 	fn write(&mut self, object: Object, ticks: u64) -> crate::Result<()> {
-		// Extrapolating past the last PCR before a small flagged jump can overshoot the jump.
-		let ticks = ticks.max(self.written);
+		// Extrapolating past the last PCR before a break can overshoot where the count resumes.
+		let mut ticks = ticks.max(self.written);
+		if object.discontinuity
+			&& let Groups::Writing(group) = &self.groups
+		{
+			// The break's marker may take the microsecond past the newest group's start, as when a
+			// second break follows a one-PCR timebase that gave no rate, and the group behind it
+			// has to start past the marker.
+			ticks = ticks.max((group.ticks / TICKS_PER_MICRO + 2) * TICKS_PER_MICRO);
+		}
 		self.written = ticks;
-		let timestamp = moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?;
+		let timestamp = moq_net::Timestamp::from_micros(ticks / TICKS_PER_MICRO)?;
 		// The first object, which starts a group, anchors the shift and is live on arrival.
 		let timestamp = self.shift.shift(timestamp)?;
 		let size = object.payload.len() as u64;

@@ -23,9 +23,9 @@ use crate::jitter::{self, Arrival, Push};
 /// source's, so the output keeps the source's PCR pacing whatever the arrival jitter, and two
 /// releases fed the same objects write the same bytes. An object that arrives past its
 /// deadline is dropped and counted; the output shows a continuity error there, since nothing
-/// is rewritten, and carries on with the next object. A flagged forward jump, which the
-/// importer declares with a discontinuity marker, opens a new clock, so the output does not
-/// wait it out; the bytes carry the jump.
+/// is rewritten, and carries on with the next object. A PCR clock break, which the importer
+/// declares with a discontinuity marker, opens a new clock, so the output does not wait out a
+/// jump; the bytes carry the break as the source sent it.
 pub struct Release {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<()>>,
