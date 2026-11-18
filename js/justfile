@@ -117,11 +117,6 @@ worklet-matrix:
 build:
     python3 ../sh/js/workspace.py build --all
 
-# Ensure the built public libraries can load without browser globals.
-dist-imports:
-    node ../sh/js/dist-imports.test.mjs msf/dist hang/dist
-    bun -e 'await import("./watch/dist/index.js"); await import("./publish/dist/index.js")'
-
 # Compare eager and cold lazy WebSocket fallback setup in Chromium.
 qmux-bench:
     uv run --no-project python ../sh/js/install.py frozen
@@ -191,7 +186,7 @@ audio-warmup-bench:
 # Sweep E2EE frame size against writes in flight through the WebCrypto pump.
 e2ee-bench:
     uv run --no-project python ../sh/js/install.py frozen
-    bun crypto/bench/pump.ts
+    bun e2ee/bench/pump.ts
 
 # Sweep audio renditions x raw retention through native WebCodecs in Chromium.
 raw-audio-bench:

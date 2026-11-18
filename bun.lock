@@ -178,8 +178,8 @@
         "typescript": "7.0.2",
       },
     },
-    "js/crypto": {
-      "name": "@moq/crypto",
+    "js/e2ee": {
+      "name": "@moq/e2ee",
       "version": "0.0.0",
       "dependencies": {
         "@moq/net": "workspace:^",
@@ -853,8 +853,6 @@
 
     "@moq/clock": ["@moq/clock@workspace:js/clock"],
 
-    "@moq/crypto": ["@moq/crypto@workspace:js/crypto"],
-
     "@moq/demo": ["@moq/demo@workspace:demo/web"],
 
     "@moq/demo-boy": ["@moq/demo-boy@workspace:demo/boy"],
@@ -864,6 +862,8 @@
     "@moq/demo-vr": ["@moq/demo-vr@workspace:demo/vr"],
 
     "@moq/drain-test": ["@moq/drain-test@workspace:test/drain"],
+
+    "@moq/e2ee": ["@moq/e2ee@workspace:js/e2ee"],
 
     "@moq/hang": ["@moq/hang@workspace:js/hang"],
 

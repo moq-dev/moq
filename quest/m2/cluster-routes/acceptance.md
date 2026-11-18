@@ -5,7 +5,8 @@
 The route layer is proven on the implementation, and the mitigations its
 fixtures replace are retired: [moq-dev/moq#5375](https://github.com/moq-dev/moq/pull/5375)'s
 retraction quarantine, [moq-dev/moq#5391](https://github.com/moq-dev/moq/pull/5391)'s
-same-clock queue dedup, and the 300 ms update hold (`origin::Config::update_hold`).
+same-clock queue dedup, and the 300 ms update hold, all marked `lite06_churn` in
+`rs/moq-net/src/model/origin.rs`.
 
 ## Plan
 
@@ -38,6 +39,10 @@ switch makes `origin::Config::update_hold` crate-private, since nothing
 outside moq-net sets it, and puts whatever of the three mitigations survives
 here under one named lite-06 marker. So retiring them below changes no
 public API, and one that a lite-06 mesh keeps is already marked temporary.
+[moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) did both: the
+three are marked by the `lite06_churn` module, and still run on every
+version, so gating any that a lite-06 mesh keeps to the lite-06 session
+path is part of retiring them below.
 
 What remains:
 
@@ -61,11 +66,8 @@ What remains:
 ## Required
 
 - [The switch](/quest/m2/multicast/switch.md) - the rule whose fixtures replace the mitigations, once the new route layer is on the wire
-- [Held after close](/quest/m2/cluster-routes/held-after-close.md) - a relay whose own session closed shows its held claims unavailable, not offline
-- [Doubt holds](/quest/m2/cluster-routes/doubt-holds.md) - a relay keeps holding while doubt alone keeps it off its routes
 - [Route fan-out](/quest/m2/cluster-routes/route-fanout.md) - a route change costs only the streams and broadcasts it touches
 
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - the contract and its fixtures
-- [Doubt and keep-alive](/quest/m2/cluster-routes/doubt-keepalive.md) - whether the doubt timer follows the keep-alive

@@ -76,7 +76,8 @@ Video encodes while enabled, so its recent groups wait in the track's cache for
 a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
-that history within the subscribers' max delay ahead of live audio when one arrives. Raw audio keeps up to
+that history a subscriber wants ahead of live audio when one arrives: from a live join's
+min delay (its playout delay plus the codec's warmup), or else within its max delay. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and
@@ -91,13 +92,17 @@ marks where each utterance ends, so listeners stay subscribed and treat the gap
 as intentional silence.
 
 A `voice` source, which the microphone is, does the same on its own while its
-talker is silent: SILK's voice activity detector (from libopus) scores each
-frame, and once it has scored 200 ms of silence nothing more is sent and the
-end is declared, so listeners play comfort noise instead of receiving encoded
-silence. Background noise that rises mid-call, such as a fan switched on, can
-keep scoring as speech, so the talker's silence over it is still sent. Speech
-reopens the gate with the frame before it, which keeps most soft onsets the
-detector scores late; a faint one it misses entirely is still clipped.
+talker is silent. Each frame is scored as libopus scores it for DTX at the
+complexity browsers and the Rust publisher encode with: its tonality analysis
+tells speech from steady noise, so a fan switched on mid-call stops sending
+within a second or so (SILK's detector decides alone at 8 and 12 kHz). Once it has
+scored 200 ms of silence nothing more is sent and the end is declared, so
+listeners play comfort noise instead of receiving encoded silence. Noise as
+loud as the talker, within 25 dB of their speech, keeps sending, as it does in
+libopus; so does any noise before they first speak, since the analysis's first
+scored frame sets the level it is judged against. Speech reopens the gate with the 20 ms before it, which keeps most soft
+onsets the detector scores late; a faint one it misses entirely is still
+clipped.
 Music and sources without a kind always send.
 
 Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
@@ -107,6 +112,11 @@ configured bitrate.
 
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
+Where the browser honors a per-frame quantizer (Chrome's VP9 and AV1, and its
+hardware H.264 and HEVC on macOS), it encodes at constant quality under a hard
+peak at that bitrate: a calm or static scene sends a fraction of it, and a busy
+one reaches it while queueing at most about a quarter second at that rate, short
+of a scene cut. Elsewhere it asks the browser for a constant bitrate.
 Codec, resolution, framerate, and bitrate are tunable through
 `el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
 who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
@@ -160,7 +170,7 @@ signals.run((effect) => {
     });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
-    meta.update({ value: current, at: Moq.Time.Timestamp.now() });
+    meta.update(current, Moq.Time.Timestamp.now());
 });
 ```
 

@@ -76,8 +76,8 @@ always, on moq-lite-07. It costs a moq-lite track nothing: only a track a moq-tr
 publisher made carries the state, so the groups of any other cross the hop byte for
 byte as they would without the extension.
 [moq-e2ee](/draft/moq-e2ee), published and experimental, is not a transport extension. It encrypts
-application payloads, so relays still forward named tracks they cannot read.
-See [Encryption](/concept/hang#encryption).
+application payloads, so relays still forward named tracks they cannot read. Its
+implementation is unpublished while the format changes.
 
 ### Deliberate deviations
 

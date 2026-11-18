@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
 	Error, Path, SessionError, Timescale, broadcast,
-	coding::{Decode, DecodeError, Decoder, Reader, Stream, Writer},
+	coding::{Decode, DecodeError, Decoder, Reader, Stream, StreamCodes as _, Writer},
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
 	origin, track,
@@ -1124,7 +1124,7 @@ pub(super) struct Subscriber {
 	// declares none of its own (see `session_route`). Base moq-transport carries no
 	// hop ids, so a peer only has an identity if it negotiated the MoQ Cluster
 	// extension; otherwise this is the one the session assigned it (a fresh id per
-	// dialed or accepted session, unless the caller pinned one with `with_peer_hop`),
+	// dialed or accepted session, unless the caller pinned one with `with_peer_node`),
 	// or `Hop::UNKNOWN` (0) when none was assigned.
 	//
 	// The assigned id stays local: it is never written into a hop chain, so a peer
@@ -1236,7 +1236,7 @@ impl Subscriber {
 		session: Transport,
 		origin: origin::Producer,
 		control: Control,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
 		self_origin: crate::Hop,
 		cost: Option<u64>,
@@ -1250,7 +1250,7 @@ impl Subscriber {
 			// Its own frame budget, so a peer's declared sizes crowd out no other session.
 			origin: origin.with_own_frames(),
 			control,
-			session_origin: peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			session_origin: peer_node.unwrap_or(crate::Hop::UNKNOWN),
 			self_origin,
 			peer_setup,
 			solicit: true,
@@ -5932,7 +5932,7 @@ impl LearnTrackStatus {
 					} else if let Poll::Ready(res) = response {
 						Some(SetupResponse::Response(res))
 					} else if let Poll::Ready(err) = this.session.poll_closed(waiter) {
-						Some(SetupResponse::Cancelled(Error::from_transport(err)))
+						Some(SetupResponse::Cancelled(this.version.transport_error(err)))
 					} else {
 						// A fetch needs nothing from the status to go out, only to read its objects.
 						while let Poll::Ready(Ok(fill)) = asked.dynamic.poll_requested_groups(waiter) {
@@ -11097,7 +11097,7 @@ mod tests {
 	}
 
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
-	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
+	/// anonymous (hop 0). An identity assigned via `Client::with_peer_node` is
 	/// stored as `via` for split-horizon and never written into the chain.
 	#[kio::test]
 	async fn assigned_peer_hop_attributes_announces() {
@@ -11153,7 +11153,7 @@ mod tests {
 		let mut announced = consumer.routes();
 
 		// The publish direction: an origin handle scoped to the peer, which is what
-		// `Client::with_peer_hop` hands the publisher. Holding its announce stream
+		// `Client::with_peer_node` hands the publisher. Holding its announce stream
 		// is what records that the peer has been offered these paths.
 		let mut publishing = consumer.clone().excluding(peer).routes();
 
@@ -13903,7 +13903,7 @@ mod tests {
 		};
 		assert_eq!(
 			SessionError::from(&err),
-			SessionError::TooManyRequestUpdates,
+			crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES,
 			"the flood must surface TOO_MANY_REQUEST_UPDATES"
 		);
 		assert!(
@@ -13911,7 +13911,7 @@ mod tests {
 				.log
 				.closes()
 				.iter()
-				.any(|close| close.0 == SessionError::TooManyRequestUpdates.to_code()),
+				.any(|close| close.0 == crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES.to_code()),
 			"the flood must close the session with TOO_MANY_REQUEST_UPDATES: {:?}",
 			session.log.closes()
 		);
@@ -14461,7 +14461,7 @@ mod tests {
 			matches!(
 				result,
 				Err(Error::Decode(DecodeError::Session(
-					crate::SessionError::UnknownAuthTokenAlias
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS
 				)))
 			),
 			"the queued update's unknown alias closes the session: {result:?}"
@@ -16693,15 +16693,14 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 1);
 	}
 
-	/// A refused headless group is reported dropped, so a reader in key order, as a
-	/// `track` socket session reads, moves on to the next group rather than wait on it.
+	/// A refused headless group is reported dropped, so a reader in key order moves on to the next group rather than wait on it.
 	#[kio::test]
 	async fn a_refused_headless_group_does_not_stall_an_ordered_reader() {
 		let h = Harness::new(
 			Fill::Done,
 			vec![tail_stream(KEY, 2, &[b"tail-2"]), tail_stream(KEY + 1, 0, &[b"next-0"])],
 		);
-		// Subscribed before the answer, as the socket does.
+		// Subscribed before the answer.
 		let mut ordered = h
 			.track
 			.subscribe(Some(

@@ -36,7 +36,7 @@ moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true }
-# `nvidia` and `vaapi` back on, matching rs/moq-c: the workspace turns
+# `nvidia` and `vaapi` back on, matching rs/libmoq: the workspace turns
 # moq-video's defaults off for `capture` (device code the bindings don't
 # expose), and the codecs are collateral rather than the goal. Nothing is paid for them off Linux, since
 # cudarc / moq-nvenc / libloading / moq-vaapi sit behind

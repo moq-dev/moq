@@ -1588,12 +1588,16 @@ impl Connection {
 		self.crypto.peer_identity()
 	}
 
-	/// 32 bytes of keying material exported from the TLS session (RFC 8446 section 7.5) under
-	/// `label` and `context`, or `None` before the handshake completes.
-	pub fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		let mut output = [0; 32];
-		self.crypto.export_keying_material(&mut output, label, context).ok()?;
-		Some(output)
+	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
+	/// `label` and `context` for domain separation
+	#[cfg(test)]
+	pub(crate) fn export_keying_material(
+		&self,
+		output: &mut [u8],
+		label: &[u8],
+		context: &[u8],
+	) -> Result<(), crypto::ExportKeyingMaterialError> {
+		self.crypto.export_keying_material(output, label, context)
 	}
 
 	/// Whether the connection is in the process of being established
@@ -1614,6 +1618,16 @@ impl Connection {
 	/// [`Error::LocallyClosed`] when the local application closed it via [`close()`](Self::close).
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
+	}
+
+	/// Whether a CONNECTION_CLOSE is due that [`poll_transmit`](Self::poll_transmit) has yet to hand
+	/// over
+	///
+	/// Closing owes the peer one, as does each packet the peer sends on the current path during
+	/// the closing period; a loss with nothing to answer, such as an idle timeout or a stateless
+	/// reset, owes none. Once a closed connection owes none, everything it had to send is out.
+	pub fn owes_close(&self) -> bool {
+		self.state.owes_close()
 	}
 
 	/// Whether there is no longer any need to keep the connection around
@@ -4466,6 +4480,13 @@ impl State {
 
 	fn is_drained(&self) -> bool {
 		matches!(*self, Self::Drained)
+	}
+
+	fn owes_close(&self) -> bool {
+		match self {
+			Self::Closed(state::Closed { send_close, .. }) | Self::Draining { send_close } => *send_close,
+			Self::Handshake(_) | Self::Established | Self::Drained => false,
+		}
 	}
 }
 

@@ -1421,21 +1421,19 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 #[tokio::test]
 async fn an_mtls_peer_is_a_cluster_peer() {
 	let source = mtls_route_source(true).await;
-	assert!(
-		matches!(source, moq_net::origin::Source::Peer(_)),
-		"an mTLS peer's route counted as {source:?}"
-	);
+	assert!(source.is_some(), "an mTLS peer's route counted as entering here");
 }
 
 /// Without `--mtls-link peer`, a certificate identifies a client ingesting here.
 #[tokio::test]
 async fn an_mtls_client_ingests_here() {
-	assert_eq!(mtls_route_source(false).await, moq_net::origin::Source::Local);
+	assert_eq!(mtls_route_source(false).await, None);
 }
 
-/// The source the relay records for a broadcast announced over a certificate
-/// session, admitted by `moq auth serve` with the peer link role when requested.
-async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
+/// The peer the relay records a broadcast announced over a certificate session as
+/// entering from, admitted by `moq auth serve` with the peer link role when requested,
+/// or `None` when it entered here.
+async fn mtls_route_source(mtls_peer: bool) -> Option<u64> {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (root, client_cert, client_key) = signed_client(dir.path());
@@ -1482,7 +1480,7 @@ async fn mtls_route_source(mtls_peer: bool) -> moq_net::origin::Source {
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "forwarded");
 	relay.abort();
-	update.route.source()
+	update.route.entered_from()
 }
 
 fn signed_client(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {

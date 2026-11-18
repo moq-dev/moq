@@ -20,7 +20,7 @@ func TestStreamAbortProtocolDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	producer, err := track.AppendGroup()
+	producer, err := track.AppendGroup(moq.Unscaled(0))
 	if err != nil {
 		t.Fatal(err)
 	}

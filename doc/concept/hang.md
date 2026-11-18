@@ -9,12 +9,8 @@ hang is the media format on top of [moq-lite](/concept/moq-lite): a catalog
 track that describes the media tracks, and a container that gives each frame a
 timestamp. It is modeled on [WebCodecs](https://www.w3.org/TR/webcodecs/) so a
 browser can decode it directly. The spec is
-[draft-lcurley-moq-hang](/draft/moq-hang). Plaintext broadcast names end in
-`.hang` so a player knows which catalog to expect. End-to-end encrypted
-broadcasts live at `<opaque>`, derived from the credential and a semantic name
-such as `foo.hang`, and the [instance](/concept/moq-lite#publisher-instances)
-on their route, the run's moq-e2ee epoch, identifies each publisher run. The path exposes no format or protection marker; the
-payloads follow [moq-e2ee](/draft/moq-e2ee). See [Encryption](#encryption).
+[draft-lcurley-moq-hang](/draft/moq-hang). Broadcast names end in
+`.hang` so a player knows which catalog to expect.
 
 ## Catalog
 
@@ -161,11 +157,15 @@ Name the section with a namespaced key such as
 
 A broadcast can carry an MPEG transport stream whole instead of demultiplexed
 into renditions, for what demultiplexing cannot carry, such as a scrambled
-service. The root `m2ts` section names the one track holding it:
+service. The `mpegts` section's `passthrough` member names the one track holding
+it:
 
 ```json
 {
-  "m2ts": { "track": "0.m2ts", "randomAccess": true, "muxRate": 2499999 }
+  "mpegts": {
+    "muxRate": 2499999,
+    "passthrough": { "track": "0.m2ts", "randomAccess": true }
+  }
 }
 ```
 
@@ -175,7 +175,8 @@ steps back is a new broadcast. `randomAccess` says whether every published group
 began where a receiver can start decoding, and `muxRate` is the measured
 constant multiplex rate in bits per second, absent for a variable-rate source.
 A player has nothing to decode here. `moq import ts --passthrough` writes this
-section (see [MPEG-TS](/bin/ts#passthrough-mode)); the encoding is in
+member (see [MPEG-TS](/bin/ts#passthrough-mode)); the section, which also
+describes a demultiplexed stream, is in
 [draft-lcurley-moq-mpegts](/draft/moq-mpegts).
 
 ## Container
@@ -223,22 +224,6 @@ which is what `avc3`/`hev1` tracks do. Decoders should handle both. CMAF is the
 exception: its samples are always length-prefixed, so an `avc3`/`hev1` CMAF
 track keeps the configuration record as its `description` for the NAL length
 size, even when the parameter sets ride in the samples.
-
-## Encryption
-
-[moq-e2ee](/draft/moq-e2ee) encrypts groups, datagrams, and track names so a
-relay forwards ciphertext and never sees a content key. The application
-distributes the credential on its own channel. Each publisher run binds that
-credential to a fresh moq-e2ee epoch, announced as its route's
-[instance](/concept/moq-lite#publisher-instances), which derives the track names
-and keys for that run alone. A restart under a fresh epoch
-shares no names or keys with the previous run. Never share or reuse an epoch
-under one credential, whether for a replica or a later run: two instances on
-one epoch derive the same keys from the same group sequences and repeat
-AES-GCM nonces. The broadcast path is an opaque name
-derived from the credential and a semantic name such as `foo.hang`; it carries
-no format marker. `moq-crypto` is the Rust implementation. Relays need no
-configuration to carry it.
 
 ## Your own format
 

@@ -141,7 +141,7 @@ client = moq.Client(
     - `fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `insecure=True`.
     - `cert`, `key`. Paired PEM certificate chain and private key paths for mTLS.
     - `host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
-  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` uses the default), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`, such as `CongestionControl.delay()`), and `qlog` (a trace directory, which must exist). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
+  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` uses the default), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`: `CongestionControl.bbr()`, `.cubic()`, or `.unlimited()`), and `qlog` (a trace directory, which must exist). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
   - `websocket=WebSocketConfig(...)`. The fallback raced against QUIC: `enabled=False` turns it off, and `delay` is QUIC's head start.
   - `once`, `backoff`. Redial with a `Backoff` when the transport drops; `once=True` dials once.
   - `.session`. The connecting or connected `Session` (or `None` before entering / after exit).
@@ -160,7 +160,7 @@ client = moq.Client(
   - `.cancel(code)`, `session.shutdown()`. Cancel immediately, or request a drain now and await `session.closed()` for its result, including a delivery timeout after one second. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; reconnects share the same session, while, until a session has stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed session, such as a refused credential, ends it with that error.
+  - `.state()` and `await .state_changed(after)`. Read one lifecycle snapshot and wait with its revision; reconnects share the same session, while, until the peer has accepted a session's credential or drained a session with a GOAWAY (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed session, such as a refused credential, ends it with that error.
   - `.allocator() → Allocator`. Divide the send estimate between encoders and app-owned tracks.
   - `.viewers() → Viewers`. Divide the receive estimate between watched broadcasts: `.watch(max_bps) → Viewer` claims up to a ceiling, `Viewer.rate()` reads its slice (`None` while there is no estimate), and dropping the viewer releases it. The summed ceilings are the PROBE target; `.set_target(bps)` overrides it (`0` sends none, `None` follows the viewers again).
   - `.grants() → GrantConsumer`. On `moq-lite-07-wip`, `.grant()` reads the peer's `Grant` and `async for grant in session.grants()` follows it.
@@ -250,29 +250,6 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
 Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `Claim`, `BroadcastRequests`, `TrackRequests`).
-
-### Sockets
-
-`from moq import socket` exposes `socket.Endpoint(origin, prefix, id)`. Use the
-same origin as the session's publish and consume sides. Hold the endpoint while
-sessions run, or use it as an async context manager. Its first dial announces
-`<prefix>/.client/<id>` and its first accept `<prefix>/.server/<id>`, so grants
-decide whether it may be a client, a server, or both; keep each session id private.
-
-- `await endpoint.dial_track(peer, info=None)` dials a server, and `await endpoint.accept_track()` takes the next dial.
-- An incoming dial has `peer` and `session`; `await incoming.accept(info=None)` verifies
-  return routability, and `incoming.reject()` refuses it.
-- `TrackStream` exposes `producer: TrackProducer`, `consumer: TrackConsumer`, `peer`,
-  and `session`. Its subscription starts reliable and ascending, and omitted
-  `info` keeps messages without a publisher age limit. Hold or cancel the consumer
-  to retain or release that subscription. A message no hop will deliver, such as
-  one a cache reclaimed after 30 s unread or a refused fetch, is skipped rather
-  than ending the session.
-
-Cancelling a dial or its acceptance resets that dial. Cancelling an accept wait
-leaves the endpoint listening. `endpoint.close()` resets sessions and pending dials.
-The [socket convention](https://doc.moq.dev/concept/socket) needs lite-07 or
-moq-transport on every relay hop; this API does not add pre-07 capability detection.
 
 ### Origin (advanced)
 

@@ -1,7 +1,5 @@
-import { ProtocolViolation } from "../error.ts";
 import * as Instance from "../instance.ts";
 import * as Mint from "../mint.ts";
-import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { hasInstance, hasRoutes, type Version } from "./version.ts";
 
@@ -29,31 +27,20 @@ export async function decodePin(r: Reader, version: Version): Promise<Instance.V
 	return decode(bytes, minted);
 }
 
-/** Encode the publisher node a request names, 0 letting the publisher select one, then how many
- * leading segments of the request's path make up the prefix of the route it follows, 0 with no
- * node. Only lite-07 carries them, so an older peer always selects, and a node set here is
- * dropped. Mirrors rs/moq-net. */
-export async function encodeNode(w: Writer, version: Version, node: bigint, depth = 0): Promise<void> {
-	if (!hasRoutes(version)) return;
-	// A route needs its publisher.
-	if (node === 0n && depth !== 0) throw new Error("a route depth without its node");
-	await w.u62(node);
-	await w.u53(depth);
+/** Encode the forwarding node a request names. An endpoint knows none, so it always sends Node
+ * ID 0, which lets the publisher select one. Only lite-07 carries it. Mirrors rs/moq-net. */
+export async function encodeNode(w: Writer, version: Version): Promise<void> {
+	if (hasRoutes(version)) await w.u62(0n);
 }
 
-/** Decode the publisher node a request for `broadcast` names, and its route's depth; see
- * {@link encodeNode}. A depth past the path's segments names no prefix of it. */
-export async function decodeNode(
-	r: Reader,
-	version: Version,
-	broadcast: Path.Valid,
-): Promise<{ node: bigint; depth: number }> {
-	if (!hasRoutes(version)) return { node: 0n, depth: 0 };
-	const node = await r.u62();
-	const depth = await r.u53();
-	if ((node === 0n && depth !== 0) || depth > Path.parts(broadcast).length)
-		throw new ProtocolViolation(`route depth ${depth} names no prefix of ${broadcast}`);
-	return { node, depth };
+/** Decode the forwarding node a request names: a Node ID, and the node's start and Marked unless
+ * the ID is 0. An endpoint forwards nothing, so whichever node the request names, it serves the
+ * request itself. */
+export async function decodeNode(r: Reader, version: Version): Promise<void> {
+	if (!hasRoutes(version)) return;
+	if ((await r.u62()) === 0n) return;
+	await r.u62();
+	await r.bool();
 }
 
 /** Encode the instance, its minted flag, and the epoch an announcement serves. Every route
@@ -83,28 +70,6 @@ async function encode(w: Writer, instance: Instance.Valid): Promise<void> {
 	await w.u53(bytes.byteLength);
 	await w.write(bytes);
 	await w.bool(Instance.isMinted(instance));
-}
-
-/** Decode lite-07's instance and epoch, with `instance` undefined when they are well framed but
- * the instance is not one this node can use, which withdraws only the claim naming it. Mirrors
- * rs/moq-net. */
-export async function decodeForwarded(r: Reader): Promise<{ instance?: Instance.Valid; epoch: bigint }> {
-	const bytes = await r.read(await r.u53());
-	const minted = await r.bool();
-	const epoch = await r.u62();
-	const text = utf8(bytes);
-	if (text === undefined || text.length === 0 || !text.isWellFormed()) return { epoch };
-	const named = Instance.parse(text);
-	return { instance: minted ? Mint.mint(named) : named, epoch };
-}
-
-/** `bytes` as UTF-8 text, or undefined when they are not UTF-8. */
-export function utf8(bytes: Uint8Array): string | undefined {
-	try {
-		return decoder.decode(bytes);
-	} catch {
-		return undefined;
-	}
 }
 
 function decode(bytes: Uint8Array, minted: boolean): Instance.Valid {

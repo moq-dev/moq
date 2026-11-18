@@ -68,11 +68,11 @@ enum State<E: catalog::Catalog> {
 /// switches the program to it at once. Subscriptions are sticky, so without stitching a
 /// replaced publisher that stays up keeps the export until it ends.
 ///
-/// A track failure is followed only when its cause says the publisher left: the route serving
-/// it was lost (`Unroutable`, which a moq-lite relay resets a copy with once its upstream
-/// session ends), the session carrying it ended, or a moq-transport peer ended it with a code
-/// it does not register, since PUBLISH_DONE has none for a lost route. Any other failure is
-/// the export's own and fails here at once.
+/// A track failure is followed only when its cause says the publisher left: the source failed
+/// to deliver, as [`moq_net::Error::retry`] answers (a lost route, an ended session, a cancel,
+/// or a going away), or a moq-transport peer ended it with a code it does not register, since
+/// PUBLISH_DONE has none for a lost route. Any other failure is the export's own and fails
+/// here at once.
 ///
 /// An instance that comes back is awaited until its catalog serves a first snapshot, with no
 /// deadline but its own end. A return that refuses its catalog waits for the next change, and
@@ -418,20 +418,14 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 }
 
-/// Whether a failure says the publisher left rather than the export failing: the route serving
-/// the broadcast was lost, the session carrying it ended, or a moq-transport peer named no cause.
+/// Whether a failure says the publisher left rather than the export failing: the source failed
+/// to deliver (see [`moq_net::Error::retry`]), or a moq-transport peer named no cause.
+///
+/// moq-transport's PUBLISH_DONE has no code for a lost route, so a relay's lost upstream and a
+/// publisher's own failure both end with an unregistered one, which `retry` cannot answer for.
 pub(super) fn left(err: &crate::Error) -> bool {
 	let (crate::Error::Moq(err) | crate::Error::Hang(hang::Error::Moq(err))) = err else {
 		return false;
 	};
-	use moq_net::{Error, StreamError};
-	matches!(
-		err,
-		Error::Unroutable
-			| Error::Stream(StreamError::Unroutable | StreamError::Session(_))
-			| Error::Session(_)
-			| Error::Transport(_)
-			| Error::IdleTimeout
-			| Error::Remote(_)
-	)
+	err.retry() != moq_net::Retry::Never || matches!(err, moq_net::Error::Remote(_))
 }

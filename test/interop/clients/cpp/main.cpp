@@ -403,6 +403,8 @@ int subscribe(
     const auto &[id, video] = *catalog->video.begin();
 
     auto subscription = moq::subscription_defaults();
+    // A video reader that plays nothing out states no min, so a hole is waited for the max.
+    subscription.delay.min = std::nullopt;
     subscription.delay.max =
         finish ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(timeout)) : MAX_DELAY;
     auto media = until(

@@ -138,17 +138,80 @@ describe("Signal", () => {
 		dispose();
 	});
 
-	test("a silent write never hides a later change from a new listener", async () => {
-		const signal = new Signal(0);
-		signal.set(1, false); // nobody listens
-
-		const seen: number[] = [];
+	test("update notifies only on a change, like set", async () => {
+		const signal = new Signal({ n: 1 });
+		const seen: { n: number }[] = [];
 		const dispose = signal.subscribe((v) => seen.push(v));
-		expect(signal.peek()).toBe(1); // the listener starts from 1
 
-		signal.set(0);
+		signal.update((v) => v);
+		signal.update((v) => ({ ...v }));
 		await settle();
-		expect(seen).toEqual([0]);
+		expect(seen).toEqual([]);
+
+		signal.update((v) => ({ n: v.n + 1 }));
+		await settle();
+		expect(seen).toEqual([{ n: 2 }]);
+
+		// An in-place change returned as the same object is no change to compare.
+		signal.update((v) => {
+			v.n++;
+			return v;
+		});
+		await settle();
+		expect(seen).toHaveLength(1);
+		dispose();
+	});
+
+	test("mutate notifies once per call, even when nothing changed", async () => {
+		const signal = new Signal<number[]>([]);
+		let notified = 0;
+		const dispose = signal.subscribe(() => notified++);
+
+		expect(signal.mutate((v) => v.push(1))).toBe(1);
+		await settle();
+		expect(notified).toBe(1);
+
+		signal.mutate(() => {});
+		await settle();
+		expect(notified).toBe(2);
+		expect(signal.peek()).toEqual([1]);
+		dispose();
+	});
+
+	test("proxy forwards a change made in place", async () => {
+		const src = new Signal<number[]>([]);
+		const dst = new Signal<number[]>([1]);
+		const effect = new Effect();
+		effect.proxy(dst, src);
+		const seen: number[][] = [];
+		const dispose = dst.subscribe((v) => seen.push([...v]));
+
+		src.mutate((v) => v.push(2));
+		await settle();
+		expect(seen.at(-1)).toEqual([2]);
+
+		const before = seen.length;
+		src.mutate((v) => v.push(3));
+		await settle();
+		expect(seen.length).toBe(before + 1);
+		expect(seen.at(-1)).toEqual([2, 3]);
+		dispose();
+		effect.close();
+	});
+
+	test("a forced set of an equal value notifies once", async () => {
+		const signal = new Signal("jump");
+		const seen: string[] = [];
+		const dispose = signal.subscribe((v) => seen.push(v));
+
+		signal.set("jump", true);
+		signal.set("jump", true);
+		await settle();
+		expect(seen).toEqual(["jump"]);
+
+		signal.set("jump");
+		await settle();
+		expect(seen).toEqual(["jump"]);
 		dispose();
 	});
 
@@ -229,6 +292,133 @@ describe("Signal", () => {
 		expect(seen).toEqual([]);
 	});
 
+	test("a value set back reaches a listener that saw the middle value", async () => {
+		const signal = new Signal(0);
+		const before: number[] = [];
+		const old = signal.subscribe((v) => before.push(v));
+		signal.set(1);
+
+		// Both register while 1 stands, so the return to 0 is a change for them.
+		const during: number[] = [];
+		const sub = signal.subscribe((v) => during.push(v));
+		const waited = signal.changed();
+		signal.set(0);
+
+		await settle();
+		expect(before).toEqual([]); // it saw 0, which never changed
+		expect(during).toEqual([0]);
+		expect(await waited).toBe(0);
+		old();
+		sub();
+	});
+
+	test("a listener already registered keeps the value it saw before the batch", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const fn = (v: number) => seen.push(v);
+		const dispose = signal.subscribe(fn);
+		signal.set(1);
+		signal.subscribe(fn); // re-adding changes nothing: it saw 0
+		signal.set(0);
+
+		await settle();
+		expect(seen).toEqual([]);
+		dispose();
+	});
+
+	test("a waiter registered by a subscriber waits for the next change", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const dispose = signal.subscribe(() => {
+			if (seen.length === 0) signal.changed((v) => seen.push(v));
+		});
+		signal.set(1);
+		await settle();
+		expect(seen).toEqual([]);
+
+		signal.set(2);
+		await settle();
+		expect(seen).toEqual([2]);
+		dispose();
+	});
+
+	test("a waiter cancelled during a flush stays cancelled", async () => {
+		for (const back of [0, 3]) {
+			const signal = new Signal(0);
+			const keep = signal.subscribe(() => {});
+			signal.set(1);
+			let cancel = () => {};
+			// Sees 1, so the flush reaches it even when the value goes back to 0.
+			const sub = signal.subscribe(() => cancel());
+			signal.set(back);
+			const fired: number[] = [];
+			cancel = signal.changed((v) => fired.push(v));
+			await settle();
+
+			signal.set(2);
+			await settle();
+			expect(fired).toEqual([]);
+			keep();
+			sub();
+		}
+	});
+
+	test("a waiter keeps its own baseline when its callback also subscribes mid-batch", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const fn = (v: number) => seen.push(v);
+		signal.changed(fn); // saw 0
+		signal.set(1);
+		const dispose = signal.subscribe(fn); // saw 1
+		signal.set(0);
+
+		await settle();
+		expect(seen).toEqual([0]); // the subscriber only; the waiter saw 0 and keeps waiting
+
+		signal.set(2);
+		await settle();
+		expect(seen).toEqual([0, 2, 2]);
+		dispose();
+	});
+
+	test("a waiter cancelled and registered again during a flush waits for the next change", async () => {
+		const signal = new Signal(0);
+		const fired: number[] = [];
+		const fn = (v: number) => fired.push(v);
+		let cancel = signal.changed(fn);
+		let renewed = false;
+		const dispose = signal.subscribe(() => {
+			if (renewed) return;
+			renewed = true;
+			cancel();
+			cancel = signal.changed(fn);
+		});
+
+		signal.set(1);
+		await settle();
+		expect(fired).toEqual([]);
+
+		signal.set(2);
+		await settle();
+		expect(fired).toEqual([2]);
+		dispose();
+	});
+
+	test("a stale dispose leaves a newer waiter with the same callback", async () => {
+		const signal = new Signal(0);
+		const fired: number[] = [];
+		const fn = (v: number) => fired.push(v);
+		const stale = signal.changed(fn);
+		signal.set(1);
+		await settle();
+		signal.changed(fn);
+		stale();
+
+		signal.set(2);
+		await settle();
+		expect(fired).toEqual([1, 2]);
+	});
+
 	test("any number of subscribers is legitimate", async () => {
 		const signal = new Signal(0);
 		let notified = 0;
@@ -265,6 +455,29 @@ describe("Effect", () => {
 		name.set("signals");
 		await settle();
 		expect(seen).toEqual(["world", "signals"]);
+		effect.close();
+	});
+
+	test("reruns when a signal flips back after the effect read the middle value", async () => {
+		const t = new Signal(0);
+		const s = new Signal(0);
+		const seen: [number, number][] = [];
+		const effect = new Effect((e) => {
+			seen.push([e.get(t), e.get(s)]);
+		});
+		await settle();
+
+		// Microtasks run: t's flush, s.set(1), the effect's rerun reading s = 1, s.set(0), and
+		// then s's flush, whose net change is zero though the rerun saw 1.
+		t.set(1);
+		queueMicrotask(() => {
+			queueMicrotask(() => s.set(0));
+			s.set(1);
+		});
+		await settle(10);
+
+		expect(s.peek()).toBe(0);
+		expect(seen.at(-1)).toEqual([1, 0]);
 		effect.close();
 	});
 
@@ -1033,7 +1246,7 @@ describe("Effect", () => {
 		}
 	});
 
-	test("timer, timeout, and interval run on the installed clock until cleanup", async () => {
+	test("timer and interval run on the installed clock until cleanup", async () => {
 		const ms = (value: number) => Duration.millis(value);
 		const clock = new Manual();
 		const installed = clock.install();
@@ -1042,22 +1255,19 @@ describe("Effect", () => {
 		try {
 			effect.timer(() => fired.push("timer"), ms(10));
 			effect.interval(() => fired.push("tick"), ms(4));
-			effect.timeout((child) => child.cleanup(() => fired.push("timeout")), ms(6));
 
 			await clock.advance(ms(3));
 			expect(fired).toEqual([]);
 			await clock.advance(ms(1));
 			expect(fired).toEqual(["tick"]);
+			await clock.advance(ms(4));
+			expect(fired).toEqual(["tick", "tick"]);
 			await clock.advance(ms(2));
-			expect(fired).toEqual(["tick", "timeout"]);
-			await clock.advance(ms(2));
-			expect(fired).toEqual(["tick", "timeout", "tick"]);
-			await clock.advance(ms(2));
-			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+			expect(fired).toEqual(["tick", "tick", "timer"]);
 
 			effect.close();
 			await clock.advance(ms(20));
-			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+			expect(fired).toEqual(["tick", "tick", "timer"]);
 		} finally {
 			effect.close();
 			installed.close();

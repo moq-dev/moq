@@ -249,7 +249,9 @@ async function subscribe(url: URL, broadcast: string, read: Read) {
 			const name = read.track ?? (await catalog(bc, (root) => first(root.video)?.[0]));
 			const group = await bc.track(name).subscribe({ priority: 0 }).recvGroup();
 			if (!group) throw new Error(`${name} ended before its first group`);
-			writeFileSync(read.file, `${name}\n${group.sequence}\n`);
+			// A group names its start in this checkout's @moq/net, and its sequence in released ones.
+			const id = group as unknown as { start?: bigint; sequence?: bigint };
+			writeFileSync(read.file, `${name}\n${id.start ?? id.sequence}\n`);
 			return;
 		}
 
@@ -340,11 +342,10 @@ if (command === "sign") {
 	if (!watch) throw new Error("track has no demand");
 	const wanted = () => (demand.wanted ? watch.peek() !== undefined : watch.peek() === true);
 	while (!wanted()) await watch.changed();
-	const group = track.appendGroup();
-	group.writeFrame({
-		payload: new TextEncoder().encode("compat-fetch"),
-		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
-	});
+	// The group starts at its frame's time; a released package's appendGroup takes no start.
+	const timestamp = Moq.Time.Timestamp.fromMicros(1 as TimestampMicros);
+	const group = track.appendGroup(timestamp);
+	group.writeFrame({ payload: new TextEncoder().encode("compat-fetch"), timestamp });
 	finishGroup.call(group);
 	await connection.closed;
 } else if (command === "subscribe") {

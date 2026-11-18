@@ -936,7 +936,7 @@ mod supervision_tests {
 		let route = origin.route("routed".into(), Default::default()).unwrap();
 		let broadcast = route.broadcast();
 		let track = broadcast.publish_track("data".into(), None).unwrap();
-		let open = track.append_group().unwrap();
+		let open = track.append_group(crate::media::MoqTimestamp::unscaled(0)).unwrap();
 		let consumer = origin.consume().request("routed".into(), None).await.unwrap();
 		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
 		let group = subscriber.recv_group().await.unwrap().unwrap();

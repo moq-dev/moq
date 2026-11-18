@@ -1,6 +1,6 @@
 //! The moq-transport error code registries, per negotiated draft.
 //!
-//! This module holds the stream reset registry and the session close encoder; [`request`]
+//! This module holds the stream reset registry and the session close codes; [`request`]
 //! holds the one for rejecting a request. The reset and request registries are disjoint, so
 //! the same integer means different things in each.
 //!
@@ -95,14 +95,53 @@ pub fn from_stream_code(code: u32) -> StreamError {
 	}
 }
 
+/// Session close codes only moq-transport defines.
+///
+/// moq-lite assigns none of them, so each is a [`SessionError::Unknown`] carrying its number:
+/// this layer sends them, and one a peer sends decodes back to the same value.
+pub(crate) mod session {
+	use crate::SessionError;
+
+	/// A request ID was reused or broke the negotiated draft's order or parity rules.
+	pub(crate) const INVALID_REQUEST_ID: SessionError = SessionError::Unknown(0x4);
+
+	/// A key-value pair was malformed or repeated more than allowed.
+	pub(crate) const KEY_VALUE_FORMATTING: SessionError = SessionError::Unknown(0x6);
+
+	/// The peer sent a PATH it may not send, such as a server sending one at all.
+	pub(crate) const INVALID_PATH: SessionError = SessionError::Unknown(0x8);
+
+	/// A token registration would exceed the advertised `MAX_AUTH_TOKEN_CACHE_SIZE`, which is
+	/// 0 when unadvertised.
+	pub(crate) const AUTH_TOKEN_CACHE_OVERFLOW: SessionError = SessionError::Unknown(0x13);
+
+	/// A token named an alias that was never registered.
+	pub(crate) const UNKNOWN_AUTH_TOKEN_ALIAS: SessionError = SessionError::Unknown(0x17);
+
+	/// The peer sent an AUTHORITY it may not send, such as a server sending one at all.
+	pub(crate) const INVALID_AUTHORITY: SessionError = SessionError::Unknown(0x19);
+
+	/// The peer left more unacknowledged REQUEST_UPDATEs outstanding on one request stream
+	/// than the MAX_REQUEST_UPDATES it was advertised (draft-22 section 9.1.7).
+	pub(crate) const TOO_MANY_REQUEST_UPDATES: SessionError = SessionError::Unknown(0x1b);
+}
+
 /// The code to close the session with.
 ///
-/// The shared session registry, except moq-lite's own 0x30-0x3f range: a bridge must not
-/// carry those codes onto this wire, so an unknown one closes as unspecified instead.
+/// moq-lite's session registry, minus its own 0x30-0x3f range: moq-transport assigns nothing
+/// there, so NOT_SUPPORTED and any unknown code from that range close as unspecified instead.
 pub(crate) fn to_session_code(error: &SessionError) -> u32 {
 	match error {
-		SessionError::Unknown(0x30..=0x3f) => SessionError::Internal.to_code(),
+		SessionError::Unsupported | SessionError::Unknown(0x30..=0x3f) => SessionError::Internal.to_code(),
 		error => error.to_code(),
+	}
+}
+
+/// Read a session close code, keeping moq-lite's own 0x30-0x3f range unknown.
+pub(crate) fn from_session_code(code: u32) -> SessionError {
+	match code {
+		0x30..=0x3f => SessionError::Unknown(code),
+		code => SessionError::from_code(code),
 	}
 }
 
@@ -557,18 +596,40 @@ mod tests {
 	fn the_lite_session_range_is_not_sent() {
 		for code in 0x30..=0x3f {
 			assert_eq!(to_session_code(&SessionError::Unknown(code)), 0x1);
+			assert_eq!(from_session_code(code), SessionError::Unknown(code));
 			assert_eq!(
 				SessionError::Unknown(code).to_code(),
 				code,
 				"the shared encoder is unchanged"
 			);
 		}
+		assert_eq!(to_session_code(&SessionError::Unsupported), 0x1);
 		assert_eq!(to_session_code(&SessionError::Unknown(0x20)), 0x20);
 		assert_eq!(
 			to_session_code(&SessionError::Unauthorized),
 			SessionError::Unauthorized.to_code()
 		);
 		assert_eq!(to_session_code(&SessionError::App(7)), 64 + 7);
+	}
+
+	/// The codes only moq-transport defines go out on their draft values and come back as the
+	/// same number, a session close like any other.
+	#[test]
+	fn moq_transport_session_codes_keep_their_number() {
+		for (err, code) in [
+			(session::INVALID_REQUEST_ID, 0x4),
+			(session::KEY_VALUE_FORMATTING, 0x6),
+			(session::INVALID_PATH, 0x8),
+			(session::AUTH_TOKEN_CACHE_OVERFLOW, 0x13),
+			(session::UNKNOWN_AUTH_TOKEN_ALIAS, 0x17),
+			(session::INVALID_AUTHORITY, 0x19),
+			(session::TOO_MANY_REQUEST_UPDATES, 0x1b),
+		] {
+			assert_eq!(to_session_code(&err), code);
+			assert_eq!(from_session_code(code), err);
+			assert_eq!(SessionError::from_code(code), SessionError::Unknown(code));
+			assert_eq!(Error::from(err).retry(), crate::Retry::Same, "{code:#x}");
+		}
 	}
 
 	/// Every code we send must decode back to what we meant, or two moq-net peers disagree
@@ -618,7 +679,6 @@ mod tests {
 			StreamError::GroupTooLarge,
 			StreamError::TimestampMismatch,
 			StreamError::Unauthorized,
-			StreamError::Yielded,
 			StreamError::ControlTimeout,
 			StreamError::App(7),
 			StreamError::Unknown(0x1234),

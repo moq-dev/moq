@@ -24,7 +24,7 @@ locally against `main`, since its CI report only appears on the cut PR, and
 hand diff the surfaces it cannot see. For each export that is awkward, judge it
 against AGENTS.md's Public API rules: names mirrored across languages, no
 callbacks or 4+ args, misuse unrepresentable, private until a consumer needs
-it. Propose 2-3 shapes with a recommendation, ask the maintainer, and file
+it; and REVIEW.md's "Return what callers use" for every returned enum. Propose 2-3 shapes with a recommendation, ask the maintainer, and file
 each approved change as a quest in m2, which holds the cut until it lands.
 Model items only the built-in sessions use stay private
 ([moq-dev/moq#6747](https://github.com/moq-dev/moq/pull/6747)); this review judges the shape of what ships.
@@ -68,12 +68,10 @@ re-read this list, so it is settled:
   stay: both have callers (the first pass's claim fell on a re-read).
 - The byte-stream rung of `MoqMediaProducer`'s simulcast ladder stays:
   removing it changes `lower`'s type in every binding again.
-- `moq_mux`'s `set_wait` folds into `Delay`
-  ([the hole wait](/quest/m2/delay-hole-wait.md)). The first pass was wrong
-  that native audio sets it to the `min` it already passes: it passes its
-  live estimate, which that quest gives a home.
-- `Rendition::applied()` and `moq_video::encode::Applied` go in
-  [the media sweep](/quest/m2/unused-api/media.md); moq-sock's ICMP error
+- `moq_mux`'s `set_wait` folded into `Delay`: a hole is waited for
+  `Delay::min`, and native audio states its live estimate there.
+- `Rendition::applied()` and `moq_video::encode::Applied` stay: the media
+  sweep found moq.pro's transcode bench reading them. moq-sock's ICMP error
   queue and `qmux::Config::fixed_receive_window` went in the transport sweep,
   [moq-dev/moq#8957](https://github.com/moq-dev/moq/pull/8957).
 - Already gone: `TcpTls::new`

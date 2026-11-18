@@ -21,12 +21,9 @@ pub struct Track<'a> {
 	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
-	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
-	pub node: u64,
-	/// How many leading segments of the broadcast path make up the prefix of the route
-	/// the request follows (lite-07); 0 with no node named.
-	pub depth: u64,
+	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 }
 
@@ -37,7 +34,6 @@ impl Track<'_> {
 			broadcast: self.broadcast,
 			instance: self.instance,
 			node: self.node,
-			depth: self.depth,
 			track: Cow::Owned(self.track.into_owned()),
 		}
 	}
@@ -52,14 +48,13 @@ impl<'a> Message<'a> for Track<'a> {
 
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
 			instance,
 			node,
-			depth,
 			track,
 		})
 	}
@@ -71,7 +66,7 @@ impl<'a> Message<'a> for Track<'a> {
 
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node, self.depth)?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -518,34 +513,57 @@ mod test {
 		));
 	}
 
-	/// Lite-07 names the origin node right after the instance; older versions carry
-	/// none, so the publisher always selects.
+	/// Lite-07 names the node right after the instance; older versions carry none, so
+	/// the publisher always selects.
 	#[test]
 	fn track_request_names_its_node_on_lite07_only() {
 		let msg = Track {
 			instance: None,
-			node: 5,
-			depth: 0,
+			node: Some(crate::route::NodeId {
+				relay: 5,
+				start: 9,
+				marked: false,
+			}),
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty unminted instance, the node and its route's depth,
+		// Length, the path, an empty unminted instance, the node with its start and Marked,
 		// then the track name.
-		assert_eq!(&buf[..], [11, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 0, 1, b'v']);
-		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, 5);
+		assert_eq!(&buf[..], [12, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 9, 0, 1, b'v']);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, msg.node);
+
+		// A request may name a node's marked identity, and a Marked past 1 is refused.
+		let marked = Track {
+			node: msg.node.map(|node| crate::route::NodeId { marked: true, ..node }),
+			..msg.clone()
+		};
+		let buf = marked.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf[10], 1);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, marked.node);
+		let mut bad = buf.to_vec();
+		bad[10] = 2;
+		assert!(Track::decode_slice(&bad, Version::Lite07).is_err());
+
+		// No node is a Node ID of 0, which nothing follows.
+		let unnamed = Track {
+			node: None,
+			..msg.clone()
+		};
+		let buf = unnamed.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(&buf[..], [10, 4, b'r', b'o', b'o', b'm', 0, 0, 0, 1, b'v']);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, None);
 
 		let buf = msg.encode_bytes(Version::Lite06).unwrap();
 		assert_eq!(&buf[..], [7, 4, b'r', b'o', b'o', b'm', 1, b'v']);
-		assert_eq!(Track::decode_slice(&buf, Version::Lite06).unwrap().0.node, 0);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite06).unwrap().0.node, None);
 	}
 
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
@@ -562,8 +580,7 @@ mod test {
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};

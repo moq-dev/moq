@@ -28,7 +28,9 @@ receives the largest enabled video rendition (then highest bitrate) in its negot
 the highest-bitrate enabled Opus rendition (then sample rate, then channels). It
 follows the catalog: a peer whose rendition is disabled moves to the next best at
 that rendition's first keyframe, a better one that re-enables wins the peer back,
-and with none enabled the peer receives nothing until one is. `--cors-origin`
+and with none enabled the peer receives nothing until one is. A WHEP offer gets one
+audio and one video line at most: the answer rejects the rest, which would only repeat
+the same media. `--cors-origin`
 opens the endpoint to browsers on other origins. Every session shares one UDP
 media port, `--udp-bind` (OS-picked by default), bound at startup so a taken port
 fails before the listener reports ready. Behind NAT, `--public-addr` advertises
@@ -43,7 +45,11 @@ reconnects while its stale session lingers replaces it at once.
 An export stays on the publisher it started with. A replacement publisher never
 reaches its session, so timestamps and codec state never reset mid-session.
 Once the original publisher leaves, the session ends with an error, and the
-player or `export webrtc --connect` must reconnect to reach the replacement.
+player or `export webrtc --connect` must reconnect to reach the replacement. A
+publisher that ends cleanly, such as an RTMP `deleteStream`, ends the session
+cleanly once its last frames are sent: the peer connection closes with an RTCP BYE
+and a DTLS close\_notify, which a browser reports as its `RTCDtlsTransport` state
+turning `closed`.
 `--connect` runs until its session ends.
 
 Built on [str0m](https://github.com/algesten/str0m), with DTLS and SRTP on [rind](https://github.com/kixel-ai/rind); the library is

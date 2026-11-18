@@ -7,7 +7,7 @@ use std::task::Poll;
 ///
 /// moq-net boxes every transport with a native `Send` bound, which a worker's
 /// `!Send` session cannot meet, so wrap the session in this
-/// before `Server::accept_request` or `Client::connect`. The session, its
+/// before `Server::handshake` or `Client::connect`. The session, its
 /// streams, and its send groups never leave the worker that polls them, so
 /// this checks the thread on every use and panics anywhere else instead of
 /// proving it at compile time.
@@ -116,10 +116,6 @@ impl<S: poll::Session> poll::Session for Local<S> {
 
 	fn set_limits(&self, limits: moq::Limits) -> Result<(), moq::LimitsError> {
 		self.0.set_limits(limits)
-	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.0.export_keying_material(label, context)
 	}
 }
 

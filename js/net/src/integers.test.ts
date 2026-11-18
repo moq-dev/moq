@@ -19,8 +19,8 @@ import { TrackInfo } from "./lite/track.ts";
 import { Version as Lite } from "./lite/version.ts";
 import * as Path from "./path.ts";
 import { Cursor, concat, encodeVarint, Reader, Writer } from "./stream.ts";
-import { Timescale, Timestamp } from "./time.ts";
-import { rangesOf, union, Window } from "./window.ts";
+import { Timescale } from "./time.ts";
+import { type Holdings, rangesOf, union, Window } from "./window.ts";
 
 const UNSAFE = (1n << 53n) + 1n;
 const FLAGS: GroupFlags = {
@@ -67,7 +67,15 @@ test("relative anchors round-trip beyond 2^53 and resolve adjacent counts exactl
 	expect((await SubscribeUpdate.decode(new Reader(undefined, updated, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(
 		ranges,
 	);
-	expect(new Window(rangesOf(ranges), UNSAFE + 5n).runs()).toEqual([{ start: 5n, end: 7n }]);
+	// Every group from 0 through the latest held, so a count back names the group that many before it.
+	const contiguous: Holdings = {
+		resolves: () => true,
+		containing: (time) => ({ group: time }),
+		nextStart: (from) => from,
+		back: (latest, back) => (latest >= back ? latest - back : undefined),
+		complete: () => false,
+	};
+	expect(new Window(rangesOf(ranges), UNSAFE + 5n, contiguous).runs()).toEqual([{ start: 5n, end: 7n }]);
 	expect(union([{ start: { relative: UNSAFE - 1n } }, { start: { relative: UNSAFE } }])).toEqual([
 		{ start: { relative: UNSAFE } },
 	]);
@@ -145,9 +153,11 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 				await Writer.collect(version, (w) => LiteMessage.encode(w, (w) => w.write(body))),
 				version,
 			);
-		// Lite-07 carries the Previous Start ahead of the Frame Start.
-		const group = version === Lite.DRAFT_07 ? fields(version, 0, 0, 0, UNSAFE) : fields(version, 0, 0, UNSAFE);
-		await expect(LiteGroup.decode(await framed(group), version)).rejects.toThrow(RangeError);
+		// Only lite-06 carries a Frame Start.
+		if (version === Lite.DRAFT_06)
+			await expect(LiteGroup.decode(await framed(fields(version, 0, 0, UNSAFE)), version)).rejects.toThrow(
+				RangeError,
+			);
 		if (version === Lite.DRAFT_07)
 			await expect(SubscribeStart.decode(await framed(fields(version, 1, UNSAFE)), version)).rejects.toThrow(
 				RangeError,
@@ -156,11 +166,10 @@ for (const version of [Lite.DRAFT_06, Lite.DRAFT_07]) {
 			const body = await Writer.collect(version, async (w) => {
 				await w.string("room");
 				if (version === Lite.DRAFT_07) {
-					// No pinned instance: empty and unminted, and no origin node nor route depth.
+					// No pinned instance: empty and unminted, and no node named.
 					await w.u53(0);
 					await w.bool(false);
 					await w.u62(0n);
-					await w.u53(0);
 				}
 				await w.string("video");
 				await w.u8(0);
@@ -187,8 +196,10 @@ test("legacy session bitrate refuses unsafe numbers", async () => {
 	await expect(SessionInfo.decode(new Reader(undefined, bytes, version), version)).rejects.toThrow(RangeError);
 });
 
-test("time anchors convert at the declared scale without losing an aligned unit", () => {
-	expect(
-		toWireRanges([{ start: { time: new Timestamp(4611686021000000, Timescale.NANO) } }], Timescale.MILLI),
-	).toEqual([{ start: { time: 4611686021n } }]);
+test("time anchors round-trip beyond 2^53 as group starts", async () => {
+	const ranges = [{ start: { time: UNSAFE }, end: { time: UNSAFE + 1n } }];
+	expect(toWireRanges(ranges)).toEqual(ranges);
+	const message = new Subscribe({ id: 1n, broadcast: Path.from("room"), track: "video", priority: 0, ranges });
+	const bytes = await Writer.collect(Lite.DRAFT_07, (w) => message.encode(w, Lite.DRAFT_07));
+	expect((await Subscribe.decode(new Reader(undefined, bytes, Lite.DRAFT_07), Lite.DRAFT_07)).ranges).toEqual(ranges);
 });

@@ -298,6 +298,12 @@ const NAMED_ONLY: &[Candidate] = &[
 		drives: Drives::Own,
 	},
 	Candidate {
+		name: probe::FAILING_FLUSH_NAME,
+		supports: |c| matches!(c, Codec::H264),
+		open: probe::Buffered::open_failing_flush,
+		drives: Drives::Own,
+	},
+	Candidate {
 		name: probe::REORDER_NAME,
 		supports: |c| matches!(c, Codec::H264),
 		open: probe::Reorder::open,
@@ -305,7 +311,7 @@ const NAMED_ONLY: &[Candidate] = &[
 	},
 	Candidate {
 		name: probe::HOLDING_NAME,
-		supports: |c| matches!(c, Codec::H264),
+		supports: |c| matches!(c, Codec::H264 | Codec::H265),
 		open: probe::Reorder::open_holding,
 		drives: Drives::Own,
 	},

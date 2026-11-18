@@ -9,7 +9,7 @@ use crate::consumer::{MoqBroadcastConsumer, MoqGroupConsumer, MoqOrder, MoqSubsc
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::{Background, OneShot, Polled};
-use crate::media::MoqFrame;
+use crate::media::{MoqFrame, MoqTimestamp};
 
 /// A location within a track, mirroring [`moq_net::track::Position`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Record)]
@@ -106,17 +106,6 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 			.compression
 			.map_or(moq_net::track::Compression::None, |compression| compression.0);
 		Ok(out.with_compression(compression))
-	}
-}
-
-/// One past the newest group's start, or 0 on an empty track, in the track's timescale: where a
-/// group the caller gave no start for begins, which stands in until every write carries a
-/// timestamp.
-fn next_start(track: &moq_net::track::Producer) -> moq_net::Result<moq_net::Timestamp> {
-	let key = track.largest().map_or(0, |largest| largest.group.saturating_add(1));
-	match track.info().timescale {
-		Some(scale) => moq_net::Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch),
-		None => Ok(moq_net::Timestamp::unscaled(key)),
 	}
 }
 
@@ -718,10 +707,10 @@ pub struct MoqTrackProducer {
 /// How far a track binding got.
 #[derive(Default)]
 enum TrackPhase {
-	/// Publishing, as a child of `family` unless it has none, as a socket's track does.
+	/// Publishing, as a child of `family`.
 	Open {
 		raw: moq_net::track::Producer,
-		family: Option<Children>,
+		family: Children,
 	},
 	/// Finished, and kept by its family until the broadcast closes. It may still take groups
 	/// below its end, and abort.
@@ -766,19 +755,12 @@ impl Drop for MoqTrackProducer {
 }
 
 impl MoqTrackProducer {
-	/// Wrap a socket's track without a broadcast family.
-	pub(crate) fn from_socket(raw: moq_net::track::Producer) -> Self {
-		Self {
-			phase: std::sync::Mutex::new(TrackPhase::Open { raw, family: None }),
-		}
-	}
-
 	/// Wrap `raw` as a child of the broadcast `children` belongs to.
 	fn child(raw: moq_net::track::Producer, children: &Children) -> Result<Arc<Self>, MoqError> {
 		children.adopt(Arc::new(Self {
 			phase: std::sync::Mutex::new(TrackPhase::Open {
 				raw,
-				family: Some(children.clone()),
+				family: children.clone(),
 			}),
 		}))
 	}
@@ -799,17 +781,12 @@ impl MoqTrackProducer {
 		let mut phase = std::mem::take(&mut *self.phase.lock().unwrap());
 		let raw = phase.raw()?.clone();
 		match (f(raw), phase) {
-			(
-				Ok(writer),
-				TrackPhase::Open {
-					family: Some(family), ..
-				},
-			) => family.adopt(Arc::new(writer)),
+			(Ok(writer), TrackPhase::Open { family, .. }) => family.adopt(Arc::new(writer)),
 			// A finished track has no family left to join, and ends at its declared end.
 			(Ok(writer), _) => Ok(Arc::new(writer)),
 			(Err(err), phase) => {
 				let family = match &phase {
-					TrackPhase::Open { family, .. } => family.clone(),
+					TrackPhase::Open { family, .. } => Some(family.clone()),
 					TrackPhase::Finished(_) | TrackPhase::Closed => None,
 				};
 				*self.phase.lock().unwrap() = phase;
@@ -855,20 +832,25 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqTrackConsumer::new(track, Background::default())))
 	}
 
-	/// Append a new group to the track, one past the newest group's start, returning a
-	/// producer for writing frames into it.
-	pub fn append_group(&self) -> Result<Arc<MoqGroupProducer>, MoqError> {
+	/// Append the next group, starting at `start`, returning a producer for writing frames into it.
+	///
+	/// A timed track converts `start` into its timescale, as [`write_frame`](Self::write_frame)
+	/// does; a scale-less track takes the [unscaled](MoqTimestamp::unscaled) group key. A start
+	/// at or before a group the track holds, or one that doesn't match the track, is refused with
+	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
+	pub fn append_group(&self, start: MoqTimestamp) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
+		let start: moq_net::Timestamp = start.try_into()?;
 		let mut phase = self.phase.lock().unwrap();
 		let raw = phase.raw()?;
-		let group = raw.append_group(next_start(raw)?)?;
+		let group = raw.append_group(start)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 
 	/// Create a group starting at `start`, in the track's timescale, which names it.
 	///
-	/// Use this for sparse or replayed tracks. [`append_group`](Self::append_group)
-	/// remains the convenient live-stream path.
+	/// Use this for sparse or replayed tracks: unlike [`append_group`](Self::append_group), it
+	/// declares nothing below it skipped.
 	pub fn create_group(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut phase = self.phase.lock().unwrap();
@@ -971,9 +953,7 @@ impl MoqTrackProducer {
 					*phase = TrackPhase::Open { raw, family };
 					return Err(err.into());
 				}
-				if let Some(family) = family {
-					family.keep(raw.clone());
-				}
+				family.keep(raw.clone());
 				TrackPhase::Finished(raw)
 			}
 			finished @ TrackPhase::Finished(_) => finished,

@@ -12,13 +12,12 @@ repeats or nearly repeats a timestamp at a group boundary.
 Follow-up of [moq-dev/moq#8470](https://github.com/moq-dev/moq/pull/8470),
 from its [review thread](https://github.com/moq-dev/moq/pull/8470#discussion_r4535290026).
 
-Three sites re-anchor a GOP-opening run at its first frame's presentation
+Two sites re-anchor a GOP-opening run at its first frame's presentation
 time instead of continuing the previous decode timeline. The rule applies to
 each:
 
 - `encode_fragment` in `rs/moq-mux/src/container/fmp4/export.rs` (`moq export
   fmp4`), which continues from `decode_end` only for a run cut inside a GOP.
-- `Fragmenter::emit` in `fragmenter.rs`, on every `push_group`.
 - `Muxer::fragment` (`mod.rs` `encode_fragment`), which HLS calls from
   `rs/moq-hls/src/export/rendition.rs`. It is stateless, so the HLS rendition
   must carry the previous segment's decode end into it.

@@ -12,7 +12,9 @@
 //!
 //! Gates nest: a read through a gate that polls another gated reader passes it the outer
 //! gate's waiter, whose waker stays the same across reads, so the inner gate keeps its arm
-//! and its wake reaches the outer gate on the way to the task.
+//! and its wake reaches the outer gate on the way to the task. A change made outside the
+//! read, such as a drop poll hearing a fill's answer, reopens the gate instead of disarming
+//! it, so that wake reaches the outer gates too.
 
 pub(super) use crate::util::Idle;
 

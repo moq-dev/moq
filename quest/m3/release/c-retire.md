@@ -13,7 +13,7 @@ replaces them.
 - Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
   hand-written API ships at the cut as `libmoq` 0.22, its final line, and
   `moq-c` names only the generated package
-  ([the C crate's name](/quest/m2/libmoq-name.md)). This replaces the
+  (`c/moq`). This replaces the
   2026-10-25 decision that it ships as `moq-c`, and with it the code-free
   `rs/libmoq` stub and its two quests: there is no stub at this cut.
 - So the crate this deletes is `rs/libmoq`. Before its source goes, publish
@@ -39,6 +39,3 @@ replaces them.
 
 - [C consumers](/quest/m3/c/consumers.md) - the interop client and `doc/lib/c` samples no longer call the hand-written ABI
 
-## Related
-
-- [The hand-written C API ships as libmoq](/quest/m2/libmoq-name.md) - the name this crate ships under until then

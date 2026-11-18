@@ -166,6 +166,12 @@ impl Version {
 		)
 	}
 
+	/// Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
+	/// earlier versions have no frame bounds, and a lite-07 subscription reads whole groups.
+	pub(crate) fn has_group_frame_start(self) -> bool {
+		matches!(self, Self::Lite06)
+	}
+
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
 	/// Added in lite-07; an earlier subscription is served newest first.
 	pub(crate) fn has_order(self) -> bool {
@@ -261,15 +267,6 @@ impl Version {
 		self.has_ranges()
 	}
 
-	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in, one for each prefix it adds.
-	/// Added in lite-07; older requests decode as not opted in.
-	pub(crate) fn has_hidden(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether ANNOUNCE_START may copy a path head from a live
 	/// announcement on the same stream. Added in lite-07.
 	pub(crate) fn has_announce_compression(self) -> bool {
@@ -303,17 +300,6 @@ impl Version {
 	/// closes an expired group's stream rather than resetting it. Added in lite-07; earlier
 	/// versions end every group with a bare FIN.
 	pub(crate) fn has_group_end(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether a Group Stream reset with YIELDED pauses its group, which a later stream
-	/// continues. Added in lite-07; an earlier publisher out of stream credit gives the reset
-	/// group up.
-	#[cfg(feature = "async")]
-	pub(crate) fn has_yield(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -379,30 +365,13 @@ impl Version {
 		)
 	}
 
-	/// Whether SETUP may carry a route key proof. Added in lite-07.
-	pub(crate) fn has_route_key(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
-	/// Whether the announce stream has ANNOUNCE_RESTART: another publisher instance
-	/// replacing an advertisement in place. Added in lite-07. Older versions send an
-	/// ANNOUNCE_END then an ANNOUNCE_START.
-	pub(crate) fn has_announce_restart(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
-	}
-
 	/// Whether each endpoint says everything about discovery and routing on one
 	/// unidirectional Announce Stream: ANNOUNCE_REQUEST edits of the prefixes it wants,
-	/// and ANNOUNCE_OK, ROUTE_START, ROUTE_UPDATE, ROUTE_HOLD, ROUTE_END, DEAD, the claims,
-	/// ANNOUNCE_FLOOR, and SYNCED answering its peer's. A claim names its Route ID in
-	/// place of a hop chain, ANNOUNCE_OK and SETUP carry no Hop ID, and requests name the
-	/// origin's Node ID and its route's depth. Added in lite-07.
+	/// and ANNOUNCE_OK, the claims, and SYNCED answering its peer's, with ROUTE,
+	/// ROUTE_END, DEAD, DRAIN, and ANNOUNCE_FLOOR between two routing nodes. A claim
+	/// carries a chain in place of a hop chain, ANNOUNCE_OK carries no Hop ID, SETUP a
+	/// Node ID only from a routing node, and requests name the node announcing their
+	/// claim. Added in lite-07.
 	pub(crate) fn has_routes(self) -> bool {
 		!matches!(
 			self,
@@ -482,13 +451,13 @@ impl fmt::Display for Version {
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
 		match v {
-			Version::Lite01 => crate::Version::Lite(Version::Lite01),
-			Version::Lite02 => crate::Version::Lite(Version::Lite02),
-			Version::Lite03 => crate::Version::Lite(Version::Lite03),
-			Version::Lite04 => crate::Version::Lite(Version::Lite04),
-			Version::Lite05 => crate::Version::Lite(Version::Lite05),
-			Version::Lite06 => crate::Version::Lite(Version::Lite06),
-			Version::Lite07 => crate::Version::Lite(Version::Lite07),
+			Version::Lite01 => crate::Version::lite(Version::Lite01),
+			Version::Lite02 => crate::Version::lite(Version::Lite02),
+			Version::Lite03 => crate::Version::lite(Version::Lite03),
+			Version::Lite04 => crate::Version::lite(Version::Lite04),
+			Version::Lite05 => crate::Version::lite(Version::Lite05),
+			Version::Lite06 => crate::Version::lite(Version::Lite06),
+			Version::Lite07 => crate::Version::lite(Version::Lite07),
 		}
 	}
 }
@@ -497,9 +466,9 @@ impl TryFrom<crate::Version> for Version {
 	type Error = ();
 
 	fn try_from(v: crate::Version) -> Result<Self, Self::Error> {
-		match v {
-			crate::Version::Lite(v) => Ok(v),
-			crate::Version::Ietf(_) => Err(()),
+		match v.0 {
+			crate::Draft::Lite(v) => Ok(v),
+			crate::Draft::Ietf(_) => Err(()),
 		}
 	}
 }

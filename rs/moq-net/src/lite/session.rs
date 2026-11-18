@@ -81,7 +81,7 @@ impl SetupAccept {
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {
-					accept_error = Some(crate::lite::error::from_transport(err));
+					accept_error = Some(Error::from_transport(err));
 					break;
 				}
 			}
@@ -193,8 +193,8 @@ pub struct Config {
 	pub subscribe: Option<origin::Producer>,
 
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
-	/// declare one itself. See `Client::with_peer_hop`.
-	pub peer_hop: Option<Hop>,
+	/// declare one itself. See `Client::with_peer_node`.
+	pub peer_node: Option<Hop>,
 
 	/// The version of the protocol to use.
 	pub version: Version,
@@ -231,7 +231,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		setup_stream,
 		publish,
 		subscribe,
-		peer_hop,
+		peer_node,
 		version,
 		mut our_setup,
 		peer_setup,
@@ -261,37 +261,17 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	if our_setup.hop.is_none() {
 		our_setup.hop = publish
 			.as_ref()
-			.map(|origin| origin.hop())
-			.or_else(|| subscribe.as_ref().map(|origin| origin.hop()))
+			.map(|origin| origin.node())
+			.or_else(|| subscribe.as_ref().map(|origin| origin.node()))
 			.map(Hop::from);
 	}
-	// Lite-07 declares the Node ID our routes originate under instead, so a peer that is
-	// this same process recognizes itself. Read without creating the route node, which
-	// the session's route layer creates when it starts.
-	if version.has_routes() && our_setup.node.is_none() {
-		our_setup.node = publish
-			.as_ref()
-			.and_then(|origin| origin.node_id())
-			.or_else(|| subscribe.as_ref().and_then(|origin| origin.consume().node_id()));
-	}
-
-	// Prove our origin's route key, bound to this session, so a peer that scopes us files
-	// our routes under it. A transport without an exporter cannot bind a proof, so neither
-	// side proves anything there.
-	let transcript = version
-		.has_route_key()
-		.then(|| session.export_keying_material(crate::route::EXPORTER_LABEL, &[]))
-		.flatten()
-		.map(crate::route::Transcript::new);
-	let route_key = publish
-		.as_ref()
-		.and_then(|origin| origin.route_key())
-		.or_else(|| subscribe.as_ref().and_then(|origin| origin.route_key()));
-	if let (Some(transcript), Some(key)) = (&transcript, route_key) {
-		our_setup.route_key = Some(transcript.prove(&key, client));
-	}
-	// Every lite-07 session reads the chain, so a claim learned over lite-06 keeps it.
-	our_setup.lite06_chain = version.has_routes();
+	// Lite-07 declares a Node ID instead, and only when this session exchanges routes:
+	// both halves share one forwarding origin and neither confines the peer.
+	our_setup.node = match (version.has_routes(), &publish, &subscribe) {
+		(true, Some(publish), Some(subscribe)) => publish.node_id(subscribe),
+		_ => None,
+	};
+	let routing = our_setup.node.is_some();
 
 	// What the peer's connection credential earns by default: publishing what our
 	// subscribe half accepts, and subscribing to what our publish half serves. A
@@ -309,11 +289,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
-	// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
-	// them unless its publish half opted in, and a socket endpoint behind it is
-	// unreachable. A server leaves it to the client, whose origin holds that endpoint.
-	let withholding =
-		(client && !version.has_hidden() && !publish.includes_hidden()).then(|| publish.hidden_withheld().hold());
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
@@ -329,13 +304,18 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// Setup stream isn't expected on the wire again.
 	let peer_implementation = crate::setup::PeerImplementation::default();
 	let mut peer_setup_slot = PeerSetup::new(client, session.address())
-		.with_transcript(transcript)
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
 	// Without AUTH, the server checks a client's credential before its SETUP, which the
-	// client reads only after going live.
+	// client reads only after going live. With AUTH, the AUTH_OK to the connection's own
+	// credential accepts it. Lite-03/04 have neither, and lite-01/02 answered in the
+	// negotiation SETUP already read.
 	if client && version.has_setup_stream() && !version.has_auth() {
 		peer_setup_slot = peer_setup_slot.accepting(auth.clone());
+	} else if client && version.has_auth() {
+		auth.await_acceptance();
+	} else if client && matches!(version, Version::Lite03 | Version::Lite04) {
+		auth.silent();
 	}
 	// A version without a Setup Stream advertises nothing, so there is nothing to wait for.
 	if !version.has_setup_stream() {
@@ -373,7 +353,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		version,
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
-		peer_hop,
+		peer_node,
 		auth: auth.clone(),
 		peer_grant,
 		client,
@@ -387,7 +367,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		recv_bandwidth: recv_bw_for_sub,
 		version,
 		peer_setup,
-		peer_hop,
+		peer_node,
 		// Local policy for what pulling from this peer costs. Set only when we
 		// configured a price; otherwise the subscriber charges what the peer declared
 		// for its own egress.
@@ -409,7 +389,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		)?;
 	}
 
-	let route_publish = publisher.route_publish();
+	let route_publish = publisher.route_publish(routing);
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
@@ -431,7 +411,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early, client, route_publish),
 		session,
-		withholding,
 	};
 
 	Ok(SessionStart {
@@ -467,9 +446,6 @@ pub(crate) struct Driver {
 	/// For the terminal close: the machine's last act reports the outcome to
 	/// the peer through the transport.
 	session: Transport,
-	/// Counts this session against the publish origin while it withholds that origin's
-	/// hidden routes from the peer.
-	withholding: Option<origin::HiddenWithholding>,
 }
 
 impl Driver {
@@ -520,7 +496,6 @@ impl Driver {
 			}
 		}
 		self.ended = Some(res.clone());
-		self.withholding = None;
 		res
 	}
 
@@ -774,7 +749,7 @@ impl PresentToken {
 							let Ok(code) = u32::try_from(refused.code) else {
 								return Poll::Ready(Error::ProtocolViolation);
 							};
-							let err = match crate::lite::error::from_session_code(code) {
+							let err = match crate::SessionError::from_code(code) {
 								crate::SessionError::Unsupported => Error::Unsupported,
 								code => Error::Session(code),
 							};
@@ -857,7 +832,7 @@ impl SendSetup {
 	fn poll_send(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		// Waiting for stream credit on our own session handle.
 		let stream = wait!(Open => self.session.poll_open_uni(&mut self.open, waiter, Default::default()))
-			.map_err(crate::lite::error::from_transport)?;
+			.map_err(Error::from_transport)?;
 		let mut writer: Writer<crate::transport::boxed::SendStream, Version> =
 			Writer::new(stream, self.version).with_stats(&self.stats);
 		writer.buffer(&super::DataType::Setup)?;
@@ -1021,7 +996,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
@@ -1067,7 +1042,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup: Setup::default(),
 			peer_setup: None,
@@ -1148,7 +1123,7 @@ mod tests {
 				setup_stream: None,
 				publish: None,
 				subscribe: None,
-				peer_hop: None,
+				peer_node: None,
 				version: Version::Lite07,
 				our_setup: Setup::default(),
 				peer_setup: None,
@@ -1236,7 +1211,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version: Version::Lite07,
 			our_setup,
 			peer_setup: None,
@@ -1306,7 +1281,7 @@ mod tests {
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
@@ -1362,7 +1337,7 @@ mod tests {
 					setup_stream: None,
 					publish: None,
 					subscribe: None,
-					peer_hop: None,
+					peer_node: None,
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
@@ -1397,7 +1372,7 @@ mod tests {
 			setup_stream: None,
 			publish: None,
 			subscribe: None,
-			peer_hop: None,
+			peer_node: None,
 			version,
 			our_setup: Setup::default(),
 			peer_setup,

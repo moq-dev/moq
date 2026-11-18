@@ -43,7 +43,7 @@ impl Version {
 
 impl From<Version> for crate::Version {
 	fn from(v: Version) -> Self {
-		crate::Version::Ietf(v)
+		crate::Version::ietf(v)
 	}
 }
 
@@ -51,9 +51,9 @@ impl TryFrom<crate::Version> for Version {
 	type Error = ();
 
 	fn try_from(v: crate::Version) -> Result<Self, Self::Error> {
-		match v {
-			crate::Version::Ietf(v) => Ok(v),
-			crate::Version::Lite(_) => Err(()),
+		match v.0 {
+			crate::Draft::Ietf(v) => Ok(v),
+			crate::Draft::Lite(_) => Err(()),
 		}
 	}
 }

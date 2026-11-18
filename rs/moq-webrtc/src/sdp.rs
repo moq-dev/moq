@@ -2,17 +2,18 @@
 //!
 //! WHIP/WHEP both shovel SDP between a peer and str0m as `application/sdp`
 //! request/response bodies. On top of str0m's offer/answer parse/serialize this
-//! refuses data channels and repairs the answer's text where str0m's falls short.
+//! refuses data channels and surplus media lines, and repairs the answer's text where
+//! str0m's falls short.
 
 use std::{borrow::Cow, collections::HashSet};
 
 use crate::{Error, Result};
 
-/// An offer's data channel sections, each answered rejected beside str0m's answer.
+/// An offer's sections the gateway refuses, each answered rejected beside str0m's answer.
 ///
-/// The gateway carries no data channels, and str0m has no setting that refuses one: it
-/// accepts an offered `m=application` section and runs SCTP that nobody reads. So
-/// [`parse_offer`] takes those sections out before str0m sees the offer, and
+/// str0m has no setting that refuses a section: it accepts an offered `m=application`
+/// section and runs SCTP that nobody reads, and gives every media line its own send
+/// buffer. So [`parse_offer`] takes those sections out before str0m sees the offer, and
 /// [`render_answer`] puts each back at its index, with port 0 and out of the BUNDLE
 /// group.
 #[derive(Debug, Default)]
@@ -22,9 +23,20 @@ pub struct Refused {
 	sections: Vec<(usize, String)>,
 }
 
-/// Parse an `application/sdp` body as an offer, setting its data channels aside.
-pub fn parse_offer(body: &str) -> Result<(str0m::change::SdpOffer, Refused)> {
-	let (body, refused) = refuse_channels(body);
+/// Which of an offer's audio and video sections the answer accepts.
+#[derive(Clone, Copy, Debug)]
+pub enum Lines {
+	/// Every one: an ingest publishes each line as a rendition of its own.
+	Every,
+	/// The first of each kind: an egress serves one rendition per kind, so another line
+	/// would only repeat a viewer's subscription, packetization, and encryption.
+	FirstOfKind,
+}
+
+/// Parse an `application/sdp` body as an offer, setting aside its data channels and any
+/// media section `lines` refuses.
+pub fn parse_offer(body: &str, lines: Lines) -> Result<(str0m::change::SdpOffer, Refused)> {
+	let (body, refused) = refuse(body, lines);
 	let offer = str0m::change::SdpOffer::from_sdp_string(&body).map_err(|err| Error::InvalidSdp(err.to_string()))?;
 	Ok((offer, refused))
 }
@@ -63,14 +75,19 @@ fn port<'a>(section: &[&'a str]) -> Option<&'a str> {
 	section.first()?.split_whitespace().nth(1)
 }
 
-/// Take each `m=application` section out of an offer, and its mid out of the BUNDLE group.
+/// Take each `m=application` section out of an offer, and each audio or video section
+/// `lines` refuses, with its mid out of the BUNDLE group.
 ///
 /// A refused section in the group keeps its share of the group's transport: each
 /// attribute no other section or the session carries moves to the session, as do its
 /// candidates, which str0m reads from either.
-fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
+fn refuse(offer: &str, lines: Lines) -> (Cow<'_, str>, Refused) {
 	let mut refused = Refused::default();
-	if !offer.contains("m=application") {
+	let surplus = match lines {
+		Lines::Every => false,
+		Lines::FirstOfKind => offer.matches("m=audio").nth(1).is_some() || offer.matches("m=video").nth(1).is_some(),
+	};
+	if !surplus && !offer.contains("m=application") {
 		return (Cow::Borrowed(offer), refused);
 	}
 
@@ -85,18 +102,34 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 	let mut kept = Vec::new();
 	let mut mids = HashSet::new();
 	let mut transport = Vec::new();
+	let (mut audio, mut video) = (false, false);
 	for (index, section) in sections.into_iter().enumerate() {
 		let mut tokens = section[0].split_whitespace();
-		if tokens.next() != Some("m=application") {
+		let media = tokens.next().unwrap_or_default();
+		// A disabled (port 0) section counts too: a max-bundle offer disables every section
+		// but its first, marking them bundle-only, and str0m still accepts them.
+		let seen = match media {
+			"m=audio" => Some(&mut audio),
+			"m=video" => Some(&mut video),
+			_ => None,
+		};
+		let keep = match seen {
+			Some(seen) => matches!(lines, Lines::Every) || !std::mem::replace(seen, true),
+			None => media != "m=application",
+		};
+		if keep {
 			kept.push(section);
 			continue;
 		}
-		// m=application <port> <proto> <fmt>...; the answer echoes the proto and formats.
+		// m=<media> <port> <proto> <fmt>...; the answer echoes the media and proto. A data
+		// channel echoes its formats, and a media line takes the placeholder static payload
+		// [`render_answer`] gives one str0m rejects, since a dynamic one needs its `a=rtpmap`.
 		let _port = tokens.next();
-		let mut answer = format!(
-			"m=application 0 {}\r\nc=IN IP4 0.0.0.0\r\n",
-			tokens.collect::<Vec<_>>().join(" ")
-		);
+		let formats = match media {
+			"m=application" => tokens.collect::<Vec<_>>().join(" "),
+			_ => format!("{} 0", tokens.next().unwrap_or_default()),
+		};
+		let mut answer = format!("{media} 0 {formats}\r\nc=IN IP4 0.0.0.0\r\n");
 		let mid = section.iter().find_map(|line| line.trim_end().strip_prefix("a=mid:"));
 		if let Some(mid) = mid {
 			answer.push_str(&format!("a=mid:{mid}\r\n"));
@@ -108,6 +141,10 @@ fn refuse_channels(offer: &str) -> (Cow<'_, str>, Refused) {
 						.filter(|line| TRANSPORT.iter().any(|a| line.starts_with(a))),
 				);
 			}
+		}
+		// A media section names its direction, which an offerer such as str0m requires.
+		if media != "m=application" {
+			answer.push_str("a=inactive\r\n");
 		}
 		refused.sections.push((index, answer));
 	}
@@ -307,7 +344,7 @@ mod tests {
 
 	/// Answer `offer` as the WHIP server does, with one local candidate.
 	fn answer(offer: &str) -> String {
-		let (offer, refused) = parse_offer(offer).unwrap();
+		let (offer, refused) = parse_offer(offer, super::Lines::Every).unwrap();
 		let mut rtc = crate::session::rtc_with_codecs(&[str0m::format::Codec::Opus]).unwrap();
 		let candidate = Candidate::host(([1, 1, 1, 1], 1000).into(), "udp").unwrap();
 		rtc.add_local_candidate(candidate);
@@ -434,7 +471,7 @@ mod tests {
 		let video = api.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
 		let (offer, pending) = api.apply().unwrap();
 
-		let (offer, refused) = parse_offer(&offer.to_sdp_string()).unwrap();
+		let (offer, refused) = parse_offer(&offer.to_sdp_string(), super::Lines::Every).unwrap();
 		let mut rtc = crate::session::rtc_with_codecs(&[str0m::format::Codec::Vp8]).unwrap();
 		rtc.add_local_candidate(Candidate::host(([1, 1, 1, 1], 1000).into(), "udp").unwrap());
 		let answer = render_answer(&rtc.sdp_api().accept_offer(offer).unwrap(), &refused);
@@ -450,6 +487,58 @@ mod tests {
 		offerer.sdp_api().accept_answer(pending, answer).unwrap();
 	}
 
+	/// A play answers the first audio and video line and rejects the rest beside them, so a
+	/// viewer cannot multiply its work, while an ingest keeps every line as a rendition.
+	#[test]
+	fn a_play_answers_one_line_per_kind() {
+		use str0m::format::Codec;
+
+		let now = kio::clock::now().into_std();
+		let mut offerer = crate::session::rtc_config().unwrap().build(now);
+		let mut api = offerer.sdp_api();
+		let kinds = [
+			MediaKind::Video,
+			MediaKind::Audio,
+			MediaKind::Video,
+			MediaKind::Audio,
+			MediaKind::Video,
+		];
+		let mids: Vec<_> = (kinds.into_iter())
+			.map(|kind| api.add_media(kind, Direction::RecvOnly, None, None, None))
+			.collect();
+		let (offer, pending) = api.apply().unwrap();
+		let offer = offer.to_sdp_string();
+
+		let answer = |lines| {
+			let (offer, refused) = parse_offer(&offer, lines).unwrap();
+			let mut rtc = crate::session::rtc_with_codecs(&[Codec::Opus, Codec::Vp8]).unwrap();
+			rtc.add_local_candidate(Candidate::host(([1, 1, 1, 1], 1000).into(), "udp").unwrap());
+			render_answer(&rtc.sdp_api().accept_offer(offer).unwrap(), &refused)
+		};
+		let ports = |answer: &str| -> Vec<String> {
+			(answer.split("\r\nm=").skip(1))
+				.map(|section| section.split_whitespace().nth(1).unwrap().to_string())
+				.collect()
+		};
+
+		let played = answer(super::Lines::FirstOfKind);
+		assert_eq!(ports(&played), ["9", "9", "0", "0", "0"], "{played}");
+		for (mid, kind) in mids.iter().zip(["video", "audio"].into_iter().cycle()).skip(2) {
+			let rejected = format!("m={kind} 0 UDP/TLS/RTP/SAVPF 0\r\n");
+			let at = played.find(&format!("a=mid:{mid}\r\n")).unwrap();
+			assert!(played[..at].rfind("m=") == played[..at].rfind(&rejected), "{played}");
+		}
+		assert!(
+			played.contains(&format!("a=group:BUNDLE {} {}\r\n", mids[0], mids[1])),
+			"{played}"
+		);
+		let accepted = SdpAnswer::from_sdp_string(&played).unwrap();
+		offerer.sdp_api().accept_answer(pending, accepted).unwrap();
+
+		let ingested = answer(super::Lines::Every);
+		assert_eq!(ports(&ingested), ["9"; 5], "{ingested}");
+	}
+
 	/// An offer of only a data channel has nothing to answer.
 	#[test]
 	fn an_offer_of_only_a_data_channel_has_no_bundle() {
@@ -461,7 +550,7 @@ mod tests {
 			m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
 			c=IN IP4 0.0.0.0\r\n\
 			a=mid:dc\r\n";
-		let (body, refused) = super::refuse_channels(offer);
+		let (body, refused) = super::refuse(offer, super::Lines::Every);
 		assert_eq!(body, "v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n");
 		assert_eq!(refused.sections.len(), 1);
 	}
@@ -492,7 +581,7 @@ mod tests {
 		}
 
 		// Quadratic work here takes ~10^10 comparisons, past nextest's timeout.
-		let (body, refused) = super::refuse_channels(&offer);
+		let (body, refused) = super::refuse(&offer, super::Lines::Every);
 		assert_eq!(refused.sections.len(), LINES + 1);
 		assert_eq!(body.matches("a=ice-ufrag:").count(), 1);
 		assert_eq!(body.matches("a=setup:").count(), 1);

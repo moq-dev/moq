@@ -33,8 +33,7 @@ async function play(events: Event[], backlog: (group: number) => boolean): Promi
 	const track = new Track.Producer("audio");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(2000) } }), {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(2000) },
-		wait: Duration.millis(100),
+		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
 	});
 	const oracle = new Jitter();
 	const base = now().since(Instant.ZERO).asMillis();
@@ -149,8 +148,7 @@ test("the join's boundary is the publisher's answer, not a group that raced it",
 	});
 	const consumer = new Consumer(raced, {
 		format: new Format("audio"),
-		delay: { max: Duration.millis(2000) },
-		wait: Duration.millis(100),
+		delay: { min: Duration.millis(100), max: Duration.millis(2000) },
 	});
 	const write = (sequence: number, media: number) => {
 		const group = track.createGroup(BigInt(sequence));
@@ -209,7 +207,6 @@ test("the join's boundary is the publisher's answer, not the largest by the firs
 	const consumer = new Consumer(raced, {
 		format: new Format("audio"),
 		delay: { max: Duration.millis(2000) },
-		wait: Duration.millis(100),
 	});
 	const write = (sequence: number, media: number) => {
 		const group = track.createGroup(BigInt(sequence));

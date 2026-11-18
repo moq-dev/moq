@@ -46,12 +46,21 @@ Natively that holds only as far as the caller lets it. The container consumer
 reads groups in sequence order and applies its age budget inside `read()`, so a
 group skipped for age is never observed, and a frame queued behind a stalled
 group is observed when the stall clears. A missing group, one that has delivered
-no frame, is waited for only the playout delay plus any lookahead, since past that
-it would play late: a reordered backlog's holes waited out to the whole budget
+no frame, is waited for only the playout delay, the subscription's `delay.min`,
+since past that it would play late: a reordered backlog's holes waited out to the whole budget
 would delay the frames behind them, which the estimator would measure as
-jitter. The browser player waits less still, only until its clock reaches the
-group past the hole: a viewer resuming behind a replayed backlog, which arrives
-newest first, would otherwise hold the live audio for the backlog's oldest group. A caller that estimates keeps the budget past the target, which is why
+jitter. The browser player leaves the hole to the transport: it reads its audio
+through an ordered track reader whose own `delay.max` is what the ring holds of
+the delay plus the stretch threshold, past which the ring would skip the hole's
+audio anyway, and plays each gap that reader reports as the hole. The reader
+gives up on a missing group by the same two clocks as any stale group: once the
+newest frame is that far past where the group after it starts, or that group
+arrived that long ago. A late burst that fills a hole a moment after the group
+past it lands still plays it, and a viewer resuming behind a replayed backlog
+does not hold the live audio for the backlog's oldest group. That reader's
+budget is its own: a second subscription to the same track, read in arrival
+order, observes every frame its own wider budget receives, so the late groups
+the reader gives up on are still measured. A caller that estimates keeps the budget past the target, which is why
 `moq play` waits on a stalled audio group for the delay plus the estimate's 2 s
 ceiling. The observation is also only as honest as
 the caller is prompt: `read()` is timed when it resolves, so a player drains it
@@ -66,8 +75,7 @@ the target: the estimate creeps up one bucket at a time while the frames it
 should have measured go unplayed. Both implementations subscribe with the delay
 plus the estimate's own 2 s ceiling, whatever the player's `stretch` setting:
 `moq play` through its age budget, and the browser through the audio
-subscription alone, since its container consumer observes each frame before
-applying the local budget. So any lateness the estimator can measure is
+subscription it observes arrivals on, beside the narrower ordered one it plays. So any lateness the estimator can measure is
 observed at once. A buffered browser player keeps its subscription at least the
 delay plus its lookahead.
 Browser video keeps the shared budget, because a longer one fetches whole stale
@@ -843,7 +851,13 @@ content; past the threshold it snaps onto the clock, as video does. When the
 audio received ahead of the playhead is about to run out, playback slows down
 to bridge the gap, never trailing the clock past the threshold. A congestion
 stall within the threshold costs a slowdown, a gap, and a catch-up; one past it
-costs a skip.
+costs a skip. Audio that arrives trailing the clock past the threshold, such as a
+publisher's replayed history ahead of the live edge, is decoded only to warm the
+codec and never reaches the playout buffer, so playback starts at the live edge
+instead of anchoring on the backlog. The exception is audio up to an end the
+stream declares before that audio decodes, such as a mute, which plays out
+rather than being skipped; a track's finish declares its end only after its
+last audio decodes, so that audio is skipped like the rest.
 
 The splice is waveform-similarity overlap-add (WSOLA), after Verhelst and
 Roelands, "An overlap-add technique based on waveform similarity (WSOLA) for

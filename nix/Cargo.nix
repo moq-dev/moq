@@ -150,16 +150,6 @@ rec {
       # File a bug if you depend on any for non-debug work!
       debug = internal.debugCrate { inherit packageId; };
     };
-    "moq-c" = rec {
-      packageId = "moq-c";
-      build = internal.buildRustCrateWithFeatures {
-        packageId = "moq-c";
-      };
-
-      # Debug support which might change between releases.
-      # File a bug if you depend on any for non-debug work!
-      debug = internal.debugCrate { inherit packageId; };
-    };
     "moq-cli" = rec {
       packageId = "moq-cli";
       build = internal.buildRustCrateWithFeatures {
@@ -184,6 +174,16 @@ rec {
       packageId = "moq-crypto";
       build = internal.buildRustCrateWithFeatures {
         packageId = "moq-crypto";
+      };
+
+      # Debug support which might change between releases.
+      # File a bug if you depend on any for non-debug work!
+      debug = internal.debugCrate { inherit packageId; };
+    };
+    "moq-e2ee" = rec {
+      packageId = "moq-e2ee";
+      build = internal.buildRustCrateWithFeatures {
+        packageId = "moq-e2ee";
       };
 
       # Debug support which might change between releases.
@@ -16647,23 +16647,141 @@ rec {
       };
       "libmoq" = rec {
         crateName = "libmoq";
-        version = "0.6.12";
+        version = "0.7.0";
         edition = "2024";
         src = lib.cleanSourceWith {
           filter = sourceFilter;
           src = ../rs/libmoq;
         };
+        type = [ "staticlib" ];
         authors = [
           "Luke Curley <kixelated@gmail.com>"
           "Brian Medley <bpm@bmedley.org>"
         ];
+        dependencies = [
+          {
+            name = "anyhow";
+            packageId = "anyhow";
+            features = [ "backtrace" ];
+          }
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
+            name = "kio";
+            packageId = "kio";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-audio";
+            packageId = "moq-audio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "moq-json";
+            packageId = "moq-json";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-mux";
+            packageId = "moq-mux";
+            features = [ "async" ];
+          }
+          {
+            name = "moq-net";
+            packageId = "moq-net";
+          }
+          {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            usesDefaultFeatures = false;
+          }
+          {
+            name = "moq-video";
+            packageId = "moq-video";
+            usesDefaultFeatures = false;
+            features = [
+              "nvidia"
+              "vaapi"
+            ];
+          }
+          {
+            name = "pollster";
+            packageId = "pollster";
+          }
+          {
+            name = "serde_json";
+            packageId = "serde_json";
+          }
+          {
+            name = "thiserror";
+            packageId = "thiserror 2.0.21";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "macros" ];
+          }
+          {
+            name = "tracing";
+            packageId = "tracing";
+          }
+          {
+            name = "url";
+            packageId = "url";
+          }
+        ];
+        buildDependencies = [
+          {
+            name = "cbindgen";
+            packageId = "cbindgen";
+          }
+        ];
         devDependencies = [
+          {
+            name = "kio";
+            packageId = "kio";
+            features = [ "runtime" ];
+          }
+          {
+            name = "moq-loc";
+            packageId = "moq-loc";
+          }
+          {
+            name = "moq-tokio";
+            packageId = "moq-tokio";
+            usesDefaultFeatures = false;
+            features = [ "test-support" ];
+          }
+          {
+            name = "moq-video";
+            packageId = "moq-video";
+            features = [ "openh264" ];
+          }
+          {
+            name = "test-env";
+            packageId = "test-env";
+          }
+          {
+            name = "tokio";
+            packageId = "tokio";
+            features = [ "test-util" ];
+          }
           {
             name = "workspace-hack";
             packageId = "workspace-hack";
           }
         ];
-
+        features = {
+          "openh264" = [ "moq-video/openh264" ];
+        };
+        resolvedDefaultFeatures = [ "openh264" ];
       };
       "libredox" = rec {
         crateName = "libredox";
@@ -18430,144 +18548,6 @@ rec {
           "openh264"
         ];
       };
-      "moq-c" = rec {
-        crateName = "moq-c";
-        version = "0.7.0";
-        edition = "2024";
-        src = lib.cleanSourceWith {
-          filter = sourceFilter;
-          src = ../rs/moq-c;
-        };
-        type = [ "staticlib" ];
-        authors = [
-          "Luke Curley <kixelated@gmail.com>"
-          "Brian Medley <bpm@bmedley.org>"
-        ];
-        dependencies = [
-          {
-            name = "anyhow";
-            packageId = "anyhow";
-            features = [ "backtrace" ];
-          }
-          {
-            name = "bytes";
-            packageId = "bytes";
-          }
-          {
-            name = "hang";
-            packageId = "hang";
-            features = [ "async" ];
-          }
-          {
-            name = "kio";
-            packageId = "kio";
-            features = [ "async" ];
-          }
-          {
-            name = "moq-audio";
-            packageId = "moq-audio";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "moq-json";
-            packageId = "moq-json";
-            features = [ "async" ];
-          }
-          {
-            name = "moq-mux";
-            packageId = "moq-mux";
-            features = [ "async" ];
-          }
-          {
-            name = "moq-net";
-            packageId = "moq-net";
-          }
-          {
-            name = "moq-tokio";
-            packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-          }
-          {
-            name = "moq-video";
-            packageId = "moq-video";
-            usesDefaultFeatures = false;
-            features = [
-              "nvidia"
-              "vaapi"
-            ];
-          }
-          {
-            name = "pollster";
-            packageId = "pollster";
-          }
-          {
-            name = "serde_json";
-            packageId = "serde_json";
-          }
-          {
-            name = "thiserror";
-            packageId = "thiserror 2.0.21";
-          }
-          {
-            name = "tokio";
-            packageId = "tokio";
-            features = [ "macros" ];
-          }
-          {
-            name = "tracing";
-            packageId = "tracing";
-          }
-          {
-            name = "url";
-            packageId = "url";
-          }
-        ];
-        buildDependencies = [
-          {
-            name = "cbindgen";
-            packageId = "cbindgen";
-          }
-        ];
-        devDependencies = [
-          {
-            name = "kio";
-            packageId = "kio";
-            features = [ "runtime" ];
-          }
-          {
-            name = "moq-loc";
-            packageId = "moq-loc";
-          }
-          {
-            name = "moq-tokio";
-            packageId = "moq-tokio";
-            usesDefaultFeatures = false;
-            features = [ "test-support" ];
-          }
-          {
-            name = "moq-video";
-            packageId = "moq-video";
-            features = [ "openh264" ];
-          }
-          {
-            name = "test-env";
-            packageId = "test-env";
-          }
-          {
-            name = "tokio";
-            packageId = "tokio";
-            features = [ "test-util" ];
-          }
-          {
-            name = "workspace-hack";
-            packageId = "workspace-hack";
-          }
-        ];
-        features = {
-          "openh264" = [ "moq-video/openh264" ];
-        };
-        resolvedDefaultFeatures = [ "openh264" ];
-      };
       "moq-cli" = rec {
         crateName = "moq-cli";
         version = "0.14.2";
@@ -19016,30 +18996,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "base64";
-            packageId = "base64 0.23.1";
-            optional = true;
-          }
-          {
-            name = "bytes";
-            packageId = "bytes";
-            optional = true;
-          }
-          {
-            name = "data-encoding";
-            packageId = "data-encoding";
-          }
-          {
-            name = "kio";
-            packageId = "kio";
-            optional = true;
-          }
-          {
-            name = "moq-net";
-            packageId = "moq-net";
-            optional = true;
-          }
-          {
             name = "rind";
             packageId = "rind";
             optional = true;
@@ -19058,10 +19014,68 @@ rec {
             features = [ "std" ];
           }
           {
-            name = "serde";
-            packageId = "serde";
-            optional = true;
-            features = [ "derive" ];
+            name = "thiserror";
+            packageId = "thiserror 2.0.21";
+          }
+        ];
+        devDependencies = [
+          {
+            name = "workspace-hack";
+            packageId = "workspace-hack";
+          }
+        ];
+        features = {
+          "cpu" = [ "dep:rind" ];
+          "provider" = [
+            "cpu"
+            "dep:rind-rustls"
+            "dep:rustls"
+          ];
+        };
+        resolvedDefaultFeatures = [
+          "cpu"
+          "provider"
+        ];
+      };
+      "moq-e2ee" = rec {
+        crateName = "moq-e2ee";
+        version = "0.0.26";
+        edition = "2024";
+        src = lib.cleanSourceWith {
+          filter = sourceFilter;
+          src = ../rs/moq-e2ee;
+        };
+        libName = "moq_e2ee";
+        authors = [
+          "Luke Curley <kixelated@gmail.com>"
+        ];
+        dependencies = [
+          {
+            name = "base64";
+            packageId = "base64 0.23.1";
+          }
+          {
+            name = "bytes";
+            packageId = "bytes";
+          }
+          {
+            name = "kio";
+            packageId = "kio";
+          }
+          {
+            name = "moq-crypto";
+            packageId = "moq-crypto";
+            usesDefaultFeatures = false;
+            features = [ "cpu" ];
+          }
+          {
+            name = "moq-net";
+            packageId = "moq-net";
+          }
+          {
+            name = "rind";
+            packageId = "rind";
+            features = [ "wipe" ];
           }
           {
             name = "thiserror";
@@ -19070,13 +19084,11 @@ rec {
           {
             name = "uuid";
             packageId = "uuid";
-            optional = true;
             features = [ "v7" ];
           }
           {
             name = "zeroize";
             packageId = "zeroize";
-            optional = true;
             features = [ "derive" ];
           }
         ];
@@ -19096,9 +19108,8 @@ rec {
             features = [ "runtime" ];
           }
           {
-            name = "moq-crypto";
-            packageId = "moq-crypto";
-            usesDefaultFeatures = false;
+            name = "moq-e2ee";
+            packageId = "moq-e2ee";
             features = [ "async" ];
           }
           {
@@ -19109,10 +19120,6 @@ rec {
           {
             name = "serde_json";
             packageId = "serde_json";
-          }
-          {
-            name = "tempfile";
-            packageId = "tempfile";
           }
           {
             name = "tokio";
@@ -19131,43 +19138,9 @@ rec {
           }
         ];
         features = {
-          "async" = [ "kio?/async" ];
-          "cpu" = [ "dep:rind" ];
-          "default" = [
-            "endpoint"
-            "e2ee"
-          ];
-          "e2ee" = [
-            "cpu"
-            "dep:base64"
-            "dep:bytes"
-            "dep:kio"
-            "dep:moq-net"
-            "dep:rind"
-            "dep:uuid"
-            "dep:zeroize"
-          ];
-          "endpoint" = [
-            "dep:moq-net"
-            "dep:rind"
-            "dep:zeroize"
-          ];
-          "provider" = [
-            "cpu"
-            "dep:rind-rustls"
-            "dep:rustls"
-          ];
-          "serde" = [ "dep:serde" ];
+          "async" = [ "kio/async" ];
         };
-        resolvedDefaultFeatures = [
-          "async"
-          "cpu"
-          "default"
-          "e2ee"
-          "endpoint"
-          "provider"
-          "serde"
-        ];
+        resolvedDefaultFeatures = [ "async" ];
       };
       "moq-ffi" = rec {
         crateName = "moq-ffi";
@@ -20133,11 +20106,6 @@ rec {
             packageId = "rangemap";
           }
           {
-            name = "rind";
-            packageId = "rind";
-            features = [ "wipe" ];
-          }
-          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" ];
@@ -20157,11 +20125,6 @@ rec {
           {
             name = "url";
             packageId = "url";
-          }
-          {
-            name = "zeroize";
-            packageId = "zeroize";
-            features = [ "derive" ];
           }
         ];
         devDependencies = [
@@ -20797,12 +20760,6 @@ rec {
               "async"
               "client"
             ];
-          }
-          {
-            name = "moq-crypto";
-            packageId = "moq-crypto";
-            usesDefaultFeatures = false;
-            features = [ "endpoint" ];
           }
           {
             name = "moq-net";
@@ -42905,9 +42862,9 @@ rec {
       };
       "rubato" = rec {
         crateName = "rubato";
-        version = "5.0.1";
+        version = "5.1.0";
         edition = "2021";
-        sha256 = "0c09jvfyrn4bxzsys4i6j1ji4l7w6dbzmp7l48afqcjlkwdra7nc";
+        sha256 = "0jpgllpvhvadr0j01m3id967mwkw0la82ybzaljx0ck6w0la4kbb";
         authors = [
           "HEnquist <henrik.enquist@gmail.com>"
         ];
@@ -59485,37 +59442,6 @@ rec {
             name = "getrandom";
             packageId = "getrandom 0.4.3";
             usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
             features = [
               "std"
               "sys_rng"
@@ -60968,37 +60894,6 @@ rec {
             name = "getrandom";
             packageId = "getrandom 0.4.3";
             usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
             features = [
               "std"
               "sys_rng"

@@ -400,17 +400,6 @@ pub mod poll {
 			Err(super::LimitsError::Unsupported)
 		}
 
-		/// Export 32 bytes of keying material from this session's handshake under `label` and
-		/// `context` (RFC 8446 section 7.5), or `None` when the transport has no exporter.
-		///
-		/// Both ends of one session export the same bytes, and no other session does.
-		/// WebTransport derives them per session as its draft specifies, since other sessions
-		/// may share the connection.
-		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-			let _ = (label, context);
-			None
-		}
-
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&self) -> AcceptUni<'_, Self> {
 			AcceptUni::new(self)
@@ -618,10 +607,6 @@ pub mod poll {
 
 		fn set_limits(&self, limits: super::Limits) -> Result<(), super::LimitsError> {
 			(**self).set_limits(limits)
-		}
-
-		fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-			(**self).export_keying_material(label, context)
 		}
 	}
 

@@ -433,7 +433,7 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().expect("parse url");
 	let label = version.map_or("every version", |version| version.as_str());
 	// Only moq-transport puts the deadline on the wire.
-	let ietf = matches!(version, Some(moq_net::Version::Ietf(_)));
+	let ietf = version.is_some_and(|version| !version.is_lite());
 
 	let connecting = tokio::spawn(connect(client.clone(), url.clone()));
 	let first = admissions.next().await.expect("first admission");
@@ -447,7 +447,14 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 
 	// Hold the next real connection at authentication. Its admission keeps the
 	// drain open even after the first session leaves, without an unrelated peer.
-	let arriving = tokio::spawn(connect(client, url));
+	// Reconnecting, so the GOAWAY that lands with the relay's acceptance leaves the drained
+	// session readable as the predecessor, where a one-shot loop ends on it.
+	let arriving = tokio::spawn(async move {
+		kio::clock::timeout(TIMEOUT, client.with_reconnect(true).connect(url).established())
+			.await
+			.expect("connect timeout")
+			.expect("connect failed")
+	});
 	let pending = admissions.next().await.expect("pending admission");
 	// The relay fixes its deadline inside `start`, so these bracket it: what is
 	// left of each bounds what the relay tells the arrival from below and above.
@@ -506,10 +513,8 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 			"{label}: an arrival mid-drain got {timeout:?}, short of the {least:?} left of the window"
 		);
 	}
-	kio::clock::timeout(TIMEOUT, arrival.closed())
-		.await
-		.unwrap_or_else(|_| panic!("{label}: the arrival never closed"))
-		.expect("a one-shot session leaves cleanly on GOAWAY");
+	// A reconnecting arrival would redial the draining relay, so leave instead.
+	drop(arrival);
 
 	// `run` joins the worker threads before returning, so returning at all is
 	// the clean join; the rebind proves every worker let go of the port.
@@ -752,24 +757,16 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let _ = running.await;
 }
 
-/// `quic.qlog` captures traces from the io_uring workers, the same as it does
-/// from the tokio ones.
-///
-/// A real session keeps both trace writers active through worker shutdown, so
-/// the test covers capture on the io_uring data path and the final flush.
-#[tokio::test]
-async fn uring_workers_write_qlog_traces() {
-	let _ = rind_rustls::default_provider().unwrap().install_default();
-	if !supported() {
-		return;
-	}
-
+/// Runs one real session through io_uring workers running `congestion` and returns
+/// every qlog record they wrote, each checked to be JSON on a line of its own.
+async fn traced_session(congestion: Option<moq_tokio::quic::CongestionControl>) -> Vec<serde_json::Value> {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = certificate(dir.path());
 	let traces = dir.path().join("qlog");
 	std::fs::create_dir(&traces).expect("create qlog dir");
 	let mut config = uring_config(&cert, &key);
 	config.quic.qlog = Some(traces.clone());
+	config.quic.congestion_control = congestion;
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let ready = relay.ready();
@@ -834,6 +831,7 @@ async fn uring_workers_write_qlog_traces() {
 
 	// Every record has to be JSON on a line of its own, or the trace is not
 	// something a qlog reader can open.
+	let mut parsed = Vec::new();
 	for path in written {
 		let raw = std::fs::read_to_string(&path).expect("read trace");
 		let records: Vec<&str> = raw
@@ -843,10 +841,51 @@ async fn uring_workers_write_qlog_traces() {
 			.collect();
 		assert!(!records.is_empty(), "{} holds no records", path.display());
 		for record in records {
-			serde_json::from_str::<serde_json::Value>(record)
-				.unwrap_or_else(|err| panic!("{}: {err}: {record}", path.display()));
+			parsed.push(
+				serde_json::from_str::<serde_json::Value>(record)
+					.unwrap_or_else(|err| panic!("{}: {err}: {record}", path.display())),
+			);
 		}
 	}
+	parsed
+}
+
+/// `quic.qlog` captures traces from the io_uring workers, the same as it does
+/// from the tokio ones.
+///
+/// A real session keeps both trace writers active through worker shutdown, so
+/// the test covers capture on the io_uring data path and the final flush.
+#[tokio::test]
+async fn uring_workers_write_qlog_traces() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	if !supported() {
+		return;
+	}
+	traced_session(None).await;
+}
+
+/// Whether any recovery metrics update in `records` reports `field`.
+fn reports(records: &[serde_json::Value], field: &str) -> bool {
+	records.iter().any(|record| record["data"].get(field).is_some())
+}
+
+/// The workers run the algorithm `[quic]` names, read back from the trace: CUBIC
+/// reports a slow-start threshold and no pacing rate, BBR v3 the reverse.
+#[tokio::test]
+async fn uring_workers_run_the_configured_congestion_control() {
+	let _ = rind_rustls::default_provider().unwrap().install_default();
+	if !supported() {
+		return;
+	}
+
+	let cubic = traced_session(Some(moq_tokio::quic::CongestionControl::Cubic)).await;
+	assert!(reports(&cubic, "ssthresh"), "cubic reported no ssthresh");
+	assert!(!reports(&cubic, "pacing_rate"), "cubic reported a pacing rate");
+
+	// Unset is BBR v3.
+	let bbr = traced_session(None).await;
+	assert!(reports(&bbr, "pacing_rate"), "bbr reported no pacing rate");
+	assert!(!reports(&bbr, "ssthresh"), "bbr reported an ssthresh");
 }
 
 /// A session the workers refuse reaches `/metrics` like one the shared runtime
@@ -1114,7 +1153,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		let (cert, key) = certificate(dir.path());
 		let mut config = uring_config(&cert, &key);
 		config.listen.timeout = Some(LISTEN.into());
-		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::None);
+		config.quic.congestion_control = Some(moq_tokio::quic::CongestionControl::Unlimited);
 		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 		let port = relay.addr().expect("workers bound an address").port();
 		let addr = SocketAddr::from(([127, 0, 0, 1], port));

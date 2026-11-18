@@ -2904,7 +2904,12 @@ async fn a_moov_with_nothing_selected_releases_its_reservation() {
 	assert!(clocks.drain().is_empty(), "nothing servable is published");
 
 	catalog
-		.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
+		.mutate(|catalog| {
+			catalog.json.tracks.insert(
+				"input.json".to_string(),
+				hang::catalog::JsonConfig::new(hang::catalog::Mode::Snapshot),
+			);
+		})
 		.unwrap();
 	assert_eq!(clocks.drain().len(), 1, "no reservation still gates the catalog");
 }

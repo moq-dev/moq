@@ -98,12 +98,9 @@ pub struct Datagrams<'a> {
 	pub broadcast: Path,
 	/// The instance the subscriber expects; see [`crate::origin::Route::instance`].
 	pub instance: Option<crate::Instance>,
-	/// The Node ID of the origin that serves the request, or 0 for whichever the
-	/// publisher selects.
-	pub node: u64,
-	/// How many leading segments of the broadcast path make up the prefix of the route
-	/// the request follows (lite-07); 0 with no node named.
-	pub depth: u64,
+	/// The forwarding node whose claim the request follows, or `None` for whichever the
+	/// publisher selects. Lite07+ only.
+	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 	/// The subscriber's priority.
 	pub priority: i8,
@@ -117,7 +114,6 @@ impl Datagrams<'_> {
 			broadcast: self.broadcast,
 			instance: self.instance,
 			node: self.node,
-			depth: self.depth,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 		}
@@ -134,7 +130,7 @@ impl<'a> Message<'a> for Datagrams<'a> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 		Ok(Self {
@@ -142,7 +138,6 @@ impl<'a> Message<'a> for Datagrams<'a> {
 			broadcast,
 			instance,
 			node,
-			depth,
 			track,
 			priority,
 		})
@@ -155,7 +150,7 @@ impl<'a> Message<'a> for Datagrams<'a> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node, self.depth)?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 		Ok(())
@@ -327,8 +322,11 @@ mod test {
 			id: 7,
 			broadcast: Path::from_static("room/alice"),
 			instance: None,
-			node: 0x7a3f,
-			depth: 0,
+			node: Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9,
+				marked: false,
+			}),
 			track: "audio".into(),
 			priority: -3,
 		};
@@ -336,7 +334,14 @@ mod test {
 		let (decoded, _) = Datagrams::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(decoded.id, 7);
 		assert_eq!(decoded.broadcast, request.broadcast);
-		assert_eq!(decoded.node, 0x7a3f);
+		assert_eq!(
+			decoded.node,
+			Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9,
+				marked: false,
+			})
+		);
 		assert_eq!(decoded.track, "audio");
 		assert_eq!(decoded.priority, -3);
 		assert!(matches!(

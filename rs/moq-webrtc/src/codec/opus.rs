@@ -33,6 +33,11 @@ impl codec::Bridge for Bridge {
 		Ok(())
 	}
 
+	fn discontinuity(&mut self) -> Result<()> {
+		self.import.discontinuity()?;
+		Ok(())
+	}
+
 	fn finish(self: Box<Self>) -> Result<codec::Finished> {
 		Ok(Box::new(self.import.finish()?))
 	}

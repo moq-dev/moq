@@ -11,6 +11,7 @@ use bytes::Bytes;
 
 use super::fixture::{ACCESS, Flags, MS, Mux, WRAP, paced, program};
 use super::passthrough::{GROUP_BYTES_MAX, GROUP_OBJECTS_MAX, Passthrough};
+use super::{Ext, PassthroughTrack};
 
 /// A delay budget no test timeline comes close to, so the reader sees every group.
 const RECORDING_MAX_DELAY: Duration = Duration::from_secs(30);
@@ -27,7 +28,7 @@ struct Object {
 }
 
 struct Imported {
-	catalog: hang::catalog::Catalog,
+	catalog: hang::catalog::Catalog<Ext>,
 	objects: Vec<Object>,
 	/// The start of each break marker: a group of one object with no bytes.
 	markers: Vec<u64>,
@@ -46,8 +47,13 @@ impl Imported {
 		bytes
 	}
 
-	fn section(&self) -> &hang::catalog::M2ts {
-		self.catalog.m2ts.as_ref().expect("an m2ts section")
+	fn section(&self) -> &PassthroughTrack {
+		self.catalog
+			.ext
+			.mpegts
+			.passthrough
+			.as_ref()
+			.expect("a passthrough track")
 	}
 
 	/// Each group's objects.
@@ -63,17 +69,22 @@ impl Imported {
 	}
 }
 
+/// A catalog carrying the `mpegts` section a passthrough lists its track in.
+fn config() -> crate::catalog::Config<Ext> {
+	crate::catalog::Config::default().with_catalog(hang::catalog::Catalog::<Ext>::default())
+}
+
 /// Import `data` in chunks of `chunk` bytes and read back every object.
 async fn import(data: &[u8], chunk: usize, pcr_pid: Option<u16>) -> crate::Result<Imported> {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default())?;
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config())?;
 	import_onto(broadcast, catalog, data, chunk, pcr_pid).await
 }
 
 /// [`import`] onto an existing `catalog` of `broadcast`.
 async fn import_onto(
 	broadcast: moq_net::broadcast::Producer,
-	catalog: crate::catalog::Producer,
+	catalog: crate::catalog::Producer<Ext>,
 	data: &[u8],
 	chunk: usize,
 	pcr_pid: Option<u16>,
@@ -257,7 +268,7 @@ async fn objects_do_not_depend_on_how_the_input_is_chunked() {
 	for chunk in [7, 188, 1316, 65_536] {
 		let chunked = import(KYRION_H264, chunk, None).await.unwrap();
 		assert_eq!(chunked.objects, whole.objects, "chunks of {chunk}");
-		assert_eq!(chunked.catalog.m2ts, whole.catalog.m2ts, "chunks of {chunk}");
+		assert_eq!(chunked.catalog.ext, whole.catalog.ext, "chunks of {chunk}");
 	}
 }
 
@@ -271,7 +282,7 @@ async fn leading_junk_does_not_hide_the_grid() {
 	for chunk in [7, 188, 1316, 65_536, data.len()] {
 		let imported = import(&data, chunk, None).await.unwrap();
 		assert_eq!(imported.objects, clean.objects, "chunks of {chunk}");
-		assert_eq!(imported.catalog.m2ts, clean.catalog.m2ts, "chunks of {chunk}");
+		assert_eq!(imported.catalog.ext, clean.catalog.ext, "chunks of {chunk}");
 	}
 }
 
@@ -316,7 +327,7 @@ async fn a_scrambled_twin_groups_and_paces_the_same() {
 			.collect::<Vec<_>>()
 	};
 	assert_eq!(shape(&twin), shape(&clear));
-	assert_eq!(twin.catalog.m2ts, clear.catalog.m2ts);
+	assert_eq!(twin.catalog.ext, clear.catalog.ext);
 }
 
 #[tokio::test(start_paused = true)]
@@ -513,23 +524,37 @@ async fn objects_after_the_last_pcr_extrapolate_its_rate() {
 	}
 }
 
+/// A catalog without the `mpegts` section has nowhere to list the track.
+#[test]
+fn a_catalog_without_the_section_is_refused() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	assert!(
+		Passthrough::new(broadcast, catalog.reserve()).is_err(),
+		"a catalog without the mpegts section must be refused"
+	);
+}
+
 /// The section describes the track for as long as the importer lives, however the track ends.
 #[tokio::test(start_paused = true)]
 async fn the_section_goes_with_the_importer() {
 	for abort in [false, true] {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 		let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
 		passthrough.decode(KYRION_H264).unwrap();
-		assert!(catalog.snapshot().m2ts.is_some(), "abort {abort}");
+		assert!(catalog.snapshot().ext.mpegts.passthrough.is_some(), "abort {abort}");
 		if abort {
 			passthrough.abort(moq_net::Error::Cancel);
 		} else {
 			let passthrough = passthrough.finish().unwrap();
-			assert!(catalog.snapshot().m2ts.is_some(), "a finished track is still described");
+			assert!(
+				catalog.snapshot().ext.mpegts.passthrough.is_some(),
+				"a finished track is still described"
+			);
 			drop(passthrough);
 		}
-		assert!(catalog.snapshot().m2ts.is_none(), "abort {abort}");
+		assert!(catalog.snapshot().ext.mpegts.passthrough.is_none(), "abort {abort}");
 	}
 }
 
@@ -619,7 +644,7 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 	let verbatim = import(&data, data.len(), None).await.unwrap();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
 	let clock = catalog.clock();
 	let fixed = catalog.snapshot().sync.clock;
 	tokio::time::advance(Duration::from_secs(5)).await;
@@ -830,8 +855,50 @@ async fn a_192_or_204_byte_source_is_refused() {
 async fn a_cbr_source_records_its_mux_rate() {
 	let data = include_bytes!("test_data/bbb_cbr.ts");
 	let imported = import(data, data.len(), None).await.unwrap();
-	let rate = imported.section().mux_rate.expect("a CBR source records its mux rate");
+	let rate = imported
+		.catalog
+		.ext
+		.mpegts
+		.mux_rate
+		.expect("a CBR source records its mux rate");
 	assert!(rate.abs_diff(400_000) * 1000 <= 400_000, "{rate}");
+	assert_suffix(data, &imported);
+}
+
+/// The demultiplexing lane of the same source may record the rate first; a passthrough that has
+/// measured none keeps it.
+#[tokio::test(start_paused = true)]
+async fn a_passthrough_without_a_rate_keeps_the_recorded_one() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 0, 50, 10, 4);
+	let data = mux.bytes();
+	let alone = import(&data, data.len(), None).await.unwrap();
+	assert_eq!(alone.catalog.ext.mpegts.mux_rate, None, "too short to measure");
+	assert!(!alone.objects.is_empty());
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
+	catalog
+		.mutate(|catalog| catalog.ext.mpegts.mux_rate = Some(400_000))
+		.unwrap();
+	let imported = import_onto(broadcast, catalog, &data, data.len(), None).await.unwrap();
+	assert!(imported.catalog.ext.mpegts.passthrough.is_some());
+	assert_eq!(imported.catalog.ext.mpegts.mux_rate, Some(400_000));
+}
+
+/// A rate recorded before the passthrough started is one it measures again, and a variable-rate
+/// multiplex clears it.
+#[tokio::test(start_paused = true)]
+async fn a_vbr_passthrough_clears_a_recorded_rate() {
+	let data = include_bytes!("test_data/scte35/bbb5s.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
+	catalog
+		.mutate(|catalog| catalog.ext.mpegts.mux_rate = Some(400_000))
+		.unwrap();
+	let imported = import_onto(broadcast, catalog, data, data.len(), None).await.unwrap();
+	assert_eq!(imported.catalog.ext.mpegts.mux_rate, None);
 	assert_suffix(data, &imported);
 }
 

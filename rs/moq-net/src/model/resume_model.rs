@@ -352,7 +352,7 @@ struct Model {
 impl Model {
 	fn new() -> Self {
 		let origin = origin::Config {
-			hop: std::num::NonZeroU64::MIN,
+			node: std::num::NonZeroU64::MIN,
 			update_hold: Duration::ZERO,
 			..Default::default()
 		};
@@ -1031,6 +1031,30 @@ fn regressions() {
 		drops,
 	};
 	let cases = [
+		// After a failover, a range moved back resolves from the first copy to answer it,
+		// even a replaced one under a failover cap, so the groups below that cap stay owed.
+		Case {
+			ops: vec![
+				Op::Up { instance: 0, slot: 1 },
+				Op::Join {
+					reader: 2,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 1,
+					group: Some(7),
+					frames: 2,
+				},
+				Op::Up { instance: 0, slot: 0 },
+				Op::Down { instance: 0, slot: 1 },
+				Op::Ranges {
+					reader: 2,
+					range: Some((1, 8)),
+				},
+			],
+			finish: false,
+		},
 		// A time start on a received copy that never reports its live edge waits for a group
 		// rather than reading everything, so it stops at its end.
 		Case {

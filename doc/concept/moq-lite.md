@@ -121,7 +121,7 @@ hidden names work exactly as before.
   instance, so it never inherits those viewers.
 - **Most specific, then highest epoch, then rank.** The most specific prefix
   wins. Within one instance only its highest epoch is eligible, ahead of cost.
-  Among instances the order is link preference, cost, a broadcast published
+  Among instances the order is link priority, cost, a broadcast published
   locally, hop length, then a hash of the instance and the path, so relays
   agree and a pool's paths spread over its hosts. See
   [choosing a route](/concept/identity#choosing-a-route).
@@ -139,9 +139,9 @@ hidden names work exactly as before.
   timeline. A relay drops its copy of the old stream, so a new subscriber never
   sees its cached groups.
 
-The instance, the epoch, and the restart message travel on moq-lite 07, which
-is opt-in. `ANNOUNCE_START` and `ANNOUNCE_RESTART` carry the instance and
-epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
+The instance and the epoch travel on moq-lite 07, which
+is opt-in. `ANNOUNCE_START` carries the instance and epoch, `ANNOUNCE_UPDATE`
+a higher epoch, and `TRACK`, `TRACKS`, `SUBSCRIBE` and `FETCH` name the instance they
 pin. A restart onto another instance, or a higher epoch of the same one, is
 advertised before the old one is withdrawn, so the path is never absent. Older
 moq-lite versions and moq-transport carry no instance, so the receiving session
@@ -161,9 +161,10 @@ choosing instances, following restarts, and answering work on demand.
 
 An endpoint can hold sessions to several CDNs at once, each feeding one shared
 origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
-a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides
+a per-link priority the endpoint sets (higher wins, 0 is neutral, negative demotes), unrelated to a subscription's priority. It decides
 among instances before cost, so metrics from different operators are never
-compared. A subscription uses the preferred link that has a route and moves to the
+compared. After the earlier keys of [choosing a route](/concept/identity#choosing-a-route), a subscription uses the
+route with the highest priority, on moq-lite 07 the lowest of any link along its path, and moves to the
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same instance,
@@ -293,6 +294,15 @@ This lets a finished subscription settle without waiting for missing groups.
 A reader of a reported group, including one still arriving, ends with the publisher's error, such as `OLD` or `NOT_FOUND`.
 Before moq-lite 07 that code is application-specific, so every reported group ends with `OLD`.
 Datagram delivery stays best effort.
+
+A peer that grants fewer streams than its subscriptions have groups in flight, as a
+browser does at about 100, gets them for the highest-priority groups. To make room
+the publisher resets the lowest-priority group's stream with `TOO_FAR_BEHIND`, on
+every moq-lite version, and from moq-lite 05 also reports that group as dropped.
+Its reader ends with that error after the frames that arrived, and no later
+stream carries the rest, even for a reader with no max delay. A reader that still
+wants the group fetches it, which returns it whole on a stream the subscriber
+opens, outside the cap.
 
 Ranges are both a request and a filter. A subscriber reads only the groups its
 own ranges cover, resolved again whenever it replaces them, even when another

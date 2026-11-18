@@ -9,7 +9,7 @@ import { type Hop, toHop, wireHop } from "../hop.ts";
 import { encodeVarint, Reader, type Writer } from "../stream.ts";
 import { decodeUtf8 } from "../util/utf8.ts";
 import * as Message from "./message.ts";
-import { hasAuth, hasImplementation, hasRouteKey, hasRoutes, hasSetupStream, type Version } from "./version.ts";
+import { hasAuth, hasImplementation, hasRoutes, hasSetupStream, type Version } from "./version.ts";
 
 const clientParameters = new WeakSet<Setup>();
 
@@ -24,18 +24,22 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 /** Setup Parameter id for the client's intended {@link Role} (client-only). */
 const PARAM_ROLE = 0x3n;
-/** Setup Parameter id for the endpoint's Hop ID, or from lite-07 its Node ID. */
+/** Setup Parameter id for the endpoint's Hop ID, or from lite-07 a forwarding node's Node ID. */
 const PARAM_HOP = 0x5n;
-/** The top bit, which marks a Node ID a relay qualified; an endpoint never declares one. */
-const QUALIFIED = 1n << 63n;
 /** Setup Parameter id for the endpoint's implementation name and version. */
 const PARAM_IMPLEMENTATION = 0x6n;
 /** Setup Parameter id for the client's connection credential (client-only, lite-07+). */
 const PARAM_TOKEN = 0x7n;
-/** Setup Parameter id for the sender's route key proof (lite-07+). */
-const PARAM_ROUTE_KEY = 0x8n;
-/** A route key proof's size: an Ed25519 public key, then its signature. */
-const ROUTE_KEY_PROOF_SIZE = 96;
+
+/** Check a lite-07 Node ID parameter: a non-zero id, the node's start, a Marked of 0, since a
+ * session's node is never a marked identity, and nothing after. */
+async function checkNode(value: Uint8Array, version: Version): Promise<void> {
+	const r = new Reader(undefined, value, version);
+	const relay = await r.u62();
+	await r.u62();
+	const marked = await r.bool();
+	if (relay === 0n || marked || !(await r.done())) throw new Error("setup Node ID is malformed");
+}
 
 /** SETUP only carries negotiation parameters, so it gets a far smaller cap than other messages. */
 const MAX_SETUP_SIZE = 0xffff;
@@ -185,8 +189,6 @@ export interface SetupProps {
 	token?: Uint8Array;
 	/** See {@link Setup.implementation}. Omitted by default. */
 	implementation?: string;
-	/** See {@link Setup.routeKey}. Omitted by default. */
-	routeKey?: Uint8Array;
 }
 
 /**
@@ -220,9 +222,9 @@ export class Setup {
 	 * This endpoint's Hop ID. The peer uses it to filter announcements and
 	 * subscriptions whose route flows through this endpoint (lite-06 removed the
 	 * per-stream `exclude_hop` in its favor). `undefined` when the endpoint declares
-	 * no identity; a wire value of 0 decodes the same way. From lite-07 it is the
-	 * endpoint's Node ID instead, never 0 or with the top bit set, so a peer that
-	 * receives its own has reached itself.
+	 * no identity; a wire value of 0 decodes the same way. Lite-07 carries none: the
+	 * parameter is a forwarding node's Node ID there, which an endpoint never declares
+	 * and reads past.
 	 */
 	hop?: Hop;
 
@@ -238,20 +240,13 @@ export class Setup {
 	 */
 	implementation?: string;
 
-	/**
-	 * Proof that the sender holds its route key, bound to this session (lite-07+): the
-	 * Ed25519 public key, then its signature over keying material exported from the session.
-	 */
-	routeKey?: Uint8Array;
-
-	constructor({ probe, path, role, hop, token, implementation, routeKey }: SetupProps = {}) {
+	constructor({ probe, path, role, hop, token, implementation }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
 		this.hop = hop;
 		this.token = token;
 		this.implementation = implementation;
-		this.routeKey = routeKey;
 	}
 
 	static #guard(version: Version) {
@@ -273,8 +268,8 @@ export class Setup {
 		if (this.role !== Role.Both) {
 			params.setVarint(PARAM_ROLE, this.role, version);
 		}
-		if (this.hop !== undefined && this.hop !== 0n) {
-			if (hasRoutes(version) && this.hop >= QUALIFIED) throw new Error("setup Node ID cannot be qualified");
+		// An endpoint forwards nothing, so on lite-07 it declares no Node ID.
+		if (this.hop !== undefined && this.hop !== 0n && !hasRoutes(version)) {
 			params.setVarint(PARAM_HOP, wireHop(this.hop, version), version);
 		}
 		if (this.implementation) {
@@ -284,11 +279,6 @@ export class Setup {
 			if (!hasAuth(version)) throw new Error("setup token not supported for this version");
 			if (this.token.byteLength === 0) throw new Error("setup token cannot be empty");
 			params.setBytes(PARAM_TOKEN, this.token);
-		}
-		if (this.routeKey !== undefined) {
-			if (!hasRouteKey(version)) throw new Error("setup route key not supported for this version");
-			if (this.routeKey.byteLength !== ROUTE_KEY_PROOF_SIZE) throw new Error("setup route key must be 96 bytes");
-			params.setBytes(PARAM_ROUTE_KEY, this.routeKey);
 		}
 		await params.encode(w);
 	}
@@ -308,12 +298,16 @@ export class Setup {
 		const role = roleCode === undefined ? Role.Both : roleFromCode(roleCode);
 
 		// Before lite-07, 0 carries no identity (it cannot be excluded), so it decodes as
-		// absent. A lite-07 Node ID is never 0 or qualified.
-		const hopRaw = await params.getVarint(PARAM_HOP, version);
-		if (hopRaw !== undefined && hasRoutes(version) && (hopRaw === 0n || hopRaw >= QUALIFIED)) {
-			throw new Error("setup Node ID must be non-zero and unqualified");
+		// absent. A lite-07 Node ID is a non-zero id and the node's start, and nothing an
+		// endpoint uses: a peer that declares one still sends this node claims alone.
+		let hop: Hop | undefined;
+		if (hasRoutes(version)) {
+			const node = params.getBytes(PARAM_HOP);
+			if (node !== undefined) await checkNode(node, version);
+		} else {
+			const hopRaw = await params.getVarint(PARAM_HOP, version);
+			hop = hopRaw === undefined || hopRaw === 0n ? undefined : toHop(hopRaw);
 		}
-		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : toHop(hopRaw);
 
 		// An older version does not know the token parameter, so it ignores it like any other.
 		const token = hasAuth(version) ? params.getBytes(PARAM_TOKEN) : undefined;
@@ -322,13 +316,7 @@ export class Setup {
 		const implementationBytes = hasImplementation(version) ? params.getBytes(PARAM_IMPLEMENTATION) : undefined;
 		const implementation = implementationBytes === undefined ? undefined : decodeUtf8(implementationBytes);
 
-		// Kept but not verified: nothing here files routes under the sender's key.
-		const routeKey = hasRouteKey(version) ? params.getBytes(PARAM_ROUTE_KEY) : undefined;
-		if (routeKey !== undefined && routeKey.byteLength !== ROUTE_KEY_PROOF_SIZE) {
-			throw new Error("setup route key must be 96 bytes");
-		}
-
-		const setup = new Setup({ probe, path, role, hop, token, implementation, routeKey });
+		const setup = new Setup({ probe, path, role, hop, token, implementation });
 		if (pathBytes !== undefined || roleCode !== undefined || token !== undefined) clientParameters.add(setup);
 		return setup;
 	}

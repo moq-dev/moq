@@ -18,16 +18,15 @@ use support::harness::{MockConnectOptions, MockPair, connect_mock, peer, peer_wi
 use support::{Kind, Rng, drain, watch};
 
 pub(super) fn produce_origin(hop: u64) -> origin::Producer {
-	produce(hop, origin::Config::default().update_hold)
+	produce(hop, origin::Config::default().update_hold())
 }
 
 /// An origin holding route updates for `hold`. Its cache never expires idle
 /// groups: nothing here carries media, and the expiry sweep would keep a timer
 /// armed forever, so [`kio::clock::sim::idle`] could never see the mesh settle.
 fn produce(hop: u64, hold: Duration) -> origin::Producer {
-	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap());
+	let mut config = origin::Config::new(std::num::NonZeroU64::new(hop).unwrap()).with_update_hold(hold);
 	config.pool = cache::Pool::unbounded();
-	config.update_hold = hold;
 	let (producer, driver) = origin::Producer::new(config);
 	support::harness::spawn(driver);
 	producer.with_proxy(true)
@@ -171,7 +170,7 @@ pub(super) const PRODUCTION_LATENCY_MS: &[u64] = &[
 /// One withdrawal on a partial mesh retracts everywhere once. A relay two hops
 /// from the publisher's hears only that its neighbor withdrew, and must not
 /// fall back to, and re-advertise, another path derived from the same
-/// announcement. Holding route updates (`origin::Config::update_hold`) lets the
+/// announcement. Holding route updates (`origin::Config::with_update_hold`) lets the
 /// withdrawal remove those paths first; with link latency and no hold, each
 /// withdrawal here costs tens of thousands of announcements.
 #[kio::test]
@@ -288,7 +287,7 @@ impl Cluster {
 		let relays: Vec<_> = (1..=n as u64)
 			.map(|id| {
 				let mut config = config.clone();
-				config.hop = std::num::NonZeroU64::new(id).unwrap();
+				config.node = std::num::NonZeroU64::new(id).unwrap();
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);
 				origin.with_proxy(true)
@@ -392,11 +391,7 @@ async fn cross_node_close_without_hold_reannounces() {
 	let mut cluster = Cluster::new(
 		"moq-lite-06",
 		STALE_PATHS,
-		{
-			let mut config = origin::Config::default();
-			config.update_hold = Duration::ZERO;
-			config
-		},
+		origin::Config::default().with_update_hold(Duration::ZERO),
 		7,
 		1,
 	)

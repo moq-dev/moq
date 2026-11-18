@@ -44,8 +44,10 @@ fn verdict(client: &Client, url: &url::Url, err: &Error) -> Verdict {
 /// Three knobs, each with one job: `initial` and `multiplier` set the wait before
 /// each retry, `max` caps it, and `healthy` decides which sessions count as failed
 /// attempts. See [`moq_net::reconnect::Backoff`], which this resolves to, for how
-/// the policy applies them. Until a session has stayed up past `healthy` or been drained by
-/// a GOAWAY, a failed dial or a closed session ends the connection instead of retrying.
+/// the policy applies them. Until the peer has accepted a session's credential or drained a
+/// session with a GOAWAY (or, on moq-lite 03/04, which never answer the credential, a session
+/// stayed up past `healthy`), a failed dial or a closed session ends the connection instead
+/// of retrying.
 #[derive(Clone, Debug, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default, deny_unknown_fields)]
@@ -89,7 +91,8 @@ pub struct Backoff {
 
 	/// How long a session must stay up to count as healthy. Defaults to 1s; zero is refused.
 	///
-	/// A healthy session's end resets the delay and the timeout. One that ends sooner is a
+	/// A healthy session establishes the connection even when its peer never answered the
+	/// credential, as on moq-lite 03/04. A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	/// failed attempt, so a peer that accepts and then drops every session still escalates
 	/// the delay and exhausts the timeout. Set by the embedding binary, not configured.
 	#[usage(skip)]
@@ -253,7 +256,10 @@ impl Backoff {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Status {
-	/// A session connected (the first connect, or a reconnect after a drop).
+	/// A session connected and its peer accepted the connection credential (the first
+	/// connect, or a reconnect after a drop). On moq-lite 03/04, which never answer the
+	/// credential, the session must stay up past [`Backoff::healthy`] instead. A session the
+	/// peer refuses never reports it.
 	Connected,
 	/// An established session dropped; a reconnect attempt follows.
 	Disconnected,
@@ -666,6 +672,9 @@ impl Shared {
 	fn end(&self, err: Option<Error>) {
 		// No session will present the tokens again, so they end with the loop.
 		let aborted = self.closed.lock().unwrap().clone();
+		// A stop the caller asked for is no failure, even when the loop saw the session
+		// it closed end first and gave up with that, before its task was aborted.
+		let err = err.filter(|_| aborted.is_none());
 		let auth_err = match (aborted, &err) {
 			(Some(err), _) => err,
 			(None, Some(Error::MoqNet(err))) => err.clone(),
@@ -896,8 +905,9 @@ pub struct Snapshot {
 ///
 /// The task connects, waits for the session to end, then (unless reconnecting is
 /// disabled, see [`crate::Client::with_reconnect`])
-/// redials with exponential backoff. Until a session has stayed up past the healthy bar or
-/// been drained by a GOAWAY, nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
+/// redials with exponential backoff. Until the peer has accepted a session's credential or
+/// drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), nothing retries: a failed dial, or a session the peer closes, as a relay refusing a
 /// credential does, stops the loop with its error, so a setup mistake surfaces at once. The read surface
 /// mirrors [`moq_net::Session`] so a caller can treat it like a session that transparently reconnects:
 /// [`version`](Self::version), [`send_bandwidth`](Self::send_bandwidth),
@@ -972,9 +982,9 @@ impl Connection {
 		// Every session of one connection reaches the same peer, so they share one hop: a
 		// route one learned is then never another's to announce, such as a successor's
 		// grant check judging what its draining predecessor learned.
-		let client = match client.peer_hop {
+		let client = match client.peer_node {
 			Some(_) => client,
-			None => client.with_peer_hop(random_hop()),
+			None => client.with_peer_node(random_hop()),
 		};
 
 		let closed: CloseGuard = Default::default();
@@ -1119,6 +1129,9 @@ impl Connection {
 		let (mut probe, mut fallback): (Option<Probing>, Option<url::Url>) = (None, None);
 		// Mirrors the live session's estimates while it serves.
 		let mut forward: Option<Forward> = None;
+		// The transport of the connected session the policy has yet to establish, published
+		// only once it does, so a refused session never shows as connected.
+		let mut pending: Option<crate::Transport> = None;
 		let mut timer: Option<kio::clock::Sleep> = None;
 		// Consecutive walks that failed since the last session, and whether a dial failed
 		// since then, which tells a failed walk from a session that ended too soon.
@@ -1135,8 +1148,7 @@ impl Connection {
 							Ok(crate::client::Dialed { session, transport }) => {
 								tracing::info!(peer = %Endpoint(&url), %transport, "connected");
 								(failed_walks, dial_failed) = (0, false);
-								shared.connected(&session, transport);
-								forward = Some(Forward::new(&session));
+								pending = Some(transport);
 								policy.connected(kio::clock::now(), session);
 								if client.on_fallback(&url, transport) {
 									policy.fallback(kio::clock::now());
@@ -1195,6 +1207,12 @@ impl Connection {
 					dial = Some((url, Box::pin(async move { client.dial(attempt).await })));
 				}
 				// The policy already counted the timeout; dropping the dial cancels it.
+				Action::Established(session) => {
+					if let Some(transport) = pending.take() {
+						shared.connected(&session, transport);
+						forward = Some(Forward::new(&session));
+					}
+				}
 				Action::Abandon => {
 					if dial.is_some() {
 						dial_failed = true;
@@ -1256,24 +1274,27 @@ impl Connection {
 	/// Poll until a session is established (the first connect, or the current one).
 	///
 	/// `Ready(Ok(session))` while a session is live (during a GOAWAY handover this is the
-	/// old session, which still serves), `Ready(Err)` once the loop has stopped, `Pending`
+	/// old session, which still serves), or once the loop has stopped after one was, since
+	/// a peer can accept a one-shot session and end it before this is polled. `Ready(Err)`
+	/// once the loop has stopped without one, as on a refused credential, `Pending`
 	/// otherwise.
 	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		match ready!(self.state.poll(waiter, |state| match &state.lifecycle {
 			Lifecycle::Live(_) => Poll::Ready(Ok(())),
-			Lifecycle::Closed(_) => Poll::Ready(Err(terminal(state))),
+			Lifecycle::Closed(_) => Poll::Ready(stopped(state)),
 			Lifecycle::Connecting { .. } | Lifecycle::Offline { .. } => Poll::Pending,
 		})) {
 			Ok(res) => Poll::Ready(res),
-			Err(state) => Poll::Ready(Err(terminal(&state))),
+			Err(state) => Poll::Ready(stopped(&state)),
 		}
 	}
 
 	/// Wait until a session is established, handing the connection back.
 	///
-	/// Returns as soon as a session is live, so the first call waits out the initial dial
-	/// (surfacing its error if the loop gives up, e.g. on an auth failure or in one-shot
-	/// mode). Useful when a caller wants dial errors up front rather than through
+	/// Returns once a session reports [`Status::Connected`], so the first call waits out the
+	/// initial dial and the peer's answer to its credential. If the loop gives up before any
+	/// session did, as when the peer refuses the credential, it returns that error instead.
+	/// Useful when a caller wants dial errors up front rather than through
 	/// [`closed`](Self::closed).
 	///
 	/// It consumes and returns the connection so the reconnecting chain,
@@ -1566,6 +1587,14 @@ fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, wai
 /// this reports [`Error::Stopped`]: [`Connection::closed`] treats that as the `Ok`
 /// it is, and a watcher that only has an error to go on can still tell it apart
 /// from a connection that failed.
+/// What [`Connection::poll_established`] reports for a stopped loop: whether any session was.
+fn stopped(state: &State) -> crate::Result<()> {
+	match state.connects {
+		0 => Err(terminal(state)),
+		_ => Ok(()),
+	}
+}
+
 fn terminal(state: &State) -> Error {
 	match &state.lifecycle {
 		Lifecycle::Closed(Some(err)) => err.clone(),
@@ -2003,6 +2032,20 @@ mod tests {
 		assert!(matches!(woken.phases()[..], [Phase::Closed { .. }]));
 	}
 
+	/// The loop can see the session an abort closed end before its task is aborted, and
+	/// give up with that error: the abort is still a deliberate stop, so `closed` reports `Ok`.
+	#[test]
+	fn a_loop_ending_on_an_aborted_session_is_still_a_clean_stop() {
+		let shared = shared();
+		let state = shared.state.consume();
+		*shared.closed.lock().unwrap() = Some(moq_net::Error::App(9));
+		shared.end(Some(Error::MoqNet(moq_net::Error::Cancel)));
+		let Lifecycle::Closed(failure) = &state.read().lifecycle else {
+			panic!("the loop never published its terminal snapshot")
+		};
+		assert!(failure.is_none(), "{failure:?}");
+	}
+
 	#[tokio::test]
 	async fn aborting_before_the_loop_is_polled_publishes_its_final_snapshot() {
 		// The current-thread runtime cannot poll the spawned loop before our first await.
@@ -2041,8 +2084,9 @@ mod tests {
 		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 		tokio::spawn(async move {
 			while let Ok(request) = server.accept().await {
-				let _ = accepted.send(());
-				let _ = request.ok().await;
+				// Held open: a session the server drops before the client reads its answer
+				// is a refusal.
+				let _ = accepted.send(request.ok().await);
 			}
 		});
 
@@ -2338,15 +2382,19 @@ mod tests {
 			let mut request = kio::clock::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
 			let mut requests = request.requests();
 			let session = request.ok().await.unwrap();
-			loop {
+			// Both, in either order: the connection's own credential, whose AUTH_OK establishes
+			// the session, and the token.
+			let (mut credential, mut presented) = (false, false);
+			while !(credential && presented) {
 				let request = kio::clock::timeout(WAIT, requests.next()).await.unwrap().unwrap();
 				if request.token().is_empty() {
 					issued.push(request.accept(moq_net::auth::Grant::default()));
+					credential = true;
 					continue;
 				}
 				assert_eq!(request.token().as_ref(), b"token", "round {round}");
 				issued.push(request.accept(moq_net::auth::Grant::all()));
-				break;
+				presented = true;
 			}
 			if let Some(added) = added.take() {
 				token = Some(added.await.unwrap().expect("granted"));
@@ -3220,7 +3268,7 @@ mod tests {
 						let mut request = moq_net::Server::new()
 							.with_versions(versions.clone())
 							.with_subscriber(server_origin)
-							.accept_request(now, server)
+							.handshake(now, server)
 							.await
 							.unwrap();
 						// The connection credential grants nothing; only the configured token

@@ -4,7 +4,6 @@ import { Producer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { concat, encodeVarint, Reader, Writer } from "../stream.ts";
 import { Timestamp } from "../time.ts";
-import { SEGMENT_BYTES } from "../util/limits.ts";
 import * as Varint from "../varint.ts";
 import { frameDecoder, Group, readFrames, type WireFrame } from "./group.ts";
 import { frameHeader } from "./publisher.ts";
@@ -220,77 +219,24 @@ test("a scale-less lite-07 FRAME carries its group's start", async () => {
 });
 
 // GROUP carries the previous group's start plus one on lite-07, 0 when unknown, and passes over the
-// starts strictly between; earlier versions carry nothing.
+// starts strictly between; earlier versions carry nothing. Only lite-06 carries a Frame Start.
 test("a lite-07 GROUP carries its Previous Start plus one", async () => {
 	const encode = (previous: bigint | undefined, version: Version) =>
-		Writer.collect(version, (w) => new Group({ subscribe: 1n, sequence: 7n, previous }).encode(w, version));
-	expect(Array.from(await encode(4n, Version.DRAFT_07))).toEqual([4, 1, 7, 5, 0]);
-	expect(Array.from(await encode(undefined, Version.DRAFT_07))).toEqual([4, 1, 7, 0, 0]);
+		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, previous }).encode(w, version));
+	expect(Array.from(await encode(4n, Version.DRAFT_07))).toEqual([3, 1, 7, 5]);
+	expect(Array.from(await encode(undefined, Version.DRAFT_07))).toEqual([3, 1, 7, 0]);
 	expect(Array.from(await encode(4n, Version.DRAFT_06))).toEqual([3, 1, 7, 0]);
+	const partial = (version: Version) =>
+		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, frameStart: 4 }).encode(w, version));
+	expect(Array.from(await partial(Version.DRAFT_06))).toEqual([3, 1, 7, 4]);
+	await expect(partial(Version.DRAFT_07)).rejects.toThrow();
 
 	const decode = (bytes: number[], version: Version) =>
 		Group.decode(streamOf([new Uint8Array(bytes)], version), version);
-	const group = await decode([4, 1, 7, 5, 0], Version.DRAFT_07);
-	expect([group.previous, group.passedOver()]).toEqual([4n, { start: 5n, end: 7n }]);
-	expect((await decode([4, 1, 7, 0, 0], Version.DRAFT_07)).passedOver()).toEqual({ start: 7n, end: 7n });
+	const group = await decode([3, 1, 7, 5], Version.DRAFT_07);
+	expect([group.previous, group.passedOver(), group.frameStart]).toEqual([4n, { start: 5n, end: 7n }, 0]);
+	expect((await decode([3, 1, 7, 0], Version.DRAFT_07)).passedOver()).toEqual({ start: 7n, end: 7n });
 	expect((await decode([3, 1, 7, 0], Version.DRAFT_06)).previous).toBeUndefined();
-});
-
-// One macrotask, so every reaction queued before it has run.
-function nextTask(): Promise<void> {
-	return new Promise((resolve) => {
-		const channel = new MessageChannel();
-		channel.port1.onmessage = () => {
-			channel.port1.close();
-			channel.port2.close();
-			resolve();
-		};
-		channel.port2.postMessage(null);
-	});
-}
-
-// Whether `work` settles within a few event-loop turns.
-async function settles(work: Promise<unknown>): Promise<boolean> {
-	let settled = false;
-	const done = () => {
-		settled = true;
-	};
-	work.then(done, done);
-	for (let i = 0; i < 10 && !settled; i++) await nextTask();
-	return settled;
-}
-
-// A lite-07 continuation re-sending a held frame past one segment skips its payload. Once the group
-// closes, the skip stops waiting on a peer that stopped sending, for a frame held whole and for the
-// one a YIELDED reset cut short alike.
-test.each([false, true])("a continuation's held-frame skip stops once the group closes (cut: %p)", async (cut) => {
-	const version = Version.DRAFT_07;
-	const size = SEGMENT_BYTES + 10;
-	const producer = new Producer(0n);
-	let partial: ReturnType<Producer["createFrame"]> | undefined;
-	if (cut) {
-		partial = producer.createFrame({ size, timestamp: Timestamp.unscaled(producer.sequence) });
-		partial.write(new Uint8Array(5));
-	} else producer.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.unscaled(producer.sequence) });
-
-	// The frame again, with fewer bytes than the skip needs, then nothing: the stream never ends.
-	let controller!: ReadableStreamDefaultController<Uint8Array>;
-	const stream = new Reader(
-		new ReadableStream<Uint8Array>({
-			start: (c) => {
-				controller = c;
-			},
-		}),
-		undefined,
-		version,
-	);
-	controller.enqueue(concat([frameHeader(version, undefined, undefined, size, true), new Uint8Array(2)]));
-	const done = readFrames(stream, producer, { scale: 0, lengthFirst: true }, { index: 0, partial });
-	expect(await settles(done)).toBe(false);
-
-	producer.abort(new StreamError(StreamCode.Cancel));
-	expect(await settles(done)).toBe(true);
-	await done;
 });
 
 // Stream end at the Payload Length ends a lite-07 group; within the rest of the header, it cut a frame.
@@ -307,23 +253,15 @@ test("a lite-07 stream ending at the Payload Length ends the group", async () =>
 	).rejects.toThrow("unexpected end of stream");
 });
 
-// A peer's huge Frame Start numbers a frame past what a number counts exactly, which is refused
-// as a protocol violation rather than counted wrong. Mirrors the Rust
-// `group_frame_start_past_any_count_is_refused`.
+// A huge frame start, such as a FETCH's, numbers a frame past what a number counts exactly, which is
+// refused as a protocol violation rather than counted wrong.
 test("a lite-07 frame numbered past the safe integer range is refused", async () => {
 	const version = Version.DRAFT_07;
 	const frame = concat([frameHeader(version, 0n, undefined, 1, true), new Uint8Array([7])]);
 	const start = Number.MAX_SAFE_INTEGER - 1;
 	const producer = new Producer(0n);
 	hooks.startGroup(producer, start);
-	const err = await readFrames(
-		streamOf([frame, frame], version),
-		producer,
-		{ scale: SCALE, lengthFirst: true },
-		{
-			index: start,
-		},
-	).then(
+	const err = await readFrames(streamOf([frame, frame], version), producer, { scale: SCALE, lengthFirst: true }).then(
 		() => undefined,
 		(err: unknown) => err,
 	);

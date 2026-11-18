@@ -77,7 +77,7 @@ pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// A listener's play session has no equivalent,
 /// which is why [`configure_socket`]'s keepalive is not optional.
-pub const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const PUBLISH_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a play request may wait for its broadcast and initial FLV header
 /// before the server rejects it.
@@ -451,7 +451,7 @@ async fn sleep_until(at: Option<kio::clock::Instant>) {
 /// [`Server`] applies this to every socket it accepts. Call it yourself when you own
 /// the listener and hand the stream to [`accept_stream`]: the keepalive is the ONLY
 /// thing bounding a play session whose viewer vanished without a FIN while its
-/// broadcast was quiet. [`PUBLISH_IDLE_TIMEOUT`] covers the publish direction, but
+/// broadcast was quiet. A media timeout covers the publish direction, but
 /// nothing reads or writes on a silent play socket, so it would otherwise live until
 /// the process restarted, holding its origin consumer open.
 ///

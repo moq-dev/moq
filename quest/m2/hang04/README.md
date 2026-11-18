@@ -1,4 +1,4 @@
-# hang-04 freezes a catalog worth keeping
+# [S] hang-04 freezes a catalog worth keeping
 
 ## Goal
 
@@ -28,8 +28,7 @@ The children land in any order.
 
 Every root section already reads under the hang draft's one rule (a root
 member the draft defines has its shape, or the catalog is refused), so
-the `sync` section and
-[the MPEG-TS section](/quest/m2/hang04/m2ts.md) are born strict.
+the `sync` section and the MPEG-TS section are born strict.
 
 What the audit judged and kept, so nobody reopens it without new evidence:
 `include`, `track` apart from the ID, `instance` on references, `enabled`,

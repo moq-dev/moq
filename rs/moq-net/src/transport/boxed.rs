@@ -282,14 +282,6 @@ impl SendStream {
 		Self(Sender::Own(Box::new(stream)))
 	}
 
-	/// Whether the session reset this group stream to make room for a higher-ranked open.
-	pub(crate) fn preempted(&self) -> bool {
-		match &self.0 {
-			Sender::Own(_) => false,
-			Sender::Listed(listing) => listing.listed.lock().preempted,
-		}
-	}
-
 	/// Run `f` on the transport's stream, then leave the session's list if `unlist`.
 	fn with<T>(&mut self, unlist: bool, f: impl FnOnce(&mut dyn ErasedSend) -> T) -> T {
 		match &mut self.0 {
@@ -596,7 +588,6 @@ pub(super) trait ErasedSession: Send + Sync {
 	fn probe(&self) -> Option<Probe>;
 	fn receive_window(&self) -> Option<ReceiveWindow>;
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError>;
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]>;
 }
 
 trait ErasedGroup: Send + Sync {
@@ -736,10 +727,6 @@ impl<S: poll::Boxable> ErasedSession for S {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		poll::Session::set_limits(self, limits)
-	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		poll::Session::export_keying_material(self, label, context)
 	}
 }
 
@@ -949,10 +936,6 @@ impl poll::Session for Session {
 
 	fn set_limits(&self, limits: Limits) -> Result<(), LimitsError> {
 		self.inner.session.set_limits(limits)
-	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.session.export_keying_material(label, context)
 	}
 }
 

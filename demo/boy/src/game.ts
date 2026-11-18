@@ -145,14 +145,12 @@ export class Game {
 		this.videoSource = new Watch.Video.Source({
 			broadcast: this.broadcast,
 			target: this.#target,
-			supported: Watch.Video.Decoder.supported,
 			rate: new Moq.Signals.Derived([connection.probe], (probe) => probe?.estimatedRecvRate),
 		});
 		this.#signals.cleanup(() => this.videoSource.close());
 
 		this.audioSource = new Watch.Audio.Source({
 			broadcast: this.broadcast,
-			supported: Watch.Audio.Decoder.supported,
 		});
 		this.#signals.cleanup(() => this.audioSource.close());
 
@@ -351,10 +349,7 @@ export class Game {
 		const command = effect.get(this.#command);
 		if (!command) return;
 
-		producer.update({
-			value: { ...command.cmd, timestamps: command.timestamps, seq: command.seq },
-			at: Moq.Time.Timestamp.now(),
-		});
+		producer.update({ ...command.cmd, timestamps: command.timestamps, seq: command.seq }, Moq.Time.Timestamp.now());
 	}
 }
 

@@ -8,17 +8,15 @@ import type { Session } from "../connection/session.ts";
 import { detect, type Probe, type Stats, statsOf, type TransportStats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
-import { type Hop, randomHop, toHop } from "../hop.ts";
+import { type Hop, randomHop } from "../hop.ts";
 import { IMPLEMENTATION } from "../implementation.ts";
-import { hooks } from "../internal.ts";
 import { lines } from "../open.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
-import type { Own } from "../route.ts";
 import { type Reader, Readers, Stream, Writer } from "../stream.ts";
 import { Observed } from "../util/observed.ts";
 import { withTimeout } from "../util/timeout.ts";
-import { registerWire, wireOf } from "../wire.ts";
+import { registerWire } from "../wire.ts";
 import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcastMaybe } from "./announce.ts";
 import { AnnounceStream } from "./announce_stream.ts";
 import { LiteAuthWire } from "./auth.ts";
@@ -28,7 +26,6 @@ import { Fetch } from "./fetch.ts";
 import { Goaway } from "./goaway.ts";
 import { Group } from "./group.ts";
 import { Publisher } from "./publisher.ts";
-import { proveRouteKey } from "./route_key.ts";
 import { SessionInfo } from "./session.ts";
 import { hasClientParameters, ProbeLevel, type Role, Setup } from "./setup.ts";
 import { DataType, StreamId } from "./stream.ts";
@@ -41,9 +38,7 @@ import {
 	hasDatagrams,
 	hasDatagramTracks,
 	hasGoaway,
-	hasHidden,
 	hasProbeRtt,
-	hasRouteKey,
 	hasRoutes,
 	hasSetupStream,
 	hasTrackStream,
@@ -115,8 +110,6 @@ export class Connection implements Session {
 
 	// Module for contributing tracks.
 	#publisher: Publisher;
-	// The lite-07 route identity our published claims are originated under, if we publish.
-	#own?: Own;
 
 	// Module for distributing tracks.
 	#subscriber: Subscriber;
@@ -219,8 +212,7 @@ export class Connection implements Session {
 		// Opens waiting for credit make room after about this RTT when the transport has none.
 		lines(quic).probe = this.#probe;
 
-		this.#own = publish && wireOf(publish).own;
-		this.hop = hasRoutes(version) && this.#own ? toHop(this.#own.hop) : randomHop();
+		this.hop = randomHop();
 		// What the peer's connection credential earns by default: publishing anything to us,
 		// since we consume on demand, and subscribing to whatever we publish.
 		this.#auth = new AuthSession({
@@ -233,6 +225,9 @@ export class Connection implements Session {
 			draining: () => this.#goaway.peek() !== undefined || this.#phase.kind !== "open",
 			// Without AUTH, the server checks a client's credential before its SETUP, which the client reads after going live.
 			awaiting: client && hasSetupStream(version) && !hasAuth(version),
+			// Lite-03/04 have neither, so the peer refuses the credential only by closing the
+			// session. Lite-01/02 answered in the negotiation SETUP already read.
+			silent: client && (version === Version.DRAFT_03 || version === Version.DRAFT_04),
 		});
 		// Left before anything observes the close, so a successor on the same handle never
 		// finds this session still active.
@@ -253,13 +248,6 @@ export class Connection implements Session {
 				if (this.#transportClosed || this.#phase.kind === "closed") return;
 				this.#fail(error(err));
 			});
-		}
-		// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
-		// them, and a socket endpoint behind it is unreachable. A server leaves it to the
-		// client, whose origin holds that endpoint.
-		if (client && publish && !hasHidden(version)) {
-			const withholding = hooks.withholdHidden(publish);
-			void quic.closed.then(withholding, withholding);
 		}
 		this.#auth.violated.subscribe((err) => {
 			if (!err) return;
@@ -289,8 +277,6 @@ export class Connection implements Session {
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path, instance) => this.#subscriber.consume(path, instance),
-			covers: (node, at, path) => this.#subscriber.covers(node, at, path),
-			coverage: this.#subscriber.coverage,
 			exclusive: false,
 			leave: () => this.#leave(),
 			auth: this.#auth,
@@ -458,20 +444,18 @@ export class Connection implements Session {
 	// Role stays Both: the publish origin starts empty and fills later, and consume is
 	// called after this point, so there is nothing to narrow yet. Before lite-07 the hop
 	// declares our session identity so the peer can filter reflected announcements
-	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). From lite-07 the parameter
-	// is the Node ID our published claims originate under, omitted when we publish nothing.
+	// (lite-06 removed ANNOUNCE_REQUEST's exclude_hop for it). Lite-07 sends none: only a node
+	// that forwards declares a Node ID.
 	async #sendSetup(): Promise<void> {
 		const writer = await Writer.open(this.#quic, { version: this.#version });
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			const routeKey = hasRouteKey(this.#version) ? await proveRouteKey(this.#quic, this.#client) : undefined;
 			await new Setup({
 				probe,
-				hop: hasRoutes(this.#version) ? this.#own && toHop(this.#own.node) : this.hop,
+				hop: this.hop,
 				token: this.#token,
 				implementation: this.#implementation,
-				routeKey,
 			}).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
@@ -614,7 +598,7 @@ export class Connection implements Session {
 			if (!this.#client && setup.path !== undefined)
 				throw new ProtocolViolation("Path on a URI-carrying binding");
 			this.#peerSetup.set(setup);
-			this.#auth.accepted();
+			this.#auth.accept();
 			this.#peerRole.set(setup.role);
 			this.#peerImplementation.resolve(setup.implementation);
 		} else {

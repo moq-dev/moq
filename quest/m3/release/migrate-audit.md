@@ -32,6 +32,20 @@ m1 quest on 2026-10-22.
   `unused()` rejecting on close is moot, and
   "`producer.unused()` is `producer.demand().unused()`" should point at
   `demand().wanted`.
+  And `rs/moq-auth/MIGRATE.md`'s "Mesh endpoints use the signing public
+  key" names `moq_crypto::sign`, which
+  [moq-dev/moq#8855](https://github.com/moq-dev/moq/pull/8855) deleted, for
+  `moq_auth::mesh`, which
+  [moq-dev/moq#8756](https://github.com/moq-dev/moq/pull/8756) removed:
+  drop it, or correct it against the published moq-auth. `sh/migrate.sh`
+  refuses that edit outside the cut, so
+  [moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947) left it here.
+  Drop `rs/moq-net/MIGRATE.md`'s "Origins prove a route key" too: no
+  release had `origin::Config::route_key` or
+  `poll::Session::export_keying_material`, and
+  [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) and
+  [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) removed
+  them.
 - Run the API-diff report on the cut PR and read the diff of the
   hand-written binding wrappers (`py/moq-rs`, `kt/moq`, `dart/moq`,
   `go/wrapper`, `swift`, `cpp/moq`, `cpp/obs`) and of each binary's flags,

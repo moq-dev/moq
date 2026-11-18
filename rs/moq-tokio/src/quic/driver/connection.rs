@@ -491,12 +491,6 @@ impl Connection {
 		moq_net::transport::ReceiveWindow::new(Some(state.inner.receive_window()), state.inner.stream_receive_window())
 	}
 
-	/// 32 bytes of keying material exported from the TLS session under `label` and `context`,
-	/// or `None` before the handshake completes.
-	pub(crate) fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.0.state.lock().inner.export_keying_material(label, context)
-	}
-
 	/// How many send streams the connection still holds state for
 	#[cfg(test)]
 	pub(crate) fn send_streams(&self) -> usize {
@@ -653,11 +647,11 @@ pub(crate) struct State {
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 	/// The terminal error [`Connection::poll_closed`] reports, set once by the driver: moq-quic's
-	/// reason, a local close only once its CONNECTION_CLOSE is on the socket, or why the driver
-	/// stopped, which moq-quic cannot take and so wins over its reason everywhere.
+	/// reason, once any CONNECTION_CLOSE it owes is on the socket, or why the driver stopped,
+	/// which moq-quic cannot take and so wins over its reason everywhere.
 	///
-	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a local close as
-	/// soon as it is asked for, before anything sent it.
+	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a close before
+	/// anything sent it.
 	closed: Option<Error>,
 	closed_waiters: kio::WaiterList,
 	/// The endpoint's socket, sent through without keeping it open
@@ -706,6 +700,7 @@ impl State {
 				None => {
 					self.send_buffer.clear();
 					self.send_buffer.reserve(self.inner.current_mtu() as usize);
+					let owed = self.inner.owes_close();
 					match self
 						.inner
 						.poll_transmit(waiter, now, max_datagrams, &mut self.send_buffer)
@@ -715,8 +710,8 @@ impl State {
 								None => 1,
 								Some(s) => t.size.div_ceil(s), // round up
 							};
-							// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
-							(t, self.inner.is_closed())
+							// This transmit carries the CONNECTION_CLOSE the loss owed.
+							(t, owed && !self.inner.owes_close())
 						}
 						Poll::Pending => break,
 					}
@@ -852,10 +847,12 @@ impl State {
 
 	/// Publish a loss moq-quic recorded, parking `waiter` until it records one.
 	///
-	/// A local close waits for `drive_transmit` to put its CONNECTION_CLOSE on the socket.
+	/// A loss that owes the peer a CONNECTION_CLOSE waits for `drive_transmit` to put it on the
+	/// socket, including one held back for a full socket.
 	fn check_lost(&mut self, waiter: &kio::Waiter) {
 		if let Poll::Ready(reason) = self.inner.poll_closed(waiter)
-			&& !matches!(reason, Error::LocallyClosed { .. })
+			&& !self.inner.owes_close()
+			&& !self.buffered_transmit.as_ref().is_some_and(|(_, closes)| *closes)
 		{
 			self.publish(reason);
 		}

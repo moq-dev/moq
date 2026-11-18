@@ -942,10 +942,10 @@ pub(super) struct Publisher {
 	// which is what makes cross-session loop detection work.
 	self_origin: crate::Hop,
 	// The identity assigned to the peer (a fresh per-session id, or one the caller
-	// pinned with `with_peer_hop`), used when the peer declares
+	// pinned with `with_peer_node`), used when the peer declares
 	// none itself. A peer that negotiates the MoQ Cluster extension declares its own,
 	// which wins unless it withheld it as the reserved 0.
-	peer_hop: Option<crate::Hop>,
+	peer_node: Option<crate::Hop>,
 	// What the peer declared in its SETUP, filled when that stream is read.
 	peer_setup: peer::PeerSetup,
 	// Shared across request handlers; None marks a dispatched subscription still resolving.
@@ -2685,7 +2685,7 @@ impl RunFill {
 		let stream = match opening {
 			Ok(stream) => stream,
 			Err(err) => {
-				tracing::debug!(err = %Error::from_transport(err), fill = %self.request_id, "fill stream failed to open");
+				tracing::debug!(err = %publisher.version.transport_error(err), fill = %self.request_id, "fill stream failed to open");
 				return Poll::Ready(());
 			}
 		};
@@ -2807,7 +2807,7 @@ impl Publisher {
 		session: Transport,
 		origin: origin::Consumer,
 		control: Control,
-		peer_hop: Option<crate::Hop>,
+		peer_node: Option<crate::Hop>,
 		peer_setup: peer::PeerSetup,
 		version: Version,
 	) -> Self {
@@ -2815,11 +2815,11 @@ impl Publisher {
 			withdrawal: Default::default(),
 			runtime,
 			session,
-			self_origin: crate::Hop::from(origin.hop()),
+			self_origin: crate::Hop::from(origin.node()),
 			// Serving the peer is not a local reader asking to discover anything.
 			origin: origin.serving(),
 			control,
-			peer_hop,
+			peer_node,
 			peer_setup,
 			joins: Default::default(),
 			version,
@@ -2906,12 +2906,12 @@ impl Publisher {
 	/// The Hop ID whose paths must not be advertised (or served) back to this peer.
 	///
 	/// A peer that declared an identity supplies its own; otherwise fall back to the one
-	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_hop`
-	/// or `Request::with_peer_hop`), since moq-transport carries no identity
+	/// we assigned it (a fresh per-session id, or one pinned with `Client::with_peer_node`
+	/// or `Request::with_peer_node`), since moq-transport carries no identity
 	/// of its own. A peer that declared the reserved 0 declared no identity, so it takes
 	/// the fallback like any other anonymous peer.
 	fn exclude(&self, peer: &cluster::Peer) -> crate::Hop {
-		peer.identity().or(self.peer_hop).unwrap_or(crate::Hop::UNKNOWN)
+		peer.identity().or(self.peer_node).unwrap_or(crate::Hop::UNKNOWN)
 	}
 
 	/// Pick what to advertise to this peer for one route.
@@ -5473,7 +5473,7 @@ impl FetchRespond {
 			waiter,
 			self.rank.as_mut().expect("ranked until opened").options(),
 		))
-		.map_err(Error::from_transport)?;
+		.map_err(|err| self.version.transport_error(err))?;
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
 			Writer::new(Ranked::new(uni, self.rank.take()).lapsing(&self.lapse), self.version);
 		writer.buffer_varint(FetchHeader::TYPE)?;
@@ -7655,7 +7655,7 @@ impl EndOfTrack {
 			object: self.end.frame,
 		});
 		let stream = wait!(Open => serve.session.poll_open_uni(&mut self.open, waiter, rank.options()))
-			.map_err(Error::from_transport)?;
+			.map_err(|err| serve.version.transport_error(err))?;
 		serve.opened.fetch_add(1, Ordering::Relaxed);
 		let stream = Ranked::new(stream, Some(rank)).lapsing(&serve.ranking.lapse);
 		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
@@ -8027,7 +8027,7 @@ impl GroupServe {
 			Ok(stream) => stream,
 			Err(err) => {
 				self.state = GroupState::Done;
-				return Poll::Ready(Err(Error::from_transport(err)));
+				return Poll::Ready(Err(self.version.transport_error(err)));
 			}
 		};
 		self.opened.fetch_add(1, Ordering::Relaxed);
@@ -10918,18 +10918,22 @@ mod serve_tests {
 			for (token, expected, why) in [
 				(
 					&[0x01, 0x07, 0x00][..],
-					crate::SessionError::AuthTokenCacheOverflow,
+					crate::ietf::error::session::AUTH_TOKEN_CACHE_OVERFLOW,
 					"REGISTER",
 				),
-				(&[0x00, 0x07][..], crate::SessionError::UnknownAuthTokenAlias, "DELETE"),
+				(
+					&[0x00, 0x07][..],
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
+					"DELETE",
+				),
 				(
 					&[0x02, 0x07][..],
-					crate::SessionError::UnknownAuthTokenAlias,
+					crate::ietf::error::session::UNKNOWN_AUTH_TOKEN_ALIAS,
 					"USE_ALIAS",
 				),
 				(
 					&[0x03][..],
-					crate::SessionError::KeyValueFormatting,
+					crate::ietf::error::session::KEY_VALUE_FORMATTING,
 					"USE_VALUE without a type",
 				),
 			] {
@@ -17658,7 +17662,7 @@ mod serve_tests {
 			h.log
 				.closes()
 				.iter()
-				.any(|close| close.0 == crate::SessionError::TooManyRequestUpdates.to_code()),
+				.any(|close| close.0 == crate::ietf::error::session::TOO_MANY_REQUEST_UPDATES.to_code()),
 			"the flood must close the session with TOO_MANY_REQUEST_UPDATES: {:?}",
 			h.log.closes()
 		);
@@ -18843,7 +18847,7 @@ mod tests {
 	}
 
 	/// A broadcast whose every route flows through the peer's assigned identity
-	/// (`Client::with_peer_hop`) is never advertised to that peer; it would only
+	/// (`Client::with_peer_node`) is never advertised to that peer; it would only
 	/// echo the peer's own content back at it. A broadcast with an independent
 	/// route still is.
 	#[kio::test]

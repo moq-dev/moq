@@ -78,10 +78,28 @@ pub(crate) fn poll_wanted_changed<T>(
 	waiter: &Waiter,
 	last: bool,
 ) -> Poll<Result<bool, Closed>> {
+	poll_consumers(state, counts, waiter, last, true)
+}
+
+/// [`poll_wanted_changed`], counting consumers past closure too: those still draining
+/// the final value.
+#[cfg_attr(feature = "sim", track_caller)]
+pub(crate) fn poll_held_changed<T>(state: &Channel<T>, counts: &Counts, waiter: &Waiter, last: bool) -> Poll<bool> {
+	poll_consumers(state, counts, waiter, last, false).map(|res| res.unwrap_or(last))
+}
+
+#[cfg_attr(feature = "sim", track_caller)]
+fn poll_consumers<T>(
+	state: &Channel<T>,
+	counts: &Counts,
+	waiter: &Waiter,
+	last: bool,
+	until_closed: bool,
+) -> Poll<Result<bool, Closed>> {
 	// Closure is checked first, so a closed channel reports `Closed` from every handle
 	// rather than a consumer count that only dropped because it's dead.
 	let check = || {
-		if state.is_closed() {
+		if until_closed && state.is_closed() {
 			return Some(Err(Closed));
 		}
 		let wanted = counts.consumers.load(Ordering::Relaxed) > 0;

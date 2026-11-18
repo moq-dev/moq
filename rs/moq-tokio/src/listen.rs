@@ -240,7 +240,7 @@ pub struct Config {
 }
 
 /// QUIC stateless reset settings (`[listen.reset]`, `--listen-reset-*`).
-#[derive(usage_rs::Args, Clone, Default, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(usage_rs::Args, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -263,6 +263,15 @@ pub struct Reset {
 	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub secret: Option<std::path::PathBuf>,
+}
+
+impl std::fmt::Debug for Reset {
+	/// Redact an inline key: the relay traces its whole resolved config.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Reset")
+			.field("secret", &self.secret.as_deref().map(crate::secret::Redacted))
+			.finish()
+	}
 }
 
 /// The QUIC listener settings with defaults applied, produced by [`Config::resolve`].
@@ -625,6 +634,20 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+	/// The relay traces its whole config, so an inline key never reaches a `Debug`.
+	#[test]
+	fn debug_redacts_an_inline_secret() {
+		let key = "00".repeat(32);
+		let reset = Reset {
+			secret: Some(key.clone().into()),
+		};
+		let forward = Forward {
+			key: Some(key.clone().into()),
+			..Default::default()
+		};
+		assert!(!format!("{reset:?} {forward:?}").contains(&key));
+	}
+
 	use super::*;
 
 	/// The SETUP extensions are no setting: a file naming them is refused.
@@ -1010,7 +1033,7 @@ pub struct LoadBalancer {
 /// packet whose connection ID names another server to the owner, which processes it as if the
 /// client had sent it there and keeps replying from the shared address. Only packets after the
 /// handshake are forwarded, so the front end must still keep a handshake on one server.
-#[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Forward {
@@ -1051,6 +1074,17 @@ pub struct Forward {
 	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub peers: Option<std::path::PathBuf>,
+}
+
+impl std::fmt::Debug for Forward {
+	/// Redact an inline key: the relay traces its whole resolved config.
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Forward")
+			.field("bind", &self.bind)
+			.field("key", &self.key.as_deref().map(crate::secret::Redacted))
+			.field("peers", &self.peers)
+			.finish()
+	}
 }
 
 impl Forward {

@@ -7,11 +7,10 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { supportCacheKey } from "../support-probe";
 import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
-import { decoderConfigKey } from "./config";
+import { stubSupport } from "../webcodecs.test-util";
 import type { Message, State, Terms } from "./render";
 import { AudioRingBuffer } from "./ring-buffer";
 import { Source } from "./source";
@@ -177,17 +176,23 @@ let codecs = 0;
 let codecErrors: AudioDecoderInit["error"][] = [];
 // Thrown by the next `decode`, as WebCodecs does synchronously for a chunk it refuses.
 let decodeThrows: Error | undefined;
+// Thrown by the next `configure`, as WebCodecs does for a config it cannot set up.
+let configureThrows: Error | undefined;
 let deferAudioOutput = false;
 let pendingAudio: (() => void)[] = [];
 let audioInputs: number[] = [];
 let audioConfigs: AudioDecoderConfig[] = [];
 let audioChunks: EncodedAudioChunkInit[] = [];
+// The stub decoder's answer to the source's support probe.
+let audioSupport: (config: AudioDecoderConfig) => Promise<boolean>;
 
 beforeEach(() => {
+	audioSupport = async () => true;
 	frameTimestamp = 0;
 	codecs = 0;
 	codecErrors = [];
 	decodeThrows = undefined;
+	configureThrows = undefined;
 	deferAudioOutput = false;
 	pendingAudio = [];
 	audioInputs = [];
@@ -199,6 +204,9 @@ beforeEach(() => {
 	for (const name of globals) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
 
 	class Codec {
+		static async isConfigSupported(config: AudioDecoderConfig) {
+			return { supported: await audioSupport(config), config };
+		}
 		state = "configured";
 		needsKey = true;
 		readonly init: AudioDecoderInit;
@@ -208,6 +216,7 @@ beforeEach(() => {
 			codecs++;
 		}
 		configure(config: AudioDecoderConfig) {
+			if (configureThrows) throw configureThrows;
 			audioConfigs.push(config);
 			this.needsKey = true;
 		}
@@ -362,9 +371,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	} as unknown as Broadcast);
 
 	const delay = new Signal<Delay>(initial);
-	const supportProbes = mock(async () => true);
-	Object.assign(supportProbes, { [supportCacheKey]: decoderConfigKey });
-	const source = new Source({ broadcast, supported: supportProbes });
+	const source = new Source({ broadcast });
 	const lookahead = new Signal(Duration.millis(buffered ? 1000 : 0));
 	const stretch = new Signal(STRETCH);
 	const sync = new Sync({ delay, lookahead, stretch });
@@ -386,7 +393,6 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	};
 
 	return {
-		supportProbes,
 		delay,
 		lookahead,
 		stretch,
@@ -408,6 +414,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		ended: () => decoder.out.ended.peek(),
 		stats: () => decoder.out.stats.peek(),
 		timestamp: () => decoder.out.timestamp.peek(),
+		buffered: decoder.out.buffered,
 		feedback: () => decoder.feedback(Moq.Path.from("watched")),
 		error: decoder.out.error,
 		play,
@@ -455,6 +462,26 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 		},
 	};
 }
+
+// Signals compare a write against the value it replaced, so a range changed in place after delivery
+// is a change no subscriber hears about.
+it("never changes the buffered ranges it already reported", async () => {
+	const playback = await play(Duration.millis(100));
+	const show = (ranges: Container.BufferedRanges) =>
+		ranges.map((r) => `${r.start.asMicros()}-${r.end.asMicros()}`).join();
+	const seen: [Container.BufferedRanges, string][] = [];
+	const dispose = playback.buffered.subscribe((ranges) => seen.push([ranges, show(ranges)]));
+	try {
+		await playback.play(12);
+		expect(seen.length).toBeGreaterThan(1);
+		for (const [ranges, shown] of seen) expect(show(ranges)).toBe(shown);
+		expect(show(playback.buffered.peek())).toBe(seen.at(-1)?.[1] ?? "");
+	} finally {
+		dispose();
+		playback.close();
+		await microtasks();
+	}
+});
 
 for (const description of [undefined, "1190"]) {
 	it(`passes AAC to WebCodecs as ${description ? "raw" : "ADTS"}`, async () => {
@@ -1004,7 +1031,9 @@ describe("Decoder across a rendition's absence", () => {
 			expect(playback.stalled()).toBe(false);
 			expect(playback.ended()).toBe(false);
 
-			await clock.advance(Duration.millis(1000));
+			// Past the end, but not so far that the replacement continuing the timeline trails the clock
+			// past the stretch bound, which a live replacement never does.
+			await clock.advance(Duration.millis(300));
 			await microtasks();
 			expect(playback.ended()).toBe(true);
 			expect(playback.stats()).toMatchObject({ underruns: 0, stalls: 0 });
@@ -1133,6 +1162,37 @@ describe("Decoder across a rendition's absence", () => {
 			expect(contexts).toHaveLength(1);
 			expect(playback.rings()).toEqual([ring]);
 		} finally {
+			playback.close();
+		}
+	});
+
+	// A publisher replays the audio it captured while nobody listened, so a viewer falling back to it
+	// receives seconds of it behind the picture, in order over a WebSocket. Written to the ring, it
+	// anchored playback there, and the ring skipped and re-stalled on each refill until it ran out.
+	it("decodes a backlog behind the clock to warm the codec but plays from the live edge", async () => {
+		const playback = await play(Duration.millis(50));
+		const video = playback.sync.track({ target: new Signal<Duration | undefined>(undefined) });
+		try {
+			// The picture anchors the clock at the live edge, 3 s in.
+			video.received(Duration.secs(3), now());
+			const stale = [];
+			for (let ms = 1000; ms < 1400; ms += 20) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: BigInt(ms / 20) });
+				stale.push(ms * 1000);
+				await microtasks();
+			}
+			for (let ms = 3000; ms < 3200; ms += 20) {
+				frameTimestamp = (ms - 20) * 1000;
+				playback.push({ ...frame(), group: BigInt(ms / 20) });
+				await microtasks();
+			}
+			expect(audioInputs.slice(0, stale.length)).toEqual(stale);
+			const inserted = playback.inserted();
+			expect(inserted.length).toBeGreaterThan(0);
+			expect(Math.min(...inserted)).toBeGreaterThanOrEqual(3_000_000);
+		} finally {
+			video.close();
 			playback.close();
 		}
 	});
@@ -1523,7 +1583,7 @@ async function livePlayback(burst: number) {
 		out: { catalog, active: new Signal({ closed: {} }) },
 		relativeBroadcast: (effect: Effect) => effect.get(media),
 	} as unknown as Broadcast);
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
 	const sync = new Sync({ delay: new Signal<Delay>("auto") });
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
@@ -1536,14 +1596,18 @@ async function livePlayback(burst: number) {
 	let frame = 0;
 	let sequence = 0n;
 	let held: number[] = [];
+	let owed: Moq.Track.Requests | undefined;
 
 	const ring = () => worklets.findLast((worklet) => worklet.ring && insert.mock.contexts.includes(worklet.ring));
 	return {
 		sync,
 		error: decoder.out.error,
 		// Lose one whole group without changing the following media timestamps or arrival cadence.
+		// An open fill nobody serves stands in for a session's feed, which owes the group until the
+		// reader gives up on it.
 		async hole() {
 			if (held.length) throw new Error("a hole needs an empty delivery burst");
+			owed ??= track.requests();
 			sequence++;
 			frame++;
 			await clock.advance(FRAME);
@@ -1600,6 +1664,7 @@ async function livePlayback(burst: number) {
 			counts.inserted = insert.mock.calls.reduce((sum, [, data]) => sum + (data as Float32Array[])[0].length, 0);
 		},
 		async close() {
+			owed?.close();
 			decoder.close();
 			source.close();
 			sync.close();
@@ -1622,8 +1687,8 @@ it("a missing live group re-primes without clearing decoded PCM or resetting Syn
 		const buffered = ring?.length;
 		await playback.hole();
 		expect(ring?.length).toBe(buffered);
-		// A missing group is waited on for the subscription's max delay, as late audio could still
-		// arrive inside it, and skipped once the frames past it span that much.
+		// A missing group is waited on for what the ring holds, as late audio could still play inside
+		// it, and the ordered reader then reports the gap the decoder re-primes on.
 		await playback.run(4000);
 		expect(prime).toHaveBeenCalledTimes(1);
 		expect(reset).not.toHaveBeenCalled();
@@ -1689,8 +1754,8 @@ describe("Decoder across a rename", () => {
 		}
 	});
 
-	// The probe accepts a CMAF init segment it cannot parse for Opus, so setup throws before the
-	// replacement's consumer exists. Nothing replaces the outgoing estimate, so it must not linger.
+	// `configure` throws for the replacement's config after its consumer exists, so the failure
+	// must still release the arrival estimate that consumer replaced.
 	it("reports a replacement that fails to set up and stops holding the delay", async () => {
 		const playback = await livePlayback(12);
 		try {
@@ -1698,7 +1763,8 @@ describe("Decoder across a rename", () => {
 			const warm = playback.sync.out.delay.peek();
 			expect(warm.asMillis()).toBeGreaterThan(200);
 
-			playback.rename("audio/1", { container: { kind: "cmaf", init: "AAAA" } });
+			configureThrows = new TypeError("unsupported config");
+			playback.rename("audio/1", { numberOfChannels: 1 });
 			await microtasks();
 
 			expect(playback.error.peek()).toBeInstanceOf(Error);
@@ -1784,6 +1850,12 @@ it("starts above the decoded audio floor without expanding PCM storage", async (
 it("waits for video support before allowing audio-only startup", async () => {
 	const playback = await play(Duration.millis(100), true);
 	let resolve!: (supported: boolean) => void;
+	using _decoder = stubSupport({
+		video: () =>
+			new Promise<boolean>((done) => {
+				resolve = done;
+			}),
+	});
 	const source = new VideoSource({
 		broadcast: {
 			out: {
@@ -1796,10 +1868,6 @@ it("waits for video support before allowing audio-only startup", async () => {
 				}),
 			},
 		} as unknown as Broadcast,
-		supported: () =>
-			new Promise<boolean>((done) => {
-				resolve = done;
-			}),
 	});
 	const video = new VideoDecoder({ source, sync: playback.sync });
 	try {
@@ -1902,6 +1970,10 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 		startup: new Signal({ start: Duration.millis(0), end: Duration.millis(100) }),
 	});
 	let reject!: (error: Error) => void;
+	audioSupport = () =>
+		new Promise<boolean>((_resolve, fail) => {
+			reject = fail;
+		});
 	const failure = new Error("audio support probe failed");
 	const logged = spyOn(console, "warn").mockImplementation(() => {});
 	const source = new Source({
@@ -1922,10 +1994,6 @@ it("a rejected audio support probe does not leave buffered video waiting on a pe
 				}),
 			},
 		} as unknown as Broadcast,
-		supported: () =>
-			new Promise<boolean>((_resolve, fail) => {
-				reject = fail;
-			}),
 	});
 	const decoder = new Decoder({ source, sync });
 	try {
@@ -1990,26 +2058,29 @@ it.each([false, true])("releases shared startup across a hole in queued audio (C
 });
 
 // Audio may trail the clock by the stretch, or a buffered player's whole lookahead when that is longer,
-// and a zero stretch turns the time stretch off in either mode. The stretch sizes nothing else: the
-// subscription reaches the estimator's 2 s ceiling past the delay whatever it is.
+// and a zero stretch turns the time stretch off in either mode. The subscription reaches the
+// estimator's 2 s ceiling past the delay whatever the stretch is, while the ordered reader that
+// delivers the audio waits a hole out for as long as the ring could still play it: the delay it holds
+// plus that bound, never less than one stretch window.
 for (const buffered of [false, true]) {
 	it(`bounds ${buffered ? "buffered" : "live"} audio's lag by the stretch alone`, async () => {
-		// The max delay each subscribe and update asked the publisher for, in order.
-		const asked: (Duration | null | undefined)[] = [];
+		// The max delay each subscription last asked for, in the order they opened.
+		const asked = new Map<Moq.Track.Subscriber, Duration | null | undefined>();
 		const subscribe = Moq.Track.Consumer.prototype.subscribe;
 		const update = Moq.Track.Subscriber.prototype.update;
 		const subscribes = spyOn(Moq.Track.Consumer.prototype, "subscribe").mockImplementation(function (
 			this: Moq.Track.Consumer,
 			...args: Parameters<typeof subscribe>
 		) {
-			asked.push(args[0]?.delay?.max);
-			return subscribe.apply(this, args);
+			const subscriber = subscribe.apply(this, args);
+			asked.set(subscriber, args[0]?.delay?.max);
+			return subscriber;
 		});
 		const updates = spyOn(Moq.Track.Subscriber.prototype, "update").mockImplementation(function (
 			this: Moq.Track.Subscriber,
 			...args: Parameters<typeof update>
 		) {
-			asked.push(args[0]?.delay?.max);
+			asked.set(this, args[0]?.delay?.max);
 			return update.apply(this, args);
 		});
 		const playback = await play(Duration.millis(100), buffered);
@@ -2017,15 +2088,16 @@ for (const buffered of [false, true]) {
 			await playback.play(12);
 			const bound = () => worklets.at(-1)?.terms?.bound;
 			expect(bound()).toBe(buffered ? 1000 : 200);
-			const reach = Duration.millis(2100);
-			expect(asked.at(-1)).toEqual(reach);
+			const budgets = (hole: number) => [Duration.millis(2100), Duration.millis(hole)];
+			expect([...asked.values()].slice(-2)).toEqual(budgets(buffered ? 1100 : 300));
 			playback.stretch.set(Duration.millis(1500));
 			await microtasks();
 			expect(bound()).toBe(1500);
+			expect([...asked.values()].slice(-2)).toEqual(budgets(1600));
 			playback.stretch.set(Duration.ZERO);
 			await microtasks();
 			expect(bound()).toBe(0);
-			expect(asked.at(-1)).toEqual(reach);
+			expect([...asked.values()].slice(-2)).toEqual(budgets(130));
 		} finally {
 			subscribes.mockRestore();
 			updates.mockRestore();

@@ -947,10 +947,6 @@ impl poll::Session for Recorder {
 	fn receive_window(&self) -> Option<crate::transport::ReceiveWindow> {
 		self.inner.receive_window()
 	}
-
-	fn export_keying_material(&self, label: &[u8], context: &[u8]) -> Option<[u8; 32]> {
-		self.inner.export_keying_material(label, context)
-	}
 }
 
 impl Recorder {

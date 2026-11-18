@@ -20,8 +20,8 @@ judged "ship as is". Everything below is breaking by this milestone's rule: a
 removal, a rename, or a wire, catalog, or format change that is free until
 0.22 publishes it.
 
-- **lite-07 wire.** [YIELDED continuations](/quest/m2/yield-defer.md) leave
-  for lite-08; the ietf extension
+- **lite-07 wire.** YIELDED continuations left for lite-08
+  ([moq-dev/moq#8965](https://github.com/moq-dev/moq/pull/8965)); the ietf extension
   costs nothing on a moq-lite track; the path escape
   is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
@@ -33,31 +33,24 @@ removal, a rename, or a wire, catalog, or format change that is free until
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
   all seven lite versions, the hidden `.` path prefix, and the route plan
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
-  [switch](/quest/m2/multicast/switch.md) also settles the public route API
-  and retires the moq-cluster draft.
-- **moq-net API.** [Names](/quest/m2/net-renames.md) and
-  [session codes](/quest/m2/session-codes.md).
-  [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
+  [switch](/quest/m2/multicast/switch.md) settled the public route API in
+  [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053). The
+  [moq-cluster draft](/quest/m2/moq-cluster-draft.md) stays, since
+  third-party relays ship it.
+- **moq-net API.** [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
-- **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md).
-- **Auth and crypto.** End-to-end encryption
-  [is its own unpublished crate again](/quest/m2/e2ee-crate.md); its
+- **Auth and crypto.** End-to-end encryption is its own unpublished crate again
+  ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
-  (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
+  (the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
-  [declared ends](/quest/m2/time-addressing/consumers.md), back from m3;
-  and [moq-json writes](/quest/m2/json-write-at.md).
-- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
-  [the hole wait](/quest/m2/delay-hole-wait.md),
-  [moq-vaapi's exports](/quest/m2/vaapi-exports.md),
-  [a chained WHEP pull's shutdown](/quest/m2/whep-chain-shutdown.md), and
-  [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
+  [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
+- **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
-- **JS and browser.** [signals](/quest/m2/signals-semantics.md).
-- **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
+- **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
 
@@ -93,7 +86,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
 - ✅ Left m2, so the cut stops waiting on them: the
   [probe epic](/quest/m3/probe/README.md) to m3 and the routes
-  [browser proof](/quest/m5/routes-browser-proof.md) to m5 (each waits on a
+  browser proof to m5, since deleted with the route key (each waits on a
   browser release and breaks nothing); the docs-only and additive quests and
   outbound federation to [m1](/quest/m1/README.md); and
   [unbounded groups](/quest/m3/unbounded-groups/README.md) to m3, whose byte
@@ -323,7 +316,6 @@ what would need a breaking release had it landed right after the cut:
 
 Decided 2026-11-17 (maintainer, on
 [moq-dev/moq#8998](https://github.com/moq-dev/moq/pull/8998#issuecomment-6947837677)):
-✅ [rising background noise](/quest/m2/voice-rising-noise.md) joins m2 though
-it breaks nothing. It ports libopus's analysis step, so the browser voice gate
+✅ rising background noise joins m2 though it breaks nothing. It ports libopus's analysis step, so the browser voice gate
 that PR ships suppresses noise starting mid-call as the Rust publisher's
 libopus does (rejected: a faster SILK floor rise; dropping it).

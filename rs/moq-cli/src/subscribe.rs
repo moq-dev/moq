@@ -222,7 +222,7 @@ pub struct SubscribeArgs {
 	/// overriding the catalog's recorded multiplex rate.
 	pub mux_rate: Option<u64>,
 
-	/// Write the `m2ts` passthrough track back out instead of muxing the media (TS only).
+	/// Write the passthrough track back out instead of muxing the media (TS only).
 	pub passthrough: bool,
 
 	/// The file to record to (MP4 only); the other formats write to stdout.
@@ -362,8 +362,9 @@ impl Subscribe {
 		// Fmp4 builds the merged init segment from the first catalog snapshot, then
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
+		// No min: an export plays nothing out, so a missing group is waited for the whole max delay.
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay))
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay))
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = fmp4.next().await? {
@@ -384,7 +385,7 @@ impl Subscribe {
 			() = finish.cancelled() => return Ok(()),
 		};
 		let mut mp4 = moq_mux::container::mp4::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay))
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay))
 			.with_fragment_duration(self.args.fragment_duration);
 		let file = tokio::fs::File::create_new(&path)
 			.await
@@ -464,7 +465,7 @@ impl Subscribe {
 
 		let stream = self.stream().await?;
 		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay));
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay));
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -479,7 +480,7 @@ impl Subscribe {
 
 		let stream = self.stream().await?;
 		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay));
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay));
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -566,7 +567,7 @@ impl Subscribe {
 		}
 	}
 
-	/// Write the multiplex the broadcast's `m2ts` track carries, each run of packets as its
+	/// Write the multiplex the broadcast's passthrough track carries, each run of packets as its
 	/// time on the source's PCR comes round.
 	async fn run_ts_passthrough(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();

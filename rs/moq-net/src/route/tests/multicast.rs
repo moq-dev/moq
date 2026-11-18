@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use kio::clock::Instant;
 
+use crate::route::prefix::within;
 use crate::route::relay::{self, Claim, Msg, Next, NodeId, Port, Role};
 
 use super::bakeoff::{Failure, Row, carries, fail, shapes};
@@ -93,6 +94,7 @@ fn own() -> Claim<()> {
 		draining: false,
 		unavailable: false,
 		chain: Vec::new(),
+		marked: false,
 	}
 }
 
@@ -137,10 +139,12 @@ impl RelaySim {
 			true => NodeId {
 				relay: node as Id | generation << 32,
 				start: 1,
+				marked: false,
 			},
 			false => NodeId {
 				relay: node as Id,
 				start: generation + 1,
+				marked: false,
 			},
 		}
 	}
@@ -182,8 +186,7 @@ impl RelaySim {
 	pub fn truth(&self, origin: NodeId, floor: Rev) -> Option<&relay::Claims<Id, ()>> {
 		let current = (0..self.spots.len())
 			.filter_map(|node| self.router(node))
-			.find(|router| router.me() == origin)
-			.map(Router::history);
+			.find_map(|router| router.history(origin));
 		let history = current.or_else(|| self.histories.get(&origin).map(Vec::as_slice))?;
 		history.get(usize::try_from(floor).ok()?)
 	}
@@ -358,7 +361,10 @@ impl RelaySim {
 		self.restarts[node] += 1;
 		if let Spot::Relay(router) = &self.spots[node] {
 			self.spent += router.work_done();
-			self.histories.insert(router.me(), router.history().to_vec());
+			for id in [router.me(), router.me_marked()] {
+				let history = router.history(id).expect("an identity of its own").to_vec();
+				self.histories.insert(id, history);
+			}
 			self.spots[node] = Spot::Relay(Box::new(self.fresh(node)));
 		}
 	}
@@ -904,6 +910,10 @@ const UNAVAILABLE: [(&str, &str); 5] = [
 /// two ends of one grant to each other for a moment, each on the copy of the claim that
 /// came the other way round (`home_dies`); the adopter's unavailable is one more message
 /// delivered while that lasts, and it clears in the same round.
+///
+/// And where a claim moves to another node, the router forwards the new node's route
+/// before the old node's withdrawal at every hop, so some readers never see it offline
+/// and never start it again: fewer of each, by as many.
 #[test]
 fn the_router_gives_the_prototypes_answers() {
 	let mut out = Vec::new();
@@ -914,7 +924,11 @@ fn the_router_gives_the_prototypes_answers() {
 		for ((failure, kept), (_, relay)) in kept.iter().zip(&relay) {
 			let (a, b) = (&kept.cost, &relay.cost);
 			let unavailable = UNAVAILABLE.contains(&(failure.as_str(), shape.name));
+			// Each reader that never saw the claim go offline also never started it again.
+			let kept_up = b.sent.starts < a.sent.starts
+				&& a.sent.starts - b.sent.starts == a.sent.offline.saturating_sub(b.sent.offline);
 			let excused = |field: &str| match field {
+				"starts" | "offline" if kept_up => true,
 				"claim_items" if a.sent.claims > b.sent.claims => true,
 				"claim_items" => unavailable,
 				"settle_rounds" => unavailable && b.rounds == a.rounds + 1,

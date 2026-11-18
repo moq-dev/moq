@@ -1,6 +1,7 @@
 use crate::{
-	Instance, Path,
+	Instance,
 	coding::{DecodeError, Decoder, EncodeError, Encoder},
+	route::NodeId,
 };
 
 use super::Version;
@@ -38,33 +39,39 @@ pub(super) fn decode_pin(r: &mut Decoder<'_>, version: Version) -> Result<Option
 	}
 }
 
-/// Encode the publisher a request names, 0 letting the receiver select one, and how many
-/// leading segments of the broadcast path make up the prefix of the route it follows. Only
-/// lite-07 carries them, so an older peer always selects, and what is set here is dropped.
-pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: u64, depth: u64) -> Result<(), EncodeError> {
+/// Encode the forwarding node a request names, or none to let the receiver select one,
+/// as Node ID 0. Only lite-07 carries it, so an older peer always selects, and what is
+/// set here is dropped.
+pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: Option<NodeId>) -> Result<(), EncodeError> {
 	if !version.has_routes() {
 		return Ok(());
 	}
-	// A route needs its publisher.
-	if node == 0 && depth != 0 {
-		return Err(EncodeError::InvalidState);
+	match node {
+		// No node names itself 0.
+		Some(node) if node.relay == 0 => Err(EncodeError::InvalidState),
+		Some(node) => {
+			w.varint(node.relay)?;
+			w.varint(node.start)?;
+			w.bool(node.marked);
+			Ok(())
+		}
+		None => w.varint(0),
 	}
-	w.varint(node)?;
-	w.varint(depth)
 }
 
-/// Decode the publisher a request for `broadcast` names, and its route's depth; see
-/// [`encode_node`]. A depth past the path's segments names no prefix of it.
-pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version, broadcast: &Path) -> Result<(u64, u64), DecodeError> {
+/// Decode the forwarding node a request names; see [`encode_node`].
+pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<Option<NodeId>, DecodeError> {
 	if !version.has_routes() {
-		return Ok((0, 0));
+		return Ok(None);
 	}
-	let node = r.varint()?;
-	let depth = r.varint()?;
-	if (node == 0 && depth != 0) || depth > broadcast.parts().count() as u64 {
-		return Err(DecodeError::InvalidValue);
-	}
-	Ok((node, depth))
+	Ok(match r.varint()? {
+		0 => None,
+		relay => Some(NodeId {
+			relay,
+			start: r.varint()?,
+			marked: r.bool()?,
+		}),
+	})
 }
 
 /// Encode the instance, its minted flag, and the epoch an announcement serves. Every route

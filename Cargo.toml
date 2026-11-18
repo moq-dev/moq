@@ -18,7 +18,7 @@ default-members = [
     "rs/kio",
     "rs/kio/macros",
     "rs/hang",
-    # "rs/moq-c",     # requires C toolchain
+    # "rs/libmoq",     # requires C toolchain
     "rs/moq-congestion",
     "rs/moq-archive",
     "rs/moq-auth",
@@ -27,6 +27,7 @@ default-members = [
     "rs/moq-bench",
     "rs/moq-cli",
     "rs/moq-crypto",
+    "rs/moq-e2ee",
     # "rs/moq-ffi",   # requires Python/maturin
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-hls",
@@ -104,7 +105,6 @@ clap = { version = "4", features = ["derive"] }
 # CUDA driver bindings for the NVENC/NVDEC path. dlopen'd at runtime
 # (`fallback-dynamic-loading`), so nothing links against libcuda at build time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "fallback-dynamic-loading", "cuda-12020"] }
-data-encoding = "2.11"
 dispatch2 = "0.3.1"
 ebml-iterable = "0.7.1"
 flate2 = { version = "1.1", default-features = false }
@@ -179,7 +179,7 @@ moq-vaapi = { version = "0.2.1", path = "rs/moq-vaapi" }
 # cross-compiled Python, Swift, Kotlin, and Go builds have no use for: adding
 # `features = ["capture"]` to a consumer that ships in those bindings pulls the
 # whole device graph into every one of them. Codec features are independent of
-# that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
+# that argument, so moq-ffi and libmoq opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
 moq-webrtc = { version = "0.3.12", path = "rs/moq-webrtc" }

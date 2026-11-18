@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class Builds(unittest.TestCase):
     def test_base_builds_report_errors_and_distinguish_new_targets(self):
         (ROOT / ".tmp").mkdir(exist_ok=True)
-        for base in ("broken", "existing", "new", "log-failure", "hangs"):
+        for base in ("broken", "existing", "glob", "new", "new-package", "log-failure", "hangs"):
             with self.subTest(base=base), tempfile.TemporaryDirectory(dir=ROOT / ".tmp") as directory:
                 repo = Path(directory) / "repo"
                 repo.mkdir()
@@ -74,6 +74,25 @@ class Builds(unittest.TestCase):
                 )
                 (package / "Cargo.toml").write_text(manifest + target)
                 bench.write_text('fn main() { println!("current catalog ran"); }\n')
+                args = ["-p", "moq-relay", "--bench", "catalog"]
+                if base == "glob":
+                    # A package pattern selects whatever the base has, and its bench targets.
+                    args = ["-p", "moq-rel*", "--bench", "catalog"]
+                elif base == "new-package":
+                    # A package the base lacks: naming it would fail the base's whole build.
+                    added = repo / "rs/moq-e2ee"
+                    (added / "src").mkdir(parents=True)
+                    (added / "benches").mkdir()
+                    (added / "src/lib.rs").touch()
+                    (added / "Cargo.toml").write_text(
+                        '[package]\nname="moq-e2ee"\nversion="0.0.0"\nedition="2024"\n'
+                        '[[bench]]\nname="protect"\nharness=false\n'
+                    )
+                    (added / "benches/protect.rs").write_text('fn main() { println!("current protect ran"); }\n')
+                    members = '["rs/moq-relay", "rs/moq-e2ee"]'
+                    (repo / "Cargo.toml").write_text(f'[workspace]\nmembers={members}\nresolver="3"\n')
+                    run("cargo", "generate-lockfile")
+                    args = ["-p", "moq-relay", "-p", "moq-e2ee", "--bench", "catalog", "--bench", "protect"]
                 if base == "log-failure":
                     tools = repo / ".tmp/tools"
                     tools.mkdir(parents=True)
@@ -85,7 +104,7 @@ class Builds(unittest.TestCase):
                     )
                     tee.chmod(0o755)
                     env["PATH"] = str(tools) + os.pathsep + env["PATH"]
-                result = run("bash", "bench/run.sh", "--criterion", "-p", "moq-relay", "--bench", "catalog")
+                result = run("bash", "bench/run.sh", "--criterion", *args)
                 (evidence,) = (repo / ".tmp/bench").glob("run.*")
                 log = (evidence / "base-build.log").read_text() if base != "log-failure" else ""
                 report = json.loads((evidence / "paired.json").read_text())
@@ -106,11 +125,29 @@ class Builds(unittest.TestCase):
                     )
                 else:
                     self.assertEqual(report["unavailable"], [])
-                    self.assertEqual("base catalog ran" in result.stdout, base in ("existing", "log-failure"))
+                    self.assertEqual(
+                        "base catalog ran" in result.stdout, base in ("existing", "glob", "new-package", "log-failure")
+                    )
+                if base == "new-package":
+                    self.assertIn("current protect ran", result.stdout)
                 if base == "log-failure":
                     self.assertIn("Failed to write base build log:", result.stderr)
                     self.assertNotEqual((evidence / "criterion-base.targets").read_text(), "")
                 self.assertEqual(len(run("git", "worktree", "list", "--porcelain").stdout.split("worktree ")) - 1, 1)
+
+    def test_base_rejects_a_package_it_cannot_match(self):
+        # A version or URL spec would match no base name, so its existing benches would pass as new.
+        for args in (["-p", "moq-relay@0.0.0"], ["--package=moq-relay"], ["-pmoq-relay"]):
+            with self.subTest(args=args):
+                result = subprocess.run(
+                    ["bash", "bench/run.sh", "--criterion", *args],
+                    cwd=ROOT,
+                    env=dict(os.environ, BENCH_BASE="HEAD"),
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("takes a package as -p NAME or a glob", result.stderr)
 
 
 if __name__ == "__main__":

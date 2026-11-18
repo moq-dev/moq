@@ -465,6 +465,32 @@ mod test {
 		small.settle(|| track.clone(), &mut (), None).unwrap();
 	}
 
+	/// A tail's bill pays the readers' debt but is no record to end: it never joins the mean
+	/// that picks which record ends, whether it is small or large.
+	#[test]
+	fn a_tail_bill_never_skews_which_record_ends() {
+		let (_pool, track) = account();
+		let mut records = [track.reader(), track.reader()];
+		records[0].set(1_536);
+		records[1].set(2_880);
+		let mut tail = track.tail();
+		tail.set(RUN_OVERHEAD);
+		assert!(
+			!records[0].ends(),
+			"the mean is the records' 2208 B, not the tail's share"
+		);
+		assert!(records[1].ends());
+		assert!(!tail.ends(), "a tail never ends");
+		tail.set(100_000);
+		assert!(
+			records[1].ends(),
+			"a large tail does not lift the mean over every record"
+		);
+		drop(tail);
+		assert!(records[1].ends());
+		assert!(!records[0].ends());
+	}
+
 	/// Whatever a bill frees pays its readers' debt, however it shrank, and the debt is forgiven
 	/// once the pool is back within its capacity: nothing needs the room any more.
 	#[test]

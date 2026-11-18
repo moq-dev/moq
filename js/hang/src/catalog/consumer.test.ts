@@ -59,7 +59,7 @@ test("watch yields a catalog with many renditions", async () => {
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update({ value: catalog(1000), at: Moq.Time.Timestamp.now() });
+	producer.update(catalog(1000), Moq.Time.Timestamp.now());
 	const next = await consumer.next();
 	expect(Object.keys(next.value?.value.audio?.renditions ?? {})).toHaveLength(1000);
 	producer.finish();
@@ -71,7 +71,7 @@ test("watch refuses a catalog needing a newer reader", async () => {
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update({ value: { version: VERSION + 1 }, at: Moq.Time.Timestamp.now() });
+	producer.update({ version: VERSION + 1 }, Moq.Time.Timestamp.now());
 	await expect(consumer.next()).rejects.toBeInstanceOf(UnsupportedVersion);
 	producer.finish();
 	broadcast.close();
@@ -97,7 +97,7 @@ async function watchRequested(root: Root) {
 	const active = request.active.peek();
 	if (!active) throw new Error("request did not resolve");
 	const consumer = watch(active)[Symbol.asyncIterator]();
-	producer.update({ value: root, at: Moq.Time.Timestamp.now() });
+	producer.update(root, Moq.Time.Timestamp.now());
 	try {
 		return await consumer.next();
 	} finally {
@@ -122,7 +122,7 @@ test("watch on a standalone broadcast refuses any parent reference", async () =>
 	const track = broadcast.createTrack(TRACK, { timescale: Moq.Time.Timescale.MILLI });
 	const producer = new Json.Snapshot.Producer<Root>({ track, deltas: false });
 	const consumer = watch(broadcast.consume())[Symbol.asyncIterator]();
-	producer.update({ value: referencing("../bob"), at: Moq.Time.Timestamp.now() });
+	producer.update(referencing("../bob"), Moq.Time.Timestamp.now());
 	await expect(consumer.next()).rejects.toBeInstanceOf(EscapingBroadcast);
 	producer.finish();
 	broadcast.close();
@@ -137,7 +137,7 @@ test("watch yields each catalog update with the timestamp it takes effect at", a
 		[1, 1_000],
 		[2, 2_500],
 	]) {
-		producer.update({ value: catalog(count), at: Moq.Time.Timestamp.fromMillis(ms) });
+		producer.update(catalog(count), Moq.Time.Timestamp.fromMillis(ms));
 		const next = await consumer.next();
 		expect(next.value?.value).toEqual(catalog(count));
 		expect(next.value?.at.asMillis()).toBe(ms);
@@ -161,8 +161,7 @@ test("a holding watcher reads every update it may still play, in order", async (
 		// Subscribed before the updates land, as a live reader is; all three arrive before it reads.
 		const updates = watch(broadcast.consume(), { delay })[Symbol.asyncIterator]();
 		const first = updates.next();
-		for (const ms of [1000, 2000, 3000])
-			producer.update({ value: catalog(ms / 1000), at: Moq.Time.Timestamp.fromMillis(ms) });
+		for (const ms of [1000, 2000, 3000]) producer.update(catalog(ms / 1000), Moq.Time.Timestamp.fromMillis(ms));
 		producer.finish();
 		const read: number[] = [];
 		for (let next = await first; !next.done; next = await updates.next()) read.push(next.value.at.asMillis());

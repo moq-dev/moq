@@ -218,7 +218,7 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 
 	expect(await reader.finished()).toEqual({ group: 2n, frame: 0 });
 	await done(TRACK_ENDED, 2n);
-	expect((await reader.recvGroup())?.sequence).toBe(0n);
+	expect((await reader.recvGroup())?.start).toBe(0n);
 	expect(await reader.recvGroup()).toBeUndefined();
 	expect(hooks.subscriberEnd(reader)).toEqual({ group: 2n, frame: 0 });
 });
@@ -254,7 +254,7 @@ test("a compact stream starting at object 5 is subgroup 5, refused without a gro
 	const group = groupStream(subscriber, 6n, { ...FLAGS, hasSubgroupObject: true });
 	group.write(object("6.0"));
 	group.finish();
-	expect((await reader.recvGroup())?.sequence).toBe(6n);
+	expect((await reader.recvGroup())?.start).toBe(6n);
 });
 
 // A live join starts at the publisher's Largest, and QUIC does not order streams, so the
@@ -273,9 +273,9 @@ test("a reader holds for groups from SUBSCRIBE_OK's Largest that land after a hi
 
 	// Asked before the lower groups land: a reader that ended early returns nothing.
 	const held = reader.recvGroup();
-	for (const sequence of [3n, 4n]) {
-		const low = groupStream(subscriber, sequence);
-		low.write(object(`${sequence}.0`));
+	for (const key of [3n, 4n]) {
+		const low = groupStream(subscriber, key);
+		low.write(object(`${key}.0`));
 		low.finish();
 	}
 	expect(await readAll(await held)).toEqual(["3.0"]);

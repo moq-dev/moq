@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { floorAt, keyOf, Timescale, Timestamp } from "./time.ts";
+import { floorAt, Timescale, Timestamp } from "./time.ts";
 
 test("Timescale accepts the safe integer range", () => {
 	expect(Timescale(1)).toBe(Timescale.SECOND);
@@ -72,8 +72,8 @@ test("Timestamp.unscaled carries a group key with no scale", () => {
 	expect(key.value).toBe(7);
 	expect(key.scale).toBeUndefined();
 	expect(Timestamp.unscaled(7)).toEqual(key);
-	expect(keyOf(key)).toBe(7n);
-	expect(keyOf(Timestamp.fromMillis(7))).toBeUndefined();
+	expect(key.key).toBe(7n);
+	expect(Timestamp.fromMillis(7).key).toBeUndefined();
 	for (const bad of [-1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])
 		expect(() => Timestamp.unscaled(bad)).toThrow(RangeError);
 	expect(() => Timestamp.unscaled(-1n)).toThrow(RangeError);
@@ -83,7 +83,7 @@ test("Timestamp.unscaled carries a group key with no scale", () => {
 test("Timestamp.unscaled takes any u64 key, refusing only to read one past 2^53 as a number", () => {
 	// A received group can name any key, so building its timestamp never throws.
 	const max = Timestamp.unscaled((1n << 64n) - 1n);
-	expect(keyOf(max)).toBe((1n << 64n) - 1n);
+	expect(max.key).toBe((1n << 64n) - 1n);
 	expect(() => max.value).toThrow(RangeError);
 	const below = Timestamp.unscaled((1n << 64n) - 2n);
 	expect(below.isBefore(max)).toBe(true);

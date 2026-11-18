@@ -42,6 +42,7 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     /// Change this subscriber's delivery preferences. Throws on a time anchor the track
     /// can't serve.
     public func update(subscription: Subscription) throws {
+        try checkSubscription(subscription)
         try ffi.update(subscription: subscription)
     }
 
@@ -142,7 +143,8 @@ public final class TrackProducer: Sendable {
     /// A read handle for this track (local pub/sub, no origin needed).
     /// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
     public func consume(subscription: Subscription? = nil) throws -> TrackConsumer {
-        TrackConsumer(try ffi.consume(subscription: subscription))
+        try checkSubscription(subscription)
+        return TrackConsumer(try ffi.consume(subscription: subscription))
     }
 
     /// A watch-only handle to the track's name and whether it has subscribers.
@@ -155,9 +157,11 @@ public final class TrackProducer: Sendable {
         TrackRequests(try ffi.requests())
     }
 
-    /// Append a new group, returning a producer for its frames.
-    public func appendGroup() throws -> GroupProducer {
-        GroupProducer(try ffi.appendGroup())
+    /// Append the next group at `start`, returning a producer for its frames. `start` is
+    /// converted to the track's timescale; on a scale-less track it is `Timestamp.unscaled(key)`
+    /// at the group's key. A start at or before a group the track holds throws.
+    public func appendGroup(start: Timestamp) throws -> GroupProducer {
+        GroupProducer(try ffi.appendGroup(start: start))
     }
 
     /// Create a group with an explicit start.

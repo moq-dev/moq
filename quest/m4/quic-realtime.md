@@ -65,9 +65,9 @@ spike assumed no consumer; teleoperation uplinks are one):
 - Naming (revised 2026-11-14, below): each winner joins
   `moq_tokio::quic::CongestionControl` as a variant named after its algorithm
   (`gcc`, `scream` on the CLI and in TOML), which is `non_exhaustive`, so it is
-  additive, as is a new moq-ffi `MoqCongestionControl` constructor. `Delay`
-  keeps meaning BBR3, documented as model-based BBR v3. A new variant rather
-  than upgrading `Delay`, so current users see no behavior change.
+  additive, as is a new moq-ffi `MoqCongestionControl` constructor. `Bbr`
+  keeps meaning BBR v3. A new variant rather than upgrading `Bbr`, so current
+  users see no behavior change.
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
 - SCReAMv2 landed as `moq_congestion::scream::Scream`
@@ -98,7 +98,7 @@ Collapse evidence for the comparison (maintainer, ✅ 2026-11-05, on
 response time bounds its reported estimate; the loss-bound estimate and
 Startup/recovery ordering fixes complete that quest. The lossless bufferbloat
 case belongs in this comparison rather than a new estimator or enabling the
-delay bound on `CongestionControl::Delay` before the bake-off:
+delay bound on `CongestionControl::Bbr` before the bake-off:
 
 - Real sockets, `just rs rung-disable`, FFI ladder over moq-shaper's
   `cellular-step` (2 → 0.5 → 0.1 → 2 Mbit/s at 8 / 20 / 32 s): the

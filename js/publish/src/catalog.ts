@@ -25,7 +25,8 @@ const ESTIMATE_INTERVAL = Duration.millis(1000);
  */
 export class CatalogProducer {
 	#value: Catalog.Root = pageRoot();
-	#outputs = new Set<Json.Snapshot.Producer<Catalog.Root>>();
+	// Each output and the track it writes, whose newest start the next update must pass.
+	#outputs = new Map<Json.Snapshot.Producer<Catalog.Root>, Moq.Track.Producer>();
 	#lastEstimate: Instant | undefined;
 	#pending: Effect | undefined;
 
@@ -65,8 +66,10 @@ export class CatalogProducer {
 		this.#pending?.close();
 		this.#pending = undefined;
 		if (estimate) this.#lastEstimate = now();
-		const at = Time.Timestamp.now();
-		for (const output of this.#outputs) output.update({ value: this.#value, at });
+		// One timestamp past every output's newest start, so each opens its group at the same time.
+		let at = Time.Timestamp.now();
+		for (const track of this.#outputs.values()) at = Json.next(track, at);
+		for (const output of this.#outputs.keys()) output.update(this.#value, at);
 	}
 
 	/**
@@ -76,9 +79,9 @@ export class CatalogProducer {
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
-		output.update({ value: this.#value, at: Time.Timestamp.now() });
+		output.update(this.#value, Json.next(track, Time.Timestamp.now()));
 
-		this.#outputs.add(output);
+		this.#outputs.set(output, track);
 		effect.cleanup(() => {
 			this.#outputs.delete(output);
 			output.finish();
