@@ -266,6 +266,12 @@ impl Agent {
 							return self.fail(Error::Closed);
 						}
 						if state.is_connected() {
+							// Take each claimed address the peer proved it is at.
+							if let Phase::Establishing { answered, .. } = &self.phase
+								&& let Some(route) = &self.inbound.route
+							{
+								answered.iter().for_each(|addr| route.confirm(*addr));
+							}
 							self.phase = Phase::Connected;
 						}
 					}
@@ -307,26 +313,20 @@ impl Agent {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
-		let mut proven = false;
+		// Before str0m sees it, since the answer may be what connects ICE.
 		if self.inbound.route.is_some()
 			&& let Phase::Establishing { checks, answered, .. } = &mut self.phase
+			&& answered.len() < CHECKS
+			&& !answered.contains(&src)
+			&& answers_check(checks, data, src)
 		{
-			if answers_check(checks, data, src) && !answered.contains(&src) && answered.len() < CHECKS {
-				answered.push(src);
-			}
-			proven = answered.contains(&src);
+			answered.push(src);
 		}
 		let result = self
 			.rtc_mut()
 			.handle_input(Input::Receive(Instant::now().into_std(), receive));
 		if let Err(err) = result {
 			self.fail(Error::rtc(err));
-		}
-		if proven
-			&& matches!(self.phase, Phase::Connected)
-			&& let Some(route) = &self.inbound.route
-		{
-			route.confirm(src);
 		}
 	}
 }
@@ -336,9 +336,10 @@ impl Agent {
 /// §7.2.5.2.1 asks for and str0m skips, pairing a response with its check by transaction
 /// ID alone, so a peer could answer its own check from a spoofed source.
 ///
-/// Only an answered address is confirmed. The datagram that connects ICE proves nothing by
-/// itself: once any pair is valid, str0m may report the connection while handling another
-/// datagram, such as a spoofed request after one switched its role to controlling.
+/// Once ICE connects, the agent confirms every claimed address that answered, never the
+/// source of whatever datagram connected it: once any pair is valid, str0m may report the
+/// connection while handling another datagram, such as a spoofed request after one switched
+/// its role to controlling.
 fn answers_check(checks: &VecDeque<(TransId, SocketAddr)>, data: &[u8], src: SocketAddr) -> bool {
 	let Some(message) = stun(data) else {
 		return false;

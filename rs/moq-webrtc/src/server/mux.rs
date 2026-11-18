@@ -17,9 +17,9 @@
 //! A binding request always routes by its ufrag, but one for an address another
 //! live session holds only claims it: anyone holding a session can sign a request,
 //! and a spoofed source proves nothing. The claim takes the address once the
-//! claimant's own ICE connects on a datagram from it that proves the peer is there
-//! ([`Route::confirm`]): the answer to a check sent to that address, which only it
-//! saw (STUN responses go to both sessions meanwhile), or once the holder ends. So
+//! claimant's own ICE connects, if the address answered one of the claimant's checks
+//! ([`Route::confirm`]), which proves its peer is there since only that address saw the
+//! check (STUN responses go to both sessions meanwhile), or once the holder ends. So
 //! a peer that re-offers from the same address reaches its new session, and neither
 //! a forged request nor a session answering its own check from a spoofed source
 //! moves anyone's traffic.
@@ -116,8 +116,8 @@ pub(crate) struct Route {
 }
 
 impl Route {
-	/// Take `src` if this session claimed it: its ICE connected on a datagram that proves
-	/// the peer is at `src`, as the answer to a check sent there (see `ice::agent::answers_check`).
+	/// Take `src` if this session claimed it: its ICE connected, and `src` answered a check
+	/// the session sent there, which proves its peer is at `src` (see `ice::agent::answers_check`).
 	pub(crate) fn confirm(&self, src: SocketAddr) {
 		let mut registry = self.registry.lock().unwrap();
 		if registry.claims.get(&src).is_some_and(|claim| claim.ufrag == self.ufrag) {
