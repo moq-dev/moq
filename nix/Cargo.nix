@@ -20157,6 +20157,7 @@ rec {
           {
             name = "moq-net";
             packageId = "moq-net";
+            usesDefaultFeatures = false;
             features = [
               "relay"
               "test-support"
