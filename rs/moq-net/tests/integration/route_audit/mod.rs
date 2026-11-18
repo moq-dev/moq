@@ -27,8 +27,7 @@ use std::sync::{
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{
-	Instance, Timestamp, Version, group, origin, track};
+use moq_net::{Instance, Timestamp, Version, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// How often a publisher writes a group.
@@ -220,7 +219,9 @@ fn groups(stream: &[u8]) -> BTreeSet<String> {
 		if start > 0 && stream[start - 1].is_ascii_uppercase() {
 			continue;
 		}
-		let tag = (stream[start..].iter()).take_while(|byte| byte.is_ascii_uppercase()).count();
+		let tag = (stream[start..].iter())
+			.take_while(|byte| byte.is_ascii_uppercase())
+			.count();
 		let key = start + tag + 1;
 		if tag == 0 || stream.get(key - 1) != Some(&b':') || digits(key) == 0 {
 			continue;
