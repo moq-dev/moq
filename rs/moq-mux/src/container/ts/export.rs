@@ -1640,10 +1640,11 @@ where
 	/// arrival skew between them. A frame that arrives after its deadline is dropped, and a
 	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
 	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
-	/// the delay, where a brief network stall only drops what it made late. A stalled group is
-	/// skipped once it falls half the delay behind the newest content (see
-	/// [`Consumer`](crate::container::Consumer)), so the group after it still arrives with
-	/// the other half to spare.
+	/// the delay, where a brief network stall only drops what it made late. Every track is
+	/// subscribed with the whole delay as its min and max, so a relay resets a group only once it
+	/// is that old. The export itself skips a stalled group once it falls half the delay behind
+	/// the newest content (see [`Consumer`](crate::container::Consumer)), so the group after it
+	/// still arrives with the other half to spare.
 	///
 	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
 	/// as does video whose HRD declares a buffer delay past the delay.
@@ -2576,17 +2577,14 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_video(
-					&self.program.source,
-					name,
-					config,
-					moq_net::track::Delay::default().with_min(None).with_max(self.budget()),
-				)?
-				.map(|s| at_edge(s, self.program.replay))
-				{
-					Some(source) => Track::new(source, kind.clone()),
-					None => continue,
-				},
+				None => {
+					match ExportSource::for_video(&self.program.source, name, config, subscribed(self.program.delay))?
+						.map(|s| at_edge(skipping(s, self.program.delay), self.program.replay))
+					{
+						Some(source) => Track::new(source, kind.clone()),
+						None => continue,
+					}
+				}
 			};
 			track.kind = kind;
 			track.timing.configure(config, name)?;
@@ -2602,17 +2600,14 @@ where
 				.filter(|track| track.source.reads(&self.program.source, name, config));
 			let mut track = match reused {
 				Some(track) => track,
-				None => match ExportSource::for_audio(
-					&self.program.source,
-					name,
-					config,
-					moq_net::track::Delay::default().with_min(None).with_max(self.budget()),
-				)?
-				.map(|s| at_edge(s, self.program.replay))
-				{
-					Some(source) => Track::new(source, kind.clone()),
-					None => continue,
-				},
+				None => {
+					match ExportSource::for_audio(&self.program.source, name, config, subscribed(self.program.delay))?
+						.map(|s| at_edge(skipping(s, self.program.delay), self.program.replay))
+					{
+						Some(source) => Track::new(source, kind.clone()),
+						None => continue,
+					}
+				}
 			};
 			track.buffer = Some(audio_buffer(config, &kind));
 			track.kind = kind;
@@ -2635,11 +2630,10 @@ where
 				Some(track) => track,
 				None => Track::new(
 					stream_edge(
-						ExportSource::for_stream(
-							&self.program.source,
-							name,
-							moq_net::track::Delay::default().with_min(None).with_max(self.budget()),
-						)?,
+						skipping(
+							ExportSource::for_stream(&self.program.source, name, subscribed(self.program.delay))?,
+							self.program.delay,
+						),
 						&kind,
 						self.program.replay,
 					),
@@ -2681,38 +2675,24 @@ where
 	/// old one stopped, so its first frame counts as a skip: late frames drop, and a leap
 	/// ahead opens a new generation.
 	fn resubscribe(&mut self, catalog: &Catalog<S::Ext>, mpegts: &catalog::Mpegts) -> Result<()> {
-		let budget = self.budget();
+		let delay = self.program.delay;
 		for (name, track) in self.program.tracks.iter_mut() {
 			if track.read != Read::Stale {
 				continue;
 			}
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
-				ExportSource::for_video(
-					&self.program.source,
-					name,
-					config,
-					moq_net::track::Delay::default().with_min(None).with_max(budget),
-				)?
-				.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_video(&self.program.source, name, config, subscribed(delay))?
+					.map(|s| at_edge(skipping(s, delay), self.program.replay))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
-				ExportSource::for_audio(
-					&self.program.source,
-					name,
-					config,
-					moq_net::track::Delay::default().with_min(None).with_max(budget),
-				)?
-				.map(|s| at_edge(s, self.program.replay))
+				ExportSource::for_audio(&self.program.source, name, config, subscribed(delay))?
+					.map(|s| at_edge(skipping(s, delay), self.program.replay))
 			} else if mpegts
 				.tracks
 				.get(name)
 				.is_some_and(|t| t.verbatim.is_some() || t.pes_packet.is_some())
 			{
-				let source = ExportSource::for_stream(
-					&self.program.source,
-					name,
-					moq_net::track::Delay::default().with_min(None).with_max(budget),
-				)?;
-				Some(stream_edge(source, &track.kind, self.program.replay))
+				let source = ExportSource::for_stream(&self.program.source, name, subscribed(delay))?;
+				Some(stream_edge(skipping(source, delay), &track.kind, self.program.replay))
 			} else {
 				None
 			};
@@ -2739,29 +2719,21 @@ where
 	/// source continues the old one ([`ExportSource::continuing`]), and the frames the old one
 	/// left held for their DTS go out first.
 	fn rebind(&mut self, catalog: &Catalog<S::Ext>) -> Result<()> {
-		let budget = self.budget();
+		let delay = self.program.delay;
 		for (name, track) in self.program.tracks.iter_mut().filter(|(_, track)| track.listed) {
 			let (source, kind) = if let Some(config) = catalog.video.renditions.get(name) {
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_video(
-					&self.program.source,
-					name,
-					config,
-					moq_net::track::Delay::default().with_min(None).with_max(budget),
-				)?;
+				let source = ExportSource::for_video(&self.program.source, name, config, subscribed(delay))?
+					.map(|s| skipping(s, delay));
 				(source, video_kind(config, name)?)
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
 				if track.source.reads(&self.program.source, name, config) {
 					continue;
 				}
-				let source = ExportSource::for_audio(
-					&self.program.source,
-					name,
-					config,
-					moq_net::track::Delay::default().with_min(None).with_max(budget),
-				)?;
+				let source = ExportSource::for_audio(&self.program.source, name, config, subscribed(delay))?
+					.map(|s| skipping(s, delay));
 				(source, audio_kind(config, name)?)
 			} else {
 				continue;
@@ -3969,10 +3941,9 @@ where
 		Ok(())
 	}
 
-	/// How far a stalled group may fall behind the newest content before each source skips it:
-	/// half the delay. A skip comes once the next group's start is that far behind, and its
-	/// frames are only read then, so with the whole delay they would arrive at their deadline.
-	/// Sources state it with no min delay, so a missing group is waited for it too.
+	/// Half the delay: how far a stalled group may fall behind the newest content before its
+	/// source skips it ([`skipping`]), how long a PES of packed frames may span, and how far a
+	/// padded output may fall behind before it sheds.
 	fn budget(&self) -> Duration {
 		self.program.delay / 2
 	}
@@ -4579,6 +4550,20 @@ fn video_kind(config: &VideoConfig, name: &str) -> Result<Kind> {
 /// begin on a group up to a delay old and carry that lag ever after; unless `replay`.
 /// Verbatim streams are sparse, and anything of theirs ahead of the first keyframe is
 /// dropped anyway, so they reach back as far as the skip budget allows.
+/// The delay a track subscription states for an export running `delay` behind: all of it, as both
+/// bounds, so a relay resets a group only once it is that old.
+pub(super) fn subscribed(delay: Duration) -> moq_net::track::Delay {
+	moq_net::track::Delay::default().with_min(delay).with_max(delay)
+}
+
+/// Skip a stalled group once the group after it runs half of `delay` past it, and wait half of
+/// it for a missing one, so the group after still arrives with the other half to spare: the
+/// reader delivers in order, so a group waited on for the whole delay would make the start of
+/// the next one late too.
+pub(super) fn skipping(source: ExportSource, delay: Duration) -> ExportSource {
+	source.skipping_at(moq_net::track::Delay::default().with_min(None).with_max(delay / 2))
+}
+
 fn at_edge(source: ExportSource, replay: bool) -> ExportSource {
 	match replay {
 		true => source,

@@ -10313,6 +10313,26 @@ async fn a_follower_keeps_a_return_awaiting_its_catalog_when_a_stitch_goes() {
 	assert_eq!(start.elapsed(), follow);
 }
 
+/// Each track subscription states the whole delay as its min and max, so a relay holds a group
+/// as long as the export could still play it, though the export skips a stalled one at half.
+#[tokio::test(start_paused = true)]
+async fn a_subscription_states_the_whole_delay() {
+	let origin = crate::source::produce_origin();
+	let (live, mut catalog) = publish_bare(&origin, None);
+	let mut audio = aac_rendition(&mut live.broadcast().clone(), &mut catalog, "a.aac");
+	write_aac(&mut audio, 0);
+	let delay = Duration::from_secs(2);
+	let mut export = open_export(crate::source::resolved(&origin, "live").await, delay)
+		.await
+		.unwrap();
+	let _ = kio::clock::timeout(Duration::from_secs(1), export.next()).await;
+	assert_eq!(
+		audio.track().subscription().unwrap().delay,
+		moq_net::track::Delay::default().with_min(delay).with_max(delay),
+	);
+	drop((live, catalog));
+}
+
 /// A program that ends while stitching, then returns after the unresolved replacement goes,
 /// resumes at normal priority.
 #[tokio::test(start_paused = true)]

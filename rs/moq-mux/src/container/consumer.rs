@@ -1414,15 +1414,11 @@ impl<F: Container> Consumer<F> {
 	/// a missing group is waited for from now on. A min past the max starts at the max, since the
 	/// publisher serves nothing older.
 	pub fn set_delay(&mut self, delay: Delay) {
+		self.set_skip(delay);
 		// An ended reader has no subscription left to tune.
 		let (Reader::Reading(track) | Reader::Failed(track, _)) = &mut self.reader else {
 			return;
 		};
-		self.min_delay = delay.min;
-		self.max_delay = delay
-			.max
-			.unwrap_or(std::time::Duration::MAX)
-			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		// The transport enforces the same budget on the subscription itself, so a
 		// tolerance set here has to reach it: otherwise moq-net skips the very groups
 		// this consumer was told to wait for, before they ever get here. It keeps the
@@ -1431,6 +1427,25 @@ impl<F: Container> Consumer<F> {
 		if track.subscription().delay != delay {
 			let subscription = track.subscription().with_delay(delay);
 			let _ = track.update(subscription);
+		}
+	}
+
+	/// Skip at `delay`, clamped like [`set_delay`](Self::set_delay), leaving the subscription's
+	/// delay as it is. A delay past the subscription's skips nothing later, since the transport
+	/// drops a group first.
+	pub(crate) fn skipping_at(mut self, delay: Delay) -> Self {
+		self.set_skip(delay);
+		self
+	}
+
+	// Wait and skip at `delay`, its max clamped to the track's max age.
+	fn set_skip(&mut self, delay: Delay) {
+		if let Reader::Reading(track) | Reader::Failed(track, _) = &self.reader {
+			self.min_delay = delay.min;
+			self.max_delay = delay
+				.max
+				.unwrap_or(std::time::Duration::MAX)
+				.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
 		}
 	}
 
