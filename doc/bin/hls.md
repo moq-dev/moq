@@ -30,10 +30,11 @@ until every rendition's playlist ends with `EXT-X-ENDLIST`. It then keeps the
 finished broadcast up for `--linger`
 (see [retention](/bin/cli#retention-and-latency)). A playlist that has already
 ended, such as a VOD recording, is refused with an error rather than imported.
-An `EXT-X-DISCONTINUITY` keeps the source's timestamps. Timestamp resets are not
-supported: if a rendition's timestamps go backwards under the same `EXT-X-MAP`,
-such as an encoder restart, the import fails with an error. Import the restarted
-source as a new broadcast. Import fetches only from the playlist's origin
+A segment that fails to decode ends the import with an error rather than being
+retried. An `EXT-X-DISCONTINUITY` keeps the source's timestamps, and timestamp
+resets are not supported: if a rendition's timestamps go backwards under the same
+`EXT-X-MAP`, such as an encoder restart, that segment fails to decode. Import the
+restarted source as a new broadcast. Import fetches only from the playlist's origin
 (scheme, host, and port): a reference or redirect to another origin, such as a
 separate CDN host, fails the import. An `EXT-X-BYTERANGE` segment needs an
 origin that honors HTTP `Range`: any answer but a `206` for exactly the

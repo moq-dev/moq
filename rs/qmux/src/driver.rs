@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::Instant;
-use moq_quic::{TransportError, TransportErrorCode};
+use moq_quic::TransportError;
 
 use crate::Error;
 use crate::session::{Inner, State};
@@ -386,21 +386,14 @@ impl<T: Transport> Run<T> {
 
 /// Feed one received record, or the transport's error, into the connection.
 fn deliver(state: &mut State, record: Result<Bytes, Error>, now: Instant) {
-	let violation = |code, reason: &str| TransportError::new(code, reason.to_string());
-	match record {
-		Ok(record) => state.conn.handle_record(record, now),
-		Err(Error::FrameTooLarge) => state.conn.handle_oversized(),
-		Err(Error::FlowControlError) => state.conn.handle_violation(violation(
-			TransportErrorCode::FLOW_CONTROL_ERROR,
-			"transport buffer overrun",
-		)),
-		Err(Error::FrameEncoding) => state
-			.conn
-			.handle_violation(violation(TransportErrorCode::FRAME_ENCODING_ERROR, "transport framing")),
-		Err(Error::ProtocolViolation) => state
-			.conn
-			.handle_violation(violation(TransportErrorCode::PROTOCOL_VIOLATION, "transport framing")),
-		Err(err) => {
+	let err = match record {
+		Ok(record) => return state.conn.handle_record(record, now),
+		Err(err) => err,
+	};
+	match err.close_code() {
+		// The peer broke the transport's framing: tell it with a CONNECTION_CLOSE.
+		Some(code) => state.conn.handle_violation(TransportError::new(code, err.to_string())),
+		None => {
 			// The transport's own error says more than the connection's reset, unless this side
 			// is closing, when the peer hanging up is the expected answer and the driver
 			// publishes the close it asked for.

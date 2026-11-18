@@ -318,15 +318,6 @@ fn rejects_oversized_records() {
 			transport_error(&mut server).code,
 			TransportErrorCode::FRAME_ENCODING_ERROR
 		);
-
-		// The same, refused by the transport before it was read
-		let mut server = Connection::new(config(version), Side::Server, now);
-		server.handle_oversized();
-		assert_eq!(
-			transport_error(&mut server).code,
-			TransportErrorCode::FRAME_ENCODING_ERROR
-		);
-		assert!(server.transmit(now).is_some(), "CONNECTION_CLOSE");
 	}
 }
 
