@@ -40,10 +40,13 @@ const PROBE_MAX = Duration.secs(300);
  * Exponential backoff settings for the reconnect loop.
  *
  * The delays carry jitter, so a fleet of tabs knocked offline together doesn't reconnect in
- * lockstep. Nothing retries until a session to the current URL has been established, which
- * takes staying up past {@link Backoff.healthy} or being drained by a GOAWAY, which no
- * refusal sends: an attempt failing, or a session closing sooner, stops that URL with its error. That covers a relay refusing a session right after
- * accepting it, as it does a rejected token on moq-lite 03 or later. After that, every failure is retried,
+ * lockstep. Nothing retries until a session to the current URL has been established: the peer
+ * accepts the connection credential (its SETUP, or on moq-lite-07-wip the AUTH_OK to the
+ * connection's own credential), drains the session with a GOAWAY, which no refusal sends, or
+ * the session stays up past {@link Backoff.healthy}, the only bar on moq-lite 03/04, which
+ * answer the credential with nothing. An attempt failing, or a session closing sooner, stops that
+ * URL with its error. That covers a relay refusing a live session, as it does a rejected token
+ * on moq-lite 03 or later. After that, every failure is retried,
  * including an attempt that outlives {@link ConnectProps.timeout}, until
  * {@link Backoff.timeout} runs out, whatever the error, an auth rejection included; only a
  * refused GOAWAY redirect stops the current URL sooner. A new URL or a disable/re-enable starts another sequence.
@@ -70,6 +73,9 @@ export type Backoff = {
 	/**
 	 * How long a session must stay up to count as healthy (default: 1000ms; must be positive).
 	 *
+	 * The first healthy session establishes the URL, though only a peer that never answers the
+	 * connection credential, as on moq-lite 03/04, waits for this: an accepting peer
+	 * establishes it sooner.
 	 * A healthy session's end resets the delay and the timeout. One that ends sooner is a
 	 * failed attempt, so a peer that accepts and then drops every session still escalates the
 	 * delay and exhausts the timeout.
@@ -191,8 +197,8 @@ export type ReloadStatus = "connecting" | "connected" | "disconnected";
  * The reconnect loop behind a Connection handle: connects, waits for the session to end, then
  * redials with exponential backoff.
  *
- * The first attempt for a URL fails fast instead: until a session to it has stayed up past
- * {@link Backoff.healthy} or been drained by a GOAWAY, a failed attempt or a closed session sets {@link Reload.error}
+ * The first attempt for a URL fails fast instead: until a session to it was established (see
+ * {@link Backoff}), a failed attempt or a closed session sets {@link Reload.error}
  * rather than retrying, so a setup mistake such as an
  * untrusted certificate or no version in common surfaces at once. A page opened before its
  * relay is reachable therefore stays disconnected until a new URL or a disable/re-enable.
@@ -373,8 +379,8 @@ export class Reload {
 	// loop is disabled.
 	#givenUpHref: string | undefined;
 
-	// The configured href a session stayed up past the healthy bar for, or the peer drained with a
-	// GOAWAY. Until it matches, a failed
+	// The configured href a session's peer accepted the credential of, a session stayed up past
+	// the healthy bar for, or the peer drained with a GOAWAY. Until it matches, a failed
 	// attempt or a closed session gives up rather than retrying. Kept across a page hide/show and a disable/re-enable, which
 	// resume a URL that worked.
 	#establishedHref: string | undefined;
@@ -559,7 +565,7 @@ export class Reload {
 		effect.cleanup(() => {
 			if (current) {
 				// A session torn down while live, as on a page hide, may already have earned it.
-				if (connected !== undefined) this.#settle(href, connected);
+				if (connected !== undefined) this.#settle(href, current, connected);
 				this.#end(current);
 				if (this.established.peek() === current) this.#serve(undefined);
 				current = undefined;
@@ -655,10 +661,10 @@ export class Reload {
 						reached = raced;
 					}
 					const ended = raced instanceof Reached ? { uri: "" } : raced;
-					this.#settle(href, connected);
+					this.#settle(href, connection, connected);
 					if (ended === null || ended instanceof Error) {
-						// Until a session has stayed up past the healthy bar, a close stops the URL as a
-						// failed attempt does: it is how a relay refuses a session it already accepted.
+						// Until a session was established, a close stops the URL as a failed attempt
+						// does: it is how a relay refuses a live session before accepting its credential.
 						// No error kind is read.
 						if (this.#establishedHref !== href) {
 							console.warn(`connection closed, not retrying: ${ended ? reason(ended) : "no error"}`);
@@ -747,9 +753,8 @@ export class Reload {
 					return;
 				}
 
-				// Attempts fail fast until a session was established: a URL that never held one past
-				// the healthy bar is more likely misconfigured than restarting, and only the app can
-				// fix that.
+				// Attempts fail fast until a session was established: a URL whose peer never accepted
+				// one is more likely misconfigured than restarting, and only the app can fix that.
 				if (this.#establishedHref !== href) {
 					console.warn("connection failed, not retrying:", err);
 					this.#giveUp(error(err));
@@ -924,8 +929,13 @@ export class Reload {
 	}
 
 	// Mark `href` established once the session connected at `connected` stayed up past the healthy bar.
-	#settle(href: string, connected: Instant): void {
-		if (now().since(connected).ge(this.#pacing().healthy)) this.#establishedHref = href;
+	// A session establishes its URL once the peer accepted its credential, which a closed
+	// session still reports, or once it stayed up past the healthy bar, the only bar on a
+	// version that never answers the credential (moq-lite-03/04).
+	#settle(href: string, session: Session, connected: Instant): void {
+		if (wireOf(session).auth.accepted.peek() || now().since(connected).ge(this.#pacing().healthy)) {
+			this.#establishedHref = href;
+		}
 	}
 
 	// Resolved per use rather than at construction, so an edit to `backoff` (including one that

@@ -442,7 +442,8 @@ for (const code of [SessionCode.Unauthorized, SessionCode.MalformedAuthToken, Se
 
 /**
  * Stub WebTransport for lite-06, which carries the credential in the URL: refuses `refused`
- * once `release` resolves, and accepts any other credential, recording each dialed jwt.
+ * once `release` resolves, never having sent the SETUP that would accept it, and accepts any
+ * other credential, recording each dialed jwt.
  */
 function refusing(refused: string, release: Promise<void>) {
 	const dialed = new Signal<readonly (string | null)[]>([]);
@@ -450,17 +451,19 @@ function refusing(refused: string, release: Promise<void>) {
 		const jwt = new URL(target).searchParams.get("jwt");
 		dialed.update((jwts) => [...jwts, jwt]);
 		const pair = createMockTransportPair(Lite.ALPN_06);
-		void accept(pair.server, new URL(target)).then(async () => {
-			if (jwt !== refused) return;
-			await release;
-			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-		});
+		if (jwt === refused) {
+			void release.then(() =>
+				pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" }),
+			);
+		} else {
+			void accept(pair.server, new URL(target));
+		}
 		return pair.client;
 	};
 	return { dialed, stub: stub as unknown as typeof WebTransport };
 }
 
-test("a first session refused before it is healthy stops the URL, even for replaced tokens", async () => {
+test("a first session refused before its credential is accepted stops the URL, even for replaced tokens", async () => {
 	using clock = manual();
 	const original = globalThis.WebTransport;
 	const { promise: release, resolve } = Promise.withResolvers<void>();
@@ -479,14 +482,49 @@ test("a first session refused before it is healthy stops the URL, even for repla
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
 		tokens.set(["new"]);
 		resolve();
-		// The refusal arrives after the session was accepted, as a relay rejects a token on
-		// moq-lite 03 or later, yet it stops the URL like a failed first attempt.
+		// The refusal arrives once the session is live, before the server's SETUP, as a relay
+		// rejects a token on moq-lite 03 or later, and stops the URL like a failed first attempt.
 		const err = await clock.drive(waitFor(reload.error, (error) => error !== undefined));
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
 		await clock.advance(Duration.millis(100));
 		expect(dialed.peek()).toEqual(["old"]);
 		expect(reload.established.peek()).toBeUndefined();
+	} finally {
+		reload.close();
+		globalThis.WebTransport = original;
+	}
+});
+
+test("a first session dropped right after the peer accepted its credential redials", async () => {
+	using clock = manual();
+	const original = globalThis.WebTransport;
+	const dials = new Signal(0);
+	let first: ReturnType<typeof createMockTransportPair> | undefined;
+	const accepted = Promise.withResolvers<void>();
+	const stub = function StubWebTransport(target: string | URL) {
+		dials.update((n) => n + 1);
+		const pair = createMockTransportPair(Lite.ALPN_06);
+		first ??= pair;
+		void accept(pair.server, new URL(target)).then(() => accepted.resolve());
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+	const reload = new Reload({
+		url: new URL("https://example.com/"),
+		versions: ["moq-lite-06"],
+		websocket: { enabled: false },
+		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
+	});
+	try {
+		const established = await clock.drive(waitFor(reload.established, (session) => session !== undefined));
+		await clock.drive(accepted.promise);
+		// The server's SETUP accepted the credential, long before the healthy bar.
+		await clock.drive(waitFor(wireOf(established as Session).auth.accepted, (yes) => yes));
+		first?.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
+		await clock.drive(waitFor(dials, (n) => n >= 2));
+		expect(reload.error.peek()).toBeUndefined();
 	} finally {
 		reload.close();
 		globalThis.WebTransport = original;
@@ -509,7 +547,8 @@ test("a refused credential keeps redialing until the tokens change", async () =>
 		backoff: { initial: Duration.millis(1), multiplier: 2, max: Duration.millis(1), timeout: null },
 	});
 	try {
-		// Refused only once a session was healthy: until then, a refusal stops the URL.
+		// Refused only once a session was healthy, though never accepted: until then, a refusal
+		// stops the URL.
 		await clock.drive(waitFor(reload.established, (established) => established !== undefined));
 		await clock.advance(Duration.millis(1000));
 		resolve();
