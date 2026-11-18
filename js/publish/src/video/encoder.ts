@@ -20,6 +20,7 @@ import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
+import { codecKey, type EncodeOptions, probeScale, Quantizer, type Scale } from "./quantizer";
 import { normalizeSource, type Source } from "./types";
 
 // The keyframe interval when the config sets none.
@@ -63,7 +64,11 @@ export interface Config {
 	 */
 	join?: Duration;
 
-	/** The highest bitrate the encoder is configured for (a target, not a hard output peak). If not provided, it is derived from the width, height, framerate, and codec. */
+	/**
+	 * The rendition's bitrate cap. Where the browser honors a per-frame quantizer, the encoder holds a
+	 * constant quality and spends up to the cap only on complex scenes; elsewhere it runs a constant
+	 * bitrate at the cap. If not provided, it is derived from the width, height, framerate, and codec.
+	 */
 	maxBitrate?: number;
 
 	/**
@@ -113,7 +118,8 @@ export type EncoderOutput = {
 	// until one resolves.
 	catalog: Signal<Catalog.VideoConfig | undefined>;
 	// The resolved WebCodecs config (codec, bitrate, dimensions), available even with no subscriber.
-	// Exposed so a local preview can re-encode with identical settings to mirror the wire output.
+	// Exposed so a local preview can re-encode with identical settings to mirror the wire output. In
+	// `bitrateMode: "quantizer"` the encoder picks each frame's QP to keep its output under `bitrate`.
 	resolved: Signal<VideoEncoderConfig | undefined>;
 	// True while encoding: enabled and the rendition has a track, which with the broadcast's
 	// `onDemand: "all"` also takes a subscriber.
@@ -434,6 +440,26 @@ export class Encoder {
 		};
 		let tearingDown = false;
 
+		// The per-frame QP control while the encoder runs in quantizer mode, and the budget it holds the
+		// output under: the resolved bitrate, the cap or a smaller grant. Kept through a disable, which
+		// clears the resolved config before the black keyframe.
+		let quantizer: { scale: Scale; control: Quantizer } | undefined;
+		let budget = 0;
+		effect.subscribe(this.out.resolved, (config) => {
+			// Including a zero grant, which holds every frame back.
+			if (config?.bitrate !== undefined) budget = config.bitrate;
+		});
+
+		// What the encoder is configured with. Quantizer mode reads the budget per frame instead, so a
+		// new grant doesn't reconfigure it.
+		const settings = effect.computed((effect) => {
+			const live = effect.get(this.#live);
+			if (!live) return;
+			const { config, detected } = live;
+			if (!detected.scale) return { config, scale: undefined };
+			return { config: { ...config, bitrate: undefined }, scale: detected.scale };
+		});
+
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
 				output: (frame: EncodedVideoChunk) => {
@@ -457,6 +483,7 @@ export class Encoder {
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
 					}));
 
+					quantizer?.control.output(frame.timestamp, frame.byteLength, key);
 					producer.encode(frame, Duration.micros(frame.timestamp), key);
 					// Including a keyframe the encoder placed on its own, which opened a group too.
 					if (key) answer();
@@ -479,8 +506,9 @@ export class Encoder {
 			// Set when the size changed, so the next frame opens a group whose keyframe carries it.
 			let resized = false;
 			effect.run((effect) => {
-				const config = effect.get(this.out.resolved);
-				if (!config) return;
+				const current = effect.get(settings);
+				if (!current) return;
+				const { config, scale } = current;
 
 				if (configured && (configured.width !== config.width || configured.height !== config.height)) {
 					resized = true;
@@ -490,8 +518,24 @@ export class Encoder {
 					configured = config;
 				} catch (error) {
 					this.#abort(error, track);
+					return;
+				}
+				// A new size keeps the control, whose estimates follow the next few frames.
+				if (!scale) quantizer = undefined;
+				else if (quantizer?.scale.codec !== scale.codec || quantizer.scale.max !== scale.max) {
+					quantizer = { scale, control: new Quantizer(scale, config.width * config.height) };
 				}
 			});
+
+			// Encode `frame`, at the controlled QP in quantizer mode.
+			const encode = (frame: VideoFrame, keyFrame: boolean) => {
+				const options: EncodeOptions = { keyFrame };
+				if (quantizer) {
+					const qp = quantizer.control.next(frame.timestamp, keyFrame, budget);
+					options[quantizer.scale.codec] = { quantizer: qp };
+				}
+				encoder.encode(frame, options);
+			};
 
 			effect.run((effect) => {
 				const fanout = effect.get(capture.out.frames);
@@ -517,7 +561,11 @@ export class Encoder {
 							// A pending input means the codec is saturated. Keep capture live instead of
 							// growing a stale encode queue whose lateness becomes permanent catalog delay.
 							// Drop before answering a keyframe request or advancing the frame-rate cursor.
-							if (encoder.encodeQueueSize > 0) {
+							// Likewise while quantizer mode's bucket is full: the scene outgrew the largest QP.
+							if (
+								encoder.encodeQueueSize > 0 ||
+								quantizer?.control.admit(frame.timestamp, budget) === false
+							) {
 								this.#out.stats.update((stats) => ({ ...stats, skipped: stats.skipped + 1 }));
 								continue;
 							}
@@ -566,7 +614,7 @@ export class Encoder {
 								answer();
 							}
 
-							encoder.encode(frame, { keyFrame });
+							encode(frame, keyFrame);
 						} catch (error) {
 							this.#abort(error, track);
 							return;
@@ -597,7 +645,7 @@ export class Encoder {
 					const interval = 1_000_000 / (config.framerate ?? 30);
 					const frame = black(config, Math.round(lastEncoded + interval));
 					try {
-						encoder.encode(frame, { keyFrame: true });
+						encode(frame, true);
 					} finally {
 						frame.close();
 					}
@@ -904,13 +952,15 @@ export class Encoder {
 
 			// The full config, like moq-video's probe: an encoder may pick its level from the frame rate
 			// or bitrate. The bitrate is the ceiling rather than the grant, so a bandwidth estimate never
-			// re-probes.
+			// re-probes. Constant is the fallback mode, so a codec without it is skipped; the default,
+			// variable, aims at an average with no peak, which would overshoot the price ABR pays.
 			const config: Probe["config"] = {
 				codec,
 				width: dimensions.width,
 				height: dimensions.height,
 				framerate: target.framerate,
 				bitrate: ceiling(codec, dimensions, target),
+				bitrateMode: "constant",
 				latencyMode: "realtime",
 				hardwareAcceleration,
 				// Annex B keeps the parameter sets in band, so the catalog carries no description and a
@@ -924,9 +974,15 @@ export class Encoder {
 			if (!support) return;
 			if (!support.supported) continue;
 
+			// Constant quality under the cap where the encoder honors a per-frame quantizer.
+			const quantizer = await probeQuantizer(config, effect);
+			if (!quantizer) return;
+			const { scale } = quantizer;
+			if (scale) config.bitrateMode = "quantizer";
+
 			const probed = await probeEncoder(config, effect);
 			if (!probed) return;
-			if ("reported" in probed) return { config, reported: probed.reported };
+			if ("reported" in probed) return { config, reported: probed.reported, scale };
 			console.warn(`moq-publish: skipping ${codec}: ${probed.refused}`);
 		}
 
@@ -975,6 +1031,8 @@ type Probe = {
 	config: VideoEncoderConfig & { framerate: number; bitrate: number };
 	// The codec string the encoder reported for it, which the catalog advertises.
 	reported: string;
+	// How the encoder reads a per-frame quantizer, when the config runs in quantizer mode.
+	scale?: Scale;
 };
 
 // A probe and the slot it ran for; another slot starts its own ceiling.
@@ -1103,6 +1161,22 @@ async function probeEncoder(
 		return { refused: "its encoder ignored the requested Annex B format" };
 	}
 	return { reported };
+}
+
+// How `config`'s encoder reads a per-frame quantizer, when its codec has one and the encoder both
+// accepts quantizer mode and honors the value; a browser may accept the mode and ignore it.
+// Undefined when superseded.
+async function probeQuantizer(config: VideoEncoderConfig, effect: Effect): Promise<{ scale?: Scale } | undefined> {
+	const codec = codecKey(config.codec);
+	if (!codec) return {};
+	// Safari 26 doesn't know the mode, and throws rather than reporting it unsupported.
+	const supported = VideoEncoder.isConfigSupported({ ...config, bitrateMode: "quantizer" }).catch(() => ({
+		supported: false,
+	}));
+	const support = await effect.race(supported);
+	if (!support) return;
+	if (!support.supported) return {};
+	return probeScale(config, codec, effect);
 }
 
 // The codecs the probe configures for Annex B output.

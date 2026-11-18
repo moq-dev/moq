@@ -14,6 +14,7 @@ class Encoder {
 		encoders.push(this);
 	}
 	configure(config: VideoEncoderConfig) {
+		if (config.bitrate === 0) throw new TypeError("bitrate must be positive");
 		this.configs.push({ ...config });
 		this.state = "configured";
 	}
@@ -82,6 +83,29 @@ test("bitrate reconfiguration keeps the codecs and last decoded frame", async ()
 		expect(transcode.out.frame.peek()).toBe(frame);
 		expect(closed).toBe(0);
 	} finally {
+		transcode.close();
+	}
+});
+
+test("a zero grant closes the preview quietly and the next grant restarts it", async () => {
+	const config = new Signal<VideoEncoderConfig | undefined>({ ...base, bitrateMode: "quantizer" });
+	const transcode = new Transcode({ config });
+	const warn = console.warn;
+	let warned = 0;
+	console.warn = () => warned++;
+	try {
+		await settle();
+		expect(encoders[0].configs.at(-1)?.bitrateMode).toBe("variable");
+		config.set({ ...base, bitrateMode: "quantizer", bitrate: 0 });
+		await settle();
+		expect(encoders[0].state).toBe("closed");
+		expect(warned).toBe(0);
+		config.set({ ...base, bitrateMode: "quantizer", bitrate: 500000 });
+		await settle();
+		expect(encoders).toHaveLength(2);
+		expect(encoders[1].configs.at(-1)?.bitrate).toBe(500000);
+	} finally {
+		console.warn = warn;
 		transcode.close();
 	}
 });
