@@ -40,7 +40,7 @@ class FeaturesTest(unittest.TestCase):
                         sys.exit(1)
                     if call[0] == 'just':
                         if os.environ['FEATURE_NESTED'] == '1' and args[1] in (
-                            'net-features', 'quic-features', 'crypto-key', 'media-features',
+                            'net-features', 'quic-features', 'media-features',
                             'coroutines',
                         ):
                             sys.exit(subprocess.call([os.environ['FEATURE_REAL_JUST'], *args]))

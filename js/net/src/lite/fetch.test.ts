@@ -82,8 +82,7 @@ test("Fetch decodes the optional delay offset before converting to milliseconds"
 				await w.string("room/1");
 				await w.u53(0); // no instance pin: empty and unminted
 				await w.bool(false);
-				await w.u62(0n); // no origin node
-				await w.u53(0); // nor route depth
+				await w.u62(0n); // no node named
 				await w.string("video");
 				await w.u8(0);
 				await w.u62(delay + 1n);

@@ -8,7 +8,7 @@ import { Timestamp } from "./time.ts";
 // Otherwise each cancelled FETCH leaves a reader and its listeners on the shared frame.
 test("stopping a payload releases its pending chunk wait", async () => {
 	const producer = new Producer(0n);
-	producer.createFrame({ size: 2, timestamp: Timestamp.unscaled(producer.sequence) });
+	producer.createFrame({ size: 2, timestamp: Timestamp.unscaled(producer.start) });
 	const group = producer.consume();
 	const frame = await group.nextFrame();
 	if (!frame) throw new Error("missing frame");

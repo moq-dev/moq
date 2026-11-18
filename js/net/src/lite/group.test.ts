@@ -222,12 +222,12 @@ test("a scale-less lite-07 FRAME carries its group's start", async () => {
 // starts strictly between; earlier versions carry nothing. Only lite-06 carries a Frame Start.
 test("a lite-07 GROUP carries its Previous Start plus one", async () => {
 	const encode = (previous: bigint | undefined, version: Version) =>
-		Writer.collect(version, (w) => new Group({ subscribe: 1n, sequence: 7n, previous }).encode(w, version));
+		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, previous }).encode(w, version));
 	expect(Array.from(await encode(4n, Version.DRAFT_07))).toEqual([3, 1, 7, 5]);
 	expect(Array.from(await encode(undefined, Version.DRAFT_07))).toEqual([3, 1, 7, 0]);
 	expect(Array.from(await encode(4n, Version.DRAFT_06))).toEqual([3, 1, 7, 0]);
 	const partial = (version: Version) =>
-		Writer.collect(version, (w) => new Group({ subscribe: 1n, sequence: 7n, frameStart: 4 }).encode(w, version));
+		Writer.collect(version, (w) => new Group({ subscribe: 1n, key: 7n, frameStart: 4 }).encode(w, version));
 	expect(Array.from(await partial(Version.DRAFT_06))).toEqual([3, 1, 7, 4]);
 	await expect(partial(Version.DRAFT_07)).rejects.toThrow();
 

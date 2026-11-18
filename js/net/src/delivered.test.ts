@@ -32,7 +32,7 @@ test("the extremes are sequences too", () => {
 
 test("forgetBelow closes the gaps under the floor", () => {
 	const delivered = new Delivered();
-	for (const sequence of [3n, 5n, 6n, 9n, 12n]) delivered.add(sequence);
+	for (const key of [3n, 5n, 6n, 9n, 12n]) delivered.add(key);
 	expect(delivered.aboveGap()).toBe(3n);
 	delivered.forgetBelow(0n);
 	expect(delivered.runs).toBe(4);
@@ -58,7 +58,7 @@ test("forgetBelow closes the gaps under the floor", () => {
 
 test("a run joins every run it touches, leaving the gaps around it", () => {
 	const delivered = new Delivered();
-	for (const sequence of [2n, 5n, 9n]) delivered.add(sequence);
+	for (const key of [2n, 5n, 9n]) delivered.add(key);
 	delivered.addRun(4n, 9n);
 	expect(delivered.runs).toBe(2);
 	expect(delivered.gaps(0n, 12n)).toEqual([

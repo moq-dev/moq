@@ -68,10 +68,10 @@ test("status skips values that fail the schema and ends when the track errors", 
 
 	// One finished group per status, so between statuses the loop waits on the next group.
 	const publish = (value: unknown) => {
-		const group = track.appendGroup();
+		const group = track.appendGroup(Moq.Time.Timestamp.unscaled((track.largest()?.group ?? -1n) + 1n));
 		group.writeFrame({
 			payload: new TextEncoder().encode(JSON.stringify(value)),
-			timestamp: Moq.Time.Timestamp.unscaled(group.sequence),
+			timestamp: Moq.Time.Timestamp.unscaled(group.start),
 		});
 		group.finish();
 	};

@@ -735,20 +735,6 @@ impl Drop for Held {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Config {
-	/// Route key file: the Ed25519 key this relay proves to every moq-lite-07 peer,
-	/// which files the routes this relay sends under it when this relay's grant is scoped.
-	///
-	/// Relays given the same file present an origin under one key, so a scoped peer
-	/// reached through either fails over as one. A missing file is generated (mode 0600).
-	/// Unset generates a fresh key on every start.
-	#[usage(
-		name = "cluster-route-key",
-		long = "cluster-route-key",
-		env = "MOQ_CLUSTER_ROUTE_KEY",
-		setting = "cluster.route_key"
-	)]
-	pub route_key: Option<PathBuf>,
-
 	/// Legacy: longest hop path accepted or forwarded on moq-lite-03 to 06, from 1 to 32
 	/// (default 32).
 	///
@@ -1476,12 +1462,6 @@ impl Cluster {
 		stats.check(&config)?;
 		let mut work = kio::Tasks::new();
 		let mut origin_config = origin::Config::default();
-		origin_config.route_key = Some(match &config.route_key {
-			Some(path) => (&moq_crypto::endpoint::SecretKey::load_or_generate(path)
-				.with_context(|| format!("--cluster-route-key {}", path.display()))?)
-				.into(),
-			None => origin::RouteKey::generate(),
-		});
 		if let Some(max) = config.max_hops {
 			origin_config.max_hops = NonZeroUsize::new(max)
 				.filter(|max| max.get() <= 32)

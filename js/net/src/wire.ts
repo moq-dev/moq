@@ -16,7 +16,6 @@ import type * as Instance from "./instance.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
-import type { Own } from "./route.ts";
 import type * as track from "./track.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
@@ -34,7 +33,7 @@ export interface Broadcast {
 	/** The newest frame the track's cache holds, read without subscribing; `undefined` while it holds none. */
 	largest(name: string): track.Position | undefined;
 	/** Fetch one group; absent when the session's version has no FETCH, so callers never ask. */
-	fetchGroup?(name: string, sequence: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
+	fetchGroup?(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer>;
 	requested(): Promise<track.Request | undefined>;
 	// Sessions dedup a peer's listings per broadcast; a custom session has no public owner yet.
 	/** List the broadcast's tracks for `owner`, ending its older listing of this broadcast with CANCELLED. */
@@ -63,11 +62,8 @@ export interface OriginProducer {
 	interests(listener: InterestListener): Dispose;
 	/** Whether an advertised prefix overlaps the handle's allowed paths. */
 	accepts(prefix: Path.Valid): boolean;
-	/**
-	 * Land a route a peer announced, taken as given and never forwarded back to a peer. `covers`,
-	 * when set, says per request whether it serves a path strictly beneath `prefix`.
-	 */
-	receive(prefix: Path.Valid, route?: Partial<WireRoute>, covers?: (path: Path.Valid) => boolean): origin.Claim;
+	/** Land a route a peer announced, taken as given and never forwarded back to a peer. */
+	receive(prefix: Path.Valid, route?: Partial<WireRoute>): origin.Claim;
 	attach(discovery: boolean): Dispose;
 	/**
 	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
@@ -109,8 +105,6 @@ export interface OriginConsumer {
 	local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined;
 	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `instance`. */
 	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
-	/** The lite-07 route identity the advertisements are originated under. */
-	readonly own: Own;
 	/** Whether the handle's scope admits everything beneath the root-relative `prefix`. */
 	covers(prefix: Path.Valid): boolean;
 }
@@ -168,16 +162,6 @@ export interface Established {
 	 * keeps serving.
 	 */
 	leave(): void;
-	/**
-	 * Whether the session's claim of origin `node` at `at` may serve a request for `path` beneath
-	 * it: lite-07's floors. Unset where every claim covers its subtree.
-	 */
-	covers?(node: bigint, at: Path.Valid, path: Path.Valid): boolean;
-	/**
-	 * Changes whenever what {@link covers} answers may have changed with no route reporting it:
-	 * a floor moving what another claim of its origin node covers.
-	 */
-	readonly coverage?: Getter<number>;
 	// private: plumbing
 	/**
 	 * This session's side of its auth handle.

@@ -36,11 +36,11 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 
 			const sealStart = performance.now();
 			const pending: Promise<void>[] = [];
-			let group = producer.appendGroup();
+			let group = producer.appendGroup(Time.Timestamp.fromMillis(0));
 			for (let frame = 0; frame < frames; frame++) {
 				if (frame > 0 && frame % GROUP_FRAMES === 0) {
 					group.finish();
-					group = producer.appendGroup();
+					group = producer.appendGroup(Time.Timestamp.fromMillis(frame));
 				}
 				pending.push(group.writeFrame(Time.Timestamp.fromMillis(frame), payload));
 				if (pending.length >= depth) await pending.shift();

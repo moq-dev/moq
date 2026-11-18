@@ -265,33 +265,13 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 			.or_else(|| subscribe.as_ref().map(|origin| origin.node()))
 			.map(Hop::from);
 	}
-	// Lite-07 declares the Node ID our routes originate under instead, so a peer that is
-	// this same process recognizes itself. Read without creating the route node, which
-	// the session's route layer creates when it starts.
-	if version.has_routes() && our_setup.node.is_none() {
-		our_setup.node = publish
-			.as_ref()
-			.and_then(|origin| origin.node_id())
-			.or_else(|| subscribe.as_ref().and_then(|origin| origin.consume().node_id()));
-	}
-
-	// Prove our origin's route key, bound to this session, so a peer that scopes us files
-	// our routes under it. A transport without an exporter cannot bind a proof, so neither
-	// side proves anything there.
-	let transcript = version
-		.has_route_key()
-		.then(|| session.export_keying_material(crate::route::EXPORTER_LABEL, &[]))
-		.flatten()
-		.map(crate::route::Transcript::new);
-	let route_key = publish
-		.as_ref()
-		.and_then(|origin| origin.route_key())
-		.or_else(|| subscribe.as_ref().and_then(|origin| origin.route_key()));
-	if let (Some(transcript), Some(key)) = (&transcript, route_key) {
-		our_setup.route_key = Some(transcript.prove(&key, client));
-	}
-	// Every lite-07 session reads the chain, so a claim learned over lite-06 keeps it.
-	our_setup.lite06_chain = version.has_routes();
+	// Lite-07 declares a Node ID instead, and only when this session exchanges routes:
+	// both halves share one forwarding origin and neither confines the peer.
+	our_setup.node = match (version.has_routes(), &publish, &subscribe) {
+		(true, Some(publish), Some(subscribe)) => publish.node_id(subscribe),
+		_ => None,
+	};
+	let routing = our_setup.node.is_some();
 
 	// What the peer's connection credential earns by default: publishing what our
 	// subscribe half accepts, and subscribing to what our publish half serves. A
@@ -309,11 +289,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// subscribe origin issues no ANNOUNCE_PLEASE.
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty().consume().with_stats(stats.clone()));
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty().with_stats(stats.clone()));
-	// Before lite-07 the peer can't ask for hidden routes, so a client publishes none of
-	// them unless its publish half opted in, and a socket endpoint behind it is
-	// unreachable. A server leaves it to the client, whose origin holds that endpoint.
-	let withholding =
-		(client && !version.has_hidden() && !publish.includes_hidden()).then(|| publish.hidden_withheld().hold());
 	let subscriptions = crate::session::Slots::default().with_stats(publish.stats(), crate::stats::Cap::Subscriptions);
 	let announces =
 		crate::session::Slots::new(limits.announces).with_stats(subscribe.stats(), crate::stats::Cap::Announces);
@@ -329,7 +304,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 	// Setup stream isn't expected on the wire again.
 	let peer_implementation = crate::setup::PeerImplementation::default();
 	let mut peer_setup_slot = PeerSetup::new(client, session.address())
-		.with_transcript(transcript)
 		.offer_ietf(our_setup.ietf)
 		.with_implementation(peer_implementation.clone());
 	// Without AUTH, the server checks a client's credential before its SETUP, which the
@@ -409,7 +383,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		)?;
 	}
 
-	let route_publish = publisher.route_publish();
+	let route_publish = publisher.route_publish(routing);
 	let driver = Driver {
 		auth: Present {
 			stats: stats.clone(),
@@ -431,7 +405,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		publisher,
 		subscriber: SubscriberDriver::new(subscriber, early, client, route_publish),
 		session,
-		withholding,
 	};
 
 	Ok(SessionStart {
@@ -467,9 +440,6 @@ pub(crate) struct Driver {
 	/// For the terminal close: the machine's last act reports the outcome to
 	/// the peer through the transport.
 	session: Transport,
-	/// Counts this session against the publish origin while it withholds that origin's
-	/// hidden routes from the peer.
-	withholding: Option<origin::HiddenWithholding>,
 }
 
 impl Driver {
@@ -520,7 +490,6 @@ impl Driver {
 			}
 		}
 		self.ended = Some(res.clone());
-		self.withholding = None;
 		res
 	}
 

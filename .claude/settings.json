@@ -6,7 +6,7 @@
 			"Bash(cargo *)",
 			"Bash(bun *)",
 			"Bash(ffprobe:*)",
-			"Bash(rs/moq-c/build.sh:*)",
+			"Bash(rs/libmoq/build.sh:*)",
 			"WebFetch(domain:www.ietf.org)",
 			"WebFetch(domain:datatracker.ietf.org)",
 			"WebFetch(domain:docs.rs)",

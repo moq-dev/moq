@@ -55,10 +55,10 @@ import { closeUnwanted } from "../util/announce.ts";
 import { toNumber } from "../util/bigint.ts";
 import { Deadline } from "../util/deadline.ts";
 import { isAbandoned, isUnrequested, unrequested, unwanted } from "../util/demand.ts";
+import { max, min, UNBOUNDED } from "../util/key.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { max, min, UNBOUNDED } from "../util/sequence.ts";
 import { Budget } from "../util/yield.ts";
-import { hasTime, rangesStart, sameRanges, Window, wireRanges, wireSpan } from "../window.ts";
+import { AT_KEYS, EMPTY, rangesStart, sameRanges, span, Window, wireRanges, wireSpan } from "../window.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	type AnnounceBroadcast,
@@ -73,7 +73,6 @@ import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate 
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
-import { Floors } from "./floors.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { Routed } from "./routed.ts";
@@ -151,10 +150,6 @@ interface SubscribeSetup {
  */
 interface Consumed {
 	readonly instance?: Instance.Valid;
-	// The publisher node every request names (lite-07): the one the route selected at consume
-	// reaches, or 0 to leave the choice to the publisher, and the depth of that route's prefix.
-	readonly node?: bigint;
-	readonly depth?: number;
 	readonly id?: number;
 	readonly valid?: AbortSignal;
 	// Aborted once another stream takes the path, which may answer a request without an instance
@@ -213,6 +208,9 @@ interface SubscribeEntry {
 	// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range starts on lite-07, by Range
 	// ID, undefined for one with nothing to deliver.
 	starts: Map<bigint, bigint | undefined>;
+	// The latest group each range's start was counted back from, by Range ID: the publisher's when
+	// SUBSCRIBE_START answered, or the copy's when SUBSCRIBE_STARTED did.
+	edges: Map<bigint, bigint | undefined>;
 	// The first group the ranges last sent ask for, which a lite-07 declaration answers.
 	floor?: bigint;
 	// What `#declare` last declared, so an unchanged one is not declared again.
@@ -243,7 +241,7 @@ interface SubscribeEntry {
 	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
 	unanswered?: Unanswered;
-	// Lite-07: the hold each stream reading a group has on the subscription's end, by sequence, one
+	// Lite-07: the hold each stream reading a group has on the subscription's end, by key, one
 	// per stream, so stream credit bounds them. A browser can lose the reset of a stream the publisher
 	// gave up on (Chromium drops one that reaches a stream before the page took it), so a drop naming
 	// the group excuses it, and the end waits for the stream at most the grace.
@@ -355,22 +353,13 @@ export class Subscriber {
 	#pending = new Map<bigint, Promise<SubscribeEntry | undefined>>();
 	#subscribeNext = 0n;
 
-	// Lite-07: what this session's Announce Stream certifies of each origin node's claims.
-	#floors = new Floors();
-	/**
-	 * Lite-07: changes whenever what {@link covers} answers may have changed with no route
-	 * reporting it.
-	 *
-	 * @internal
-	 */
-	readonly coverage = new Signal(0);
-	// Lite-07: the routes and claims the peer sends, shared by every `routes()` reader.
+	// Lite-07: the claims the peer sends, shared by every `routes()` reader.
 	#routed?: Routed;
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
-	#consumes = new BroadcastCache(this.#floors);
+	#consumes = new BroadcastCache();
 	#consumeNext = 0;
 
-	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, instance, track, sequence].
+	// Dedup in-flight one-shot fetches, keyed by [consume, broadcast, instance, track, key].
 	// Concurrent (or repeat, while still open) fetchGroup() calls for the same group of one consume
 	// share one FETCH stream and each get an independent mirror; the entry is evicted once the
 	// group closes.
@@ -432,15 +421,9 @@ export class Subscriber {
 			this.#routed = new Routed({
 				quic,
 				version,
-				hop,
-				floors: this.#floors,
 				consumes: this.#consumes,
 				slots: this.#announces,
 				drained: (route) => this.#drained(route),
-				revalidate: () => {
-					this.#consumes.revalidate();
-					this.coverage.update((n) => n + 1);
-				},
 				goaway,
 				send: (msg) => stream.send(msg),
 			});
@@ -479,7 +462,7 @@ export class Subscriber {
 	 *
 	 * Only routes whose literal name matches `scope` are reported, unless `options.covering`
 	 * also asks for those whose subtree overlaps it. A lite-07 stream reports the best claim at
-	 * each path, or each origin node's with `options.claims`.
+	 * each path, or each instance's with `options.claims`.
 	 */
 	routes(scope: Path.Pattern = Path.Pattern.all(), options?: announce.RouteOptions): announce.Routes {
 		const announced = new announce.Producer();
@@ -492,7 +475,7 @@ export class Subscriber {
 		const covering = options?.covering ?? false;
 		if (this.#routed) {
 			// Lite-07: every reader shares the session's one Announce Stream.
-			this.#routed.attach(announced, { prefix, scope, hidden, covering, perNode: options?.claims ?? false });
+			this.#routed.attach(announced, { prefix, scope, hidden, covering, claims: options?.claims ?? false });
 		} else {
 			void this.#runAnnounced(announced, prefix, scope, hidden, covering);
 		}
@@ -721,8 +704,6 @@ export class Subscriber {
 						active = true;
 						hops = announce.hops ?? [];
 						cost = announce.cost;
-						instance = announce.instance;
-						epoch = announce.epoch;
 						break;
 					}
 					case "ended":
@@ -938,16 +919,6 @@ export class Subscriber {
 	}
 
 	/**
-	 * Whether the session's claim of origin `node` at `at` may serve a request for `path` beneath
-	 * it: what the node's newest floor certifies there. See `Floors.covers`.
-	 *
-	 * @internal
-	 */
-	covers(node: bigint, at: Path.Valid, path: Path.Valid): boolean {
-		return this.#floors.covers(node, at, path);
-	}
-
-	/**
 	 * Consumes a broadcast from the connection.
 	 *
 	 * Deduplicated per serving instance: repeat calls for the same path share one reference-counted
@@ -968,23 +939,8 @@ export class Subscriber {
 	}
 
 	#createConsume(path: Path.Valid, instance: ReturnType<BroadcastCache["instance"]>): broadcast.Consumer {
-		const consumes = this.#consumes;
-		const pinned =
-			instance.route.node === undefined
-				? undefined
-				: { node: instance.route.node, depth: instance.route.depth ?? 0 };
-		// The best route now serving the instance, which moves with failover even once another
-		// instance wins the path; the one it first resolved through once none does.
-		const target = (instance: Instance.Valid | undefined) =>
-			(instance !== undefined ? consumes.node(path, instance) : undefined) ?? pinned;
 		const consumed = {
 			instance: instance.route.instance,
-			get node() {
-				return target(this.instance)?.node;
-			},
-			get depth() {
-				return target(this.instance)?.depth;
-			},
 			id: this.#consumeNext++,
 			get valid() {
 				return instance.validity?.signal;
@@ -1081,8 +1037,6 @@ export class Subscriber {
 							id,
 							broadcast: path,
 							instance: consumed.instance,
-							node: consumed.node,
-							depth: consumed.depth,
 							track: request.name,
 							priority,
 						}).encode(opened.writer, this.version);
@@ -1244,10 +1198,7 @@ export class Subscriber {
 			// Gave up, perhaps handed a stream as it did: the catch below hands back any stream.
 			if (!stream || cut.aborted) throw cut.reason;
 			await stream.writer.u53(StreamId.Tracks);
-			await new TracksMessage(broadcast, consumed.instance, consumed.node, consumed.depth).encode(
-				stream.writer,
-				this.version,
-			);
+			await new TracksMessage(broadcast, consumed.instance).encode(stream.writer, this.version);
 			let synced = false;
 			const answering = consumed.answering;
 			let unanswered = answering ? AbortSignal.any([stop, answering]) : stop;
@@ -1462,8 +1413,6 @@ export class Subscriber {
 			id,
 			broadcast,
 			instance: consumed.instance,
-			node: consumed.node,
-			depth: consumed.depth,
 			track: name,
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
@@ -1641,14 +1590,7 @@ export class Subscriber {
 				settle = resolve;
 			}),
 		);
-		const timed = hasRanges(this.version) && hasTime(ranges);
-		const sending = timed
-			? info.then((answered) => {
-					// Refused on an untimed track before anything is accepted.
-					msg.ranges = toWireRanges(ranges, this.#toModelInfo(answered.info).timescale ?? undefined);
-					return this.#sendSubscribe(state, msg, deadline);
-				})
-			: this.#sendSubscribe(state, this.#withRanges(msg, ranges, undefined), deadline);
+		const sending = this.#sendSubscribe(state, this.#withRanges(msg, ranges), deadline);
 		try {
 			// Either failing fails the subscription: a reset TRACK rejects the request, so the
 			// origin can try another route, and the caller resets the SUBSCRIBE.
@@ -1686,8 +1628,8 @@ export class Subscriber {
 
 	// `msg` asking for `ranges` on a wire that carries them, its time anchors counted in `scale`,
 	// the timescale the track declares: refused on an untimed one.
-	#withRanges(msg: Subscribe, ranges: readonly track.Range[], scale: Time.Timescale | undefined): Subscribe {
-		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges, scale);
+	#withRanges(msg: Subscribe, ranges: readonly track.Range[]): Subscribe {
+		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges);
 		return msg;
 	}
 
@@ -1707,7 +1649,12 @@ export class Subscriber {
 		});
 		// A new upstream subscription: stale runs an earlier one reported were judged under other terms.
 		hooks.supersedeStale(producer);
-		if (!hasRanges(this.version)) hooks.dropAnchors(producer);
+		if (!hasRanges(this.version)) {
+			hooks.dropAnchors(producer);
+			// A wire without ranges starts a time anchor at the first group at or after it, so its
+			// readers do too, rather than at an earlier group the copy happens to hold.
+			hooks.startsAtKeys(producer);
+		}
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });
@@ -1724,6 +1671,7 @@ export class Subscriber {
 			asked: [...ranges],
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
+			edges: new Map(),
 			sent: 0,
 			stream: { kind: "setup" },
 			fillIds: new Set(),
@@ -1789,7 +1737,7 @@ export class Subscriber {
 	// stays open, as interest in the track, until the caller closes it.
 	async #trackInfo(
 		broadcast: Path.Valid,
-		{ instance, node, depth }: Pin,
+		{ instance }: Pin,
 		track: string,
 		signal: AbortSignal | undefined,
 		deadline: Deadline,
@@ -1798,7 +1746,7 @@ export class Subscriber {
 			{ version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Track);
-				await new TrackMessage(broadcast, track, instance, node, depth).encode(stream.writer, this.version);
+				await new TrackMessage(broadcast, track, instance).encode(stream.writer, this.version);
 				const info = await TrackInfo.decode(stream.reader, this.version);
 				return { info, stream };
 			},
@@ -1879,7 +1827,7 @@ export class Subscriber {
 	async fetchGroup(
 		broadcast: Path.Valid,
 		track: string,
-		sequence: bigint,
+		key: bigint,
 		options: track.FetchGroupOptions = {},
 		consumed: Consumed = {},
 	): Promise<netGroup.Consumer> {
@@ -1898,13 +1846,13 @@ export class Subscriber {
 		// budgets still coalesce and each caller keeps an independent mirror.
 		// A minted instance is an object, which JSON prints as {}, so key on its text and flag.
 		const pin = instance === undefined ? null : [Instance.text(instance), Instance.isMinted(instance)];
-		const key = JSON.stringify([consumed.id, broadcast, pin, track, String(sequence), options.maxDelay?.asNanos()]);
-		let entry = this.#fetches.get(key);
+		const slot = JSON.stringify([consumed.id, broadcast, pin, track, String(key), options.maxDelay?.asNanos()]);
+		let entry = this.#fetches.get(slot);
 		let consumer: netGroup.Consumer;
 		if (entry && entry.group.closed.peek() === undefined) {
 			consumer = entry.group.mirror();
 		} else {
-			const group = new netGroup.Producer(sequence);
+			const group = new netGroup.Producer(key);
 			consumer = group.mirror();
 			entry = {
 				group,
@@ -1912,15 +1860,15 @@ export class Subscriber {
 					broadcast,
 					consumed,
 					track,
-					sequence,
+					key,
 					options.priority ?? 0,
 					group,
 					options.maxDelay,
 				),
 			};
-			this.#fetches.set(key, entry);
+			this.#fetches.set(slot, entry);
 			void group.closed.then(() => {
-				if (this.#fetches.get(key)?.group === group) this.#fetches.delete(key);
+				if (this.#fetches.get(slot)?.group === group) this.#fetches.delete(slot);
 			});
 		}
 
@@ -1940,7 +1888,7 @@ export class Subscriber {
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		track: string,
-		sequence: bigint,
+		slot: bigint,
 		priority: number,
 		group: netGroup.Producer,
 		maxDelay?: Duration,
@@ -1971,7 +1919,7 @@ export class Subscriber {
 			// stage and resets the streams it opened.
 			const deadline = new Deadline();
 			const setup = deadline.wait(
-				this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, deadline, maxDelay),
+				this.#fetchSetup(broadcast, consumed, track, slot, priority, group, deadline, maxDelay),
 			);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
@@ -2000,13 +1948,13 @@ export class Subscriber {
 		broadcast: Path.Valid,
 		consumed: Consumed,
 		track: string,
-		sequence: bigint,
+		key: bigint,
 		priority: number,
 		group: netGroup.Producer,
 		deadline: Deadline,
 		maxDelay?: Duration,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const { instance, node, depth, valid } = consumed;
+		const { instance, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
 		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
@@ -2025,15 +1973,13 @@ export class Subscriber {
 					await new FetchMessage({
 						broadcast,
 						instance,
-						node,
-						depth,
 						track,
 						priority,
 						maxDelay:
 							hasFetchMaxDelay(this.version) && maxDelay !== undefined
 								? Math.ceil(maxDelay.asMillis())
 								: undefined,
-						group: sequence,
+						group: key,
 					}).encode(stream.writer, this.version);
 					// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 					// done() buffers that byte so the response pump can decode it normally.
@@ -2146,12 +2092,12 @@ export class Subscriber {
 	): Promise<void> {
 		try {
 			let last: bigint | undefined;
-			for (let sequence = fill.wanted(); sequence !== undefined; sequence = fill.wanted()) {
+			for (let key = fill.wanted(); key !== undefined; key = fill.wanted()) {
 				// Every fetch answers its group, so the same one coming back is a bug: closing the
 				// fill names it dropped rather than fetching it forever.
-				if (sequence === last) break;
-				last = sequence;
-				await this.#fillGroup(broadcast, consumed, producer.name, framing, fill, sequence);
+				if (key === last) break;
+				last = key;
+				await this.#fillGroup(broadcast, consumed, producer.name, framing, fill, key);
 			}
 		} finally {
 			fill.close();
@@ -2172,7 +2118,7 @@ export class Subscriber {
 	): RecoveryHandle {
 		const producer = copy.track;
 		const id = this.#subscribeNext++;
-		const ranges: track.Range[] = [{ start: { absolute: groups.start }, end: { absolute: groups.end } }];
+		const ranges: track.Range[] = [span(groups.start, groups.end) ?? EMPTY];
 		const msg = this.#withRanges(
 			this.#subscribeMessage(
 				id,
@@ -2183,7 +2129,6 @@ export class Subscriber {
 				ranges,
 			),
 			ranges,
-			undefined,
 		);
 		const entry: SubscribeEntry = {
 			track: producer,
@@ -2196,6 +2141,7 @@ export class Subscriber {
 			asked: ranges,
 			live: new LiveRanges(this.version, msg.ranges ?? []),
 			starts: new Map(),
+			edges: new Map(),
 			sent: 0,
 			// Its responses are read here, which owns this stream's end.
 			stream: { kind: "setup" },
@@ -2378,7 +2324,7 @@ export class Subscriber {
 		return bound === undefined ? undefined : { budget: bound, everyone: true };
 	}
 
-	// FETCH group `sequence` of `fill` and write it into the copy once the publisher answers: lite
+	// FETCH group `key` of `fill` and write it into the copy once the publisher answers: lite
 	// has no FETCH_OK, so a publisher without the group resets the stream, which refuses the group
 	// to the readers waiting now, as the Rust `GroupFill::reject` does. A fetch nobody waits on any
 	// more is cancelled.
@@ -2388,13 +2334,11 @@ export class Subscriber {
 		name: string,
 		framing: Framing,
 		fill: track.FillGroups,
-		sequence: bigint,
+		key: bigint,
 	): Promise<void> {
 		const cancel = new AbortController();
-		void fill
-			.unwanted(sequence)
-			.then(() => cancel.abort(new StreamError(StreamCode.Cancel, { message: "cancel" })));
-		const stream = await this.#requestFill(broadcast, consumed, name, framing, fill, sequence, cancel.signal);
+		void fill.unwanted(key).then(() => cancel.abort(new StreamError(StreamCode.Cancel, { message: "cancel" })));
+		const stream = await this.#requestFill(broadcast, consumed, name, framing, fill, key, cancel.signal);
 		if (!stream) {
 			cancel.abort();
 			return;
@@ -2402,8 +2346,8 @@ export class Subscriber {
 		let group: netGroup.Producer;
 		try {
 			// The live feed may have brought it meanwhile, or every reader left.
-			if (!fill.isWanted(sequence)) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
-			group = fill.accept(sequence);
+			if (!fill.isWanted(key)) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+			group = fill.accept(key);
 		} catch (err) {
 			stream.abort(error(err));
 			return;
@@ -2432,7 +2376,7 @@ export class Subscriber {
 		}
 	}
 
-	// Open the FETCH for group `sequence` of `fill` once the session's grant admits it, and wait
+	// Open the FETCH for group `key` of `fill` once the session's grant admits it, and wait
 	// for the publisher's answer. A refusal answers the readers waiting now, unless the fill's
 	// budget widened since the FETCH carried it: a reader that joined meanwhile may reach what
 	// the narrower one could not, so it asks again. An OLD one judged the budget the FETCH
@@ -2444,7 +2388,7 @@ export class Subscriber {
 		name: string,
 		framing: Framing,
 		fill: track.FillGroups,
-		sequence: bigint,
+		key: bigint,
 		cancel: AbortSignal,
 	): Promise<Stream | undefined> {
 		const signal = consumed.valid ? AbortSignal.any([consumed.valid, cancel]) : cancel;
@@ -2460,10 +2404,10 @@ export class Subscriber {
 				while (
 					(await this.#auth?.ready(broadcast, "subscribe", {
 						signal: consumed.valid,
-						until: () => fill.unwanted(sequence),
+						until: () => fill.unwanted(key),
 					})) === false
 				) {
-					if (!fill.isWanted(sequence)) return undefined;
+					if (!fill.isWanted(key)) return undefined;
 				}
 				if (this.#denied(broadcast)) throw unauthorized(broadcast);
 				const deadline = new Deadline();
@@ -2475,12 +2419,10 @@ export class Subscriber {
 							await new FetchMessage({
 								broadcast,
 								instance: consumed.instance,
-								node: consumed.node,
-								depth: consumed.depth,
 								track: name,
 								priority,
 								maxDelay,
-								group: sequence,
+								group: key,
 							}).encode(stream.writer, this.version);
 							// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 							await stream.reader.done();
@@ -2491,10 +2433,10 @@ export class Subscriber {
 					),
 				);
 			} catch (err) {
-				if (cancel.aborted || !fill.isWanted(sequence)) return undefined;
+				if (cancel.aborted || !fill.isWanted(key)) return undefined;
 				if (maxDelay !== undefined && (fill.maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY) > maxDelay)
 					continue;
-				rejectGroups(fill, sequence, sequence + 1n, error(err), this.#stale(framing, maxDelay));
+				rejectGroups(fill, key, key + 1n, error(err), this.#stale(framing, maxDelay));
 				return undefined;
 			}
 		}
@@ -2546,8 +2488,11 @@ export class Subscriber {
 							`SUBSCRIBE_OK resolves ${resp.start.starts.length} ranges, not ${entry.live.initial}`,
 						);
 					// An update may have retired some already, whose starts say nothing now.
+					const edge = resp.start.largest?.position.group;
 					resp.start.starts.forEach((start, index) => {
-						if (entry.live.get(BigInt(index))) entry.starts.set(BigInt(index), start);
+						if (!entry.live.get(BigInt(index))) return;
+						entry.starts.set(BigInt(index), start);
+						entry.edges.set(BigInt(index), edge);
 					});
 				}
 				// The lowest range start is the first group served; none leaves nothing owed.
@@ -2603,6 +2548,7 @@ export class Subscriber {
 				const range = entry.live.get(id);
 				if (range) {
 					entry.starts.set(id, start);
+					entry.edges.set(id, hooks.producerLargest(entry.track).peek()?.group);
 					// A fill's range starting past where it asked skips groups it will not deliver.
 					const asked = entry.fillIds.has(id) ? fillRun(range) : undefined;
 					if (asked) {
@@ -2678,7 +2624,7 @@ export class Subscriber {
 	// Wait for the group streams the publisher still owes once it has ended the subscription.
 	//
 	// Received headers and SUBSCRIBE_DROP account for the range. An unaccounted
-	// sequence, such as a lost datagram, still waits out the grace. Streams whose
+	// key, such as a lost datagram, still waits out the grace. Streams whose
 	// headers arrived keep reading until their own FIN or reset.
 	async #settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
@@ -2705,9 +2651,10 @@ export class Subscriber {
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
 				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
-				owed.push({ ...model, start: { absolute: at } });
+				owed.push({ ...model, start: { time: at } });
 			}
-			const window = new Window(owed, entry.track.largest()?.group);
+			// Each starts at the group its publisher reported starting it at.
+			const window = new Window(owed, entry.track.largest()?.group, AT_KEYS);
 			return window.runs(0n, end).every((run) => entry.tail.covers(run.start, run.end));
 		}
 		// Without SUBSCRIBE_START the publisher served no group at all. Otherwise each group is owed
@@ -2811,19 +2758,21 @@ export class Subscriber {
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
 			// started. The retired ones owe nothing more.
 			let edit: { remove: bigint[]; add: WireRange[] } | undefined;
-			const fillRanges: track.Range[] = fillGroups.map((run) => ({
+			const fillRanges: WireRange[] = fillGroups.map((run) => ({
 				start: { absolute: run.start },
 				end: { absolute: run.end },
 			}));
 			if (hasRanges(this.version)) {
 				// The demand's ranges, then the fills'.
-				const edited = entry.live.edit(
-					[...toWireRanges(ranges, entry.scale), ...toWireRanges(fillRanges, undefined)],
-					fillRanges.length,
-					(id) => entry.fillIds.has(id),
+				const edited = entry.live.edit([...toWireRanges(ranges), ...fillRanges], fillRanges.length, (id) =>
+					entry.fillIds.has(id),
 				);
 				edit = edited;
-				for (const id of entry.starts.keys()) if (!entry.live.get(id)) entry.starts.delete(id);
+				for (const id of entry.starts.keys())
+					if (!entry.live.get(id)) {
+						entry.starts.delete(id);
+						entry.edges.delete(id);
+					}
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
@@ -2873,6 +2822,25 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
+		// Where the publisher started each live range asked from a group's start, which a reader's
+		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
+		// `report_time_starts`.
+		const times: [bigint, bigint][] = [];
+		// And each one counting back, which the copy, holding only part of the track, can't count,
+		// with the latest group it counted back from.
+		const relative: [bigint, bigint, bigint | undefined][] = [];
+		for (const id of entry.live.ids()) {
+			const range = entry.live.get(id);
+			const time = range?.start?.time ?? range?.start?.absolute;
+			const back = range?.start?.relative;
+			const at = entry.starts.get(id);
+			if (at === undefined) continue;
+			if (time !== undefined) times.push([time, at]);
+			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
+		}
+		hooks.timeStarts(entry.track, times);
+		hooks.relativeStarts(entry.track, relative);
+
 		let start: bigint | null = null;
 		let pending = entry.start === undefined;
 
@@ -2943,31 +2911,31 @@ export class Subscriber {
 		const { track, timescale, tail } = entry;
 		// The group before it must start below it, or the header contradicts itself: only this
 		// stream ends, as a malformed FRAME does.
-		if (group.previous !== undefined && group.previous >= group.sequence) {
+		if (group.previous !== undefined && group.previous >= group.key) {
 			stream.stop(
 				new StreamError(StreamCode.MalformedTrack, {
-					message: `group ${group.sequence} names group ${group.previous} as the one before it`,
+					message: `group ${group.key} names group ${group.previous} as the one before it`,
 				}),
 			);
 			return;
 		}
 		// Asked before this stream accounts for the group: a drop that overtook it named it.
-		let owed = !tail.covers(group.sequence, group.sequence + 1n);
+		let owed = !tail.covers(group.key, group.key + 1n);
 		// A drop that overtook this stream, rather than a gap the grace gave up on.
-		const dropped = !owed && tail.dropped(group.sequence);
+		const dropped = !owed && tail.dropped(group.key);
 		let producer: netGroup.Producer | undefined;
 		let arriving: Arriving | undefined;
 		// Lite-07: this stream's entry in `SubscribeEntry.reading`.
 		let reading = false;
-		const counted = tail.open(group.sequence);
+		const counted = tail.open(group.key);
 
 		try {
 			// The publisher contradicted its own end, which no later group can repair. lite-05
 			// specified an inclusive end, so its last group lands on it: the write below drops
 			// only that group there.
-			if (entry.end !== undefined && group.sequence >= entry.end && this.version !== Version.DRAFT_05) {
+			if (entry.end !== undefined && group.key >= entry.end && this.version !== Version.DRAFT_05) {
 				const violation = new ProtocolViolation(
-					`group ${group.sequence} is at or past the declared end ${entry.end}`,
+					`group ${group.key} is at or past the declared end ${entry.end}`,
 				);
 				track.abort(violation);
 				throw violation;
@@ -2975,7 +2943,7 @@ export class Subscriber {
 			// Registered before any duplicate wait below, so a drop that lands during it finds the read.
 			if (hasSkip(this.version)) {
 				entry.reading ??= new Map();
-				entry.reading.set(group.sequence, counted);
+				entry.reading.set(group.key, counted);
 				reading = true;
 			}
 			// A duplicate of a copy still arriving, such as one another subscription sharing the copy
@@ -2985,7 +2953,7 @@ export class Subscriber {
 			// wait; a clean end leaves it on the copy alone.
 			for (;;) {
 				// Kept held past a failure until this copy takes the group, below.
-				const next = hooks.arrivingGroup(track, group.sequence);
+				const next = hooks.arrivingGroup(track, group.key);
 				if (next === undefined) break;
 				arriving?.release();
 				arriving = next;
@@ -2995,15 +2963,15 @@ export class Subscriber {
 				await race([settled, stream.closed.then(() => settled)]);
 			}
 			producer ??= hooks.receiveGroup(track, {
-				sequence: group.sequence,
-				start: group.frameStart,
+				start: group.key,
+				offset: group.frameStart,
 				fill: entry.filling,
 			});
 			// Lite-07: the starts the header passes over were never produced, as a SUBSCRIBE_SKIP
 			// would say. Recorded once the group is, so a relay serving the copy sees the group the
 			// skip runs up to, whose own GROUP passes over it again.
 			const passed = group.passedOver();
-			if (passed.start < passed.end) this.#skipped(entry, passed.start, passed.end, `GROUP ${group.sequence}`);
+			if (passed.start < passed.end) this.#skipped(entry, passed.start, passed.end, `GROUP ${group.key}`);
 			// Released once this copy took the group, so the failed copy's readers find it.
 			arriving?.release();
 			// A drop that overtook the header already accounts for the group; a copy served again is
@@ -3030,7 +2998,7 @@ export class Subscriber {
 			stream.stop(e);
 		} finally {
 			arriving?.release();
-			if (reading && entry.reading?.get(group.sequence) === counted) entry.reading.delete(group.sequence);
+			if (reading && entry.reading?.get(group.key) === counted) entry.reading.delete(group.key);
 			counted.done();
 		}
 	}
@@ -3038,8 +3006,8 @@ export class Subscriber {
 	// A SUBSCRIBE_DROP named `[start, end)`: a stream still reading a group it names holds the
 	// subscription's end at most the grace, since a browser can lose that stream's reset.
 	#dropped(entry: SubscribeEntry, start: bigint, end: bigint): void {
-		for (const [sequence, counted] of entry.reading ?? []) {
-			if (sequence >= start && sequence < end) counted.excuse();
+		for (const [key, counted] of entry.reading ?? []) {
+			if (key >= start && key < end) counted.excuse();
 		}
 	}
 
@@ -3167,7 +3135,7 @@ export class Subscriber {
 		const entry = this.#datagrams.get(dg.subscribe);
 		if (!entry) return dg.subscribe;
 		if (behindHeld && this.#isHeld(dg.subscribe)) return dg.subscribe;
-		// A scale-less datagram's timestamp is bare, which the track checks is its sequence.
+		// A scale-less datagram's timestamp is bare, which the track checks is its key.
 		const timestamp =
 			entry.timescale === undefined
 				? Time.Timestamp.unscaled(dg.timestamp)
@@ -3396,7 +3364,7 @@ class ConsumeBroadcast extends broadcast.Consumer {
 			},
 			// FETCH streams start at lite-05; older sessions offer no fetch at all.
 			fetchGroup: hasTrackStream(subscriber.version)
-				? (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options, consumed)
+				? (name, key, options) => subscriber.fetchGroup(path, name, key, options, consumed)
 				: undefined,
 		});
 		this.#subscriber = subscriber;

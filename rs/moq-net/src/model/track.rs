@@ -5161,6 +5161,12 @@ impl Producer {
 		}
 	}
 
+	/// A handle that aborts the track without keeping it open, for an owner that hands this
+	/// producer out and must end the track on its own shutdown.
+	pub fn abort_handle(&self) -> AbortHandle {
+		AbortHandle(Arc::downgrade(&self.alive))
+	}
+
 	/// Create a [`Demand`]: a cloneable, watch-only handle to this track's
 	/// subscriber demand.
 	///
@@ -5634,6 +5640,33 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 	Some(combined)
 }
 
+/// Aborts a track without keeping it open, from [`Producer::abort_handle`].
+///
+/// Holding one neither keeps the track alive nor counts as its producer, so a track whose
+/// producers all dropped closes as usual and the handle then does nothing.
+#[derive(Clone)]
+pub struct AbortHandle(std::sync::Weak<Alive>);
+
+impl AbortHandle {
+	/// Whether the track closed: aborted, or every producer gone.
+	pub fn is_closed(&self) -> bool {
+		self.0.upgrade().is_none_or(|alive| alive.state.is_closed())
+	}
+
+	/// Abort the track with `err`, as [`Producer::abort`] does, unless it already closed.
+	pub fn abort(&self, err: Error) {
+		let Some(alive) = self.0.upgrade() else {
+			return;
+		};
+		// Unlisted first, as `Producer::abort` does, so the name is free only once it left.
+		alive.unlist(false);
+		let Ok(state) = alive.state.write() else {
+			return;
+		};
+		commit_abort(state, err, None).abort();
+	}
+}
+
 /// A weak reference to a track that doesn't prevent auto-close.
 #[derive(Clone)]
 pub(super) struct TrackWeak {
@@ -5696,21 +5729,6 @@ impl TrackWeak {
 		state.reject(err, None);
 		state.close();
 		true
-	}
-
-	/// Abort the track with `err`, as [`Producer::abort`] does, unless it already closed.
-	///
-	/// For an owner that hands a track's [`Producer`] out and must end it on its own
-	/// shutdown without keeping it alive. Leaves the listing alone: such a track is one
-	/// served on request, which is never listed.
-	pub(super) fn abort(&self, err: Error) {
-		let Some(producer) = self.state.produce() else {
-			return;
-		};
-		let Ok(state) = producer.write() else {
-			return;
-		};
-		commit_abort(state, err, None).abort();
 	}
 
 	/// Whether its producer declared the track's end, which is how its listing ends too.

@@ -56,7 +56,7 @@ function frames(results: Read[]): string[] {
 function write(group: Group.Producer, timestamp: number) {
 	group.writeFrame({
 		payload: encodeFrame(new Uint8Array([1]), Duration.micros(timestamp)),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(timestamp),
 	});
 }
 

@@ -71,8 +71,11 @@ public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
 /// deliver, and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
-/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency and
-/// where a cold join starts, `nil` to leave it unstated (a decoder plays it as zero), and `max`,
+/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
+/// cold join starts, and how long a decoder waits for a missing group, `nil` to leave it unstated
+/// (a decoder starts it as zero and waits a missing group for `max`, except an audio decoder, which
+/// floors it at zero and waits only its playout estimate, which can be larger; a catalog warmup or
+/// an audio decoder's playout delay still states a `min` to the publisher), and `max`,
 /// `nil` for no subscriber limit, is how far a non-latest group may fall behind before it is
 /// skipped. A `min` past `max` starts at `max`.
 public typealias Delay = MoqFFI.MoqDelay
@@ -106,8 +109,8 @@ public typealias ServerTls = MoqFFI.MoqServerTls
 /// QUIC transport tuning, such as the peer's inbound stream cap.
 public typealias QuicConfig = MoqFFI.MoqQuicConfig
 
-/// The congestion control family for a QUIC connection. Build one with `CongestionControl.delay()`,
-/// `.loss()`, or `.none()`; a new algorithm joins as a new constructor.
+/// The congestion control algorithm for a QUIC connection. Build one with `CongestionControl.bbr()`,
+/// `.cubic()`, or `.unlimited()`; a new algorithm joins as a new constructor named after it.
 public typealias CongestionControl = MoqFFI.MoqCongestionControl
 
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.

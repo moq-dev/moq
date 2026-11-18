@@ -5,7 +5,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
-import type { Producer as GroupProducer } from "../group.ts";
+import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
@@ -18,7 +18,7 @@ import { Reader, Readers, Stream, Writer, writeBudget } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { Subscriber as TrackSubscriber } from "../track.ts";
 import { wireOf } from "../wire.ts";
-import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
+import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast, ownClaim } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
@@ -198,7 +198,7 @@ test.each([Version.DRAFT_06])("a republish restarts the advertisement (version %
 // Delivers `sequences` in the given order, finishes the track (with `error`, if given), and
 // returns the SUBSCRIBE_FINISH the publisher put on the wire.
 async function subscribeEnd(
-	sequences: number[],
+	keys: number[],
 	version: Version = Version.DRAFT_05,
 	error?: Error,
 ): Promise<SubscribeFinish> {
@@ -219,9 +219,9 @@ async function subscribeEnd(
 
 	// Finish the track only once it's being served, so the publisher observes a live
 	// track ending rather than resolving a subscribe against an already-closed one.
-	for (const sequence of sequences) {
-		const group = track.createGroup(BigInt(sequence));
-		group.writeFrame(textFrame("hello", Timestamp.fromMillis(sequence)));
+	for (const key of keys) {
+		const group = track.createGroup(BigInt(key));
+		group.writeFrame(textFrame("hello", Timestamp.fromMillis(key)));
 		group.finish();
 
 		// Let the publisher drain this group before the next, so arrival order is the
@@ -266,12 +266,12 @@ async function servingNextGroup(opened: ReadableStreamDefaultReader<ReadableStre
 // other. A group that finished would leave the ranking, which is the point of it.
 async function groupSendOrders(options: {
 	priority: number;
-	sequences: number[];
+	keys: number[];
 	update?: number;
 	publisher?: number;
 	version?: Version;
 }) {
-	const { priority, sequences, update, version = Version.DRAFT_05 } = options;
+	const { priority, keys: sequences, update, version = Version.DRAFT_05 } = options;
 	const groups: GroupProducer[] = [];
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
@@ -300,16 +300,16 @@ async function groupSendOrders(options: {
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 
 	try {
-		for (const [index, sequence] of sequences.entries()) {
+		for (const [index, key] of sequences.entries()) {
 			if (index === 1 && update !== undefined) {
 				await replayUpdate({ priority: update, ...keep(version) }).encode(client.writer, version);
 				// Wait for the publisher to apply it, rather than assuming it beat the next group.
 				while (track.subscription.peek()?.priority !== update) await track.subscription.changed();
 			}
 
-			const group = track.createGroup(BigInt(sequence));
+			const group = track.createGroup(BigInt(key));
 			groups.push(group);
-			group.writeFrame(textFrame("hello"));
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(Number(key))));
 
 			// One stream per group, in the order given: wait for this one before queuing the next.
 			await servingNextGroup(opened);
@@ -331,7 +331,7 @@ async function groupSendOrders(options: {
 // and a stalled low-priority track steals bandwidth from the one the subscriber asked for.
 // Live playback wants the newest group, so it is the one at position 0.
 test("lite draft-05: group streams are ranked newest-first", async () => {
-	const orders = await groupSendOrders({ priority: 7, sequences: [0, 1, 2] });
+	const orders = await groupSendOrders({ priority: 7, keys: [0, 1, 2] });
 	expect(orders).toEqual([
 		sendOrder({ priority: 7, position: 2 }),
 		sendOrder({ priority: 7, position: 1 }),
@@ -345,8 +345,8 @@ test("lite draft-05: group streams are ranked newest-first", async () => {
 // numbering: ranking by sequence would let the one with larger numbers starve the other.
 test("lite draft-05: equal priorities tie regardless of group numbering", async () => {
 	const [fresh, ongoing] = await Promise.all([
-		groupSendOrders({ priority: 7, sequences: [0, 1] }),
-		groupSendOrders({ priority: 7, sequences: [900_000, 900_001] }),
+		groupSendOrders({ priority: 7, keys: [0, 1] }),
+		groupSendOrders({ priority: 7, keys: [900_000, 900_001] }),
 	]);
 
 	expect(fresh).toEqual(ongoing);
@@ -355,14 +355,14 @@ test("lite draft-05: equal priorities tie regardless of group numbering", async 
 // The track's publisher priority breaks ties on every draft, as in Rust, including the drafts
 // before lite-05 that acknowledge with SUBSCRIBE_OK instead of TRACK_INFO.
 test.each([Version.DRAFT_03, Version.DRAFT_05])("lite %s: the publisher priority ranks each group", async (version) => {
-	const orders = await groupSendOrders({ priority: 7, publisher: 5, sequences: [0], version });
+	const orders = await groupSendOrders({ priority: 7, publisher: 5, keys: [0], version });
 	expect(orders).toEqual([sendOrder({ priority: 7, publisher: 5 })]);
 });
 
 // SUBSCRIBE_UPDATE re-ranks the subscription, so every group it is serving picks up the new
 // priority, including one opened after the update landed.
 test("lite draft-05: a subscribe update re-ranks the whole subscription", async () => {
-	const orders = await groupSendOrders({ priority: 1, sequences: [0, 1], update: 9 });
+	const orders = await groupSendOrders({ priority: 1, keys: [0, 1], update: 9 });
 	expect(orders).toEqual([sendOrder({ priority: 9, position: 1 }), sendOrder({ priority: 9, position: 0 })]);
 });
 
@@ -503,10 +503,10 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 
 	try {
-		for (let sequence = 0n; sequence < BigInt(count); sequence++) {
-			const group = track.createGroup(sequence);
+		for (let key = 0n; key < BigInt(count); key++) {
+			const group = track.createGroup(key);
 			groups.push(group);
-			group.writeFrame(textFrame("hello"));
+			group.writeFrame(textFrame("hello", Timestamp.fromMillis(Number(key))));
 			await servingNextGroup(opened);
 		}
 		opened.releaseLock();
@@ -517,9 +517,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 		while (track.subscription.peek()?.priority !== 9) await track.subscription.changed();
 
 		// Newest-first, so the last group opened is at position 0 and the first is at the back.
-		const expected = groups.map((group) =>
-			sendOrder({ priority: 9, position: count - 1 - Number(group.sequence) }),
-		);
+		const expected = groups.map((group) => sendOrder({ priority: 9, position: count - 1 - Number(group.start) }));
 		await clock.advance(Duration.ZERO);
 
 		expect(pair.server.sendStreams.uni.map((stream) => stream.sendOrder)).toEqual(expected);
@@ -572,7 +570,7 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = hooks.receiveGroup(track, { sequence: 0n, start: 5 });
+	const group = hooks.receiveGroup(track, { start: 0n, offset: 5 });
 	for (const value of ["a", "b"]) group.writeFrame(textFrame(value));
 	group.finish();
 	const client = await Stream.open(pair.client, { version });
@@ -742,10 +740,10 @@ async function servedSubscription(
 	// Unset is no publisher limit: these fixtures serve superseded groups.
 	const info = { timescale: Timescale.MILLI, maxAge: options.maxAge ?? null };
 	let track = options.pending ? undefined : broadcast.createTrack("video", info);
-	for (const sequence of options.prefill ?? []) {
+	for (const key of options.prefill ?? []) {
 		if (!track) throw new Error("a pending track holds nothing to prefill");
-		const group = track.createGroup(sequence);
-		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
+		const group = track.createGroup(key);
+		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 		group.finish();
 	}
 	if (options.reported !== undefined) {
@@ -809,17 +807,17 @@ async function servedSubscription(
 			if (!pulled) throw new Error("the publisher never requested the track");
 			const staged = hooks.stageRequest(pulled, info);
 			if (reported !== undefined) hooks.reportedGroup(staged.producer, reported);
-			for (const sequence of held) {
-				const group = staged.producer.createGroup(sequence);
-				for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
+			for (const key of held) {
+				const group = staged.producer.createGroup(key);
+				for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 				group.finish();
 			}
 			track = staged.commit();
 		},
 		// Stamped by sequence, so a group served out of order still starts in order.
-		serve(sequence: bigint) {
-			const group = resolved().createGroup(sequence);
-			for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(sequence))));
+		serve(key: bigint) {
+			const group = resolved().createGroup(key);
+			for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 			group.finish();
 		},
 		// Makes the next group stream withhold its FIN from the client, the way a stream the
@@ -853,7 +851,7 @@ async function servedSubscription(
 			if (next.done) return undefined;
 			const reader = new Reader(next.value, undefined, version);
 			await reader.u53(); // stream type
-			return (await GroupMessage.decode(reader, version)).sequence;
+			return (await GroupMessage.decode(reader, version)).key;
 		},
 		// Whether the publisher opens another group stream before `clock` passes IDLE_MS. The
 		// read stays queued, so it takes the next stream: call this last.
@@ -885,7 +883,7 @@ async function servedSubscription(
 				payloads.push(new TextDecoder().decode(await reader.read(size)));
 			}
 			return {
-				sequence: header.sequence,
+				key: header.key,
 				frameStart: header.frameStart,
 				payloads,
 				previous: header.previous,
@@ -901,7 +899,7 @@ async function servedSubscription(
 		},
 		// The sequence alone, for tests that only care which groups reached the wire.
 		async servedSequence(): Promise<bigint | undefined> {
-			return (await this.servedGroup())?.sequence;
+			return (await this.servedGroup())?.key;
 		},
 		async close() {
 			// Settles any pending read as well as dropping the stream.
@@ -1005,13 +1003,14 @@ test("lite-07 SUBSCRIBE_STARTED reports an added range's start, which later upda
 		expect([started.started.id, started.started.start]).toEqual([1n, 2n]);
 
 		// Newer groups arrive, and another update leaves the range live: it still starts at 2.
-		for (const sequence of [5n, 6n, 7n]) sub.serve(sequence);
+		// The added range starts at time 9, which the live group 7 contains.
+		for (const key of [5n, 6n, 7n]) sub.serve(key);
 		await replayUpdate({ priority: 0, ranges: [{ start: { absolute: 9n } }] }).encode(sub.client.writer, version);
 		const pinned = await next();
 		if (!("started" in pinned)) throw new Error("expected SUBSCRIBE_STARTED");
-		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 9n]);
+		expect([pinned.started.id, pinned.started.start]).toEqual([2n, 7n]);
 		const ranges = sub.track.subscription.peek()?.ranges ?? [];
-		expect(ranges.some((range) => range.start?.absolute === 2n)).toBe(true);
+		expect(ranges.some((range) => range.start?.time === 2n)).toBe(true);
 		expect(ranges.some((range) => range.start?.relative !== undefined)).toBe(false);
 	} finally {
 		await sub.close();
@@ -1270,7 +1269,9 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 				if (version !== Version.DRAFT_07) {
 					expect([codes, skips]).toEqual([[0], []]);
 				} else if (declared) {
-					expect([codes, skips]).toEqual([[], [[2n, 5n]]]);
+					// Lite-07's time 2 lies before every held group, so the range reaches back to
+					// group 0: groups 0 and 1, never declared, go out as a drop.
+					expect([codes, skips]).toEqual([[StreamCode.NotFound], [[2n, 5n]]]);
 				} else {
 					expect([codes, skips]).toEqual([[StreamCode.NotFound], []]);
 				}
@@ -1302,10 +1303,10 @@ test("lite-07 ends a finished group with GROUP_END and a closed one with a bare 
 		const whole = sub.track.createGroup(0n);
 		whole.writeFrame(textFrame("x", Timestamp.fromMillis(0)));
 		whole.finishAt(500n);
-		expect(await sub.servedGroup()).toMatchObject({ sequence: 0n, payloads: ["x"], end: 500n });
+		expect(await sub.servedGroup()).toMatchObject({ key: 0n, payloads: ["x"], end: 500n });
 		sub.serve(1000n);
 		const closed = await sub.servedGroup();
-		expect([closed?.sequence, closed?.payloads, closed?.end]).toEqual([1000n, ["hello"], undefined]);
+		expect([closed?.key, closed?.payloads, closed?.end]).toEqual([1000n, ["hello"], undefined]);
 	} finally {
 		await sub.close();
 	}
@@ -1318,10 +1319,10 @@ test("lite-07 passes over a skipped run in the GROUP above it", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 0n });
 	try {
 		sub.serve(0n);
-		expect(await sub.servedGroup()).toMatchObject({ sequence: 0n, previous: undefined });
+		expect(await sub.servedGroup()).toMatchObject({ key: 0n, previous: undefined });
 		sub.serve(3n);
 		sub.track.skipGroups(1n, 3n);
-		expect(await sub.servedGroup()).toMatchObject({ sequence: 3n, previous: 0n });
+		expect(await sub.servedGroup()).toMatchObject({ key: 3n, previous: 0n });
 		sub.track.finish();
 		sub.track.close();
 		expect(await holesToFinish(sub.client.reader)).toEqual([]);
@@ -1590,9 +1591,9 @@ test("lite draft-06: a raised floor is not dropped early", async () => {
 		await flush();
 		await replayUpdate({ priority: 0, startGroup: 1n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
-		for (const sequence of [1n, 2n, 3n, 4n]) {
-			sub.serve(sequence);
-			expect(await sub.servedSequence()).toBe(sequence);
+		for (const key of [1n, 2n, 3n, 4n]) {
+			sub.serve(key);
+			expect(await sub.servedSequence()).toBe(key);
 		}
 		sub.track.finish();
 		sub.track.close();
@@ -1647,9 +1648,11 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 
 // A relay receives the newest group first while its source still promises older groups.
 // START must preserve that promise, bounded by the downstream floor and first served group.
+// Lite-07 asks for the group containing time 2, which the source's start places, so no floor
+// raises it: a source starting at group 0 contains time 2.
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	for (const [source, expected] of [
-		[0n, 2n],
+		[0n, hasRanges(version) ? 0n : 2n],
 		[3n, 3n],
 		[9n, 6n],
 	]) {
@@ -1657,6 +1660,8 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 			const sub = await servedSubscription({ version, startGroup: 2n });
 			try {
 				hooks.receiveTrack(sub.track);
+				// A lite-07 source reports where it started the time asked for.
+				if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, source]]);
 				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6n);
 				expect(await sub.servedSequence()).toBe(6n);
@@ -1684,12 +1689,39 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6n);
 			await flush();
+			if (hasRanges(version)) hooks.timeStarts(sub.track, [[2n, 3n]]);
 			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
 			expect(response.start.starts[0]).toBe(3n);
 			expect(await sub.servedSequence()).toBe(6n);
 		} finally {
+			await sub.close();
+		}
+	});
+
+	// A subscription that ends while a group waits for the START has no one to read it, so the
+	// held group is closed, not left for a relay to keep reading upstream.
+	test(`lite ${version}: a subscription ending before the upstream START closes the group it held`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2n });
+		const closed: bigint[] = [];
+		const close = GroupConsumer.prototype.close;
+		const spy = spyOn(GroupConsumer.prototype, "close").mockImplementation(function (this: GroupConsumer) {
+			closed.push(this.start);
+			close.call(this);
+		});
+		try {
+			hooks.receiveTrack(sub.track);
+			hooks.startTrack(sub.track, { requested: 2n });
+			sub.serve(6n);
+			await flush();
+			expect(closed).not.toContain(6n);
+
+			sub.client.close();
+			await sub.serving;
+			expect(closed).toContain(6n);
+		} finally {
+			spy.mockRestore();
 			await sub.close();
 		}
 	});
@@ -1969,8 +2001,8 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 
 		sub.release();
 
-		expect(await sub.servedGroup()).toEqual({ sequence: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
-		expect(await sub.servedGroup()).toEqual({ sequence: 1n, frameStart: 2, payloads: ["c"] });
+		expect(await sub.servedGroup()).toEqual({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+		expect(await sub.servedGroup()).toEqual({ key: 1n, frameStart: 2, payloads: ["c"] });
 		expect(lastGroups(ranges)).toEqual({ start: { included: 1n }, end: undefined });
 	} finally {
 		ranges.mockRestore();
@@ -1999,8 +2031,8 @@ test("lite draft-06: a queued frame update applies before the next group pop", a
 
 		sub.release();
 
-		expect(await sub.servedGroup()).toEqual({ sequence: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
-		expect(await sub.servedGroup()).toEqual({ sequence: 1n, frameStart: 0, payloads: ["a"] });
+		expect(await sub.servedGroup()).toEqual({ key: 0n, frameStart: 0, payloads: ["a", "b", "c"] });
+		expect(await sub.servedGroup()).toEqual({ key: 1n, frameStart: 0, payloads: ["a"] });
 	} finally {
 		await sub.close();
 	}
@@ -2024,7 +2056,7 @@ test("lite draft-06: a popped group keeps its frame bounds across a queued updat
 		await flush();
 
 		sub.release();
-		expect(await sub.servedGroup()).toEqual({ sequence: 0n, frameStart: 0, payloads: ["a", "b"] });
+		expect(await sub.servedGroup()).toEqual({ key: 0n, frameStart: 0, payloads: ["a", "b"] });
 	} finally {
 		await sub.close();
 	}
@@ -2058,12 +2090,12 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 
 			// Group 0 was popped before either update and is not the end group either way.
 			expect(await sub.servedGroup()).toEqual({
-				sequence: 0n,
+				key: 0n,
 				frameStart: 0,
 				payloads: ["a", "b", "c"],
 			});
 			// Group 1 is popped under the latest state, with no application of the older one.
-			expect(await sub.servedGroup()).toEqual({ sequence: 1n, frameStart: 0, payloads: ["a"] });
+			expect(await sub.servedGroup()).toEqual({ key: 1n, frameStart: 0, payloads: ["a"] });
 			expect(ranges).toHaveBeenCalledTimes(1);
 			// Draft-06 encodes a floor of group 0 as no floor, which assigns 0.
 			expect(lastGroups(ranges)).toEqual({ start: { included: 0n } });
@@ -2141,7 +2173,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 			// Lite-06 cannot state a minimum.
 			delay: { min: null, max: Duration.millis(TEST_MAX_DELAY_MS) },
 			order: "descending",
-			ranges: [{ end: { absolute: 6n } }],
+			ranges: [{ end: { time: 5n } }],
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
@@ -2273,7 +2305,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 
 	try {
 		const first = track.createGroup(0n);
-		first.writeFrame(textFrame("hello"));
+		first.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 		first.finish();
 		track.finishAt({ group: 2n, frame: 0 });
 
@@ -2284,7 +2316,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 		expect("finish" in early).toBe(true);
 
 		const second = track.createGroup(1n);
-		second.writeFrame(textFrame("hello"));
+		second.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		second.finish();
 		track.finish();
 		track.close();
@@ -2318,7 +2350,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 
 	try {
 		const first = track.createGroup(0n);
-		first.writeFrame(textFrame("hello"));
+		first.writeFrame(textFrame("hello", Timestamp.fromMillis(0)));
 		first.finish();
 		// An errored end past the live edge, which only a received copy forwards: group 1 is still
 		// to come below it.
@@ -2330,7 +2362,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 		expect(await settlesWithin(pending, clock, Duration.millis(20))).toBe(false);
 
 		const second = track.createGroup(1n);
-		second.writeFrame(textFrame("hello"));
+		second.writeFrame(textFrame("hello", Timestamp.fromMillis(1)));
 		second.finish();
 		await expect(pending).rejects.toBeDefined();
 	} finally {
@@ -2343,7 +2375,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 test("lite draft-06: a subscription capped short of an errored end gets its boundary", async () => {
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0n, endGroup: 1n });
 	try {
-		for (const sequence of [0n, 1n, 2n, 3n]) sub.serve(sequence);
+		for (const key of [0n, 1n, 2n, 3n]) sub.serve(key);
 		sub.track.fail(new StreamError(StreamCode(71)));
 		for (;;) {
 			const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
@@ -2514,12 +2546,12 @@ test("blocked DROP responses stop opening later groups", async () => {
 		}
 		await write(chunk);
 	});
-	const append = (sequence: number) => {
-		const group = track.createGroup(BigInt(sequence));
-		group.writeFrame(textFrame("frame"));
+	const append = (key: number) => {
+		const group = track.createGroup(BigInt(key));
+		group.writeFrame(textFrame("frame", Timestamp.fromMillis(key)));
 		group.finish();
 	};
-	for (let sequence = 0; sequence < 8; sequence++) append(sequence);
+	for (let key = 0; key < 8; key++) append(key);
 	const serving = publisher.runSubscribe(
 		replaySubscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
 		server,
@@ -2528,7 +2560,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 		expect("start" in (await decodeSubscribeResponse(client.reader, Version.DRAFT_07))).toBe(true);
 		await waiting;
 		expect(opens).toHaveBeenCalledTimes(8);
-		for (let sequence = 8; sequence < 72; sequence++) append(sequence);
+		for (let key = 8; key < 72; key++) append(key);
 		// One executor turn drains pending signal notifications without advancing time.
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(opens).toHaveBeenCalledTimes(8);
@@ -2557,7 +2589,7 @@ test("blocked DROP responses stop opening later groups", async () => {
 });
 
 /** One group stream the publisher put on the wire. */
-type Served = { sequence: bigint; frameStart: number; payloads: string[]; previous?: bigint; end?: bigint };
+type Served = { key: bigint; frameStart: number; payloads: string[]; previous?: bigint; end?: bigint };
 
 /**
  * Serves `groups` (frame payloads per group, keyed by sequence) under `bounds`, and
@@ -2594,13 +2626,13 @@ async function serve(
 	});
 	void publisher.runSubscribe(msg, server);
 
-	for (const [sequence, frames] of Object.entries(groups)) {
-		const start = received[Number(sequence)];
+	for (const [key, frames] of Object.entries(groups)) {
+		const start = received[Number(key)];
 		const group =
 			start === undefined
-				? track.createGroup(BigInt(sequence))
-				: hooks.receiveGroup(track, { sequence: BigInt(sequence), start });
-		for (const frame of frames) group.writeFrame(textFrame(frame));
+				? track.createGroup(BigInt(key))
+				: hooks.receiveGroup(track, { start: BigInt(key), offset: start });
+		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(Number(key))));
 		group.finish();
 
 		// Let the publisher drain each group before the next, so the streams arrive in
@@ -2632,7 +2664,7 @@ async function serve(
 				await stream.u62();
 				payloads.push(new TextDecoder().decode(await stream.read(await stream.u53())));
 			}
-			served.push({ sequence: header.sequence, frameStart: header.frameStart, payloads });
+			served.push({ key: header.key, frameStart: header.frameStart, payloads });
 		}
 
 		let start: bigint | undefined;
@@ -2658,7 +2690,7 @@ async function serve(
 // GROUP header. Ignoring the requested start would relabel frame 0 as frame N.
 test("lite draft-06: a subscription starting mid-group skips the head", async () => {
 	const { served } = await serve({ 0: ["a", "b", "c", "d"] }, { startGroup: 0n, startFrame: 2 });
-	expect(served).toEqual([{ sequence: 0n, frameStart: 2, payloads: ["c", "d"] }]);
+	expect(served).toEqual([{ key: 0n, frameStart: 2, payloads: ["c", "d"] }]);
 });
 
 // A start at the group's final frame count is a valid, empty range: FIN, don't reset.
@@ -2666,13 +2698,13 @@ test("lite draft-06: a subscription starting mid-group skips the head", async ()
 test("lite draft-06: a subscription starting at the end of a group serves it empty", async () => {
 	const { start, served } = await serve({ 0: ["a", "b"] }, { startGroup: 0n, startFrame: 2 });
 	expect(start).toBe(0n);
-	expect(served).toEqual([{ sequence: 0n, frameStart: 2, payloads: [] }]);
+	expect(served).toEqual([{ key: 0n, frameStart: 2, payloads: [] }]);
 });
 
 // A received tail that ends where it starts is the same valid, empty range.
 test("lite draft-06: an empty received tail is served empty at its start", async () => {
 	const { served } = await serve({ 0: [] }, { startGroup: 0n, startFrame: 5 }, { 0: 5 });
-	expect(served).toEqual([{ sequence: 0n, frameStart: 5, payloads: [] }]);
+	expect(served).toEqual([{ key: 0n, frameStart: 5, payloads: [] }]);
 });
 
 // The end bound is inclusive.
@@ -2681,13 +2713,13 @@ test("lite draft-06: a subscription capped mid-group stops at the end frame", as
 		{ 0: ["a", "b", "c", "d"] },
 		{ startGroup: 0n, startFrame: 1, endGroup: 0n, endFrame: 2 },
 	);
-	expect(served).toEqual([{ sequence: 0n, frameStart: 1, payloads: ["b", "c"] }]);
+	expect(served).toEqual([{ key: 0n, frameStart: 1, payloads: ["b", "c"] }]);
 });
 
 // The default is the whole group, byte-identical to a draft with no such field.
 test("lite draft-06: an unbounded subscription serves the whole group", async () => {
 	const { served } = await serve({ 0: ["a", "b"] }, {});
-	expect(served).toEqual([{ sequence: 0n, frameStart: 0, payloads: ["a", "b"] }]);
+	expect(served).toEqual([{ key: 0n, frameStart: 0, payloads: ["a", "b"] }]);
 });
 
 // The frame bounds qualify their own group and nothing else. Without a span like this,
@@ -2698,10 +2730,10 @@ test("lite draft-06: frame bounds apply only to the groups they name", async () 
 		{ startGroup: 0n, startFrame: 2, endGroup: 2n, endFrame: 0 },
 	);
 	expect(served).toEqual([
-		{ sequence: 0n, frameStart: 2, payloads: ["a2"] },
+		{ key: 0n, frameStart: 2, payloads: ["a2"] },
 		// Between the bounds: served whole, from frame 0, with no cap.
-		{ sequence: 1n, frameStart: 0, payloads: ["b0", "b1", "b2"] },
-		{ sequence: 2n, frameStart: 0, payloads: ["c0"] },
+		{ key: 1n, frameStart: 0, payloads: ["b0", "b1", "b2"] },
+		{ key: 2n, frameStart: 0, payloads: ["c0"] },
 	]);
 });
 
@@ -2709,14 +2741,14 @@ test("lite draft-06: frame bounds apply only to the groups they name", async () 
 // SUBSCRIBE_START name a group below the start, which the draft forbids.
 test("lite draft-06: groups below the start group are not served", async () => {
 	const { start, served } = await serve({ 0: ["x"], 1: ["y"], 2: ["z"] }, { startGroup: 1n });
-	expect(served.map((s) => s.sequence)).toEqual([1n, 2n]);
+	expect(served.map((s) => s.key)).toEqual([1n, 2n]);
 	expect(start).toBe(1n);
 });
 
 // The end group is inclusive; anything past it is outside the subscription.
 test("lite draft-06: groups past the end group are not served", async () => {
 	const { served } = await serve({ 0: ["w"], 1: ["x"], 2: ["y"], 3: ["z"] }, { startGroup: 1n, endGroup: 2n });
-	expect(served.map((s) => s.sequence)).toEqual([1n, 2n]);
+	expect(served.map((s) => s.key)).toEqual([1n, 2n]);
 });
 
 // SUBSCRIBE_FINISH names the track's exclusive final boundary, not the capped delivered
@@ -3065,8 +3097,8 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 			server,
 		);
 
-		const write = (sequence: bigint, ms: number) => {
-			const group = track.createGroup(sequence);
+		const write = (key: bigint, ms: number) => {
+			const group = track.createGroup(key);
 			group.writeFrame({ payload: new TextEncoder().encode("frame"), timestamp: Timestamp.fromMillis(ms) });
 			group.finish();
 		};
@@ -3420,7 +3452,7 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 	}
 });
 
-test.each([0, 1])("lite draft-07 reports the cached largest position when starting at group %s", async (start) => {
+test.each([0, 1])("lite draft-07 reports the cached largest position when starting at time %s", async (start) => {
 	const startGroup = BigInt(start);
 	const version = Version.DRAFT_07;
 	const pair = createMockTransportPair(ALPN_07_WIP);
@@ -3447,7 +3479,8 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
-		expect(response.start.starts[0]).toBe(startGroup);
+		// Either time falls in group 0, the only group, which lite-07 starts at.
+		expect(response.start.starts[0]).toBe(0n);
 		// The group finished, so the answer says it ended.
 		expect(response.start.largest).toEqual({ position: { group: 0n, frame: 0 }, ended: true });
 	} finally {
@@ -3624,10 +3657,8 @@ test("lite-07 SYNCED survives an initial removal and continuous earlier-prefix c
 			events.push(event);
 			if (event.status === "synced") break;
 		}
-		// The route, its claims, and their floor, then SYNCED.
-		expect(events[0]).toMatchObject({ status: "routeStart" });
-		expect(events).toContainEqual(expect.objectContaining({ status: "active", suffix: "z/retained" }));
-		expect(events.at(-2)).toMatchObject({ status: "floor", id: 0n });
+		// The claim that outlived the removal, then SYNCED.
+		expect(events).toContainEqual(expect.objectContaining({ status: "start", suffix: "z/retained" }));
 		expect(events.at(-1)).toEqual({ status: "synced", prefix: 0n });
 		expect(events).not.toContainEqual(expect.objectContaining({ suffix: "z/removed" }));
 	} finally {
@@ -3822,8 +3853,6 @@ function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>,
 	publisher.request(false, [], [{ prefix, hidden: false }]);
 	const next = async () => decodeAnnounceBroadcast(await reader, version);
 	return {
-		node: wireOf(origin.consume()).own.node,
-		hop: wireOf(origin.consume()).own.hop,
 		publisher,
 		next,
 		// The next ANNOUNCE_REQUEST, as the session hands the publisher each one the peer sends.
@@ -3844,58 +3873,25 @@ function routedAnswer(origin: OriginProducer, grant?: Signal<Grant | undefined>,
 	};
 }
 
-test("a lite-07 answer carries this origin's claims under its own route", async () => {
+test("a lite-07 answer carries this origin's claims", async () => {
 	const origin = new OriginProducer();
 	const cam = publish(origin, Path.from("cam"));
-	const { node, hop, next, ok, close } = routedAnswer(origin);
-	// The origin's own route covers every path, along its own hop alone, at the top priority.
-	const offer = {
-		path: [{ node: hop, session: 0n }],
-		draining: false,
-		priority: 127,
-		metric: 0n,
-		downOnly: false,
-	};
+	const { next, ok, close } = routedAnswer(origin);
 	try {
 		await ok();
-		expect(await next()).toEqual({
-			status: "routeStart",
-			node,
-			prefix: 0n,
-			suffix: Path.empty(),
-			exact: false,
-			offer,
-		});
-		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
+		// An endpoint sends claims and never a route: each at no cost, at the top priority.
+		expect(await next()).toMatchObject({ status: "start", suffix: "cam", claim: ownClaim(0n) });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
 
-		// Each change is a batch closed by the next revision.
 		const mic = publish(origin, Path.from("mic"));
-		expect(await next()).toMatchObject({ status: "active", suffix: "mic", route: 0n });
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 1n });
+		expect(await next()).toMatchObject({ status: "start", suffix: "mic" });
 		cam.close();
-		expect(await next()).toEqual({ status: "endedId", id: 0n });
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 2n });
-
-		// The last claim withdrawn ends the route after its batch.
+		expect(await next()).toEqual({ status: "endedId", id: 0n, lost: false });
 		mic.close();
-		expect(await next()).toEqual({ status: "endedId", id: 1n });
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 3n });
-		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
+		expect(await next()).toEqual({ status: "endedId", id: 1n, lost: false });
 
-		// The next claim starts the route again at once, under the next Route ID: no echo waits.
 		const again = publish(origin, Path.from("again"));
-		expect(await next()).toEqual({
-			status: "routeStart",
-			node,
-			prefix: 0n,
-			suffix: Path.empty(),
-			exact: false,
-			offer,
-		});
-		expect(await next()).toMatchObject({ status: "active", suffix: "again", route: 1n });
-		expect(await next()).toMatchObject({ status: "floor", id: 1n });
+		expect(await next()).toMatchObject({ status: "start", suffix: "again" });
 		again.close();
 	} finally {
 		close();
@@ -3903,22 +3899,24 @@ test("a lite-07 answer carries this origin's claims under its own route", async 
 	}
 });
 
-// Another broadcast at the path, without an instance, is another instance: one batch under the
-// route, closed by its floor.
-test("a lite-07 republish restarts the claim", async () => {
+// Another broadcast at the path, without an instance, is another instance, so another claim:
+// started before the one it replaces ends, so the peer sees the broadcast restart.
+test("a lite-07 republish starts the next claim before ending the last", async () => {
 	const origin = new OriginProducer();
 	const old = publish(origin, Path.from("cam"));
 	const { next, ok, close } = routedAnswer(origin);
 	try {
 		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart" });
-		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		const first = await next();
+		expect(first).toMatchObject({ status: "start", suffix: "cam" });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
 
 		const republished = publish(origin, Path.from("cam"));
-		expect(await next()).toMatchObject({ status: "restart", id: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		const second = await next();
+		expect(second).toMatchObject({ status: "start", suffix: "cam" });
+		if (first.status !== "start" || second.status !== "start") throw new Error("two claims");
+		expect(second.instance).not.toBe(first.instance);
+		expect(await next()).toEqual({ status: "endedId", id: 0n, lost: false });
 		republished.close();
 	} finally {
 		old.close();
@@ -3927,35 +3925,30 @@ test("a lite-07 republish restarts the claim", async () => {
 	}
 });
 
-// The peer edits the prefixes it asks for one ANNOUNCE_REQUEST at a time. Each added prefix takes
-// the next Prefix ID, its route names it, and its paths are the session's, whatever the prefix.
+// The peer edits the prefixes it asks for. Each added prefix takes the next Prefix ID, and its
+// claims' paths are the session's, whatever the prefix.
 test("a lite-07 edit answers each added prefix under its own Prefix ID", async () => {
 	const origin = new OriginProducer();
 	const cam = publish(origin, Path.from("a/cam"));
 	const mic = publish(origin, Path.from("b/mic"));
-	const { node, next, ok, request, close } = routedAnswer(origin, undefined, Path.from("a"));
+	const { next, ok, request, close } = routedAnswer(origin, undefined, Path.from("a"));
 	try {
 		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart", node, prefix: 0n, suffix: "" });
-		expect(await next()).toMatchObject({ status: "active", suffix: "a/cam", route: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toMatchObject({ status: "start", suffix: "a/cam" });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
 
-		// Adding `b` leaves the route for `a` as it stands: nothing of it is sent again.
+		// Adding `b` leaves what `a` covers as it stands: nothing of it is sent again.
 		request([], [Path.from("b")]);
 		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart", node, prefix: 1n, suffix: "" });
-		expect(await next()).toMatchObject({ status: "active", suffix: "b/mic", route: 1n });
-		expect(await next()).toMatchObject({ status: "floor", id: 1n });
+		expect(await next()).toMatchObject({ status: "start", suffix: "b/mic" });
 		expect(await next()).toEqual({ status: "synced", prefix: 1n });
 
-		// Removing `a` ends its route with the answer, which names nothing: both ends drop it there.
+		// Removing `a` drops its claims with the answer, which names nothing: both ends drop them there.
 		request([0n], []);
 		await ok();
 		cam.close();
 		const late = publish(origin, Path.from("b/late"));
-		expect(await next()).toMatchObject({ status: "active", suffix: "b/late", route: 1n });
-		expect(await next()).toMatchObject({ status: "floor", id: 1n });
+		expect(await next()).toMatchObject({ status: "start", suffix: "b/late" });
 		late.close();
 	} finally {
 		cam.close();
@@ -3965,52 +3958,45 @@ test("a lite-07 edit answers each added prefix under its own Prefix ID", async (
 	}
 });
 
-// An edit swapping two prefixes for the one covering both re-sends nothing both sets cover: the
-// routes widen at the answer on both ends, each keeping its Route ID and its claims but the one
-// at its own old prefix, and the publisher sends only a floor for each.
-test("a lite-07 swap edit re-sends nothing both sets cover", async () => {
+// An edit swapping one prefix for another drops every claim within the one it removes, on both
+// ends, and tells again what the one it adds covers, under the next Announce IDs.
+test("a lite-07 swap edit tells again what the added prefix covers", async () => {
 	const origin = new OriginProducer();
 	const cam = publish(origin, Path.from("room/a/cam"));
 	const mic = publish(origin, Path.from("room/b/mic"));
 	const { next, ok, request, close } = routedAnswer(origin, undefined, Path.from("room/a"));
-	try {
-		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart", prefix: 0n });
-		expect(await next()).toMatchObject({ status: "active", suffix: "room/a/cam", route: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
-		expect(await next()).toEqual({ status: "synced", prefix: 0n });
-
-		// `room` covers `room/a`: the route widens, and only what it lacks follows the answer.
-		request([0n], [Path.from("room")]);
-		await ok();
-		const widened: AnnounceBroadcast[] = [];
+	const until = async () => {
+		const msgs: AnnounceBroadcast[] = [];
 		for (;;) {
 			const msg = await next();
-			widened.push(msg);
-			if (msg.status === "synced") break;
+			msgs.push(msg);
+			if (msg.status === "synced") return msgs;
 		}
-		expect(widened).toMatchObject([
-			{ status: "active", suffix: "room/b/mic", route: 0n },
-			{ status: "floor", id: 0n },
+	};
+	try {
+		await ok();
+		expect(await until()).toMatchObject([
+			{ status: "start", suffix: "room/a/cam" },
+			{ status: "synced", prefix: 0n },
+		]);
+
+		request([0n], [Path.from("room")]);
+		await ok();
+		expect(await until()).toMatchObject([
+			{ status: "start", suffix: "room/a/cam" },
+			{ status: "start", suffix: "room/b/mic" },
 			{ status: "synced", prefix: 1n },
 		]);
 
-		// Back to `room/a`: the route narrows under the next Route ID, its claim there carried
-		// over with what its floor certified, and the claim outside it dropped on both ends.
 		request([1n], [Path.from("room/a")]);
 		await ok();
-		const narrowed: AnnounceBroadcast[] = [];
-		for (;;) {
-			const msg = await next();
-			narrowed.push(msg);
-			if (msg.status === "synced") break;
-		}
-		expect(narrowed).toEqual([{ status: "synced", prefix: 2n }]);
-		// The carried claim kept its Announce ID, under the route's new one.
+		expect(await until()).toMatchObject([
+			{ status: "start", suffix: "room/a/cam" },
+			{ status: "synced", prefix: 2n },
+		]);
+		// The claim told last holds the fourth Announce ID.
 		cam.close();
-		expect(await next()).toEqual({ status: "endedId", id: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 1n });
-		expect(await next()).toEqual({ status: "routeEnd", id: 1n });
+		expect(await next()).toEqual({ status: "endedId", id: 3n, lost: false });
 	} finally {
 		cam.close();
 		mic.close();
@@ -4045,10 +4031,17 @@ test("a lite-07 edit the peer may not send is a violation", async () => {
 		nested.request([0n], [Path.from("a")]);
 		await nested.ok();
 		expect(await nested.next()).toEqual({ status: "synced", prefix: 1n });
-		// A second edit before the first is answered.
+		// A second edit before the first is answered, whole or the first part of one: a peer
+		// that never reads its answers leaves one edit here.
 		const early = await answer("a");
 		early.request([], [Path.from("b")]);
 		expect(() => early.request([], [Path.from("c")])).toThrow(ProtocolViolation);
+		expect(() => early.publisher.request(true, [], [])).toThrow(ProtocolViolation);
+		await early.ok();
+		expect(await early.next()).toEqual({ status: "synced", prefix: 1n });
+		early.request([1n], [Path.from("c")]);
+		await early.ok();
+		expect(await early.next()).toEqual({ status: "synced", prefix: 2n });
 		// A set past what one message holds.
 		const large = await answer("a");
 		const long = (i: number) => Path.from(`${String(i).padStart(4, "0")}/${"x".repeat(1000)}`);
@@ -4064,51 +4057,22 @@ test("a lite-07 edit the peer may not send is a violation", async () => {
 	}
 });
 
-// A rotated identity, which only an exhausted revision space forces, ends the route with every
-// claim under it, and starts the new one at once.
-test("a lite-07 rotated identity ends the route and starts the next", async () => {
-	const origin = new OriginProducer();
-	const cam = publish(origin, Path.from("cam"));
-	const { node, next, ok, close } = routedAnswer(origin);
-	const own = wireOf(origin.consume()).own;
-	try {
-		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart", node });
-		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
-		expect(await next()).toEqual({ status: "synced", prefix: 0n });
-
-		own.rotate();
-		expect(own.node).not.toBe(node);
-		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
-		expect(await next()).toMatchObject({ status: "routeStart", node: own.node });
-		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 1n });
-		expect(await next()).toMatchObject({ status: "floor", id: 1n });
-	} finally {
-		cam.close();
-		close();
-		origin.close();
-	}
-});
-
-// A floor certifies the requested prefix only while the grant covers all of it, so a grant
-// change that flips that re-floors the route even when it shows the same claims.
-test("a lite-07 grant change alone re-floors the route", async () => {
+// A claim our grant no longer lets us publish is lost to the peer, since its publisher never
+// ended it, and is told again once the grant covers it.
+test("a lite-07 grant change loses and tells again the claims it moves", async () => {
 	const origin = new OriginProducer();
 	const cam = publish(origin, Path.from("a/x"));
 	const grant = new Signal<Grant | undefined>(grantOf("a/x"));
 	const { next, ok, close } = routedAnswer(origin, grant);
 	try {
 		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart" });
-		expect(await next()).toMatchObject({ status: "active", suffix: "a/x", route: 0n });
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+		expect(await next()).toMatchObject({ status: "start", suffix: "a/x" });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
 
-		grant.set({ ...grantOf("a/x"), publish: new Path.Patterns([Path.Pattern.subtree(Path.empty())]) });
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: 0n });
+		grant.set(grantOf("b"));
+		expect(await next()).toEqual({ status: "endedId", id: 0n, lost: true });
 		grant.set(grantOf("a/x"));
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+		expect(await next()).toMatchObject({ status: "start", suffix: "a/x" });
 	} finally {
 		cam.close();
 		close();
@@ -4116,21 +4080,16 @@ test("a lite-07 grant change alone re-floors the route", async () => {
 	}
 });
 
-// A request prefix that fits the wire alone may overflow once joined to the handle's root:
-// nothing the scope allows lies there, so the floor certifies nothing rather than failing. The
-// claim at room covers more than was asked for, so it is presented at the requested prefix.
-test("a lite-07 request beyond the scope's path limits floors uncertified", async () => {
+// A claim covering more than was asked for is presented at the requested prefix, that many
+// segments above it.
+test("a lite-07 claim above the requested prefix is presented at it", async () => {
 	const origin = new OriginProducer();
-	const scoped = origin.scope(Path.from("tenant"), new Path.Patterns([Path.Pattern.parse("room/**")]));
-	// The claim at room covers the request, so the answer floors it.
-	const room = publish(scoped, Path.from("room"));
-	const prefix = Path.from(["room", ...Array.from({ length: Path.MAX_PARTS - 1 }, () => "a")].join("/"));
-	const { next, ok, close } = routedAnswer(scoped, undefined, prefix);
+	const room = publish(origin, Path.from("room"));
+	const prefix = Path.from("room/a/b");
+	const { next, ok, close } = routedAnswer(origin, undefined, prefix);
 	try {
 		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart" });
-		expect(await next()).toMatchObject({ status: "active", suffix: prefix, route: 0n });
-		expect(await next()).toEqual({ status: "floor", id: 0n, revision: undefined });
+		expect(await next()).toMatchObject({ status: "start", suffix: prefix, claim: ownClaim(0n, 2n) });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
 	} finally {
 		room.close();
@@ -4139,44 +4098,37 @@ test("a lite-07 request beyond the scope's path limits floors uncertified", asyn
 	}
 });
 
-// The publishing origin closing ends its claims and its route. The stream stays: only this side
-// leaving the session finishes it.
-test("a lite-07 answer ends its route once the publishing origin closes", async () => {
+// The publishing origin closing ends its claims. The stream stays: only this side leaving the
+// session finishes it.
+test("a lite-07 answer ends its claims once the publishing origin closes", async () => {
 	const origin = new OriginProducer();
 	const cam = publish(origin, Path.from("cam"));
 	const { next, ok, close } = routedAnswer(origin);
 	try {
 		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart" });
-		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toMatchObject({ status: "start", suffix: "cam" });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
 
 		origin.close();
-		expect(await next()).toEqual({ status: "endedId", id: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
-		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
+		expect(await next()).toEqual({ status: "endedId", id: 0n, lost: false });
 	} finally {
 		cam.close();
 		close();
 	}
 });
 
-// Leaving the session ends every route and then finishes the Announce Stream, which is how the
-// peer learns this side is going.
-test("a lite-07 answer ends its routes and finishes the stream as the session leaves", async () => {
+// Leaving the session finishes the Announce Stream, which ends everything the peer was sent and
+// is how it learns this side is going.
+test("a lite-07 answer finishes the stream as the session leaves", async () => {
 	const origin = new OriginProducer();
 	const cam = publish(origin, Path.from("cam"));
 	const { publisher, next, ok, finished, close } = routedAnswer(origin);
 	try {
 		await ok();
-		expect(await next()).toMatchObject({ status: "routeStart" });
-		expect(await next()).toMatchObject({ status: "active", suffix: "cam", route: 0n });
-		expect(await next()).toMatchObject({ status: "floor", id: 0n });
+		expect(await next()).toMatchObject({ status: "start", suffix: "cam" });
 		expect(await next()).toEqual({ status: "synced", prefix: 0n });
 
 		const drained = publisher.drain();
-		expect(await next()).toEqual({ status: "routeEnd", id: 0n });
 		expect(await finished()).toBe(true);
 		await drained;
 	} finally {
@@ -4186,29 +4138,25 @@ test("a lite-07 answer ends its routes and finishes the stream as the session le
 	}
 });
 
-test("a lite-07 request naming another origin node is unroutable", async () => {
-	const pair = createMockTransportPair(ALPN_07_WIP);
-	const origin = new OriginProducer();
-	const cam = publish(origin, Path.from("cam"));
-	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
-	const node = wireOf(origin.consume()).own.node;
-	const resets = spyOn(Writer.prototype, "reset");
-	const stream = () =>
-		new Stream({
-			version: Version.DRAFT_07,
-			readable: new ReadableStream<Uint8Array>(),
-			writable: new WritableStream<Uint8Array>(),
-		});
-	try {
-		await publisher.runTrackInfo(new TrackMessage(Path.from("cam"), "video", undefined, node + 1n), stream());
-		const codes = resets.mock.calls.map(([reason]) => toStreamCode(reason as Error));
-		expect(codes).toContain(StreamCode.Unroutable);
-	} finally {
-		resets.mockRestore();
-		publisher.close();
-		cam.close();
-		origin.close();
-		pair.client.close();
-		pair.server.close();
-	}
+// A request names the forwarding node that should serve it, or none. An endpoint forwards
+// nothing, so it serves the request itself whichever the request names.
+test("a lite-07 request naming a node is served here", async () => {
+	const version = Version.DRAFT_07;
+	const named = await Writer.collect(version, async (w) => {
+		await w.u53(3);
+		await w.string("cam");
+		// No instance pinned, then Node ID 7 with its start.
+		await w.u53(0);
+		await w.bool(false);
+		await w.u62(7n);
+		await w.u62(9n);
+		await w.string("video");
+	});
+	// The message's own size prefix, then its body.
+	const sized = await Writer.collect(version, async (w) => {
+		await w.u53(named.byteLength - 1);
+		await w.write(named.subarray(1));
+	});
+	const msg = await TrackMessage.decode(new Reader(undefined, sized, version), version);
+	expect(msg).toMatchObject({ broadcast: "cam", track: "video", instance: undefined });
 });

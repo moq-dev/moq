@@ -13,7 +13,7 @@ The classification below covers the numeric wire fields in `src/lite` and
 | Fields | Representation and reason |
 | --- | --- |
 | Subscribe/request IDs, joining request IDs, track aliases, FETCH headers, GOAWAY request ID | `bigint`: opaque peer-chosen identities, including map keys and parity checks. |
-| Group sequences, absolute anchors, wanted groups, range starts/ends, drops, relative joining offsets | `bigint`: the entire group namespace must be addressable. |
+| Group starts, time anchors, wanted groups, range starts/ends, drops, relative joining offsets | `bigint`: the entire group namespace must be addressable. |
 | Relative anchors | `bigint`: counts back through that same namespace; neither the count nor the latest group is bounded by JS array size. |
 | IETF subgroup IDs, including explicit FETCH subgroups | `bigint` in the codec. The model supports only subgroup zero and refuses the others without narrowing their identity. |
 | IETF datagram Object ID | `bigint` in the codec. The model delivers only Object 0, dropping all others without narrowing their identity. |

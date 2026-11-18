@@ -35,11 +35,10 @@ removal, a rename, or a wire, catalog, or format change that is free until
   of [cache-aware multicast](/quest/m2/multicast/README.md), whose
   [switch](/quest/m2/multicast/switch.md) also settles the public route API
   and retires the moq-cluster draft.
-- **moq-net API.** [Socket endpoints](/quest/m2/sockets/README.md) leave for Kixel, and the
+- **moq-net API.** [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
   item re-checked for a downstream caller first.
-- **Relay and transports.** [Congestion names](/quest/m2/congestion-names.md).
 - **Auth and crypto.** End-to-end encryption is its own unpublished crate again
   ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
@@ -47,12 +46,10 @@ removal, a rename, or a wire, catalog, or format change that is free until
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
-- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
-  [the hole wait](/quest/m2/delay-hole-wait.md),
-  [a chained WHEP pull's shutdown](/quest/m2/whep-chain-shutdown.md), and
+- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md) and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
-- **Bindings.** [The C API as `libmoq`](/quest/m2/libmoq-name.md), reversing 2026-10-25.
+- **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
   [the exporter switch](/quest/m3/ffi-exporter.md).
 
@@ -88,7 +85,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
 - ✅ Left m2, so the cut stops waiting on them: the
   [probe epic](/quest/m3/probe/README.md) to m3 and the routes
-  [browser proof](/quest/m5/routes-browser-proof.md) to m5 (each waits on a
+  browser proof to m5, since deleted with the route key (each waits on a
   browser release and breaks nothing); the docs-only and additive quests and
   outbound federation to [m1](/quest/m1/README.md); and
   [unbounded groups](/quest/m3/unbounded-groups/README.md) to m3, whose byte

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { StreamCode, Stream as StreamError } from "../error.ts";
 import { Cursor, concat, encodeVarint, Reader, Writer } from "../stream.ts";
-import { keyOf, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { FetchHeader } from "./fetch.ts";
 import { decodeGroupGap, encodeGroupGap, Frame, Group, objectTime } from "./object.ts";
 import { Version } from "./version.ts";
@@ -53,7 +53,7 @@ test("a received object's time is its group's key", () => {
 	// A key past what a Timestamp holds at a scale refuses the group; unscaled, any key is fine.
 	const huge = BigInt(Number.MAX_SAFE_INTEGER) + 1n;
 	expect(() => objectTime(Timescale.MILLI, huge)).toThrow(RangeError);
-	expect(keyOf(objectTime(undefined, huge))).toBe(huge);
+	expect(objectTime(undefined, huge).key).toBe(huge);
 });
 
 test("an object's header goes out in one write, ahead of its payload", async () => {
