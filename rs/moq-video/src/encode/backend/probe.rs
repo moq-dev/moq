@@ -6,6 +6,7 @@
 //!
 //! It also holds each frame back by one, like the Media Foundation MFT, so a
 //! drain that loses the tail shows up as a missing frame rather than passing.
+//! Every bitrate it accepts is logged too, so a test can follow rate control.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -40,6 +41,12 @@ static BITRATES: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 /// A bitrate the probe refuses once, standing in for a transient codec failure.
 static REFUSE: Mutex<Option<u64>> = Mutex::new(None);
 
+/// How many of the next opens fail, standing in for a codec that is busy or gone.
+static FAIL_OPENS: Mutex<u32> = Mutex::new(0);
+
+/// Whether the next flush fails, standing in for a codec that loses its tail.
+static LOSE_TAIL: Mutex<bool> = Mutex::new(false);
+
 /// Serializes the tests that read [`LOG`], which is process-wide. nextest gives
 /// each test its own process, but `cargo test` does not, and a shared log that
 /// only holds up under one runner is a trap for whoever adds the next test.
@@ -51,6 +58,8 @@ pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 	let _ = take();
 	BITRATES.lock().unwrap().clear();
 	REFUSE.lock().unwrap().take();
+	*FAIL_OPENS.lock().unwrap() = 0;
+	*LOSE_TAIL.lock().unwrap() = false;
 	guard
 }
 
@@ -76,15 +85,34 @@ pub(crate) fn take() -> Vec<Event> {
 }
 
 /// Empty the accepted bitrates and hand them back.
-#[cfg(feature = "capture")]
 pub(crate) fn bitrates() -> Vec<u64> {
 	std::mem::take(&mut BITRATES.lock().unwrap())
 }
 
 /// Fail the first `set_bitrate` asking for `bitrate`, then accept it again.
-#[cfg(feature = "capture")]
 pub(crate) fn refuse_once(bitrate: u64) {
 	*REFUSE.lock().unwrap() = Some(bitrate);
+}
+
+/// Fail the next `count` opens.
+pub(crate) fn fail_opens(count: u32) {
+	*FAIL_OPENS.lock().unwrap() = count;
+}
+
+/// Record an open, failing it while [`fail_opens`] has any left.
+fn opened() -> Result<(), Error> {
+	record("open");
+	let mut failing = FAIL_OPENS.lock().unwrap();
+	if *failing == 0 {
+		return Ok(());
+	}
+	*failing -= 1;
+	Err(Error::Unsupported("probe open refused".into()))
+}
+
+/// Fail the next flush, losing the frame held back.
+pub(crate) fn lose_tail() {
+	*LOSE_TAIL.lock().unwrap() = true;
 }
 
 pub(crate) struct Probe {
@@ -96,7 +124,7 @@ pub(crate) struct Probe {
 
 impl Probe {
 	pub(crate) fn open(_config: &Config) -> Result<Box<dyn Backend>, Error> {
-		record("open");
+		opened()?;
 		Ok(Box::new(Self {
 			held: None,
 			ready: VecDeque::new(),
@@ -105,7 +133,7 @@ impl Probe {
 	}
 
 	pub(crate) fn open_no_cut(_config: &Config) -> Result<Box<dyn Backend>, Error> {
-		record("open");
+		opened()?;
 		Ok(Box::new(Self {
 			held: None,
 			ready: VecDeque::new(),
@@ -125,8 +153,12 @@ impl Backend for Probe {
 			record("cut");
 		}
 		// The payload is the frame's timestamp, so a test can tell which frame a
-		// packet came from independently of what it's stamped with.
-		let payload = bytes::Bytes::from(frame.timestamp.as_micros()?.to_string());
+		// packet came from independently of what it's stamped with. It rides in an
+		// H.264 filler NAL, which a publisher parses and never emits as a frame, so a
+		// test can publish what the probe encodes without a real codec.
+		let mut payload = vec![0, 0, 0, 1, 0x0c];
+		payload.extend_from_slice(frame.timestamp.as_micros()?.to_string().as_bytes());
+		let payload = bytes::Bytes::from(payload);
 		let previous = self.held.replace(Encoded::new(payload, frame.timestamp, cut));
 		self.ready.extend(previous);
 		Ok(())
@@ -138,6 +170,9 @@ impl Backend for Probe {
 
 	fn flush(&mut self) -> Result<(), Error> {
 		record("flush");
+		if std::mem::take(&mut *LOSE_TAIL.lock().unwrap()) {
+			return Err(Error::codec(anyhow::anyhow!("the probe lost its tail")));
+		}
 		self.ready.extend(self.held.take());
 		Ok(())
 	}

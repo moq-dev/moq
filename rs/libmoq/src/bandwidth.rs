@@ -10,7 +10,7 @@ use crate::{Error, Id, NonZeroSlab, State, ffi};
 #[derive(Default)]
 pub(crate) struct Bandwidth {
 	allocators: NonZeroSlab<moq_net::bandwidth::Allocator>,
-	reservations: NonZeroSlab<Arc<moq_net::bandwidth::Reservation>>,
+	reservations: NonZeroSlab<Claim>,
 	consumers: NonZeroSlab<Arc<Consumer>>,
 	viewers: NonZeroSlab<moq_net::bandwidth::Viewers>,
 	controls: NonZeroSlab<RateControl>,
@@ -33,6 +33,15 @@ impl RateControl {
 	}
 }
 
+/// Who keeps a reservation handle's claim alive.
+enum Claim {
+	/// From [`moq_allocator_reserve`]: the handle is the claim.
+	Owned(Arc<moq_net::bandwidth::Reservation>),
+	/// A producer's own claim. Weak, so a handle the caller keeps cannot hold the room
+	/// after the producer finishes or moves to another track.
+	Borrowed(std::sync::Weak<moq_net::bandwidth::Reservation>),
+}
+
 impl Bandwidth {
 	pub fn insert(&mut self, allocator: moq_net::bandwidth::Allocator) -> Result<Id, Error> {
 		self.allocators.insert(allocator)
@@ -50,15 +59,20 @@ impl Bandwidth {
 	pub fn reserve(&mut self, allocator: Id, demand: &moq_net::track::Demand, max_bps: u64) -> Result<Id, Error> {
 		let allocator = self.allocator(allocator)?;
 		let reservation = allocator.reserve(demand, moq_net::bandwidth::Rate::from_bps(max_bps));
-		self.reservations.insert(Arc::new(reservation))
+		self.reservations.insert(Claim::Owned(Arc::new(reservation)))
 	}
 
-	pub fn hold(&mut self, reservation: Arc<moq_net::bandwidth::Reservation>) -> Result<Id, Error> {
-		self.reservations.insert(reservation)
+	/// A handle viewing a claim `owner` holds, released when the owner drops it.
+	pub fn borrow(&mut self, owner: &Arc<moq_net::bandwidth::Reservation>) -> Result<Id, Error> {
+		self.reservations.insert(Claim::Borrowed(Arc::downgrade(owner)))
 	}
 
-	pub fn reservation(&self, id: Id) -> Result<Arc<moq_net::bandwidth::Reservation>, Error> {
-		self.reservations.get(id).cloned().ok_or(Error::NotFound)
+	/// The handle's claim, or `None` once the producer that owned it released it.
+	pub fn reservation(&self, id: Id) -> Result<Option<Arc<moq_net::bandwidth::Reservation>>, Error> {
+		Ok(match self.reservations.get(id).ok_or(Error::NotFound)? {
+			Claim::Owned(inner) => Some(inner.clone()),
+			Claim::Borrowed(inner) => inner.upgrade(),
+		})
 	}
 
 	pub fn reservation_close(&mut self, id: Id) -> Result<(), Error> {
@@ -115,6 +129,7 @@ pub extern "C" fn moq_allocator_reserve(allocator: u32, track: u32, max_bps: u64
 /// `present` is false when there is no estimate: hold the current rate. `present`
 /// true and `bps` 0 is a real zero rate. While nothing subscribes to the track,
 /// `bps` is the slice it would get back, without claiming it from the others.
+/// `present` is false too once the producer that owns this claim releases it.
 ///
 /// # Safety
 /// - `bps` and `present` must be valid pointers.
@@ -124,7 +139,11 @@ pub unsafe extern "C" fn moq_reservation_rate(reservation: u32, bps: *mut u64, p
 		let reservation = ffi::parse_id(reservation)?;
 		let bps = unsafe { bps.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
-		match State::lock().bandwidth.reservation(reservation)?.rate() {
+		match State::lock()
+			.bandwidth
+			.reservation(reservation)?
+			.and_then(|inner| inner.rate())
+		{
 			Some(rate) => {
 				*bps = rate.as_bps();
 				*present = true;
@@ -138,15 +157,15 @@ pub unsafe extern "C" fn moq_reservation_rate(reservation: u32, bps: *mut u64, p
 	})
 }
 
-/// Change the ceiling, keeping the same claim.
+/// Change the ceiling, keeping the same claim. Does nothing once the producer that
+/// owns this claim releases it.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_reservation_update(reservation: u32, max_bps: u64) -> i32 {
 	ffi::enter(move || {
 		let reservation = ffi::parse_id(reservation)?;
-		State::lock()
-			.bandwidth
-			.reservation(reservation)?
-			.update(moq_net::bandwidth::Rate::from_bps(max_bps));
+		if let Some(inner) = State::lock().bandwidth.reservation(reservation)? {
+			inner.update(moq_net::bandwidth::Rate::from_bps(max_bps));
+		}
 		Ok(())
 	})
 }
@@ -154,7 +173,8 @@ pub extern "C" fn moq_reservation_update(reservation: u32, max_bps: u64) -> i32 
 /// Release a reservation, handing its share back to siblings.
 ///
 /// Closing an accessor returned by a video or audio producer does not release
-/// the encoder's claim; that lasts until the producer is finished.
+/// the encoder's claim, and keeping it open does not hold it: the claim lasts
+/// until the producer is finished.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_reservation_close(reservation: u32) -> i32 {
 	ffi::enter(move || {
@@ -472,7 +492,8 @@ impl From<moq_mux::rate::Target> for moq_rate_target {
 
 /// Create a rate control following this reservation, starting at the policy's maximum bitrate.
 ///
-/// A zero `max_bps` is rejected with `MOQ_ERROR_INVALID_CONFIG`.
+/// A zero `max_bps` is rejected with `MOQ_ERROR_INVALID_CONFIG`, and a claim its producer
+/// already released with `MOQ_ERROR_NOT_FOUND`.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_rate_control_create(reservation: u32, policy: moq_rate_policy) -> i32 {
 	ffi::enter(move || {
@@ -484,7 +505,11 @@ pub extern "C" fn moq_rate_control_create(reservation: u32, policy: moq_rate_pol
 			.has_lower
 			.then(|| moq_net::bandwidth::Rate::from_bps(policy.lower_bps));
 		let mut state = State::lock();
-		let grant = state.bandwidth.reservation(ffi::parse_id(reservation)?)?.consume();
+		let grant = state
+			.bandwidth
+			.reservation(ffi::parse_id(reservation)?)?
+			.ok_or(Error::NotFound)?
+			.consume();
 		state.bandwidth.controls.insert(RateControl {
 			inner: moq_mux::rate::Control::new(native),
 			grant,

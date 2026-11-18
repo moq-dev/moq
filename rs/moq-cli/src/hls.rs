@@ -539,7 +539,7 @@ mod test {
 		// The source restarts at zero under the same init segment.
 		std::fs::write(&playlist, format!("{live}#EXT-X-DISCONTINUITY\n#EXTINF:1,\n1.m4s\n")).unwrap();
 		let err = importing.await.unwrap().expect_err("a reset fails the import");
-		assert!(format!("{err:#}").contains("rewound"), "{err:#}");
+		assert!(format!("{err:#}").contains("failed to decode"), "{err:#}");
 
 		for track in [&mut media, &mut listing] {
 			let ended = ended_with(track).await;

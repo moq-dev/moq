@@ -46,8 +46,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
-- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md) and
-  [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
+- **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
   The bindings break twice by decision: at 0.22, and again at
