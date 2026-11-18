@@ -1537,9 +1537,67 @@ class Reader implements ResumeSource {
 		if (serving) hooks.askSubscriber(serving.sub, ask);
 	}
 
-	refresh(signal?: AbortSignal): Promise<void> {
-		this.sync();
-		return this.#serving()?.sub.refresh({ signal }) ?? Promise.resolve();
+	// A request outlives the copy it asked: once that copy closes while the logical track is open,
+	// it asks the copy the route serves next, so only the logical track closing rejects it.
+	// Mirrors the Rust `Failover`.
+	async refresh(signal?: AbortSignal): Promise<void> {
+		// How the copy last asked closed: the track's end once no route serves another.
+		let failed: unknown;
+		for (let asked: number | undefined; ; ) {
+			this.sync();
+			const closed = this.#shell.closed.peek();
+			if (closed !== undefined) throw closed ?? closedBeforeSent(this.route.name);
+			signal?.throwIfAborted();
+			const generation = this.route.generation;
+			if (generation !== asked) {
+				asked = generation;
+				const serving = this.#serving();
+				if (serving) {
+					try {
+						return await this.#request(serving, signal);
+					} catch (err) {
+						if (signal?.aborted) throw err;
+						failed = err;
+						continue;
+					}
+				}
+				// Nothing served when it was called: the next copy's join asks.
+				if (failed === undefined) return;
+			} else if (this.route.concluded || this.route.refusal) {
+				throw failed;
+			}
+			await new Promise<void>((resolve) => {
+				const disposes: Dispose[] = [];
+				const wake = () => {
+					for (const dispose of disposes) dispose();
+					signal?.removeEventListener("abort", wake);
+					resolve();
+				};
+				disposes.push(this.route.changed.changed(wake), this.#shell.closed.changed(wake));
+				signal?.addEventListener("abort", wake, { once: true });
+			});
+		}
+	}
+
+	// Ask `serving` for a refresh, withdrawing it once the logical track closes.
+	async #request(serving: Copy, signal?: AbortSignal): Promise<void> {
+		const asked = new AbortController();
+		const abort = () => asked.abort(signal?.reason);
+		signal?.addEventListener("abort", abort, { once: true });
+		let dispose: Dispose | undefined;
+		const ended = new Promise<never>((_, reject) => {
+			dispose = this.#shell.closed.changed((closed) => {
+				if (closed === undefined) return;
+				reject(closed ?? closedBeforeSent(this.route.name));
+				asked.abort();
+			});
+		});
+		try {
+			return await Promise.race([serving.sub.refresh({ signal: asked.signal }), ended]);
+		} finally {
+			signal?.removeEventListener("abort", abort);
+			dispose?.();
+		}
 	}
 
 	fork(options?: track.Subscription): track.Subscriber {
@@ -1644,6 +1702,10 @@ async function until(change: PromiseLike<unknown>, signal?: AbortSignal): Promis
 		signal.removeEventListener("abort", onAbort);
 	}
 	signal.throwIfAborted();
+}
+
+function closedBeforeSent(name: string): Error {
+	return new StreamError(StreamCode.Cancel, { message: `track ${name} closed before the refresh was sent` });
 }
 
 function dropped(): Error {

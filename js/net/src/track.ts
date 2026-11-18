@@ -5276,7 +5276,8 @@ export class Subscriber {
 	 * once when there is nothing to send: a track that does not refresh, a ratio the newest group
 	 * is under, a track with no group yet (whose first is already asked for), or a request
 	 * already sent. It also resolves when a newer group lands first, which answers it. It rejects
-	 * if the track closes before then. A resumed reader asks the copy serving it.
+	 * if the track closes before then. A resumed reader asks the copy serving it, and asks the next
+	 * one if that copy closes first.
 	 *
 	 * The answer arrives like any other group: the first group this subscriber receives that
 	 * starts after the newest held when it was called. A group already on its way when the

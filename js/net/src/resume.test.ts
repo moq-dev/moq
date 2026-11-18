@@ -164,6 +164,58 @@ test("returning to a route reuses its subscription and held group", async () => 
 	}
 });
 
+// Mirrors `a_front_refresh_moves_to_the_next_copy` in rs/moq-net/src/model/track.rs: a pending
+// refresh outlives the copy it asked, and only the logical track closing rejects it.
+test("a pending refresh moves to the next copy when the one it asked closes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const tracks = sources.map((source) => {
+		const producer = source.createTrack("seq", { maxAge: null, refresh: { interval: Duration.secs(5) } });
+		const group = producer.createGroup(0n);
+		group.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.unscaled(group.start) });
+		group.finish();
+		return producer;
+	});
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe();
+	try {
+		await clock.advance(Duration.ZERO);
+		const refresh = sub.refresh();
+		expect(await isPending(refresh)).toBe(true);
+		tracks[0].abort(new StreamError(StreamCode.SessionClosed));
+		expect(await isPending(refresh)).toBe(true);
+
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		expect(await isPending(refresh)).toBe(true);
+		await clock.advance(Duration.secs(5));
+		expect(tracks[1].demand().refresh.peek()).toBe(true);
+		await refresh;
+
+		const group = tracks[1].createGroup(1n);
+		group.writeFrame({ payload: enc.encode("1"), timestamp: Timestamp.unscaled(group.start) });
+		group.finish();
+		drain(sub);
+		const closed = sub.refresh().catch((err: unknown) => err);
+		expect(await isPending(closed)).toBe(true);
+		// The serving route loses the track: the read ends it, and the refresh with it.
+		tracks[1].abort(new StreamError(StreamCode.Internal));
+		const ended = await sub.recvGroup().catch((err: unknown) => err);
+		expect(ended).toBeInstanceOf(StreamError);
+		expect(await closed).toBe(ended);
+		expect(await sub.refresh().catch((err: unknown) => err)).toBe(ended);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 /**
  * A returning route resumes where a fresh copy would, and what it buffered while replaced below
  * what another route already handed out comes through the backfill: the late group once.
