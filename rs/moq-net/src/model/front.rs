@@ -563,11 +563,21 @@ impl Front {
 				track.ended = true;
 				actions.push(Action::Finish { track: name });
 			}
-			// Died mid-serve after delivering: normal failover, re-splice from
-			// the serving source at the first missing group.
-			Err(_) if delivered => {
+			// Died mid-serve after delivering from a broadcast published here: the
+			// source is that one broadcast, so re-splice from it at the first missing
+			// group, as for a track its publisher re-created.
+			Err(_) if delivered && self.identity == Identity::Local => {
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
+			}
+			// Died mid-serve after delivering from a peer. Asking the source again
+			// could reach another broadcast under the same path (the peer's front may
+			// have ended and a fresh one taken over), so the track ends with the error
+			// instead of re-splicing, and a returning reader is not re-spliced either.
+			Err(err) if delivered => {
+				track.state = TrackState::Idle;
+				track.ended = true;
+				actions.push(Action::Abort { track: name, err });
 			}
 			// Died before producing anything: a refusal.
 			Err(err) => self.refuse(name, source, closing, err, actions),
@@ -1031,9 +1041,33 @@ mod tests {
 		assert!(front.tracks[&name("audio")].refused.is_empty());
 	}
 
+	/// A peer's copy dying after delivering ends the track: asking the peer again could
+	/// reach another broadcast under the same path. A returning reader is not
+	/// re-spliced either.
 	#[test]
-	fn a_copy_dying_after_delivering_resplices() {
+	fn a_peer_copy_dying_after_delivering_ends_the_track() {
 		let mut front = serving(remote(1, 10), 100);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Dropped),
+				delivered: true,
+			}),
+			&[Action::Abort {
+				track: name("video"),
+				err: Error::Dropped,
+			}],
+		);
+		assert_actions(front.step(Event::Used { track: name("video") }), &[]);
+	}
+
+	/// A local copy dying after delivering re-splices: the source is the one broadcast
+	/// published here, as when its publisher re-creates the track.
+	#[test]
+	fn a_local_copy_dying_after_delivering_resplices() {
+		let mut front = serving(local(1), 100);
 		assert_actions(
 			front.step(Event::TrackEnded {
 				track: name("video"),
