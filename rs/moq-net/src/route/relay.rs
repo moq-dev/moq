@@ -1752,6 +1752,17 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		if withdraws && self.sent_to.contains_key(&origin) {
 			self.advertise_stale(Some(origin));
 		}
+		// A neighbour `origin`'s route no longer goes to, such as an upstream once the route
+		// turned marked, loses it before it hears another claim of it. An end brings no
+		// claims, so unlike a start it can go now.
+		if self.stale.contains(&origin) {
+			let ended: Vec<N> = (self.sent_to.get(&origin).into_iter().flatten().copied())
+				.filter(|&peer| self.offer_for(origin, peer).is_none())
+				.collect();
+			for peer in ended {
+				self.advertise_to(origin, peer);
+			}
+		}
 		let own = self.is_self(origin);
 		let known = self.known.entry(origin).or_default();
 		let floor = known.floor;
@@ -3860,6 +3871,98 @@ mod tests {
 				|msg| matches!(msg, Msg::Claims { origin, changes, .. } if *origin == node(20) && !changes.is_empty())
 			),
 			"the new route came without its claim: {out:?}"
+		);
+	}
+
+	/// A route that turns marked ends at an upstream before the upstream hears another
+	/// claim of it.
+	#[test]
+	fn a_route_turning_marked_ends_at_an_upstream_before_its_claims() {
+		let mut router = relay(1);
+		let upstream = |router: &mut Relay, peer: usize| {
+			router
+				.connect(
+					peer,
+					Port {
+						upstream: true,
+						..port(Role::Routing(node(peer as Id)))
+					},
+				)
+				.unwrap();
+			router.recv(peer, Msg::Edited).unwrap();
+			router
+				.edit(
+					peer,
+					Edit {
+						remove: Vec::new(),
+						add: vec![p(ROOT)],
+					},
+				)
+				.unwrap();
+		};
+		open(&mut router, 3, Role::Routing(node(3)));
+		upstream(&mut router, 4);
+		upstream(&mut router, 6);
+		router.drain();
+
+		let route = |via: Id| Msg::Route {
+			origin: node(9),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(9),
+						session: 0,
+					},
+					Hop {
+						node: node(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		let claims = |broadcast: (Path, u64), floor| Msg::Claims {
+			origin: node(9),
+			changes: vec![(broadcast, live(0))],
+			floor,
+		};
+		router.recv(3, route(3)).unwrap();
+		router.recv(4, route(4)).unwrap();
+		router.recv(3, claims((p("live"), 7), 1)).unwrap();
+		let out = router.drain();
+		assert!(
+			(out.iter()).any(|(to, msg)| *to == 6 && matches!(msg, Msg::Route { offer: Some(_), .. })),
+			"the unmarked route reaches the other upstream: {out:?}"
+		);
+
+		router
+			.recv(
+				3,
+				Msg::Route {
+					origin: node(9),
+					offer: None,
+				},
+			)
+			.unwrap();
+		router.recv(4, claims((p("more"), 7), 2)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 6)
+			.map(|(_, msg)| msg)
+			.collect();
+		let ended = out
+			.iter()
+			.position(|msg| matches!(msg, Msg::Route { origin, offer: None } if *origin == node(9)));
+		let told = out.iter().position(
+			|msg| matches!(msg, Msg::Claims { origin, changes, .. } if *origin == node(9) && !changes.is_empty()),
+		);
+		assert!(ended.is_some(), "the marked route stays at the upstream: {out:?}");
+		assert!(
+			told.is_none_or(|told| told > ended.unwrap()),
+			"told a claim first: {out:?}"
 		);
 	}
 

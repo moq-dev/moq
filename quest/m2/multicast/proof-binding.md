@@ -11,20 +11,26 @@ Found 2026-11-16 by [the proof](https://github.com/moq-dev/moq/pull/8904)
 against the prototype; proposed by
 [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053).
 
-- Order equal routes by the neighbour's Node ID, or give the proof's binding
-  the key the router orders them by: the proof orders them by the neighbour,
-  the prototype by its simulation's node index, and `route::relay::Router` by
-  its neighbour key.
+- Order equal routes the same way in the proof and the router: the proof
+  orders them by the neighbour, the prototype by its simulation's node index,
+  and `route::relay::Router::reselect` by rank (drain, priority, cost), then
+  an unmarked route first, then the next hop in use, then path length, then
+  the sender's Node ID, then the neighbour key. Ordering by the neighbour's
+  Node ID alone matches only if the router adopts it; otherwise give the
+  binding the router's whole key.
 - Record the chain as the claim instance's path: the announcing relay first,
   then each grant's exporter and adopter, so a node refuses a claim naming it
   in the role it would take. The prototype and the router record only the
   adopters, so they refuse fewer echoes than the proof assumes. This changes
   what a lite-07 claim's Path carries, so it lands before the lite-07 cut or
   is dropped.
-- A claim the router adopts across a marked link sits under a second Node ID,
-  the node's Relay with its Start plus 1, at cost 0 and a two-hop Path
-  ([moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053)). Model it,
-  or say why the proof's single identity per node covers it.
+- A claim the router adopts across a marked link, or one carrying the
+  `Marked` flag, is announced under a second Node ID, the node's Relay with
+  its Start plus 1 ([moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053)).
+  The route to that identity is the node's own: marked, at cost 0, with the
+  Path `[marked identity, node]`. The claim keeps its own cost, the giver's
+  claim cost plus the adopting link's, and no Path of its own. Model both, or
+  say why the proof's single identity per node covers them.
 - Move the binding to the router: point `route/tests/algebra.rs` and
   `route/tests/sticky.rs` at the router's own functions for a node's own
   route, sending a route on, taking one in, ordering candidates, and listing
