@@ -412,7 +412,8 @@ describe.each([Lite.ALPN_07_WIP])("%s", (protocol) => {
 		issued[0]?.revoke(SessionCode.Unauthorized, "expired");
 		const second = await nextRoute(announced);
 		expect(second?.prefix).toBe(Path.from("a/x"));
-		expect(second?.kind).toBe("end");
+		// Its publisher never ended it: the grant stopped covering it, so it is lost.
+		expect(second?.kind).toBe("offline");
 
 		// The union is empty but still a grant, and a new token restores it.
 		const empty = await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size === 0);

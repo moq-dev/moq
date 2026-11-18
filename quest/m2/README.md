@@ -46,8 +46,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   (the `sync` section, a version per entry, no video `warmup`, `m2ts` under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
-- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md),
-  [the hole wait](/quest/m2/delay-hole-wait.md), and
+- **Native media and gateways.** [The video producer](/quest/m2/video-producer.md) and
   [upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
@@ -86,7 +85,7 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
 
 - ✅ Left m2, so the cut stops waiting on them: the
   [probe epic](/quest/m3/probe/README.md) to m3 and the routes
-  [browser proof](/quest/m5/routes-browser-proof.md) to m5 (each waits on a
+  browser proof to m5, since deleted with the route key (each waits on a
   browser release and breaks nothing); the docs-only and additive quests and
   outbound federation to [m1](/quest/m1/README.md); and
   [unbounded groups](/quest/m3/unbounded-groups/README.md) to m3, whose byte

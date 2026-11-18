@@ -7,8 +7,7 @@
 //! broadcasts, then applies one external change at a time: a link flap, a relay
 //! restart, a publisher restarting under a fresh identity, a client joining or
 //! leaving, or a broadcast published or withdrawn. Once the mesh goes quiet, every
-//! relay and client must have followed the rules the `verify-route` skill states on
-//! what it showed, and must now show exactly what it can reach. The announce
+//! relay and client must have followed the route rules on what it showed, and must now show exactly what it can reach. The announce
 //! messages each change cost are counted against [`budget`].
 //!
 //! `MOQ_ROUTE_SEED` and `MOQ_ROUTE_CASES` pick the cases; a failure prints the seed

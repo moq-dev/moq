@@ -586,14 +586,7 @@ impl Subscriber {
 		run: &mut PrefixRun,
 	) -> Result<(), Error> {
 		match announce {
-			lite::AnnounceBroadcast::Active {
-				suffix,
-				instance,
-				epoch,
-				hops,
-				cost,
-				..
-			} => {
+			lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
 				let suffix = match self.version.has_announce_id() {
 					// Every `active` assigns the next ordinal, even ones we drop locally.
 					// Only lite-07 refuses a forwarded path, and it never reaches here.
@@ -619,11 +612,10 @@ impl Subscriber {
 						&mut run.announced,
 					)?;
 				} else {
-					// Before lite-07 an announcement names no instance, so the session mints one.
-					let instance = instance.map(|instance| (instance, epoch));
+					// An announcement here names no instance, so the session mints one.
 					self.start_announce(
 						path,
-						instance,
+						None,
 						hops,
 						cost,
 						run.link_cost,
@@ -658,39 +650,19 @@ impl Subscriber {
 					&mut run.announced,
 				)?;
 			}
-			lite::AnnounceBroadcast::Restart {
-				id,
-				instance,
-				epoch,
-				cost,
-				..
-			} => {
-				// Resolved like an update: the id stays live.
-				let suffix = run.decoder.get(id)?;
-				let path = prefix.join(&suffix)?;
-				run.announced.restart(&path, instance.map(|instance| (instance, epoch)));
-				// Only lite-07 restarts, and its claims name their route instead.
-				self.restart_announce(
-					path,
-					crate::Hops::new(),
-					cost,
-					run.link_cost,
-					run.responder_origin,
-					&mut run.announced,
-				)?;
-			}
 			lite::AnnounceBroadcast::Skipped => {}
 			// Only lite-07 carries the route layer, on a stream of its own.
-			lite::AnnounceBroadcast::Synced { .. }
+			lite::AnnounceBroadcast::Start { .. }
+			| lite::AnnounceBroadcast::Change { .. }
+			| lite::AnnounceBroadcast::End { .. }
+			| lite::AnnounceBroadcast::Synced { .. }
 			| lite::AnnounceBroadcast::Request { .. }
 			| lite::AnnounceBroadcast::Ok
-			| lite::AnnounceBroadcast::RouteStart { .. }
-			| lite::AnnounceBroadcast::RouteUpdate { .. }
-			| lite::AnnounceBroadcast::RouteHold { .. }
+			| lite::AnnounceBroadcast::Route { .. }
 			| lite::AnnounceBroadcast::RouteEnd { .. }
-			| lite::AnnounceBroadcast::Dead(_)
-			| lite::AnnounceBroadcast::Floor { .. }
-			| lite::AnnounceBroadcast::Refused { .. } => return Err(Error::ProtocolViolation),
+			| lite::AnnounceBroadcast::Dead { .. }
+			| lite::AnnounceBroadcast::Drain { .. }
+			| lite::AnnounceBroadcast::Floor { .. } => return Err(Error::ProtocolViolation),
 		}
 		Ok(())
 	}
@@ -828,43 +800,10 @@ impl Subscriber {
 		Ok(announced.offer(self, path, metadata))
 	}
 
-	/// Handle an ANNOUNCE_RESTART: a live advertisement serves another instance, or a
-	/// newer epoch of its own, as the caller recorded.
-	///
-	/// The replacement enters the origin as a fresh route before the old one leaves, so
-	/// local consumers see one restart rather than an end and a start, and nothing
-	/// resolved through the old route is joined again. The sources the old route minted
-	/// take no new tracks, while the tracks already in flight run to their own end.
-	///
-	/// Returns `Ok(false)` if the new hop chain is a reflected loop (this session's
-	/// route is now gone), `Ok(true)` otherwise.
-	fn restart_announce(
-		&mut self,
-		path: Path,
-		hops: crate::Hops,
-		// See `update_announce`.
-		cost: crate::origin::Cost,
-		link_cost: u64,
-		responder_origin: Option<crate::Hop>,
-		announced: &mut Announced,
-	) -> Result<bool, Error> {
-		let Some(hops) = self.chain(&path, hops, responder_origin) else {
-			announced.declined(path);
-			return Ok(false);
-		};
-
-		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
-		let route = self.announced_route(&path, hops, cost, link_cost, responder_origin, announced);
-		// Held to the limit like a start: a restart outside it is withheld, dropping the old route.
-		Ok(announced.offer(self, path, route))
-	}
-
-	/// Whether `hops` passed through this node, under its lite-06 hop or the hop its
-	/// route identity travels as: a moq-lite-07 relay translating this node's claims
-	/// for a lite-06 peer names the latter. Either way the claim came back, and filed
-	/// again it would keep itself alive once its source left.
+	/// Whether `hops` passed through this node: the claim came back, and filed again it
+	/// would keep itself alive once its source left.
 	pub(super) fn names_self(&self, hops: &crate::Hops) -> bool {
-		hops.contains(&self.self_origin) || self.origin.route_hop().is_some_and(|hop| hops.contains(&hop))
+		hops.contains(&self.self_origin)
 	}
 
 	/// The full chain of a new or replacing advertisement, or `None` when it is
@@ -2455,10 +2394,8 @@ struct MintedSource {
 	path: Path,
 	/// The instance the route announced, asked for on every request.
 	instance: Option<crate::Instance>,
-	/// The origin node every request names (lite-07), or 0.
-	node: u64,
-	/// How many leading segments of the path make up the route's prefix (lite-07).
-	depth: u64,
+	/// The node every request names (lite-07), or none to let the peer select.
+	node: Option<crate::route::NodeId>,
 	source: crate::model::broadcast::SourceGuard,
 	/// The source's track handler, registered before its requester could ask for a track.
 	dynamic: crate::broadcast::Requests,
@@ -2476,9 +2413,7 @@ struct SourceServe {
 	subscriber: Subscriber,
 	path: Path,
 	instance: Option<crate::Instance>,
-	node: u64,
-	/// How many leading segments of the path make up the route's prefix (lite-07).
-	depth: u64,
+	node: Option<crate::route::NodeId>,
 	source: crate::model::broadcast::SourceGuard,
 	dynamic: crate::broadcast::Requests,
 	route: kio::Consumer<()>,
@@ -2577,7 +2512,6 @@ impl TracksRecv {
 					broadcast: source.path.clone(),
 					instance: source.instance.clone(),
 					node: source.node,
-					depth: source.depth,
 				})?;
 				self.stream.insert(stream)
 			}
@@ -2648,7 +2582,6 @@ impl SourceServe {
 			path: minted.path,
 			instance: minted.instance,
 			node: minted.node,
-			depth: minted.depth,
 			source: minted.source,
 			datagram_requests: minted.dynamic.datagrams(),
 			dynamic: minted.dynamic,
@@ -2743,7 +2676,7 @@ impl kio::Task for SourceServe {
 				let serve = DatagramServe::new(
 					self.subscriber.clone(),
 					self.path.clone(),
-					(self.instance.clone(), self.node, self.depth),
+					(self.instance.clone(), self.node),
 					self.dynamic.validity().clone(),
 					self.source.consume(),
 					request,
@@ -2762,7 +2695,6 @@ impl kio::Task for SourceServe {
 						path: self.path.clone(),
 						instance: self.instance.clone(),
 						node: self.node,
-						depth: self.depth,
 						name: request.name().to_string(),
 					};
 					// One machine per track serves its lone subscription and any number
@@ -2814,9 +2746,7 @@ struct DatagramServe {
 	subscriber: Subscriber,
 	path: Path,
 	instance: Option<crate::Instance>,
-	node: u64,
-	/// How many leading segments of the path make up the route's prefix (lite-07).
-	depth: u64,
+	node: Option<crate::route::NodeId>,
 	validity: crate::model::broadcast::RequestValidity,
 	// A dedicated close-watch handle.
 	closed: Transport,
@@ -2879,7 +2809,7 @@ impl DatagramServe {
 	fn new(
 		subscriber: Subscriber,
 		path: Path,
-		(instance, node, depth): (Option<crate::Instance>, u64, u64),
+		(instance, node): (Option<crate::Instance>, Option<crate::route::NodeId>),
 		validity: crate::model::broadcast::RequestValidity,
 		source: crate::broadcast::Consumer,
 		request: datagram::Request,
@@ -2894,7 +2824,6 @@ impl DatagramServe {
 			path,
 			instance,
 			node,
-			depth,
 			validity,
 			id,
 			source: Some(source),
@@ -2995,7 +2924,6 @@ impl DatagramServe {
 						broadcast: self.path.clone(),
 						instance: self.instance.clone(),
 						node: self.node,
-						depth: self.depth,
 						track: request.name().to_string().into(),
 						priority,
 					})?;
@@ -5366,8 +5294,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -5442,8 +5369,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -5554,8 +5480,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -5611,8 +5536,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -5964,8 +5888,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -6044,8 +5967,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6114,8 +6036,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6237,8 +6158,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -6312,8 +6232,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -6484,8 +6403,7 @@ mod tests {
 				subscriber: subscriber.clone(),
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".to_string(),
 			},
 			request,
@@ -6558,8 +6476,7 @@ mod tests {
 					subscriber,
 					path: Path::from_static("room"),
 					instance: None,
-					node: 0,
-					depth: 0,
+					node: None,
 					name: "video".into(),
 				};
 				let info = track::Info::default().with_timescale(None);
@@ -6643,8 +6560,7 @@ mod tests {
 					subscriber,
 					path: Path::from_static("room"),
 					instance: None,
-					node: 0,
-					depth: 0,
+					node: None,
 					name: "video".to_string(),
 				},
 				request,
@@ -6698,8 +6614,7 @@ mod tests {
 			subscriber: subscriber.clone(),
 			path: Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "video".to_string(),
 		};
 		(waiting, TrackServeRun::new(serve, request))
@@ -7101,8 +7016,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".to_string(),
 			},
 			request,
@@ -7151,8 +7065,7 @@ mod tests {
 			MintedSource {
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				source: crate::model::broadcast::SourceGuard::new(broadcast),
 				dynamic,
 				route: route.consume(),
@@ -7298,8 +7211,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".to_string(),
 			},
 			request,
@@ -7352,8 +7264,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "catalog.json".to_string(),
 		};
 
@@ -7422,8 +7333,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "audio".to_string(),
 		};
 
@@ -7489,8 +7399,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room/host"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "audio".to_string(),
 			};
 
@@ -7589,8 +7498,7 @@ mod tests {
 			subscriber,
 			path: Path::from_static("room/host"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			name: "audio".to_string(),
 		};
 
@@ -7653,8 +7561,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room/host"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "audio".to_string(),
 			};
 
@@ -7774,8 +7681,7 @@ mod tests {
 					subscriber,
 					path: Path::from_static("room/host"),
 					instance: None,
-					node: 0,
-					depth: 0,
+					node: None,
 					name: "catalog.json".to_string(),
 				},
 				session,
@@ -7851,8 +7757,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -7926,8 +7831,7 @@ mod tests {
 				subscriber,
 				path: Path::from_static("room"),
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				name: "video".into(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -9085,89 +8989,6 @@ mod tests {
 		(subscriber, consumer)
 	}
 
-	/// A restart re-prices the announced route in place: consumers observe another
-	/// active update with the new metadata rather than a retract-and-announce.
-	#[kio::test]
-	async fn restart_updates_the_route_in_place() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
-
-		let mut announced = Announced::default();
-		let path = Path::from_static("room/host");
-		subscriber
-			.start_announce(
-				path.clone(),
-				None,
-				crate::Hops::new(),
-				crate::origin::Cost::UNKNOWN,
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-
-		let mut cursor = consumer.routes();
-		kio::clock::sim::yield_now().await;
-		cursor.expect_next_active("room/host").await;
-
-		subscriber
-			.update_announce(
-				path.clone(),
-				crate::Hops::new(),
-				crate::origin::Cost::new(5),
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-
-		kio::clock::sim::yield_now().await;
-		let route = cursor.expect_next_active("room/host").await;
-		assert_eq!(route.cost, crate::origin::Cost::new(5).charged(0));
-	}
-
-	/// A restart is held to the subscribe limit like a start: one the limit no longer
-	/// covers is withheld, ending the old instance rather than attaching the new one.
-	#[kio::test]
-	async fn a_restart_outside_the_limit_is_withheld() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
-		let auth = subscriber.auth.clone();
-
-		let mut announced = Announced::default();
-		let path = Path::from_static("room/host");
-		subscriber
-			.start_announce(
-				path.clone(),
-				None,
-				crate::Hops::new(),
-				crate::origin::Cost::UNKNOWN,
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-		let mut cursor = consumer.routes();
-		cursor.expect_next_active("room/host").await;
-
-		auth.handle().authorize(&crate::auth::Grant {
-			publish: Default::default(),
-			subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
-			expires: None,
-		});
-		announced.restart(&path, None);
-		let attached = subscriber
-			.restart_announce(
-				path.clone(),
-				crate::Hops::new(),
-				crate::origin::Cost::UNKNOWN,
-				0,
-				Some(crate::Hop::new(7).unwrap()),
-				&mut announced,
-			)
-			.unwrap();
-		assert!(!attached, "a restart outside the limit was attached");
-		cursor.expect_next_offline("room/host").await;
-	}
-
 	/// An announce stream that dies without an explicit `ended` retracts the route
 	/// as promptly as an explicit retraction: a route into a dead session must not
 	/// stay announced.
@@ -9240,13 +9061,9 @@ mod tests {
 	async fn an_unknown_announce_type_keeps_the_stream() {
 		const VERSION: Version = Version::Lite06;
 		let start = |suffix| lite::AnnounceBroadcast::Active {
-			route: 0,
-			instance: None,
-			epoch: 0,
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
-			above: 0,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {
@@ -9317,52 +9134,41 @@ mod tests {
 		}
 	}
 
+	/// A lite-07 claim `above` segments broader than the path it is shown at.
+	fn claim(above: u64) -> crate::route::node::Claim {
+		crate::route::relay::Claim {
+			item: crate::route::node::Attr { epoch: 0, above },
+			cost: 0,
+			priority: i8::MAX,
+			draining: false,
+			unavailable: false,
+			chain: Vec::new(),
+		}
+	}
+
 	/// An ANNOUNCE_START for `suffix`.
 	fn announce_start(version: Version, suffix: &'static str) -> impl Fn(&mut crate::coding::Encoder<'_>) {
 		move |w| {
-			lite::AnnounceBroadcast::Active {
-				route: 0,
-				instance: version.has_instance().then(crate::Instance::random),
-				epoch: 0,
-				suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
-				hops: crate::Hops::new(),
-				cost: crate::origin::Cost::default(),
-				above: 0,
-			}
-			.encode(w, version)
-			.unwrap()
-		}
-	}
-
-	/// A lite-07 ROUTE_START to the publisher `node`, which the peer sends itself.
-	fn route_start(node: crate::route::Id) -> impl Fn(&mut crate::coding::Encoder<'_>) {
-		move |w| {
-			let offer = crate::route::path::Offer {
-				path: [crate::route::path::Hop { node, session: 0 }].into(),
-				draining: false,
-				priority: i8::MAX,
-				metric: 0,
-				down_only: false,
+			let suffix = lite::PathRef::literal(Path::new(suffix).unwrap());
+			let start = match version.has_routes() {
+				true => lite::AnnounceBroadcast::Start {
+					suffix,
+					instance: crate::Instance::random(),
+					claim: claim(0),
+				},
+				false => lite::AnnounceBroadcast::Active {
+					suffix,
+					hops: crate::Hops::new(),
+					cost: crate::origin::Cost::default(),
+				},
 			};
-			lite::AnnounceBroadcast::RouteStart {
-				node,
-				prefix: 0,
-				suffix: Path::empty(),
-				exact: false,
-				offer,
-			}
-			.encode(w, Version::Lite07)
-			.unwrap()
+			start.encode(w, version).unwrap()
 		}
 	}
 
-	/// A lite-07 ANNOUNCE_FLOOR closing the batch of Route ID `id`.
-	fn floor(id: u64, revision: Option<crate::route::Rev>) -> impl Fn(&mut crate::coding::Encoder<'_>) {
-		move |w| {
-			lite::AnnounceBroadcast::Floor { id, revision }
-				.encode(w, Version::Lite07)
-				.unwrap()
-		}
+	/// The lite-07 message `message`.
+	fn wire(message: lite::AnnounceBroadcast) -> impl Fn(&mut crate::coding::Encoder<'_>) {
+		move |w| message.encode(w, Version::Lite07).unwrap()
 	}
 
 	/// What reads a peer's announces of the root: its stream, or from lite-07 the
@@ -9450,17 +9256,7 @@ mod tests {
 	async fn a_lite07_peer_keeps_one_announce_stream() {
 		const VERSION: Version = Version::Lite07;
 		use crate::lite::test_transport::{Close, ScriptedSession};
-		let script = || {
-			announce_script(
-				VERSION,
-				&[
-					&announce_ok(VERSION, 0),
-					&route_start(7),
-					&announce_start(VERSION, "room"),
-					&floor(0, Some(0)),
-				],
-			)
-		};
+		let script = || announce_script(VERSION, &[&announce_ok(VERSION, 0), &announce_start(VERSION, "room")]);
 		let waiter = kio::Waiter::noop();
 
 		let session = ScriptedSession::new(script());
@@ -9502,40 +9298,12 @@ mod tests {
 		session.close(Close::Fin);
 		assert!(routes.poll(&waiter).is_pending());
 		assert!(session.log.closes().is_empty(), "{:?}", session.log.closes());
+		// Unavailable until the reader's debounce runs out, on a timer the origin's driver
+		// fires.
+		kio::clock::sleep(crate::route::relay::debounce(crate::route::relay::HOP) * 2).await;
+		consumer.route_node().timeout();
+		assert!(routes.poll(&waiter).is_pending());
 		cursor.expect_next_offline("room").await;
-	}
-
-	/// Nothing comes between a DEAD and the ROUTE_UPDATEs it counts, not even a request
-	/// from the peer's other half.
-	#[kio::test]
-	async fn a_request_inside_a_dead_closes_the_session() {
-		const VERSION: Version = Version::Lite07;
-		let dead = |w: &mut crate::coding::Encoder<'_>| {
-			lite::AnnounceBroadcast::Dead(lite::Dead::Closed {
-				hop: crate::route::path::Hop { node: 7, session: 0 },
-				far: 9,
-				gone: true,
-				moved: 1,
-			})
-			.encode(w, VERSION)
-			.unwrap()
-		};
-		let request = |w: &mut crate::coding::Encoder<'_>| {
-			lite::AnnounceBroadcast::Request {
-				more: false,
-				remove: Vec::new(),
-				add: Vec::new(),
-			}
-			.encode(w, VERSION)
-			.unwrap()
-		};
-		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &route_start(7), &dead, &request]);
-		let (mut routes, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
-		let result = routes.poll(&kio::Waiter::noop());
-		assert!(
-			matches!(result, Poll::Ready(Err(Error::ProtocolViolation))),
-			"{result:?}"
-		);
 	}
 
 	/// Nothing comes between the ANNOUNCE_REQUESTs of one edit.
@@ -9551,7 +9319,10 @@ mod tests {
 			.encode(w, VERSION)
 			.unwrap()
 		};
-		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0), &part, &route_start(7)]);
+		let script = announce_script(
+			VERSION,
+			&[&announce_ok(VERSION, 0), &part, &announce_start(VERSION, "room")],
+		);
 		let (mut routes, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let result = routes.poll(&kio::Waiter::noop());
 		assert!(
@@ -9678,19 +9449,7 @@ mod tests {
 	#[kio::test]
 	async fn an_incomplete_announce_waits_for_its_body() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
-			// Lite-07 names the claim's route, and serves it once a floor closes its batch.
-			let mut script = match version.has_routes() {
-				true => announce_script(
-					version,
-					&[
-						&announce_ok(version, 0),
-						&route_start(7),
-						&announce_start(version, "room"),
-						&floor(0, Some(0)),
-					],
-				),
-				false => announce_script(version, &[&announce_ok(version, 1), &announce_start(version, "room")]),
-			};
+			let mut script = announce_script(version, &[&announce_ok(version, 1), &announce_start(version, "room")]);
 			let last = script.pop().unwrap();
 			let session = crate::lite::test_transport::ScriptedSession::new(script);
 			let log = session.log.clone();
@@ -9705,127 +9464,18 @@ mod tests {
 		}
 	}
 
-	/// A lite-07 ANNOUNCE_START for `suffix` under Route ID `route`.
-	fn claim_on(route: u64, suffix: &'static str) -> impl Fn(&mut crate::coding::Encoder<'_>) {
-		move |w| {
-			lite::AnnounceBroadcast::Active {
-				route,
-				instance: Some(crate::Instance::random()),
-				epoch: 0,
-				suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
-				hops: crate::Hops::new(),
-				cost: crate::origin::Cost::default(),
-				above: 0,
-			}
-			.encode(w, Version::Lite07)
-			.unwrap()
-		}
-	}
-
-	/// A lite-07 message of type `typ` with `body`, as a newer or broken peer might send it.
-	fn raw(typ: u64, body: Vec<u8>) -> impl Fn(&mut crate::coding::Encoder<'_>) {
-		move |w| {
-			w.varint(typ).unwrap();
-			w.varint(body.len() as u64).unwrap();
-			w.slice(&body);
-		}
-	}
-
-	/// A route message body: `lead` (a ROUTE_START's Node ID, Prefix ID, and empty suffix, or a
-	/// ROUTE_UPDATE's Route ID), then an offer along `hops` hops from Node ID `first` up,
-	/// with `flags`, the top priority, metric 0, and `rest`.
-	fn offer_body(lead: &[u64], hops: u64, first: u64, flags: u8, rest: &[u8]) -> Vec<u8> {
-		let mut body = Vec::new();
-		let w = &mut crate::coding::Encoder::new(&mut body, Version::Lite07.into());
-		for field in lead {
-			w.varint(*field).unwrap();
-		}
-		w.varint(hops).unwrap();
-		for hop in 0..hops {
-			w.varint(first + hop).unwrap();
-			w.varint(0).unwrap();
-		}
-		w.u8(flags);
-		w.u8(0xff);
-		w.varint(0).unwrap();
-		w.slice(rest);
-		body
-	}
-
-	const ROUTE_START: u64 = 6;
-	const ROUTE_UPDATE: u64 = 7;
-
-	/// Every offer a relay refuses as content: a flag no version defines (with the field it
-	/// might announce), a hop naming Node ID 0, and more hops than a route may cross.
-	fn refused_offers(lead: &[u64]) -> [(&'static str, Vec<u8>); 3] {
-		[
-			("an unknown flag", offer_body(lead, 1, 100, 0x80, &[42])),
-			("a hop naming node 0", offer_body(lead, 2, 0, 0, &[])),
-			(
-				"33 hops",
-				offer_body(lead, crate::route::MAX_HOPS as u64 + 1, 100, 0, &[]),
-			),
-		]
-	}
-
-	/// The scripted peer's two routes, each with a claim: Route ID 0 to node 7 carrying
-	/// `a`, and Route ID 1 to node 8 carrying `b`.
-	fn two_routes() -> Vec<u8> {
+	/// A lite-07 peer that declared no Node ID answering the root with the claims `a`
+	/// and `b`.
+	fn two_claims() -> Vec<u8> {
+		const VERSION: Version = Version::Lite07;
 		announce_script(
-			Version::Lite07,
+			VERSION,
 			&[
-				&announce_ok(Version::Lite07, 0),
-				&route_start(7),
-				&route_start(8),
-				&claim_on(0, "a"),
-				&claim_on(1, "b"),
-				&floor(0, Some(0)),
-				&floor(1, Some(0)),
+				&announce_ok(VERSION, 0),
+				&announce_start(VERSION, "a"),
+				&announce_start(VERSION, "b"),
 			],
 		)
-	}
-
-	/// A neighbour forwarding a route this relay refuses, whatever it refuses, loses only
-	/// that route: its claims withdraw, while the session, the neighbour's other route,
-	/// and that route's claims stay, and the stream keeps reading. The route comes back
-	/// once the neighbour forwards it usably again.
-	#[kio::test]
-	async fn a_refused_route_update_withdraws_only_that_route() {
-		for (what, body) in refused_offers(&[0]) {
-			let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
-			let log = session.log.clone();
-			let (registry, stats) = counted();
-			let (mut prefix, consumer) = root_prefix_counted(Version::Lite07, session.clone(), stats);
-			let mut cursor = consumer.routes();
-			let poll = |prefix: &mut Announcing| {
-				assert!(prefix.poll(&kio::Waiter::noop()).is_pending(), "{what}");
-				assert!(log.closes().is_empty(), "{what}: {:?}", log.closes());
-			};
-			let push = |messages: &[&dyn Fn(&mut crate::coding::Encoder<'_>)]| {
-				session.push(&announce_script(Version::Lite07, messages));
-			};
-			poll(&mut prefix);
-			cursor.assert_next_active("a");
-			cursor.assert_next_active("b");
-
-			// Its claims go offline, as when the neighbour ends the route.
-			push(&[&raw(ROUTE_UPDATE, body)]);
-			poll(&mut prefix);
-			cursor.expect_next_offline("a").await;
-			cursor.assert_next_wait();
-
-			// The stream reads on, the other route's claims with it.
-			push(&[&claim_on(1, "c"), &floor(1, Some(1))]);
-			poll(&mut prefix);
-			cursor.assert_next_active("c");
-
-			// Forwarded usably again, the route files its last floor's claims again.
-			push(&[&raw(ROUTE_UPDATE, offer_body(&[0], 1, 7, 0, &[]))]);
-			poll(&mut prefix);
-			cursor.assert_next_active("a");
-			cursor.assert_next_wait();
-			assert_eq!(refusals(&registry), 1, "{what}");
-		}
 	}
 
 	/// A stats registry and one session counting into it.
@@ -9836,197 +9486,26 @@ mod tests {
 		(registry, session)
 	}
 
-	/// The routes and claims `registry`'s sessions refused.
+	/// The claims `registry`'s sessions refused.
 	fn refusals(registry: &crate::stats::Registry) -> u64 {
 		let sessions = registry.snapshot().sessions();
 		sessions.iter().map(|(_, presence)| presence.routes_refused).sum()
 	}
 
-	/// A ROUTE_START this relay refuses still takes its Route ID, so the claims the
-	/// neighbour sends under it are held but never served, and the next route's ids line
-	/// up. A ROUTE_UPDATE it can use files the route after all, unless the route named
-	/// the reserved node, and ROUTE_END retires it like any other.
-	#[kio::test]
-	async fn a_refused_route_start_holds_its_route_id() {
-		// Node ID 7, Prefix ID 0, an empty suffix, and not exact.
-		let mut cases = refused_offers(&[7, 0, 0, 0])
-			.map(|(what, body)| (what, body, true))
-			.to_vec();
-		cases.push(("node 0", offer_body(&[0, 0, 0, 0], 1, 7, 0, &[]), false));
-		for (what, body, revives) in cases {
-			let script = announce_script(
-				Version::Lite07,
-				&[
-					&announce_ok(Version::Lite07, 0),
-					&raw(ROUTE_START, body),
-					&claim_on(0, "a"),
-					&floor(0, Some(0)),
-					&route_start(8),
-					&claim_on(1, "b"),
-					&floor(1, Some(0)),
-				],
-			);
-			let session = crate::lite::test_transport::ScriptedSession::new(script);
-			let log = session.log.clone();
-			let (mut prefix, consumer) = root_prefix(Version::Lite07, session.clone());
-			let mut cursor = consumer.routes();
-			let poll = |prefix: &mut Announcing| {
-				assert!(prefix.poll(&kio::Waiter::noop()).is_pending(), "{what}");
-				assert!(log.closes().is_empty(), "{what}: {:?}", log.closes());
-			};
-			poll(&mut prefix);
-			cursor.assert_next_active("b");
-			cursor.assert_next_wait();
-
-			session.push(&announce_script(
-				Version::Lite07,
-				&[&raw(ROUTE_UPDATE, offer_body(&[0], 1, 7, 0, &[]))],
-			));
-			poll(&mut prefix);
-			match revives {
-				true => cursor.assert_next_active("a"),
-				false => {
-					cursor.assert_next_wait();
-					continue;
-				}
-			};
-			session.push(&announce_script(
-				Version::Lite07,
-				&[&|w: &mut crate::coding::Encoder<'_>| {
-					lite::AnnounceBroadcast::RouteEnd { id: 0 }
-						.encode(w, Version::Lite07)
-						.unwrap()
-				}],
-			));
-			poll(&mut prefix);
-			cursor.expect_next_offline("a").await;
-		}
-	}
-
-	/// The body of a lite-07 ANNOUNCE_START under Route ID 0, its path and instance
-	/// written raw.
-	fn start_body(path: &[u8], instance: &[u8]) -> Vec<u8> {
-		based_start_body(0, 0, path, instance)
-	}
-
-	/// An ANNOUNCE_START body on route 0 whose suffix keeps `keep` segments of the claim
-	/// `base` Announce IDs back.
-	fn based_start_body(base: u64, keep: u64, path: &[u8], instance: &[u8]) -> Vec<u8> {
-		above_start_body(base, keep, path, instance, 0)
-	}
-
-	/// The same body for a claim `above` segments broader than the path it is shown at.
-	fn above_start_body(base: u64, keep: u64, path: &[u8], instance: &[u8], above: u64) -> Vec<u8> {
-		let mut body = Vec::new();
-		let w = &mut crate::coding::Encoder::new(&mut body, Version::Lite07.into());
-		w.varint(base).unwrap();
-		w.varint(keep).unwrap();
-		w.bytes(path).unwrap();
-		w.varint(0).unwrap();
-		w.bytes(instance).unwrap();
-		w.bool(false);
-		w.varint(0).unwrap();
-		w.varint(0).unwrap();
-		w.varint(above).unwrap();
-		body
-	}
-
-	const ANNOUNCE_START: u64 = 0;
-	const ANNOUNCE_END: u64 = 1;
-	const ANNOUNCE_UPDATE: u64 = 2;
-	const ANNOUNCE_RESTART: u64 = 3;
-
-	/// A claim this relay refuses withdraws only that claim. One refused before its path
-	/// still takes its Announce ID, so the ids after it line up and its end is no
-	/// violation; one refused by a later change goes until an ANNOUNCE_RESTART names
-	/// all of it again.
-	#[kio::test]
-	async fn a_refused_claim_withdraws_only_that_claim() {
-		let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
-		let log = session.log.clone();
-		let (registry, stats) = counted();
-		let (mut prefix, consumer) = root_prefix_counted(Version::Lite07, session.clone(), stats);
-		let mut cursor = consumer.routes();
-		let poll = |prefix: &mut Announcing| {
-			assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
-			assert!(log.closes().is_empty(), "{:?}", log.closes());
-		};
-		let push = |messages: &[&dyn Fn(&mut crate::coding::Encoder<'_>)]| {
-			session.push(&announce_script(Version::Lite07, messages));
-		};
-		poll(&mut prefix);
-		cursor.assert_next_active("a");
-		cursor.assert_next_active("b");
-
-		// Ids 2 and 3: an invalid path, and an invalid instance. Then `a` (id 0) changes
-		// to an empty Lite-06 Chain, and `c` (id 4) arrives after them.
-		push(&[
-			&raw(ANNOUNCE_START, start_body(b"x//y", b"i")),
-			&raw(ANNOUNCE_START, start_body(b"d", b"")),
-			&raw(ANNOUNCE_UPDATE, vec![0, 0, 0, 0]),
-			&claim_on(0, "c"),
-			&floor(0, Some(1)),
-		]);
-		poll(&mut prefix);
-		cursor.assert_next_active("c");
-		// Refused, not withdrawn by its origin: it goes offline.
-		cursor.assert_next_offline("a");
-		cursor.assert_next_wait();
-		assert_eq!(refusals(&registry), 3);
-
-		// An update names nothing a refused claim lacks; a restart names all of it.
-		let restart = |w: &mut crate::coding::Encoder<'_>| {
-			lite::AnnounceBroadcast::Restart {
-				id: 0,
-				instance: Some(crate::Instance::random()),
-				epoch: 1,
-				cost: Default::default(),
-				hops: Default::default(),
-				above: 0,
-			}
-			.encode(w, Version::Lite07)
-			.unwrap()
-		};
-		push(&[&raw(ANNOUNCE_UPDATE, vec![3, 5, 0]), &floor(0, Some(2))]);
-		poll(&mut prefix);
-		cursor.assert_next_wait();
-		push(&[&restart, &floor(0, Some(3))]);
-		poll(&mut prefix);
-		cursor.assert_next_active("a");
-
-		// A restart to an empty instance is refused like the update was.
-		push(&[&raw(ANNOUNCE_RESTART, vec![0, 0, 0, 0, 0, 0]), &floor(0, Some(4))]);
-		poll(&mut prefix);
-		cursor.assert_next_offline("a");
-		assert_eq!(refusals(&registry), 4);
-
-		// The refused claims end like any other, and `c`'s end still finds it, though only
-		// offline: the route still holds the refused `a`, so its floor certifies nothing.
-		push(&[
-			&raw(ANNOUNCE_END, vec![2]),
-			&raw(ANNOUNCE_END, vec![3]),
-			&raw(ANNOUNCE_END, vec![4]),
-			&floor(0, Some(5)),
-		]);
-		poll(&mut prefix);
-		cursor.assert_next_offline("c");
-		cursor.assert_next_wait();
-
-		// Once `a` ends too, the route's floors certify again: `e` (id 5) ends.
-		push(&[&raw(ANNOUNCE_END, vec![0]), &claim_on(0, "e"), &floor(0, Some(6))]);
-		poll(&mut prefix);
-		cursor.assert_next_active("e");
-		push(&[&raw(ANNOUNCE_END, vec![5]), &floor(0, Some(7))]);
-		poll(&mut prefix);
-		cursor.assert_next_ended("e");
-		cursor.assert_next_wait();
+	/// A lite-07 ANNOUNCE_START at `suffix`, `above` segments broader than it.
+	fn start_at(suffix: lite::PathRef, above: u64) -> impl Fn(&mut crate::coding::Encoder<'_>) {
+		wire(lite::AnnounceBroadcast::Start {
+			suffix,
+			instance: crate::Instance::random(),
+			claim: claim(above),
+		})
 	}
 
 	/// Fields valid alone can still resolve past the path limits: that claim is refused
-	/// and counted like any other, and the stream keeps going.
+	/// and counted, keeps its Announce ID, and the stream keeps going.
 	#[kio::test]
 	async fn a_claim_resolved_too_deep_is_refused() {
-		let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
+		let session = crate::lite::test_transport::ScriptedSession::new(two_claims());
 		let log = session.log.clone();
 		let (registry, stats) = counted();
 		let (mut prefix, consumer) = root_prefix_counted(Version::Lite07, session.clone(), stats);
@@ -10037,19 +9516,26 @@ mod tests {
 
 		// Id 2 sits at the depth limit; id 3 keeps all of it and adds a segment.
 		let deep = vec!["s"; Path::MAX_PARTS].join("/");
+		let past = lite::PathRef {
+			base: 1,
+			keep: Path::MAX_PARTS as u64,
+			rest: Path::from_static("z"),
+		};
 		session.push(&announce_script(
 			Version::Lite07,
 			&[
-				&raw(ANNOUNCE_START, start_body(deep.as_bytes(), b"i")),
-				&raw(ANNOUNCE_START, based_start_body(1, Path::MAX_PARTS as u64, b"z", b"i")),
-				&claim_on(0, "c"),
-				&floor(0, Some(1)),
+				&start_at(lite::PathRef::literal(Path::new(&deep).unwrap()), 0),
+				&start_at(past, 0),
+				&announce_start(Version::Lite07, "c"),
+				// The refused claim still holds id 3.
+				&wire(lite::AnnounceBroadcast::End { id: 3, lost: false }),
 			],
 		));
 		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
 		assert!(log.closes().is_empty(), "{:?}", log.closes());
-		cursor.assert_next_active(&deep);
+		// The node serves a burst in the order of its paths.
 		cursor.assert_next_active("c");
+		cursor.assert_next_active(&deep);
 		cursor.assert_next_wait();
 		assert_eq!(refusals(&registry), 1);
 	}
@@ -10059,27 +9545,19 @@ mod tests {
 	/// segments cannot be, and closes the session.
 	#[kio::test]
 	async fn a_claim_above_its_path_stays_within_the_path() {
-		let session = crate::lite::test_transport::ScriptedSession::new(two_routes());
+		let at = || lite::PathRef::literal(Path::from_static("x/y"));
+		let session = crate::lite::test_transport::ScriptedSession::new(two_claims());
 		let (mut prefix, consumer) = root_prefix(Version::Lite07, session.clone());
 		let mut cursor = consumer.routes();
 		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
 		cursor.assert_next_active("a");
 		cursor.assert_next_active("b");
-		session.push(&announce_script(
-			Version::Lite07,
-			&[
-				&raw(ANNOUNCE_START, above_start_body(0, 0, b"x/y", b"i", 2)),
-				&floor(0, Some(1)),
-			],
-		));
+		session.push(&announce_script(Version::Lite07, &[&start_at(at(), 2)]));
 		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
 		cursor.assert_next_active("x/y");
 
-		let mut script = two_routes();
-		script.extend(announce_script(
-			Version::Lite07,
-			&[&raw(ANNOUNCE_START, above_start_body(0, 0, b"x/y", b"i", 3))],
-		));
+		let mut script = two_claims();
+		script.extend(announce_script(Version::Lite07, &[&start_at(at(), 3)]));
 		let (mut prefix, _consumer) = root_prefix(
 			Version::Lite07,
 			crate::lite::test_transport::ScriptedSession::new(script),
@@ -10094,11 +9572,9 @@ mod tests {
 	#[kio::test]
 	async fn a_claim_above_its_path_counts_from_the_sessions_root() {
 		for (above, closes) in [(1, false), (2, true)] {
-			let mut script = two_routes();
-			script.extend(announce_script(
-				Version::Lite07,
-				&[&raw(ANNOUNCE_START, above_start_body(0, 0, b"x", b"i", above))],
-			));
+			let mut script = two_claims();
+			let at = lite::PathRef::literal(Path::from_static("x"));
+			script.extend(announce_script(Version::Lite07, &[&start_at(at, above)]));
 			let origin = origin::Config::new(std::num::NonZeroU64::new(1).unwrap())
 				.produce()
 				.scope("tenant", &crate::Patterns::from(crate::Pattern::all()))
@@ -10115,34 +9591,30 @@ mod tests {
 		}
 	}
 
-	/// Only the neighbour's own framing and state close the session: a refused route
-	/// message naming a Route ID or Announce ID the neighbour never opened still does.
+	/// A claim its publisher withdrew ends, and its Announce ID is retired: naming
+	/// it again, or one the peer never assigned, closes the session.
 	#[kio::test]
-	async fn an_unknown_id_still_closes_the_session() {
-		let unknown: [(&str, Vec<u8>, u64); 3] = [
-			(
-				"a refused update of an unknown route",
-				refused_offers(&[5])[0].1.clone(),
-				ROUTE_UPDATE,
-			),
-			(
-				"a refused change of an unknown claim",
-				vec![9, 0, 0, 0],
-				ANNOUNCE_UPDATE,
-			),
-			(
-				"a refused claim under an unknown route",
-				{
-					let mut body = start_body(b"x//y", b"i");
-					body[7] = 5;
-					body
-				},
-				ANNOUNCE_START,
-			),
-		];
-		for (what, body, typ) in unknown {
-			let mut script = two_routes();
-			script.extend(announce_script(Version::Lite07, &[&raw(typ, body)]));
+	async fn an_unknown_announce_id_closes_the_session() {
+		let end = |id| lite::AnnounceBroadcast::End { id, lost: false };
+		let session = crate::lite::test_transport::ScriptedSession::new(two_claims());
+		let (mut prefix, consumer) = root_prefix(Version::Lite07, session.clone());
+		let mut cursor = consumer.routes();
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		cursor.assert_next_active("a");
+		cursor.assert_next_active("b");
+		session.push(&announce_script(Version::Lite07, &[&wire(end(0))]));
+		assert!(prefix.poll(&kio::Waiter::noop()).is_pending());
+		cursor.expect_next_ended("a").await;
+
+		let change = |id| lite::AnnounceBroadcast::Change { id, claim: claim(0) };
+		for (what, message) in [
+			("an end of a retired id", end(0)),
+			("a change of a retired id", change(0)),
+			("an end of an unassigned id", end(9)),
+			("a change of an unassigned id", change(9)),
+		] {
+			let mut script = two_claims();
+			script.extend(announce_script(Version::Lite07, &[&wire(end(0)), &wire(message)]));
 			let (mut prefix, _consumer) = root_prefix(
 				Version::Lite07,
 				crate::lite::test_transport::ScriptedSession::new(script),
@@ -10152,60 +9624,35 @@ mod tests {
 		}
 	}
 
-	/// Every well-formed message naming a Route ID closes the session when the neighbour
-	/// never assigned it (5, past its two routes) or already retired it (0, after its
-	/// ROUTE_END), as the draft requires: a route's state is the neighbour's to keep in
-	/// step, so a stray ID means the two ends disagree on which routes live.
+	/// Two nodes exchange routes only when both declared a Node ID: from any other peer a
+	/// route, its end, a floor, a dead hop, or a drain closes the session.
 	#[kio::test]
-	async fn an_unassigned_or_retired_route_id_closes_the_session() {
-		type Encode = Box<dyn Fn(&mut crate::coding::Encoder<'_>)>;
-		let encode = |message: lite::AnnounceBroadcast| -> Encode {
-			Box::new(move |w| message.encode(w, Version::Lite07).unwrap())
+	async fn a_peer_that_declared_no_node_sends_no_routes() {
+		use crate::route::relay::{Hop, NodeId, Offer};
+		let node = NodeId { relay: 7, start: 1 };
+		let hop = Hop { node, session: 0 };
+		let offer = Offer {
+			path: [hop].into(),
+			draining: false,
+			priority: i8::MAX,
+			cost: 0,
+			marked: false,
 		};
-		let naming = |id: u64| -> [(&str, Encode); 6] {
-			[
-				(
-					"ROUTE_UPDATE",
-					Box::new(raw(ROUTE_UPDATE, offer_body(&[id], 1, 7, 0, &[]))),
-				),
-				("ROUTE_HOLD", encode(lite::AnnounceBroadcast::RouteHold { id })),
-				("ROUTE_END", encode(lite::AnnounceBroadcast::RouteEnd { id })),
-				("ANNOUNCE_FLOOR", Box::new(floor(id, Some(1)))),
-				("ANNOUNCE_START", Box::new(claim_on(id, "x"))),
-				(
-					"DEAD",
-					// A DEAD counts the ROUTE_UPDATEs moving routes off the hop that follow it.
-					Box::new(move |w| {
-						lite::AnnounceBroadcast::Dead(lite::Dead::Closed {
-							hop: crate::route::path::Hop { node: 7, session: 0 },
-							far: 7,
-							gone: false,
-							moved: 1,
-						})
-						.encode(w, Version::Lite07)
-						.unwrap();
-						raw(ROUTE_UPDATE, offer_body(&[id], 1, 7, 0, &[]))(w);
-					}),
-				),
-			]
-		};
-		let end = encode(lite::AnnounceBroadcast::RouteEnd { id: 0 });
-		for (id, before, what) in [(5, None, "unassigned"), (0, Some(&end), "retired")] {
-			for (message, naming) in naming(id) {
-				let mut script = two_routes();
-				let messages: Vec<&dyn Fn(&mut crate::coding::Encoder<'_>)> =
-					before.into_iter().map(|end| &**end).chain([&*naming]).collect();
-				script.extend(announce_script(Version::Lite07, &messages));
-				let (mut prefix, _consumer) = root_prefix(
-					Version::Lite07,
-					crate::lite::test_transport::ScriptedSession::new(script),
-				);
-				let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
-				assert!(
-					matches!(err, Error::ProtocolViolation),
-					"{message} of a {what} route: {err}"
-				);
-			}
+		for (what, message) in [
+			("ROUTE", lite::AnnounceBroadcast::Route { offer }),
+			("ROUTE_END", lite::AnnounceBroadcast::RouteEnd { id: 0 }),
+			("ANNOUNCE_FLOOR", lite::AnnounceBroadcast::Floor { id: 0, revision: 1 }),
+			("DEAD", lite::AnnounceBroadcast::Dead { hop, far: node }),
+			("DRAIN", lite::AnnounceBroadcast::Drain { node }),
+		] {
+			let mut script = two_claims();
+			script.extend(announce_script(Version::Lite07, &[&wire(message)]));
+			let (mut prefix, _consumer) = root_prefix(
+				Version::Lite07,
+				crate::lite::test_transport::ScriptedSession::new(script),
+			);
+			let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+			assert!(matches!(err, Error::ProtocolViolation), "{what}: {err}");
 		}
 	}
 
@@ -10292,13 +9739,9 @@ mod tests {
 	async fn announces_past_the_cap_close_the_session() {
 		const VERSION: Version = Version::Lite06;
 		let start = |suffix| lite::AnnounceBroadcast::Active {
-			route: 0,
-			instance: None,
-			epoch: 0,
 			suffix: lite::PathRef::literal(Path::new(suffix).unwrap()),
 			hops: crate::Hops::new(),
 			cost: crate::origin::Cost::default(),
-			above: 0,
 		};
 		let mut script = Vec::new();
 		lite::AnnounceOk {
@@ -10878,14 +10321,6 @@ impl Announced {
 		self.instances.get(path).map(|(instance, _)| instance.clone())
 	}
 
-	/// Record the instance and epoch a restart of the live advertisement at `path` names.
-	fn restart(&mut self, path: &Path, instance: Option<(crate::Instance, u64)>) {
-		self.forget(path, true);
-		if let Some(instance) = instance {
-			self.instances.insert(path.clone(), (instance, false));
-		}
-	}
-
 	/// Drop the instance recorded for `path`, releasing it if the session minted it, and
 	/// retiring it if the peer `ended` the advertisement.
 	fn forget(&mut self, path: &Path, ended: bool) {
@@ -10924,7 +10359,7 @@ impl Announced {
 				continue;
 			};
 			// No origin node to name before lite-07.
-			mint_sources(subscriber, entry, (0, 0));
+			mint_sources(subscriber, entry, None);
 		}
 	}
 
@@ -10970,12 +10405,12 @@ impl Announced {
 
 /// Serve the queued requests on a route whose queue woke: mint a source per requested
 /// path, answer the requester with its consumer, and hand the source to the driver's
-/// serve machines. Every request through it names the publisher `node` and the depth of
-/// the route it follows (lite-07; 0 lets the peer select).
+/// serve machines. Every request through it names `node`, which claims the broadcast
+/// (lite-07; none lets the peer select).
 fn mint_sources<K: Clone + Send + Sync + 'static>(
 	subscriber: &Subscriber,
 	entry: &mut AnnouncedRoute<K>,
-	(node, depth): (u64, u64),
+	node: Option<crate::route::NodeId>,
 ) {
 	let root = subscriber.origin.root();
 	// Cleared before polling, so a request landing mid-pass queues the route again.
@@ -11009,7 +10444,6 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
 			path,
 			instance: entry.route.instance.clone(),
 			node,
-			depth,
 			source: crate::model::broadcast::SourceGuard::new(source),
 			dynamic,
 			route: entry.live.consume(),
@@ -11096,10 +10530,8 @@ struct TrackServe {
 	path: Path,
 	/// The instance to ask for; the peer refuses a request for another.
 	instance: Option<crate::Instance>,
-	/// The origin node to ask for (lite-07), or 0 to let the peer select.
-	node: u64,
-	/// How many leading segments of the path make up the route's prefix (lite-07).
-	depth: u64,
+	/// The node to ask for (lite-07), or none to let the peer select.
+	node: Option<crate::route::NodeId>,
 	name: String,
 }
 
@@ -11625,7 +11057,6 @@ impl Establish {
 		let msg = lite::Subscribe {
 			instance: self.serve.instance.clone(),
 			node: self.serve.node,
-			depth: self.serve.depth,
 			id: self.id,
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
@@ -12401,7 +11832,6 @@ impl TrackInfoFetch {
 		stream.writer.buffer(&lite::Track {
 			instance: serve.instance.clone(),
 			node: serve.node,
-			depth: serve.depth,
 			broadcast: serve.path.clone(),
 			track: serve.name.as_str().into(),
 		})?;
@@ -13794,7 +13224,6 @@ impl kio::Task for FetchServeRun {
 					let msg = lite::Fetch {
 						instance: self.serve.instance.clone(),
 						node: self.serve.node,
-						depth: self.serve.depth,
 						broadcast: self.serve.path.clone(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),

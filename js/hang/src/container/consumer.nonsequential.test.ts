@@ -60,7 +60,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat("data"),
-		delay: { max: Duration.millis(5000) },
+		delay: { min: null, max: Duration.millis(5000) },
 	});
 
 	// Group A at a large sequence, completed so the cursor advances past it.
@@ -149,7 +149,7 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 	});
 	const consumer = new Consumer(track.subscribe(), {
 		format: new LegacyFormat(config),
-		delay: { max: Duration.millis(5000) },
+		delay: { min: null, max: Duration.millis(5000) },
 	});
 	// One 20 ms CELT packet per group, each read before the next lands. The group starting at 40 ms
 	// never arrives.

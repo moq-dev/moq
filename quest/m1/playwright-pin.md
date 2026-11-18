@@ -7,9 +7,11 @@ or later, the first build whose `exportKeyingMaterial` follows
 draft-ietf-webtrans-http3, so the route key lane
 (`test/interop/clients/js/route-key.ts`) proves the Chromium tab. The lane
 already requires a proof from Chromium 158 on, so the bump changes no
-expectation. Firefox's exporter departs from the draft in every build so far;
-[its own quest](/quest/m5/routes-browser-proof.md) carries
-that bump.
+expectation. Firefox's exporter departs from the draft in every build so far.
+
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) removed the route key and its lane, so nothing
+waits on this bump any more: [the switch's leftovers](/quest/m2/multicast/switch.md)
+list restating or deleting this quest.
 
 The root flake's `pkgs.playwright-driver` supplies `PLAYWRIGHT_BROWSERS_PATH`
 and `PLAYWRIGHT_VERSION` (`flake.nix`), and the npm pins
