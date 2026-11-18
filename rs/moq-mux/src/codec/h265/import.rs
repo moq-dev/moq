@@ -570,11 +570,21 @@ mod tests {
 	}
 
 	/// An hvcC stream whose keyframes carry any parameter set in band lands as hev1, a VPS alone
-	/// included; the record still frames it.
+	/// included, or a PPS the record omits; the record still frames it.
 	#[tokio::test(start_paused = true)]
 	async fn hvcc_with_in_band_parameter_sets_lands_as_hev1() {
-		let hvcc = fixtures::hvcc();
-		for in_band in [&[fixtures::VPS, fixtures::SPS, fixtures::PPS][..], &[fixtures::VPS][..]] {
+		let full = fixtures::hvcc();
+		let no_pps = super::super::build_hvcc(
+			&[Bytes::from_static(fixtures::VPS)],
+			&[Bytes::from_static(fixtures::SPS)],
+			&[],
+		)
+		.unwrap();
+		for (hvcc, in_band) in [
+			(full.clone(), &[fixtures::VPS, fixtures::SPS, fixtures::PPS][..]),
+			(full, &[fixtures::VPS][..]),
+			(no_pps, &[fixtures::PPS][..]),
+		] {
 			let (track, catalog) = setup("video");
 			let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
 			import.initialize(&hvcc).unwrap();
