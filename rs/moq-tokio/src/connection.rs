@@ -2015,7 +2015,7 @@ mod tests {
 		*shared.closed.lock().unwrap() = Some(moq_net::Error::App(9));
 		shared.end(Some(Error::MoqNet(moq_net::Error::Cancel)));
 		let Lifecycle::Closed(failure) = &state.read().lifecycle else {
-			panic!("the loop ended")
+			panic!("the loop never published its terminal snapshot")
 		};
 		assert!(failure.is_none(), "{failure:?}");
 	}
