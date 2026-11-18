@@ -4772,8 +4772,8 @@ impl Consumer {
 
 		// A route covers the path: mint the front and hand its watcher the
 		// request. The watcher materializes the path from the best covering
-		// route, resolves the channel, and re-splices the front through
-		// routes sharing its first hop for as long as one serves.
+		// route, resolves the channel, and serves that one source until it ends
+		// or another route becomes best, when the front bounces the path and ends.
 		let broadcast = broadcast::Producer::new_spliced(broadcast::Info {
 			pool: self.pool.clone(),
 			cache_duration: self.cache_duration,
