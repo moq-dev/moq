@@ -14,9 +14,9 @@ against the prototype; proposed by
 Decided 2026-11-18 (maintainer, on
 [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053#issuecomment-6975349236)):
 ✅ kept, and it follows the lite-07 cut, since none of it is wire; the
-chain change, which is, lands before the cut as
-[its own quest](/quest/m2/multicast/claim-chain.md) (rejected: the whole
-binding before the cut; dropping the chain change).
+chain change, which is, landed before the cut in
+[moq-dev/moq#9082](https://github.com/moq-dev/moq/pull/9082) (rejected: the
+whole binding before the cut; dropping the chain change).
 
 - Order equal routes the same way in the proof and the router: the proof
   orders them by the neighbour, the prototype by its simulation's node index,
@@ -44,11 +44,13 @@ binding before the cut; dropping the chain change).
   a route reaches it, and only then the route joined with the claim's drain,
   priority, and cost. Neither the mechanized instance nor its Rust vectors
   cover precedence yet. Bind the chain as
-  [the claim chain](/quest/m2/multicast/claim-chain.md) leaves it.
+  [moq-dev/moq#9082](https://github.com/moq-dev/moq/pull/9082) left it: the
+  relays a claim entered or left a routing domain by, a relay across a grant
+  refusing a chain that names a relay twice once it appends itself, and no
+  check inside a domain (the proof README's "What this does not give").
 
 Public API: none. Wire: none.
 
 ## Related
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer it proves
-- [Claim chain](/quest/m2/multicast/claim-chain.md) - the wire half, before the cut

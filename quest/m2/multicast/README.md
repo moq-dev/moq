@@ -26,11 +26,13 @@ its holds, doubt, route key, qualified Node IDs, and routes per prefix;
 wait for a claim's route before answering a request for it; and
 [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053) made the
 test-only route API crate-private, kept adopted claims off upstreams under
-a marked Node ID, and marked the lite-06 churn mitigations. Its proof is
+a marked Node ID, and marked the lite-06 churn mitigations; and
+[moq-dev/moq#9082](https://github.com/moq-dev/moq/pull/9082) made a claim's
+chain name its announcing relay, then each grant's exporter and adopter.
+Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
 wire were retargeted or deleted. The lite-07 cut still waits on this epic's
-two children, [the claim chain](/quest/m2/multicast/claim-chain.md) and
-[the uncovered cases](/quest/m2/multicast/accept.md), and on
+last child, [the uncovered cases](/quest/m2/multicast/accept.md), and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. After the cut come warmth's wire
 ([cache-aware routing](/quest/m3/cache-routing/README.md)),

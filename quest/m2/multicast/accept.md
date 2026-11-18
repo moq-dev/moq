@@ -41,7 +41,3 @@ A case that fails is a flaw to fix on lite-07-wip, in the quest that owns
 the code, before the cut.
 
 Public API: none. Wire: none expected.
-
-## Related
-
-- [Claim chain](/quest/m2/multicast/claim-chain.md) - changes the chain the scoped-ring case checks

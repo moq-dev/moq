@@ -21,9 +21,11 @@ so a forger declaring a victim's identity captures nothing: the claim
 belongs to the relay that announced it again. Nested scoped federation is in:
 a relay behind the local relay may be scoped too, and the chain bounds the
 nesting at 32 relays. The route key, qualified Node IDs, and their key file
-went with [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987);
-[claim chain](/quest/m2/multicast/claim-chain.md) changes what the chain
-records before the cut.
+went with [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987).
+Since [moq-dev/moq#9082](https://github.com/moq-dev/moq/pull/9082) the chain
+names the announcing relay, then each grant's exporter and adopter, and a
+relay refuses a claim whose chain would name any relay twice once it adds
+itself.
 
 Decided 2026-10-13: this is a required use case, independently shippable from
 peer-to-peer routing. Existing cluster sessions are bidirectional and scoped peer
@@ -88,4 +90,3 @@ and Rust/JS parity. Run `just check`, `just test interop --all`, and `just draft
 ## Related
 
 - [Routing guide](/quest/m3/routing-guide.md) - runnable operator setup after integration
-- [Claim chain](/quest/m2/multicast/claim-chain.md) - what a claim's chain records across each grant

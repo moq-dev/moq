@@ -75,7 +75,7 @@ export interface Claim {
 	marked: boolean;
 	/** The lowest link priority on the way to its publisher. */
 	priority: number;
-	/** The Node IDs that announced the claim again across a scoped grant or an older version. */
+	/** The Relay of each relay the claim entered or left a routing domain by, oldest first. */
 	chain: bigint[];
 }
 
