@@ -37,9 +37,9 @@ Agent's choices, for the implementer to revisit:
 - Count in `rs/moq-net/src/stats.rs` beside `routes_refused`, per label and
   never per broadcast or per node, so the cost and the output stay flat as
   the mesh grows.
-- The count of broadcasts rewritten is the cost
-  [route benches](/quest/m3/route-benches.md) measures, read from a running
-  relay.
+- The count of broadcasts rewritten is the cost the `routes/reopen` bench
+  measures and [route wakes](/quest/m4/route-wakes.md) owns, read from a
+  running relay.
 - Say what the announce counters mean on a lite-07 session, where a route
   change is no longer one announce per broadcast, and fix the doc or the
   counter if they now mislead.
@@ -49,5 +49,4 @@ shared role. Wire: none.
 
 ## Related
 
-- [Route benches](/quest/m3/route-benches.md) - measures the rewrite these count
 - [Real relays replay a mesh and its faults](/quest/m2/multicast/mesh-replay.md) - reads these in its report
