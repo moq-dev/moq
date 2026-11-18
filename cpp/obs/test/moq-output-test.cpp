@@ -68,6 +68,7 @@ std::atomic<bool> g_encoder_active{false};
 // The x264 CRF and "use_bufsize" the settings report; a negative CRF is the stub's default.
 std::atomic<long long> g_crf{-1};
 std::atomic<bool> g_use_bufsize{false};
+std::atomic<long long> g_buffer_size{-1};
 // How many times Start() or a retune rewrote an encoder's settings.
 std::atomic<int> g_update_calls{0};
 // A reason Configure reports itself, for a setting the config cannot express.
@@ -222,6 +223,8 @@ long long obs_data_get_int(obs_data_t *settings, const char *key)
 {
 	if (g_crf >= 0 && std::string(key) == "crf")
 		return g_crf;
+	if (g_buffer_size >= 0 && std::string(key) == "buffer_size")
+		return g_buffer_size;
 	if (settings == reinterpret_cast<obs_data_t *>(LOW_ENCODER))
 		return 2000;
 	return settings == reinterpret_cast<obs_data_t *>(MID_ENCODER) ? 4000 : 8000;
@@ -363,6 +366,7 @@ void reset(std::string url)
 	g_encoder_active = false;
 	g_crf = -1;
 	g_use_bufsize = false;
+	g_buffer_size = -1;
 	g_update_calls = 0;
 	g_encoder_id = "obs_x264";
 	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
@@ -762,6 +766,8 @@ int main()
 			const char *rate_control;
 			long long crf;
 			bool use_bufsize;
+			// The custom buffer in kbit, or -1 for the stub's own.
+			long long buffer_size;
 			bool active;
 			bool starts;
 			// Whether Start() rewrites the encoder's settings.
@@ -769,22 +775,28 @@ int main()
 		};
 		for (const auto &c :
 		     {// Not running yet: today's behavior, the buffer and the lossless CRF are replaced.
-		      ActiveCase{"obs_x264", "VBR", 23, true, false, true, true},
-		      ActiveCase{"obs_x264", "VBR", 0, false, false, true, true},
+		      ActiveCase{"obs_x264", "VBR", 23, true, -1, false, true, true},
+		      ActiveCase{"obs_x264", "VBR", 0, false, -1, false, true, true},
+		      ActiveCase{"obs_x264", "CBR", 0, true, 0, false, true, true},
 		      // Running with a cap: kept as it is, even with a buffer of its own.
-		      ActiveCase{"obs_x264", "VBR", 23, true, true, true, false},
-		      ActiveCase{"obs_x264", "CBR", 0, false, true, true, false},
-		      ActiveCase{"obs_nvenc_h264_tex", "CQVBR", -1, false, true, true, false},
+		      ActiveCase{"obs_x264", "VBR", 23, true, -1, true, true, false},
+		      ActiveCase{"obs_x264", "ABR", 0, false, -1, true, true, false},
+		      ActiveCase{"obs_x264", "CBR", 0, false, -1, true, true, false},
+		      ActiveCase{"obs_nvenc_h264_tex", "CQVBR", -1, false, -1, true, true, false},
 		      // Running without one: refused.
-		      ActiveCase{"obs_x264", "CQP", -1, false, true, false, false},
-		      ActiveCase{"obs_x264", "VBR", 0, false, true, false, false},
-		      ActiveCase{"obs_nvenc_h264_tex", "CQP", -1, false, true, false, false}}) {
+		      ActiveCase{"obs_x264", "CQP", -1, false, -1, true, false, false},
+		      ActiveCase{"obs_x264", "VBR", 0, false, -1, true, false, false},
+		      ActiveCase{"obs_x264", "VBR", 23, true, 0, true, false, false},
+		      ActiveCase{"obs_x264", "ABR", 0, true, 0, true, false, false},
+		      ActiveCase{"obs_x264", "CBR", 0, true, 0, true, false, false},
+		      ActiveCase{"obs_nvenc_h264_tex", "CQP", -1, false, -1, true, false, false}}) {
 			TestRelay relay;
 			reset(relay.Url());
 			g_encoder_id = c.id;
 			g_rate_control = c.rate_control;
 			g_crf = c.crf;
 			g_use_bufsize = c.use_bufsize;
+			g_buffer_size = c.buffer_size;
 			g_encoder_active = c.active;
 			MoQOutput o(nullptr, OUTPUT);
 			CHECK(o.Start() == c.starts);

@@ -131,9 +131,9 @@ std::string CapEncoders(obs_output_t *output)
 				       " is already running without a bitrate cap (rate control " +
 				       obs_data_get_string(settings, "rate_control") +
 				       "). Stop the recording first, or give it its own encoder.";
-			for (const std::string &option : X264RateOptions(obs_data_get_string(settings, "x264opts")))
-				LOG_WARNING("Video encoder %s: x264opts %s can override its %lld kbps cap", id,
-					    option.c_str(), running);
+			for (const std::string &option : RateOptions(id, settings))
+				LOG_WARNING("Video encoder %s: %s %s can override its %lld kbps cap", id,
+					    EncoderOptionsKey(id), option.c_str(), running);
 			LOG_INFO("Video encoder %s already running, advertising its %lld kbps cap", id, running);
 			continue;
 		}
@@ -143,9 +143,9 @@ std::string CapEncoders(obs_output_t *output)
 			LOG_WARNING("Video encoder %s: replacing %s to hold its %lld kbps cap", id, replaced.c_str(),
 				    cap);
 		for (const std::string &option : result.overridden)
-			LOG_WARNING("Video encoder %s: x264opts %s can override the %lld kbps cap. Use the MoQ "
-				    "dock's Quality or Performance profile, which hold it without x264opts.",
-				    id, option.c_str(), cap);
+			LOG_WARNING("Video encoder %s: %s %s can override the %lld kbps cap. Use the MoQ "
+				    "dock's Quality or Performance profile, which hold it without it.",
+				    id, EncoderOptionsKey(id), option.c_str(), cap);
 		if (result.changed)
 			obs_encoder_update(encoder, patch);
 		LOG_INFO("Video encoder %s capped at %lld kbps", id, cap);

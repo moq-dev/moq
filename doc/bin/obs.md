@@ -53,7 +53,9 @@ it holds whatever else the settings say:
   cap: the log warns, and the dock's Quality and Performance profiles hold it
   without them.
 - NVENC keeps CBR and VBR, and otherwise runs constant quality (CQVBR), with
-  `max_bitrate` at the cap and VBR's average under it.
+  `max_bitrate` at the cap and VBR's average under it. Its `opts` are never
+  rewritten either, so `maxBitRate`, `averageBitRate`, or `vbvBufferSize` in them
+  can override the cap, and the log warns.
 - Every other encoder runs CBR at the cap: Quick Sync's ICQ and AMF's QVBR have
   no hard peak, and VA-API's and VideoToolbox's quality modes have not been
   checked.
@@ -62,7 +64,8 @@ The log names each setting of yours it replaced. An encoder shared with a
 recording takes the cap too, unless the recording started first: a running
 encoder cannot switch rate control, so its settings stay as they are and the
 catalog advertises the cap it runs with. If it runs without one (constant
-quality such as CQP or CRF, or lossless), the output refuses to start. Stop the
+quality such as CQP or CRF, lossless, or x264 with a buffer size of your own set
+to 0, which turns its VBV off), the output refuses to start. Stop the
 recording first, or give it its own encoder.
 
 The dock's Custom settings profiles start from

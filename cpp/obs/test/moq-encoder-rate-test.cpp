@@ -53,26 +53,52 @@ int main()
 	assert(rate_control(x264) == "VBR" && obs_data_get_int(&x264, "bitrate") == 8000);
 	assert(EncoderPeak("obs_x264", &x264).kbps == 8000);
 
-	// A running encoder's cap is what its settings hold: its peak, or none for a quality mode
-	// and for x264's lossless CRF.
+	// A running encoder's cap is what its settings hold: its peak, or none for a quality mode,
+	// x264's lossless CRF, and x264's own buffer of 0 (which drops the VBV in every mode).
 	struct Running {
 		const char *id;
 		const char *mode;
 		long long crf;
 		long long expect;
+		bool use_bufsize = false;
+		long long buffer_size = 0;
 	};
-	for (const Running &c :
-	     {Running{"obs_x264", "CBR", 0, 6000}, Running{"obs_x264", "VBR", 23, 6000},
-	      Running{"obs_x264", "VBR", 0, 0}, Running{"obs_x264", "CRF", 23, 0}, Running{"obs_x264", "CQP", 23, 0},
-	      Running{"obs_nvenc_h264_tex", "CQP", 0, 0}, Running{"obs_nvenc_h264_tex", "CQVBR", 0, 7000},
-	      Running{"obs_qsv11_v2", "ICQ", 0, 0}}) {
+	for (const Running &c : {Running{"obs_x264", "CBR", 0, 6000},
+				 Running{"obs_x264", "VBR", 23, 6000},
+				 Running{"obs_x264", "VBR", 0, 0},
+				 Running{"obs_x264", "ABR", 0, 6000},
+				 Running{"obs_x264", "CRF", 23, 0},
+				 Running{"obs_x264", "CQP", 23, 0},
+				 Running{"obs_x264", "CBR", 0, 6000, true, 12000},
+				 Running{"obs_x264", "VBR", 23, 6000, true, 12000},
+				 Running{"obs_x264", "CBR", 0, 0, true, 0},
+				 Running{"obs_x264", "VBR", 23, 0, true, 0},
+				 Running{"obs_x264", "ABR", 0, 0, true, 0},
+				 Running{"obs_x264", "VBR", 23, 6000, false, 0},
+				 Running{"obs_nvenc_h264_tex", "CQP", 0, 0},
+				 Running{"obs_nvenc_h264_tex", "CQVBR", 0, 7000},
+				 Running{"obs_nvenc_h264_tex", "VBR", 0, 7000},
+				 Running{"obs_nvenc_h264_tex", "CBR", 0, 6000},
+				 Running{"obs_nvenc_h264_tex", "lossless", 0, 0},
+				 Running{"obs_qsv11_v2", "ICQ", 0, 0},
+				 Running{"obs_qsv11_v2", "VBR", 0, 0},
+				 Running{"obs_qsv11_v2", "CBR", 0, 6000}}) {
 		obs_data_t running;
 		obs_data_set_string(&running, "rate_control", c.mode);
 		obs_data_set_int(&running, "bitrate", 6000);
 		obs_data_set_int(&running, "max_bitrate", 7000);
 		obs_data_set_int(&running, "crf", c.crf);
+		obs_data_set_bool(&running, "use_bufsize", c.use_bufsize);
+		obs_data_set_int(&running, "buffer_size", c.buffer_size);
 		assert(RunningCapKbps(c.id, &running) == c.expect);
 	}
+
+	// NVENC's opts can replace its rates, and are reported rather than rewritten.
+	obs_data_t nvenc_opts;
+	obs_data_set_string(&nvenc_opts, "opts", "maxBitRate=20000 lookaheadLevel=1 vbvBufferSize=0");
+	assert((RateOptions("obs_nvenc_h264_tex", &nvenc_opts) ==
+		std::vector<std::string>{"maxBitRate=20000", "vbvBufferSize=0"}));
+	assert(RateOptions("obs_qsv11_v2", &nvenc_opts).empty());
 
 	// x264 runs the user's CBR or VBR at the cap, and anything else as VBR. A buffer of
 	// its own is replaced. x264opts is never rewritten: the options in it that set a rate
@@ -122,7 +148,7 @@ int main()
 	EnforceCap("obs_x264", &cbr_crf, &cbr_crf_patch, 6000);
 	assert(!cbr_crf_patch.values.count("crf"));
 	assert(!cbr_crf_patch.values.count("x264opts"));
-	assert(X264RateOptions("crf=0.0 crf=18") == std::vector<std::string>{"crf=0.0"});
+	assert(RateOptions("obs_x264", &cbr_crf) == std::vector<std::string>{"crf=0.0"});
 
 	// A compliant encoder is not touched.
 	obs_data_t clean, nothing;
