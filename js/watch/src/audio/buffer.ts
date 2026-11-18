@@ -629,6 +629,8 @@ export class AudioBuffer {
 	 * whose whole target fits the floor. Resolves early, releasing the wait, once `signal` aborts.
 	 */
 	wait(timestamp: number, signal: AbortSignal): Promise<void> {
+		// An aborted loop already dropped what it was decoding, so it must not count another frame.
+		if (signal.aborted) return Promise.resolve();
 		if (this.stale(timestamp)) {
 			this.#backpressure.pass(timestamp);
 			return Promise.resolve();
