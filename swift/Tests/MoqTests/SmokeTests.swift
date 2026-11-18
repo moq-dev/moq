@@ -843,7 +843,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let producer = try Json.StreamProducer<String>(
             broadcast: broadcast,
-            track: try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000)))
+            track: try broadcast.publishTrack(name: "events", info: TrackInfo(maxAge: nil, timescale: 1_000_000)))
         let demand = try producer.demand()
         while try await demand.wantedChanged() != nil {}
 
