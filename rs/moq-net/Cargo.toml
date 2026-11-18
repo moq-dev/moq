@@ -66,6 +66,7 @@ kio = { path = "../kio", features = ["runtime", "sim"] }
 # This crate's own doors, for its integration tests and benches.
 moq-net = { path = ".", features = ["relay", "test-support"] }
 proptest = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 serde_json = { workspace = true }
 # The benches run on tokio, the session fanout bench across worker threads. test-util
 # (tokio::time::pause/advance) is test-only, so it must not leak into the normal

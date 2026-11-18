@@ -33,6 +33,23 @@ pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
 	}
 }
 
+struct Labeled<D> {
+	driver: D,
+	label: String,
+}
+
+impl<D: moq_net::time::Driver> moq_net::time::Driver for Labeled<D> {
+	fn poll(
+		&mut self,
+		now: moq_net::time::Instant,
+		waiter: &kio::Waiter,
+	) -> Result<Option<moq_net::time::Instant>, moq_net::Error> {
+		let span = tracing::info_span!("s", l = %self.label);
+		let _g = span.enter();
+		self.driver.poll(now, waiter)
+	}
+}
+
 struct Controlled<D> {
 	driver: D,
 	polls: Option<Arc<AtomicUsize>>,
@@ -96,6 +113,8 @@ pub struct MockConnectOptions {
 	pub probe: bool,
 	/// The context the server records under.
 	pub server_stats: moq_net::stats::Session,
+	/// The context the client records under.
+	pub client_stats: moq_net::stats::Session,
 	/// Count server driver polls into this counter when supplied.
 	pub server_polls: Option<Arc<AtomicUsize>>,
 	/// Hold an announcement stream over the client's whole subscribe origin for
@@ -129,6 +148,7 @@ impl MockConnectOptions {
 			stats: MockStats::default(),
 			probe: false,
 			server_stats: Default::default(),
+			client_stats: Default::default(),
 			server_polls: None,
 			client_discovers_all: true,
 			server_gate: None,
@@ -189,8 +209,11 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	client_transport.set_probe(opts.probe);
 	server_transport.set_probe(opts.probe);
 	let transports = (client_transport.clone(), server_transport.clone());
+	let cnode = opts.client_subscribe.as_ref().map(|o| o.node().get()).or(opts.client_publish.as_ref().map(|o| o.node().get())).unwrap_or(0);
+	let snode = opts.server_subscribe.as_ref().map(|o| o.node().get()).or(opts.server_publish.as_ref().map(|o| o.node().get())).unwrap_or(0);
 
 	let mut client = Client::new()
+		.with_stats(opts.client_stats)
 		.with_versions(opts.version.into())
 		.with_solicit(opts.client_extensions.solicit)
 		.with_ietf(opts.client_extensions.ietf);
@@ -239,7 +262,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.connect(now(), client_transport)
 			.await
 			.expect("client handshake failed");
-		spawn(driver);
+		spawn(Labeled { driver, label: format!("{cnode}>{snode}") });
 		session
 	};
 	let server_fut = async {
@@ -248,7 +271,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 			.await
 			.expect("server handshake failed");
 		spawn(Controlled {
-			driver,
+			driver: Labeled { driver, label: format!("{snode}>{cnode}") },
 			polls: opts.server_polls,
 			gate: opts.server_gate,
 		});
