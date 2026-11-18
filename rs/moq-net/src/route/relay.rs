@@ -2035,8 +2035,10 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// that relay and came back to it, and one this node would carry to the longest path
 	/// is never taken, as a route past the metric is never used.
 	fn takes(&self, chain: &[Id]) -> bool {
-		let mut seen = BTreeSet::from([self.me.relay]);
-		chain.iter().all(|relay| seen.insert(*relay)) && chain.len() + usize::from(self.forwards) < MAX_HOPS
+		let me = self.me.relay;
+		// At most 31 relays (`well_built`), so a quadratic scan beats allocating a set.
+		let once = (chain.iter().enumerate()).all(|(at, relay)| *relay != me && !chain[..at].contains(relay));
+		once && chain.len() + usize::from(self.forwards) < MAX_HOPS
 	}
 
 	/// Name this node at the end of a claim's chain as the claim enters or leaves its
