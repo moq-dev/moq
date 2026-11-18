@@ -71,6 +71,8 @@ The simplest way to watch a stream:
 | `visible`        | never, distance, or always | `20%`         | When to download video (see below)       |
 | `volume`         | number                     | 0.5           | Audio level (0-1), independent of mute    |
 | `backend`        | auto, webgpu, 2d           | `auto`        | Graphics API for the canvas. `auto` picks WebGPU where it can render video, else Canvas2D. |
+| `video-priority` | integer, -128 to 127       | 60            | Delivery priority of the video track, higher sent first. It ranks against every subscription on the connection, so elements sharing a `url` can favor one video over another under congestion. |
+| `audio-priority` | integer, -128 to 127       | 80            | Delivery priority of the audio track, ranked as `video-priority` is. |
 | `follow`         | boolean                    | true          | Follow the broadcast's announcements: wait for one before subscribing, and move to each restart. Ignored when the relay does not support broadcast discovery. |
 | `delay`          | `auto`, duration, `instant` | `auto`       | Distance from the live edge. `instant` paints frames as they decode and disables audio. |
 | `lookahead`      | duration                   | `0ms`         | How far future-dated media may run ahead of the live edge. Not a jitter buffer: live streams tune `delay`. |
@@ -124,9 +126,9 @@ const player = new Watch.Player({
 // Later: player.close(); connection.close();
 ```
 
-Per-media inputs nest by kind: `video` takes `target`, `canvas`, `visible`, and
-`backend`; `audio` takes `target`, `volume`, and `muted`; `text` takes the
-caption `target` and its `container`. A `target` pins a rendition by catalog
+Per-media inputs nest by kind: `video` takes `target`, `canvas`, `visible`,
+`backend`, and `priority`; `audio` takes `target`, `volume`, `muted`, and
+`priority`; `text` takes the caption `target` and its `container`. A `target` pins a rendition by catalog
 name or, for video, caps its size and bitrate. `<moq-watch>` exposes the same
 signals under `controls.video`, `controls.audio`, and `controls.text`.
 

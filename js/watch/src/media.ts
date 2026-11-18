@@ -1,10 +1,10 @@
 import type { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
 import { Error as NetError } from "@moq/net";
-import type { Effect, Getter } from "@moq/signals";
+import { type Effect, type Getter, type GetterInit, getter } from "@moq/signals";
 
 /**
- * Open a media subscription with its delay on the initial request and every update.
+ * Open a media subscription with its priority and delay on the initial request and every update.
  *
  * @internal
  */
@@ -13,17 +13,19 @@ export function subscribeMedia(
 	props: {
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
-		priority: number;
+		priority: GetterInit<number>;
 		delay: Getter<Moq.Track.Delay>;
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
-	const subscription = () => ({ priority: props.priority, delay: props.delay.peek() });
-	const subscriber = props.broadcast.track(props.track).subscribe(subscription());
+	const priority = getter(props.priority);
+	const subscriber = props.broadcast
+		.track(props.track)
+		.subscribe({ priority: priority.peek(), delay: props.delay.peek() });
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		subscriber.update({ priority: props.priority, delay: inner.get(props.delay) });
+		subscriber.update({ priority: inner.get(priority), delay: inner.get(props.delay) });
 	});
 
 	return subscriber;
