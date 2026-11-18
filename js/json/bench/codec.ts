@@ -16,10 +16,8 @@ for (const keys of [1, 10, 100, 1000]) {
 				for (let n = 1; n <= updates; n++) {
 					value = { ...value };
 					for (let key = 0; key < changed; key++) value[`k${key}`] = n;
-					const update = encoder.update(value);
-					if (update.kind === "tooLarge") throw new Error("codec benchmark value past the group budget");
-					if (update.kind === "frame") {
-						const frame = update.frame;
+					const frame = encoder.update(value);
+					if (frame) {
 						if (frame.keyframe) decoder.snapshot(frame.payload);
 						else decoder.delta(frame.payload);
 						frame.commit();

@@ -52,7 +52,7 @@ pub mod producer;
 
 pub use consumer::Consumer;
 pub use decoder::Decoder;
-pub use encoder::{Config, Encoded, Encoder, Pending, Update};
+pub use encoder::{Config, Encoded, Encoder, Pending};
 pub use producer::{Finished, Guard, Producer};
 
 #[cfg(test)]

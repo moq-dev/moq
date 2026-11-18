@@ -58,19 +58,11 @@ fn transport(
 	(tx, transport)
 }
 
-async fn recv(transport: &mut WsTransport<Mock>) -> Result<Received, Error> {
+async fn recv(transport: &mut WsTransport<Mock>) -> Result<Bytes, Error> {
 	kio::wait(|waiter| transport.poll_recv(waiter)).await
 }
 
-/// The next record, which must be one.
-async fn record(transport: &mut WsTransport<Mock>) -> Bytes {
-	match recv(transport).await {
-		Ok(Received::Record(record)) => record,
-		other => panic!("expected a record, got {other:?}"),
-	}
-}
-
-fn try_recv(transport: &mut WsTransport<Mock>) -> Poll<Result<Received, Error>> {
+fn try_recv(transport: &mut WsTransport<Mock>) -> Poll<Result<Bytes, Error>> {
 	transport.poll_recv(&kio::Waiter::noop())
 }
 
@@ -137,7 +129,7 @@ async fn skips_empty_messages() {
 	peer.unbounded_send(Ok(Message::Binary(Bytes::new()))).unwrap();
 	peer.unbounded_send(Ok(Message::Binary(Bytes::from_static(b"one"))))
 		.unwrap();
-	assert_eq!(record(&mut transport).await, &b"one"[..]);
+	assert_eq!(recv(&mut transport).await.unwrap(), &b"one"[..]);
 }
 
 #[tokio::test]
@@ -145,12 +137,12 @@ async fn refuses_a_message_past_one_record() {
 	let (peer, mut transport) = transport(None, 16382);
 	peer.unbounded_send(Ok(Message::Binary(Bytes::from(vec![0; 16383]))))
 		.unwrap();
-	assert!(matches!(recv(&mut transport).await, Ok(Received::Oversized)));
+	assert!(matches!(recv(&mut transport).await, Err(Error::FrameTooLarge)));
 }
 
 #[tokio::test]
 async fn refuses_a_text_message() {
 	let (peer, mut transport) = transport(None, 16382);
 	peer.unbounded_send(Ok(Message::Text("hello".into()))).unwrap();
-	assert!(matches!(recv(&mut transport).await, Ok(Received::Violation)));
+	assert!(matches!(recv(&mut transport).await, Err(Error::ProtocolViolation)));
 }

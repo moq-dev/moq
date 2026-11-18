@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { TransportCode, transportCode } from "./error.ts";
 import * as Frame from "./frame.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
@@ -215,6 +216,18 @@ describe("QMux02 (draft-02)", () => {
 			0x01, // duplicate
 		]);
 		expect(() => Frame.decode(bytes, "qmux-02")).toThrow();
+	});
+
+	test("a malformed transport parameter value is a TRANSPORT_PARAMETER_ERROR", () => {
+		// QX_TRANSPORT_PARAMETERS carrying initial_max_data (0x04) with an empty value.
+		const bytes = new Uint8Array([0xff, 0x51, 0x53, 0x30, 0x0d, 0x0a, 0x0d, 0x0a, 0x02, 0x04, 0x00]);
+		let caught: unknown;
+		try {
+			Frame.decode(bytes, "qmux-02");
+		} catch (err) {
+			caught = err;
+		}
+		expect(transportCode(caught)).toBe(TransportCode.TRANSPORT_PARAMETER_ERROR);
 	});
 
 	test("forbidden QUIC v1 transport parameters are rejected", () => {

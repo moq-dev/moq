@@ -3,20 +3,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use super::*;
 use crate::Version;
 
-async fn recv(stream: &mut Stream<DuplexStream>) -> Result<Received, Error> {
+async fn recv(stream: &mut Stream<DuplexStream>) -> Result<Bytes, Error> {
 	kio::wait(|waiter| stream.poll_recv(waiter)).await
 }
 
-/// The next record, which must be one.
-async fn record(stream: &mut Stream<DuplexStream>) -> Bytes {
-	match recv(stream).await {
-		Ok(Received::Record(record)) => record,
-		other => panic!("expected a record, got {other:?}"),
-	}
-}
-
 /// Poll `recv` once, for a record that must not be complete yet.
-fn try_recv(stream: &mut Stream<DuplexStream>) -> Poll<Result<Received, Error>> {
+fn try_recv(stream: &mut Stream<DuplexStream>) -> Poll<Result<Bytes, Error>> {
 	stream.poll_recv(&kio::Waiter::noop())
 }
 
@@ -62,7 +54,7 @@ async fn a_record_split_across_reads_arrives_whole() {
 			);
 		}
 		peer.write_all(&wire[wire.len() - 1..]).await.unwrap();
-		assert_eq!(record(&mut stream).await, payload, "{version:?}");
+		assert_eq!(recv(&mut stream).await.unwrap(), payload, "{version:?}");
 	}
 }
 
@@ -73,8 +65,8 @@ async fn records_in_one_read_arrive_in_order() {
 	let mut stream = bound(io, Version::QMux02, 16 * 1024);
 	peer.write_all(b"\x05hello\x05world").await.unwrap();
 
-	let first = record(&mut stream).await;
-	let second = record(&mut stream).await;
+	let first = recv(&mut stream).await.unwrap();
+	let second = recv(&mut stream).await.unwrap();
 	assert_eq!(first, &b"hello"[..]);
 	assert_eq!(second, &b"world"[..]);
 	// Both point into the one read buffer rather than copies of it.
@@ -96,8 +88,8 @@ async fn a_record_larger_than_the_read_buffer_arrives_whole() {
 	peer.write_all(b"\x01x").await.unwrap();
 	peer.write_all(&wire).await.unwrap();
 
-	assert_eq!(record(&mut stream).await, &b"x"[..]);
-	assert_eq!(record(&mut stream).await, payload);
+	assert_eq!(recv(&mut stream).await.unwrap(), &b"x"[..]);
+	assert_eq!(recv(&mut stream).await.unwrap(), payload);
 }
 
 /// A record declaring more than `max_record_size` is refused at its header, before any of
@@ -107,7 +99,7 @@ async fn a_record_past_the_maximum_is_refused_at_its_header() {
 	let (io, mut peer) = tokio::io::duplex(64 * 1024);
 	let mut stream = bound(io, Version::QMux01, 16382);
 	peer.write_all(&[0x7f, 0xff]).await.unwrap();
-	assert!(matches!(recv(&mut stream).await, Ok(Received::Oversized)));
+	assert!(matches!(recv(&mut stream).await, Err(Error::FrameTooLarge)));
 }
 
 /// draft-00 §5.2 bounds the whole frame at `max_frame_size`, header included: a frame of
@@ -129,10 +121,10 @@ async fn a_draft_00_frame_is_bounded_whole() {
 	let (io, mut peer) = tokio::io::duplex(64 * 1024);
 	let mut stream = bound(io, Version::QMux00, 0);
 	peer.write_all(&at_limit).await.unwrap();
-	assert_eq!(record(&mut stream).await, at_limit);
+	assert_eq!(recv(&mut stream).await.unwrap(), at_limit);
 
 	peer.write_all(&over_limit).await.unwrap();
-	assert!(matches!(recv(&mut stream).await, Ok(Received::Oversized)));
+	assert!(matches!(recv(&mut stream).await, Err(Error::FrameTooLarge)));
 }
 
 /// draft-00 frames a byte stream cannot delimit are refused: an unknown type, and STREAM
@@ -143,7 +135,7 @@ async fn an_undelimited_draft_00_frame_is_refused() {
 		let (io, mut peer) = tokio::io::duplex(64);
 		let mut stream = bound(io, Version::QMux00, 0);
 		peer.write_all(wire).await.unwrap();
-		assert!(matches!(recv(&mut stream).await, Ok(Received::Malformed)), "{wire:?}");
+		assert!(matches!(recv(&mut stream).await, Err(Error::FrameEncoding)), "{wire:?}");
 	}
 }
 
@@ -178,7 +170,7 @@ async fn closing_after_a_framing_error_still_drains_the_peer() {
 	let (io, mut peer) = tokio::io::duplex(64);
 	let mut stream = bound(io, Version::QMux02, 16382);
 	peer.write_all(&[0x7f, 0xff]).await.unwrap();
-	assert!(matches!(recv(&mut stream).await, Ok(Received::Oversized)));
+	assert!(matches!(recv(&mut stream).await, Err(Error::FrameTooLarge)));
 
 	let mut close = std::pin::pin!(kio::wait(|waiter| stream.poll_close(waiter)));
 	let mut extra = [0];

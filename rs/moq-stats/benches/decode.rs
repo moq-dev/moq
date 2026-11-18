@@ -107,9 +107,7 @@ fn frames(broadcasts: usize, tiers: usize, changed_percent: usize) -> Vec<(Vec<u
 				epoch: epoch.clone(),
 				tiers,
 			};
-			let moq_json::snapshot::Update::Frame(encoded) = encoder.update(&frame).unwrap() else {
-				panic!("every tick changes something, within the budget");
-			};
+			let encoded = encoder.update(&frame).unwrap().expect("every tick changes something");
 			let out = (encoded.payload.to_vec(), encoded.keyframe);
 			encoded.commit();
 			out

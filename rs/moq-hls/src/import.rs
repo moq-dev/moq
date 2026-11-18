@@ -733,9 +733,9 @@ impl TrackState {
 		// memory than a chunk, and a slow importer slows the transfer.
 		//
 		// Once the importer has read part of a segment it cannot take that segment again from the
-		// start, so a failure past that point retires the generation and the next pass rejoins
-		// with a gap. A rewind keeps it instead: it ends the import, and the tracks are aborted
-		// with the cause rather than dropped.
+		// start, so a failed fetch past that point retires the generation and the next pass
+		// rejoins with a gap. A decode failure keeps it instead: it ends the import, and the
+		// tracks are aborted with the cause rather than dropped.
 		let mut evict = false;
 		let streamed = loop {
 			let chunk = match body.chunk().await {
@@ -744,18 +744,13 @@ impl TrackState {
 				Err(err) => break Err(err),
 			};
 			evict = true;
-			if let Err(err) = importer.decode(&chunk) {
-				// Timestamp resets are unsupported: the published tracks never rewind, and no later
-				// pass can import this segment, so it is refused rather than retried.
-				break Err(match importer.rewound() {
-					true => {
-						evict = false;
-						Error::Rewind {
-							rendition: self.label.clone(),
-							source: err,
-						}
-					}
-					false => err.into(),
+			if let Err(source) = importer.decode(&chunk) {
+				// Media the importer refuses, such as a timestamp reset, is refused on every later
+				// pass too, so it ends the import rather than being retried.
+				evict = false;
+				break Err(Error::Decode {
+					rendition: self.label.clone(),
+					source,
 				});
 			}
 		};
@@ -847,13 +842,14 @@ impl Import {
 	/// An `EXT-X-DISCONTINUITY` keeps the source's timestamps: a forward jump continues the same
 	/// tracks, and a changed `EXT-X-MAP` starts a fresh generation of them. Timestamps that go
 	/// backwards on the same tracks, such as an encoder restart that reuses its init segment,
-	/// end the import with [`Error::Rewind`] instead of publishing a group that rewinds.
+	/// are a decode failure rather than a group that rewinds.
 	///
-	/// A failed step is logged and retried with escalating backoff, and the import ends with the
-	/// last error once the backoff budget is spent, so a broken source surfaces within seconds
-	/// instead of looping forever. A settled answer ends the import immediately: an HTTP status
-	/// the origin actually sent, such as a `404` playlist, or [`Error::PlaylistEnded`], since no
-	/// amount of waiting changes either.
+	/// Any segment the importer fails to decode ends the import with [`Error::Decode`] and is
+	/// never retried. A failed fetch is logged and retried with escalating backoff, and the import
+	/// ends with the last error once the backoff budget is spent, so a broken source surfaces
+	/// within seconds instead of looping forever. A settled answer ends the import immediately: an
+	/// HTTP status the origin actually sent, such as a `404` playlist, or
+	/// [`Error::PlaylistEnded`], since no amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
 		let mut deadline = kio::clock::now().saturating_add(STEP_RETRY_BUDGET);
@@ -889,8 +885,8 @@ impl Import {
 				Err(err) if err.settled() => {
 					return Err(err);
 				}
-				// The source rewound its timestamps, which no later pass can import.
-				Err(err @ Error::Rewind { .. }) => return Err(err),
+				// Media the importer refused, which no later pass can import.
+				Err(err @ Error::Decode { .. }) => return Err(err),
 				Err(err) => {
 					let now = kio::clock::now();
 					if now >= deadline {
@@ -1013,9 +1009,9 @@ impl Import {
 					// dead variant the others can cover for: importing the rest would publish a
 					// broadcast silently missing it.
 					OnError::Warn if matches!(err, Error::PlaylistEnded) => return Err(err),
-					// A rewind ends the import: no sibling covers for it, and evicting the
-					// rendition would rejoin it as fresh tracks, accepting the reset after all.
-					OnError::Warn if matches!(err, Error::Rewind { .. }) => return Err(err),
+					// A decode failure ends the import: no sibling covers for it, and evicting the
+					// rendition would rejoin it as fresh tracks, accepting the bad media after all.
+					OnError::Warn if matches!(err, Error::Decode { .. }) => return Err(err),
 					// Keep the other renditions going: one bad variant or segment shouldn't
 					// drop the rest or abort the whole step.
 					OnError::Warn => {
@@ -2184,12 +2180,10 @@ mod tests {
 		assert!(import.video[0].generation.is_none(), "the dead rendition is retired");
 	}
 
-	/// A decode refusal retires its importer at once, rather than after
-	/// [`MAX_RENDITION_FAILURES`] consecutive failures, so the next pass rebuilds it under fresh
-	/// track names and can import a repaired source. The refusal is not settled, so `run` still
-	/// retries the step within its backoff budget.
+	/// A segment the importer refuses ends the import, unwrapped or CMAF: it is not retried, and
+	/// the rendition is not evicted and rejoined as fresh tracks.
 	#[tokio::test]
-	async fn a_refused_segment_recovers_through_a_new_importer() {
+	async fn a_malformed_segment_ends_the_import() {
 		for cmaf in [false, true] {
 			let dir = temp_dir();
 			write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
@@ -2200,25 +2194,22 @@ mod tests {
 			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 			let mut cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
 			cfg.cmaf = cmaf;
-			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 			import.init().await.unwrap();
-			let previous = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 
-			let segment = std::fs::read(dir.join("video1.m4s")).unwrap();
 			// An mdat without a moof is refused at its header.
 			std::fs::write(dir.join("video1.m4s"), b"\0\0\0\x0cmdatdata").unwrap();
 			std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
-			let step = import.step(OnError::Warn).await.unwrap();
-			assert!(step.failed.is_some());
-			assert!(import.video[0].generation.is_none());
-			std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
-			let step = import.step(OnError::Warn).await.unwrap();
-			assert!(step.failed.is_none());
-			assert_eq!(step.wrote_segments, 2);
-			let snapshot = catalog.snapshot();
-			assert_eq!(snapshot.video.renditions.len(), 1);
-			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
-			drop(import.finish().unwrap());
+			let step = import.step(OnError::Warn).await;
+			assert!(
+				matches!(step, Err(Error::Decode { .. })),
+				"cmaf={cmaf}: {:?}",
+				step.err()
+			);
+			assert!(
+				import.video[0].generation.is_some(),
+				"cmaf={cmaf}: the rendition is kept"
+			);
 			std::fs::remove_dir_all(dir).unwrap();
 		}
 	}
@@ -2581,7 +2572,7 @@ mod tests {
 
 	const DISCONTINUITY: &str = "#EXT-X-DISCONTINUITY\n";
 
-	/// A timestamp reset under the same init segment is refused as a rewind, unwrapped or
+	/// A timestamp reset under the same init segment is refused as a decode failure, unwrapped or
 	/// CMAF, with or without the discontinuity the source should have signalled, and
 	/// without publishing anything for it: the track keeps its media and its name, and no group
 	/// (not even an aborted one) opens for the refused segment.
@@ -2593,16 +2584,7 @@ mod tests {
 					let case = discontinuity(video, cmaf, tags, 0).await;
 					let label = format!("video={video} cmaf={cmaf} tags={tags:?}");
 					assert!(
-						matches!(
-							case.result,
-							Err(Error::Rewind {
-								source: moq_mux::Error::TimestampRewind(_)
-									| moq_mux::Error::Cmaf(
-										moq_mux::container::fmp4::Error::NonMonotonicDecodeTime { .. }
-									),
-								..
-							})
-						),
+						matches!(case.result, Err(Error::Decode { .. })),
 						"{label}: {:?}",
 						case.result
 					);
@@ -2614,10 +2596,10 @@ mod tests {
 		}
 	}
 
-	/// A rewind ends the import at once, even while a sibling rendition is healthy: it is not
-	/// retried, and the rendition is not evicted and rejoined as fresh tracks.
+	/// A decode failure, here a rewind, ends the import at once, even while a sibling rendition
+	/// is healthy: it is not retried, and the rendition is not evicted and rejoined as fresh tracks.
 	#[tokio::test]
-	async fn a_rewind_ends_the_import() {
+	async fn a_decode_failure_ends_the_import() {
 		let dir = temp_dir();
 		write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
 		write_synth(&dir, &synth(false), "audio", &[5_000_000, 0]);
@@ -2650,9 +2632,9 @@ mod tests {
 		);
 		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
-			.expect("a rewind is not retried");
+			.expect("a decode failure is not retried");
 		assert!(
-			matches!(&run, Err(Error::Rewind { rendition, .. }) if rendition == "audio"),
+			matches!(&run, Err(Error::Decode { rendition, .. }) if rendition == "audio"),
 			"{run:?}"
 		);
 		std::fs::remove_dir_all(dir).unwrap();

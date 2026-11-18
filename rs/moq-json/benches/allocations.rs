@@ -8,7 +8,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use moq_json::snapshot::{self, Decoder, Encoder, Pending, Update};
+use moq_json::snapshot::{self, Decoder, Encoder};
 use serde_json::{Map, Value};
 
 struct Counter;
@@ -70,12 +70,12 @@ fn measure(fields: usize, changed_percent: usize) -> (usize, usize) {
 	let (old, new) = docs(fields, changed_percent);
 	let mut encoder = Encoder::<Value>::new(snapshot::Config::default().with_deltas(true));
 	let mut decoder = Decoder::<Value>::new(snapshot::consumer::Config::default());
-	let snapshot = frame(encoder.update(&old).unwrap()).unwrap();
+	let snapshot = encoder.update(&old).unwrap().unwrap();
 	decoder.snapshot(&snapshot.payload).unwrap();
 	snapshot.commit();
 
 	// Warm the reusable key buffers.
-	if let Some(frame) = frame(encoder.update(&new).unwrap()) {
+	if let Some(frame) = encoder.update(&new).unwrap() {
 		decoder.delta(&frame.payload).unwrap();
 		frame.commit();
 	}
@@ -85,7 +85,7 @@ fn measure(fields: usize, changed_percent: usize) -> (usize, usize) {
 		let value = if index % 2 == 0 { &old } else { &new };
 		let mut payload = None;
 		encoded += count(|| {
-			if let Some(frame) = frame(encoder.update(value).unwrap()) {
+			if let Some(frame) = encoder.update(value).unwrap() {
 				payload = Some(frame.payload.clone());
 				frame.commit();
 			}
@@ -108,14 +108,5 @@ fn main() {
 			let (encoder, decoder) = black_box(measure(fields, changed));
 			println!("{fields:>6} {changed:>8} {encoder:>14} {decoder:>14}");
 		}
-	}
-}
-
-/// The frame an update produced, or `None` when unchanged; these values always fit the budget.
-fn frame<T>(update: Update<'_, T>) -> Option<Pending<'_, T>> {
-	match update {
-		Update::Unchanged => None,
-		Update::Frame(frame) => Some(frame),
-		Update::TooLarge => panic!("the value is past the group budget"),
 	}
 }

@@ -87,7 +87,7 @@ impl Track {
 		Ok(samples)
 	}
 
-	pub fn write(&mut self, sample: &Sample, data: &[u8]) -> super::Refused<()> {
+	pub fn write(&mut self, sample: &Sample, data: &[u8]) -> crate::Result<()> {
 		if self.discontinuity {
 			self.producer.discontinuity()?;
 			self.discontinuity = false;
@@ -99,9 +99,6 @@ impl Track {
 			..
 		} = *sample;
 		let end = timestamp.checked_add(duration)?;
-		if let Some(rewind) = self.producer.rewind(timestamp, true)? {
-			return Err(super::Refusal::Rewind(rewind.into()));
-		}
 		let payload = match &self.format {
 			Format::Vtt { header } => vtt(header, data, timestamp, end)?,
 			Format::Ttml => ttml::rewrite(

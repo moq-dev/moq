@@ -51,22 +51,27 @@ pub(crate) fn before(
 }
 
 /// The start of a group whose first frame is at `timestamp` on `track`: `timestamp` in the track's
-/// timescale, or the [`TimestampRewind`](crate::container::TimestampRewind) to refuse it with when
-/// that doesn't pass the newest start, such as a keyframe repeating the last one's timestamp.
-/// One read of the newest start decides both, so a group appended meanwhile can't split them.
+/// timescale, or `None` when that doesn't pass the newest start, such as a keyframe repeating the
+/// last one's timestamp.
 ///
 /// For groups keyed by media, whose timestamps a publisher can't move.
-pub(crate) fn opens(
-	track: &moq_net::track::Producer,
-	timestamp: moq_net::Timestamp,
-) -> crate::Result<Result<u64, crate::container::TimestampRewind>> {
-	Ok(match of(track, timestamp)? {
+pub(crate) fn opens(track: &moq_net::track::Producer, timestamp: moq_net::Timestamp) -> crate::Result<Option<u64>> {
+	let (start, _, newest) = of(track, timestamp)?;
+	Ok(newest
+		.is_none_or(|newest| start.value() > newest)
+		.then_some(start.value()))
+}
+
+/// [`opens`], refusing a start that doesn't pass the newest with
+/// [`TimestampRewind`](crate::container::TimestampRewind).
+pub(crate) fn after(track: &moq_net::track::Producer, timestamp: moq_net::Timestamp) -> crate::Result<u64> {
+	match of(track, timestamp)? {
 		(start, scale, Some(newest)) if start.value() <= newest => {
 			let floor = moq_net::Timestamp::new(newest, scale).unwrap_or(start);
-			Err(crate::container::TimestampRewind { timestamp, floor })
+			Err(crate::container::TimestampRewind { timestamp, floor }.into())
 		}
 		(start, _, _) => Ok(start.value()),
-	})
+	}
 }
 
 /// Where a group ends whole on `track` when its content stops at `timestamp`: `timestamp` in the

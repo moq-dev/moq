@@ -2829,10 +2829,7 @@ async fn seek_keeps_the_decode_time_until_a_discontinuity_in(passthrough: bool) 
 			fmp4.discontinuity().unwrap();
 		}
 		fmp4.seek(100).unwrap();
-		assert!(!fmp4.rewound());
 		let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
-		// Either way the importer reports the refusal as a rewind, typed rather than read off `err`.
-		assert!(fmp4.rewound(), "{err:?}");
 		if discontinuity {
 			// Passthrough and unwrapped tracks both refuse a rewound group themselves.
 			assert!(matches!(err, crate::Error::TimestampRewind(_)), "{err:?}");

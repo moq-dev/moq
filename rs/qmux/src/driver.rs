@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
+use bytes::Bytes;
 use kio::clock::Instant;
-use moq_quic::{TransportError, TransportErrorCode};
+use moq_quic::TransportError;
 
 use crate::Error;
 use crate::session::{Inner, State};
-use crate::transport::{Received, Transport};
+use crate::transport::Transport;
 
 /// How long a closing session keeps the transport open to deliver its close and finish graceful
 /// shutdown, like QUIC's draining period. A peer that stopped reading or never finishes its send
@@ -192,7 +193,7 @@ struct Run<T> {
 	transport: T,
 	timer: Timer,
 	/// Records read but not yet handed to the connection, kept to reuse its allocation.
-	inbound: Vec<Result<Received, Error>>,
+	inbound: Vec<Result<Bytes, Error>>,
 	/// The transport's receive side has not ended.
 	reading: bool,
 	/// The last flush did not finish.
@@ -255,14 +256,9 @@ impl<T: Transport> Run<T> {
 					break;
 				}
 				match self.transport.poll_recv(recv.waiter) {
-					Poll::Ready(Ok(Received::Record(record))) => {
+					Poll::Ready(Ok(record)) => {
 						read += record.len().max(1);
-						self.inbound.push(Ok(Received::Record(record)));
-					}
-					Poll::Ready(Ok(refused)) => {
-						self.reading = false;
-						self.inbound.push(Ok(refused));
-						break;
+						self.inbound.push(Ok(record));
 					}
 					Poll::Ready(Err(err)) => {
 						self.reading = false;
@@ -276,7 +272,7 @@ impl<T: Transport> Run<T> {
 		let now = kio::clock::now();
 		let mut state = self.inner.lock();
 		for record in self.inbound.drain(..) {
-			if let Ok(Received::Record(record)) = &record {
+			if let Ok(record) = &record {
 				self.received_bytes += record.len() as u64;
 			}
 			deliver(&mut state, record, now);
@@ -388,20 +384,16 @@ impl<T: Transport> Run<T> {
 	}
 }
 
-/// Feed one received record, the transport's refusal of what the peer sent, or the transport's
-/// error into the connection.
-fn deliver(state: &mut State, record: Result<Received, Error>, now: Instant) {
-	let violation = |code, reason: &str| TransportError::new(code, reason.to_string());
-	match record {
-		Ok(Received::Record(record)) => state.conn.handle_record(record, now),
-		Ok(Received::Oversized) => state.conn.handle_oversized(),
-		Ok(Received::Malformed) => state
-			.conn
-			.handle_violation(violation(TransportErrorCode::FRAME_ENCODING_ERROR, "transport framing")),
-		Ok(Received::Violation) => state
-			.conn
-			.handle_violation(violation(TransportErrorCode::PROTOCOL_VIOLATION, "transport framing")),
-		Err(err) => {
+/// Feed one received record, or the transport's error, into the connection.
+fn deliver(state: &mut State, record: Result<Bytes, Error>, now: Instant) {
+	let err = match record {
+		Ok(record) => return state.conn.handle_record(record, now),
+		Err(err) => err,
+	};
+	match err.close_code() {
+		// The peer broke the transport's framing: tell it with a CONNECTION_CLOSE.
+		Some(code) => state.conn.handle_violation(TransportError::new(code, err.to_string())),
+		None => {
 			// The transport's own error says more than the connection's reset, unless this side
 			// is closing, when the peer hanging up is the expected answer and the driver
 			// publishes the close it asked for.

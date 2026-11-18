@@ -1441,7 +1441,7 @@ export class Session implements WebTransport {
 		// A RESET_STREAM_AT frame (reliableSize present, draft-02) is only legal if
 		// we advertised the `reset_stream_at` transport parameter. Receiving it
 		// otherwise - or on an earlier draft, which never advertises it - is a
-		// PROTOCOL_VIOLATION. Plain RESET_STREAM is always allowed.
+		// FRAME_ENCODING_ERROR. Plain RESET_STREAM is always allowed.
 		if (frame.reliableSize !== undefined && !this.#ourParams.resetStreamAt) {
 			throw new TransportError(
 				TransportCode.FRAME_ENCODING_ERROR,

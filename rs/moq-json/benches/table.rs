@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_json::snapshot::{Config, Encoder, Pending, Update};
+use moq_json::snapshot::{Config, Encoder};
 use moq_net::stats::Traffic;
 use serde::Serialize;
 
@@ -85,12 +85,10 @@ fn table(c: &mut Criterion) {
 			for changed in [1, 10, 100] {
 				let table = Table::new(rows, changed);
 				let mut encoder = Encoder::<Table>::new(config.clone());
-				frame(encoder.update(&table).unwrap())
-					.expect("an initial snapshot")
-					.commit();
+				encoder.update(&table).unwrap().expect("an initial snapshot").commit();
 				if config.deltas && !force_snapshot {
 					// Populate the memo so every timed delta has the steady-state fast path.
-					assert!(frame(encoder.update(&table).unwrap()).is_none());
+					assert!(encoder.update(&table).unwrap().is_none());
 				}
 				let state = RefCell::new((table, encoder));
 				group.throughput(Throughput::Elements(rows as u64));
@@ -103,14 +101,14 @@ fn table(c: &mut Criterion) {
 								encoder.reset();
 							} else if config.deltas {
 								// Restating resets both caps without discarding the parsed baseline or memo.
-								frame(encoder.snapshot().unwrap()).expect("a seeded baseline").commit();
+								encoder.snapshot().unwrap().expect("a seeded baseline").commit();
 							}
 						},
 						|()| {
 							let mut state = state.borrow_mut();
 							let (table, encoder) = &mut *state;
 							table.tick();
-							let frame = frame(encoder.update(table).unwrap()).expect("a changed tick");
+							let frame = encoder.update(table).unwrap().expect("a changed tick");
 							assert_eq!(frame.keyframe, force_snapshot || !config.deltas);
 							black_box(&frame.payload);
 							frame.commit();
@@ -126,12 +124,3 @@ fn table(c: &mut Criterion) {
 
 criterion_group!(benches, table);
 criterion_main!(benches);
-
-/// The frame an update produced, or `None` when unchanged; these values always fit the budget.
-fn frame<T>(update: Update<'_, T>) -> Option<Pending<'_, T>> {
-	match update {
-		Update::Unchanged => None,
-		Update::Frame(frame) => Some(frame),
-		Update::TooLarge => panic!("the value is past the group budget"),
-	}
-}

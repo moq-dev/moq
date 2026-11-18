@@ -577,7 +577,7 @@ impl<T: Transport> Transport for Inject<T> {
 		self.inner.bind(config);
 	}
 
-	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<crate::transport::Received, Error>> {
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		// The driver polls the receive side when its waiter wakes, and flushes after, so
 		// queue the injected records here.
 		let mut queue = self.queue.borrow_mut();

@@ -516,7 +516,20 @@ function encodeTransportParams(params: TransportParams): Uint8Array<ArrayBuffer>
 	return buffer;
 }
 
+/** Any failure inside the parameters, a bad varint included, is a TRANSPORT_PARAMETER_ERROR,
+ *  as rs/qmux closes with. */
 function decodeTransportParams(buffer: Uint8Array): TransportParams {
+	try {
+		return parseTransportParams(buffer);
+	} catch (err) {
+		throw new TransportError(
+			TransportCode.TRANSPORT_PARAMETER_ERROR,
+			err instanceof Error ? err.message : String(err),
+		);
+	}
+}
+
+function parseTransportParams(buffer: Uint8Array): TransportParams {
 	const params = { ...DEFAULT_TRANSPORT_PARAMS };
 	const seen = new Set<bigint>();
 	let v: VarInt;

@@ -1,3 +1,4 @@
+import { Error as NetError } from "@moq/net";
 import type * as z from "zod/mini";
 import { deepEqual, diff } from "../diff.ts";
 import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
@@ -30,10 +31,9 @@ export interface Config<T> {
 	/**
 	 * The most bytes a group may hold, snapshot and deltas together.
 	 *
-	 * A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it is refused:
-	 * `tooLarge` from the {@link Encoder}, `FrameTooLarge` from the {@link Producer}. Lowering it
-	 * lets a test reach the limit without megabytes of JSON; a value above moq-net's current
-	 * whole-frame limit is clamped to it. Defaults to that limit.
+	 * A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it throws
+	 * `FrameTooLarge`. Lowering it lets a test reach the limit without megabytes of JSON; a value
+	 * above moq-net's current whole-frame limit is clamped to it. Defaults to that limit.
 	 */
 	maxGroupBytes?: number;
 }
@@ -57,21 +57,7 @@ export interface Encoded {
 }
 
 /**
- * What {@link Encoder.update} or {@link Encoder.snapshot} made of a value.
- *
- * - `unchanged`: nothing to write. The value is unchanged, or there is no value yet to restate.
- * - `frame`: a frame to write, then commit.
- * - `tooLarge`: the value's snapshot is past {@link Config.maxGroupBytes}. It was refused before
- *   anything changed, so the encoder still holds the previous value, and nothing was published to
- *   supersede it.
- */
-export type Update = { kind: "unchanged" } | { kind: "frame"; frame: Pending } | { kind: "tooLarge" };
-
-const UNCHANGED: Update = { kind: "unchanged" };
-const TOO_LARGE: Update = { kind: "tooLarge" };
-
-/**
- * An encoded frame the caller has not yet acknowledged writing, returned in an {@link Update}.
+ * An encoded frame the caller has not yet acknowledged writing, returned by {@link Encoder.update}.
  *
  * Write the frame, then {@link commit}. The frame's value is staged until commit, so one that is
  * never committed leaves {@link Encoder.value} at the last value that reached the wire, and the
@@ -176,14 +162,11 @@ export class Encoder<T> {
 	/**
 	 * Encode a new value, as a snapshot or a delta.
 	 *
-	 * `unchanged` when the value matches the last one committed, so nothing needs to be written, and
-	 * `tooLarge` when its snapshot is past the group budget. Otherwise the frame comes back as a
-	 * {@link Pending} the caller writes and then commits; leaving one uncommitted resynchronizes the
-	 * encoder here, on the next call.
-	 *
-	 * Throws only when the value isn't representable as JSON, or fails the schema.
+	 * Returns `undefined` when the value is unchanged from the last one committed, so nothing needs
+	 * to be written. Otherwise the frame comes back as a {@link Pending} the caller writes and then
+	 * commits; leaving one uncommitted resynchronizes the encoder here, on the next call.
 	 */
-	update(value: T): Update {
+	update(value: T): Pending | undefined {
 		// The previous frame was never acknowledged, so it never reached the wire. Resynchronize so
 		// this value goes out as a fresh snapshot rather than as a patch against a state no consumer
 		// holds.
@@ -204,7 +187,7 @@ export class Encoder<T> {
 
 		// A resync has to emit even for an unchanged value: the frame that carried it may never have
 		// landed, so the consumer's state is unknown.
-		if (!this.#resync && this.#last !== undefined && deepEqual(this.#last, json)) return UNCHANGED;
+		if (!this.#resync && this.#last !== undefined && deepEqual(this.#last, json)) return undefined;
 
 		const delta = this.#delta(json);
 
@@ -223,7 +206,6 @@ export class Encoder<T> {
 		}
 
 		const payload = this.#snapshot(new TextEncoder().encode(text));
-		if (!payload) return TOO_LARGE;
 		return this.#pend({ payload, keyframe: true }, json);
 	}
 
@@ -232,24 +214,22 @@ export class Encoder<T> {
 	 *
 	 * For a caller that opens groups itself: call it when a joiner wants a fresh group, such as when
 	 * the track's `demand().wanted` passes the largest group written, so the joiner reads the value
-	 * without the deltas before it. `unchanged` before the first value, when there is nothing to
-	 * restate, and `tooLarge` when deltas grew the value past the group budget. The frame is a
-	 * {@link Pending} like any other.
+	 * without the deltas before it. Returns `undefined` before the first value, when there is nothing
+	 * to restate. The frame is a {@link Pending} like any other.
 	 */
-	snapshot(): Update {
-		if (this.#last === undefined) return UNCHANGED;
+	snapshot(): Pending | undefined {
+		if (this.#last === undefined) return undefined;
 		const payload = this.#snapshot(new TextEncoder().encode(JSON.stringify(this.#last)));
-		if (!payload) return TOO_LARGE;
 		return this.#pend({ payload, keyframe: true }, this.#last);
 	}
 
 	// Hand a frame to the caller, marking it unacknowledged until they commit, when `value` becomes
 	// the baseline.
-	#pend(encoded: Encoded, value: unknown): Update {
+	#pend(encoded: Encoded, value: unknown): Pending {
 		this.#pending = true;
 		const generation = ++this.#generation;
 
-		const frame: Pending = {
+		return {
 			...encoded,
 			commit: () => {
 				// A caller that starts the next update before this frame settles has already made the
@@ -260,7 +240,6 @@ export class Encoder<T> {
 				this.#last = value;
 			},
 		};
-		return { kind: "frame", frame };
 	}
 
 	// Build a delta frame, or `undefined` to signal that a fresh snapshot should be emitted.
@@ -279,11 +258,11 @@ export class Encoder<T> {
 		return new TextEncoder().encode(JSON.stringify(result.patch));
 	}
 
-	// Encode a group's snapshot (frame 0), returning its payload, or `undefined` for one past the
-	// budget. That is refused before any state changes, so the previous value stays readable rather
-	// than superseded by a frame moq-net would refuse on write.
-	#snapshot(frame: Uint8Array): Uint8Array | undefined {
-		if (frame.length > this.#maxGroupBytes) return undefined;
+	// Encode a group's snapshot (frame 0), returning its payload. A snapshot past the budget is
+	// refused before any state changes, so the previous value stays readable rather than superseded
+	// by a frame moq-net would refuse on write.
+	#snapshot(frame: Uint8Array): Uint8Array {
+		if (frame.length > this.#maxGroupBytes) throw new NetError.FrameTooLarge();
 		this.#groupBytes = frame.length;
 		this.#groupCharge = tailCharge(frame.length);
 		this.#groupFrames = 1;

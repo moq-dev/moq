@@ -8,7 +8,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use moq_quic::VarInt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use super::{Received, Transport};
+use super::Transport;
 use crate::protocol::validate_protocol;
 use crate::{Config, Driver, Error, MAX_FRAME_SIZE, Protocol, Session};
 
@@ -106,13 +106,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream<T> {
 	}
 
 	/// Split the record at the front of the read buffer off, if it is all there.
-	fn parse(&mut self) -> Result<Option<Bytes>, Received> {
+	fn parse(&mut self) -> Result<Option<Bytes>, Error> {
 		let header = match self.framing {
 			Framing::Records(max) => peek_varint(&self.read)
 				.map(|(size, prefix)| {
-					let size = peer_len(size)?;
+					let size = usize::try_from(size).map_err(|_| Error::FrameTooLarge)?;
 					if size > max {
-						return Err(Received::Oversized);
+						return Err(Error::FrameTooLarge);
 					}
 					Ok((prefix + size, prefix))
 				})
@@ -166,12 +166,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Transport for Stream<T> {
 		self.framing = Framing::new(config);
 	}
 
-	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Received, Error>> {
+	fn poll_recv(&mut self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
 		loop {
-			match self.parse() {
-				Ok(Some(record)) => return Poll::Ready(Ok(Received::Record(record))),
-				Ok(None) => {}
-				Err(refused) => return Poll::Ready(Ok(refused)),
+			if let Some(record) = self.parse()? {
+				return Poll::Ready(Ok(record));
 			}
 			if self.eof {
 				// The peer finished mid-record, or without the close frame that ends a session.
@@ -248,8 +246,8 @@ fn peek_varint(buf: &[u8]) -> Option<(u64, usize)> {
 }
 
 /// A peer-sent length as `usize`, refused where it does not fit (32-bit targets)
-fn peer_len(value: u64) -> Result<usize, Received> {
-	usize::try_from(value).map_err(|_| Received::Oversized)
+fn peer_len(value: u64) -> Result<usize, Error> {
+	usize::try_from(value).map_err(|_| Error::FrameTooLarge)
 }
 
 /// Walks a draft-00 frame header.
@@ -279,21 +277,20 @@ impl Header<'_> {
 	/// draft-00 §5.2 bounds the whole frame, header included. A byte stream cannot
 	/// resynchronize past an oversized frame, so this is fatal, as the draft requires
 	/// (FRAME_ENCODING_ERROR).
-	fn body(&mut self) -> Result<Option<usize>, Received> {
+	fn body(&mut self) -> Result<Option<usize>, Error> {
 		let Some(len) = self.varint() else {
 			return Ok(None);
 		};
 		let total = self.pos.saturating_add(peer_len(len)?);
 		if total > MAX_FRAME_SIZE {
-			return Err(Received::Oversized);
+			return Err(Error::FrameTooLarge);
 		}
 		Ok(Some(total))
 	}
 }
 
-/// The whole length of the draft-00 frame at the front of `buf`, once its header is there,
-/// or the refusal of a frame the stream cannot delimit.
-fn frame_len(buf: &[u8]) -> Result<Option<usize>, Received> {
+/// The whole length of the draft-00 frame at the front of `buf`, once its header is there.
+fn frame_len(buf: &[u8]) -> Result<Option<usize>, Error> {
 	let mut header = Header { buf, pos: 0 };
 	let Some(frame_type) = header.varint() else {
 		return Ok(None);
@@ -305,7 +302,7 @@ fn frame_len(buf: &[u8]) -> Result<Option<usize>, Received> {
 		let has_len = frame_type & 0x02 != 0;
 		// A byte stream cannot delimit a STREAM frame without its length.
 		if !has_len {
-			return Err(Received::Malformed);
+			return Err(Error::FrameEncoding);
 		}
 		if header.skip(1 + usize::from(has_off)).is_none() {
 			return Ok(None);
@@ -337,7 +334,7 @@ fn frame_len(buf: &[u8]) -> Result<Option<usize>, Received> {
 		0x3f5153300d0a0d0a => return header.body(),
 		// Draft-00 has no datagrams or QX_PING, and an unknown type cannot be skipped on a byte
 		// stream.
-		_ => return Err(Received::Malformed),
+		_ => return Err(Error::FrameEncoding),
 	};
 	Ok(header.skip(fixed).map(|()| header.pos))
 }

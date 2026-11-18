@@ -4,7 +4,6 @@ import { MissingSnapshot } from "../error.ts";
 import { key, resetKeys } from "../key.test-util.ts";
 import { Decoder } from "./decoder.ts";
 import { type Config, Encoder } from "./encoder.ts";
-import { pending } from "./pending.test-util.ts";
 
 beforeEach(resetKeys);
 
@@ -16,7 +15,7 @@ function encode(config: Config<Doc>, values: Doc[]): [boolean, number][] {
 	const encoder = new Encoder<Doc>(config);
 	const out: [boolean, number][] = [];
 	for (const value of values) {
-		const frame = pending(encoder.update(value));
+		const frame = encoder.update(value);
 		if (frame) {
 			out.push([frame.keyframe, frame.payload.length]);
 			frame.commit();
@@ -27,7 +26,7 @@ function encode(config: Config<Doc>, values: Doc[]): [boolean, number][] {
 
 // Encode one value and commit it.
 function commit(encoder: Encoder<Doc>, value: Doc) {
-	const frame = pending(encoder.update(value));
+	const frame = encoder.update(value);
 	frame?.commit();
 	return frame;
 }
@@ -40,7 +39,7 @@ function roundtrip(config: Config<Doc>, values: Doc[]): Doc[] {
 
 	const out: Doc[] = [];
 	for (const value of values) {
-		const frame = pending(encoder.update(value));
+		const frame = encoder.update(value);
 		if (!frame) continue;
 		if (frame.keyframe) {
 			decoder.snapshot(frame.payload);
@@ -156,11 +155,11 @@ test("deltas never roll on their own", () => {
 
 test("snapshot restates the last value", () => {
 	const encoder = new Encoder<Doc>({});
-	expect(pending(encoder.snapshot())).toBeUndefined();
+	expect(encoder.snapshot()).toBeUndefined();
 
 	commit(encoder, { a: 1, b: 1 });
 	commit(encoder, { a: 1, b: 2 });
-	const frame = pending(encoder.snapshot());
+	const frame = encoder.snapshot();
 	if (!frame) throw new Error("expected a snapshot");
 	expect(frame.keyframe).toBe(true);
 	frame.commit();
@@ -170,7 +169,7 @@ test("snapshot restates the last value", () => {
 	const decoder = new Decoder<Doc>({});
 	decoder.snapshot(frame.payload);
 	expect(decoder.decode()).toEqual({ a: 1, b: 2 });
-	const delta = pending(encoder.update({ a: 1, b: 3 }));
+	const delta = encoder.update({ a: 1, b: 3 });
 	if (!delta) throw new Error("expected a delta");
 	expect(delta.keyframe).toBe(false);
 	decoder.delta(delta.payload);
@@ -181,10 +180,10 @@ test("snapshot restates the last value", () => {
 test("an uncommitted snapshot resynchronizes", () => {
 	const encoder = new Encoder<Doc>({});
 	commit(encoder, { a: 1 });
-	expect(pending(encoder.snapshot())?.keyframe).toBe(true);
+	expect(encoder.snapshot()?.keyframe).toBe(true);
 
 	// The restatement never reached the wire, so the next change opens a group of its own.
-	expect(pending(encoder.update({ a: 2 }))?.keyframe).toBe(true);
+	expect(encoder.update({ a: 2 })?.keyframe).toBe(true);
 });
 
 test("no value before the first snapshot", () => {
@@ -204,7 +203,7 @@ test("frames apply without materializing", () => {
 	const decoder = new Decoder<Doc>({});
 
 	for (let n = 0; n <= 20; n += 1) {
-		const frame = pending(encoder.update({ n }));
+		const frame = encoder.update({ n });
 		if (!frame) continue;
 		if (frame.keyframe) {
 			decoder.snapshot(frame.payload);
@@ -227,7 +226,7 @@ test("an uncommitted frame resynchronizes the encoder", () => {
 	expect(commit(encoder, { a: 2 })?.keyframe).toBe(false);
 
 	// This one fails to write, so the caller never commits it.
-	expect(pending(encoder.update({ a: 3 }))?.keyframe).toBe(false);
+	expect(encoder.update({ a: 3 })?.keyframe).toBe(false);
 
 	// The next value opens a new group with a full snapshot rather than patching a state the
 	// consumer never reached.
@@ -240,7 +239,7 @@ test("an uncommitted frame resynchronizes the encoder", () => {
 // already published and skip it as unchanged.
 test("an uncommitted first frame is re-encoded", () => {
 	const encoder = new Encoder<Doc>({});
-	pending(encoder.update({ a: 1 }));
+	encoder.update({ a: 1 });
 
 	expect(commit(encoder, { a: 1 })?.keyframe).toBe(true);
 });
@@ -260,7 +259,7 @@ test("the value getter does not expose the live baseline", () => {
 
 test("a value JSON cannot represent is rejected", () => {
 	const encoder = new Encoder<unknown>({});
-	expect(() => pending(encoder.update(undefined))).toThrow("not representable as JSON");
+	expect(() => encoder.update(undefined)).toThrow("not representable as JSON");
 });
 
 // A caller that starts the next update before the previous frame settles makes the encoder
@@ -269,16 +268,16 @@ test("a value JSON cannot represent is rejected", () => {
 // `Pending` borrows the encoder, so a second `update` while one is outstanding does not compile.)
 test("a stale commit does not clear a newer pending frame", () => {
 	const encoder = new Encoder<Doc>({ deltas: true });
-	const first = pending(encoder.update({ a: 1 }));
+	const first = encoder.update({ a: 1 });
 
 	// The second update starts before the first frame settles, so the encoder resyncs around it.
-	expect(pending(encoder.update({ a: 2 }))?.keyframe).toBe(true);
+	expect(encoder.update({ a: 2 })?.keyframe).toBe(true);
 
 	// The first write finally completes, but it is no longer the outstanding frame.
 	first?.commit();
 
 	// The second frame was never committed either, so this must still resynchronize.
-	expect(pending(encoder.update({ a: 3 }))?.keyframe).toBe(true);
+	expect(encoder.update({ a: 3 })?.keyframe).toBe(true);
 });
 
 // The baseline is also what `Producer.mutate` seeds an edit from, so a resync must not erase it:
@@ -298,9 +297,9 @@ test("an uncommitted frame leaves the value at the last committed", () => {
 	commit(encoder, { a: 1, b: 1 });
 	commit(encoder, { a: 1, b: 2 });
 
-	pending(encoder.update({ a: 1, b: 3 }));
+	encoder.update({ a: 1, b: 3 });
 	expect(encoder.value).toEqual({ a: 1, b: 2 });
-	expect(pending(encoder.snapshot())?.payload).toEqual(new TextEncoder().encode(JSON.stringify({ a: 1, b: 2 })));
+	expect(encoder.snapshot()?.payload).toEqual(new TextEncoder().encode(JSON.stringify({ a: 1, b: 2 })));
 });
 
 // The reconstruction is the base every later delta merges into, so handing out the live object lets
@@ -343,9 +342,9 @@ test("a non-object root forces a keyframe", () => {
 	// Typed as `unknown` because the root deliberately stops being an object partway through.
 	const encoder = new Encoder<unknown>({ deltas: true });
 
-	const object = pending(encoder.update({ a: 1 }));
+	const object = encoder.update({ a: 1 });
 	object?.commit();
-	const array = pending(encoder.update([1, 2, 3]));
+	const array = encoder.update([1, 2, 3]);
 	array?.commit();
 
 	expect([object?.keyframe, array?.keyframe]).toEqual([true, true]);

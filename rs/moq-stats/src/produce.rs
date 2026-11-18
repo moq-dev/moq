@@ -509,9 +509,9 @@ impl<T: Serialize> Snapshot<T> {
 	/// means the value was unchanged, the interval already has a group for a snapshot, or
 	/// the track already ended, and nothing was written.
 	///
-	/// A frame over the group budget aborts the track with
-	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking.
+	/// Any encoder error, such as a frame over the group budget, aborts the group and the
+	/// track with the cause: skipping it would leave readers on the previous snapshot with no
+	/// sign it stopped tracking.
 	fn update(&mut self, value: &T, stamp: Stamp) -> moq_json::Result<Option<usize>> {
 		#[cfg(feature = "bench")]
 		{
@@ -528,17 +528,20 @@ impl<T: Serialize> Snapshot<T> {
 		{
 			self.encoder.reset();
 		}
-		let frame = match self.encoder.update(value)? {
-			moq_json::snapshot::Update::Frame(frame) => frame,
-			moq_json::snapshot::Update::Unchanged => return Ok(None),
-			// The encoder refuses a frame past the group budget before anything is written.
-			moq_json::snapshot::Update::TooLarge => {
-				let err = moq_net::Error::FrameTooLarge;
+		let frame = match self.encoder.update(value) {
+			Ok(Some(frame)) => frame,
+			Ok(None) => return Ok(None),
+			Err(err) => {
+				// The track carries a moq-net error; a value that won't serialize has no wire code.
+				let reason = match &err {
+					moq_json::Error::Net(err) => err.clone(),
+					_ => moq_net::StreamError::Internal.into(),
+				};
 				if let Some(group) = self.group.take() {
-					let _ = group.abort(err.clone());
+					let _ = group.abort(reason.clone());
 				}
-				let _ = self.track.clone().abort(err.clone());
-				return Err(err.into());
+				let _ = self.track.clone().abort(reason);
+				return Err(err);
 			}
 		};
 		let len = frame.payload.len();
