@@ -2802,6 +2802,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		for (origin, best) in &self.best {
 			assert_eq!(self.marks.contains(origin), best.offer.marked, "marks");
 		}
+		// A claim is marked exactly when it is filed under the marked identity, whose route
+		// is marked, so a marked claim never travels on an unmarked route.
+		for (id, marked) in [(self.me, false), (self.me_marked, true)] {
+			let items = self.known.get(&id).into_iter().flat_map(|known| known.items.values());
+			for claim in items {
+				assert_eq!(claim.marked, marked, "a claim under the wrong identity");
+			}
+		}
 		for origin in &self.marks {
 			assert!(
 				self.best.contains_key(origin) || self.known.contains_key(origin),
