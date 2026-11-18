@@ -27,6 +27,6 @@ export { DuplicateKey, MissingSnapshot } from "./error.ts";
 export * as Snapshot from "./snapshot/index.ts";
 /** Lossless append-log JSON publishing. */
 export * as Stream from "./stream/index.ts";
-export { after } from "./time.ts";
+export { next } from "./time.ts";
 /** Sliding-window JSON publishing. */
 export * as Window from "./window/index.ts";

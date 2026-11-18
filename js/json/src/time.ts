@@ -28,7 +28,7 @@ export function startsPast(track: Moq.Track.Producer, at: Moq.Time.Timestamp): b
  * two groups never share a start. Compared and minted in the track's timescale; `at` as given while
  * that is unknown or `at` is a scale-less key. Mirrors the Rust `moq_mux::start::next`.
  */
-export function after(track: Moq.Track.Producer, at: Moq.Time.Timestamp): Moq.Time.Timestamp {
+export function next(track: Moq.Track.Producer, at: Moq.Time.Timestamp): Moq.Time.Timestamp {
 	const largest = track.largest();
 	const scale = track.timescale;
 	if (largest === undefined || !scale || at.scale === undefined) return at;

@@ -68,7 +68,7 @@ export class CatalogProducer {
 		if (estimate) this.#lastEstimate = now();
 		// One timestamp past every output's newest start, so each opens its group at the same time.
 		let at = Time.Timestamp.now();
-		for (const track of this.#outputs.values()) at = Json.after(track, at);
+		for (const track of this.#outputs.values()) at = Json.next(track, at);
 		for (const output of this.#outputs.keys()) output.update(this.#value, at);
 	}
 
@@ -79,7 +79,7 @@ export class CatalogProducer {
 	 */
 	serve(track: Moq.Track.Producer, effect: Effect): void {
 		const output = new Json.Snapshot.Producer<Catalog.Root>({ track, deltas: false });
-		output.update(this.#value, Json.after(track, Time.Timestamp.now()));
+		output.update(this.#value, Json.next(track, Time.Timestamp.now()));
 
 		this.#outputs.set(output, track);
 		effect.cleanup(() => {

@@ -51,7 +51,7 @@ export class Publisher {
 	send(text: string): void {
 		if (!text) return;
 		this.expire();
-		this.#producer.push(text, Json.after(this.#track, Time.Timestamp.now()));
+		this.#producer.push(text, Json.next(this.#track, Time.Timestamp.now()));
 		this.#expires.update((expires) => [...expires, now().saturatingAdd(HISTORY)]);
 	}
 
@@ -62,7 +62,7 @@ export class Publisher {
 		let count = 0;
 		while (count < expires.length && expires[count].le(at)) count++;
 		if (!count) return;
-		this.#producer.pop(count, Json.after(this.#track, Time.Timestamp.now()));
+		this.#producer.pop(count, Json.next(this.#track, Time.Timestamp.now()));
 		this.#expires.set(expires.slice(count));
 	}
 
