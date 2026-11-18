@@ -865,6 +865,28 @@ async fn a_cbr_source_records_its_mux_rate() {
 	assert_suffix(data, &imported);
 }
 
+/// The demultiplexing lane of the same source may record the rate first; a passthrough that has
+/// measured none keeps it.
+#[tokio::test(start_paused = true)]
+async fn a_passthrough_without_a_rate_keeps_the_recorded_one() {
+	let mut mux = Mux::default();
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 0, 50, 10, 4);
+	let data = mux.bytes();
+	let alone = import(&data, data.len(), None).await.unwrap();
+	assert_eq!(alone.catalog.ext.mpegts.mux_rate, None, "too short to measure");
+	assert!(!alone.objects.is_empty());
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config()).unwrap();
+	catalog
+		.mutate(|catalog| catalog.ext.mpegts.mux_rate = Some(400_000))
+		.unwrap();
+	let imported = import_onto(broadcast, catalog, &data, data.len(), None).await.unwrap();
+	assert!(imported.catalog.ext.mpegts.passthrough.is_some());
+	assert_eq!(imported.catalog.ext.mpegts.mux_rate, Some(400_000));
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_overriding_clock_paces_on_its_own_pcrs() {
 	let mut mux = Mux::default();

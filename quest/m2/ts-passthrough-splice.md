@@ -65,7 +65,3 @@ existing reader handles the result.
 ## Closes
 
 - [#8911](https://github.com/moq-dev/moq/issues/8911) - `import ts --passthrough` ends at an unflagged clock step back
-
-## Related
-
-- [A transport stream carried whole is listed under the mpegts section](/quest/m2/hang04/m2ts.md) - also edits the passthrough import and release

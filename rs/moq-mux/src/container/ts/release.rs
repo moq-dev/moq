@@ -195,7 +195,8 @@ impl Release {
 		};
 		match &self.track {
 			None => {
-				let source = ExportSource::for_stream(&self.source, &passthrough.track, export::subscribed(self.delay))?;
+				let source =
+					ExportSource::for_stream(&self.source, &passthrough.track, export::subscribed(self.delay))?;
 				let source = export::skipping(source, self.delay);
 				let source = match self.replay {
 					true => source,

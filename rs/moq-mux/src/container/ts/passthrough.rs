@@ -708,12 +708,17 @@ impl<E: super::Catalog> Passthrough<E> {
 		if self.section.as_ref().is_some_and(|section| section.written == written) {
 			return Ok(());
 		}
+		// The demultiplexing lane of the same source may record the rate too, so write it only
+		// when this meter's own value changes: one that has measured nothing leaves it alone.
+		let rate_changed = self.section.as_ref().and_then(|section| section.written.mux_rate) != written.mux_rate;
 		let update = written.clone();
 		self.catalog.mutate(|catalog| {
 			// `new` checked the section exists, and an extension keeps it for its life.
 			if let Some(mpegts) = catalog.ext.mpegts_mut() {
 				mpegts.passthrough = Some(update.track);
-				mpegts.mux_rate = update.mux_rate;
+				if rate_changed {
+					mpegts.mux_rate = update.mux_rate;
+				}
 			}
 		})?;
 		match &mut self.section {
