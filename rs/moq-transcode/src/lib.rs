@@ -490,8 +490,6 @@ mod tests {
 			let request = requests.requested_track().await.unwrap();
 			assert_eq!(request.name(), name);
 			let mut serving = Box::pin(rung::serve(ladder.rung(name).unwrap(), request));
-			// The source track is local, so its timescale is known and this poll accepts the track.
-			assert!(futures::poll!(&mut serving).is_pending());
 			subscribers.push((name, subscribing.await.unwrap().ordered()));
 			// With demand present and no source group, this poll attaches the rung
 			// to the shared feed before parking. No startup sleep can guarantee that.

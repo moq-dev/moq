@@ -53,6 +53,8 @@ pub(crate) struct Pipeline {
 	/// The catalog ID of the source rendition the rungs are sized against.
 	name: String,
 	rendition: VideoConfig,
+	/// Its track's timescale, which every rung's output takes.
+	scale: moq_net::Timescale,
 	/// The shared live decode of that rendition: one subscription and one
 	/// decoder for every rung serving off it.
 	feed: Feed,
@@ -83,6 +85,7 @@ impl Pipeline {
 		name: String,
 		rendition: VideoConfig,
 	) -> Result<Self, Error> {
+		let scale = timescale(&source, rendition.track(&name)).await?;
 		// One shared live decode for every rung of this source: N active rungs
 		// share one subscription and one decoder instead of N.
 		let feed = Feed::new(
@@ -99,6 +102,7 @@ impl Pipeline {
 			decoders,
 			name,
 			rendition,
+			scale,
 			feed,
 			rungs: Vec::new(),
 			names: Names::default(),
@@ -201,6 +205,7 @@ impl Pipeline {
 			feed: self.feed.clone(),
 			broadcast: self.source.clone(),
 			config: self.rendition.clone(),
+			scale: self.scale,
 			transcode: self.config.clone(),
 			active: self.active.clone(),
 			rendition: self.active.rendition(&published.rung),
@@ -235,6 +240,17 @@ impl Pipeline {
 			true => Vec::new(),
 			false => self.rungs.clone(),
 		};
+		// Another track, or another stream on it, may key its groups in another timescale.
+		let scale = match rebuilt {
+			true => match timescale(&self.source, rendition.track(&name)).await {
+				Ok(scale) => scale,
+				Err(err) => {
+					tracing::warn!(%err, source = %name, "could not resolve the new source's timescale");
+					return Ok(());
+				}
+			},
+			false => self.scale,
+		};
 
 		// Resolve against the new source before committing to it, so a failure
 		// leaves the ladder exactly as it was and the next snapshot tries again.
@@ -263,6 +279,7 @@ impl Pipeline {
 		}
 		self.name = name;
 		self.rendition = rendition;
+		self.scale = scale;
 
 		// Retire whatever the new ladder does not carry forward: a height it has no
 		// room for, and a height it kept at a picture it is no longer serving,
@@ -283,6 +300,21 @@ impl Pipeline {
 		self.rungs = rungs;
 		Ok(())
 	}
+}
+
+/// The timescale of the source track `track`, for its rungs to key their groups in, so each output
+/// group has its source group's key. Resolved once per source rendition rather than per request,
+/// so a rung request is answered at once and an idle rung holds nothing of its source.
+///
+/// A scale-less source's keys aren't times, but the frames decoded from it are, so its rungs are
+/// in the container's microseconds, and its keys pass through as they are.
+async fn timescale(source: &moq_net::broadcast::Consumer, track: &str) -> Result<moq_net::Timescale, Error> {
+	let track = source.track(track)?;
+	let info = tokio::select! {
+		info = track.info() => info?,
+		() = source.closed() => return Err(moq_net::Error::Cancel.into()),
+	};
+	Ok(info.timescale.unwrap_or(hang::container::TIMESCALE))
 }
 
 #[cfg(test)]
@@ -310,6 +342,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_flapping_source_probes_each_shape_once() {
 		let source = moq_net::broadcast::Info::default().produce();
+		let _video = source
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
 		let config = Config {
 			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
 			encoder: moq_video::encode::Kind::Software,
@@ -344,5 +379,49 @@ mod tests {
 		let mut cursor = active.consume();
 		assert_eq!(cursor.try_next().unwrap().rendition.name(), "video/120p.5");
 		assert!(cursor.try_next().is_none());
+	}
+
+	/// Each rung keys its groups in its source track's timescale, so a ladder following the source
+	/// onto another track takes that track's.
+	#[tokio::test]
+	async fn a_rung_takes_its_source_tracks_timescale() {
+		let source = moq_net::broadcast::Info::default().produce();
+		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
+		let _micro = source.create_track("video", info.clone()).unwrap();
+		let _nano = source
+			.create_track("nano", info.with_timescale(moq_net::Timescale::NANO))
+			.unwrap();
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let decoders = catalog::Decoders::new(config.decoder());
+		let mut pipeline = Pipeline::new(
+			source.consume(),
+			config,
+			active::Producer::default(),
+			decoders,
+			"video".into(),
+			video(640, 360),
+		)
+		.await
+		.unwrap();
+		let scale = |pipeline: &mut Pipeline| {
+			let name = pipeline.rungs()[0].rung.name.clone();
+			pipeline.rung(&name).unwrap().scale
+		};
+		assert_eq!(scale(&mut pipeline), hang::container::TIMESCALE);
+
+		let mut snapshot = Video::default();
+		snapshot.insert("nano", video(640, 360)).unwrap();
+		pipeline.follow(&snapshot).await.unwrap();
+		assert_eq!(
+			pipeline.name, "nano",
+			"the ladder follows the source onto its new track"
+		);
+		assert_eq!(scale(&mut pipeline), moq_net::Timescale::NANO);
 	}
 }

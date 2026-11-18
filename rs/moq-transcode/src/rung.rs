@@ -82,6 +82,9 @@ pub(crate) struct Rung {
 	pub broadcast: moq_net::broadcast::Consumer,
 	/// The source rendition's catalog entry (codec + container).
 	pub config: VideoConfig,
+	/// The source track's timescale, which the output track takes so each output group has its
+	/// source group's key.
+	pub scale: moq_net::Timescale,
 	/// The codec implementations, devices, and resize the transcode was configured with.
 	pub transcode: crate::Config,
 	/// Where to report that this rung is encoding.
@@ -143,51 +146,13 @@ impl Rung {
 	}
 }
 
-/// A rung track not yet ended, which a cancelled serving future ends with `Cancel` rather than
-/// dropping it unanswered or unfinished. `None` once it ended on purpose.
-struct Serving(Option<Stage>);
-
-/// How far a rung track's answer got.
-enum Stage {
-	/// Waiting on the source track's timescale to accept the request in.
-	Requested(moq_net::track::Request),
-	/// Accepted, until the track ends.
-	Accepted(moq_net::track::Producer),
-}
-
-impl Serving {
-	/// Accept the request in `info`, returning the track.
-	fn accept(&mut self, info: moq_net::track::Info) -> moq_net::track::Producer {
-		let Some(Stage::Requested(request)) = self.0.take() else {
-			unreachable!("a rung track is accepted once, before anything else ends it");
-		};
-		let producer = request.accept(info);
-		self.0 = Some(Stage::Accepted(producer.clone()));
-		producer
-	}
-
-	/// Let go of a track that ended on its own, releasing the last clone without aborting it.
-	fn release(&mut self) {
-		self.0 = None;
-	}
-
-	/// Refuse the request with `err`. Only a request still waiting can be.
-	fn reject(&mut self, err: moq_net::Error) {
-		let Some(Stage::Requested(request)) = self.0.take() else {
-			unreachable!("a rung track is refused only before it is accepted");
-		};
-		request.reject(err);
-	}
-}
+/// Keeps a cancelled serving future from dropping an unfinished output track.
+struct Serving(Option<moq_net::track::Producer>);
 
 impl Drop for Serving {
 	fn drop(&mut self) {
-		match self.0.take() {
-			Some(Stage::Requested(request)) => request.reject(moq_net::Error::Cancel),
-			Some(Stage::Accepted(producer)) => {
-				let _ = producer.abort(moq_net::Error::Cancel);
-			}
-			None => {}
+		if let Some(producer) = self.0.take() {
+			let _ = producer.abort(moq_net::Error::Cancel);
 		}
 	}
 }
@@ -239,20 +204,12 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 	// Grab the group-request handle before accepting: a Request is dynamic from
 	// birth, so a fetch racing the acceptance queues instead of failing.
 	let dynamic = request.requests();
-	// Held before the future is polled, so dropping it unpolled still answers the request.
-	let mut serving = Serving(Some(Stage::Requested(request)));
+	// In the source's timescale, so each output group has its source group's key.
+	let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(rung.scale);
+	let mut producer = request.accept(info);
+	let serving = Serving(Some(producer.clone()));
 	async move {
-		let scale = match timescale(&rung).await {
-			Ok(Some(scale)) => scale,
-			// `serving` refuses the request with `Cancel` as it drops.
-			Ok(None) => return Ok(()),
-			Err(err) => {
-				serving.reject(err.clone());
-				return Err(err.into());
-			}
-		};
-		let info = hang::container::track_info(hang::catalog::PRIORITY.video).with_timescale(scale);
-		let mut producer = serving.accept(info);
+		let mut serving = serving;
 		let (finished, mut finishing) = tokio::sync::watch::channel(false);
 
 		let live = async {
@@ -274,29 +231,14 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 		// to count, so finishing then would reject the very group it was fetching.
 		match (live, fetches) {
 			(Ok(Ended::Finished), Ok(())) => {
+				// Released with `serving`, the last clone, which then no longer aborts it.
 				drop(producer.finish()?);
-				serving.release();
+				serving.0 = None;
 				Ok(())
 			}
 			// `serving` aborts the track on drop, so subscribers see an end rather than a stall.
 			(live, fetches) => live.map(|_| ()).and(fetches),
 		}
-	}
-}
-
-/// The timescale to accept a rung track in: its source track's, so each output group has its
-/// source group's key. `None` when the rung retires or its source closes first, since the source
-/// may never say: a later request reaches the rung that replaces this one.
-///
-/// A scale-less source's keys aren't times, but the frames decoded from it are, so its rungs are
-/// in the container's microseconds, and its keys still pass through as they are.
-async fn timescale(rung: &Rung) -> moq_net::Result<Option<moq_net::Timescale>> {
-	let track = rung.broadcast.track(&rung.source)?;
-	let mut retire = rung.retire.clone();
-	tokio::select! {
-		info = track.info() => Ok(Some(info?.timescale.unwrap_or(hang::container::TIMESCALE))),
-		() = retire.fired() => Ok(None),
-		() = rung.broadcast.closed() => Ok(None),
 	}
 }
 
@@ -1239,6 +1181,7 @@ mod tests {
 			),
 			broadcast,
 			config,
+			scale: hang::container::TIMESCALE,
 			transcode: crate::Config {
 				encoder: moq_video::encode::Kind::Software,
 				decoder: moq_video::decode::Kind::Software,
@@ -1380,33 +1323,6 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		drop(video);
-	}
-
-	/// A retired rung can't wait on its source to say what timescale to accept a request in, so
-	/// it refuses the request for the rung that replaces it rather than holding it.
-	#[tokio::test(start_paused = true)]
-	async fn a_retired_rung_refuses_a_request_it_cant_describe() {
-		let (rung, source, retire) = idle_rung();
-		// Nothing answers the source's track request, so its info never resolves.
-		let _unanswered = source.requests();
-		let output = moq_net::broadcast::Info::default().produce();
-		let mut dynamic = output.requests();
-		let view = output.consume().track("video/120p").unwrap();
-		let track = tokio::spawn(async move { view.info().await.map(drop) });
-		let request = dynamic.requested_track().await.unwrap();
-		let mut running = tokio::spawn(serve(rung, request));
-		let wait = std::time::Duration::from_secs(5);
-		assert!(
-			kio::clock::timeout(wait, &mut running).await.is_err(),
-			"the rung waits on its source"
-		);
-		retire.send(true).unwrap();
-		kio::clock::timeout(wait, running)
-			.await
-			.expect("retirement ends the wait")
-			.unwrap()
-			.unwrap();
-		assert!(matches!(track.await.unwrap(), Err(moq_net::Error::Cancel)));
 	}
 
 	/// Fill output starts 1 to an hour, with source groups at 0 and an hour, or, when `empty`,
@@ -1576,8 +1492,8 @@ mod tests {
 		let request = dynamic.requested_track().await.unwrap();
 		let running = tokio::spawn(serve(rung, request));
 		let mut track = subscribing.await.unwrap();
-		// The feed's subscription proves the live path is parked waiting for media rather than
-		// never started.
+		// The track is admitted before `serve` is polled; the feed's subscription proves the
+		// live path is parked waiting for media rather than never started.
 		let mut demand = video.demand();
 		while !demand.wanted_changed().await.unwrap() {}
 		running.abort();
@@ -1604,7 +1520,7 @@ mod tests {
 		assert!(matches!(observed.closed().await, Err(moq_net::Error::Cancel)));
 	}
 
-	/// The request is held before the serving future is spawned, so it also owns the answer
+	/// The track is admitted before the serving future is spawned, so it also owns cleanup
 	/// when its caller abandons that future without polling it at all.
 	#[tokio::test(start_paused = true)]
 	async fn an_unpolled_rung_reports_cancel() {
@@ -1612,11 +1528,12 @@ mod tests {
 		let output = moq_net::broadcast::Info::default().produce();
 		let mut dynamic = output.requests();
 		let view = output.consume();
-		let subscribing = tokio::spawn(async move { view.track("rung").unwrap().subscribe(None).await.map(drop) });
+		let subscribing = tokio::spawn(async move { view.track("rung").unwrap().subscribe(None).await.unwrap() });
 		let request = dynamic.requested_track().await.unwrap();
 		let running = serve(rung, request);
+		let mut track = subscribing.await.unwrap();
 		drop(running);
-		assert!(matches!(subscribing.await.unwrap(), Err(moq_net::Error::Cancel)));
+		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));
 	}
 
 	/// A source switching color space mid-stream (an SDR insert in an HDR
