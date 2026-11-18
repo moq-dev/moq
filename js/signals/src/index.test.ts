@@ -326,6 +326,22 @@ describe("Signal", () => {
 		dispose();
 	});
 
+	test("a waiter registered by a subscriber waits for the next change", async () => {
+		const signal = new Signal(0);
+		const seen: number[] = [];
+		const dispose = signal.subscribe(() => {
+			if (seen.length === 0) signal.changed((v) => seen.push(v));
+		});
+		signal.set(1);
+		await settle();
+		expect(seen).toEqual([]);
+
+		signal.set(2);
+		await settle();
+		expect(seen).toEqual([2]);
+		dispose();
+	});
+
 	test("any number of subscribers is legitimate", async () => {
 		const signal = new Signal(0);
 		let notified = 0;

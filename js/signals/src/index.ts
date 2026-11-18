@@ -164,6 +164,13 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 		const deliver = (fn: Subscriber<T>) =>
 			changed || (seen?.has(fn) === true && !isEqual(seen.get(fn) as T, value));
 
+		// Detached before any callback runs, so a waiter one registers waits for the next change.
+		let waiters: Set<Subscriber<T>> | undefined;
+		if (changed || seen) {
+			waiters = this.#changed;
+			this.#changed = new Set();
+		}
+
 		for (const fn of this.#subscribers) {
 			if (this.#initial.has(fn)) continue;
 			// A pending watcher is owed its first value whether or not this flush is a change.
@@ -175,9 +182,7 @@ export class Signal<T> implements Getter<T>, Setter<T> {
 			}
 		}
 
-		if (!changed && !seen) return;
-		const waiters = this.#changed;
-		this.#changed = new Set();
+		if (!waiters) return;
 		for (const fn of waiters) {
 			// Saw the final value, so it keeps waiting.
 			if (!deliver(fn)) {
