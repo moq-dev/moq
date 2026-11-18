@@ -39,6 +39,14 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - ✅ Wrapper fixes: `abort` takes an error, `create_group` is deleted, the
   subscribe shape and names match moq-net, `name()` means one thing, and
   `Config`, `Frame`, `Datagram`, and `Event` are `#[non_exhaustive]`.
+- ✅ A datagram consumer's `recv` (`poll_recv` in Rust) yields `Datagram`
+  alone, and its rejects (authentication, duplicate, identity, oversize) are
+  counted, not returned, so `Event` is deleted in Rust and JS
+  (2026-11-18, maintainer, /quest-plan of the enum-return audit). Every
+  caller skips the four rejects, which carry only a sequence, and building
+  them matches `Error` variants (`datagram.rs`, `group.rs`, js
+  `failure.ts`'s `code`); `Key::open` reports what the caller must do, and
+  group.rs stops matching on errors too.
 - ✅ No compression in the profile, and `Config` gains `profile` (rejected:
   designing the inner header now; shipping and planning a third label).
 - ✅ Nothing on the moq-net layer or the wire says a payload is encrypted or
