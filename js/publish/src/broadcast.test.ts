@@ -381,7 +381,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 	if (!net) throw new Error("expected a network producer once connected");
 
 	const subscriber = net.track(Broadcast.CATALOG_TRACK).subscribe({ delay: { max: null } });
-	const group = (await subscriber.ordered().nextGroup())?.group;
+	const group = await subscriber.ordered().nextGroup();
 	// Reaching back over every group, the oldest is also the newest: nothing was published before it.
 	expect(group?.start).toBe((await subscriber.largest())?.group);
 	const catalog = (await group?.readJson()) as Catalog.Root;
@@ -409,7 +409,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
-	const start = (await first.nextGroup())?.group?.start;
+	const start = (await first.nextGroup())?.start;
 	if (start === undefined) throw new Error("expected the first catalog");
 	const instance = announced?.active.peek()?.instance;
 	expect(instance).toBeDefined();
@@ -426,7 +426,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	// is past the first.
 	expect(announced?.active.peek()?.instance).toBe(instance);
 	expect(broadcast.net.peek()).toBe(net);
-	const group = (await first.nextGroup())?.group;
+	const group = await first.nextGroup();
 	expect(group?.start).toBeGreaterThan(start);
 	const catalog = (await group?.readJson()) as Catalog.Root;
 	expect(Object.keys(catalog.audio?.renditions ?? {})).toEqual(["audio"]);

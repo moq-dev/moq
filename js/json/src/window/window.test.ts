@@ -217,7 +217,7 @@ test("compressed round-trip across rolls", async () => {
 async function groups(track: Track.Producer): Promise<[number, number | undefined][]> {
 	const ordered = track.subscribe({ delay: { max: Duration.millis(30_000) } }).ordered();
 	const out: [number, number | undefined][] = [];
-	for (let group = (await ordered.nextGroup())?.group; group; group = (await ordered.nextGroup())?.group) {
+	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const first = await group.readFrame();
 		let frames = first ? 1 : 0;
 		while ((await group.readFrame()) !== undefined) frames++;
@@ -571,7 +571,7 @@ test("edits keep their timestamps, and a scale-less edit its group's key", async
 		producer.finish();
 
 		// A scale-less header opens its group at its key, and an op carries that key.
-		const group = (await track.subscribe().ordered().nextGroup())?.group;
+		const group = await track.subscribe().ordered().nextGroup();
 		for (let i = 0; i < 2; i++) expect((await group?.readFrame())?.timestamp).toEqual(at);
 	}
 });

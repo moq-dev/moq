@@ -83,7 +83,7 @@ function taken(read: () => Recv, ended: () => undefined): GroupConsumer | undefi
 	}
 }
 
-/** What an {@link Ordered} read returns next. Mirrors the Rust `track::Item`. */
+/** What {@link Ordered.nextItem} returns next. Mirrors the Rust `track::Item`. */
 export type Item =
 	/** A group, with a higher key than any group or gap returned before. */
 	| { kind: "group"; group: GroupConsumer }
@@ -1080,6 +1080,7 @@ let fillsOf: (producer: Producer) => FillState;
 // assigned in the class's static block.
 let makeOrdered: (subscriber: Subscriber) => Ordered;
 let ordered_: {
+	nextGroup(subscriber: Subscriber): Promise<GroupConsumer | undefined>;
 	nextItem(subscriber: Subscriber): Promise<Item | undefined>;
 	tryItem(subscriber: Subscriber): ItemRecv;
 	ended(subscriber: Subscriber): undefined;
@@ -4152,6 +4153,7 @@ export class Subscriber {
 		// The key cursor lives here (it shares the buffer and the drift anchor with
 		// the arrival cursor); `Ordered` is the handle that reaches it.
 		ordered_ = {
+			nextGroup: (subscriber) => subscriber.#nextGroup(),
 			nextItem: (subscriber) => subscriber.#nextItem(),
 			tryItem: (subscriber) => subscriber.#tryItem(),
 			ended: (subscriber) => subscriber.#ended(),
@@ -4833,7 +4835,7 @@ export class Subscriber {
 		}
 	}
 
-	// The next group in key order, past any gap, for the frame helpers.
+	// The next group in key order, past any gap.
 	async #nextGroup(): Promise<GroupConsumer | undefined> {
 		for (;;) {
 			const item = await this.#nextItem();
@@ -5368,32 +5370,55 @@ export class Ordered {
 	}
 
 	/**
-	 * The next group with a higher key than any returned before, or a gap this reader gave up on
-	 * below the next group, as the Rust `next_group` returns. Mirrors its `Item`.
+	 * Return the next group with a strictly-greater sequence number than the last returned,
+	 * passing any gap {@link nextItem} would report below it. Mirrors the Rust `next_group`.
+	 *
+	 * Late arrivals (key at or below the last returned) are silently skipped, as is a
+	 * group whose every frame is further behind the live edge than `delay.max` (the default
+	 * subscription's zero keeps only what nothing newer has superseded). Honors the bounds set by
+	 * {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
+	 * finishes once nothing in them is left to deliver. Later reads return `undefined`
+	 * immediately too; widening the ranges with {@link update} reads on above the last key returned.
+	 */
+	nextGroup(): Promise<GroupConsumer | undefined> {
+		return ordered_.nextGroup(this.#subscriber);
+	}
+
+	/**
+	 * Take the next group as {@link nextGroup} would, without waiting: `undefined` when nothing
+	 * is deliverable right now, which is not by itself the end of the track. Mirrors the Rust
+	 * `poll_next_group`.
+	 */
+	tryNextGroup(): GroupConsumer | undefined {
+		for (;;) {
+			const item = this.tryNextItem();
+			if (item?.kind !== "gap") return item?.group;
+		}
+	}
+
+	/**
+	 * The next group, as {@link nextGroup} returns it, or a gap this reader gave up on below it.
+	 * Mirrors the Rust `next_item` and its `Item`.
 	 *
 	 * A gap is every group the publisher or a relay dropped, the transport evicted, `delay.max`
-	 * aged out (the default subscription's zero keeps only what nothing newer has superseded), a
-	 * fill could not find, or that landed after the read passed its key. It carries the keys it
-	 * spans and is returned once, after any group the read still owes below it and before the
-	 * next group above it, or when the track ends. Keys the publisher declared skipped were never
-	 * groups, so they are no gap, and nor is a key a local track never produced. Unlike Rust, nor
-	 * is a group a local track produces after the read moved past its key: the read keeps no record
-	 * below where it is, so its memory stays bounded. A session-fed track reports such a key at
-	 * the latest when the read passes it. Honors the bounds
-	 * set by {@link withRange}. Like {@link Subscriber.recvGroup}, a read whose ranges all end
-	 * finishes once nothing in them is left to deliver. Later reads return `undefined` immediately
-	 * too; widening the ranges with {@link update} reads on above the last key returned.
+	 * aged out, a fill could not find, or that landed after the read passed its key. It carries
+	 * the keys it spans and is returned once, after any group the read still owes below it and
+	 * before the next group above it, or when the track ends. Keys the publisher declared skipped
+	 * were never groups, so they are no gap, and nor is a key a local track never produced.
+	 * Unlike Rust, nor is a group a local track produces after the read moved past its key: the
+	 * read keeps no record below where it is, so its memory stays bounded. A session-fed track
+	 * reports such a key at the latest when the read passes it.
 	 */
-	nextGroup(): Promise<Item | undefined> {
+	nextItem(): Promise<Item | undefined> {
 		return ordered_.nextItem(this.#subscriber);
 	}
 
 	/**
-	 * Take the next item as {@link nextGroup} would, without waiting: `undefined` when nothing
+	 * Take the next item as {@link nextItem} would, without waiting: `undefined` when nothing
 	 * is ready right now, which is not by itself the end of the track. Mirrors the Rust
-	 * `poll_next_group`.
+	 * `poll_next_item`.
 	 */
-	tryNextGroup(): Item | undefined {
+	tryNextItem(): Item | undefined {
 		const recv = ordered_.tryItem(this.#subscriber);
 		switch (recv.kind) {
 			case "group":

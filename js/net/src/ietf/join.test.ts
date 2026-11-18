@@ -6,7 +6,6 @@ import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
@@ -197,7 +196,7 @@ test("a head that lands before its tail is continued by it", async () => {
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
 	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2", "t3"]));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(group?.start).toBe(GROUP);
 	expect(await frames(group)).toEqual(["h0", "h1", "t2", "t3"]);
 });
@@ -210,7 +209,7 @@ test("a tail that lands before its head waits for it", async () => {
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
 	await tail;
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 });
 
@@ -221,7 +220,7 @@ test("a catalog written once is readable from the head alone", async () => {
 	// No live stream ever comes: the group was written before the subscription.
 	await subscriber.handleFetch(await head(fetch.requestId, ['{"video":{}}'], 0n));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(group?.start).toBe(0n);
 	expect(untext((await group?.readFrame())?.payload)).toBe('{"video":{}}');
 });
@@ -235,7 +234,7 @@ test("an empty tail finishes a group the head already holds whole", async () => 
 	header.flags = flags(false);
 	await subscriber.handleGroup(header, new Reader(undefined, new Uint8Array(), VERSION));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await frames(group)).toEqual(["h0", "h1"]);
 	expect(await group?.closed).toBeNull();
 });
@@ -257,7 +256,7 @@ for (const outcome of ["a refused joining FETCH", "an empty joining FETCH"] as c
 		await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
 		await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["n0"]));
 
-		const group = await nextGroup(consumer.ordered());
+		const group = await consumer.ordered().nextGroup();
 		expect(group?.start).toBe(GROUP + 1n);
 		expect(await frames(group)).toEqual(["n0"]);
 	});
@@ -272,7 +271,7 @@ test("a reader in sequence order with no delay budget skips headless groups", as
 	await subscriber.handleGroup(...liveStream(GROUP + 1n, 1, ["m1"]));
 	await subscriber.handleGroup(...liveStream(GROUP + 2n, 0, ["n0"]));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(group?.start).toBe(GROUP + 2n);
 });
 
@@ -288,7 +287,7 @@ for (const version of VERSIONS) {
 			// Largest is inclusive, including object 0: its following tail is no whole message.
 			await subscriber.handleGroup(...liveStream(0n, Number(objectId) + 1, ["cut"], version));
 			await subscriber.handleGroup(...liveStream(1n, 0, ["whole"], version));
-			const group = await nextGroup(consumer.ordered());
+			const group = await consumer.ordered().nextGroup();
 			expect(group?.start).toBe(1n);
 			expect(await frames(group)).toEqual(["whole"]);
 		});
@@ -303,7 +302,7 @@ test("a tail parked on a refused joining FETCH is dropped", async () => {
 	await tail;
 	await subscriber.handleGroup(...liveStream(GROUP + 1n, 0, ["n0"]));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(group?.start).toBe(GROUP + 1n);
 });
 
@@ -319,7 +318,7 @@ test("a joining FETCH has no deadline of its own", async () => {
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
 	await tail;
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(group?.start).toBe(GROUP);
 	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 });
@@ -350,7 +349,7 @@ test("SUBSCRIPTION_ENDED cancels a head nothing claimed", async () => {
 	const { subscriber, consumer, fetching, fetch, peer } = await join();
 	await accept(fetching);
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(group?.start).toBe(GROUP);
 
 	// The group may run past the head upstream, so it must not read as whole.
@@ -387,7 +386,7 @@ test("a whole group that precedes the head wins the sequence", async () => {
 	await subscriber.handleGroup(...liveStream(GROUP, 0, ["w0", "w1", "w2"]));
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await frames(group)).toEqual(["w0", "w1", "w2"]);
 });
 
@@ -398,7 +397,7 @@ test("a whole group for a headed sequence is refused, with its head", async () =
 	await subscriber.handleFetch(await head(fetch.requestId, ["h0", "h1"]));
 	await subscriber.handleGroup(...liveStream(GROUP, 0, ["w0"]));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(group?.start).toBe(GROUP);
 	expect(await group?.closed).toBeInstanceOf(Error);
 });
@@ -411,7 +410,7 @@ test("a head that does not meet its tail is refused", async () => {
 	// Object 2 is missing.
 	await subscriber.handleGroup(...liveStream(GROUP, 3, ["t3"]));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await group?.closed).toBeInstanceOf(Error);
 });
 
@@ -442,7 +441,7 @@ test("a head that spells Object ID Delta 1 is contiguous", async () => {
 	await subscriber.handleFetch(await deltaHead(fetch.requestId, ["h0", "h1"], 1));
 	await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"]));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 });
 
@@ -452,7 +451,7 @@ test("a head that repeats an Object ID is dropped", async () => {
 
 	await subscriber.handleFetch(await deltaHead(fetch.requestId, ["h0", "h0"], 0));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await group?.closed).toBeInstanceOf(Error);
 });
 
@@ -466,7 +465,7 @@ test("a tail that is only an End of Group finishes the head", async () => {
 	// Object ID 2, an empty payload, then status End of Group.
 	await subscriber.handleGroup(header, new Reader(undefined, new Uint8Array([2, 0, 3]), VERSION));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await frames(group)).toEqual(["h0", "h1"]);
 	expect(await group?.closed).toBeNull();
 });
@@ -490,7 +489,7 @@ test("a joining FETCH spanning another group drops the head", async () => {
 	});
 	await subscriber.handleFetch(new Reader(undefined, bytes, VERSION));
 
-	const group = await nextGroup(consumer.ordered());
+	const group = await consumer.ordered().nextGroup();
 	expect(await group?.closed).toBeInstanceOf(Error);
 });
 
@@ -516,7 +515,7 @@ for (const version of VERSIONS) {
 		await subscriber.handleFetch(await head(subscribe.requestId, ["h0", "h1"], GROUP, version));
 		await tail;
 
-		const group = await nextGroup(consumer.ordered());
+		const group = await consumer.ordered().nextGroup();
 		expect(group?.start).toBe(GROUP);
 		expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 	});
@@ -528,7 +527,7 @@ for (const version of VERSIONS) {
 		await fill;
 		await subscriber.handleGroup(...liveStream(GROUP, 2, ["t2"], version));
 
-		const group = await nextGroup(consumer.ordered());
+		const group = await consumer.ordered().nextGroup();
 		expect(await frames(group)).toEqual(["h0", "h1", "t2"]);
 	});
 

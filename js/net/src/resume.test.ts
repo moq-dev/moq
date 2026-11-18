@@ -12,7 +12,6 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
 import { hooks, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
-import { nextGroup, tryNextGroup } from "./ordered.test-util.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
@@ -1852,15 +1851,15 @@ test("an ordered reader takes a replaced copy's buffered group before the new co
 		.subscribe({ delay: { max: Duration.millis(10_000) } })
 		.ordered();
 	ta.write(0n);
-	expect((await nextGroup(ordered))?.start).toBe(0n);
+	expect((await ordered.nextGroup())?.start).toBe(0n);
 
 	// The old copy holds group 1 unread; the new one only has group 2.
 	ta.write(1n);
 	tb.write(2n);
 	front.serve(b.consume());
 	await settle();
-	expect((await nextGroup(ordered))?.start).toBe(1n);
-	expect((await nextGroup(ordered))?.start).toBe(2n);
+	expect((await ordered.nextGroup())?.start).toBe(1n);
+	expect((await ordered.nextGroup())?.start).toBe(2n);
 
 	ordered.close();
 	front.consumer.close();
@@ -1883,7 +1882,7 @@ test("a routed read right after an update picks its group under the new preferen
 		await settle();
 		// The copy learns of the update a microtask later; the read must not pick under its old budget.
 		ordered.update({ delay: { max: Duration.ZERO } });
-		expect(tryNextGroup(ordered)?.start).toBe(1n);
+		expect(ordered.tryNextGroup()?.start).toBe(1n);
 	} finally {
 		ordered.close();
 		front.consumer.close();
@@ -1909,13 +1908,13 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 			.ordered();
 		try {
 			ta.write(4n);
-			expect((await nextGroup(ordered))?.start).toBe(4n);
+			expect((await ordered.nextGroup())?.start).toBe(4n);
 			ta.write(6n);
 			tb.write(7n);
 			hooks.startTrack(tb.producer, { start: 7n, requested: 4n });
 			front.serve(b.consume());
 			await settle();
-			const held = nextGroup(ordered);
+			const held = ordered.nextGroup();
 			expect(await isPending(held)).toBe(true);
 			if (resolution === "arrival") ta.write(5n);
 			if (resolution === "other copy") {
@@ -1927,7 +1926,7 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 			if (resolution === "budget") await clock.advance(Duration.millis(1000));
 			const expected = resolution === "arrival" || resolution === "other copy" ? [5n, 6n, 7n] : [6n, 7n];
 			expect((await held)?.start).toBe(expected[0]);
-			for (const key of expected.slice(1)) expect((await nextGroup(ordered))?.start).toBe(key);
+			for (const key of expected.slice(1)) expect((await ordered.nextGroup())?.start).toBe(key);
 		} finally {
 			ordered.close();
 			front.consumer.close();
@@ -2096,13 +2095,13 @@ test("a route copy's record folds while the reader returns only gaps", () => {
 		.ordered();
 	try {
 		ta.write(0n);
-		expect(ordered.tryNextGroup()).toMatchObject({ kind: "group" });
+		expect(ordered.tryNextItem()).toMatchObject({ kind: "group" });
 		const cut = new StreamError(StreamCode(70), { message: "cut" });
 		for (let i = 1n; i <= 1000n; i++) {
 			// A drop and a skip apart, so each would be a run of its own in the copy's record.
 			hooks.dropTrackGroups(ta.producer, 2n * i - 1n, 2n * i, { error: cut });
 			ta.producer.skipGroups(2n * i, 2n * i + 1n);
-			expect(ordered.tryNextGroup()).toMatchObject({ kind: "gap", start: 2n * i - 1n, end: 2n * i });
+			expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 2n * i - 1n, end: 2n * i });
 		}
 		expect(copies.size).toBeGreaterThan(0);
 		for (const sub of copies) expect(hooks.reportedRuns(sub)).toBeLessThanOrEqual(4);
@@ -2616,7 +2615,7 @@ test.each([true, false])(
 		const sub = front.consumer.track("seq").subscribe();
 		const view = ordered ? sub.ordered() : undefined;
 		const next = async () => {
-			const group = await (view ? nextGroup(view) : sub.recvGroup());
+			const group = await (view ? view.nextGroup() : sub.recvGroup());
 			group?.close();
 			return group?.start;
 		};
@@ -2658,7 +2657,7 @@ test.each([
 		front.serve(a.consume());
 		const sub = front.consumer.track("seq").subscribe();
 		const view = ordered ? sub.ordered() : undefined;
-		const next = () => (view ? nextGroup(view) : sub.recvGroup());
+		const next = () => (view ? view.nextGroup() : sub.recvGroup());
 		ta.write(0n);
 		(await next())?.close();
 		front.serve(b.consume());
@@ -2701,7 +2700,7 @@ test.each([true, false])(
 		front.serve(a.consume());
 		const sub = front.consumer.track("seq").subscribe();
 		const view = ordered ? sub.ordered() : undefined;
-		const next = () => (view ? nextGroup(view) : sub.recvGroup());
+		const next = () => (view ? view.nextGroup() : sub.recvGroup());
 		ta.write(0n);
 		(await next())?.close();
 		front.serve(b.consume());
@@ -3205,7 +3204,7 @@ test.each([true, false])(
 		front.serve(a.consume());
 		const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
 		const view = ordered ? sub.ordered() : undefined;
-		const next = () => (view ? nextGroup(view) : sub.recvGroup());
+		const next = () => (view ? view.nextGroup() : sub.recvGroup());
 		ta.write(0n);
 		(await next())?.close();
 		front.serve(b.consume());
@@ -3247,7 +3246,7 @@ test.each([true, false])("a replaced copy backs a group before its first arrival
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
 	const view = ordered ? sub.ordered() : undefined;
-	const next = () => (view ? nextGroup(view) : sub.recvGroup());
+	const next = () => (view ? view.nextGroup() : sub.recvGroup());
 	ta.write(0n);
 	(await next())?.close();
 	front.serve(b.consume());
@@ -3569,7 +3568,7 @@ test.each([
 		const inOrder = ordered ? sub.ordered() : undefined;
 		const read = () => {
 			const keys: bigint[] = [];
-			const next = () => (inOrder ? tryNextGroup(inOrder) : sub.tryRecvGroup());
+			const next = () => (inOrder ? inOrder.tryNextGroup() : sub.tryRecvGroup());
 			for (let group = next(); group; group = next()) {
 				keys.push(group.start);
 				group.close();

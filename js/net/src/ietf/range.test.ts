@@ -2,7 +2,6 @@ import { expect, onTestFinished, test } from "bun:test";
 import { StreamCode, StreamError } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { type Subscription, Producer as TrackProducer } from "../track.ts";
@@ -152,7 +151,7 @@ for (const version of VERSIONS) {
 		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 5n));
 		fx.readers.push(reader);
 		const ordered = reader.ordered();
-		const read = nextGroup(ordered);
+		const read = ordered.nextGroup();
 		await fx.status();
 		const { stream, request } = await fx.fetch();
 		await fx.answer(stream, 4n);
@@ -163,17 +162,17 @@ for (const version of VERSIONS) {
 		expect(await payloads(first)).toEqual(["1a", "", "1c"]);
 		first.close();
 		for (const key of [3n, 4n]) {
-			const group = await nextGroup(ordered);
+			const group = await ordered.nextGroup();
 			expect(group?.start).toBe(key);
 			if (!group) throw new Error("missing group");
 			expect(await payloads(group)).toEqual([`${key}a`, "", `${key}c`]);
 			group.close();
 		}
-		expect(await nextGroup(ordered)).toBeUndefined();
+		expect(await ordered.nextGroup()).toBeUndefined();
 		const overlapping = fx.broadcast.track("video").subscribe(ranges(0n, 5n));
 		fx.readers.push(overlapping);
 		const overlap = overlapping.ordered();
-		const missing = nextGroup(overlap);
+		const missing = overlap.nextGroup();
 		const backfill = await fx.fetch();
 		await fx.answer(backfill.stream, 0n);
 		await fx.data(backfill.request.requestId, [0n]);
@@ -181,14 +180,14 @@ for (const version of VERSIONS) {
 		expect(zero?.start).toBe(0n);
 		zero?.close();
 		for (const key of [1n, 3n, 4n]) {
-			const group = await nextGroup(overlap);
+			const group = await overlap.nextGroup();
 			expect(group?.start).toBe(key);
 			group?.close();
 		}
-		expect(await nextGroup(overlap)).toBeUndefined();
+		expect(await overlap.nextGroup()).toBeUndefined();
 		overlapping.close();
 		reader.update(ranges(5n, 6n));
-		const more = nextGroup(ordered);
+		const more = ordered.nextGroup();
 		const second = await fx.fetch();
 		await fx.answer(second.stream, 5n);
 		await fx.data(second.request.requestId, [5n]);
@@ -258,7 +257,7 @@ for (const version of VERSIONS) {
 		const fx = fixture(version);
 		const reader = fx.broadcast.track("video").subscribe(ranges(1n, 2n));
 		fx.readers.push(reader);
-		const pending = nextGroup(reader.ordered());
+		const pending = reader.ordered().nextGroup();
 		await fx.status();
 		const { stream, request } = await fx.fetch();
 		await fx.answer(stream, 1n);
@@ -322,7 +321,7 @@ for (const version of VERSIONS) {
 		const history = fx.broadcast.track("video").subscribe(ranges(1n, 3n));
 		fx.readers.push(history);
 		const ordered = history.ordered();
-		const first = nextGroup(ordered);
+		const first = ordered.nextGroup();
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
@@ -341,12 +340,12 @@ for (const version of VERSIONS) {
 		if (!group) throw new Error("missing history group");
 		expect(await payloads(group)).toEqual(["1a", "", "1c"]);
 		group?.close();
-		const second = await nextGroup(ordered);
+		const second = await ordered.nextGroup();
 		expect(second?.start).toBe(2n);
 		if (!second) throw new Error("missing history group");
 		expect(await payloads(second)).toEqual(["2a", "", "2c"]);
 		second?.close();
-		expect(await nextGroup(ordered)).toBeUndefined();
+		expect(await ordered.nextGroup()).toBeUndefined();
 		const cached = await fx.broadcast.track("video").fetchGroup(1n);
 		expect(await payloads(cached)).toEqual(["1a", "", "1c"]);
 		cached.close();
@@ -357,7 +356,7 @@ for (const version of VERSIONS) {
 		const history = fx.broadcast.track("video").subscribe(ranges(1n, 3n));
 		fx.readers.push(history);
 		const ordered = history.ordered();
-		const first = nextGroup(ordered);
+		const first = ordered.nextGroup();
 		await fx.status();
 		const fetching = await fx.fetch();
 		await fx.answer(fetching.stream, 2n);
@@ -375,11 +374,11 @@ for (const version of VERSIONS) {
 		if (!group) throw new Error("missing history group");
 		expect(await payloads(group)).toEqual(["1a", "", "1c"]);
 		group.close();
-		const second = await nextGroup(ordered);
+		const second = await ordered.nextGroup();
 		if (!second) throw new Error("missing history group");
 		expect(await payloads(second)).toEqual(["2a", "", "2c"]);
 		second.close();
-		expect(await nextGroup(ordered)).toBeUndefined();
+		expect(await ordered.nextGroup()).toBeUndefined();
 	});
 
 	test(`${version}: a relative end on an empty track subscribes for the first group`, async () => {
@@ -391,7 +390,7 @@ for (const version of VERSIONS) {
 		});
 		fx.readers.push(reader);
 		const ordered = reader.ordered();
-		const first = nextGroup(ordered);
+		const first = ordered.nextGroup();
 		await fx.status(null);
 		const live = await fx.next();
 		expect(await live.reader.u53()).toBe(Subscribe.id);
@@ -422,7 +421,7 @@ for (const version of VERSIONS) {
 		if (!group) throw new Error("missing first group");
 		expect(await payloads(group)).toEqual(["0a"]);
 		group.close();
-		expect(await nextGroup(ordered)).toBeUndefined();
+		expect(await ordered.nextGroup()).toBeUndefined();
 	});
 
 	test(`${version}: a nonexistent trailing object range preserves the group's payloads`, async () => {

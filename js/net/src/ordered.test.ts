@@ -1,4 +1,4 @@
-// What an ordered read returns: groups in key order, and a gap for every group it gives up on.
+// What an ordered read returns from nextItem: groups in key order, and a gap for every group it gives up on.
 // Ports the Rust `track::Ordered` item tests, so both read the same.
 import { expect, test } from "bun:test";
 import { Duration, sleep } from "@moq/clock";
@@ -38,7 +38,7 @@ function items(ordered: Ordered): string[] {
 	const out: string[] = [];
 	for (;;) {
 		if (out.length > 20) throw new Error(`no end to the items: ${out.join(", ")}`);
-		const item = ordered.tryNextGroup();
+		const item = ordered.tryNextItem();
 		if (!item) return out;
 		if (item.kind === "group") {
 			out.push(`group ${item.group.start}`);
@@ -72,11 +72,25 @@ test("an ordered read reports what it gives up, in key order, but no skip", () =
 
 	// A group handed out and then dropped is never reported again.
 	const cut = producer.createGroup(7n);
-	const read = ordered.tryNextGroup();
+	const read = ordered.tryNextItem();
 	expect(read?.group?.start).toBe(7n);
 	drop(producer, 7n, 8n);
 	cut.abort(new StreamError(StreamCode.Cancel));
 	expect(items(ordered)).toEqual([]);
+});
+
+test("nextGroup and tryNextGroup pass the gaps nextItem reports", async () => {
+	const producer = new TrackProducer("test");
+	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	drop(producer, 3n, 4n);
+	put(producer, 4n);
+	expect((await ordered.nextGroup())?.start).toBe(0n);
+	expect(ordered.tryNextGroup()?.start).toBe(2n);
+	expect(ordered.tryNextItem()).toMatchObject({ kind: "gap", start: 3n, end: 4n });
+	expect((await ordered.nextGroup())?.start).toBe(4n);
 });
 
 test("a key a local track never produced is no gap", () => {
@@ -106,7 +120,7 @@ test("a gap waits behind what is owed below it, and goes out before the end", ()
 		drop(local, 1n, 2n);
 		local.finish();
 		expect(items(read)).toEqual(["group 0", "gap 1..2 (delivery timeout)"]);
-		expect(read.tryNextGroup()).toBeUndefined();
+		expect(read.tryNextItem()).toBeUndefined();
 	}));
 
 test("a gap is returned once, even when a later drop names it again", () =>
@@ -221,11 +235,11 @@ test("a group held past a gap, under a cap lowered off it, still sees the read e
 	put(producer, 0n);
 	drop(producer, 1n, 2n);
 	put(producer, 2n);
-	expect((await ordered.nextGroup())?.group?.start).toBe(0n);
-	expect((await ordered.nextGroup())?.kind).toBe("gap");
+	expect((await ordered.nextItem())?.group?.start).toBe(0n);
+	expect((await ordered.nextItem())?.kind).toBe("gap");
 	ordered.withRange({ end: { excluded: 2n } });
-	expect(ordered.tryNextGroup()).toBeUndefined();
-	const pending = ordered.nextGroup();
+	expect(ordered.tryNextItem()).toBeUndefined();
+	const pending = ordered.nextItem();
 	ordered.close();
 	const ended = await Promise.race([
 		pending.then(

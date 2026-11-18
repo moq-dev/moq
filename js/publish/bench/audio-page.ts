@@ -132,7 +132,7 @@ async function measure(tracks: number, seconds: number, onDemand: boolean) {
 		const catchup = performance.now() - joining;
 		for (const subscriber of subscribers) {
 			const reader = subscriber.ordered();
-			const group = (await reader.nextGroup())?.group;
+			const group = await reader.nextGroup();
 			const frame = await group?.readFrame();
 			if (!frame) throw new Error("missing retained audio");
 			const timestamp = Moq.Varint.decode(frame.payload)[0];

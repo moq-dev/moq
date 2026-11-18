@@ -767,7 +767,8 @@ export namespace Track {
 		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
-		nextGroup(): Promise<Track.Item | undefined>;
+		nextGroup(): Promise<Group.Consumer | undefined>;
+		nextItem(): Promise<Track.Item | undefined>;
 		readFrame(): Promise<{
 			frame: number;
 			group: bigint;
@@ -775,7 +776,8 @@ export namespace Track {
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
-		tryNextGroup(): Track.Item | undefined;
+		tryNextGroup(): Group.Consumer | undefined;
+		tryNextItem(): Track.Item | undefined;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}

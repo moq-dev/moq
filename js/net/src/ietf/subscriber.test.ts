@@ -7,7 +7,6 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { type Hop, toHop, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -809,7 +808,7 @@ test("a track without TIMESCALE arrives untimed, even if an object carries a Tim
 
 	// Property 0x10 (Timestamp) = 5, with no units to read it in.
 	await subscriber.handleGroup(stampedGroup(0n), new Reader(undefined, encodeStamped([0x10, 5]), VERSION));
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	const frame = await group?.readFrame();
 	expect(frame?.payload).toEqual(new Uint8Array([42]));
 	// Its group's key, not the object's Timestamp.
@@ -825,7 +824,7 @@ test("a received frame's time is its group's key in the track's TIMESCALE", asyn
 	// neither is read. The second object carries no properties at all.
 	const objects = new Uint8Array([...encodeStamped([0x08, 1, 0x08, 5]), ...encodeStamped([])]);
 	await subscriber.handleGroup(stampedGroup(7n), new Reader(undefined, objects, VERSION));
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	for (let i = 0; i < 2; i++) {
 		const frame = await group?.readFrame();
 		expect(frame?.payload).toEqual(new Uint8Array([42]));
@@ -1145,7 +1144,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	expect((await track.info()).priority).toBe(127 - 37);
 	expect(group.publisherPriority).toBe(37);
 	const ordered = track.ordered();
-	expect((await nextGroup(ordered))?.start).toBe(3n);
+	expect((await ordered.nextGroup())?.start).toBe(3n);
 	const explicit = new GroupMessage({
 		trackAlias: ALIAS,
 		groupId: 4n,
@@ -1156,7 +1155,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
 	expect(explicit.publisherPriority).toBe(9);
 	expect((await track.info()).priority).toBe(127 - 37);
-	expect((await nextGroup(ordered))?.start).toBe(4n);
+	expect((await ordered.nextGroup())?.start).toBe(4n);
 	ordered.close();
 	track.close();
 });
@@ -1204,7 +1203,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 			const ordered = consumer.ordered();
 			try {
 				for (const key of [1n, 2n]) {
-					const group = await nextGroup(ordered);
+					const group = await ordered.nextGroup();
 					expect(group?.start).toBe(key);
 					if (!group) throw new Error("missing prefix group");
 					expect(await group.readString()).toBe("object 0");
@@ -1260,7 +1259,7 @@ test.each([Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22])(
 				new Reader(undefined, encodeObjects([0, 0]), version),
 			);
 			// The reader waits on group 0, which only a FETCH can bring.
-			void nextGroup(ordered).catch(() => {});
+			void ordered.nextGroup().catch(() => {});
 			fetch = await nextStream(pair.client, version);
 			expect(await fetch.reader.u53()).toBe(Fetch.id);
 			const { type } = await Fetch.decode(fetch.reader, version);
@@ -1338,7 +1337,7 @@ test("a group served from partway through is dropped", async () => {
 		new Reader(undefined, encodeObjects([0, 0]), VERSION),
 	);
 
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	expect(group?.start).toBe(4n);
 
 	track.close();
@@ -1358,7 +1357,7 @@ test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
 		new Reader(undefined, encodeObjects([0, 0]), VERSION),
 	);
 
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	expect(group?.start).toBe(3n);
 	if (!group) return;
 	expect(await group.readString()).toBe("object 0");
@@ -1383,7 +1382,7 @@ test("an END_OF_GROUP status on a marked stream finishes the group", async () =>
 		new Reader(undefined, objects, VERSION),
 	);
 
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	expect(group?.start).toBe(3n);
 	if (!group) return;
 	for (let i = 0; i < 5; i++) {
@@ -1449,7 +1448,7 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 		new Reader(undefined, encodeObjects([0]), VERSION),
 	);
 
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	expect(group?.start).toBe(4n);
 
 	track.close();
@@ -1509,7 +1508,7 @@ test("a group that claims its first object must start at zero", async () => {
 	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0n, publisherPriority: 0, flags });
 	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
 
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	expect(group).toBeDefined();
 	if (!group) return;
 	await expect(group.readFrameIndex()).rejects.toThrow(/object IDs must start at 0/);
@@ -1627,7 +1626,7 @@ test("every object in a chunk reaches the reader before it wakes", async () => {
 	});
 	const handled = subscriber.handleGroup(header, new Reader(readable, undefined, VERSION));
 
-	const group = await nextGroup(track.ordered());
+	const group = await track.ordered().nextGroup();
 	if (!group) throw new Error("no group");
 	expect(await group.readString()).toBe("object 0");
 	expect(group.frameCount).toBe(10);
@@ -1687,7 +1686,7 @@ test("object extension limit accepts 64 KiB and stops one byte over before readi
 			await subscriber.handleGroup(header, reader);
 			if (size === 65536) {
 				expect(stop.mock.calls).toEqual([]);
-				const group = await nextGroup(track.ordered());
+				const group = await track.ordered().nextGroup();
 				expect(group?.frameCount).toBe(first ? 1 : 2);
 				expect(await group?.readString()).toBe("*");
 			} else {
@@ -1758,7 +1757,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 			message,
 			new Reader(undefined, new Uint8Array([0, 0, 0, 0, 1, 42, 0, 0, 3]), version),
 		);
-		const group = await nextGroup(track.ordered());
+		const group = await track.ordered().nextGroup();
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array());
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
 		expect(await group?.readFrame()).toBeUndefined();

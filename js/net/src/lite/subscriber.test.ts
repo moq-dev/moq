@@ -25,7 +25,6 @@ import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -1813,7 +1812,7 @@ test("a grant that shrinks while the subscription sets up refuses it", async () 
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, toHop(1n), undefined, undefined, undefined, grant);
 
 	const track = subscriber.consume(Path.from("room/cam")).track("video").subscribe().ordered();
-	const next = nextGroup(track).catch((err: unknown) => err);
+	const next = track.nextGroup().catch((err: unknown) => err);
 
 	// Parked on TRACK_INFO when the grant shrinks, which ends the TRACK exchange too.
 	await opened(0);
@@ -2580,7 +2579,7 @@ test("a local unsubscribe owes no SUBSCRIBE_FINISH", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], Version.DRAFT_07);
 		await (await opened(1)).reading;
-		const next = nextGroup(ordered);
+		const next = ordered.nextGroup();
 		await subscriber.runGroup(
 			new Group({ subscribe: 0n, key: 0n }),
 			new Reader(

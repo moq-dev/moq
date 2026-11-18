@@ -62,10 +62,7 @@ try {
 			try {
 				const seen: bigint[] = [];
 				const ordered = reader.ordered();
-				for (let item = await ordered.nextGroup(); item; item = await ordered.nextGroup()) {
-					// A key the range never produced may read as a gap; only the groups are graded.
-					if (item.kind === "gap") continue;
-					const group = item.group;
+				for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 					seen.push(group.start);
 					try {
 						for (const size of [1024, 513, 513]) {

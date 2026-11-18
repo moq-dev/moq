@@ -1553,7 +1553,7 @@ test.each(["off", "all"] as const)(
 			const groups: bigint[] = [];
 			const firsts: number[] = [];
 			for (let i = 0; i < (onDemand ? 1 : 2); i++) {
-				const group = (await ordered.nextGroup())?.group;
+				const group = await ordered.nextGroup();
 				if (!group) throw new Error("expected a group");
 				groups.push(group.start);
 				const frame = await group.readFrame();

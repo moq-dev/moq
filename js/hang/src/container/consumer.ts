@@ -403,7 +403,7 @@ export class Consumer {
 				while (this.#full() && this.#groups.length >= 2 && !this.#signals.abort.aborted) await this.#park();
 				if (this.#signals.abort.aborted) break;
 
-				const item = await ordered.nextGroup();
+				const item = await ordered.nextItem();
 				if (!item) break;
 				if (item.kind === "gap") {
 					this.#gap = true;

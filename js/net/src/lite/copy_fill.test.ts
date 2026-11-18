@@ -13,7 +13,6 @@ import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, requestedGroups } from "../mock.ts";
 import { lines } from "../open.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
@@ -269,7 +268,7 @@ test("copy fill: a filled group stops downloading once every reader left or pass
 		// A live reader keeps the copy up, and has read past group 0 before it lands. It never
 		// reads again, so the copy it still buffers is all that is left of it.
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
-		expect((await nextGroup(reader.ordered()))?.start).toBe(1n);
+		expect((await reader.ordered().nextGroup())?.start).toBe(1n);
 		const history = remote
 			.track("video")
 			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
@@ -336,7 +335,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		// A live reader keeps the copy up. It reads in order, so it lets go of what it passes.
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
 		const live = reader.ordered();
-		expect((await nextGroup(live))?.start).toBe(1n);
+		expect((await live.nextGroup())?.start).toBe(1n);
 		const history = remote
 			.track("video")
 			.subscribe({ ...WIDE, ranges: [{ start: { time: 0n }, end: { time: 0n } }] });
@@ -354,7 +353,7 @@ test("copy fill: a filled group nobody holds any more stops downloading", async 
 		group?.close();
 		history.close();
 		write(track.createGroup(2n), 2n, "live");
-		expect((await nextGroup(live))?.start).toBe(2n);
+		expect((await live.nextGroup())?.start).toBe(2n);
 		await clock.drive(
 			timeout(
 				Duration.millis(2000),
@@ -407,7 +406,7 @@ test("copy fill: a group reset to make room ends", async () => {
 	const remote = wireOf(client).consume(Path.from("room"));
 	try {
 		const reader = remote.track("video").subscribe({ ranges: [{ start: { relative: 0n } }] });
-		const live = await nextGroup(reader.ordered());
+		const live = await reader.ordered().nextGroup();
 		expect(live?.start).toBe(2n);
 		expect(dec.decode((await live?.readFrame())?.payload)).toBe("live 2");
 		expect(await live?.readFrame()).toBeUndefined();

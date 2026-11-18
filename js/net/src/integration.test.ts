@@ -22,7 +22,6 @@ import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame, waitFor } from "./mock.ts";
-import { nextGroup } from "./ordered.test-util.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -355,11 +354,11 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		})
 		.ordered();
 	try {
-		expect((await nextGroup(subscriber))?.start).toBe(INITIAL_START_GROUP);
-		expect((await nextGroup(subscriber))?.start).toBe(INITIAL_END_GROUP - 1n);
+		expect((await subscriber.nextGroup())?.start).toBe(INITIAL_START_GROUP);
+		expect((await subscriber.nextGroup())?.start).toBe(INITIAL_END_GROUP - 1n);
 
 		// A bounded read ends once its window is read, as in Rust.
-		expect(await nextGroup(subscriber)).toBeUndefined();
+		expect(await subscriber.nextGroup()).toBeUndefined();
 
 		// Replacing the ranges reads on from the same reader, the update going upstream.
 		subscriber.update({
@@ -368,15 +367,15 @@ test("integration: lite applies initial and updated group bounds", async () => {
 		});
 		const updated = (pending: Promise<unknown>) =>
 			withTimeout(pending, Duration.millis(UPDATE_TIMEOUT_MS), "updated group bound timed out");
-		expect(((await updated(nextGroup(subscriber))) as { start: bigint } | undefined)?.start).toBe(UPDATED_GROUP);
-		expect(await updated(nextGroup(subscriber))).toBeUndefined();
+		expect(((await updated(subscriber.nextGroup())) as { start: bigint } | undefined)?.start).toBe(UPDATED_GROUP);
+		expect(await updated(subscriber.nextGroup())).toBeUndefined();
 
 		// An open range parks at the live edge instead.
 		subscriber.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { time: GROUP_COUNT } }],
 		});
-		expect(await settlesWithin(nextGroup(subscriber), clock, Duration.millis(PENDING_ASSERT_MS))).toBe(false);
+		expect(await settlesWithin(subscriber.nextGroup(), clock, Duration.millis(PENDING_ASSERT_MS))).toBe(false);
 	} finally {
 		subscriber.close();
 		remote.close();
@@ -424,12 +423,12 @@ test("integration: lite refuses an empty requested range on open and on update",
 				ranges: [{ start: { time: 1n }, end: { time: 1n } }],
 			})
 			.ordered();
-		expect((await nextGroup(live))?.start).toBe(1n);
+		expect((await live.nextGroup())?.start).toBe(1n);
 		live.update({
 			delay: { max: Duration.millis(REPLAY_LATENCY_MS) },
 			ranges: [{ start: { time: 3n }, end: { time: 2n } }],
 		});
-		expect(await nextGroup(live)).toBeUndefined();
+		expect(await live.nextGroup()).toBeUndefined();
 		expect(
 			await withTimeout(Promise.resolve(live.closed), Duration.millis(TIMEOUT_MS), "empty update never settled"),
 		).toHaveProperty("message", "empty subscription range cannot be encoded");
@@ -471,9 +470,9 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 			.ordered();
 		// Covering the ranges ends the subscription upstream, and the read with its window.
 		const got: bigint[] = [];
-		for (let i = 0; i < 4; i++) got.push((await nextGroup(reader))?.start ?? -1n);
+		for (let i = 0; i < 4; i++) got.push((await reader.nextGroup())?.start ?? -1n);
 		expect(got).toEqual([1n, 2n, 7n, 8n]);
-		expect(await nextGroup(reader)).toBeUndefined();
+		expect(await reader.nextGroup()).toBeUndefined();
 		reader.close();
 	} finally {
 		remote.close();
@@ -563,7 +562,7 @@ test("integration: lite-07 joins a late relative start at the live edge", async 
 			"the update never reached the publisher",
 		);
 		late = remote.track("video").subscribe(subscription).ordered();
-		expect((await nextGroup(late))?.start).toBe(3n);
+		expect((await late.nextGroup())?.start).toBe(3n);
 	} finally {
 		late?.close();
 		first.close();
@@ -863,7 +862,7 @@ test("integration: a group reset carries the peer's code to the subscriber", asy
 	const group = hooks.appendNext(producer);
 	group.writeFrame(textFrame("frame"));
 
-	const consumer = await nextGroup(track);
+	const consumer = await track.nextGroup();
 	if (!consumer) throw new Error("expected a group");
 	expect(await consumer.readString()).toBe("frame");
 
@@ -903,7 +902,7 @@ test("integration: a locally raised group error reaches the peer as its own code
 	const group = hooks.appendNext(producer);
 	group.writeFrame(textFrame("frame"));
 
-	const consumer = await nextGroup(track);
+	const consumer = await track.nextGroup();
 	if (!consumer) throw new Error("expected a group");
 	expect(await consumer.readString()).toBe("frame");
 

@@ -8,7 +8,6 @@ import { inspect } from "../connection/stats.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
@@ -371,7 +370,7 @@ for (const [alpn, version] of [
 			first.finish();
 			// A frame can arrive while its sender still yields on the write. Drain the setup group
 			// before a zero-delay subscription supersedes its still-unfinished sender.
-			const received = await nextGroup(track);
+			const received = await track.nextGroup();
 			expect(await received?.readString()).toBe("first");
 			expect(await received?.readString()).toBeUndefined();
 			received?.close();
@@ -384,7 +383,7 @@ for (const [alpn, version] of [
 			producer.close();
 			const closing = server.close();
 
-			expect(await (await nextGroup(track))?.readString()).toBe("last");
+			expect(await (await track.nextGroup())?.readString()).toBe("last");
 			await fin.reached;
 			await settle();
 			expect(closed).toBe(false);
@@ -392,7 +391,7 @@ for (const [alpn, version] of [
 			fin.release();
 			await closing;
 			expect(closed).toBe(true);
-			expect(await nextGroup(track)).toBeUndefined();
+			expect(await track.nextGroup()).toBeUndefined();
 		} finally {
 			fin.release();
 			track.close();
@@ -434,7 +433,7 @@ for (const [alpn, version] of [
 				const first = hooks.appendNext(producer);
 				first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 				first.finish();
-				const received = await nextGroup(track);
+				const received = await track.nextGroup();
 				expect(await received?.readString()).toBe("first");
 				expect(await received?.readString()).toBeUndefined();
 				received?.close();
@@ -443,14 +442,14 @@ for (const [alpn, version] of [
 				const last = hooks.appendNext(producer);
 				last.writeFrame(textFrame("last", Timestamp.fromMillis(Number(last.start))));
 				last.finish();
-				expect(await (await nextGroup(track))?.readString()).toBe("last");
+				expect(await (await track.nextGroup())?.readString()).toBe("last");
 				await fin.reached;
 				replies.enable();
 				producer.finish();
 				producer.close();
 				const closing = server.close();
 
-				expect(await nextGroup(track)).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
 				await settle();
 				expect(closed).toBe(false);
 
@@ -497,7 +496,7 @@ for (const [alpn, version] of [
 				const first = hooks.appendNext(producer);
 				first.writeFrame(textFrame("first", Timestamp.fromMillis(Number(first.start))));
 				first.finish();
-				expect(await (await nextGroup(track))?.readString()).toBe("first");
+				expect(await (await track.nextGroup())?.readString()).toBe("first");
 
 				const frames = Array.from({ length: 32 }, (_, i) => `frame ${i}`);
 				const last = hooks.appendNext(producer);
@@ -507,10 +506,10 @@ for (const [alpn, version] of [
 				producer.close();
 				await server.close();
 
-				const group = await nextGroup(track);
+				const group = await track.nextGroup();
 				for (const frame of frames) expect(await group?.readString()).toBe(frame);
 				expect(await group?.readString()).toBeUndefined();
-				expect(await nextGroup(track)).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
 			} finally {
 				yielding.mockRestore();
 				track.close();
@@ -548,14 +547,14 @@ for (const [alpn, version] of [
 				const group = hooks.appendNext(producer);
 				group.writeFrame(textFrame("only", Timestamp.fromMillis(Number(group.start))));
 				group.finish();
-				expect(await (await nextGroup(track))?.readString()).toBe("only");
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
 
 				producer.finish();
 				producer.close();
 				await settle();
 				client.abort();
 
-				expect(await nextGroup(track)).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
 				expect(await track.closed).toBeNull();
 			} finally {
 				track.close();
@@ -592,12 +591,12 @@ for (const [alpn, version] of [
 				const group = hooks.appendNext(producer);
 				group.writeFrame(textFrame("only", Timestamp.fromMillis(Number(group.start))));
 				group.finish();
-				expect(await (await nextGroup(track))?.readString()).toBe("only");
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
 
 				producer.finish();
 				producer.close();
 				await server.close();
-				expect(await nextGroup(track)).toBeUndefined();
+				expect(await track.nextGroup()).toBeUndefined();
 			} finally {
 				track.close();
 				remote.close();

@@ -6,7 +6,6 @@ import * as Ietf from "./ietf/index.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
-import { nextGroup } from "./ordered.test-util.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -120,7 +119,7 @@ for (const [name, alpn] of [
 		const group = hooks.appendNext(producer);
 
 		group.writeFrame(frame(0));
-		const consumer = await nextGroup(track);
+		const consumer = await track.nextGroup();
 		if (!consumer) throw new Error("no group");
 		await readFrames(consumer, 1);
 
@@ -143,7 +142,7 @@ for (const [name, alpn] of [
 				const group = hooks.appendNext(producer);
 				group.writeFrame(frame(offset + i));
 				group.finish();
-				const consumer = await nextGroup(track);
+				const consumer = await track.nextGroup();
 				if (!consumer) throw new Error("no group");
 				await readFrames(consumer, 1);
 			}
