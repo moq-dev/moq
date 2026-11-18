@@ -163,7 +163,7 @@ test("watch mute and volume are independent in either attribute or property orde
 	}
 }, 30_000);
 
-test("watch video priority follows its attribute and property, and refuses a value off the wire range", async () => {
+test("watch video and audio priority follow their attribute and property, and refuse a value off the wire range", async () => {
 	const server = await createServer({
 		configFile: false,
 		root: `${import.meta.dir}/watch-ui`,
@@ -176,45 +176,52 @@ test("watch video priority follows its attribute and property, and refuses a val
 		const page = await browser.newPage();
 		await page.goto(server.resolvedUrls?.local[0] ?? "");
 		await page.waitForFunction(() => !!customElements.get("moq-watch"));
-		const result = await page.evaluate(async () => {
+		const results = await page.evaluate(async () => {
 			const settle = async () => {
 				for (let i = 0; i < 5; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 			};
-			document.body.insertAdjacentHTML("beforeend", '<moq-watch video-priority="-128"></moq-watch>');
-			const watch = document.body.lastElementChild as MoqWatch;
-			const read = () => ({
-				property: watch.videoPriority,
-				attribute: watch.getAttribute("video-priority"),
-				decoder: watch.video.in.priority.peek(),
-			});
-			await settle();
-			const attribute = read();
-			watch.videoPriority = 127;
-			await settle();
-			const property = read();
-			const refused = [128, -129, 1.5, Number.NaN].map((value) => {
-				try {
-					watch.videoPriority = value;
-					return false;
-				} catch {
-					return true;
-				}
-			});
-			await settle();
-			const kept = read();
-			watch.removeAttribute("video-priority");
-			await settle();
-			const absent = read();
-			watch.remove();
-			watch.signals.close();
-			return { attribute, property, refused, kept, absent };
+			const results = [];
+			for (const kind of ["video", "audio"] as const) {
+				document.body.insertAdjacentHTML("beforeend", `<moq-watch ${kind}-priority="-128"></moq-watch>`);
+				const watch = document.body.lastElementChild as MoqWatch;
+				const read = () => ({
+					property: watch[`${kind}Priority`],
+					attribute: watch.getAttribute(`${kind}-priority`),
+					decoder: watch[kind].in.priority.peek(),
+				});
+				await settle();
+				const attribute = read();
+				watch[`${kind}Priority`] = 127;
+				await settle();
+				const property = read();
+				const refused = [128, -129, 1.5, Number.NaN].map((value) => {
+					try {
+						watch[`${kind}Priority`] = value;
+						return false;
+					} catch {
+						return true;
+					}
+				});
+				await settle();
+				const kept = read();
+				watch.removeAttribute(`${kind}-priority`);
+				await settle();
+				results.push({ kind, attribute, property, refused, kept, absent: read() });
+				watch.remove();
+				watch.signals.close();
+			}
+			return results;
 		});
-		expect(result.attribute).toEqual({ property: -128, attribute: "-128", decoder: -128 });
-		expect(result.property).toEqual({ property: 127, attribute: "127", decoder: 127 });
-		expect(result.refused).toEqual([true, true, true, true]);
-		expect(result.kept).toEqual(result.property);
-		// Without the attribute, video takes hang's default and reflects it.
-		expect(result.absent).toEqual({ property: 60, attribute: "60", decoder: 60 });
+		expect(results.map((result) => result.kind)).toEqual(["video", "audio"]);
+		for (const result of results) {
+			expect(result.attribute).toEqual({ property: -128, attribute: "-128", decoder: -128 });
+			expect(result.property).toEqual({ property: 127, attribute: "127", decoder: 127 });
+			expect(result.refused).toEqual([true, true, true, true]);
+			expect(result.kept).toEqual(result.property);
+			// Without the attribute, the track takes hang's default for its kind and reflects it.
+			const fallback = result.kind === "video" ? 60 : 80;
+			expect(result.absent).toEqual({ property: fallback, attribute: `${fallback}`, decoder: fallback });
+		}
 	} finally {
 		await browser.close();
 		await server.close();

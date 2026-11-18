@@ -60,6 +60,7 @@ const OBSERVED = [
 	"visible",
 	"backend",
 	"video-priority",
+	"audio-priority",
 	"follow",
 	// Renamed to `follow`, observed only to refuse it.
 	"announced",
@@ -91,13 +92,14 @@ function parseBackend(value: string | null): Video.Backend {
 	throw invalidAttribute("backend", value, '"auto", "webgpu", or "2d"');
 }
 
-// Parse the `video-priority` attribute: a signed byte, or the hang default when absent.
-function parseVideoPriority(value: string | null): number {
-	if (value === null) return Catalog.PRIORITY.video;
+// Parse the `video-priority` or `audio-priority` attribute: a signed byte, or hang's default for
+// the kind when absent.
+function parsePriority(kind: "video" | "audio", value: string | null): number {
+	if (value === null) return Catalog.PRIORITY[kind];
 	const trimmed = value.trim();
 	const priority = Number(trimmed);
 	if (/^-?\d+$/.test(trimmed) && priority >= -128 && priority <= 127) return priority;
-	throw invalidAttribute("video-priority", value, "an integer from -128 to 127");
+	throw invalidAttribute(`${kind}-priority`, value, "an integer from -128 to 127");
 }
 
 // Parse the `delay` attribute: "auto" (adaptive), "instant" (no buffer, no pacing), or a duration.
@@ -245,6 +247,8 @@ export default class MoqWatch extends HTMLElement {
 			target: new Signal<Audio.Target | undefined>(undefined),
 			volume: new Signal(0.5),
 			muted: new Signal(false),
+			// Delivery priority of the audio track against the connection's other subscriptions.
+			priority: new Signal<number>(Catalog.PRIORITY.audio),
 		},
 		viewer: {
 			// The viewer ceiling in bits per second instead of the catalog's, or 0 to claim none.
@@ -388,6 +392,9 @@ export default class MoqWatch extends HTMLElement {
 		this.signals.run((effect) =>
 			this.#reflect(effect, "video-priority", effect.get(this.controls.video.priority).toString()),
 		);
+		this.signals.run((effect) =>
+			this.#reflect(effect, "audio-priority", effect.get(this.controls.audio.priority).toString()),
+		);
 		this.signals.run((effect) => this.#reflect(effect, "follow", effect.get(this.#follow) ? "" : "false"));
 		this.signals.run((effect) => this.#reflect(effect, "catalog-format", effect.get(this.#catalogFormat)));
 		this.signals.run((effect) => this.#reflect(effect, "captions", effect.get(this.controls.text.target)));
@@ -471,7 +478,8 @@ export default class MoqWatch extends HTMLElement {
 			else if (name === "muted") this.muted = parseBoolean(newValue, false);
 			else if (name === "visible") this.visible = parseVisible(newValue);
 			else if (name === "backend") this.backend = parseBackend(newValue);
-			else if (name === "video-priority") this.videoPriority = parseVideoPriority(newValue);
+			else if (name === "video-priority") this.videoPriority = parsePriority("video", newValue);
+			else if (name === "audio-priority") this.audioPriority = parsePriority("audio", newValue);
 			else if (name === "follow") this.follow = parseBoolean(newValue, true);
 			else if (name === "announced" && newValue !== null)
 				throw new Error("moq-watch: `announced` was renamed to `follow`");
@@ -617,8 +625,22 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	set videoPriority(value: number) {
-		this.controls.video.priority.set(parseVideoPriority(String(value)));
+		this.controls.video.priority.set(parsePriority("video", String(value)));
 		this.#accept("video-priority");
+	}
+
+	/**
+	 * Delivery priority of the audio track, mirrored by the `audio-priority` attribute: an integer in
+	 * `-128..=127`, higher sent first, defaulting to `Catalog.PRIORITY.audio`. It ranks as
+	 * {@link videoPriority} does.
+	 */
+	get audioPriority(): number {
+		return this.controls.audio.priority.peek();
+	}
+
+	set audioPriority(value: number) {
+		this.controls.audio.priority.set(parsePriority("audio", String(value)));
+		this.#accept("audio-priority");
 	}
 
 	/** Whether to follow the broadcast's announcements, waiting for one before subscribing, mirrored by the `follow` attribute. */

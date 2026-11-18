@@ -15,8 +15,10 @@ import { Video } from "@moq/watch";
 
 export default class extends HTMLElement {
 	constructor();
-	attributeChangedCallback(name: "delay" | "lookahead" | "stretch" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "video-priority" | "announced" | "buffer" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "delay" | "lookahead" | "stretch" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "video-priority" | "audio-priority" | "announced" | "buffer" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
 	readonly audio: Audio.Decoder;
+	get audioPriority(): number;
+	set audioPriority(value: number);
 	get backend(): Video.Backend;
 	set backend(value: Video.Backend);
 	readonly broadcast: Broadcast;
@@ -31,6 +33,7 @@ export default class extends HTMLElement {
 	readonly controls: {
 		audio: {
 			muted: Signals.Signal<boolean>;
+			priority: Signals.Signal<number>;
 			target: Signals.Signal<Audio.Target | undefined>;
 			volume: Signals.Signal<number>;
 		};
@@ -65,7 +68,7 @@ export default class extends HTMLElement {
 	set muted(value: boolean);
 	get name(): Net.Path.Valid;
 	set name(value: string | Net.Path.Valid);
-	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "video-priority", "follow", "announced", "buffer", "delay", "lookahead", "stretch", "catalog-format", "captions", "echo"];
+	static observedAttributes: readonly ["url", "versions", "name", "paused", "volume", "muted", "visible", "backend", "video-priority", "audio-priority", "follow", "announced", "buffer", "delay", "lookahead", "stretch", "catalog-format", "captions", "echo"];
 	get paused(): boolean;
 	set paused(value: boolean);
 	readonly renderer: Video.Renderer;

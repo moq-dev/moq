@@ -51,6 +51,11 @@ type Queued = {
 export type DecoderInput = {
 	// Whether to download the audio track. Defaults to true.
 	enabled: Getter<boolean>;
+	/**
+	 * Delivery priority of the audio track against the connection's other subscriptions, in
+	 * `-128..=127` with higher sent first. Defaults to `Catalog.PRIORITY.audio`.
+	 */
+	priority: Getter<number>;
 };
 
 /** Constructor properties for {@link Decoder}. */
@@ -245,6 +250,7 @@ export class Decoder {
 	constructor(props: DecoderProps) {
 		this.in = {
 			enabled: getter(props?.enabled ?? true),
+			priority: getter(props?.priority ?? Catalog.PRIORITY.audio),
 		};
 
 		this.source = props.source;
@@ -659,7 +665,7 @@ export class Decoder {
 			const sub = subscribeMedia(run, {
 				broadcast: active,
 				track: Catalog.track(track, identity),
-				priority: Catalog.PRIORITY.audio,
+				priority: this.in.priority,
 				delay: new Derived([this.#subscribeMinDelay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
 			});
 			// A second subscription to the same track, read in key order, delivers the audio; `sub`
@@ -667,7 +673,7 @@ export class Decoder {
 			const read = subscribeMedia(run, {
 				broadcast: active,
 				track: Catalog.track(track, identity),
-				priority: Catalog.PRIORITY.audio,
+				priority: this.in.priority,
 				delay: new Derived([this.#subscribeMinDelay, this.#readMaxDelay], (min, max) => ({ min, max })),
 			});
 			if (!sub || !read) {

@@ -56,6 +56,11 @@ export type PlayerInput = {
 		volume: Getter<number>;
 		/** Silence audio and stop its download. */
 		muted: Getter<boolean>;
+		/**
+		 * Delivery priority of the audio track against the connection's other subscriptions, in
+		 * `-128..=127` with higher sent first.
+		 */
+		priority: Getter<number>;
 	};
 	/**
 	 * The claim this player holds on its connection's receive estimate while it downloads. Video
@@ -145,6 +150,7 @@ export class Player {
 				target: getter<Audio.Target | undefined>(props.audio?.target),
 				volume: getter(props.audio?.volume ?? 0.5),
 				muted: getter(props.audio?.muted ?? false),
+				priority: getter(props.audio?.priority ?? Catalog.PRIORITY.audio),
 			},
 			viewer: {
 				viewers: getter(props.viewer?.viewers),
@@ -185,7 +191,12 @@ export class Player {
 			enabled: this.#videoEnabled,
 			priority: this.in.video.priority,
 		});
-		this.audio = new Audio.Decoder({ source: audioSource, sync: this.sync, enabled: this.#audioEnabled });
+		this.audio = new Audio.Decoder({
+			source: audioSource,
+			sync: this.sync,
+			enabled: this.#audioEnabled,
+			priority: this.in.audio.priority,
+		});
 		this.#signals.cleanup(() => {
 			this.video.close();
 			this.audio.close();
