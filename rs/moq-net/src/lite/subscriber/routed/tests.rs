@@ -12,7 +12,11 @@ use crate::{
 use super::{Routed, Subscriber};
 
 /// The forwarding node the peer declares.
-const PEER: NodeId = NodeId { relay: 7, start: 1 };
+const PEER: NodeId = NodeId {
+	relay: 7,
+	start: 1,
+	marked: false,
+};
 
 fn subscriber() -> (Subscriber, crate::origin::Consumer) {
 	super::super::tests::restart_subscriber(SinkSession::new(Default::default()))
@@ -349,7 +353,11 @@ async fn a_batch_ends_only_at_its_floor() {
 #[kio::test]
 async fn a_route_to_the_same_node_keeps_its_route_id() {
 	let (subscriber, _consumer) = forwarding();
-	let other = NodeId { relay: 9, start: 1 };
+	let other = NodeId {
+		relay: 9,
+		start: 1,
+		marked: false,
+	};
 	let mut routed = routing(&subscriber);
 	routed.receive(route(PEER)).unwrap();
 	routed.receive(route(PEER)).unwrap();

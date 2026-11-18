@@ -9629,7 +9629,11 @@ mod tests {
 	#[kio::test]
 	async fn a_peer_that_declared_no_node_sends_no_routes() {
 		use crate::route::relay::{Hop, NodeId, Offer};
-		let node = NodeId { relay: 7, start: 1 };
+		let node = NodeId {
+			relay: 7,
+			start: 1,
+			marked: false,
+		};
 		let hop = Hop { node, session: 0 };
 		let offer = Offer {
 			path: [hop].into(),

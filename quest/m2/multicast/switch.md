@@ -19,6 +19,10 @@ Decided 2026-11-17 (maintainer, on
 [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987#issuecomment-6958210502)):
 ✅ this quest is kept.
 
+Decided 2026-11-18 (maintainer, on
+[moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053#issuecomment-6975349236)):
+✅ kept as rewritten here, retargeting the old-wire quests (rejected: dropping it).
+
 Retarget each to the route rule that ships (`rs/moq-net/src/route/relay.rs`
 and the lite-07 draft's Routing section), or delete it when the new rule
 makes it moot:
@@ -41,6 +45,7 @@ Public API: none. Wire: none.
 ## Related
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the epic
-- [Route benches](/quest/m2/multicast/route-benches.md) - the path-rule benches and costs the switch left
-- [Proof binding](/quest/m2/multicast/proof-binding.md) - binds the route proof to the router
+- [Route benches](/quest/m3/route-benches.md) - the path-rule benches and costs the switch left
+- [Proof binding](/quest/m3/route-proof-binding.md) - binds the route proof to the router
+- [Claim chain](/quest/m2/multicast/claim-chain.md) - the chain change the cut waits on
 - [The moq-cluster draft](/quest/m2/moq-cluster-draft.md) - kept, since third-party relays ship it

@@ -11,6 +11,12 @@ with a number that says why.
 Found by [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) and
 proposed by [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053).
 
+Decided 2026-11-18 (maintainer, on
+[moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053#issuecomment-6975349236)):
+✅ kept (rejected: dropping it). It follows the lite-07 cut, as the
+2026-11-17 brief allowed for benches, so it sits in m3 rather than the
+multicast epic the cut waits on.
+
 - The path-rule benches (drain, repath, follow) left `benches/routes.rs`
   with the old router and have no equivalent on the new one. Add them,
   swept over both axes: relays on the path and broadcasts per node.
@@ -33,5 +39,5 @@ which lands before the lite-07 cut.
 
 ## Related
 
-- [Cache-aware multicast](/quest/m2/multicast/README.md) - the epic
+- [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer these measure
 - [What the route switch left](/quest/m2/multicast/switch.md) - where these came from

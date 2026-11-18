@@ -9122,7 +9122,11 @@ mod tests {
 
 	/// The forwarding node of the relay `relay`.
 	fn node_id(relay: u64) -> crate::route::NodeId {
-		crate::route::NodeId { relay, start: 1 }
+		crate::route::NodeId {
+			relay,
+			start: 1,
+			marked: false,
+		}
 	}
 
 	fn hops(ids: &[u64]) -> Hops {

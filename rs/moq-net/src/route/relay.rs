@@ -11,9 +11,11 @@
 //! extending a route never improves it. Among equal ranks it takes one with no marked link
 //! on its path, which it may send to more neighbours, and then stays on its next hop. A
 //! claim a node takes over a marked link, or one told it marked across a scoped grant, it
-//! announces under a second Node ID, its relay at the next start, whose route is marked
-//! from the start: the mark then keeps the claim off every other marked link, while each
-//! copy of a node's claims stays whole.
+//! announces under its marked Node ID, the same relay and start with the Marked bit set,
+//! whose route is marked from the start: the mark then keeps the claim off every other
+//! marked link, while each copy of a node's claims stays whole. The marked Node ID holds
+//! no session, so it files no session floor, and a path names it only as its first hop,
+//! followed by the node itself; that hop counts toward [`MAX_HOPS`] like any other.
 //!
 //! A closed session is named once per neighbour in a fixed-size [`Msg::Dead`], which ends
 //! every route its sender offered through it until the sender offers it again or ends
@@ -82,6 +84,21 @@ use super::{Error, Event, Id, Item, Key, MAX_HOPS, Metric, Rev, Shown};
 pub(crate) struct NodeId {
 	pub relay: Id,
 	pub start: u64,
+	/// The node's marked identity, which it announces what crossed a marked link under:
+	/// the same process at the same start, holding no session of its own, so it names
+	/// no start of any relay.
+	pub marked: bool,
+}
+
+impl NodeId {
+	/// The node `relay` names itself at `start`.
+	pub fn new(relay: Id, start: u64) -> Self {
+		Self {
+			relay,
+			start,
+			marked: false,
+		}
+	}
 }
 
 /// One node on a route's path, and the session it learned the route on. The forwarding
@@ -120,18 +137,38 @@ impl Offer {
 	}
 }
 
-/// The Node ID a node announces what it took over a marked link under: its relay at the
-/// next start, which no start of the same process takes.
+/// The Node ID a node announces what it took over a marked link under.
 fn marked_id(me: NodeId) -> NodeId {
-	NodeId {
-		relay: me.relay,
-		start: me.start.wrapping_add(1),
-	}
+	NodeId { marked: true, ..me }
 }
 
 /// Whether `path` crosses any start of `relay`.
 fn names(path: &[Hop], relay: Id) -> bool {
 	path.iter().any(|hop| hop.node.relay == relay)
+}
+
+/// Whether a path names a marked identity only as the node it leads to, and then next
+/// the node itself, unmarked, as its route begins: the identity holds no session.
+fn marked_well(path: &[Hop]) -> bool {
+	let rest = match path {
+		[first, second, rest @ ..] if first.node.marked => {
+			let own = Hop {
+				node: NodeId {
+					marked: false,
+					..first.node
+				},
+				session: 0,
+			};
+			if *second != own {
+				return false;
+			}
+			rest
+		}
+		[first, ..] if first.node.marked => return false,
+		[_, rest @ ..] => rest,
+		[] => path,
+	};
+	!rest.iter().any(|hop| hop.node.marked)
 }
 
 /// The pairs of relays a path joins, each with where its session stands in the pair's
@@ -448,8 +485,8 @@ pub(crate) struct Kept {
 #[derive(Clone)]
 pub(crate) struct Router<N, I, A> {
 	me: NodeId,
-	/// The Node ID it announces the claims it took over a marked link under: its relay at
-	/// the next start, whose route is marked from the start, so no such claim ever crosses
+	/// The Node ID it announces the claims it took over a marked link under: `me` with the
+	/// Marked bit, whose route is marked from the start, so no such claim ever crosses
 	/// another marked link while every neighbour still gets each copy whole.
 	me_marked: NodeId,
 	/// How long the reader shows a lost claim unavailable before offline.
@@ -569,6 +606,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// A node with no sessions, naming itself `me`, whose reader waits `debounce` before
 	/// showing a lost claim offline.
 	pub fn new(me: NodeId, debounce: Duration) -> Self {
+		debug_assert!(!me.marked, "a node names itself unmarked");
 		Self {
 			me,
 			me_marked: marked_id(me),
@@ -1155,7 +1193,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						}) || path.last().map(|hop| hop.node) != Some(sender)
 					|| path.len() > MAX_HOPS
 					|| names(path, self.me.relay)
-					|| !built
+					|| !built || !marked_well(path)
 				{
 					return Err(Error::Malformed);
 				}
@@ -2841,7 +2879,11 @@ mod tests {
 	}
 
 	fn node(relay: Id) -> NodeId {
-		NodeId { relay, start: 1 }
+		NodeId {
+			relay,
+			start: 1,
+			marked: false,
+		}
 	}
 
 	fn port(role: Role) -> Port {
@@ -3460,7 +3502,11 @@ mod tests {
 		assert_eq!(router.recv(2, route), Err(Error::Malformed));
 		// Through this relay.
 		let me = Hop {
-			node: NodeId { relay: 1, start: 0 },
+			node: NodeId {
+				relay: 1,
+				start: 0,
+				marked: false,
+			},
 			session: 3,
 		};
 		let route = Msg::Route {
@@ -3501,7 +3547,11 @@ mod tests {
 	fn a_start_that_went_back_is_refused() {
 		let mut router = relay(1);
 		open(&mut router, 2, Role::Routing(node(2)));
-		let started = |start| NodeId { relay: 7, start };
+		let started = |start| NodeId {
+			relay: 7,
+			start,
+			marked: false,
+		};
 		let origin = Hop {
 			node: node(5),
 			session: 0,
@@ -4145,6 +4195,72 @@ mod tests {
 			.filter(|(to, msg)| *to == 6 && matches!(msg, Msg::Announce { changes } if !changes.is_empty()))
 			.collect();
 		assert!(told.is_empty(), "the upstream was told the claim: {told:?}");
+	}
+
+	/// A path names a marked Node ID only as the node it leads to, followed by that node
+	/// itself, unmarked, at session 0; anything else is refused. The marked hop counts
+	/// toward the longest path like any other.
+	#[test]
+	fn a_marked_node_id_leads_a_path_and_counts_as_a_hop() {
+		let mut router = relay(1);
+		open(&mut router, 2, Role::Routing(node(2)));
+		let marked = NodeId {
+			marked: true,
+			..node(5)
+		};
+		let hop = |node: NodeId, session| Hop { node, session };
+		let offer = |path: Vec<Hop>| Offer {
+			path: path.into(),
+			draining: false,
+			priority: i8::MAX,
+			cost: 1,
+			marked: true,
+		};
+		let send = |router: &mut Relay, origin: NodeId, path: Vec<Hop>| {
+			router.recv(
+				2,
+				Msg::Route {
+					origin,
+					offer: Some(offer(path)),
+				},
+			)
+		};
+		let sender = hop(node(2), 1);
+		// Alone, followed by another node, by itself at a session, or past the first hop.
+		for path in [
+			vec![hop(marked, 0), sender],
+			vec![hop(marked, 0), hop(node(6), 0), sender],
+			vec![hop(marked, 0), hop(node(5), 3), sender],
+		] {
+			assert_eq!(
+				send(&mut router, marked, path.clone()),
+				Err(Error::Malformed),
+				"{path:?}"
+			);
+		}
+		assert_eq!(
+			send(&mut router, node(5), vec![hop(node(5), 0), hop(marked, 0), sender]),
+			Err(Error::Malformed)
+		);
+		send(&mut router, marked, vec![hop(marked, 0), hop(node(5), 0), sender]).unwrap();
+		assert!(router.best(marked).is_some());
+
+		// Through relays 10 and up, as long as the path may be, the marked hop included,
+		// it is heard and never used, as any route at the longest path.
+		let through = |len: usize| {
+			let mut path = vec![hop(marked, 0), hop(node(5), 0)];
+			path.extend((10..).take(len - 3).map(|relay| hop(node(relay), 1)));
+			path.push(sender);
+			path
+		};
+		send(&mut router, marked, through(MAX_HOPS - 1)).unwrap();
+		assert!(router.best(marked).is_some(), "one hop short of the longest path");
+		send(&mut router, marked, through(MAX_HOPS)).unwrap();
+		assert!(
+			router.best(marked).is_none(),
+			"the marked hop counts toward the longest path"
+		);
+		assert_eq!(send(&mut router, marked, through(MAX_HOPS + 1)), Err(Error::Malformed));
 	}
 
 	/// A route that turns marked at the same rank re-tells a scoped neighbour each claim

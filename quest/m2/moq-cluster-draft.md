@@ -24,6 +24,11 @@ which kept the binding: two do.
   draft-22 session engine (`docs/moq-cluster-01-design.md`,
   `core/include/moq/cluster.h`).
 
+Decided 2026-11-18 (maintainer, on
+[moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053#issuecomment-6975349236)):
+✅ the draft and its binding are kept and the draft rewritten to what ships
+(rejected: retiring both anyway).
+
 The work:
 
 - Audit the draft against the binding, rule by rule, and rewrite it to what
@@ -41,14 +46,6 @@ The work:
 
 Public API: none. Wire: none, unless the audit finds the binding departs from
 -01 in a way a -01 peer cannot read.
-
-## Waiting
-
-- Maintainer: confirm keeping the draft and its binding now that moqx and
-  moq5 ship it (recommended), or retire both anyway and let moqx and moq5
-  peers run without hop paths, as moqx's own docs allow ("Disable it only to
-  peer with a relay network that lacks MoQ Cluster"). Answer on
-  [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053).
 
 ## Related
 

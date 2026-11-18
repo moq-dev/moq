@@ -4,7 +4,11 @@ use super::*;
 use crate::route::relay::{Edit, Hop, Offer, Role};
 
 fn id(relay: u64) -> NodeId {
-	NodeId { relay, start: 1 }
+	NodeId {
+		relay,
+		start: 1,
+		marked: false,
+	}
 }
 
 fn node() -> (Node, Deadlines) {

@@ -301,6 +301,7 @@ impl Node {
 		let me = NodeId {
 			relay: relay.get(),
 			start: u64::try_from(started.as_micros()).unwrap_or(u64::MAX),
+			marked: false,
 		};
 		Self::new(me, clock)
 	}

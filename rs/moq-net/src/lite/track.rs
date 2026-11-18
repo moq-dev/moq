@@ -519,15 +519,31 @@ mod test {
 	fn track_request_names_its_node_on_lite07_only() {
 		let msg = Track {
 			instance: None,
-			node: Some(crate::route::NodeId { relay: 5, start: 9 }),
+			node: Some(crate::route::NodeId {
+				relay: 5,
+				start: 9,
+				marked: false,
+			}),
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty unminted instance, the node and its start, then the
-		// track name.
-		assert_eq!(&buf[..], [11, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 9, 1, b'v']);
+		// Length, the path, an empty unminted instance, the node with its start and Marked,
+		// then the track name.
+		assert_eq!(&buf[..], [12, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 9, 0, 1, b'v']);
 		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, msg.node);
+
+		// A request may name a node's marked identity, and a Marked past 1 is refused.
+		let marked = Track {
+			node: msg.node.map(|node| crate::route::NodeId { marked: true, ..node }),
+			..msg.clone()
+		};
+		let buf = marked.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(buf[10], 1);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, marked.node);
+		let mut bad = buf.to_vec();
+		bad[10] = 2;
+		assert!(Track::decode_slice(&bad, Version::Lite07).is_err());
 
 		// No node is a Node ID of 0, which nothing follows.
 		let unnamed = Track {

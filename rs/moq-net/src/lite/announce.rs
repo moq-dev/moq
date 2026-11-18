@@ -131,22 +131,34 @@ const UNAVAILABLE: u8 = 0x1;
 /// Claim flag: a marked link lies on the way to the claim, so it is never told over another.
 const CLAIM_MARKED: u8 = 0x4;
 
-fn encode_node(w: &mut Encoder<'_>, node: NodeId) -> Result<(), EncodeError> {
-	// No node names itself 0.
+/// Encode a Node ID: its relay, start, and Marked. No node names itself 0.
+pub(super) fn encode_node(w: &mut Encoder<'_>, node: NodeId) -> Result<(), EncodeError> {
 	if node.relay == 0 {
 		return Err(EncodeError::InvalidState);
 	}
 	w.varint(node.relay)?;
-	w.varint(node.start)
+	w.varint(node.start)?;
+	w.bool(node.marked);
+	Ok(())
 }
 
-fn decode_node(r: &mut Decoder<'_>) -> Result<NodeId, DecodeError> {
+/// Decode a Node ID. A relay of 0, or a Marked other than 0 or 1, fails the stream.
+pub(super) fn decode_node(r: &mut Decoder<'_>) -> Result<NodeId, DecodeError> {
 	let relay = match r.varint()? {
 		0 => return Err(DecodeError::InvalidValue),
 		relay => relay,
 	};
 	let start = r.varint()?;
-	Ok(NodeId { relay, start })
+	let marked = r.bool()?;
+	Ok(NodeId { relay, start, marked })
+}
+
+/// Decode the Node ID of a node that holds sessions, which is never a marked one.
+fn decode_session_node(r: &mut Decoder<'_>) -> Result<NodeId, DecodeError> {
+	match decode_node(r)? {
+		node if node.marked => Err(DecodeError::InvalidValue),
+		node => Ok(node),
+	}
 }
 
 fn encode_hop(w: &mut Encoder<'_>, hop: RouteHop) -> Result<(), EncodeError> {
@@ -194,6 +206,10 @@ fn decode_offer(r: &mut Decoder<'_>) -> Result<Offer, DecodeError> {
 		return Err(DecodeError::TooMany);
 	}
 	let path = (0..count).map(|_| decode_hop(r)).collect::<Result<Vec<_>, _>>()?;
+	// Only the node a route leads to may be a marked identity.
+	if path.iter().skip(1).any(|hop| hop.node.marked) {
+		return Err(DecodeError::InvalidValue);
+	}
 	let flags = r.u8()?;
 	if flags & !(MARKED | DRAINING) != 0 {
 		return Err(DecodeError::InvalidValue);
@@ -632,12 +648,16 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						offer: decode_offer(&mut body)?,
 					},
 					ROUTE_END if version.has_routes() => Self::RouteEnd { id: body.varint()? },
+					// A marked Node ID holds no session, so it neither loses one nor drains.
 					DEAD if version.has_routes() => Self::Dead {
-						hop: decode_hop(&mut body)?,
-						far: decode_node(&mut body)?,
+						hop: RouteHop {
+							node: decode_session_node(&mut body)?,
+							session: body.varint()?,
+						},
+						far: decode_session_node(&mut body)?,
 					},
 					DRAIN if version.has_routes() => Self::Drain {
-						node: decode_node(&mut body)?,
+						node: decode_session_node(&mut body)?,
 					},
 					ANNOUNCE_FLOOR if version.has_routes() => Self::Floor {
 						id: body.varint()?,
