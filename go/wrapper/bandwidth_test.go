@@ -82,7 +82,7 @@ func TestReservationUpdateReleasesSubscribedTrack(t *testing.T) {
 	retired.Update(0)
 	retired.Update(0)
 	rate(sibling, 1)
-	if demand.Wanted() == nil {
+	if !demand.Wanted() {
 		t.Fatal("release ended the track subscription")
 	}
 	runtime.KeepAlive(retired)

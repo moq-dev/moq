@@ -6705,7 +6705,7 @@ impl TrackServe {
 		};
 		let end = range.end.map_or(Bound::Unbounded, |end| Bound::Included(end.group));
 		let track = track.with_range((Bound::Included(floor), end));
-		let dynamic = track.info().refresh.is_some();
+		let dynamic = track.info().refresh.enabled();
 		let priority = kio::Producer::new(track.subscription().priority);
 		let publisher = track.info().priority;
 		let session = session;
@@ -6888,7 +6888,7 @@ impl TrackServe {
 		if value != 0 && self.track.latest_key().is_some_and(|latest| value <= latest) {
 			return;
 		}
-		self.track.join();
+		self.track.ask(crate::model::track::Ask::Refresh);
 	}
 
 	/// Group streams opened so far.
@@ -10727,7 +10727,10 @@ mod serve_tests {
 	async fn a_subscribe_joins_under_the_refresh_ratio() {
 		for version in [Version::Draft22] {
 			for refresh in [Some(1), None] {
-				let h = serve_track(version, crate::track::Info::timed().with_refresh(refresh));
+				let h = serve_track(
+					version,
+					crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(refresh)),
+				);
 				let _group = refresh_group(&h);
 				let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 					.await
@@ -10739,7 +10742,7 @@ mod serve_tests {
 				let wanted = if refresh.is_some() { 5 } else { 0 };
 				let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
 				serve_until(serve.as_mut(), "the join reached the track", || {
-					h.track.demand().wanted() == Some(wanted) && !h.log.trail().is_empty()
+					h.track.demand().wanted_start() == Some(wanted) && !h.log.trail().is_empty()
 				})
 				.await;
 				assert_eq!(
@@ -10755,7 +10758,10 @@ mod serve_tests {
 	#[kio::test]
 	async fn an_absolute_subscribe_is_no_join() {
 		let version = Version::Draft22;
-		let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+		let h = serve_track(
+			version,
+			crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)),
+		);
 		let _group = refresh_group(&h);
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 			.await
@@ -10769,7 +10775,7 @@ mod serve_tests {
 		);
 		let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
 		serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
-		assert_eq!(h.track.demand().wanted(), Some(0));
+		assert_eq!(h.track.demand().wanted_start(), Some(0));
 	}
 
 	/// An absolute SUBSCRIBE carrying NEW_GROUP_REQUEST asks as an update would: past a group
@@ -10778,7 +10784,10 @@ mod serve_tests {
 	async fn an_absolute_subscribe_with_a_new_group_request_joins() {
 		let version = Version::Draft22;
 		for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
-			let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+			let h = serve_track(
+				version,
+				crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)),
+			);
 			let _group = refresh_group(&h);
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 				.await
@@ -10795,7 +10804,7 @@ mod serve_tests {
 			};
 			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
 			serve_until(serve.as_mut(), "SUBSCRIBE_OK", || !h.log.trail().is_empty()).await;
-			assert_eq!(h.track.demand().wanted(), Some(wanted), "{value}");
+			assert_eq!(h.track.demand().wanted_start(), Some(wanted), "{value}");
 		}
 	}
 
@@ -10805,7 +10814,10 @@ mod serve_tests {
 	async fn a_new_group_update_joins_a_refreshing_track() {
 		for version in [Version::Draft22] {
 			for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
-				let h = serve_track(version, crate::track::Info::timed().with_refresh(1));
+				let h = serve_track(
+					version,
+					crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)),
+				);
 				let session = ScriptedSession::new(new_group_update(version, 10, value));
 				let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await
@@ -10834,7 +10846,7 @@ mod serve_tests {
 					&mut updates
 				));
 				assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
-				assert_eq!(h.track.demand().wanted(), Some(wanted), "{version} {value}");
+				assert_eq!(h.track.demand().wanted_start(), Some(wanted), "{version} {value}");
 				let written = session.log.writes.lock().unwrap().clone();
 				assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");
 			}
@@ -14848,7 +14860,7 @@ mod serve_tests {
 			.unwrap();
 		assert!(upstream.dynamic_groups);
 		let info = track::Info {
-			refresh: Some(0),
+			refresh: crate::track::Refresh::default().with_ratio(0),
 			properties: Some(Arc::new(crate::model::object::TrackProperties {
 				version: Version::Draft22,
 				values: upstream.unknown.clone(),

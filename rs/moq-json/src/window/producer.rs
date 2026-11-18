@@ -292,6 +292,7 @@ impl<T> Inner<T> {
 			return Err(err);
 		}
 		self.state = crate::state::State::Finished;
+		self.refresh.ended();
 		Ok(())
 	}
 
@@ -311,6 +312,7 @@ impl<T> Inner<T> {
 		// Idempotent: a track that is already closed keeps its first reason.
 		let _ = self.track.inner.clone().abort(reason);
 		self.state.abort(err);
+		self.refresh.ended();
 	}
 
 	/// Refuse further edits once the track can't take another group.

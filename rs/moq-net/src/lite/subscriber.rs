@@ -6705,7 +6705,7 @@ mod tests {
 
 				let mut info = Vec::new();
 				lite::TrackInfo {
-					refresh: None,
+					refresh: crate::track::Refresh::default(),
 					priority: 0,
 					max_age: None,
 					timescale: Some(Timescale::MILLI),
@@ -6731,7 +6731,7 @@ mod tests {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut info = Vec::new();
 			lite::TrackInfo {
-				refresh: None,
+				refresh: crate::track::Refresh::default(),
 				priority: 0,
 				max_age: Some(Duration::from_secs(1)),
 				timescale: Some(Timescale::MILLI),
@@ -8175,7 +8175,11 @@ mod tests {
 	async fn refresh_joins_coalesce_upstream() {
 		let h = Harness::new(Version::Lite07);
 		let request = h._broadcast.reserve_track("refresh").unwrap();
-		let mut serving = ServeLoop::new(&h.serve, request, track::Info::default().with_refresh(1));
+		let mut serving = ServeLoop::new(
+			&h.serve,
+			request,
+			track::Info::default().with_refresh(crate::track::Refresh::default().with_ratio(1)),
+		);
 		let track = h._broadcast.consume().track("refresh").unwrap();
 		let _baseline = track.subscribe(None).await.unwrap();
 		assert!(serving.poll(&h.serve, &kio::Waiter::noop()).is_pending());
@@ -12860,10 +12864,9 @@ impl ServeLoop {
 						while let Poll::Ready(Some(largest)) = self.edge.poll_largest(waiter) {
 							self.largest = Some(largest.group);
 						}
-						let _ = self.demand.poll_wanted_changed(waiter);
 						if let Sub::Active(active) = &mut self.sub
 							&& let Some(largest) = self.largest
-							&& let Some(wanted) = self.demand.wanted().filter(|wanted| *wanted > largest)
+							&& let Some(wanted) = self.demand.poll_asked(waiter).filter(|wanted| *wanted > largest)
 							&& active.wanted != Some(wanted)
 						{
 							active.wanted = Some(wanted);

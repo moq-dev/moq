@@ -78,6 +78,8 @@ export class Track {
 export class TrackInfo {
 	/** Refresh byte ratio on lite-07. */
 	refresh?: number;
+	/** Refresh Interval (milliseconds) on lite-07. */
+	refreshInterval?: number;
 	/** The publisher's tie-break priority for this track. */
 	priority: number;
 	/**
@@ -102,12 +104,14 @@ export class TrackInfo {
 		maxAge,
 		timescale,
 		refresh,
+		refreshInterval,
 		compress = false,
 	}: {
 		priority?: number;
 		maxAge?: number;
 		timescale?: number;
 		refresh?: number;
+		refreshInterval?: number;
 		compress?: boolean;
 	}) {
 		if (!Number.isInteger(priority) || priority < -128 || priority > 127) {
@@ -118,7 +122,11 @@ export class TrackInfo {
 		}
 		if (refresh !== undefined && (!Number.isInteger(refresh) || refresh < 0 || refresh > 0xffff_ffff))
 			throw new RangeError("refresh exceeds u32");
+		if (refreshInterval !== undefined && (!Number.isSafeInteger(refreshInterval) || refreshInterval < 0)) {
+			throw new RangeError(`refreshInterval must be a safe non-negative integer: ${refreshInterval}`);
+		}
 		this.refresh = refresh;
+		this.refreshInterval = refreshInterval;
 		this.priority = priority;
 		this.maxAge = maxAge;
 		this.timescale = timescale === undefined ? undefined : Timescale(timescale);
@@ -133,7 +141,10 @@ export class TrackInfo {
 		const age = this.maxAge === undefined ? undefined : BigInt(this.maxAge);
 		await w.u62(legacy ? (age ?? BigInt(Number.MAX_SAFE_INTEGER)) : age === undefined ? 0n : age + 1n);
 		await w.u53(wireTimescale(version, this.timescale) ?? 0);
-		if (hasRefresh(version)) await w.u53(this.refresh === undefined ? 0 : this.refresh + 1);
+		if (hasRefresh(version)) {
+			await w.u53(this.refresh === undefined ? 0 : this.refresh + 1);
+			await w.u62(this.refreshInterval === undefined ? 0n : BigInt(this.refreshInterval) + 1n);
+		}
 		if (hasCompression(version)) await w.u53(this.compress ? COMPRESSION_DEFLATE : COMPRESSION_NONE);
 	}
 
@@ -156,12 +167,16 @@ export class TrackInfo {
 		const scale = await r.u53();
 		const timescale = scale === 0 && !legacy ? undefined : Timescale(scale);
 		const refresh = hasRefresh(version) ? (await r.u53()) - 1 : undefined;
+		const interval = hasRefresh(version) ? (await r.u62()) - 1n : -1n;
+		if (interval > BigInt(Number.MAX_SAFE_INTEGER))
+			throw new RangeError("refreshInterval exceeds safe milliseconds");
 		const compress = hasCompression(version) ? await decodeCompression(r) : false;
 		return new TrackInfo({
 			priority,
 			maxAge,
 			timescale,
 			refresh: refresh === -1 ? undefined : refresh,
+			refreshInterval: interval === -1n ? undefined : Number(interval),
 			compress,
 		});
 	}
@@ -181,6 +196,12 @@ export class TrackInfo {
 			(!Number.isInteger(this.refresh) || this.refresh < 0 || this.refresh > 0xffff_ffff)
 		)
 			throw new RangeError("refresh exceeds u32");
+		if (
+			this.refreshInterval !== undefined &&
+			(!Number.isSafeInteger(this.refreshInterval) || this.refreshInterval < 0)
+		) {
+			throw new RangeError(`refreshInterval must be a safe non-negative integer: ${this.refreshInterval}`);
+		}
 		if (this.timescale !== undefined) Timescale(this.timescale);
 		if (this.compress && !hasCompression(version)) {
 			throw new Error("a compressed track needs lite-07");

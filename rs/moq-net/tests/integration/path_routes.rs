@@ -316,12 +316,13 @@ async fn an_unknown_hop_in_a_dead_changes_nothing() {
 	assert_eq!(watch.seen(start), [], "W keeps its route as it was");
 }
 
-/// A chain one relay longer than a route's hops allow: the last relay refuses the route
-/// whose path is full, and every relay before it uses its own.
+/// A chain one relay longer than a claim's chain allows. Each session here exchanges no
+/// routes, so each relay takes the claim across it and names itself in the chain, the
+/// publisher's own relay first: the chain names at most 31 relays, so the 32nd refuses it.
 #[kio::test]
 async fn a_path_at_the_hop_limit_is_refused() {
 	let version = lite07();
-	let nodes: Vec<_> = (1..=33).map(produce_origin).collect();
+	let nodes: Vec<_> = (1..=32).map(produce_origin).collect();
 	let mut watched = Vec::new();
 	for node in &nodes {
 		watched.push(record(node, "live").await);
@@ -337,10 +338,8 @@ async fn a_path_at_the_hop_limit_is_refused() {
 	let reached: Vec<bool> = (watched.iter_mut())
 		.map(|watch| watch.seen(start).iter().any(|seen| seen.available))
 		.collect();
-	// The publisher names itself in one hop, and each relay adds its own, so the 32nd
-	// relay past it hears a path of 32 hops.
-	assert!(reached[..32].iter().all(|reached| *reached), "{reached:?}");
-	assert!(!reached[32], "the full path is refused");
+	assert!(reached[..31].iter().all(|reached| *reached), "{reached:?}");
+	assert!(!reached[31], "the full chain is refused");
 }
 
 /// A peer whose session is limited to `a` reports its own session closing. That DEAD

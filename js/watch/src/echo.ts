@@ -152,7 +152,7 @@ export class Echo {
 			// Observing the probe asks the peer for PROBE updates, so only do it while someone reads them.
 			const demand = writer.track.demand();
 			effect.run((inner) => {
-				if (inner.get(demand.wanted) !== undefined) inner.get(this.in.probe);
+				if (inner.get(demand.wanted)) inner.get(this.in.probe);
 			});
 		});
 	}

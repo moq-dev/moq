@@ -472,7 +472,7 @@ export function hasAnnounceCompression(version: Version): boolean {
 	}
 }
 
-/** Whether TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE a wanted group. Added in lite-07.
+/** Whether TRACK_INFO carries the refresh ratio and interval, and SUBSCRIBE_UPDATE a wanted group. Added in lite-07.
  * Older peers see a track that never refreshes. */
 export function hasRefresh(version: Version): boolean {
 	// Explicitly list older versions so future versions keep the lite-07+ behavior.

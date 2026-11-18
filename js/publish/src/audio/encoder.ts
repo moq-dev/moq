@@ -15,7 +15,6 @@ import {
 } from "@moq/signals";
 import { hosted } from "../assets";
 import type { Broadcast } from "../broadcast";
-import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import type { AudioFrame, Capture, Format } from "./capture";
@@ -487,7 +486,7 @@ export class Encoder {
 			const fatal = effect.get(this.#out.error);
 
 			const onDemand = effect.get(broadcast.in.onDemand) !== "off";
-			const demanded = !!track && effect.get(track.demand().wanted) !== undefined;
+			const demanded = !!track && effect.get(track.demand().wanted);
 			// Demand from fetches alone carries no subscription, so no budget beyond the retention.
 			this.#budget = replayBudget(track && effect.get(track.subscription));
 			// Not gated on `enabled` or `muted`: a paused rendition takes no capture, but still encodes what it retained.
@@ -512,7 +511,7 @@ export class Encoder {
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
-			const demanded = watched(track, effect);
+			const demanded = track.demand().wanted;
 			effect.run((effect) => {
 				if (!effect.get(demanded)) return;
 

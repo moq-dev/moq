@@ -26,7 +26,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   is finished; Subscriber Min Age stays and
   gains its reader, reversing 2026-11-14; and
   [lite-07 by start](https://github.com/moq-dev/moq/pull/8908) carries the
-  smaller wire fixes. [Refresh](/quest/m2/refresh-interval.md) and
+  smaller wire fixes. Refresh ([moq-dev/moq#9054](https://github.com/moq-dev/moq/pull/9054)) and
   group drops took simpler contracts.
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918)
   returned from m4, and the two moq-transport interop quests in m3 were

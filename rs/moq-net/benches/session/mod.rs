@@ -1875,7 +1875,7 @@ impl<B: Backend> ChurnRoom<B> {
 			drop(subscriber);
 			drop(track);
 			let mut demand = self.churn[session].demand();
-			while demand.wanted_changed().await.unwrap().is_some() {}
+			while demand.wanted_changed().await.unwrap() {}
 		}
 		start.elapsed()
 	}
