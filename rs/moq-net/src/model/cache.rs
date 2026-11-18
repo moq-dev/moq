@@ -1367,7 +1367,7 @@ impl Drop for Charge {
 
 /// What one reader's record bills to its track's account, and its share of the debt the
 /// track could not pay. Released on drop.
-pub(super) struct Reader {
+pub(crate) struct Reader {
 	track: Arc<Track>,
 	bytes: u64,
 }
@@ -1375,7 +1375,7 @@ pub(super) struct Reader {
 impl Reader {
 	/// Bill `bytes` in all, settling the track's debt after a growth: call with no track lock
 	/// held.
-	pub(super) fn set(&mut self, bytes: u64) {
+	pub(crate) fn set(&mut self, bytes: u64) {
 		if bytes == self.bytes {
 			return;
 		}
@@ -1406,7 +1406,7 @@ impl Reader {
 
 	/// The debt the track's readers owe, forgiven once the pool is back within its capacity:
 	/// nothing needs the room any more, as the track forgives its own debt.
-	pub(super) fn debt(&self) -> u64 {
+	pub(crate) fn debt(&self) -> u64 {
 		let readers = &self.track.readers;
 		let pool = &self.track.pool;
 		if pool.capacity().is_none_or(|capacity| pool.used() <= capacity) {
@@ -1424,6 +1424,14 @@ impl Reader {
 		let count = readers.count.load(Ordering::Relaxed);
 		self.bytes > ENTRY_OVERHEAD
 			&& u128::from(self.bytes) * u128::from(count) >= u128::from(readers.bytes.load(Ordering::Relaxed))
+	}
+}
+
+impl std::fmt::Debug for Reader {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Reader")
+			.field("bytes", &self.bytes)
+			.finish_non_exhaustive()
 	}
 }
 
