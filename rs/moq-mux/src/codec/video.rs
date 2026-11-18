@@ -261,6 +261,11 @@ impl Catalog {
 		self.last.is_some()
 	}
 
+	/// The out-of-band record the last published config carries, if any.
+	pub(crate) fn description(&self) -> Option<&[u8]> {
+		self.last.as_ref()?.description.as_deref()
+	}
+
 	/// Overlay the hint onto `config` and publish it to `rendition`, unless it matches the last
 	/// publish. A decoder identity change finishes the previous track and mints a fresh name;
 	/// anything else updates the rendition in place.

@@ -1184,3 +1184,66 @@ async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
 	}
 	assert_eq!(starts, [100]);
 }
+
+/// A changed sequence header on a live track skips the deltas before its keyframe, which can't
+/// decode against the old record, and a seek in between keys the group that keyframe opens.
+#[tokio::test(start_paused = true)]
+async fn a_changed_sequence_header_waits_for_its_keyframe() {
+	let video = |frame_type: u8, nalus: &[u8], ms: u32| {
+		let mut body = vec![(frame_type << 4) | super::VIDEO_CODEC_AVC, super::AVC_NALU, 0, 0, 0];
+		body.extend_from_slice(nalus);
+		let mut out = Vec::new();
+		write_tag(&mut out, super::TAG_VIDEO, ms, &body);
+		out
+	};
+	let idr = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let delta = [0, 0, 0, 5, 0x41, 0x9a, 0x02, 0x03, 0x04];
+	let (headers, keyframe) = avc_session(&idr);
+	let mut changed = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	changed.extend_from_slice(&avcc_level(0x28));
+	let mut header = Vec::new();
+	write_tag(&mut header, super::TAG_VIDEO, 66, &changed);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	let replay = || {
+		moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)))
+	};
+	importer.decode(&headers).unwrap();
+	importer.decode(&keyframe).unwrap();
+	importer.decode(&video(2, &delta, 33)).unwrap();
+	let old = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+	let mut old = consumer.track(&old).unwrap().subscribe(replay()).await.unwrap();
+
+	importer.decode(&header).unwrap();
+	importer.decode(&video(2, &delta, 66)).unwrap();
+	importer.seek(100).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 100)).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let mut deltas = 0;
+	while let Some(mut group) = old.recv_group().await.unwrap() {
+		while let Some(frame) = group.read_frame().await.unwrap() {
+			deltas += usize::from(frame.payload.ends_with(&delta));
+		}
+	}
+	assert_eq!(deltas, 1, "the delta after the new header never reaches the old track");
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+	let mut starts = Vec::new();
+	while let Some(group) = track.recv_group().await.unwrap() {
+		starts.push(group.start);
+	}
+	assert_eq!(starts, [100]);
+}

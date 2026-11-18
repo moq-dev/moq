@@ -95,6 +95,11 @@ impl Import {
 		// Only switch to length-prefixed mode once the avcC actually parses, so a parse failure
 		// leaves the importer in Annex-B mode where inline-SPS keyframes still self-initialize.
 		let config = config_from_avcc(avcc_bytes)?;
+		// A new record starts a coded sequence: frames before its keyframe can't decode against the
+		// open group's, so they wait for that keyframe.
+		if self.catalog.configured() && self.catalog.description() != Some(avcc_bytes) {
+			self.track.cut(None)?;
+		}
 		self.length_size = Some(super::Avcc::parse(avcc_bytes)?.length_size);
 		self.pending = Some(config);
 		Ok(())

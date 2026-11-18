@@ -97,6 +97,11 @@ impl Import {
 		// Only switch to hvc1 mode once the hvcC actually parses, so a parse failure leaves the
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
+		// A new record starts a coded sequence: frames before its keyframe can't decode against the
+		// open group's, so they wait for that keyframe.
+		if self.catalog.configured() && self.catalog.description() != Some(hvcc_bytes) {
+			self.track.cut(None)?;
+		}
 		self.length_size = Some(super::Hvcc::parse(hvcc_bytes)?.length_size);
 		self.pending = Some(config);
 		Ok(())
