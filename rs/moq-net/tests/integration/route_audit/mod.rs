@@ -1,7 +1,7 @@
 #![cfg(feature = "async")]
 
 //! The cases a 2026-11-15 audit of lite-07's route layer found neither a model nor a test
-//! for, on real sessions with time mocked (`quest/m2/multicast/accept.md`).
+//! for, on real sessions with time mocked.
 //!
 //! Every case reads like an application: a publisher writes one group of one frame every
 //! [`CADENCE`], and a [`Reader`] on a relay follows the path, reads each group, and
