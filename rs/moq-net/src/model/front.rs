@@ -97,7 +97,8 @@ pub(super) enum Event {
 	},
 	/// A reader arrived on the track.
 	Wanted { track: Arc<str> },
-	/// The last reader left the track.
+	/// The last reader left the track. A finished track is read until nothing holds it,
+	/// such as a fetch still reading a group, which keeps moving off a dying route.
 	Unwanted { track: Arc<str>, now: Instant },
 	/// The armed deadline passed.
 	Deadline { now: Instant },

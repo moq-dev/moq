@@ -5786,6 +5786,12 @@ impl TrackWeak {
 		self.state.poll_wanted_changed(waiter, false).map_ok(drop)
 	}
 
+	/// `Ready` once [`Self::is_held`] differs from `last`, closed or not, and otherwise park
+	/// `waiter` for the change.
+	pub(super) fn poll_held_changed(&self, waiter: &kio::Waiter, last: bool) -> Poll<bool> {
+		self.state.poll_held_changed(waiter, last)
+	}
+
 	/// `Ready(Ok)` while nobody reads the track, `Ready(Err)` once it closed, and
 	/// otherwise park `waiter` for the last reader leaving. Only `Pending` registers,
 	/// as with [`Self::poll_wanted`].
