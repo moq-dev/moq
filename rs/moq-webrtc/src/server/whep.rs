@@ -139,7 +139,8 @@ impl<'a> Request<'a> {
 /// enforced by moq-net exactly as for a native session; the bundled [`Server::subscribe_router`]
 /// passes the server's own (unauthenticated) consumer. It parses the offer,
 /// resolves the broadcast on `subscriber`, restricts the answer to the codecs the
-/// catalog actually has, registers a media session on the shared mux, and
+/// catalog actually has and to at most one audio and one video line (rejecting the
+/// rest, as it does data channels), registers a media session on the shared mux, and
 /// returns the SDP answer plus an opaque `resource_id` for the WHEP `Location`
 /// header. The caller must run the returned [`Response`] to drive the MoQ->RTP
 /// session. Mirrors [`whip::accept`](super::whip::accept).
@@ -158,7 +159,7 @@ pub async fn accept(server: &Server, request: Request<'_>) -> Result<Response> {
 		broadcast,
 		offer,
 	} = request;
-	let (offer, refused) = sdp::parse_offer(offer)?;
+	let (offer, refused) = sdp::parse_offer(offer, sdp::Lines::FirstOfKind)?;
 
 	let source = resolve(subscriber, broadcast).await?;
 	let codecs = source.catalog_codecs();

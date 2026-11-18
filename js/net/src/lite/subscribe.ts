@@ -328,12 +328,15 @@ export function rangesOf(msg: Span & { ranges?: WireRange[] }): WireRange[] {
 	return [range];
 }
 
+/** The bytes `value` takes as a lite-07 varint, which counts leading ones. */
+export function varintSize(value: number | bigint): number {
+	const lo = split(value);
+	return lengthLeadingOnes(parts.hi, lo);
+}
+
 /** The bytes a lite-07 range takes on the wire, whose varints count leading ones. */
-function rangeSize(range: WireRange): number {
-	const size = (value: number | bigint) => {
-		const lo = split(value);
-		return lengthLeadingOnes(parts.hi, lo);
-	};
+export function rangeSize(range: WireRange): number {
+	const size = varintSize;
 	const anchor = (anchor: WireAnchor | undefined, end: boolean): number => {
 		// An end at group 0 can't go out, which encoding refuses; size it as the smallest.
 		if (end && anchor?.absolute === 0n) return size(1) + size(0);
@@ -369,6 +372,9 @@ export class LiveRanges {
 	readonly #live = new Map<bigint, WireRange>();
 	// The bytes the live ranges take on the wire, held to what one SUBSCRIBE carries.
 	#size = 0;
+	// The live ranges `apply` last returned, until one changes, so an edit that changes nothing
+	// costs nothing.
+	#snapshot?: readonly { id: bigint; range: WireRange }[];
 	/** How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports. */
 	readonly initial: bigint;
 
@@ -380,6 +386,7 @@ export class LiveRanges {
 	}
 
 	#add(ranges: readonly WireRange[]) {
+		if (ranges.length > 0) this.#snapshot = undefined;
 		for (const range of ranges) {
 			// Only lite-07 numbers ranges on the wire, and only it is held to one SUBSCRIBE.
 			if (hasRanges(this.#version)) this.#size += rangeSize(range);
@@ -390,9 +397,15 @@ export class LiveRanges {
 	#remove(id: bigint): boolean {
 		const range = this.#live.get(id);
 		if (!range) return false;
+		this.#snapshot = undefined;
 		if (hasRanges(this.#version)) this.#size -= rangeSize(range);
 		this.#live.delete(id);
 		return true;
+	}
+
+	/** The Range ID the next range added takes. */
+	next(): bigint {
+		return this.#next;
 	}
 
 	/** The live range with Range ID `id`. */
@@ -426,11 +439,11 @@ export class LiveRanges {
 	}
 
 	/**
-	 * Apply a received lite-07 `update`'s edit, returning every live range by Range ID. Throws
-	 * {@link ProtocolViolation} for an edit it cannot apply. Before lite-07 an update restates
-	 * its ranges, so nothing is numbered.
+	 * Apply a received lite-07 `update`'s edit, returning every live range by Range ID: the same
+	 * array as last time while nothing changed. Throws {@link ProtocolViolation} for an edit it
+	 * cannot apply. Before lite-07 an update restates its ranges, so nothing is numbered.
 	 */
-	apply(update: SubscribeUpdate): { id: bigint; range: WireRange }[] {
+	apply(update: SubscribeUpdate): readonly { id: bigint; range: WireRange }[] {
 		if (!hasRanges(this.#version)) return [];
 		for (const id of update.remove ?? []) {
 			// An id never assigned, or already retired (including earlier in this list).
@@ -441,7 +454,8 @@ export class LiveRanges {
 		// could carry like one too large to send.
 		if (this.#live.size === 0) throw new ProtocolViolation("a subscription asks for no range");
 		if (this.#size > Message.MAX_MESSAGE_SIZE) throw new ProtocolViolation("too many ranges");
-		return [...this.#live].map(([id, range]) => ({ id, range }));
+		this.#snapshot ??= [...this.#live].map(([id, range]) => ({ id, range }));
+		return this.#snapshot;
 	}
 
 	/**
@@ -479,11 +493,17 @@ export class LiveRanges {
 			wanted.set(k, (wanted.get(k) ?? 0) + 1);
 		});
 		const remove: bigint[] = [];
+		// The bytes the live ranges take once the edit applies.
+		let size = this.#size;
 		for (const [id, range] of this.#live) {
 			const k = key(range, isFill(id));
 			const count = wanted.get(k) ?? 0;
-			if (count > 0) wanted.set(k, count - 1);
-			else remove.push(id);
+			if (count > 0) {
+				wanted.set(k, count - 1);
+			} else {
+				remove.push(id);
+				size -= rangeSize(range);
+			}
 		}
 		// In the order asked for, so the publisher numbers them the way this side does.
 		const add: WireRange[] = [];
@@ -497,9 +517,11 @@ export class LiveRanges {
 			add.push(range);
 			if (index >= demand) fillIds.push(first + BigInt(add.length - 1));
 		});
+		// Checked before anything changes, so a refused edit leaves the ranges as last sent.
+		for (const range of add) size += rangeSize(range);
+		if (size > Message.MAX_MESSAGE_SIZE) throw new Error("too many ranges for one SUBSCRIBE");
 		for (const id of remove) this.#remove(id);
 		this.#add(add);
-		if (this.#size > Message.MAX_MESSAGE_SIZE) throw new Error("too many ranges for one SUBSCRIBE");
 		return { remove, add, fillIds };
 	}
 }

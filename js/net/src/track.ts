@@ -84,6 +84,19 @@ function taken(read: () => Recv, ended: () => undefined): GroupConsumer | undefi
 	}
 }
 
+/** What {@link Ordered.nextItem} returns next. Mirrors the Rust `track::Item`. */
+export type Item =
+	/** A group, with a higher key than any group or gap returned before. */
+	| { kind: "group"; group: GroupConsumer }
+	/**
+	 * Groups `[start, end)` this reader gave up on, which it will not return, with what a read of
+	 * them would have ended with. `group` is absent, so `item?.group` reads a group or nothing.
+	 */
+	| { kind: "gap"; start: bigint; end: bigint; error: Error; group?: never };
+
+// What an ordered read found: an item, or the same idle, end, and error as a group read.
+type ItemRecv = Item | { kind: "idle" } | { kind: "done" } | { kind: "error"; error: Error };
+
 // The unset priority, the midpoint of the signed range: moq-lite carries it as 128 and
 // moq-transport as 127, one urgency on both.
 const DEFAULT_PRIORITY = 0;
@@ -1018,7 +1031,11 @@ let mayLand: (producer: Producer, land: Land) => boolean;
 // Recompute the producer's aggregates now, for a sink that just became a fetch; assigned in its
 // static block.
 let resubscribe: (producer: Producer) => void;
+// Where a session's live feed starts owing groups, if known: it owes none below.
+let feedFloor: (producer: Producer) => bigint | undefined;
 let owedRuns: (producer: Producer, start: bigint, end: bigint) => Iterable<Run & { folds?: Instant }>;
+// Whether a wire subscription feeds the producer, so it owes every group it has not accounted for.
+let wireFed: (producer: Producer) => boolean;
 let owedGroup: (producer: Producer, start: bigint, end: bigint) => { key: bigint; folds?: Instant } | undefined;
 let fillEdge: (producer: Producer) => bigint | undefined;
 let sourceStart: (producer: Producer) => bigint | "pending" | undefined;
@@ -1113,7 +1130,8 @@ let fillsOf: (producer: Producer) => FillState;
 let makeOrdered: (subscriber: Subscriber) => Ordered;
 let ordered_: {
 	nextGroup(subscriber: Subscriber): Promise<GroupConsumer | undefined>;
-	tryNextGroup(subscriber: Subscriber): Recv;
+	nextItem(subscriber: Subscriber): Promise<Item | undefined>;
+	tryItem(subscriber: Subscriber): ItemRecv;
 	ended(subscriber: Subscriber): undefined;
 	readFrame(subscriber: Subscriber): Promise<({ group: bigint; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
@@ -1616,10 +1634,15 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
+		wireFed = (producer) => producer.#wire !== undefined;
+		feedFloor = (producer) => {
+			if (!producer.#wire) return undefined;
+			const feed = producer.#feedStart();
+			return feed === "pending" ? producer.#wire.served?.requested : feed;
+		};
 		owedRuns = (producer, start, end) => {
 			if (!producer.#wire) return [];
-			const feed = producer.#feedStart();
-			const floor = feed === "pending" ? producer.#wire.served?.requested : feed;
+			const floor = feedFloor(producer);
 			return producer.#landing({
 				start: max(start, floor ?? 0n),
 				end,
@@ -2868,6 +2891,21 @@ type Drift = {
 	end?: bigint;
 };
 
+// An ordered read's state, mirroring the Rust `Ordered`: a group read and held back because a gap
+// below it goes first, the gaps found and not returned yet (sorted and disjoint), and one past
+// the highest key returned, as a group or the end of a gap.
+type Items = { held?: GroupConsumer; gaps: DropRun[]; at: bigint };
+
+// A group that landed after an ordered read passed its key.
+function late(): Hole {
+	return { error: new StreamError(StreamCode.Old, { message: "group landed after the read passed it" }) };
+}
+
+// A group missing its head that no fill could serve.
+function headless(): Hole {
+	return { error: new StreamError(StreamCode.NotFound, { message: "group head never served" }) };
+}
+
 // The successor a handed-out group was last judged by, so the group stays judgeable once the
 // cache evicts both. Each reader keeps its own, so the memory is bounded by the groups held.
 type Superseded = { successor?: Successor };
@@ -3011,6 +3049,14 @@ export class Subscriber {
 		coverage?: Coverage;
 	};
 	#reported = new Runs<Reported>(sameReport);
+	// Everything below was settled for good and folded out of #reported: handed out, told, or
+	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
+	// under pool pressure; a key-order read folds at where it is instead (see #fold).
+	#floor = 0n;
+	// A wire publisher reads #reported as what its wire was told, so it never folds.
+	#wired = false;
+	// What an ordered read owes before its next group; unset before its first read. See #tryItem.
+	#items?: Items;
 	// The group the frame-level helpers are currently draining, acquired through the
 	// key cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -3337,6 +3383,7 @@ export class Subscriber {
 		const forgot = this.#delivered.runEnd(0n) ?? 0n;
 		if (forgot > floor) this.#stoppedReading(floor, forgot);
 		if (key >= forgot) this.#stoppedReading(key, key + 1n);
+		if (ordered) this.#fold(forgot);
 	}
 
 	// This reader stopped reading `[start, end)` for good: clip what it asked there, and judge
@@ -3481,6 +3528,7 @@ export class Subscriber {
 
 	// The publisher's view of this reader's record.
 	#wireRecord(): WireRecord {
+		this.#wired = true;
 		const reported = this.#reported;
 		return {
 			told: (key) => reported.at(key) !== undefined,
@@ -4216,8 +4264,10 @@ export class Subscriber {
 			return subscriber.#peekGroup(ordered);
 		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
+		hooks.fold = (subscriber, at) => subscriber.#fold(at);
 		hooks.wire = (subscriber) => subscriber.#wireRecord();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
+		hooks.reportedRuns = (subscriber) => subscriber.#reported.size;
 		hooks.handedOut = (subscriber, key) => subscriber.#delivered.has(key);
 		hooks.hasUnreadGroup = (subscriber, start, end, delivered) =>
 			subscriber.#state.groups
@@ -4368,7 +4418,8 @@ export class Subscriber {
 		// the arrival cursor); `Ordered` is the handle that reaches it.
 		ordered_ = {
 			nextGroup: (subscriber) => subscriber.#nextGroup(),
-			tryNextGroup: (subscriber) => subscriber.#tryNextGroup(),
+			nextItem: (subscriber) => subscriber.#nextItem(),
+			tryItem: (subscriber) => subscriber.#tryItem(),
 			ended: (subscriber) => subscriber.#ended(),
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
@@ -4640,6 +4691,9 @@ export class Subscriber {
 		});
 		if (this.#frameGroup) hooks.releaseGroupReader(this.#frameGroup, abort);
 		this.#frameGroup = undefined;
+		// A group an ordered read holds behind a gap is buffered too, so the read ends without it.
+		if (this.#items?.held) hooks.releaseGroupReader(this.#items.held, abort);
+		if (this.#items) this.#items.held = undefined;
 		this.#state.timeline.length = 0;
 		this.#wall.timer?.abort();
 		this.#wall.timer = undefined;
@@ -4816,7 +4870,7 @@ export class Subscriber {
 	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
 	// replacing what it goes out over. Mirrors the Rust `Record::report`.
 	#reportRun(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
-		const start = from;
+		const start = max(from, this.#floor);
 		if (start >= to) return undefined;
 		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
 		const [gap] = runGaps(blocked, start, to);
@@ -4931,8 +4985,21 @@ export class Subscriber {
 				this.#queueResumedDrop(recv);
 				continue;
 			}
-			if (recv.kind === "group") this.#handOut(recv.group.start, ordered);
-			else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
+			if (recv.kind === "group") {
+				// Passing the keys below it hands them out as far as #delivered knows, so first take what
+				// the copies gave up there: a session-fed copy reports a key it passed to take this group.
+				if (ordered) {
+					const key = recv.group.start;
+					for (
+						let drop = resume.tryDrop(this.#delivered, key);
+						drop;
+						drop = resume.tryDrop(this.#delivered, key)
+					) {
+						this.#queueResumedDrop(drop);
+					}
+				}
+				this.#handOut(recv.group.start, ordered);
+			} else if (recv.kind === "idle" && this.#exhausted()) return { kind: "done" };
 			return recv;
 		}
 	}
@@ -5032,12 +5099,13 @@ export class Subscriber {
 	}
 
 	// The key cursor behind {@link Ordered}, which owns the only public door to it.
-	async #nextGroup(): Promise<GroupConsumer | undefined> {
+	async #nextItem(): Promise<Item | undefined> {
 		for (;;) {
-			const recv = this.#tryNextGroup();
+			const recv = this.#tryItem();
 			switch (recv.kind) {
 				case "group":
-					return recv.group;
+				case "gap":
+					return recv;
 				case "done":
 					return this.#ended();
 				case "error":
@@ -5045,6 +5113,215 @@ export class Subscriber {
 			}
 			await this.#wait();
 		}
+	}
+
+	// The next group in key order, past any gap.
+	async #nextGroup(): Promise<GroupConsumer | undefined> {
+		for (;;) {
+			const item = await this.#nextItem();
+			if (!item || item.kind === "group") return item?.group;
+		}
+	}
+
+	// The synchronous half of #nextItem: the next group, or a gap the read gave up on below it,
+	// as the Rust `Ordered::poll_item` merges them. Every gap goes out before the end.
+	#tryItem(): ItemRecv {
+		let items = this.#items;
+		if (!items) {
+			items = this.#items = { gaps: [], at: 0n };
+			// The drop record starts before the first read, so the cursor keeps what it gives up.
+			this.#findGaps(items);
+		}
+		const read = this.#readHeld(items);
+		this.#findGaps(items);
+		switch (read.kind) {
+			case "group": {
+				const key = read.group.start;
+				const lowest = this.#lowestGap(items);
+				// The gap lies wholly below it, or around it: the part below goes first.
+				if (lowest && lowest.span.start < key) {
+					// What lies above the group, or above the run when it ends before it, waits.
+					const resume = lowest.span.end <= key ? lowest.span.end : key + 1n;
+					const below = { start: lowest.span.start, end: min(lowest.span.end, key) };
+					items.held = read.group;
+					return this.#takeGap(items, lowest.index, below, resume);
+				}
+				// A group handed out is no gap, even one a drop also named, as a cut group is.
+				if (lowest && lowest.span.start === key) this.#cutGap(items, lowest.index, key, key + 1n);
+				items.at = max(items.at, key + 1n);
+				this.#fold(this.#delivered.runEnd(0n) ?? 0n);
+				return read;
+			}
+			case "done":
+			case "error": {
+				const lowest = this.#lowestGap(items);
+				if (lowest) return this.#takeGap(items, lowest.index, lowest.span, lowest.span.end);
+				return read;
+			}
+			case "drop":
+				// Only a read with dispositions reports a drop, which this one finds through the record.
+				throw new Error("an ordered read took a drop");
+			default: {
+				// What the read still owes lies above the gap, so the gap goes first.
+				const lowest = this.#lowestGap(items);
+				if (!lowest) return { kind: "idle" };
+				const owed = this.nextInRange(items.at);
+				const ready = lowest.span.start <= items.at || owed === undefined || owed >= lowest.span.start;
+				return ready ? this.#takeGap(items, lowest.index, lowest.span, lowest.span.end) : { kind: "idle" };
+			}
+		}
+	}
+
+	// The group held behind a gap, while the bounds still cover it, else the cursor's next. A group
+	// read is settled, so no later cut or drop of it is a gap.
+	#readHeld(items: Items): Recv {
+		const held = items.held;
+		if (held) {
+			items.held = undefined;
+			if (this.#covered(held.start, held.start + 1n).length > 0) return { kind: "group", group: held };
+			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
+			// still polling the cursor so the read sees the track or itself end; otherwise the read
+			// passes it.
+			if (this.#covered(held.start, UNBOUNDED).length === 0) {
+				const read = this.#tryNextGroup();
+				// A clean end keeps it, as the buffer keeps a group past the cap, for a raise to read.
+				if (read.kind === "error") held.close();
+				else items.held = held;
+				return read.kind === "done" || read.kind === "error" ? read : { kind: "idle" };
+			}
+			held.close();
+		}
+		const read = this.#tryNextGroup();
+		if (read.kind === "group") this.#settled(read.group.start, read.group.start + 1n);
+		return read;
+	}
+
+	// The parts of `[start, end)` this reader's ranges and bounds cover now.
+	#covered(start: bigint, end: bigint): Run[] {
+		const cursor = this.#cursor.peek();
+		const from = max(start, cursor.start);
+		const to = cursor.end === undefined ? end : min(end, cursor.end);
+		if (from >= to) return [];
+		if (this.#resume) return this.#resume.runs(from, to) ?? [{ start: from, end: to }];
+		return this.#window.runs(from, to);
+	}
+
+	// Take every run the record gave up into the gaps waiting, in whatever order they come. A drop
+	// replaces what it overlaps, and a skip was never a group, so it removes them. Runs come lowest
+	// first, so one past every gap waiting is appended without copying the rest.
+	#findGaps(items: Items): void {
+		for (let dropped = this.#tryDrop(); dropped; dropped = this.#tryDrop()) {
+			const last = items.gaps.at(-1);
+			if (!last || last.end <= dropped.start) {
+				if (dropped.skip) continue;
+				const gap = { start: dropped.start, end: dropped.end, error: dropped.error };
+				if (last && last.end === gap.start && sameHole(last, gap)) last.end = gap.end;
+				else items.gaps.push(gap);
+				continue;
+			}
+			items.gaps = dropped.skip
+				? removeRun(items.gaps, dropped.start, dropped.end)
+				: insertDrop(items.gaps, dropped.start, dropped.end, { error: dropped.error });
+		}
+	}
+
+	// The lowest gap waiting that the bounds cover, as its index and the first part of it they cover,
+	// since they may have moved since it was found. A gap they exclude waits, in case they widen.
+	#lowestGap(items: Items): { index: number; span: Run } | undefined {
+		for (let index = 0; index < items.gaps.length; index++) {
+			const gap = items.gaps[index];
+			const [span] = this.#covered(gap.start, gap.end);
+			if (span) return { index, span };
+		}
+		return undefined;
+	}
+
+	// Take `given` from the gap at `index` as an item, which the read has now moved past. What lies
+	// below `given`, which the bounds leave out, and from `resume` on stay gaps.
+	#takeGap(items: Items, index: number, given: Run, resume: bigint): Item {
+		const error = this.#cutGap(items, index, given.start, resume);
+		items.at = max(items.at, given.end);
+		// Told once: no later drop of these keys is a gap again.
+		this.#settled(given.start, given.end);
+		// Passed for good, as a group handed out is: an ordered read never goes back, so no group
+		// below its end is handed out after it, whether it lands late here or on a resumed
+		// reader's copy, and a fill no longer owes it there.
+		const floor = this.#delivered.runEnd(0n) ?? 0n;
+		this.#delivered.forgetBelow(given.end);
+		const forgot = this.#delivered.runEnd(0n) ?? 0n;
+		if (forgot > floor) this.#stoppedReading(floor, forgot);
+		if (!this.#resume) this.#nextKey = max(this.#nextKey, given.end);
+		this.#fold(forgot);
+		return { kind: "gap", start: given.start, end: given.end, error };
+	}
+
+	// Remove `[from, resume)` from the gap at `index`, returning its error.
+	#cutGap(items: Items, index: number, from: bigint, resume: bigint): Error {
+		const gap = items.gaps[index];
+		const kept: DropRun[] = [];
+		if (gap.start < from) kept.push({ ...gap, end: from });
+		if (gap.end > resume) kept.push({ ...gap, start: resume });
+		items.gaps.splice(index, 1, ...kept);
+		return gap.error;
+	}
+
+	// Record `[start, end)` as settled: handed out, or told as a gap.
+	#settled(start: bigint, end: bigint): void {
+		start = max(start, this.#floor);
+		if (start < end) this.#reported.set(start, end, { start, end, kind: "settled" });
+	}
+
+	// Fold the record below `at`, where a key-order read is, into the floor, held below every run
+	// still to report there: a run given up and not reported yet, and a gap found and not returned
+	// that the read may still reach.
+	// The record then holds only what lies ahead of the read, bounded however long it plays. A
+	// session-fed read loses nothing, since every key it passed was handed out or reported; a group
+	// a local track produces below the floor is told as nothing, where Rust, folding only under pool
+	// pressure, would report it Old. A wire publisher's record is what its wire was told, which it
+	// keeps.
+	#fold(at: bigint): void {
+		if (this.#wired) return;
+		const items = this.#items;
+		if (items) {
+			// A gap the bounds left out below where the read is can never come in key order, and an
+			// ordered read never goes back, so it is dropped rather than held for a widening.
+			if ((items.gaps[0]?.start ?? items.at) < items.at) items.gaps = removeRun(items.gaps, 0n, items.at);
+			at = min(at, items.at);
+			for (const gap of items.gaps) at = min(at, gap.start);
+		}
+		for (const run of this.#pending) if (run.end > this.#floor) at = min(at, run.start);
+		if (at <= this.#floor) return;
+		this.#floor = at;
+		this.#reported.set(0n, at);
+	}
+
+	// The key cursor passes `[start, end)` to hand out the group at `end`. Each key there that the
+	// track owed and no group or drop accounts for was given up, whether the budget convicted it or
+	// the tail's grace folded it, so it is stale. A wire-fed copy's feed owes every key from where it
+	// starts, and a fill what this reader asked it for. Below the first group passed is where the
+	// read joined, which is no gap.
+	#passOwed(start: bigint, end: bigint, drift: Drift): void {
+		const producer = this.#state.producer;
+		if (start >= end || this.#nextKey === 0n || !this.#dropsSeen || !producer) return;
+		const owed = [...intersect(this.#asked, start, end), ...intersect(this.#givenUp, start, end)];
+		if (wireFed(producer)) owed.push(...this.#window.runs(max(start, feedFloor(producer) ?? 0n), end));
+		// Only a drop that settles this reader reports the key; a stale verdict under a tighter budget
+		// does not, so the key is still this reader's to give up.
+		const { drops, refused } = this.#state;
+		const coverage = this.#coverage();
+		for (const run of owed) {
+			const settled = givenUp(drops, refused.peek(), run.start, run.end, (drop) =>
+				settles(drop, drift.budget, coverage),
+			).filter((drop) => settles({ ...drop, start: max(drop.start, run.start) }, drift.budget, coverage));
+			for (const passed of runGaps(settled, run.start, run.end)) {
+				this.#giveUp(passed, staleHole(drift.budget));
+			}
+		}
+	}
+
+	// Keep a run the key cursor gave up, once the drop record started, so a read reports it.
+	#giveUp(run: Run, hole: Hole): void {
+		if (this.#dropsSeen) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
 	}
 
 	// A missing group the subscription still owes holds sequence order until it lands,
@@ -5108,7 +5385,13 @@ export class Subscriber {
 		const groups = this.#state.groups.peek();
 		const cursor = this.#cursor.peek();
 		let start = max(cursor.start, this.#nextKey);
-		while (groups.length > 0 && groups[0].start < start) groups.shift()?.close();
+		// A group landing after the read passed its key is old: the read never goes back.
+		for (let group = groups[0]; group && group.start < start; group = groups[0]) {
+			groups.shift();
+			group.close();
+			// The record tells nothing twice, so a key already handed out or given up stays told.
+			this.#giveUp({ start: group.start, end: group.start + 1n }, late());
+		}
 		// One anchor for the whole pass, so walking a backlog off stays linear.
 		const drift = this.#drift();
 
@@ -5124,6 +5407,9 @@ export class Subscriber {
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {
+				// Passing it passes the owed keys below it too, which the budget gives up with it.
+				this.#passOwed(start, group.start, drift);
+				this.#giveUp({ start: group.start, end: group.start + 1n }, staleHole(drift.budget));
 				const passed = this.#nextKey;
 				this.#pass(groups, index);
 				// The cursor passed what lies below it, which a fill no longer owes this reader.
@@ -5143,7 +5429,9 @@ export class Subscriber {
 					this.#fillWait = true;
 					return { kind: "idle" };
 				}
-				// Given up: past it, as past any group no fill can serve.
+				// Given up: past it, as past any group no fill can serve, and the owed keys below it.
+				this.#passOwed(start, group.start, drift);
+				this.#giveUp({ start: group.start, end: group.start + 1n }, headless());
 				const passed = this.#nextKey;
 				this.#pass(groups, index);
 				this.#stoppedReading(passed, this.#nextKey);
@@ -5152,6 +5440,7 @@ export class Subscriber {
 				group.close();
 				continue;
 			}
+			this.#passOwed(start, group.start, drift);
 			this.#pass(groups, index);
 			this.#handOut(group.start, true);
 			return { kind: "group", group: this.#guard(group) };
@@ -5317,7 +5606,8 @@ export class Subscriber {
  * Created by {@link Subscriber.ordered}, which takes the subscription over: the two
  * cursors draw from one buffer, so a track is read one way or the other and never both.
  * Every group this returns has a higher key than the last, so a late arrival is
- * skipped rather than delivered out of turn.
+ * reported as a gap rather than delivered out of turn, as is every group the read gives up on
+ * (see {@link Ordered.nextGroup}).
  *
  * `delay.max` applies as this cursor reads, exactly as it does on the arrival cursor: a
  * group is skipped once its reach, where its immediate successor begins, is that far
@@ -5383,7 +5673,8 @@ export class Ordered {
 	/**
 	 * Limit subsequent reads to these groups and return this reader for chaining; see
 	 * {@link Subscriber.withRange}. An ordered read never goes back, so lowering the floor
-	 * below a group it already returned offers nothing.
+	 * below a group it already returned offers nothing, not even a gap it passed while the
+	 * range left it out.
 	 */
 	withRange(groups: Groups): this {
 		this.#subscriber.withRange(groups);
@@ -5406,7 +5697,8 @@ export class Ordered {
 	}
 
 	/**
-	 * Return the next group with a strictly-greater sequence number than the last returned.
+	 * Return the next group with a strictly-greater sequence number than the last returned,
+	 * passing any gap {@link nextItem} would report below it. Mirrors the Rust `next_group`.
 	 *
 	 * Late arrivals (key at or below the last returned) are silently skipped, as is a
 	 * group whose every frame is further behind the live edge than `delay.max` (the default
@@ -5425,10 +5717,47 @@ export class Ordered {
 	 * `poll_next_group`.
 	 */
 	tryNextGroup(): GroupConsumer | undefined {
-		return taken(
-			() => ordered_.tryNextGroup(this.#subscriber),
-			() => ordered_.ended(this.#subscriber),
-		);
+		for (;;) {
+			const item = this.tryNextItem();
+			if (item?.kind !== "gap") return item?.group;
+		}
+	}
+
+	/**
+	 * The next group, as {@link nextGroup} returns it, or a gap this reader gave up on below it.
+	 * Mirrors the Rust `next_item` and its `Item`.
+	 *
+	 * A gap is every group the publisher or a relay dropped, the transport evicted, `delay.max`
+	 * aged out, a fill could not find, or that landed after the read passed its key. It carries
+	 * the keys it spans and is returned once, after any group the read still owes below it and
+	 * before the next group above it, or when the track ends. Keys the publisher declared skipped
+	 * were never groups, so they are no gap, and nor is a key a local track never produced.
+	 * Unlike Rust, nor is a group a local track produces after the read moved past its key: the
+	 * read keeps no record below where it is, so its memory stays bounded. A session-fed track
+	 * reports such a key at the latest when the read passes it.
+	 */
+	nextItem(): Promise<Item | undefined> {
+		return ordered_.nextItem(this.#subscriber);
+	}
+
+	/**
+	 * Take the next item as {@link nextItem} would, without waiting: `undefined` when nothing
+	 * is ready right now, which is not by itself the end of the track. Mirrors the Rust
+	 * `poll_next_item`.
+	 */
+	tryNextItem(): Item | undefined {
+		const recv = ordered_.tryItem(this.#subscriber);
+		switch (recv.kind) {
+			case "group":
+			case "gap":
+				return recv;
+			case "error":
+				throw recv.error;
+			case "done":
+				return ordered_.ended(this.#subscriber);
+			default:
+				return undefined;
+		}
 	}
 
 	/**

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { ProtocolViolation } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import { MAX_MESSAGE_SIZE } from "./message.ts";
 import {
 	decodeSubscribeResponse,
 	encodeSubscribeResponse,
@@ -624,6 +625,35 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	expect(() => refused([1n], [a])).toThrow(ProtocolViolation);
 	expect(() => refused([0n, 0n], [a])).toThrow(ProtocolViolation);
 	expect(() => refused([0n], [])).toThrow(ProtocolViolation);
+});
+
+// An edit that changes nothing hands back the snapshot it last did, so a stream of empty updates
+// copies nothing; one that changes a range takes a fresh one. Mirrors the Rust
+// `lite07_an_empty_edit_reuses_the_snapshot`.
+test("lite-07 an empty edit reuses the snapshot", () => {
+	const live = new LiveRanges(Version.DRAFT_07, [{}]);
+	const empty = () => new SubscribeUpdate({ priority: 0, remove: [], ranges: [] });
+	const first = live.apply(empty());
+	expect(live.apply(empty())).toBe(first);
+	const range: WireRange = { start: { absolute: 4n } };
+	const edited = live.apply(new SubscribeUpdate({ priority: 0, remove: [0n], ranges: [range] }));
+	expect(edited).toEqual([{ id: 1n, range }]);
+	expect(live.apply(empty())).toBe(edited);
+});
+
+// An edit to ranges too large for a SUBSCRIBE is refused before anything changes, so the live
+// ranges stay those last sent and the next edit is made against them. Mirrors the Rust
+// `lite07_a_refused_edit_leaves_the_ranges_as_sent`.
+test("lite-07 a refused edit leaves the ranges as sent", () => {
+	const live = new LiveRanges(Version.DRAFT_07, [{}]);
+	const wide: WireRange[] = Array.from({ length: Math.floor(MAX_MESSAGE_SIZE / 4) }, (_, group) => ({
+		start: { absolute: BigInt(group) << 20n },
+		end: { absolute: (BigInt(group) << 20n) + 1n },
+	}));
+	expect(() => live.edit(wide)).toThrow("too many ranges");
+	expect(live.entries()).toEqual([[0n, {}]]);
+	expect(live.next()).toBe(1n);
+	expect(live.edit(wide.slice(0, 2))).toEqual({ remove: [0n], add: wide.slice(0, 2), fillIds: [] });
 });
 
 test("SUBSCRIBE_STARTED is type 4 on lite-07 and unknown before it", async () => {

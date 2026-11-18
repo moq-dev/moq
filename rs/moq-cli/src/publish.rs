@@ -305,6 +305,8 @@ fn suggest_program(err: ts::Error) -> anyhow::Error {
 /// The catalog a stdin decoder publishes into.
 enum PublishCatalog {
 	Media(Box<moq_mux::catalog::Producer>),
+	/// `import ts --passthrough`'s, with the `mpegts` extension that names its track.
+	Passthrough(Box<moq_mux::catalog::Producer<ts::Ext>>),
 	/// A TS import's: each instance's or program's, with the `mpegts` extension, finished by
 	/// [`ts::Republish::finish`] or [`ts::Programs::finish`].
 	Ts,
@@ -314,6 +316,7 @@ impl PublishCatalog {
 	fn abort(self, err: moq_net::Error) {
 		match self {
 			Self::Media(catalog) => catalog.abort(err),
+			Self::Passthrough(catalog) => catalog.abort(err),
 			Self::Ts => {}
 		}
 	}
@@ -322,6 +325,7 @@ impl PublishCatalog {
 	fn finish(&mut self) -> anyhow::Result<()> {
 		match self {
 			Self::Media(catalog) => catalog.finish()?,
+			Self::Passthrough(catalog) => catalog.finish()?,
 			Self::Ts => {}
 		}
 		Ok(())
@@ -422,6 +426,22 @@ impl Publish {
 			!matches!(format, PublishFormat::Ts { .. }),
 			"a TS import publishes through an origin, which republishes it as its source changes"
 		);
+		if let PublishFormat::TsPassthrough { pcr_pid } = *format {
+			// Nothing about the multiplex is described beyond the track that carries it, which the
+			// `mpegts` section names.
+			let config = config.with_catalog(hang::Catalog::<ts::Ext>::default());
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
+			let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.timebase().reserve())?;
+			if let Some(pid) = pcr_pid {
+				passthrough = passthrough.with_pcr_pid(pid);
+			}
+			let decoder = PublishDecoder::TsPassthrough(Box::new(passthrough));
+			return Ok(Self::decode(
+				broadcast,
+				decoder,
+				PublishCatalog::Passthrough(Box::new(catalog)),
+			));
+		}
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let decoder = match format {
 			PublishFormat::Avc3 => {
@@ -438,17 +458,7 @@ impl Publish {
 				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve()).with_cmaf(*cmaf);
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
-			PublishFormat::Ts { .. } => unreachable!("refused above"),
-			// The `m2ts` section is in the base catalog: nothing about the multiplex is described
-			// beyond the track that carries it.
-			PublishFormat::TsPassthrough { pcr_pid } => {
-				let timebase = catalog.timebase();
-				let mut passthrough = ts::Passthrough::new(broadcast.clone(), timebase.reserve())?;
-				if let Some(pid) = pcr_pid {
-					passthrough = passthrough.with_pcr_pid(*pid);
-				}
-				PublishDecoder::TsPassthrough(Box::new(passthrough))
-			}
+			PublishFormat::Ts { .. } | PublishFormat::TsPassthrough { .. } => unreachable!("handled above"),
 			// FLV's 32-bit milliseconds wrap after 49 days, which its importer does not follow,
 			// so it takes no era.
 			PublishFormat::Flv => {
@@ -458,18 +468,24 @@ impl Publish {
 			}
 		};
 
-		Ok(Self {
-			source: Source::Stream {
-				decoder,
-				catalog: PublishCatalog::Media(Box::new(catalog)),
-			},
+		Ok(Self::decode(
+			broadcast,
+			decoder,
+			PublishCatalog::Media(Box::new(catalog)),
+		))
+	}
+
+	/// A publisher feeding `decoder` from stdin into `broadcast`, described by `catalog`.
+	fn decode(broadcast: moq_net::broadcast::Producer, decoder: PublishDecoder, catalog: PublishCatalog) -> Self {
+		Self {
+			source: Source::Stream { decoder, catalog },
 			broadcast: Some(broadcast),
 			route: None,
 			announce: false,
 			report: None,
 			linger: moq_mux::Linger::DEFAULT,
 			sections: Sections::default(),
-		})
+		}
 	}
 
 	/// Build a publisher decoding `format` from stdin into a new broadcast at `name` on
@@ -593,6 +609,9 @@ impl Publish {
 				(_, PublishCatalog::Media(catalog), Some(broadcast)) => {
 					crate::report::Stats::new(broadcast, catalog, connection)?
 				}
+				(_, PublishCatalog::Passthrough(catalog), Some(broadcast)) => {
+					crate::report::Stats::new(broadcast, catalog, connection)?
+				}
 				(PublishDecoder::Ts(republish), _, _) => {
 					self.sections.report = Some(connection.clone());
 					report(republish, connection)?
@@ -615,6 +634,7 @@ impl Publish {
 		match &mut self.source {
 			Source::Stream { decoder, catalog } => match (decoder, catalog) {
 				(_, PublishCatalog::Media(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
+				(_, PublishCatalog::Passthrough(catalog)) => catalog.mutate(|catalog| catalog.echo = Some(echo))?,
 				(PublishDecoder::Ts(republish), _) => {
 					self.sections.echo = Some(echo.clone());
 					republish
@@ -1791,7 +1811,7 @@ pub(crate) mod tests {
 		);
 	}
 
-	/// `moq import ts --passthrough` publishes no renditions, only the `m2ts` section naming one
+	/// `moq import ts --passthrough` publishes no renditions, only the `mpegts` section naming one
 	/// track, and that track reads back as the input from its first group on.
 	#[tokio::test(start_paused = true)]
 	async fn ts_passthrough_publishes_the_multiplex_on_one_track() {
@@ -1819,7 +1839,7 @@ pub(crate) mod tests {
 		}
 		let _decoder = decoder.finish().unwrap();
 
-		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
+		let catalog = hang::catalog::Catalog::<ts::Ext>::subscribe(&consumer)
 			.await
 			.unwrap()
 			.next()
@@ -1828,11 +1848,11 @@ pub(crate) mod tests {
 			.expect("a catalog")
 			.value;
 		assert!(catalog.video.renditions.is_empty() && catalog.audio.renditions.is_empty());
-		let m2ts = catalog.m2ts.expect("the m2ts section");
-		assert!(m2ts.random_access);
+		let passthrough = catalog.ext.mpegts.passthrough.expect("the passthrough track");
+		assert!(passthrough.random_access);
 
 		let mut track = consumer
-			.track(&m2ts.track)
+			.track(&passthrough.track)
 			.unwrap()
 			.subscribe(
 				moq_net::track::Subscription::default()
@@ -1956,14 +1976,14 @@ pub(crate) mod tests {
 				.unwrap()
 				.unwrap()
 				.unwrap();
-			let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
+			let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&consumer).await.unwrap();
 			let catalog = kio::clock::timeout(WAIT, catalogs.next())
 				.await
 				.unwrap()
 				.unwrap()
 				.expect("a catalog")
 				.value;
-			let name = catalog.m2ts.expect("the m2ts section").track;
+			let name = catalog.ext.mpegts.passthrough.expect("the passthrough track").track;
 
 			// Subscribe and take the first group, so a read starts behind anything decoded
 			// afterwards: an IETF subscription joins the publisher's current group when its
@@ -2409,11 +2429,11 @@ pub(crate) mod tests {
 					let event = announced.next().await.expect("origin closed");
 					assert!(matches!(event, moq_net::announce::Event::Present(_)), "{event:?}");
 					let broadcast = consumer.request("demo", None).await.unwrap();
-					let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
+					let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
 					let catalog = catalogs.next().await.unwrap().expect("a catalog").value;
-					// A passthrough carries the multiplex on one track, named by its m2ts section.
-					let name = match catalog.m2ts {
-						Some(m2ts) => m2ts.track,
+					// A passthrough carries the multiplex on one track, named in the mpegts section.
+					let name = match catalog.ext.mpegts.passthrough {
+						Some(passthrough) => passthrough.track,
 						None => catalog.video.renditions.keys().next().expect("a video rendition").clone(),
 					};
 					broadcast.track(&name).unwrap().subscribe(None).await

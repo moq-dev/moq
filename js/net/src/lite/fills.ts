@@ -339,7 +339,6 @@ export class RangeFills {
 		ask.groups = remaining;
 		if (ask.priority === this.ask.priority && sameRuns(ask.groups, this.ask.groups))
 			return this.isEmpty() !== empty;
-		this.#retireSkipped(ask.groups);
 		this.ask = ask;
 		return true;
 	}
@@ -400,9 +399,18 @@ export class RangeFills {
 		this.#refused = refuseRun(this.#refused, start, end, refusal);
 	}
 
-	// Asking for `asked` from now on retires the range of each run not asked whole any more, and
-	// what its start skipped with it.
-	#retireSkipped(asked: readonly Run[]): void {
+	/** The groups the ask leaves out on purpose: refused, or recovered on their own. */
+	avoid(): Run[] {
+		const avoid = [...this.#recovering];
+		for (const refused of this.#refused) insertRun(avoid, refused.start, refused.end);
+		return avoid;
+	}
+
+	/**
+	 * Asking for `asked` from now on, the runs the subscription carries, retires the range of each
+	 * run not asked whole any more, and what its start skipped with it.
+	 */
+	retireSkipped(asked: readonly Run[]): void {
 		this.#skipped = this.#skipped.filter((skipped) =>
 			asked.some((run) => run.start === skipped.asked.start && run.end === skipped.asked.end),
 		);

@@ -489,8 +489,11 @@ export interface ResumeSource {
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
 	 */
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv;
-	/** The next run no copy may still deliver, reported once as a `drop`, without taking a group. */
-	tryDrop(delivered: Delivered): (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * The next run no copy may still deliver, reported once as a `drop`, without taking a group.
+	 * Below `passing`, which a key-order read is about to pass, no copy can deliver one later.
+	 */
+	tryDrop(delivered: Delivered, passing?: bigint): (Recv & { kind: "drop" }) | undefined;
 	/**
 	 * Whether the reader's bounded `window` has nothing left to deliver, judged by the serving
 	 * copy against what it and the logical reader (`delivered`) handed out. A copy that may still
@@ -852,10 +855,14 @@ export const hooks: {
 	exhaustedFor: (subscriber: Subscriber, delivered: Delivered) => boolean;
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
+	/** How many runs a subscriber's record of what it reported holds. Tests only. */
+	reportedRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `key`, or no longer expects it. */
 	handedOut: (subscriber: Subscriber, key: bigint) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
+	/** Fold a route copy's record below `at`, where the reader it feeds is, which reports nothing there. */
+	fold: (subscriber: Subscriber, at: bigint) => void;
 	/**
 	 * What a lite publisher told its wire about a subscriber's keys, kept in the
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
@@ -1202,6 +1209,9 @@ export const hooks: {
 	forgetPastBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
+	fold: () => {
+		throw new Error("track.ts not loaded");
+	},
 	wire: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1209,6 +1219,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	deliveredRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reportedRuns: () => {
 		throw new Error("track.ts not loaded");
 	},
 	handedOut: () => {

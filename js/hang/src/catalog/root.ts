@@ -44,7 +44,9 @@ const RootVersionSchema = VersionSchema.check(
  * ignores the extra sections; an extended consumer validates them with its own schema, typically
  * built via `z.extend(RootSchema, { ... })`. An application names its own sections with a
  * namespaced key (`com.example.telemetry`): every section defined here must have its shape when
- * present, or parsing refuses the whole catalog, the same as Rust.
+ * present, or parsing refuses the whole catalog, the same as Rust. The `mpegts` section
+ * (draft-lcurley-moq-mpegts), including a transport stream carried whole, is such an extension:
+ * nothing in JS reads it yet.
  *
  * The root `version` is the oldest moq-hang draft that reads the catalog correctly, absent while
  * that is 3, and parsing throws {@link UnsupportedVersion} when it is above {@link VERSION}. Each

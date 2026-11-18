@@ -344,6 +344,7 @@ mod test {
 			node: Some(crate::route::NodeId {
 				relay: 0x7a3f,
 				start: 9,
+				marked: false,
 			}),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
@@ -354,7 +355,8 @@ mod test {
 			got.node,
 			Some(crate::route::NodeId {
 				relay: 0x7a3f,
-				start: 9
+				start: 9,
+				marked: false,
 			})
 		);
 	}

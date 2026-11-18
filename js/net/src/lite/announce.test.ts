@@ -405,8 +405,8 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 	expect(await resolveStream(wire)).toEqual(GOLDEN_RESOLVED);
 });
 
-// A claim says its cost, how far above its path it is, whether it is unavailable or draining,
-// the lowest priority on its way, and the nodes that announced it again.
+// A claim says its cost, how far above its path it is, whether it is unavailable, draining, or
+// behind a marked session, the lowest priority on its way, and the nodes that announced it again.
 test("a lite-07 claim round-trips with its exact bytes", async () => {
 	const v = Version.DRAFT_07;
 	const claim: Claim = {
@@ -415,17 +415,18 @@ test("a lite-07 claim round-trips with its exact bytes", async () => {
 		above: 2n,
 		unavailable: true,
 		draining: true,
+		marked: true,
 		priority: -3,
 		chain: [5n, 9n],
 	};
 	const cases: [AnnounceBroadcast, number[]][] = [
 		// Path base, path keep, the suffix, instance "b", unminted, epoch, then the claim: cost,
-		// above, both flags, the priority with its sign bit flipped, and the chain.
+		// above, all three flags, the priority with its sign bit flipped, and the chain.
 		[
 			{ status: "start", suffix: Path.from("x"), instance: b, claim },
-			[0, 15, 0, 0, 1, 0x78, 1, 0x62, 0, 7, 12, 2, 3, 0x7d, 2, 5, 9],
+			[0, 15, 0, 0, 1, 0x78, 1, 0x62, 0, 7, 12, 2, 7, 0x7d, 2, 5, 9],
 		],
-		[{ status: "change", id: 1n, claim }, [2, 9, 1, 7, 12, 2, 3, 0x7d, 2, 5, 9]],
+		[{ status: "change", id: 1n, claim }, [2, 9, 1, 7, 12, 2, 7, 0x7d, 2, 5, 9]],
 		[{ status: "endedId", id: 1n, lost: true }, [1, 2, 1, 1]],
 		[{ status: "endedId", id: 1n, lost: false }, [1, 2, 1, 0]],
 	];
@@ -471,7 +472,7 @@ test("a lite-07 claim refuses Node ID 0, unknown flags, and too long a chain", a
 		return decodeAnnounceBroadcast(new Reader(undefined, new Uint8Array([2, body.length, ...body]), v), v);
 	};
 	expect(await decode(0, 0xff, 0)).toEqual({ status: "change", id: 0n, claim: ownClaim(0n) });
-	await expect(decode(4, 0xff, 0)).rejects.toThrow(ProtocolViolation);
+	await expect(decode(8, 0xff, 0)).rejects.toThrow(ProtocolViolation);
 	await expect(decode(0, 0xff, 1, 0)).rejects.toThrow(ProtocolViolation);
 	await expect(decode(0, 0xff, CHAIN_MAX + 1, ...full.map(Number), 40)).rejects.toThrow(ProtocolViolation);
 });

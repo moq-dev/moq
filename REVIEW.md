@@ -20,6 +20,7 @@ Assume a better approach exists until you have tried to find one:
 - **Simpler**: could existing code, an upstream fix, or deleting something deliver most of it? Is a rare case getting machinery that a simple, slightly lossy answer would cover?
 - **Layer**: does the logic live where it belongs (library vs runtime adapter, application vs relay, moq-lite model vs IETF layer, our crate vs upstream)? Does a package boundary leak?
 - **Public API and wire**: would we want to support this shape for years, in every language? Look for foot-guns, names tied to today's implementation, a new surface that could merge into an existing one, and exports nothing needs yet. Is every API or wire change listed under the body's Impact, with breaking ones marked `!`?
+- **Return what callers use**: an outcome enum earns its place when callers handle its variants differently. Flag one that two callers collapse the same way (return the common case; make the detail opt-in or a counter), a `bool`, `Option`, `Poll`, or `Result` in disguise, and an error variant that means a normal outcome (ask first whether the caller needs to tell it apart at all).
 - **Completeness**: does it fix every instance of the problem and the gaps it exposes, or land a partial version plus follow-ups?
 - **Bounds**: can a peer grow a queue or map here? It should hold the latest state per key, or be bounded by credit the peer already spent, never one entry per event.
 - **Evidence**: is a performance claim measured, a bug reproduced, and is each new test worth running forever?

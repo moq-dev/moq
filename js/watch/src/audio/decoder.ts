@@ -19,7 +19,7 @@ import { base64ToBytes } from "../base64";
 import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { DELAY_MAX, type Sync, type Track } from "../sync";
-import { AudioBuffer } from "./buffer";
+import { AudioBuffer, holeWait } from "./buffer";
 import {
 	type DecoderConfig,
 	decoderDescription,
@@ -31,7 +31,6 @@ import {
 import { Handover } from "./handover";
 import { bound, maxDelay, ringHold, target } from "./latency";
 import { Order } from "./order";
-import { playable } from "./playhead";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
@@ -136,7 +135,14 @@ const EMPTY: Stats = {
 };
 
 // What a decode attempt reads, and where its counts go.
-type Attempt = { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid; key: Key };
+type Attempt = {
+	config: DecoderConfig;
+	failure: Signal<Error | undefined>;
+	path: Moq.Path.Valid;
+	key: Key;
+	// The same track read in key order, which decides every hole.
+	ordered: Moq.Track.Ordered;
+};
 
 // The newest container consumer, the path it reads, and its codec, whose estimate a replacement
 // continues.
@@ -191,8 +197,6 @@ export class Decoder {
 
 	// Audio ring bridging the main thread and the worklet.
 	#ring = new Signal<AudioBuffer | undefined>(undefined);
-	// How far ahead of the clock the ring renders, so what it renders sounds when due.
-	#output: Getter<Duration | undefined>;
 
 	// The context, worklet, and ring are keyed on this alone. It outlives a rendition's absence, so
 	// the queued tail plays out and a return with the same shape reuses the graph.
@@ -212,6 +216,9 @@ export class Decoder {
 	// The subscription's min delay: the playout delay plus the warmup, where the publisher starts a
 	// live join.
 	#subscribeMinDelay = new Signal<Duration>(Duration.ZERO);
+	// The ordered reader's max delay, how long it waits for a missing group before reporting a gap:
+	// as long as the ring could still play it, plus the warmup the subscription adds.
+	#readMaxDelay = new Signal<Duration>(Duration.ZERO);
 	// The container consumer's delay: the playout delay to start at and the shared budget. Its warmup
 	// reaches the start further back, to the media the decoder primes on.
 	#delay = new Signal<Moq.Track.Delay>({});
@@ -285,10 +292,6 @@ export class Decoder {
 				lead: delay.saturatingSub(held),
 				complete,
 			};
-		});
-		this.#output = this.#signals.computed((effect) => {
-			const ring = effect.get(this.#ring);
-			return ring ? effect.get(ring.lead) : undefined;
 		});
 		this.#track = this.sync.track({ target: playout, startup });
 		this.#signals.cleanup(() => this.#track.close());
@@ -367,20 +370,25 @@ export class Decoder {
 
 	// The subscription reaches the estimator's 2 s ceiling past the delay, whatever the stretch, since a
 	// group the relay expires is never observed: a subscription cut to the target would leave the
-	// estimate rising one bucket at a time. The container
-	// consumer drops aged media at the same max delay, since it observes each frame before applying
-	// it, and carves out the warmup the subscription adds once it has warmed, as Rust's does. It waits
-	// on a missing group only for the delay, its min: past that the group would play late, and a
-	// reordered backlog's holes waited out to the max would read as jitter to the estimator.
-	// See doc/concept/audio-jitter.md.
+	// estimate rising one bucket at a time. The container consumer reads it only to observe every
+	// arrival, and drops aged media at the same max delay.
+	//
+	// The ordered reader delivering the audio decides each hole, giving up on a missing group once the
+	// ring could no longer play it: past what the ring holds of the delay and the stretch bound it still
+	// plays late audio within, which follow the delay, the stretch, and the output latency. Both carry
+	// the warmup, so the start reaches the media the decoder primes on. See doc/concept/audio-jitter.md.
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const budget = this.#budget(effect);
 		const delay = budget.delay;
 		const max = maxDelay(budget);
 		const warmup = Duration.millis(effect.get(this.source.out.config)?.warmup ?? 0).min(DELAY_MAX);
+		const ring = effect.get(this.#ring);
+		if (ring) effect.get(ring.output);
+		const held = ring ? ring.held(delay) : delay;
 		this.#delay.set({ min: delay, max });
 		this.#subscribeMinDelay.set(delay.add(warmup));
 		this.#subscribeMaxDelay.set(max.add(warmup));
+		this.#readMaxDelay.set(holeWait(held, bound(budget)).add(warmup));
 	}
 
 	// The shared delay and max delay, and the stretch threshold the ring skips past.
@@ -654,14 +662,22 @@ export class Decoder {
 				priority: Catalog.PRIORITY.audio,
 				delay: new Derived([this.#subscribeMinDelay, this.#subscribeMaxDelay], (min, max) => ({ min, max })),
 			});
-			if (!sub) {
+			// A second subscription to the same track, read in key order, delivers the audio; `sub`
+			// only feeds the arrival estimate. Both share one upstream request, at the wider budget.
+			const read = subscribeMedia(run, {
+				broadcast: active,
+				track: Catalog.track(track, identity),
+				priority: Catalog.PRIORITY.audio,
+				delay: new Derived([this.#subscribeMinDelay, this.#readMaxDelay], (min, max) => ({ min, max })),
+			});
+			if (!sub || !read) {
 				this.#retire();
 				return;
 			}
 
 			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
 			// header). Report it like a decode failure, which also retires the outgoing estimate.
-			const props: Attempt = { config, failure, path: active.path, key: rendition };
+			const props: Attempt = { config, failure, path: active.path, key: rendition, ordered: read.ordered() };
 			spawnFatal(run, failure, async () => {
 				if (config.container.kind === "cmaf") await this.#runCmafDecoder(run, sub, props);
 				else this.#runLegacyDecoder(run, sub, props);
@@ -669,7 +685,11 @@ export class Decoder {
 		});
 	}
 
-	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, { config, failure, path, key }: Attempt): void {
+	#runLegacyDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure, path, key, ordered }: Attempt,
+	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(
@@ -682,7 +702,7 @@ export class Decoder {
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
-		const { consumer, read } = this.#consume(effect, sub, format, { config, path });
+		const { consumer, read } = this.#consume(effect, sub, format, { config, path, ordered });
 
 		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill(hosted.url);
@@ -752,7 +772,7 @@ export class Decoder {
 	async #runCmafDecoder(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
-		{ config, failure, path, key }: Attempt,
+		{ config, failure, path, key, ordered }: Attempt,
 	): Promise<void> {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
@@ -776,7 +796,7 @@ export class Decoder {
 			config.description ? Util.Hex.toBytes(config.description) : init.description,
 		);
 
-		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path });
+		const { consumer, read } = this.#consume(effect, sub, new Cmaf.Format(init), { config, path, ordered });
 
 		spawnFatal(effect, failure, async () => {
 			const loaded = await Util.Libav.polyfill(hosted.url);
@@ -935,14 +955,15 @@ export class Decoder {
 		}));
 	}
 
-	// Reorders groups and frames up to the shared max delay. A rename is not a cold start: the path's
-	// arrivals are what they were, so the estimate continues from whatever read it before. Another
-	// path's arrivals have nothing to do with what this one learned.
+	// Reads `ordered` in key order, playing each gap it reports as the hole, and observes every arrival
+	// on `sub`. A rename is not a cold start: the path's arrivals are what they were, so the estimate
+	// continues from whatever read it before. Another path's arrivals have nothing to do with what
+	// this one learned.
 	#consume(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
 		format: Container.Format,
-		{ config, path }: { config: DecoderConfig; path: Moq.Path.Valid },
+		{ config, path, ordered }: { config: DecoderConfig; path: Moq.Path.Valid; ordered: Moq.Track.Ordered },
 	): { consumer: Container.Consumer; read: Signal<Queued> } {
 		const phase = this.#phase.peek();
 		if (phase.kind !== "running") throw new Error("audio: a consumer opened outside a running rendition");
@@ -953,7 +974,7 @@ export class Decoder {
 			delay: this.#delay,
 			warmup: Duration.millis(config.warmup ?? 0).min(DELAY_MAX),
 			predecessor: continues ? outgoing.consumer : undefined,
-			playhead: playable(this.sync, this.#output),
+			ordered,
 		});
 		effect.cleanup(() => consumer.close());
 		this.#phase.set({ ...phase, consumer: { path, codec: config.codec, consumer } });

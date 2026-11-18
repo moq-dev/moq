@@ -73,6 +73,7 @@ import { Datagram as DatagramMessage, Datagrams, DatagramsInfo, DatagramsUpdate 
 import { closeViolation } from "./error.ts";
 import { Fetch as FetchMessage } from "./fetch.ts";
 import { dropped, passing, RangeFills, type RecoveryHandle, type Refusal, type Refused, refuseRun } from "./fills.ts";
+import * as Fit from "./fit.ts";
 import { type Group as GroupMessage, readFrames } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { Routed } from "./routed.ts";
@@ -235,8 +236,9 @@ interface SubscribeEntry {
 	// The Range IDs of the fills' live ranges; the rest are the demand's, which alone say where the
 	// live feed starts.
 	fillIds: Set<bigint>;
-	// The groups the fills' ranges ask for, as last sent.
-	fillGroups: Run[];
+	// The groups the fills' ranges ask for, as last sent: widened with the demand's ranges until
+	// they fit, so a run may cover more than the fills ask.
+	fillGroups: readonly Run[];
 	// Bumped as what the fills ask changes, for the update loop.
 	fillsChanged: Signal<number>;
 	// Until the SUBSCRIBE's first response (lite-05+); see `Unanswered`.
@@ -1586,7 +1588,9 @@ export class Subscriber {
 				settle = resolve;
 			}),
 		);
-		const sending = this.#sendSubscribe(state, this.#withRanges(msg, ranges), deadline);
+		const sending = this.#fitted(this.#withRanges(msg, ranges)).then((msg) =>
+			this.#sendSubscribe(state, msg, deadline),
+		);
 		try {
 			// Either failing fails the subscription: a reset TRACK rejects the request, so the
 			// origin can try another route, and the caller resets the SUBSCRIBE.
@@ -1627,6 +1631,39 @@ export class Subscriber {
 	#withRanges(msg: Subscribe, ranges: readonly track.Range[]): Subscribe {
 		if (hasRanges(this.version)) msg.ranges = toWireRanges(ranges);
 		return msg;
+	}
+
+	// `msg` with its lite-07 ranges widened until they fit, as the Rust `pipeline` does: the union of
+	// a relay's readers' ranges need not fit one message though each reader's does.
+	async #fitted(msg: Subscribe): Promise<Subscribe> {
+		if (!msg.ranges || !hasRanges(this.version)) return msg;
+		const fields = await this.#subscribeFields(msg, msg);
+		msg.ranges = [...Fit.fit(msg.ranges, [], [], Fit.budget(fields, 0n, msg.ranges.length)).ranges];
+		return msg;
+	}
+
+	// The bytes a SUBSCRIBE like `msg` under `terms` takes besides its ranges, at the widest id,
+	// measured with the smallest range, since it carries at least one. Mirrors the Rust
+	// `subscribe_fields`.
+	async #subscribeFields(
+		msg: Subscribe,
+		terms: { priority: number; order?: track.Order; maxDelay: number | null; minDelay?: number },
+	): Promise<number> {
+		const widest = new Subscribe({
+			...msg,
+			priority: terms.priority,
+			order: terms.order,
+			maxDelay: terms.maxDelay,
+			minDelay: terms.minDelay,
+			id: (1n << 64n) - 1n,
+			ranges: [{}],
+		});
+		try {
+			return (await Writer.collect(this.version, (w) => widest.encode(w, this.version))).byteLength;
+		} catch {
+			// One that can't go out leaves no room, and fails as it would have.
+			return Number.POSITIVE_INFINITY;
+		}
 	}
 
 	// Register a subscription's accepted copy, asking for `ranges`, so incoming groups and
@@ -2757,13 +2794,26 @@ export class Subscriber {
 			// Lite-07 edits the live ranges: a range already live keeps its Range ID, and where it
 			// started. The retired ones owe nothing more.
 			let edit: { remove: bigint[]; add: WireRange[] } | undefined;
-			const fillRanges: WireRange[] = fillGroups.map((run) => ({
-				start: { absolute: run.start },
-				end: { absolute: run.end },
-			}));
 			if (hasRanges(this.version)) {
+				// The demand's ranges and the fills' groups, widened together until they fit. The fills
+				// keep their exact ask, so what they ask next is compared with that, not the wire.
+				const demanded = toWireRanges(ranges);
+				const fields = await this.#subscribeFields(msg, {
+					priority,
+					order: current.order,
+					maxDelay: wireMaxDelay(current),
+					minDelay: minDelayOf(current),
+				});
+				const budget = Fit.budget(fields, entry.live.next(), demanded.length + fillGroups.length);
+				const fitted = Fit.fit(demanded, fillGroups, entry.fills?.avoid() ?? [], budget);
+				// A fill's range starting past its run speaks only while that run is asked whole.
+				entry.fills?.retireSkipped(fitted.fills);
+				const fillRanges: WireRange[] = fitted.fills.map((run) => ({
+					start: { absolute: run.start },
+					end: { absolute: run.end },
+				}));
 				// The demand's ranges, then the fills'.
-				const edited = entry.live.edit([...toWireRanges(ranges), ...fillRanges], fillRanges.length, (id) =>
+				const edited = entry.live.edit([...fitted.ranges, ...fillRanges], fillRanges.length, (id) =>
 					entry.fillIds.has(id),
 				);
 				edit = edited;
@@ -2775,10 +2825,10 @@ export class Subscriber {
 				for (const id of entry.fillIds) if (!entry.live.get(id)) entry.fillIds.delete(id);
 				for (const id of edited.fillIds) entry.fillIds.add(id);
 				// The groups a fill newly asks for wait a fresh grace too.
-				for (const run of fillGroups)
+				for (const run of fitted.fills)
 					for (const gap of runGaps(entry.fillGroups, run.start, run.end))
 						entry.tail.demand(gap.start, gap.end);
-				entry.fillGroups = fillGroups;
+				entry.fillGroups = fitted.fills;
 				entry.floor = span.start;
 				// Pending while a range the update adds awaits SUBSCRIBE_STARTED.
 				this.#declare(entry);

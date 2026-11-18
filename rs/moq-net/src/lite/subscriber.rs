@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
 	Error, Path, Timescale, Timestamp, bandwidth,
-	coding::{Decode as _, Reader, Recv, Stream},
+	coding::{Decode as _, Encode as _, Reader, Recv, Stream},
 	lite,
 	track::{Anchor, Position, Subscription},
 	util::SendCell,
@@ -23,6 +23,7 @@ use kio::Lock;
 
 mod fills;
 use fills::{FillAsk, RangeFills};
+mod fit;
 pub(super) mod route_stream;
 mod routed;
 
@@ -3392,9 +3393,9 @@ mod tests {
 					.await
 					.unwrap();
 			} else {
-				let begin = h
-					.serve
-					.begin_subscription(&mut track, &mut Sub::None, lowered, &FillAsk::default(), true);
+				let begin =
+					h.serve
+						.begin_subscription(&mut track, &mut Sub::None, lowered, &mut RangeFills::default(), true);
 				assert!(matches!(begin, Ok(Begin::Establish(_))));
 			}
 
@@ -9146,6 +9147,7 @@ mod tests {
 			draining: false,
 			unavailable: false,
 			chain: Vec::new(),
+			marked: false,
 		}
 	}
 
@@ -9696,7 +9698,11 @@ mod tests {
 	#[kio::test]
 	async fn a_peer_that_declared_no_node_sends_no_routes() {
 		use crate::route::relay::{Hop, NodeId, Offer};
-		let node = NodeId { relay: 7, start: 1 };
+		let node = NodeId {
+			relay: 7,
+			start: 1,
+			marked: false,
+		};
 		let hop = Hop { node, session: 0 };
 		let offer = Offer {
 			path: [hop].into(),
@@ -10621,7 +10627,7 @@ impl TrackServe {
 		producer: &mut track::Producer,
 		sub: &mut Sub,
 		pref: Option<Subscription>,
-		fills: &FillAsk,
+		range_fills: &mut RangeFills,
 		supports_update: bool,
 	) -> Result<Begin, Error> {
 		let opening = matches!(sub, Sub::None);
@@ -10629,8 +10635,9 @@ impl TrackServe {
 		// while they are out keeps what it asked until they are answered, rather than retire
 		// the live feed's ranges under a subscription that still runs.
 		let none = FillAsk::default();
-		let fills = match self.subscriber.version.has_ranges() {
-			true => fills,
+		let ranged = self.subscriber.version.has_ranges();
+		let fills = match ranged {
+			true => &range_fills.ask,
 			false => &none,
 		};
 		let pref = match (pref, &*sub) {
@@ -10638,12 +10645,37 @@ impl TrackServe {
 			(pref, _) => pref,
 		};
 		let request = self.wire_request(pref, opening, producer.idle_newest());
+		// The demand's ranges and the fills' groups, widened together until they fit.
+		let (request, groups) = match ranged {
+			true => {
+				let next = match &*sub {
+					Sub::Active(active) => active.live.next(),
+					Sub::None => 0,
+				};
+				let (demand, demand_ranges) = match request {
+					Some((demand, ranges)) => (Some(demand), ranges),
+					None => (None, Vec::new()),
+				};
+				let count = demand_ranges.len() + fills.groups.iter().count();
+				let fields = self.subscribe_fields(demand.as_ref().unwrap_or(&fills.subscription()));
+				let budget = fit::Budget::new(self.subscriber.version, fields, next, count);
+				let (demand_ranges, groups) = fit::fit(demand_ranges, &fills.groups, &range_fills.avoid(), budget)?;
+				// A fill's range starting past its run speaks only while that run is asked whole.
+				range_fills.retire_skipped(&groups);
+				(demand.map(|demand| (demand, demand_ranges)), groups)
+			}
+			false => (request, Default::default()),
+		};
+		let fills = match ranged {
+			true => &range_fills.ask,
+			false => &none,
+		};
 		// What goes on the wire: the demand's ranges, then the fills', under the demand's
 		// parameters. The demand alone sets the floor.
 		let request = match request {
 			Some((demand, demand_ranges)) => {
 				let mut ranges = demand_ranges.clone();
-				ranges.extend(fills.wire());
+				ranges.extend(FillAsk::wire(&groups));
 				Some(Wire {
 					subscription: fills.merge(demand.clone()),
 					demand: Some(demand),
@@ -10656,7 +10688,7 @@ impl TrackServe {
 				subscription: fills.subscription(),
 				demand: None,
 				demand_ranges: Vec::new(),
-				ranges: fills.wire().collect(),
+				ranges: FillAsk::wire(&groups).collect(),
 			}),
 		};
 
@@ -10667,7 +10699,7 @@ impl TrackServe {
 					// stale run an earlier subscription reported is no verdict on them.
 					Sub::None => {
 						producer.supersede_stale();
-						Ok(Begin::Establish(self.prepare_establish(producer, wire, &fills.groups)))
+						Ok(Begin::Establish(self.prepare_establish(producer, wire, &groups)))
 					}
 					Sub::Active(active) => {
 						let Wire {
@@ -10703,14 +10735,14 @@ impl TrackServe {
 								tail.demand(groups, now);
 							}
 							// So do the groups a fill newly asks for.
-							for groups in fills.groups.iter() {
+							for groups in groups.iter() {
 								let asked = active.fill_groups.gaps(groups).collect::<Vec<_>>();
 								for groups in asked {
 									tail.demand(groups, now);
 								}
 							}
 						}
-						active.fill_groups = fills.groups.clone();
+						active.fill_groups = groups;
 						active.demand = demand;
 						active.start = subscription.start();
 						if supports_update {
@@ -10754,6 +10786,26 @@ impl TrackServe {
 				Ok(Begin::None)
 			}
 		}
+	}
+
+	/// The bytes a SUBSCRIBE for `subscription` takes besides its ranges, at the widest id,
+	/// measured with the smallest range, since it carries at least one.
+	fn subscribe_fields(&self, subscription: &Subscription) -> usize {
+		let msg = lite::Subscribe {
+			instance: self.instance.clone(),
+			node: self.node,
+			id: u64::MAX,
+			broadcast: self.path.clone(),
+			track: self.name.as_str().into(),
+			priority: subscription.priority,
+			max_delay: subscription.delay.max,
+			min_delay: subscription.delay.min,
+			ranges: vec![lite::Range::OLDEST],
+			order: subscription.order,
+		};
+		// One that can't go out leaves no room, and fails as it would have.
+		msg.encode_bytes(self.subscriber.version)
+			.map_or(usize::MAX, |bytes| bytes.len())
 	}
 
 	/// What a SUBSCRIBE carries for the demand `pref`: the subscription and its ranges, or
@@ -10803,6 +10855,14 @@ impl TrackServe {
 		// A copy not accepted yet caches nothing.
 		let Some((subscription, ranges)) = self.wire_request(Some(pref.clone()), true, None) else {
 			return Ok(None);
+		};
+		let ranges = match self.subscriber.version.has_ranges() {
+			true => {
+				let fields = self.subscribe_fields(&subscription);
+				let budget = fit::Budget::new(self.subscriber.version, fields, 0, ranges.len());
+				fit::fit(ranges, &Default::default(), &Default::default(), budget)?.0
+			}
+			false => ranges,
 		};
 		let establish = self.register(subscription, ranges, None);
 		Ok(Some(Pipelined {
@@ -10964,7 +11024,7 @@ impl TrackServe {
 		pref: Option<Subscription>,
 		supports_update: bool,
 	) -> Result<(), Error> {
-		match self.begin_subscription(producer, sub, pref, &FillAsk::default(), supports_update)? {
+		match self.begin_subscription(producer, sub, pref, &mut RangeFills::default(), supports_update)? {
 			Begin::Establish(est) => {
 				let mut est = Box::new(est);
 				let id = est.id;
@@ -12294,7 +12354,7 @@ impl ServeLoop {
 			&mut self.serving,
 			&mut self.sub,
 			pref,
-			&self.range_fills.ask,
+			&mut self.range_fills,
 			self.supports_update,
 		)? {
 			Begin::Establish(est) => {

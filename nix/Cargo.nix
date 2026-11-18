@@ -20111,11 +20111,6 @@ rec {
             packageId = "rangemap";
           }
           {
-            name = "rind";
-            packageId = "rind";
-            features = [ "wipe" ];
-          }
-          {
             name = "serde";
             packageId = "serde";
             features = [ "derive" ];
@@ -42872,9 +42867,9 @@ rec {
       };
       "rubato" = rec {
         crateName = "rubato";
-        version = "5.0.1";
+        version = "5.1.0";
         edition = "2021";
-        sha256 = "0c09jvfyrn4bxzsys4i6j1ji4l7w6dbzmp7l48afqcjlkwdra7nc";
+        sha256 = "0jpgllpvhvadr0j01m3id967mwkw0la82ybzaljx0ck6w0la4kbb";
         authors = [
           "HEnquist <henrik.enquist@gmail.com>"
         ];

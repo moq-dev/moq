@@ -9,7 +9,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Delay, Order, Subscription, TrackState, clamp_combined};
+use super::{Delay, Order, Range, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -243,21 +243,27 @@ impl Subscriptions {
 	}
 
 	/// Mutate counts under one lock, taking wakes only when the aggregate changes.
-	fn replace(&mut self, old: Option<&Subscription>, new: Option<&Subscription>) -> kio::WaiterList {
+	///
+	/// `moved` is the ranges `old` holds and `new` doesn't, then those `new` holds and `old`
+	/// doesn't, so the lock every subscriber shares is held for what changed alone.
+	fn replace(
+		&mut self,
+		old: Option<&Subscription>,
+		new: Option<&Subscription>,
+		moved: (&[Range], &[Range]),
+	) -> kio::WaiterList {
 		let prev = self.scalars();
 		// New ranges count before old ones leave, so a range both hold never reads as gone.
 		let mut reshaped = false;
-		let moved = old.map(|old| &old.ranges) != new.map(|new| &new.ranges);
+		let (gone, came) = moved;
 		if let Some(new) = new {
 			add(&mut self.priority, new.priority);
 			add(&mut self.max_delay, new.budget());
 			if let Some(min) = new.delay.min {
 				add(&mut self.min_delay, min);
 			}
-			if moved {
-				for range in &new.ranges {
-					reshaped |= self.ranges.add(*range);
-				}
+			for range in came {
+				reshaped |= self.ranges.add(*range);
 			}
 			self.descending += usize::from(new.order == Order::Descending);
 			self.feed += usize::from(new.feed);
@@ -269,10 +275,8 @@ impl Subscriptions {
 			if let Some(min) = old.delay.min {
 				remove(&mut self.min_delay, min);
 			}
-			if moved {
-				for range in &old.ranges {
-					reshaped |= self.ranges.remove(*range);
-				}
+			for range in gone {
+				reshaped |= self.ranges.remove(*range);
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
 			self.feed -= usize::from(old.feed);
@@ -288,6 +292,26 @@ impl Subscriptions {
 	pub(super) fn len(&self) -> usize {
 		self.count
 	}
+}
+
+/// The ranges `old` holds more of than `new`, then those `new` holds more of than `old`.
+fn moved(old: &[Range], new: &[Range]) -> (Vec<Range>, Vec<Range>) {
+	if old == new {
+		return Default::default();
+	}
+	let mut counts = std::collections::HashMap::<Range, isize>::with_capacity(old.len());
+	for range in old {
+		*counts.entry(*range).or_default() += 1;
+	}
+	for range in new {
+		*counts.entry(*range).or_default() -= 1;
+	}
+	let (mut gone, mut came) = (Vec::new(), Vec::new());
+	for (range, count) in counts {
+		let into = if count > 0 { &mut gone } else { &mut came };
+		into.extend(std::iter::repeat_n(range, count.unsigned_abs()));
+	}
+	(gone, came)
 }
 
 /// Count `value`, returning whether it is new.
@@ -324,7 +348,7 @@ impl Preferences {
 		let subscriptions = (!state.is_closed()).then(|| state.subscriptions.clone());
 		drop(state);
 		if let Some(subs) = &subscriptions {
-			let mut wakes = subs.lock().replace(None, Some(&value));
+			let mut wakes = subs.lock().replace(None, Some(&value), (&[], &value.ranges));
 			wakes.wake();
 		}
 		Self(Arc::new(Preference {
@@ -339,11 +363,13 @@ impl Preferences {
 		if *value == next {
 			return Ok(());
 		}
+		// Found before taking the lock every subscriber shares.
+		let (gone, came) = moved(&value.ranges, &next.ranges);
 		let mut wakes = self
 			.0
 			.subscriptions
 			.as_ref()
-			.map(|subs| subs.lock().replace(Some(&value), Some(&next)));
+			.map(|subs| subs.lock().replace(Some(&value), Some(&next), (&gone, &came)));
 		if value.ranges != next.ranges {
 			self.0.ranges_revision.fetch_add(1, atomic::Ordering::Relaxed);
 		}
@@ -386,7 +412,8 @@ impl Preferences {
 impl Drop for Preference {
 	fn drop(&mut self) {
 		if let Some(subs) = &self.subscriptions {
-			let mut wakes = subs.lock().replace(Some(&self.value.read()), None);
+			let value = self.value.read();
+			let mut wakes = subs.lock().replace(Some(&value), None, (&value.ranges, &[]));
 			wakes.wake();
 		}
 	}
@@ -407,6 +434,27 @@ impl From<kio::Producer<Subscription>> for Preferences {
 mod tests {
 	use super::super::super::subscription::Combined;
 	use super::super::{Anchor, Range};
+
+	/// The ranges an update moves are its multiset difference, in either direction.
+	#[test]
+	fn an_update_moves_only_the_ranges_it_changes() {
+		let range = |start| Range {
+			start: Anchor::Time(start),
+			end: None,
+		};
+		let sorted = |(mut gone, mut came): (Vec<Range>, Vec<Range>)| {
+			gone.sort();
+			came.sort();
+			(gone, came)
+		};
+		let old = [range(1), range(2), range(2), range(3)];
+		assert_eq!(sorted(super::moved(&old, &old)), (vec![], vec![]));
+		assert_eq!(
+			sorted(super::moved(&old, &[range(3), range(2), range(4), range(1)])),
+			(vec![range(2)], vec![range(4)])
+		);
+		assert_eq!(sorted(super::moved(&[], &old[..2])), (vec![], vec![range(1), range(2)]));
+	}
 	use super::*;
 	use rand::{RngExt, SeedableRng};
 	use std::sync::atomic::{AtomicUsize, Ordering};

@@ -97,7 +97,9 @@ pub struct EgressSource {
 	catalog: watch::Receiver<Catalog>,
 	/// Why the catalog stopped, until the session takes it.
 	catalog_end: Option<tokio::task::JoinHandle<Result<()>>>,
-	writes_tx: mpsc::Sender<WriteRequest>,
+	/// Cloned into each pump until [`Self::end`], so the writes channel closes once the
+	/// catalog ended and every pump has written what it holds.
+	writes_tx: Option<mpsc::Sender<WriteRequest>>,
 	writes_rx: Option<mpsc::Receiver<WriteRequest>>,
 }
 
@@ -122,7 +124,7 @@ impl EgressSource {
 			source,
 			catalog,
 			catalog_end: Some(catalog_end),
-			writes_tx: tx,
+			writes_tx: Some(tx),
 			writes_rx: Some(rx),
 		})
 	}
@@ -139,12 +141,23 @@ impl EgressSource {
 		self.catalog_end.take().expect("EgressSource catalog_end already taken")
 	}
 
+	/// Open no more lines, as the catalog ended cleanly: the writes channel closes once every
+	/// pump has served its rendition to the end.
+	pub(crate) fn end(&mut self) {
+		self.writes_tx = None;
+	}
+
 	/// Spawn a pump task for a newly added (sendonly) media line.
 	///
 	/// `mid` and `formats` come from str0m's negotiated state, `formats` in the peer's order.
 	/// The pump serves the best enabled catalog rendition in any of them and forwards every
-	/// frame as a [`WriteRequest`] in that rendition's format.
+	/// frame as a [`WriteRequest`] in that rendition's format. A line added after
+	/// [`Self::end`] serves nothing.
 	pub fn on_track(&mut self, mid: Mid, formats: Vec<Format>) -> Result<()> {
+		let Some(tx) = &self.writes_tx else {
+			tracing::debug!(?mid, "egress track added after the catalog ended; ignored");
+			return Ok(());
+		};
 		if !formats
 			.iter()
 			.any(|format| format.codec == Codec::Opus || video_kind(format.codec).is_some())
@@ -157,7 +170,7 @@ impl EgressSource {
 			formats,
 			source: self.source.clone(),
 			catalog: self.catalog.clone(),
-			tx: self.writes_tx.clone(),
+			tx: tx.clone(),
 			playhead: None,
 		};
 		// Subscribing blocks on SUBSCRIBE_OK, so keep it inside the pump task to keep this
@@ -663,7 +676,7 @@ mod tests {
 			source,
 			catalog: watch::channel(catalog).1,
 			catalog_end: None,
-			writes_tx,
+			writes_tx: Some(writes_tx),
 			writes_rx: Some(writes_rx),
 		};
 

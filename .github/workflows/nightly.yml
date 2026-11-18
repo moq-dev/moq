@@ -408,8 +408,6 @@ jobs:
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
         # `rs hls-conformance` probes every segment moq-hls serves with ffprobe, against its playlists and manifest.
-        # `gate` runs the queue's Check over every package, catching what a
-        # diff-scoped queue run let into main.
         # `rs audio-devices` plays moq-audio's device tests into a private null sink.
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
@@ -417,7 +415,7 @@ jobs:
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
-        recipe: ["gate", "gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        recipe: ["gh test-integration", "rs doctest --workspace", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "test route-sweep", "rs quic-sim", "rs rung-disable", "test drill impaired", "rs cli-export", "rs hls-conformance", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe and moq-sock's and moq-uring's
           # control-message walks; too slow for the merge gate.
@@ -838,11 +836,13 @@ jobs:
   # moq-net edit, so they take hours.
   gate-cost:
     name: Gate cost
+    # Main's reviewed code alone, as for Gate: these runners keep state the queue builds with.
+    if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, moq-queue]
-    # One measurement at a time, so a dispatch beside the schedule never holds
-    # both runners and stalls the merge queue.
+    # One Nightly job on the queue's runners at a time, so this and Gate, or a
+    # dispatch beside the schedule, never hold both and stall the merge queue.
     concurrency:
-      group: gate-cost
+      group: moq-queue-nightly
       cancel-in-progress: false
     timeout-minutes: 330
     permissions:
@@ -871,6 +871,35 @@ jobs:
           name: bench-gate-cost
           path: target/bench/nightly/gate-cost
           retention-days: 45
+
+  # The queue's Check over every package, catching what a diff-scoped queue run
+  # let into main. On the queue's runners, which check what the queue checks
+  # and have the disk for a full build, which a hosted runner ran out of.
+  # Those runners keep state the queue builds with, such as the Cargo registry,
+  # so only main's reviewed code runs here, without the Rust cache, which only
+  # the queue writes (see .github/actions/rust-cache), and with a fresh home,
+  # as for Gate cost.
+  gate:
+    name: Gate
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, moq-queue]
+    concurrency:
+      group: moq-queue-nightly
+      cancel-in-progress: false
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history for the dispatcher's base comparison.
+          fetch-depth: 0
+      - name: Check every package
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          nix develop --command just gate
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

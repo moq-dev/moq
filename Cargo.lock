@@ -4651,7 +4651,6 @@ dependencies = [
  "proptest",
  "rand 0.10.3",
  "rangemap",
- "rind",
  "serde",
  "serde_json",
  "slab",
@@ -7319,9 +7318,9 @@ dependencies = [
 
 [[package]]
 name = "rubato"
-version = "5.0.1"
+version = "5.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc1e951b9f5432ec1422f4dcfa5733fc501265902612edf5ef8bd8ecdd960930"
+checksum = "6b4da228e06632d025557f798114057cf27a4c6a71d40024c84d6db82fa5ef4a"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",

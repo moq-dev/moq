@@ -51,7 +51,9 @@ pub(super) fn encode_node(w: &mut Encoder<'_>, version: Version, node: Option<No
 		Some(node) if node.relay == 0 => Err(EncodeError::InvalidState),
 		Some(node) => {
 			w.varint(node.relay)?;
-			w.varint(node.start)
+			w.varint(node.start)?;
+			w.bool(node.marked);
+			Ok(())
 		}
 		None => w.varint(0),
 	}
@@ -67,6 +69,7 @@ pub(super) fn decode_node(r: &mut Decoder<'_>, version: Version) -> Result<Optio
 		relay => Some(NodeId {
 			relay,
 			start: r.varint()?,
+			marked: r.bool()?,
 		}),
 	})
 }
