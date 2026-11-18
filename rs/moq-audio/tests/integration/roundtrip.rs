@@ -139,7 +139,9 @@ fn power(samples: &[f32], frequency: f64, rate: u32) -> f64 {
 	previous * previous + older * older - coefficient * previous * older
 }
 
-#[tokio::test]
+// Paused: the default zero max delay ages a finished group out once its span passes on the
+// wall clock, so a loaded runner would subscribe after the frame went stale.
+#[tokio::test(start_paused = true)]
 async fn pcm_round_trip_is_lossless() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
@@ -186,7 +188,9 @@ async fn pcm_round_trip_is_lossless() {
 /// A 5.1 broadcast carries only its channel count in the catalog, which reads
 /// back as 5.1 in canonical order and remixes to whatever the subscriber asks
 /// for.
-#[tokio::test]
+// Paused: the default zero max delay ages a finished group out once its span passes on the
+// wall clock, so a loaded runner would subscribe after the frame went stale.
+#[tokio::test(start_paused = true)]
 async fn pcm_five_one_reads_back_at_any_layout() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
