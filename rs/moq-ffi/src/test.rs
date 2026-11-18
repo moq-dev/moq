@@ -10138,10 +10138,11 @@ async fn video_subscribe_configuration_boundary() {
 	let consumer = broadcast.consume().unwrap();
 	for (codec, description, supported) in [
 		("avc1.42001e", None, true),
-		("avc1.42001e", Some(vec![]), false),
+		// An empty description is no description: Annex-B framing.
+		("avc1.42001e", Some(vec![]), true),
 		("avc1.42001e", Some(vec![1, 0x42, 0, 0x1e]), false),
-		// hvc1 requires hvcC before any backend is opened, even on HEVC-capable hosts.
-		("hvc1.1.6.L93.B0", None, false),
+		// A malformed hvcC is refused before any backend is opened, even on HEVC-capable hosts.
+		("hvc1.1.6.L93.B0", Some(vec![1, 2, 3]), false),
 		("vp09.02.10.10", None, false),
 		("avc1.invalid", None, false),
 		("unknown", None, false),

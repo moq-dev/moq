@@ -185,7 +185,7 @@ for (const stage of ["support", "flush"] as const) {
 			if (stage === "flush") expect(FakeVideoEncoder.instances[0]?.state).toBe("closed");
 			enabled.set(true);
 			await settle();
-			expect(encoder.out.catalog.peek()?.codec).toStartWith("avc1");
+			expect(encoder.out.catalog.peek()?.codec).toStartWith("avc3");
 			// The abandoned browser promise still has not resolved.
 			expect(held.mock.calls.length).toBeGreaterThan(1);
 		} finally {
@@ -1095,10 +1095,12 @@ test("the catalog advertises the codec string a probe encode reports", async () 
 		encoder.config.set({ codec: "avc1" });
 		await settle();
 		expect(encoder.out.resolved.peek()?.codec).toBe("avc1.640028");
-		expect(encoder.out.catalog.peek()?.codec).toBe("avc1.64001F");
+		// Annex B carries its parameter sets in band, so the catalog says avc3 rather than the
+		// avc1 the encoder reports.
+		expect(encoder.out.catalog.peek()?.codec).toBe("avc3.64001F");
 
 		// The configured strings were never advertised, not even briefly.
-		expect([...new Set(advertised)]).toEqual(["vp09.00.31.08", "avc1.64001F"]);
+		expect([...new Set(advertised)]).toEqual(["vp09.00.31.08", "avc3.64001F"]);
 	} finally {
 		unsubscribe();
 		encoder.close();
