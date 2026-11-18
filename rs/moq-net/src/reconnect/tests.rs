@@ -100,7 +100,7 @@ async fn next<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failu
 ) -> Action<A, E> {
 	loop {
 		match next_any(machine).await {
-			Action::Established => continue,
+			Action::Established(_) => continue,
 			action => return action,
 		}
 	}
@@ -157,7 +157,7 @@ async fn drive<A: Target>(
 		let attempt = match next_any(machine).await {
 			Action::Dial(attempt) => attempt,
 			Action::Done(res) => return Some(res),
-			Action::Established => {
+			Action::Established(_) => {
 				run.events.push("established");
 				continue;
 			}
@@ -455,7 +455,7 @@ async fn a_silent_version_is_established_by_uptime() {
 			"moq-lite-04 has no answer to accept with"
 		);
 		if healthy {
-			assert!(matches!(next_any(&mut machine).await, Action::Established));
+			assert!(matches!(next_any(&mut machine).await, Action::Established(_)));
 		}
 		server.abort(Error::Unauthorized);
 		match next_any(&mut machine).await {
@@ -464,6 +464,27 @@ async fn a_silent_version_is_established_by_uptime() {
 			_ => panic!("unexpected action"),
 		}
 	}
+}
+
+/// A GOAWAY before any answer (moq-lite-04 never sends one) establishes the session, and the
+/// action carries it, since the same pass already moved it out of the live slot.
+#[kio::test]
+async fn an_early_goaway_establishes_the_session_it_drains() {
+	let lite04: crate::Version = "moq-lite-04".parse().unwrap();
+	let mut machine =
+		Reconnect::<Url, TestError>::new(config(INITIAL, None), vec![url("tcp://peer:1/")], kio::clock::now()).unwrap();
+	assert!(matches!(next(&mut machine).await, Action::Dial(_)));
+	let (client, server, _) = handshake_with(lite04, false).await;
+	machine.connected(kio::clock::now(), client.clone());
+	server.goaway(goaway::Goaway::new()).unwrap();
+
+	let Action::Established(established) = next_any(&mut machine).await else {
+		panic!("the drained session was never established");
+	};
+	assert!(established == client, "established another session");
+	assert!(matches!(next_any(&mut machine).await, Action::Migrating));
+	assert!(machine.session().is_none(), "the drained session left the live slot");
+	drop(server);
 }
 
 /// A session that stayed up past the healthy bar establishes the policy even when the peer
@@ -909,7 +930,7 @@ async fn an_unanswered_replacement_does_not_serve() {
 		HANDOVER,
 		"the idle predecessor closed early"
 	);
-	assert!(matches!(next_any(&mut machine).await, Action::Established));
+	assert!(matches!(next_any(&mut machine).await, Action::Established(_)));
 	assert_eq!(kio::clock::now() - connected, healthy);
 }
 
@@ -980,7 +1001,7 @@ async fn a_retirement_mid_dial_is_offline_until_the_replacement_is_established()
 	let action = next_any(&mut machine).await;
 	assert!(matches!(action, Action::Offline(None)), "{action:?}");
 	let action = next_any(&mut machine).await;
-	assert!(matches!(action, Action::Established), "{action:?}");
+	assert!(matches!(action, Action::Established(_)), "{action:?}");
 	assert!(machine.session().is_some());
 }
 
@@ -1406,7 +1427,7 @@ async fn a_dropped_replacement_goes_offline_over_a_closing_predecessor() {
 	let (replacement, replacement_server) = handshake().await;
 	machine.connected(kio::clock::now(), replacement.clone());
 	// Only an established replacement serves, which lets the idle predecessor close.
-	assert!(matches!(next_any(&mut machine).await, Action::Established));
+	assert!(matches!(next_any(&mut machine).await, Action::Established(_)));
 	// The replacement is already closed when the next poll starts the idle predecessor's
 	// graceful close, so its close is seen over a predecessor that is closing, not retired.
 	drop(replacement_server);
@@ -1492,7 +1513,10 @@ async fn connecting_once_never_probes() {
 	let (mut machine, _fallback) = on_fallback(config).await;
 	kio::clock::sleep(PROBE_MAX * 2).await;
 	let waiter = kio::Waiter::noop();
-	assert!(matches!(machine.poll(kio::clock::now(), &waiter), Action::Established));
+	assert!(matches!(
+		machine.poll(kio::clock::now(), &waiter),
+		Action::Established(_)
+	));
 	assert!(matches!(machine.poll(kio::clock::now(), &waiter), Action::Wait(None)));
 }
 

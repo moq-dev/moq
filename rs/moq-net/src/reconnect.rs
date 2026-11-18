@@ -344,7 +344,8 @@ pub enum Action<A, E> {
 	/// The live session is established: its peer accepted the connection credential,
 	/// drained it with a GOAWAY, or it stayed up past [`Backoff::healthy`]. Until then a
 	/// connected session may still be a refusal, so report it as serving only from here.
-	Established,
+	/// Carries the session, which a GOAWAY may already have moved to the predecessor.
+	Established(Session),
 	/// Drop the dial or probe in flight: it ran out its deadline, which already counted as
 	/// its failure, or the predecessor's peer redirected while it headed for that peer.
 	Abandon,
@@ -613,7 +614,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 					if !live.established && (now >= healthy || live.session.poll_accepted(waiter).is_ready()) {
 						live.established = true;
 						self.established = true;
-						return Action::Established;
+						return Action::Established(live.session.clone());
 					}
 					let mut ended = None;
 					// Checked before the close: a GOAWAY means the session is still up, and
@@ -625,7 +626,7 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						// redials now or serves until the peer closes the session.
 						self.established = true;
 						if !std::mem::replace(&mut live.established, true) {
-							self.queue.push_back(Action::Established);
+							self.queue.push_back(Action::Established(live.session.clone()));
 						}
 						// Under `Handoff`, a session drained before it was healthy is a redial that
 						// reached the draining process rather than a replacement, so another would

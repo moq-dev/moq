@@ -1203,10 +1203,10 @@ impl Connection {
 					dial = Some((url, Box::pin(async move { client.dial(attempt).await })));
 				}
 				// The policy already counted the timeout; dropping the dial cancels it.
-				Action::Established => {
-					if let (Some(transport), Some(session)) = (pending.take(), policy.session()) {
-						shared.connected(session, transport);
-						forward = Some(Forward::new(session));
+				Action::Established(session) => {
+					if let Some(transport) = pending.take() {
+						shared.connected(&session, transport);
+						forward = Some(Forward::new(&session));
 					}
 				}
 				Action::Abandon => {

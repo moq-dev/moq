@@ -169,7 +169,8 @@ OnDone ==
     /\ probing' = FALSE
     /\ UNCHANGED started
 
-\* `p` is the predecessor, or for `Established` the session it serves.
+\* `p` is the predecessor, or for `Established` the session the action carries,
+\* which a GOAWAY in the same pass already moved out of the live slot.
 Apply(a, p) ==
     CASE a = "Established" -> OnEstablished(p)
       [] a = "Migrating" -> OnMigrating(p)
