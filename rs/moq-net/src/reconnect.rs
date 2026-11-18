@@ -626,7 +626,8 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						// redials now or serves until the peer closes the session.
 						self.established = true;
 						if !std::mem::replace(&mut live.established, true) {
-							self.queue.push_back(Action::Established(Box::new(live.session.clone())));
+							self.queue
+								.push_back(Action::Established(Box::new(live.session.clone())));
 						}
 						// Under `Handoff`, a session drained before it was healthy is a redial that
 						// reached the draining process rather than a replacement, so another would
