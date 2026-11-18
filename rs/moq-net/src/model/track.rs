@@ -6679,10 +6679,11 @@ impl Consumer {
 
 	/// Request a new group from the instance this handle reads; see [`Subscriber::refresh`].
 	fn request(&self) -> Refreshing {
-		if let Some(serving) = self.serving() {
-			return serving.request();
-		}
-		self.with_state(|state| state.map_or_else(Refreshing::done, TrackState::request))
+		self.with_state(|state| match state {
+			Some(state) if state.read().routes.is_some() => Refreshing::front(state),
+			Some(state) => TrackState::request(state),
+			None => Refreshing::done(),
+		})
 	}
 
 	/// Whether the cache is fed live, so the newest object it holds is the track's largest.
@@ -9910,27 +9911,7 @@ impl Target {
 	fn request(&self) -> Refreshing {
 		match self {
 			Self::Plain(state) => TrackState::request(state),
-			Self::Front(logical) => {
-				let Some(routes) = logical.read().routes.clone() else {
-					return Refreshing::done();
-				};
-				let (generation, copy, _) = routes.answering();
-				let ticket = copy.and_then(|copy| copy.request().ticket);
-				// A logical track already closed still rejects, as a plain track does.
-				if ticket.is_none() && !logical.is_closed() {
-					return Refreshing::done();
-				}
-				Refreshing {
-					ticket,
-					failover: Some(Failover {
-						logical: logical.clone(),
-						routes,
-						asked: generation,
-						closed: Error::Dropped,
-					}),
-					park: kio::Park::default(),
-				}
-			}
+			Self::Front(logical) => Refreshing::front(logical),
 		}
 	}
 }
@@ -11108,8 +11089,8 @@ impl Subscriber {
 #[must_use = "dropping it withdraws the request"]
 pub struct Refreshing {
 	ticket: Option<Ticket>,
-	/// A front's reader follows its logical track's route; see [`Failover`].
-	failover: Option<Failover>,
+	/// A front's reader follows its logical track's route instead; see [`Failover`].
+	failover: Option<Box<Failover>>,
 	park: kio::Park,
 }
 
@@ -11121,8 +11102,51 @@ struct Failover {
 	routes: super::resume::Consumer,
 	/// The route generation of the copy last asked.
 	asked: u64,
-	/// How that copy closed: the track's end once no route serves another.
+	/// The request to that copy, itself a front's when fronts are chained.
+	copy: Option<Refreshing>,
+	/// How that copy's request ended: the track's end once no route serves another.
 	closed: Error,
+}
+
+impl Failover {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		loop {
+			if self.logical.poll_closed(waiter).is_ready() {
+				self.copy = None;
+				let err = self.logical.read().outcome.aborted().cloned();
+				return Poll::Ready(Err(err.unwrap_or(Error::Dropped)));
+			}
+			if let Some(copy) = &mut self.copy {
+				match copy.poll(waiter) {
+					Poll::Pending => return Poll::Pending,
+					Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
+					Poll::Ready(Err(err)) => {
+						self.copy = None;
+						self.closed = err;
+						continue;
+					}
+				}
+			}
+			// The copy asked closed, or none served: ask the next one the route serves.
+			let (generation, copy, terminal) = self.routes.answering();
+			if generation != self.asked {
+				self.asked = generation;
+				if let Some(copy) = copy {
+					let request = copy.request();
+					// The new copy has nothing to send, such as no group yet: its join asks.
+					if request.is_done() {
+						return Poll::Ready(Ok(()));
+					}
+					self.copy = Some(request);
+				}
+				continue;
+			}
+			if terminal {
+				return Poll::Ready(Err(std::mem::replace(&mut self.closed, Error::Dropped)));
+			}
+			ready!(self.routes.poll_changed(generation, waiter));
+		}
+	}
 }
 
 /// A caller's claim on a pending request: [`Refreshing`] without the parked waiter.
@@ -11149,6 +11173,34 @@ impl Refreshing {
 		}
 	}
 
+	/// A request on the logical track `logical`, asking the copy its routes serve.
+	fn front(logical: &kio::ConsumerWeak<TrackState>) -> Self {
+		let Some(routes) = logical.read().routes.clone() else {
+			return Self::done();
+		};
+		let (asked, copy, _) = routes.answering();
+		let copy = copy.map(|copy| copy.request()).filter(|copy| !copy.is_done());
+		// A logical track already closed still rejects, as a plain track does.
+		if copy.is_none() && !logical.is_closed() {
+			return Self::done();
+		}
+		Self {
+			ticket: None,
+			failover: Some(Box::new(Failover {
+				logical: logical.clone(),
+				routes,
+				asked,
+				copy,
+				closed: Error::Dropped,
+			})),
+			park: kio::Park::default(),
+		}
+	}
+
+	fn is_done(&self) -> bool {
+		self.ticket.is_none() && self.failover.is_none()
+	}
+
 	/// Ready once the request is sent, or ended without needing to be: answered by a newer
 	/// group. Errors if the track closes first.
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<()>> {
@@ -11157,67 +11209,22 @@ impl Refreshing {
 
 	fn poll_request(
 		slot: &mut Option<Ticket>,
-		failover: &mut Option<Failover>,
+		failover: &mut Option<Box<Failover>>,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<()>> {
-		loop {
-			let result = Self::poll_ticket(slot, failover.as_ref(), waiter);
-			let Some(front) = failover.as_mut() else {
-				return result;
-			};
-			match result {
-				Poll::Ready(Err(err)) if !front.logical.is_closed() => front.closed = err,
-				Poll::Pending if slot.is_some() => return Poll::Pending,
-				Poll::Pending => {}
-				done => {
-					*failover = None;
-					return done;
-				}
-			}
-			// The copy asked closed, or none served: ask the next one the route serves.
-			let (generation, copy, terminal) = front.routes.answering();
-			if generation != front.asked {
-				front.asked = generation;
-				if let Some(copy) = copy {
-					*slot = copy.request().ticket;
-					// The new copy has nothing to send, such as no group yet: its join asks.
-					if slot.is_none() {
-						*failover = None;
-						return Poll::Ready(Ok(()));
-					}
-				}
-				continue;
-			}
-			if terminal {
-				let err = std::mem::replace(&mut front.closed, Error::Dropped);
-				*failover = None;
-				return Poll::Ready(Err(err));
-			}
-			ready!(front.routes.poll_changed(generation, waiter));
+		let Some(front) = failover else {
+			return Self::poll_ticket(slot, waiter);
+		};
+		let result = front.poll(waiter);
+		if result.is_ready() {
+			*failover = None;
 		}
+		result
 	}
 
-	/// Poll the ticket, if any: `Pending` with none is a front's reader between copies.
-	/// A front's request also ends with its logical track.
-	fn poll_ticket(slot: &mut Option<Ticket>, failover: Option<&Failover>, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		if let Some(front) = failover
-			&& front.logical.poll_closed(waiter).is_ready()
-		{
-			*slot = None;
-			let err = front
-				.logical
-				.read()
-				.outcome
-				.aborted()
-				.cloned()
-				.unwrap_or(Error::Dropped);
-			return Poll::Ready(Err(err));
-		}
+	fn poll_ticket(slot: &mut Option<Ticket>, waiter: &kio::Waiter) -> Poll<Result<()>> {
 		let Some(ticket) = slot else {
-			return match failover {
-				Some(_) => Poll::Pending,
-				None => Poll::Ready(Ok(())),
-			};
+			return Poll::Ready(Ok(()));
 		};
 		if ticket.subscriptions.lock().requested(ticket.epoch, waiter) {
 			*slot = None;
@@ -24303,7 +24310,8 @@ mod test {
 
 	/// A front reader's pending refresh outlives the copy it asked: once that copy closes
 	/// while the logical track is open, it asks the copy the route serves next, and resolves
-	/// when that one is sent. Only the logical track closing rejects it.
+	/// when that one is sent. Only the logical track closing rejects it. The same holds
+	/// through a chain of fronts, where the switch happens on the inner one.
 	#[test]
 	fn a_front_refresh_moves_to_the_next_copy() {
 		let info = Info::default().with_refresh(Refresh::default().with_interval(Duration::from_secs(5)));
@@ -24313,38 +24321,56 @@ mod test {
 			refresh_group(&copy, 0);
 			copy
 		};
-		let routes = super::super::resume::Producer::new();
-		let logical = Request::new(Arc::new(broadcast::Info::default()), "test")
-			.routes(routes.consume())
-			.accept(info.clone());
-		let first = copy();
-		routes.serve(first.consume());
-		let subscriber = logical.consume().subscribe(None).now_or_never().unwrap().unwrap();
+		let front = || {
+			let routes = super::super::resume::Producer::new();
+			let logical = Request::new(Arc::new(broadcast::Info::default()), "test")
+				.routes(routes.consume())
+				.accept(info.clone());
+			(routes, logical)
+		};
+		for chained in [false, true] {
+			let (routes, logical) = front();
+			// The front whose route switches: the outer one's own, or the one it serves from.
+			let (routes, _inner) = match chained {
+				false => (routes, None),
+				true => {
+					let (inner_routes, inner) = front();
+					routes.serve(inner.consume());
+					(inner_routes, Some((routes, inner)))
+				}
+			};
+			let first = copy();
+			routes.serve(first.consume());
+			let subscriber = logical.consume().subscribe(None).now_or_never().unwrap().unwrap();
 
-		let (woken, waiter) = Flag::waiter();
-		let mut refresh = subscriber.refresh();
-		assert!(refresh.poll(&waiter).is_pending(), "deferred on the first copy");
-		first.abort(Error::Cancel).unwrap();
-		assert!(woken.take());
-		assert!(refresh.poll(&waiter).is_pending(), "the logical track is still open");
+			let (woken, waiter) = Flag::waiter();
+			let mut refresh = subscriber.refresh();
+			assert!(refresh.poll(&waiter).is_pending(), "deferred on the first copy");
+			first.abort(Error::Cancel).unwrap();
+			assert!(woken.take());
+			assert!(refresh.poll(&waiter).is_pending(), "the logical track is still open");
 
-		let second = copy();
-		routes.serve(second.consume());
-		assert!(woken.take(), "the new copy wakes it");
-		assert!(refresh.poll(&waiter).is_pending(), "deferred on the new copy");
-		elapse(&second, Duration::from_secs(5));
-		assert!(refreshing(&second.demand()), "asked of the new copy");
-		assert!(sent(&mut refresh));
+			let second = copy();
+			// Something reading the copy, so its publisher sees demand: a chained front's
+			// reader subscribes only once it reads.
+			let _reader = second.subscribe(None);
+			routes.serve(second.consume());
+			assert!(woken.take(), "the new copy wakes it");
+			assert!(refresh.poll(&waiter).is_pending(), "deferred on the new copy");
+			elapse(&second, Duration::from_secs(5));
+			assert!(refreshing(&second.demand()), "asked of the new copy");
+			assert!(sent(&mut refresh));
 
-		refresh_group(&second, 0);
-		let mut refresh = subscriber.refresh();
-		assert!(refresh.poll(&waiter).is_pending());
-		logical.abort(Error::Cancel).unwrap();
-		assert!(matches!(refresh.poll(&waiter), Poll::Ready(Err(Error::Cancel))));
-		assert!(
-			matches!(subscriber.refresh().poll(&waiter), Poll::Ready(Err(Error::Cancel))),
-			"asked after the logical track closed"
-		);
+			refresh_group(&second, 0);
+			let mut refresh = subscriber.refresh();
+			assert!(refresh.poll(&waiter).is_pending());
+			logical.abort(Error::Cancel).unwrap();
+			assert!(matches!(refresh.poll(&waiter), Poll::Ready(Err(Error::Cancel))));
+			assert!(
+				matches!(subscriber.refresh().poll(&waiter), Poll::Ready(Err(Error::Cancel))),
+				"asked after the logical track closed"
+			);
+		}
 	}
 
 	#[test]
