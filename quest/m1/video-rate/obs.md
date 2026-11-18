@@ -21,7 +21,9 @@ recommends the dock profiles), NVENC keeps
 CBR and VBR and otherwise runs `CQVBR` with `max_bitrate`, and every other
 encoder runs CBR at the cap. The output prices and retunes that peak (NVENC
 under `max_bitrate`). Quick Sync (ICQ has no max rate) and AMF (QVBR sets no
-peak) stay CBR for good.
+peak) stay CBR for good. An encoder already running when the output starts keeps its
+settings and the catalog advertises the cap it runs with; one running uncapped (CQP, CRF,
+lossless) refuses the output.
 
 Remaining, each needing hardware to measure that the peak holds:
 

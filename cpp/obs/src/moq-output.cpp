@@ -106,7 +106,11 @@ MoQPeak PeakOf(obs_encoder_t *encoder, obs_data_t *settings)
 // Makes every video encoder of `output` hold the cap its settings name as a hard peak, before
 // OBS initializes it: the cap the catalog advertises is the one set here, whatever else the
 // user's rate settings say. An encoder whose settings name no bitrate is left alone.
-void CapEncoders(obs_output_t *output)
+// An encoder already running (shared with a recording that started first) cannot switch rate
+// control, so its settings stay as they are and the catalog advertises the cap it runs with.
+// Returns why the output cannot start, or an empty string: one that runs uncapped (CQP, CRF,
+// lossless) has no cap to advertise.
+std::string CapEncoders(obs_output_t *output)
 {
 	for (uint32_t idx = 0; idx < MAX_OUTPUT_VIDEO_ENCODERS; idx++) {
 		obs_encoder_t *encoder = obs_output_get_video_encoder2(output, idx);
@@ -117,6 +121,20 @@ void CapEncoders(obs_output_t *output)
 		const long long cap = ConfiguredCapKbps(id, settings);
 		if (cap <= 0) {
 			LOG_WARNING("Video encoder %s names no bitrate, so it has no cap to advertise", id);
+			continue;
+		}
+		const bool active = obs_encoder_active(encoder);
+		if (active) {
+			const long long running = RunningCapKbps(id, settings);
+			if (running <= 0)
+				return std::string("Video encoder ") + id +
+				       " is already running without a bitrate cap (rate control " +
+				       obs_data_get_string(settings, "rate_control") +
+				       "). Stop the recording first, or give it its own encoder.";
+			for (const std::string &option : X264RateOptions(obs_data_get_string(settings, "x264opts")))
+				LOG_WARNING("Video encoder %s: x264opts %s can override its %lld kbps cap", id,
+					    option.c_str(), running);
+			LOG_INFO("Video encoder %s already running, advertising its %lld kbps cap", id, running);
 			continue;
 		}
 		OBSDataAutoRelease patch = obs_data_create();
@@ -132,6 +150,7 @@ void CapEncoders(obs_output_t *output)
 			obs_encoder_update(encoder, patch);
 		LOG_INFO("Video encoder %s capped at %lld kbps", id, cap);
 	}
+	return "";
 }
 
 // Whether `rate_control` lets the "bitrate" setting drive the encoder's output.
@@ -205,7 +224,12 @@ bool MoQOutput::Start()
 	}
 
 	// The cap goes on before initialization, which reads the settings it builds the encoder from.
-	CapEncoders(output);
+	const std::string uncapped = CapEncoders(output);
+	if (!uncapped.empty()) {
+		LOG_ERROR("%s", uncapped.c_str());
+		obs_output_set_last_error(output, uncapped.c_str());
+		return false;
+	}
 
 	if (!obs_output_initialize_encoders(output, 0)) {
 		LOG_ERROR("Failed to initialize encoders");

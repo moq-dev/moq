@@ -63,6 +63,13 @@ using Update = std::tuple<obs_encoder_t *, std::string, long long>;
 std::mutex g_updates_mutex;
 std::vector<Update> g_updates;
 std::atomic<bool> g_settings_ok{true};
+// The encoders are already running, as when a recording that started first shares them.
+std::atomic<bool> g_encoder_active{false};
+// The x264 CRF and "use_bufsize" the settings report; a negative CRF is the stub's default.
+std::atomic<long long> g_crf{-1};
+std::atomic<bool> g_use_bufsize{false};
+// How many times Start() or a retune rewrote an encoder's settings.
+std::atomic<int> g_update_calls{0};
 // A reason Configure reports itself, for a setting the config cannot express.
 std::string g_settings_error;
 // Lets a test run something inside obs_output_signal_stop, standing in for a
@@ -211,8 +218,10 @@ const char *obs_data_get_string(obs_data_t *, const char *)
 	return g_rate_control.c_str();
 }
 
-long long obs_data_get_int(obs_data_t *settings, const char *)
+long long obs_data_get_int(obs_data_t *settings, const char *key)
 {
+	if (g_crf >= 0 && std::string(key) == "crf")
+		return g_crf;
 	if (settings == reinterpret_cast<obs_data_t *>(LOW_ENCODER))
 		return 2000;
 	return settings == reinterpret_cast<obs_data_t *>(MID_ENCODER) ? 4000 : 8000;
@@ -225,9 +234,14 @@ struct obs_data {
 	std::vector<std::pair<std::string, std::string>> strings;
 };
 
-bool obs_data_get_bool(obs_data_t *, const char *)
+bool obs_data_get_bool(obs_data_t *, const char *key)
 {
-	return false;
+	return g_use_bufsize && std::string(key) == "use_bufsize";
+}
+
+bool obs_encoder_active(const obs_encoder_t *)
+{
+	return g_encoder_active;
 }
 
 void obs_data_set_bool(obs_data_t *, const char *, bool) {}
@@ -254,6 +268,7 @@ uint32_t obs_encoder_get_caps(const obs_encoder_t *)
 
 void obs_encoder_update(obs_encoder_t *encoder, obs_data_t *settings)
 {
+	g_update_calls++;
 	std::lock_guard<std::mutex> lock(g_updates_mutex);
 	for (const auto &[key, kbps] : settings->rates)
 		g_updates.emplace_back(encoder, key, kbps);
@@ -345,6 +360,10 @@ void reset(std::string url)
 	g_settings_ok = true;
 	g_settings_error.clear();
 	g_rate_control = "CBR";
+	g_encoder_active = false;
+	g_crf = -1;
+	g_use_bufsize = false;
+	g_update_calls = 0;
 	g_encoder_id = "obs_x264";
 	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
 	g_ladder = false;
@@ -733,6 +752,51 @@ int main()
 		o.Stop();
 	}
 	printf("video follows only a live-retunable encoder: ok\n");
+
+	// An encoder already running (shared with a recording that started first) cannot switch
+	// rate control, so its settings are left as they are: a cap it runs with is advertised,
+	// and one it runs without refuses the output with a reason.
+	{
+		struct ActiveCase {
+			const char *id;
+			const char *rate_control;
+			long long crf;
+			bool use_bufsize;
+			bool active;
+			bool starts;
+			// Whether Start() rewrites the encoder's settings.
+			bool rewrites;
+		};
+		for (const auto &c :
+		     {// Not running yet: today's behavior, the buffer and the lossless CRF are replaced.
+		      ActiveCase{"obs_x264", "VBR", 23, true, false, true, true},
+		      ActiveCase{"obs_x264", "VBR", 0, false, false, true, true},
+		      // Running with a cap: kept as it is, even with a buffer of its own.
+		      ActiveCase{"obs_x264", "VBR", 23, true, true, true, false},
+		      ActiveCase{"obs_x264", "CBR", 0, false, true, true, false},
+		      ActiveCase{"obs_nvenc_h264_tex", "CQVBR", -1, false, true, true, false},
+		      // Running without one: refused.
+		      ActiveCase{"obs_x264", "CQP", -1, false, true, false, false},
+		      ActiveCase{"obs_x264", "VBR", 0, false, true, false, false},
+		      ActiveCase{"obs_nvenc_h264_tex", "CQP", -1, false, true, false, false}}) {
+			TestRelay relay;
+			reset(relay.Url());
+			g_encoder_id = c.id;
+			g_rate_control = c.rate_control;
+			g_crf = c.crf;
+			g_use_bufsize = c.use_bufsize;
+			g_encoder_active = c.active;
+			MoQOutput o(nullptr, OUTPUT);
+			CHECK(o.Start() == c.starts);
+			CHECK((g_update_calls > 0) == c.rewrites);
+			{
+				std::lock_guard<std::mutex> lock(g_signals_mutex);
+				CHECK(g_last_error.empty() == c.starts);
+			}
+			o.Stop();
+		}
+	}
+	printf("a running encoder keeps its settings and must hold a cap: ok\n");
 
 	// Stopping hands the configured bitrate back to an encoder the grant lowered,
 	// so the next Start() reads the user's rate rather than the last grant.

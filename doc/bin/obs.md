@@ -59,7 +59,13 @@ it holds whatever else the settings say:
   checked.
 
 The log names each setting of yours it replaced. An encoder shared with a
-recording takes the cap too. The dock's Custom settings profiles start from
+recording takes the cap too, unless the recording started first: a running
+encoder cannot switch rate control, so its settings stay as they are and the
+catalog advertises the cap it runs with. If it runs without one (constant
+quality such as CQP or CRF, or lossless), the output refuses to start. Stop the
+recording first, or give it its own encoder.
+
+The dock's Custom settings profiles start from
 constant quality under the cap on x264 and NVENC: Quality caps at 8 Mbps and
 Performance at 2.5 Mbps, which a complex scene reaches and a calm one stays well
 under. **Use OBS Output settings** starts from the rate control OBS configured.

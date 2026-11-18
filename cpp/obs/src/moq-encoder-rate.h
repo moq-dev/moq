@@ -80,6 +80,20 @@ inline long long ConfiguredCapKbps(const std::string &id, obs_data_t *settings)
 	return obs_data_get_int(settings, "bitrate");
 }
 
+// The hard peak in kbps an encoder already running with `settings` holds, or 0 when it runs
+// uncapped: a quality mode with no peak (CQP, CRF, ICQ), or x264's lossless CRF of 0, which
+// runs as constant QP with no VBV. The settings are read as they are, never rewritten.
+inline long long RunningCapKbps(const std::string &id, obs_data_t *settings)
+{
+	const MoQPeak peak = EncoderPeak(id, settings);
+	if (!peak.key)
+		return 0;
+	if (id == "obs_x264" && Upper(obs_data_get_string(settings, "rate_control")) != "CBR" &&
+	    obs_data_get_int(settings, "crf") <= 0)
+		return 0;
+	return peak.kbps;
+}
+
 // The options in `x264opts` that set a rate of their own: OBS applies them after its rate
 // parameters, so `vbv-maxrate` and `vbv-bufsize` replace the VBV (0 disables it), `bitrate`
 // replaces the rate mode, and `qp` or a `crf` of 0 (lossless) drops the VBV for constant QP.
