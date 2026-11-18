@@ -1179,8 +1179,9 @@ where
 		self.producer.estimate()
 	}
 
-	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining get the clean end
-	/// instead once every group below the end finished.
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining get the end
+	/// the track declared instead once every group below it finished: the clean end after [`Producer::finish`],
+	/// or the error [`Producer::fail`] gave.
 	pub fn abort(self, err: moq_net::Error) {
 		self.producer.abort(err);
 	}
