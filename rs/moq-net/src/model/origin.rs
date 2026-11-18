@@ -11240,7 +11240,10 @@ mod tests {
 		let _held = producer
 			.forward(
 				"room/alice",
-				RouteInfo::new().with_instance(held.clone(), 0).with_hops(hops(&[10])).with_cost(3),
+				RouteInfo::new()
+					.with_instance(held.clone(), 0)
+					.with_hops(hops(&[10]))
+					.with_cost(3),
 			)
 			.unwrap();
 		announced.expect_next_active("room/alice").await;
