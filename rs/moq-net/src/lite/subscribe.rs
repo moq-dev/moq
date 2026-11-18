@@ -18,12 +18,9 @@ pub struct Subscribe<'a> {
 	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
-	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
-	pub node: u64,
-	/// How many leading segments of the broadcast path make up the prefix of the route
-	/// the request follows (lite-07); 0 with no node named.
-	pub depth: u64,
+	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 	pub priority: i8,
 	/// The subscriber's `Subscriber Max Age`, or `None` for no limit beyond the publisher's.
@@ -49,7 +46,6 @@ impl Subscribe<'_> {
 			broadcast: self.broadcast,
 			instance: self.instance,
 			node: self.node,
-			depth: self.depth,
 			track: Cow::Owned(self.track.into_owned()),
 			priority: self.priority,
 			max_delay: self.max_delay,
@@ -131,7 +127,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		let id = r.varint()?;
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 		let priority = super::priority::from_wire(r.u8()?);
 
@@ -149,7 +145,6 @@ impl<'a> Message<'a> for Subscribe<'a> {
 			broadcast,
 			instance,
 			node,
-			depth,
 			track,
 			priority,
 			max_delay,
@@ -163,7 +158,7 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		w.varint(self.id)?;
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node, self.depth)?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		w.u8(super::priority::to_wire(self.priority));
 
@@ -1511,8 +1506,7 @@ mod test {
 		Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			id: 1,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
@@ -1559,9 +1553,18 @@ mod test {
 	#[test]
 	fn node_roundtrips_only_on_lite07() {
 		let mut msg = subscribe_sample();
-		msg.node = 0x7a3f;
-		assert_eq!(roundtrip(&msg, Version::Lite07).node, 0x7a3f);
-		assert_eq!(roundtrip(&msg, Version::Lite06).node, 0);
+		msg.node = Some(crate::route::NodeId {
+			relay: 0x7a3f,
+			start: 9,
+		});
+		assert_eq!(
+			roundtrip(&msg, Version::Lite07).node,
+			Some(crate::route::NodeId {
+				relay: 0x7a3f,
+				start: 9
+			})
+		);
+		assert_eq!(roundtrip(&msg, Version::Lite06).node, None);
 	}
 
 	/// Lite-06 carries one range's frame bounds; an inclusive `Frame End` on the wire is the

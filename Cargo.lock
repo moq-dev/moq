@@ -4422,18 +4422,11 @@ dependencies = [
 name = "moq-crypto"
 version = "0.0.11"
 dependencies = [
- "data-encoding",
- "hex",
- "moq-net",
  "rind",
  "rind-rustls",
  "rustls",
- "serde",
- "serde_json",
- "tempfile",
  "thiserror 2.0.21",
  "workspace-hack",
- "zeroize",
 ]
 
 [[package]]
@@ -4667,7 +4660,6 @@ dependencies = [
  "tracing",
  "url",
  "workspace-hack",
- "zeroize",
 ]
 
 [[package]]
@@ -4777,7 +4769,6 @@ dependencies = [
  "libc",
  "moq-auth",
  "moq-congestion",
- "moq-crypto",
  "moq-net",
  "moq-quic",
  "moq-shaper",

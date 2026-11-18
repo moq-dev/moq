@@ -31,8 +31,17 @@ use std::{
 	collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque},
 };
 
-use super::cache::rendezvous;
 use super::compare::Arm as Rule;
+
+/// A rendezvous hash of a broadcast's path and a relay, which ranks its carriers. The
+/// basis is the one the measurements here were taken with.
+fn rendezvous(path: &Path, node: Id) -> u64 {
+	let mut hash: u64 = 0x420C_0DEC_B00B;
+	for byte in path.as_str().bytes().chain(node.to_le_bytes()) {
+		hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+	}
+	hash
+}
 use super::multi::{Broadcast, MultiSim, Next, Tie};
 use super::*;
 

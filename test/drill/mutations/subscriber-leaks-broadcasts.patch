@@ -11,7 +11,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -2651,7 +2651,8 @@
+@@ -2596,7 +2596,8 @@ struct PrefixRun {
  	/// it comes from the connect config or the peer's SETUP, neither of which
  	/// changes for the life of the session.
  	link_cost: u64,
@@ -21,7 +21,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	// Lite06+: announce ids. Each received `active` implicitly assigns the next
  	// per-stream ordinal; `ended`/`restart` reference it instead of repeating the
  	// path, and lite-07 bases name it too. Tracked even for announces we drop
-@@ -2814,7 +2815,10 @@
+@@ -2682,7 +2683,10 @@ impl AnnouncePrefix {
  		let mut run: PrefixRun = PrefixRun {
  			responder_origin,
  			link_cost,
@@ -33,26 +33,26 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  			decoder: lite::AnnounceDecoder::default(),
  			auth_epoch: 0,
  			initial,
-@@ -2983,7 +2987,8 @@
- 	node: u64,
- 	/// How many leading segments of the path make up the route's prefix (lite-07).
- 	depth: u64,
+@@ -2811,7 +2815,8 @@ struct SourceServe {
+ 	path: Path,
+ 	instance: Option<crate::Instance>,
+ 	node: Option<crate::route::NodeId>,
 -	source: crate::model::broadcast::SourceGuard,
 +	// MUTATION: never dropped, so a session that ends keeps every source it minted alive.
 +	source: std::mem::ManuallyDrop<crate::model::broadcast::SourceGuard>,
  	dynamic: crate::broadcast::Requests,
  	route: kio::Consumer<()>,
  	// A dedicated close-watch handle, since each pending operation needs its own.
-@@ -3129,7 +3134,7 @@
+@@ -2955,7 +2960,7 @@ impl SourceServe {
+ 			path: minted.path,
  			instance: minted.instance,
  			node: minted.node,
- 			depth: minted.depth,
 -			source: minted.source,
 +			source: std::mem::ManuallyDrop::new(minted.source),
  			datagram_requests: minted.dynamic.datagrams(),
  			dynamic: minted.dynamic,
  			route: minted.route,
-@@ -3237,7 +3242,7 @@
+@@ -3063,7 +3068,7 @@ impl kio::Task for SourceServe {
  					let serve = TrackServe {
  						validity: self.dynamic.validity().clone(),
  						route: Some(self.route.clone()),
