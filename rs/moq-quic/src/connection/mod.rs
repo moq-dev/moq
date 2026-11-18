@@ -1620,6 +1620,16 @@ impl Connection {
 		self.state.is_closed()
 	}
 
+	/// Whether a CONNECTION_CLOSE is due that [`poll_transmit`](Self::poll_transmit) has yet to hand
+	/// over
+	///
+	/// Closing owes the peer one, as does each packet the peer sends on the current path during
+	/// the closing period; a loss with nothing to answer, such as an idle timeout or a stateless
+	/// reset, owes none. Once a closed connection owes none, everything it had to send is out.
+	pub fn owes_close(&self) -> bool {
+		self.state.owes_close()
+	}
+
 	/// Whether there is no longer any need to keep the connection around
 	///
 	/// Closed connections become drained after a brief timeout to absorb any remaining in-flight
@@ -4470,6 +4480,13 @@ impl State {
 
 	fn is_drained(&self) -> bool {
 		matches!(*self, Self::Drained)
+	}
+
+	fn owes_close(&self) -> bool {
+		match self {
+			Self::Closed(state::Closed { send_close, .. }) | Self::Draining { send_close } => *send_close,
+			Self::Handshake(_) | Self::Established | Self::Drained => false,
+		}
 	}
 }
 

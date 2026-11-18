@@ -7519,3 +7519,26 @@ fn default_controller_supports_bandwidth_probing() {
 	assert!(controller.probes());
 	assert!(controller.metrics().pacing_rate.is_some());
 }
+
+/// A local close owes the peer a CONNECTION_CLOSE until a transmit hands it over, and the peer it
+/// reaches owes none back
+#[test]
+fn close_owed_until_transmitted() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	assert!(!pair.client_conn_mut(client_ch).owes_close());
+
+	let now = pair.time;
+	pair.client_conn_mut(client_ch).close(now, VarInt(42), String::new());
+	assert!(pair.client_conn_mut(client_ch).owes_close());
+
+	pair.drive_client();
+	assert!(!pair.client_conn_mut(client_ch).owes_close());
+	assert!(pair.client_conn_mut(client_ch).error().is_some());
+
+	pair.drive();
+	let server = pair.server_conn_mut(server_ch);
+	assert!(server.is_closed());
+	assert!(!server.owes_close());
+}

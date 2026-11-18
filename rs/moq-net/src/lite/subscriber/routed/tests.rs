@@ -513,3 +513,71 @@ async fn an_unresolved_claim_outlives_another_prefixs_removal() {
 	let ended = routed.receive(Wire::End { id: 2, lost: false });
 	assert!(matches!(ended, Err(Error::ProtocolViolation)), "{ended:?}");
 }
+
+/// The node shows a peer's claim to the sessions it reaches before the session serving it
+/// lands its route in the origin, each on its own task. A reader asking for the claim the
+/// moment it hears of it waits for that route, and is not refused for want of it.
+#[kio::test]
+async fn a_request_for_a_claim_shown_waits_for_its_route() {
+	use crate::model::ProduceTest;
+	const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+	let version = crate::Version::lite(crate::lite::Version::Lite07);
+	let (subscriber, _consumer) = forwarding();
+	let mut upstream = asking(&subscriber, &Permit::default());
+
+	// A reader on lite-07, served from the relay's origin.
+	let reader = crate::origin::Config::new(std::num::NonZeroU64::new(3).unwrap()).produce();
+	let (client, server) = crate::transport::memory::pair(crate::transport::memory::Config {
+		protocol: Some(version.alpn().to_string()),
+		..Default::default()
+	});
+	let dial = crate::Client::new()
+		.with_versions(version.into())
+		.with_subscriber(reader.clone());
+	let serve = crate::Server::new()
+		.with_versions(version.into())
+		.with_publisher(subscriber.origin.consume());
+	let (_client, _server) = futures::join!(
+		async {
+			let (session, driver) = dial.connect(kio::clock::now(), client).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+		async {
+			let (session, driver) = serve.accept(kio::clock::now(), server).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
+			session
+		},
+	);
+
+	// The claim reaches the node, which shows it to the reader, while the session it
+	// arrived on has yet to land its route.
+	upstream.receive(start("live")).unwrap();
+	upstream.flush();
+	let live = kio::clock::timeout(TIMEOUT, reader.consume().follow("live", None).unwrap().available())
+		.await
+		.expect("the reader hears of the claim")
+		.unwrap()
+		.expect("the claim is shown");
+	// It asks at once, and its request reaches the relay before the route does.
+	let _subscribing = kio::clock::sim::spawn(async move { live.track("video").unwrap().subscribe(None).await });
+	kio::clock::sleep(std::time::Duration::from_millis(100)).await;
+
+	// The route lands, and the request goes on to the session serving the claim. Refused
+	// instead, the reader would wait for a route change that never comes.
+	let stream = upstream.stream();
+	while let Some(output) = stream.try_serve() {
+		upstream.output(&subscriber, output);
+	}
+	let minted = kio::clock::timeout(
+		TIMEOUT,
+		kio::wait(|waiter| {
+			upstream.poll(&subscriber, waiter);
+			subscriber.sources.poll_pop(waiter)
+		}),
+	)
+	.await
+	.expect("the request reaches the claim")
+	.unwrap();
+	assert_eq!(minted.path.as_str(), "live");
+}

@@ -163,8 +163,11 @@ mod threaded {
 					let _ = resp.send(decoded);
 				}
 				Request::Flush { resp } => {
-					let flushed = decoder.flush().and_then(|()| collect(&mut decoder, &queue));
-					let _ = resp.send(flushed);
+					// Collected even when the flush failed, so the pictures it readied come out
+					// ahead of whatever the caller queues behind the drain.
+					let flushed = decoder.flush();
+					let collected = collect(&mut decoder, &queue);
+					let _ = resp.send(flushed.and(collected));
 				}
 			}
 		}

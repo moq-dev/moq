@@ -1,4 +1,5 @@
 import type { Window } from "./credit.ts";
+import { TransportCode, TransportError } from "./error.ts";
 import { Queue } from "./queue.ts";
 
 /** A receive half's phase, each carrying its own data: the RFC 9000 §3.2 states,
@@ -154,7 +155,8 @@ export class RecvStream {
 		const bytes = BigInt(chunk.byteLength);
 		const end = this.#end + bytes;
 		const total = this.#conn.received + bytes;
-		if (!this.#window.allows(end) || !this.#conn.allows(total)) throw new Error("flow control error");
+		if (!this.#window.allows(end) || !this.#conn.allows(total))
+			throw new TransportError(TransportCode.FLOW_CONTROL_ERROR, "flow control error");
 		this.#window.receiveTo(end);
 		this.#conn.receiveTo(total);
 		this.#end = end;
@@ -187,7 +189,8 @@ export class RecvStream {
 		const size = finalSize > this.#end ? finalSize : this.#end;
 		const gap = size - this.#end;
 		const total = this.#conn.received + gap;
-		if (!this.#window.allows(size) || !this.#conn.allows(total)) throw new Error("flow control error");
+		if (!this.#window.allows(size) || !this.#conn.allows(total))
+			throw new TransportError(TransportCode.FLOW_CONTROL_ERROR, "flow control error");
 		this.#window.receiveTo(size);
 		this.#conn.receiveTo(total);
 		this.#end = size;

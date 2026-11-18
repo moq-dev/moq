@@ -1,6 +1,6 @@
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
-import { Canvas2D } from "./canvas2d";
-import { Gpu, probe } from "./webgpu";
+import { Canvas2D } from "./canvas2d.ts";
+import { Gpu, probe } from "./webgpu.ts";
 
 /**
  * Which graphics API draws the frames.

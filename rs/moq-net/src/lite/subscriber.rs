@@ -10630,7 +10630,7 @@ impl TrackServe {
 						let widened = (changed && demand.is_some())
 							.then(|| subscription.start().or(active.started.flatten()).unwrap_or(0)..u64::MAX);
 						if let Ok(mut tail) = active.tail.write() {
-							tail.set_grace(producer.tail_grace(subscription.budget()));
+							tail.follow(producer, subscription.budget());
 							let now = self.subscriber.runtime.now();
 							for groups in lowered.into_iter().chain(widened) {
 								tail.demand(groups, now);
@@ -10820,11 +10820,12 @@ impl TrackServe {
 		tracing::debug!(id, broadcast = %self.subscriber.log_path(&self.path), track = %self.name, "subscribe started");
 
 		// A pipelined SUBSCRIBE has no copy, so no max age, until it is adopted.
-		let grace = match &copy {
-			Some(copy) => copy.producer.tail_grace(subscription.budget()),
-			None => tail::grace(subscription.budget()),
-		};
-		let tail = kio::Producer::new(Tail::new(grace));
+		let tail = kio::Producer::new(Tail::new(tail::grace(subscription.budget())));
+		if let Some(copy) = &copy
+			&& let Ok(mut tail) = tail.write()
+		{
+			tail.follow(&copy.producer, subscription.budget());
+		}
 		let mut entry = TrackEntry::new(copy, tail.clone());
 		let version = self.subscriber.version;
 		if version.has_datagrams() && !version.has_datagram_tracks() {
@@ -12195,7 +12196,7 @@ impl ServeLoop {
 			PipelinedState::Open(active) => &active.tail,
 		};
 		if let Ok(mut tail) = tail.write() {
-			tail.set_grace(self.serving.tail_grace(pipelined.pref.budget()));
+			tail.follow(&self.serving, pipelined.pref.budget());
 		}
 		self.serving.seen_subscription(Some(pipelined.pref));
 		match pipelined.state {
@@ -12500,7 +12501,7 @@ impl ServeLoop {
 			if !serve.subscriber.version.has_track_stream() {
 				tail.end();
 			}
-			tail.set_grace(serving.tail_grace(budget.unwrap_or_default()));
+			tail.follow(serving, budget.unwrap_or_default());
 			tail.expire(serve.subscriber.runtime.now());
 		}
 		Settle::new(&serve.subscriber.runtime, active.tail.consume())

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { Duration, type Installed, now, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
-import { SessionError, StreamError } from "./error.ts";
+import { SessionError, StreamError, TransportCode } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
 import * as QMux from "./index.ts";
@@ -666,7 +666,7 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect(err.message).toContain("flow control error");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FLOW_CONTROL_ERROR);
 	});
 
 	test("RESET_STREAM final_size is cumulative with later stream data for MAX_DATA", async () => {
@@ -692,7 +692,7 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect(err.message).toContain("flow control error");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FLOW_CONTROL_ERROR);
 	});
 
 	test("RESET_STREAM final_size replenishes connection credit once discarded", async () => {
@@ -784,7 +784,7 @@ describe("Session integration (scripted peer)", () => {
 
 			const err = await expectSessionFailure(session);
 			expect((err.cause as Error).message).toContain("does not continue the stream");
-			await waitFor(() => sentCloseCode(peer) === 1002);
+			await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 		});
 	}
 
@@ -798,7 +798,7 @@ describe("Session integration (scripted peer)", () => {
 		peer.send({ type: "stream", id, offset: 5n, data: new Uint8Array(), fin: true });
 
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("a new stream must start at offset zero", async () => {
@@ -815,7 +815,7 @@ describe("Session integration (scripted peer)", () => {
 		});
 
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("frames without OFF from a pre-offset sender continue the stream", async () => {
@@ -1028,7 +1028,7 @@ describe("Session integration (scripted peer)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("never opened");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.STREAM_STATE_ERROR);
 	});
 
 	test("a RESET_STREAM on a stream we never opened closes the session", async () => {
@@ -1489,14 +1489,14 @@ describe("Session integration (scripted peer)", () => {
 		});
 	});
 
-	test("a text frame rejects closed and tells the peer why (1003)", async () => {
+	test("a text frame rejects closed and tells the peer why (PROTOCOL_VIOLATION)", async () => {
 		const { session, peer } = connect();
 		await started(peer);
 		peer.sendText("not binary");
 
 		const err = await expectSessionFailure(session);
 		expect(err.message).toContain("text frames are not valid for QMux");
-		await waitFor(() => sentCloseCode(peer) === 1003);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 		// A violation we detect is a CONNECTION_CLOSE (0x1c), so the peer rejects too.
 		expect(sentClose(peer)?.type).toBe("connection_close");
 	});
@@ -1512,7 +1512,7 @@ describe("Session integration (scripted peer)", () => {
 
 		await waitFor(() => peer.has("connection_close"));
 		await expectSessionFailure(session);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.FRAME_ENCODING_ERROR);
 	});
 
 	test("draft-01 rejects max_record_size below the default minimum", async () => {
@@ -1526,10 +1526,10 @@ describe("Session integration (scripted peer)", () => {
 
 		await waitFor(() => peer.has("connection_close"));
 		await expectSessionFailure(session);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.TRANSPORT_PARAMETER_ERROR);
 	});
 
-	test("an unnegotiated RESET_STREAM_AT rejects closed and tells the peer why (1002)", async () => {
+	test("an unnegotiated RESET_STREAM_AT rejects closed and tells the peer why (FRAME_ENCODING_ERROR)", async () => {
 		// The peer negotiates qmux-01, which never advertises `reset_stream_at`, so
 		// a RESET_STREAM_AT (0x24) frame is a protocol violation. Hand-built bytes:
 		// type=0x24, id=3, code=0, final_size=0, reliable_size=0.
@@ -1540,7 +1540,7 @@ describe("Session integration (scripted peer)", () => {
 		const err = await expectSessionFailure(session);
 		// The decode failure itself is carried as the cause, not flattened away.
 		expect(err.cause).toBeInstanceOf(Error);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.FRAME_ENCODING_ERROR);
 		expect(sentClose(peer)?.type).toBe("connection_close");
 	});
 
@@ -1751,7 +1751,7 @@ describe("Session integration (scripted peer)", () => {
 
 		peer.send({ type: "datagram", data: new Uint8Array(10) });
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("datagrams: a DATAGRAM we never advertised support for is fatal", async () => {
@@ -1763,7 +1763,7 @@ describe("Session integration (scripted peer)", () => {
 
 		peer.send({ type: "datagram", data: new Uint8Array([1, 2, 3]) });
 		await expectSessionFailure(session);
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 
 	test("datagrams: a no-length (0x30) DATAGRAM is sized without a length varint", async () => {
@@ -2314,14 +2314,14 @@ describe("Session integration (scripted peer)", () => {
 			expect(await session.closed).toEqual({ closeCode: 42, reason: "bye" });
 		});
 
-		test("a STREAM frame on a send-only stream ID fails the session with 1002", async () => {
+		test("a STREAM frame on a send-only stream ID fails the session with STREAM_STATE_ERROR", async () => {
 			const { session, peer } = connect();
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
 
 			// A client-initiated uni stream is send-only from our (client) perspective;
 			// the peer writing to it is a protocol violation. Now that #handleStreamFrame
-			// is synchronous, the throw propagates to #onData and closes with 1002 -
+			// is synchronous, the throw propagates to #onData and closes with STREAM_STATE_ERROR -
 			// previously it leaked as a rejection while the session limped on.
 			peer.send({
 				type: "stream",
@@ -2331,7 +2331,7 @@ describe("Session integration (scripted peer)", () => {
 			});
 
 			await expectSessionFailure(session);
-			await waitFor(() => sentCloseCode(peer) === 1002);
+			await waitFor(() => sentCloseCode(peer) === TransportCode.STREAM_STATE_ERROR);
 			await settle();
 			expect(rejections).toEqual([]);
 		});
@@ -2395,7 +2395,7 @@ describe("Session integration (scripted peer)", () => {
 			// Tight connection window (300B). Each refused stream's bytes advance the
 			// connection recv offset; if they aren't also counted as consumed, the
 			// advertised window never replenishes and the peer is wrongly starved /
-			// eventually tripped into a 1002 flow-control close.
+			// eventually tripped into a FLOW_CONTROL_ERROR close.
 			const { session, peer } = connect({ receiveWindow: 300n });
 			peer.send({ type: "transport_parameters", params: peerParams() });
 			await session.ready;
@@ -2673,7 +2673,7 @@ describe("Session.accept (server role)", () => {
 		});
 
 		await waitFor(() => peer.has("connection_close"));
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.STREAM_STATE_ERROR);
 		await expectSessionFailure(session);
 	});
 
@@ -2835,7 +2835,7 @@ describe("STREAM frame size", () => {
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("max_frame_size");
 		await waitFor(() => sentCloseCode(peer) !== undefined);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.FRAME_ENCODING_ERROR);
 	});
 
 	test("a record over max_record_size closes the session", async () => {
@@ -2851,7 +2851,7 @@ describe("STREAM frame size", () => {
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("max_record_size");
 		await waitFor(() => sentCloseCode(peer) !== undefined);
-		expect(sentCloseCode(peer)).toBe(1002);
+		expect(sentCloseCode(peer)).toBe(TransportCode.FRAME_ENCODING_ERROR);
 	});
 
 	test("we keep STREAM payloads within the released-receiver ceiling", async () => {
@@ -3011,6 +3011,6 @@ describe("RESET_STREAM_AT (qmux-02)", () => {
 
 		const err = await expectSessionFailure(session);
 		expect((err.cause as Error).message).toContain("reliable_size");
-		await waitFor(() => sentCloseCode(peer) === 1002);
+		await waitFor(() => sentCloseCode(peer) === TransportCode.PROTOCOL_VIOLATION);
 	});
 });

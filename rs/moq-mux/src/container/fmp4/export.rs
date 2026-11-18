@@ -15,7 +15,8 @@ use crate::container::fmp4::Error;
 use crate::container::{ExportSource, Resume};
 use moq_net::Timestamp;
 
-/// How much media a track may queue while another track waits for its codec configuration.
+/// How long, on the local clock from the first frame read, the init segment may wait for
+/// every track's codec configuration before the export fails.
 ///
 /// The init segment declares every track, so it waits until each one can be described.
 /// An Annex-B H.264 or H.265 source whose catalog codec string and dimensions determine
@@ -23,9 +24,14 @@ use moq_net::Timestamp;
 /// the string does not carry, HEVC beyond Main and Main Still Picture, and a catalog that
 /// leaves out dimensions still wait for the first keyframe's parameter sets. The other
 /// tracks keep reading meanwhile, so they don't fall behind the subscription's max delay,
-/// and their fragments are written right after the init. A source that never delivers
-/// what the init needs would otherwise queue forever.
-const INIT_QUEUE: Duration = Duration::from_secs(30);
+/// and their fragments are written right after the init, each up to [`INIT_SHARE`]. The
+/// local clock times the wait because the publisher's timestamps may never advance.
+const INIT_WAIT: Duration = Duration::from_secs(30);
+
+/// The bytes of media a track may hold while the init segment waits: what its consumer may
+/// buffer ahead of the reader. A track past it stops reading, leaving its backlog to the
+/// transport, which the subscription's max delay bounds.
+const INIT_SHARE: usize = crate::container::consumer::DEFAULT_MAX_BUFFER;
 
 /// Subscribe to a moq broadcast and produce a single fMP4 / CMAF byte stream.
 ///
@@ -44,11 +50,13 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// fragment rate. Returns `None` when the broadcast ends.
 ///
 /// The init segment declares every enabled rendition in the catalog once each can be
-/// described, and fragments cut while it waits are written right after it. Annex-B H.264
-/// and H.265 whose catalog codec string and dimensions determine the sample entry are
-/// described at the first catalog, as avc3 or hev1 with parameter sets in the samples. From
-/// then on the track set is fixed: a rendition that leaves the catalog, as a disabled one
-/// (`enabled: false`) does, is unsubscribed and idles. On its return it is resubscribed after
+/// described, and fragments cut while it waits are written right after it. Each track holds
+/// at most its consumer's max buffer meanwhile, and the export fails with
+/// [`TrackUndescribed`](Error::TrackUndescribed) once the init has waited 30 s on the local
+/// clock. Annex-B H.264 and H.265 whose catalog codec string and dimensions determine the
+/// sample entry are described at the first catalog, as avc3 or hev1 with parameter sets in
+/// the samples. From then on the track set is fixed: a rendition that leaves the catalog, as
+/// a disabled one (`enabled: false`) does, is unsubscribed and idles. On its return it is resubscribed after
 /// the last group read, under the track it was declared as, when its sample entry is
 /// unchanged. That comparison covers the catalog-derived record, so an Annex-B encoder that
 /// restarts with a new parameter set can return. A rendition the catalog moves to another
@@ -113,8 +121,12 @@ impl<S> Feed<S> {
 
 /// Whether the init segment went out, which fixes the track set.
 enum Init {
-	/// Fragments cut before the init segment, written right after it in the order they were cut.
-	Waiting(VecDeque<(String, Fragment)>),
+	/// Fragments cut before the init segment, written right after it in the order they were cut,
+	/// and the [`INIT_WAIT`] deadline, armed at the first frame any source reads.
+	Waiting {
+		queued: VecDeque<(String, Fragment)>,
+		deadline: Option<Box<kio::clock::Sleep>>,
+	},
 	/// `first_late` is the first track id the init does not declare, and `queued` the
 	/// fragments cut while it waited, still to go out.
 	Written {
@@ -128,9 +140,22 @@ impl Init {
 		matches!(self, Init::Written { .. })
 	}
 
+	/// Whether the init waited out [`INIT_WAIT`], arming the deadline once a frame was `read`.
+	fn poll_expired(&mut self, read: bool, waiter: &kio::Waiter) -> bool {
+		let Init::Waiting { deadline, .. } = self else {
+			return false;
+		};
+		if read && deadline.is_none() {
+			*deadline = Some(Box::new(kio::clock::sleep(INIT_WAIT)));
+		}
+		deadline
+			.as_mut()
+			.is_some_and(|deadline| waiter.poll_future(std::pin::Pin::new(deadline)).is_ready())
+	}
+
 	/// The init segment went out, declaring every track id below `first_late`.
 	fn write(&mut self, first_late: u32) {
-		if let Init::Waiting(queued) = self {
+		if let Init::Waiting { queued, .. } = self {
 			let queued = std::mem::take(queued)
 				.into_iter()
 				.map(|(_, fragment)| fragment)
@@ -403,9 +428,8 @@ struct Fmp4Track {
 	/// fragment's `tfdt` ahead of the one that follows.
 	decode_end: Option<u64>,
 
-	/// The first presentation time read before the init segment, which bounds how much
-	/// media queues behind it.
-	backlog: Option<Duration>,
+	/// The bytes of media read before the init segment, held against [`INIT_SHARE`].
+	held: usize,
 
 	track_id: u32,
 	/// Kept from the first catalog entry, so a later framerate change doesn't move the
@@ -433,7 +457,7 @@ impl Fmp4Track {
 			buffer: Buffer::Empty,
 			written: None,
 			decode_end: None,
-			backlog: None,
+			held: 0,
 			track_id,
 			timescale,
 		})
@@ -674,7 +698,10 @@ impl<S: Stream> Export<S> {
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			departed: HashMap::new(),
-			init: Init::Waiting(VecDeque::new()),
+			init: Init::Waiting {
+				queued: VecDeque::new(),
+				deadline: None,
+			},
 			late: false,
 			next_track_id: 1,
 			sequence_number: 1,
@@ -796,9 +823,11 @@ impl<S: Stream> Export<S> {
 			// length-prefixed) and absorbed parameter-only frames.
 			//
 			// A track that can't be described yet drops its frames, so the source keeps
-			// polling for the SPS/PPS-bearing keyframe instead of parking.
+			// polling for the SPS/PPS-bearing keyframe instead of parking. Before the init, a
+			// track that holds its share parks instead.
+			let waiting = !self.init.written();
 			for (name, track) in &mut self.tracks {
-				if track.pending.is_some() || track.buffer.is_closed() {
+				if track.pending.is_some() || track.buffer.is_closed() || (waiting && track.held >= INIT_SHARE) {
 					continue;
 				}
 				while let Phase::Reading(subscription) = &mut track.phase {
@@ -810,6 +839,9 @@ impl<S: Stream> Export<S> {
 								if !track.described() {
 									continue;
 								}
+							}
+							if waiting {
+								track.held += crate::container::consumer::frame_cost(&frame);
 							}
 							track.pending = Some(frame);
 							break;
@@ -846,7 +878,7 @@ impl<S: Stream> Export<S> {
 
 			// 3. Emit the init segment once every track can be described, then the
 			// fragments queued while it waited.
-			if let Init::Waiting(queued) = &self.init {
+			if let Init::Waiting { queued, .. } = &self.init {
 				if self.init_ready() {
 					let init = self.build_init()?;
 					self.init.write(self.next_track_id);
@@ -858,6 +890,15 @@ impl<S: Stream> Export<S> {
 						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 					}
 					return Poll::Ready(Ok(None));
+				}
+				// Any frame read starts the wait, even a parameter set the source absorbed.
+				let read = self
+					.tracks
+					.values()
+					.filter_map(Fmp4Track::subscription)
+					.any(|sub| sub.source.read());
+				if self.init.poll_expired(read, waiter) {
+					return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 				}
 			} else if let Init::Written { queued, .. } = &mut self.init
 				&& let Some(fragment) = queued.pop_front()
@@ -894,14 +935,6 @@ impl<S: Stream> Export<S> {
 				let frag = self.fragment_duration;
 				let track = self.tracks.get_mut(&name).unwrap();
 				let frame = track.pending.take().unwrap();
-				// Everything a track reads before the init is queued or buffered behind it.
-				if !self.init.written() {
-					let at = Duration::try_from(frame.timestamp)?;
-					let start = *track.backlog.get_or_insert(at);
-					if at.saturating_sub(start) > INIT_QUEUE {
-						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
-					}
-				}
 				// A zero cap emits one sample at a time. Unknown video duration still
 				// needs a successor timestamp or endpoint before it can be encoded.
 				let fragment = if frag == Some(Duration::ZERO) {
@@ -979,7 +1012,7 @@ impl<S: Stream> Export<S> {
 	fn deliver(&mut self, name: String, fragment: Fragment) -> Option<Chunk> {
 		match &mut self.init {
 			Init::Written { .. } => Some(Chunk::Fragment(fragment)),
-			Init::Waiting(queued) => {
+			Init::Waiting { queued, .. } => {
 				queued.push_back((name, fragment));
 				None
 			}
@@ -1059,7 +1092,7 @@ impl<S: Stream> Export<S> {
 				.and_then(Fmp4Track::subscription)
 				.is_some_and(|subscription| !config.read_by(&subscription.source, &self.source, &name));
 			// Before the init nothing of a moved rendition went out, so it starts over as a new one.
-			if moved && let Init::Waiting(queued) = &mut self.init {
+			if moved && let Init::Waiting { queued, .. } = &mut self.init {
 				self.tracks.remove(&name);
 				queued.retain(|(queued, _)| *queued != name);
 			}
@@ -1119,13 +1152,28 @@ impl<S: Stream> Export<S> {
 					}
 				}
 			}
-			Init::Waiting(queued) => {
+			Init::Waiting { queued, .. } => {
 				self.tracks.retain(|name, _| active.contains(name));
 				queued.retain(|(name, _)| active.contains(name));
 			}
 		}
 
 		Ok(())
+	}
+
+	/// The bytes of media the export holds between its sources and the output.
+	#[cfg(test)]
+	pub(super) fn held(&self) -> usize {
+		let frames = self.tracks.values().flat_map(|track| {
+			let buffered = track.buffer.batch().into_iter().flat_map(|batch| &batch.frames);
+			buffered.chain(&track.pending)
+		});
+		let queued = match &self.init {
+			Init::Waiting { queued, .. } => queued.iter().map(|(_, fragment)| fragment).collect::<Vec<_>>(),
+			Init::Written { queued, .. } => queued.iter().collect(),
+		};
+		frames.map(|frame| frame.payload.len()).sum::<usize>()
+			+ queued.iter().map(|fragment| fragment.data.len()).sum::<usize>()
 	}
 
 	/// True once every track can be described, so the merged init segment can be built.

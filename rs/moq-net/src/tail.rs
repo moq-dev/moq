@@ -14,14 +14,20 @@ use std::{ops::Range, task::Poll, time::Duration};
 
 pub(crate) use crate::ledger::{GRACE, grace};
 use crate::{
-	ledger::Ledger,
+	cache,
+	ledger::{Ledger, RUN_OVERHEAD},
 	time::{Deadline, Instant},
+	track,
 };
 
 /// The data streams a subscription has received, and the groups they account for.
 #[derive(Debug)]
 pub(crate) struct Tail {
 	ledger: Ledger,
+	// What the ledger's gaps bill to the copy's account, once it has one. A publisher's drops
+	// and skips name any range, so under pool pressure the oldest gaps fold early rather
+	// than grow with a grace that never passes.
+	bill: Option<cache::Reader>,
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
@@ -41,6 +47,7 @@ impl Tail {
 	pub fn new(grace: Duration) -> Self {
 		Self {
 			ledger: Ledger::new(grace),
+			bill: None,
 			streams: 0,
 			active: 0,
 			ended: false,
@@ -62,6 +69,31 @@ impl Tail {
 		self.ledger.set_grace(grace);
 	}
 
+	/// Follow the copy `track`: wait on its max age and `budget`, and bill the ledger to its
+	/// account. Call it with no lock on `track`'s state held, as [`Self::account`] and
+	/// [`Self::expire`] must be: billing the ledger can take that lock to settle the debt.
+	pub fn follow(&mut self, track: &track::Producer, budget: Duration) {
+		self.set_grace(track.tail_grace(budget));
+		if self.bill.is_none() {
+			self.bill = Some(track.tail_bill());
+			self.rebill();
+		}
+	}
+
+	/// Bill the ledger's gaps, then pay what the pool is owed from them: fold the oldest gaps
+	/// early, giving up on them as the grace passing would, until the debt is paid or none is
+	/// left. The run they split is the subscription's own, so an in-order feed bills nothing.
+	fn rebill(&mut self) {
+		let Some(bill) = &mut self.bill else {
+			return;
+		};
+		let bytes = |ledger: &Ledger| ledger.len().saturating_sub(1) as u64 * RUN_OVERHEAD;
+		bill.set(bytes(&self.ledger));
+		while bill.debt() > 0 && self.ledger.fold_oldest().is_some() {
+			bill.set(bytes(&self.ledger));
+		}
+	}
+
 	/// Record groups as accounted for without a stream: dropped, or sent as a datagram.
 	pub fn account(&mut self, groups: Range<u64>, now: Instant) {
 		if groups.is_empty() {
@@ -79,6 +111,7 @@ impl Tail {
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
 		self.ledger.expire(now);
+		self.rebill();
 	}
 
 	/// See [`Ledger::covers`].
@@ -258,5 +291,65 @@ mod tests {
 		assert_eq!(tail.read().active, 1);
 		drop(reading);
 		assert_eq!(tail.read().active, 0);
+	}
+
+	/// A copy with no max age and a subscription with no max delay never ages a gap out, so a
+	/// publisher's alternating single-group drops bill the pool instead, and the oldest gaps
+	/// fold once it is short of room.
+	#[kio::test]
+	async fn drops_are_billed_and_fold_under_pressure() {
+		const DROPS: u64 = 1000;
+		let runtime = crate::time::sim();
+		let capacity = 64 * RUN_OVERHEAD;
+		let pool = cache::Pool::new(cache::Config::default().with_capacity(capacity));
+		let broadcast = crate::broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let track = track::Producer::new(std::sync::Arc::new(broadcast), "test", track::Info::timed());
+		let base = pool.used();
+
+		let mut tail = Tail::default();
+		tail.follow(&track, Duration::MAX);
+		assert_eq!(tail.ledger.grace(), Duration::MAX, "nothing ever ages a gap out");
+		let now = runtime.now();
+		for drop in 0..DROPS {
+			tail.account(2 * drop..2 * drop + 1, now);
+		}
+		assert!(tail.ledger.len() < DROPS as usize, "the oldest gaps folded");
+		assert!(
+			pool.used() <= base + capacity + 2 * RUN_OVERHEAD,
+			"the ledger stayed within the pool: {}",
+			pool.used()
+		);
+		assert_eq!(
+			pool.used(),
+			base + (tail.ledger.len() - 1) as u64 * RUN_OVERHEAD,
+			"what is left is billed"
+		);
+
+		drop(tail);
+		assert_eq!(pool.used(), base, "the bill went with the tail");
+	}
+
+	/// Without pressure nothing folds early: the pool bills the gaps and keeps them.
+	#[kio::test]
+	async fn drops_are_kept_while_the_pool_has_room() {
+		let runtime = crate::time::sim();
+		let pool = cache::Pool::unbounded();
+		let broadcast = crate::broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let track = track::Producer::new(std::sync::Arc::new(broadcast), "test", track::Info::timed());
+		let base = pool.used();
+
+		let mut tail = Tail::default();
+		tail.follow(&track, Duration::MAX);
+		for drop in 0..100 {
+			tail.account(2 * drop..2 * drop + 1, runtime.now());
+		}
+		assert_eq!(tail.ledger.len(), 100);
+		assert_eq!(pool.used(), base + 99 * RUN_OVERHEAD);
 	}
 }
