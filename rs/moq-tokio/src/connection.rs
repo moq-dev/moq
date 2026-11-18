@@ -666,6 +666,9 @@ impl Shared {
 	fn end(&self, err: Option<Error>) {
 		// No session will present the tokens again, so they end with the loop.
 		let aborted = self.closed.lock().unwrap().clone();
+		// A stop the caller asked for is no failure, even when the loop saw the session
+		// it closed end first and gave up with that, before its task was aborted.
+		let err = err.filter(|_| aborted.is_none());
 		let auth_err = match (aborted, &err) {
 			(Some(err), _) => err,
 			(None, Some(Error::MoqNet(err))) => err.clone(),
@@ -2001,6 +2004,20 @@ mod tests {
 		let (woken, _waiter) = Woken::watch(&monitor);
 		drop(shared);
 		assert!(matches!(woken.phases()[..], [Phase::Closed { .. }]));
+	}
+
+	/// The loop can see the session an abort closed end before its task is aborted, and
+	/// give up with that error: the abort is still a deliberate stop, so `closed` reports `Ok`.
+	#[test]
+	fn a_loop_ending_on_an_aborted_session_is_still_a_clean_stop() {
+		let shared = shared();
+		let state = shared.state.consume();
+		*shared.closed.lock().unwrap() = Some(moq_net::Error::App(9));
+		shared.end(Some(Error::MoqNet(moq_net::Error::Cancel)));
+		let Lifecycle::Closed(failure) = &state.read().lifecycle else {
+			panic!("the loop ended")
+		};
+		assert!(failure.is_none(), "{failure:?}");
 	}
 
 	#[tokio::test]
