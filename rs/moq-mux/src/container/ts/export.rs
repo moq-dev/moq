@@ -1642,9 +1642,10 @@ where
 	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
 	/// the delay, where a brief network stall only drops what it made late. Every track is
 	/// subscribed with the whole delay as its min and max, so a relay resets a group only once it
-	/// is that old. The export itself skips a stalled group once it falls half the delay behind
-	/// the newest content (see [`Consumer`](crate::container::Consumer)), so the group after it
-	/// still arrives with the other half to spare.
+	/// is that old. The export skips a stalled group once it falls the whole delay behind the
+	/// newest content (see [`Consumer`](crate::container::Consumer)), so a stall shorter than the
+	/// delay loses nothing, while a group whose tail never arrives makes the start of the next one
+	/// late.
 	///
 	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
 	/// as does video whose HRD declares a buffer delay past the delay.
@@ -3941,9 +3942,8 @@ where
 		Ok(())
 	}
 
-	/// Half the delay: how far a stalled group may fall behind the newest content before its
-	/// source skips it ([`skipping`]), how long a PES of packed frames may span, and how far a
-	/// padded output may fall behind before it sheds.
+	/// Half the delay: how long a PES of packed frames may span, and how far a padded output may
+	/// fall behind before it sheds.
 	fn budget(&self) -> Duration {
 		self.program.delay / 2
 	}
@@ -4552,12 +4552,13 @@ pub(super) fn subscribed(delay: Duration) -> moq_net::track::Delay {
 	moq_net::track::Delay::default().with_min(delay).with_max(delay)
 }
 
-/// Skip a stalled group once the group after it runs half of `delay` past it, and wait half of
-/// it for a missing one, so the group after still arrives with the other half to spare: the
-/// reader delivers in order, so a group waited on for the whole delay would make the start of
-/// the next one late too.
+/// Skip a stalled group once the group after it runs `delay` past it, and wait that long for a
+/// missing one, so a stall shorter than the delay loses nothing. The reader delivers in order, so a
+/// group whose tail never arrives holds the next one for the whole delay, and the next group's
+/// first frames go out late. No min, unlike [`subscribed`], so a live start begins at the newest
+/// group rather than reach back the delay.
 pub(super) fn skipping(source: ExportSource, delay: Duration) -> ExportSource {
-	source.skipping_at(moq_net::track::Delay::default().with_min(None).with_max(delay / 2))
+	source.skipping_at(moq_net::track::Delay::default().with_min(None).with_max(delay))
 }
 
 /// Start a media track's source at the live edge, the newest group, so the export does not

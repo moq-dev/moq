@@ -161,8 +161,7 @@ pub(crate) struct ExportSource {
 	state: SourceState,
 	/// Where the subscription starts behind the live edge, and how late a group may fall.
 	delay: moq_net::track::Delay,
-	/// A narrower delay the consumer skips at, if the reader's own deadlines leave less room
-	/// than the subscription states.
+	/// The delay the consumer skips and starts at, if not the one the subscription states.
 	skip: Option<moq_net::track::Delay>,
 	transform: Option<VideoTransform>,
 	/// Resolved codec configuration record (avcC / hvcC / AudioSpecificConfig /
@@ -400,8 +399,9 @@ impl ExportSource {
 		self
 	}
 
-	/// Skip at `delay` instead of the subscription's own, which still tells the publisher how
-	/// long to keep a group: for a reader whose deadlines leave less room than it waits for.
+	/// Skip and start at `delay` instead of the subscription's own, which still tells the
+	/// publisher how long to keep a group: for a reader that asks the publisher for more than
+	/// it plays out itself.
 	pub(crate) fn skipping_at(mut self, delay: moq_net::track::Delay) -> Self {
 		self.skip = Some(delay);
 		self
