@@ -4,12 +4,14 @@
 # Removes the relay's withdrawal of a publisher it lost. Each announced route
 # holds an origin handle whose drop retracts it; wrapping that in `ManuallyDrop`
 # means a route outlives the session that announced it, so a crashed publisher's
-# name stays announced with nothing behind it. Explicit withdrawals still consume
-# the handle, so only the implicit retraction on session loss is removed.
+# name stays announced with nothing behind it, and a copy the route node lets go
+# of without its publisher ending it is leaked rather than retired. Explicit
+# withdrawals still consume the handle, so only the implicit retraction on
+# session loss is removed.
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -11273,7 +11273,7 @@ impl Announced {
+@@ -10418,7 +10418,7 @@ impl Announced {
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -18,7 +20,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -11359,7 +11359,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
+@@ -10504,7 +10504,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
  		let validity = if subscriber.version.has_instance() {
  			Default::default()
  		} else {
@@ -27,7 +29,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
  		// The handler exists before the requester sees the source, so a track it
-@@ -11387,7 +11387,8 @@ struct AnnouncedRoute<K = Path> {
+@@ -10532,7 +10532,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
@@ -37,7 +39,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Queues this route on its prefix's ready set when its request queue wakes.
-@@ -11405,7 +11406,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
+@@ -10550,7 +10551,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
  	) -> Self {
  		Self {
  			route,
@@ -49,7 +51,18 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs
-@@ -291,7 +291,7 @@ impl Routed {
+@@ -146,8 +146,8 @@ impl node::Orphan for Left {
+ fn release(claim: crate::origin::Claim, gone: node::Gone) {
+ 	match gone {
+ 		// Dropped, it goes offline, while another copy serves.
+-		node::Gone::Moved => drop(claim),
+-		node::Gone::Lost => claim.retire(false),
++		// MUTATION: a copy let go of without its publisher ending it stays announced.
++		node::Gone::Moved | node::Gone::Lost => std::mem::forget(claim),
+ 		node::Gone::Ended => claim.retire(true),
+ 	}
+ }
+@@ -418,7 +417,7 @@ impl Routed {
  		for ((origin, path, instance), mut served) in self.served.drain() {
  			let unavailable = served.route.route.clone().with_available(false);
  			served.route.update(unavailable);
@@ -58,12 +71,12 @@ diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subs
  			self.stream.orphan(origin, &(path, instance), Box::new(left));
  		}
  	}
-@@ -641,7 +641,7 @@ impl Routed {
- 				if let Some(served) = self.served.remove(&(origin, path, instance))
- 					&& ended
- 				{
--					served.route.dynamic.withdrawn();
-+					std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
+@@ -777,7 +776,7 @@ impl Routed {
+ 				gone,
+ 			} => {
+ 				if let Some(served) = self.served.remove(&(origin, path, instance)) {
+-					release(served.route.dynamic, gone);
++					release(std::mem::ManuallyDrop::into_inner(served.route.dynamic), gone);
  				}
  			}
  		}

@@ -392,7 +392,10 @@ async fn cross_node_close_retracts_once(version: &str) {
 /// not absorb, under an instance the quarantine does not recognize.
 #[kio::test]
 async fn cross_node_close_reannounces_on_lite06() {
-	for config in [origin::Config::default(), origin::Config::default().with_update_hold(Duration::ZERO)] {
+	for config in [
+		origin::Config::default(),
+		origin::Config::default().with_update_hold(Duration::ZERO),
+	] {
 		let hold = config.update_hold();
 		let mut cluster = Cluster::new("moq-lite-06", STALE_PATHS, config, 7, 1).await;
 		let (broadcast, _) = cluster.publish("room/a").await;

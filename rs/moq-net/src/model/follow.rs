@@ -745,7 +745,8 @@ mod tests {
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
 			drop(dynamic);
-			kio::clock::sleep(Duration::from_secs(1)).await;
+			// A gap, well inside the second `available` waits.
+			kio::clock::sleep(Duration::from_millis(600)).await;
 			origin.route("live", RouteOptions::default()).unwrap()
 		});
 		none(&mut announced).await;

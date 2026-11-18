@@ -547,7 +547,9 @@ async fn a_primary_that_fails_and_returns_takes_every_relay_back() {
 			);
 		}
 		assert!(
-			seen[0].iter().all(|seen| !withdrawn(seen) && (seen.available || seen.at.is_zero())),
+			seen[0]
+				.iter()
+				.all(|seen| !withdrawn(seen) && (seen.available || seen.at.is_zero())),
 			"A after {back:?}: {:?}",
 			seen[0]
 		);
