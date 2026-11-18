@@ -1,3 +1,4 @@
+import { TransportCode, TransportError } from "./error.ts";
 import * as Stream from "./stream.ts";
 import { VarInt } from "./varint.ts";
 
@@ -515,7 +516,20 @@ function encodeTransportParams(params: TransportParams): Uint8Array<ArrayBuffer>
 	return buffer;
 }
 
+/** Any failure inside the parameters, a bad varint included, is a TRANSPORT_PARAMETER_ERROR,
+ *  as rs/qmux closes with. */
 function decodeTransportParams(buffer: Uint8Array): TransportParams {
+	try {
+		return parseTransportParams(buffer);
+	} catch (err) {
+		throw new TransportError(
+			TransportCode.TRANSPORT_PARAMETER_ERROR,
+			err instanceof Error ? err.message : String(err),
+		);
+	}
+}
+
+function parseTransportParams(buffer: Uint8Array): TransportParams {
 	const params = { ...DEFAULT_TRANSPORT_PARAMS };
 	const seen = new Set<bigint>();
 	let v: VarInt;
@@ -528,7 +542,7 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 		const len = Number(v.value);
 
 		if (buffer.byteLength < len) {
-			throw new Error("transport parameter truncated");
+			throw new TransportError(TransportCode.TRANSPORT_PARAMETER_ERROR, "transport parameter truncated");
 		}
 
 		let paramData: Uint8Array;
@@ -538,7 +552,10 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 		// DuplicateParam). Unknown IDs fall through and may repeat.
 		if (RECOGNIZED_PARAM_IDS.has(id)) {
 			if (seen.has(id)) {
-				throw new Error(`duplicate transport parameter 0x${id.toString(16)}`);
+				throw new TransportError(
+					TransportCode.TRANSPORT_PARAMETER_ERROR,
+					`duplicate transport parameter 0x${id.toString(16)}`,
+				);
 			}
 			seen.add(id);
 		}
@@ -547,14 +564,20 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 		// (TCP, Unix sockets). This implementation only runs over WebSocket, which
 		// negotiates via its subprotocol, so the parameter must never appear.
 		if (id === APPLICATION_PROTOCOLS_ID) {
-			throw new Error("unexpected application_protocols parameter over WebSocket");
+			throw new TransportError(
+				TransportCode.TRANSPORT_PARAMETER_ERROR,
+				"unexpected application_protocols parameter over WebSocket",
+			);
 		}
 
 		// reset_stream_at: presence-only. A non-empty value is a
 		// TRANSPORT_PARAMETER_ERROR per the extension spec.
 		if (id === RESET_STREAM_AT_PARAM_ID) {
 			if (paramData.byteLength !== 0) {
-				throw new Error("reset_stream_at transport parameter must be empty");
+				throw new TransportError(
+					TransportCode.TRANSPORT_PARAMETER_ERROR,
+					"reset_stream_at transport parameter must be empty",
+				);
 			}
 			params.resetStreamAt = true;
 			continue;
@@ -563,7 +586,10 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 		// QMux permits only a subset of the transport parameters defined by
 		// QUIC v1. Unassigned IDs are extensions and remain ignorable.
 		if (id === 0x00n || id === 0x02n || id === 0x03n || (id >= 0x0an && id <= 0x10n)) {
-			throw new Error(`forbidden QUIC v1 transport parameter 0x${id.toString(16)}`);
+			throw new TransportError(
+				TransportCode.TRANSPORT_PARAMETER_ERROR,
+				`forbidden QUIC v1 transport parameter 0x${id.toString(16)}`,
+			);
 		}
 
 		if (!RECOGNIZED_PARAM_IDS.has(id)) {
@@ -572,7 +598,10 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 
 		const [paramValueVarInt, remaining] = VarInt.decode(paramData);
 		if (remaining.byteLength !== 0) {
-			throw new Error(`transport parameter 0x${id.toString(16)} has trailing bytes`);
+			throw new TransportError(
+				TransportCode.TRANSPORT_PARAMETER_ERROR,
+				`transport parameter 0x${id.toString(16)} has trailing bytes`,
+			);
 		}
 		const paramValue = paramValueVarInt.value;
 
@@ -605,7 +634,10 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 				params.maxRecordSize = paramValue;
 				break;
 			default:
-				throw new Error(`unhandled recognized transport parameter 0x${id.toString(16)}`);
+				throw new TransportError(
+					TransportCode.TRANSPORT_PARAMETER_ERROR,
+					`unhandled recognized transport parameter 0x${id.toString(16)}`,
+				);
 		}
 	}
 
@@ -614,7 +646,7 @@ function decodeTransportParams(buffer: Uint8Array): TransportParams {
 
 export function decode(buffer: Uint8Array, _version: WireFormat): Any | null {
 	if (buffer.length === 0) {
-		throw new Error("Invalid frame: empty buffer");
+		throw new TransportError(TransportCode.FRAME_ENCODING_ERROR, "Invalid frame: empty buffer");
 	}
 
 	return decodeQMux(buffer);
@@ -631,7 +663,10 @@ export function decode(buffer: Uint8Array, _version: WireFormat): Any | null {
  */
 function take(buffer: Uint8Array, len: number): [Uint8Array, Uint8Array] {
 	if (buffer.byteLength < len) {
-		throw new Error(`frame truncated: need ${len} bytes, have ${buffer.byteLength}`);
+		throw new TransportError(
+			TransportCode.FRAME_ENCODING_ERROR,
+			`frame truncated: need ${len} bytes, have ${buffer.byteLength}`,
+		);
 	}
 	return [buffer.subarray(0, len), buffer.subarray(len)];
 }
@@ -730,7 +765,10 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 		[v, buffer] = VarInt.decode(buffer);
 		const reliableSize = v.value;
 		if (reliableSize > finalSize) {
-			throw new Error("RESET_STREAM_AT reliable_size exceeds final_size");
+			throw new TransportError(
+				TransportCode.FRAME_ENCODING_ERROR,
+				"RESET_STREAM_AT reliable_size exceeds final_size",
+			);
 		}
 		return [{ type: "reset_stream", id, code, finalSize, reliableSize }, buffer];
 	}
@@ -852,5 +890,8 @@ function decodeQMuxOne(buffer: Uint8Array): [Any | null, Uint8Array] | null {
 		return [{ type: "datagram", data: own(data), lengthPrefixed: true }, buffer];
 	}
 
-	throw new Error(`Invalid QMux frame type: 0x${frameType.toString(16)}`);
+	throw new TransportError(
+		TransportCode.FRAME_ENCODING_ERROR,
+		`Invalid QMux frame type: 0x${frameType.toString(16)}`,
+	);
 }

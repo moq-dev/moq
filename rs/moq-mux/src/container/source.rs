@@ -177,6 +177,8 @@ pub(crate) struct ExportSource {
 	markers: u64,
 	/// Whether a frame of the group being read went out and the group has not ended since.
 	open: bool,
+	/// Whether any frame was read, including one the transform absorbed or the splice dropped.
+	read: bool,
 	cuts: u64,
 	// A stopped encoder may still emit final packets in this group on the old timeline.
 	ends: Option<(u64, u64)>,
@@ -329,6 +331,7 @@ impl ExportSource {
 			skips: 0,
 			markers: 0,
 			open: false,
+			read: false,
 			cuts: 0,
 			ends: None,
 			received: source.received(name),
@@ -423,6 +426,11 @@ impl ExportSource {
 	/// Gaps and declared ends this source has advanced past.
 	pub fn skips(&self) -> u64 {
 		self.skips
+	}
+
+	/// Whether any frame was read, even one that never came out as an [`Event::Frame`].
+	pub(crate) fn read(&self) -> bool {
+		self.read
 	}
 
 	/// The resolved codec-config record, if available.
@@ -670,6 +678,7 @@ impl ExportSource {
 							self.finish_ends();
 						}
 						self.open = true;
+						self.read = true;
 						self.received.frame(frame.timestamp, frame.payload.len());
 						(frame, arrived)
 					}

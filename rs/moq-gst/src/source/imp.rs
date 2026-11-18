@@ -1712,9 +1712,12 @@ impl Reader {
 		// ending a broadcast produces for a name nobody served). A publisher that answers neither
 		// leaves this waiting, so racing `cancel` keeps such a reader reapable, and holding the
 		// wait here keeps it off every other rendition.
-		// The catalog warmup reaches that much further back for a decoder to start clean.
-		let playout =
-			moq_mux::container::Playout::new(moq_net::track::Delay::default().with_max(max_delay), shape.warmup);
+		// The catalog warmup reaches that much further back for a decoder to start clean. No min:
+		// the pipeline's own latency is unknown here, so a missing group is waited for the max delay.
+		let playout = moq_mux::container::Playout::new(
+			moq_net::track::Delay::default().with_min(None).with_max(max_delay),
+			shape.warmup,
+		);
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return Exit::Done,
 			subscriber = async {

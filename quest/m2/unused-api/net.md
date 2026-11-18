@@ -15,13 +15,12 @@ without a caller.
 
 Findings (2026-11-17, from reading the code when this quest was claimed as
 `[S]`): moving the reader onto `Gap` is not an `Ordered` swap, so the quest
-is `[L]` and waits for the hole wait to settle.
+is `[L]`.
 
 - `moq-mux`'s `container::Consumer` reads in arrival order
   (`poll_recv_group`) into its own `pending` queue and judges a hole at
   `current` while the groups past it are already buffered: the wall-time wait
-  since a later group arrived (`hole_wait`, which
-  [the hole wait quest](/quest/m2/delay-hole-wait.md) turns into
+  since a later group arrived (`hole_wait`, now
   `Delay::min`), media-timestamp `aged` against the newest buffered content,
   the playout clock `passed`, a full max buffer, and container continuity
   (`poll_continues`, 1 ms contiguity).
@@ -74,10 +73,6 @@ Steps:
 
 Public API: breaking, removals only unless step 1 adds `Ordered` inputs.
 Wire: none.
-
-## Required
-
-- [A hole is waited for by the subscription's delay](/quest/m2/delay-hole-wait.md) - the one hole wait the reader judges holes by, which this designs `Ordered`'s policy around
 
 ## Related
 

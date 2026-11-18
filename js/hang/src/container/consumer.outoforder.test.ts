@@ -86,7 +86,7 @@ test("the head of the window arriving after the live edge is delivered first", a
 	subscriber.start = async () => 10n;
 	const consumer = new Consumer(subscriber, {
 		format: new LegacyFormat("data"),
-		delay: { max: Duration.millis(5000) },
+		delay: { min: null, max: Duration.millis(5000) },
 	});
 
 	// The live edge lands first, and delivery waits for the floor rather than starting there.

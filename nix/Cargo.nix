@@ -18996,15 +18996,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "data-encoding";
-            packageId = "data-encoding";
-          }
-          {
-            name = "moq-net";
-            packageId = "moq-net";
-            optional = true;
-          }
-          {
             name = "rind";
             packageId = "rind";
             optional = true;
@@ -19023,35 +19014,11 @@ rec {
             features = [ "std" ];
           }
           {
-            name = "serde";
-            packageId = "serde";
-            optional = true;
-            features = [ "derive" ];
-          }
-          {
             name = "thiserror";
             packageId = "thiserror 2.0.21";
           }
-          {
-            name = "zeroize";
-            packageId = "zeroize";
-            optional = true;
-            features = [ "derive" ];
-          }
         ];
         devDependencies = [
-          {
-            name = "hex";
-            packageId = "hex";
-          }
-          {
-            name = "serde_json";
-            packageId = "serde_json";
-          }
-          {
-            name = "tempfile";
-            packageId = "tempfile";
-          }
           {
             name = "workspace-hack";
             packageId = "workspace-hack";
@@ -19059,25 +19026,15 @@ rec {
         ];
         features = {
           "cpu" = [ "dep:rind" ];
-          "default" = [ "endpoint" ];
-          "endpoint" = [
-            "dep:moq-net"
-            "dep:rind"
-            "dep:zeroize"
-          ];
           "provider" = [
             "cpu"
             "dep:rind-rustls"
             "dep:rustls"
           ];
-          "serde" = [ "dep:serde" ];
         };
         resolvedDefaultFeatures = [
           "cpu"
-          "default"
-          "endpoint"
           "provider"
-          "serde"
         ];
       };
       "moq-e2ee" = rec {
@@ -20174,11 +20131,6 @@ rec {
             name = "url";
             packageId = "url";
           }
-          {
-            name = "zeroize";
-            packageId = "zeroize";
-            features = [ "derive" ];
-          }
         ];
         devDependencies = [
           {
@@ -20813,12 +20765,6 @@ rec {
               "async"
               "client"
             ];
-          }
-          {
-            name = "moq-crypto";
-            packageId = "moq-crypto";
-            usesDefaultFeatures = false;
-            features = [ "endpoint" ];
           }
           {
             name = "moq-net";
@@ -59501,37 +59447,6 @@ rec {
             name = "getrandom";
             packageId = "getrandom 0.4.3";
             usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
             features = [
               "std"
               "sys_rng"
@@ -60984,37 +60899,6 @@ rec {
             name = "getrandom";
             packageId = "getrandom 0.4.3";
             usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-apple-darwin");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "aarch64-unknown-linux-gnu");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-pc-windows-msvc");
-            features = [
-              "std"
-              "sys_rng"
-            ];
-          }
-          {
-            name = "getrandom";
-            packageId = "getrandom 0.4.3";
-            usesDefaultFeatures = false;
-            target = { target, features }: (target.name == "x86_64-unknown-linux-gnu");
             features = [
               "std"
               "sys_rng"

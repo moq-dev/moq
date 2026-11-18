@@ -252,11 +252,19 @@ pub struct Jwk {
 	pub material: KeyMaterial,
 
 	/// The key ID, useful for rotating keys.
-	#[serde(skip_serializing_if = "Option::is_none")]
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		deserialize_with = "crate::wire::present"
+	)]
 	pub kid: Option<crate::KeyId>,
 
 	/// Optional authorization limits for tokens signed by this key.
-	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[serde(
+		default,
+		skip_serializing_if = "Option::is_none",
+		deserialize_with = "crate::wire::present"
+	)]
 	pub scope: Option<crate::Scope>,
 }
 
@@ -736,10 +744,9 @@ fn deserialize_base64url_optional<'de, D>(deserializer: D) -> Result<Option<Vec<
 where
 	D: Deserializer<'de>,
 {
-	let s: Option<String> = Option::deserialize(deserializer)?;
-	s.map(|s| decode_base64url(&s))
-		.transpose()
-		.map_err(serde::de::Error::custom)
+	// A present field: `null` is refused, as `@moq/auth` does, rather than read as absent.
+	let s = String::deserialize(deserializer)?;
+	decode_base64url(&s).map(Some).map_err(serde::de::Error::custom)
 }
 
 /// A key field: unpadded base64url, or padded for backwards compatibility. Empty is refused,

@@ -40,19 +40,51 @@ settings** off. A keyframe interval shorter than 2 s stays. Both tune x264,
 NVENC, Quick Sync, AMF, VA-API, and VideoToolbox, and leave any other encoder's
 settings alone.
 
-The video bitrate follows the connection's bandwidth estimate, with the
-configured bitrate as the ceiling: it drops as soon as the uplink narrows and
-climbs back over a few seconds. Audio holds its configured bitrate, and video
-gets what is left. Only encoders that can retune while live, with CBR, VBR, or
-ABR rate control, follow; CQP and CRF keep their setting. The dock's Stats tab
-shows the current video target beside the configured rate. An encoder shared
-with a recording follows too, so record with a separate encoder to keep the
-recording at the full rate.
+Every video encoder the MoQ output starts has a cap, and the catalog's `bitrate`
+is that cap, never the measured rate, so viewers price the rendition by what it
+can send. The cap is the encoder's bitrate setting (NVENC's `max_bitrate` when its
+VBR or constant quality sets one). The plugin writes it into the encoder itself, so
+it holds whatever else the settings say:
+
+- x264 keeps CBR and otherwise runs constant quality (VBR) under a VBV whose max
+  rate and buffer are the cap. A CRF of 0 and a buffer size of your own are
+  replaced. Your x264 options are never rewritten, so `vbv-maxrate`,
+  `vbv-bufsize`, `bitrate`, `qp`, or a lossless `crf=0` in them can override the
+  cap: the log warns, and the dock's Quality and Performance profiles hold it
+  without them.
+- NVENC keeps CBR and VBR, and otherwise runs constant quality (CQVBR), with
+  `max_bitrate` at the cap and VBR's average under it. Its `opts` are never
+  rewritten either, so `maxBitRate`, `averageBitRate`, or `vbvBufferSize` in them
+  can override the cap, and the log warns.
+- Every other encoder runs CBR at the cap: Quick Sync's ICQ and AMF's QVBR have
+  no hard peak, and VA-API's and VideoToolbox's quality modes have not been
+  checked.
+
+The log names each setting of yours it replaced. An encoder shared with a
+recording takes the cap too, unless the recording started first: a running
+encoder cannot switch rate control, so its settings stay as they are and the
+catalog advertises the cap it runs with. If it runs without one (constant
+quality such as CQP or CRF, lossless, or x264 with a buffer size of your own set
+to 0, which turns its VBV off), the output refuses to start. Stop the
+recording first, or give it its own encoder.
+
+The dock's Custom settings profiles start from
+constant quality under the cap on x264 and NVENC: Quality caps at 8 Mbps and
+Performance at 2.5 Mbps, which a complex scene reaches and a calm one stays well
+under. **Use OBS Output settings** starts from the rate control OBS configured.
+
+The video bitrate follows the connection's bandwidth estimate, with the cap as
+the ceiling: it drops as soon as the uplink narrows and climbs back over a few
+seconds. Audio holds its configured bitrate, and video gets what is left. Only
+encoders that can retune while live follow. The dock's Stats tab shows the
+current video target beside the configured rate. An encoder shared with a
+recording follows too, so record with a separate encoder to keep the recording
+at the full rate.
 
 ## Simulcast renditions
 
 Every video encoder on OBS's stream output is its own rendition of the
-broadcast, with its size, codec, and (under CBR) configured bitrate in the
+broadcast, with its size, codec, and cap in the
 catalog, so `<moq-watch>` picks between them. OBS adds encoders from its WHIP
 simulcast layer count, `Stream1` / `WHIPSimulcastTotalLayers` in the profile,
 whatever the service: `N` layers add `N - 1` copies of the stream encoder,

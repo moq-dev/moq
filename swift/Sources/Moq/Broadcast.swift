@@ -18,7 +18,8 @@ public final class BroadcastConsumer: Sendable {
     /// or container parsing. `subscription` tunes delivery priority, group range, and
     /// staleness; omit for defaults.
     public func subscribeTrack(name: String, subscription: Subscription? = nil) async throws -> TrackConsumer {
-        TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
+        try checkSubscription(subscription)
+        return TrackConsumer(try await ffi.subscribeTrack(name: name, subscription: subscription))
     }
 
     /// Fetch one complete group by track name and group start without holding
@@ -28,7 +29,8 @@ public final class BroadcastConsumer: Sendable {
         start: UInt64,
         options: FetchGroupOptions? = nil
     ) async throws -> GroupConsumer {
-        GroupConsumer(try await ffi.fetchGroup(name: name, start: start, options: options))
+        try checkFetch(options)
+        return GroupConsumer(try await ffi.fetchGroup(name: name, start: start, options: options))
     }
 
     /// Resolve a catalog rendition to the broadcast serving its track.
@@ -45,7 +47,8 @@ public final class BroadcastConsumer: Sendable {
     /// Throws if this broadcast came from a local producer rather than an origin, since a
     /// standalone broadcast has no sibling to name.
     public func resolve(_ rendition: Media.Rendition) async throws -> BroadcastConsumer {
-        BroadcastConsumer(try await ffi.resolve(rendition: rendition))
+        try checkRendition(rendition)
+        return BroadcastConsumer(try await ffi.resolve(rendition: rendition))
     }
 
 }
@@ -82,7 +85,8 @@ public final class BroadcastProducer: Sendable {
     /// Open a track for arbitrary byte payloads, with no codec or container.
     /// `info` sets track properties (priority, cache, timescale); omit for defaults.
     public func publishTrack(name: String, info: TrackInfo? = nil) throws -> TrackProducer {
-        TrackProducer(try ffi.publishTrack(name: name, info: info))
+        try checkTrackInfo(info)
+        return TrackProducer(try ffi.publishTrack(name: name, info: info))
     }
 
     /// End the broadcast for good: retract it and serve no new tracks.

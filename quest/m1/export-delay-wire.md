@@ -64,4 +64,3 @@ Caused by, for the fix PR's `## Caused by`:
 ## Related
 
 - [Export order](/quest/m3/export-order.md) - the drain after an outage, the rest of the loss in #8559
-- [A hole is waited for by the subscription's delay](/quest/m2/delay-hole-wait.md) - makes the consumer's hole wait follow `Delay::min`, which this sets

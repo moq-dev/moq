@@ -52,7 +52,7 @@ vars == <<trk, front, rd, reading>>
 
 Landed(t) == {trk[t].arr[i] : i \in 1 .. Len(trk[t].arr)}
 Live(t) == trk[t].made /\ ~trk[t].failed
-\* `max_key`: the newest group the track holds.
+\* `track::Consumer::latest_key` (`TrackState::max_key`): the newest group the track holds.
 Latest(t) == IF Landed(t) = {} THEN None ELSE Max(Landed(t))
 
 \* `TrackState::is_complete`: the end is declared and the tail holds every group
@@ -85,7 +85,8 @@ NewCopy(id, t, gen, floor, rep, until) ==
      until |-> until, done |-> "no", since |-> rep, idx |-> 1,
      took |-> {}, owed |-> {}]
 
-\* The wire asks for [floor, until] instead (`Copy::update`/`send`): the cursor
+\* The wire asks for [floor, until] instead (`Copy::bound`, or `Copy::send` on a
+\* reuse or a widening; neither reopens a drained copy): the cursor
 \* passes what its window leaves out, holding nothing, and a widening owes it
 \* the cached groups the window newly covers.
 Window(c, floor, until) ==
@@ -393,8 +394,8 @@ Finish(t) ==
 \* The front serves another live route (`Producer::splice`), and every reader
 \* follows at once (`serve_from`). Leaving a failed route is not counted. A
 \* copy the front serves after a clean end (`Action::Reroute`) is for group
-\* reads and fetches, not this reader, which stays on the copy the track ended
-\* on (`Route::finished`), so it is no step here.
+\* reads and fetches, not this reader: `Reader::sync` stays on the generation
+\* and copy the track ended on (`Phase::Finished`), so it is no step here.
 Serve(t) ==
     /\ front.end = "open"
     /\ Live(t) /\ t # front.cur

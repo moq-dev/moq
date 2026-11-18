@@ -877,19 +877,13 @@ export class Publisher {
 		}
 	}
 
-	/**
-	 * The broadcast a request names, from this session's origin. A request naming an origin node
-	 * other than this one is not ours to serve: a browser forwards nothing.
-	 */
+	/** The broadcast a request names, from this session's origin. */
 	async #resolve(
-		msg: { broadcast: Path.Valid; instance?: Instance.Valid; node: bigint },
+		msg: { broadcast: Path.Valid; instance?: Instance.Valid },
 		signal: AbortSignal,
 	): Promise<broadcast.Consumer | undefined> {
 		const origin = this.#publish && wireOf(this.#publish);
 		if (!origin) return undefined;
-		if (msg.node !== 0n && msg.node !== origin.own.node) {
-			throw new StreamError(StreamCode.Unroutable, { message: `origin node ${msg.node} is not this one` });
-		}
 		return origin.local(msg.broadcast, msg.instance) ?? (await origin.demand(msg.broadcast, msg.instance, signal));
 	}
 
@@ -1865,6 +1859,8 @@ export class Publisher {
 				});
 			}
 		} finally {
+			// A group held for the upstream START has no one left to read it.
+			first?.group.close();
 			if (!finished) unsubscribe();
 			// A lite-07 subscriber FINs once it read the finished track's tail, or once it wants
 			// nothing more, even while a reply is still being written. Either way the groups still

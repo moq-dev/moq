@@ -180,33 +180,49 @@ impl Shared {
 		crate::auth::Gate::new(self.auth.clone(), broadcast.clone(), crate::auth::Direction::Publish)
 	}
 
-	/// The routes a request resolves through when it names the origin node `node` and the
-	/// route it was offered covering the first `depth` segments of `broadcast`: this node's
-	/// own when it publishes the broadcast, else the route this node follows to `node`
-	/// covering that prefix. `None` when that route is gone or would lead back to the
-	/// peer. A request naming no node resolves through any route.
-	fn node_filter(
+	/// The routes a request for `instance` at `broadcast` resolves through when it names
+	/// the node `node` that claims it: this node's own when it serves the claim itself,
+	/// else the claim it follows to `node`. `None` when nothing reaches that node or the
+	/// way would lead back to the peer. A request naming no node resolves through any
+	/// route. Waits while the session the request would leave on has yet to serve the claim,
+	/// whether or not the request names a node.
+	fn poll_node_filter(
 		&self,
 		origin: origin::Consumer,
 		broadcast: &crate::Path,
-		(node, depth): (u64, u64),
-	) -> Option<origin::Consumer> {
-		if node == 0 {
-			return Some(origin);
-		}
-		let prefix = origin.resolve(&broadcast.head(usize::try_from(depth).ok()?)?)?;
-		let claim = origin.resolve(broadcast)?;
-		let filter = match origin
-			.route_node()
-			.forward(self.peer_setup.tag(), node, &claim, &prefix)?
-		{
-			crate::route::node::Via::Here => origin::NodeFilter::Own,
-			crate::route::node::Via::Route { prefix } => origin::NodeFilter::Route {
-				node,
-				depth: prefix.parts().count() as u64,
-			},
+		instance: Option<&crate::Instance>,
+		node: Option<crate::route::NodeId>,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<origin::Consumer>> {
+		let claim = origin.resolve(broadcast).zip(instance.cloned());
+		let Some(node) = node else {
+			// The node shows a peer's claim to the sessions it reaches before the session
+			// serving it lands its route in the origin, each on its own task. A peer that
+			// asks the moment it hears must find that route, not an origin without one.
+			if let Some(claim) = claim {
+				let _ = ready!(
+					origin
+						.route_node()
+						.poll_forward(self.peer_setup.tag(), None, &claim, waiter)
+				);
+			}
+			return Poll::Ready(Some(origin));
 		};
-		Some(origin.with_node(filter))
+		// A node is named for the claim of one instance.
+		let Some(claim) = claim else {
+			return Poll::Ready(None);
+		};
+		let via = ready!(
+			origin
+				.route_node()
+				.poll_forward(self.peer_setup.tag(), Some(node), &claim, waiter)
+		);
+		Poll::Ready(via.map(|via| {
+			origin.with_node(match via {
+				crate::route::node::Via::Here => origin::NodeFilter::Own,
+				crate::route::node::Via::Route { node } => origin::NodeFilter::Route { node },
+			})
+		}))
 	}
 
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
@@ -293,12 +309,14 @@ impl Publisher {
 }
 
 impl Publisher {
-	/// What the session's route layer answers the peer from (lite-07).
-	pub fn route_publish(&self) -> super::subscriber::route_stream::Publish {
+	/// What the session's route layer answers the peer from (lite-07). `routing` is
+	/// whether this side's SETUP declared a Node ID.
+	pub fn route_publish(&self, routing: bool) -> super::subscriber::route_stream::Publish {
 		super::subscriber::route_stream::Publish {
 			origin: self.shared.origin.clone(),
 			auth: self.shared.auth.clone(),
 			withdrawal: self.shared.withdrawal.clone(),
+			routing,
 		}
 	}
 
@@ -1110,24 +1128,6 @@ struct Advertised {
 	/// wire cannot carry (the route's source, servability), which must not restart.
 	hops: Hops,
 	cost: crate::origin::Cost,
-	/// The instance and epoch last put on the wire (lite-07); see [`served`].
-	served: Served,
-}
-
-/// The instance and epoch a route serves, as an advertisement carries them.
-type Served = (Option<crate::Instance>, u64);
-
-/// What `route` serves; see [`Served`].
-fn served(route: &crate::origin::RouteInfo) -> Served {
-	(route.instance.clone(), route.epoch)
-}
-
-/// The hop chain as `version` carries it: lite-07 names a claim's route instead.
-fn chain(version: Version, hops: Hops) -> Hops {
-	match version.has_routes() {
-		true => Hops::new(),
-		false => hops,
-	}
 }
 
 enum AnnouncePhase {
@@ -1231,7 +1231,7 @@ impl AnnounceRun {
 			}
 			let absolute = origin.root().rejoin(&suffix);
 			if let Some((hops, cost)) = self.outgoing(&route, &absolute) {
-				self.advertise(stream, suffix, hops, cost, served(&route), &absolute)?;
+				self.advertise(stream, suffix, hops, cost, &absolute)?;
 			}
 		}
 		Ok(())
@@ -1245,14 +1245,9 @@ impl AnnounceRun {
 		suffix: crate::Path,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		route: Served,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
 		match self.live.get_mut(&suffix) {
-			// A newer epoch of the same instance is no new stream, but the peer must rank it.
-			Some(advertised) if self.version.has_instance() && advertised.served != route => {
-				self.restart(stream, suffix, hops, cost, route, absolute)?;
-			}
 			// The peer would decode what it already holds.
 			Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
 			// A metadata update on a live advertisement: restart it in
@@ -1261,23 +1256,15 @@ impl AnnounceRun {
 				tracing::debug!(route = %absolute, "reannounce");
 				advertised.hops = hops.clone();
 				advertised.cost = cost;
-				let hops = chain(self.version, hops);
 				match advertised.id {
-					Some(id) => stream.writer.buffer(&lite::AnnounceBroadcast::Update {
-						id,
-						hops,
-						cost,
-						above: 0,
-					})?,
+					Some(id) => stream
+						.writer
+						.buffer(&lite::AnnounceBroadcast::Update { id, hops, cost })?,
 					// lite-05: a duplicate ANNOUNCE, which assigns no id.
 					None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-						route: 0,
-						instance: None,
-						epoch: 0,
 						suffix: lite::PathRef::literal(suffix),
 						hops,
 						cost,
-						above: 0,
 					})?,
 				}
 				self.sent(stream)?;
@@ -1287,7 +1274,7 @@ impl AnnounceRun {
 			Some(_) => {}
 			None => {
 				tracing::debug!(route = %absolute, "announce");
-				self.start(stream, suffix, hops, cost, route)?;
+				self.start(stream, suffix, hops, cost)?;
 			}
 		}
 		Ok(())
@@ -1333,74 +1320,38 @@ impl AnnounceRun {
 		suffix: crate::Path,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		// Fixed while the peer holds the advertisement: a new one is a restart.
-		route: Served,
 	) -> Result<(), Error> {
 		let (id, wire) = self.encoder.start(suffix.clone());
-		let wire_hops = chain(self.version, hops.clone());
 		self.live.insert(
 			suffix,
 			Advertised {
 				id,
-				hops,
+				hops: hops.clone(),
 				cost,
-				served: route.clone(),
 			},
 		);
-		let (instance, epoch) = route;
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-			route: 0,
-			instance,
-			epoch,
 			suffix: wire,
-			hops: wire_hops,
+			hops,
 			cost,
-			above: 0,
 		})?;
 		self.sent(stream)?;
 		Ok(())
 	}
 
-	/// Replace the peer's advertisement for `suffix` with another instance or epoch:
-	/// ANNOUNCE_RESTART on lite-07, an end and a fresh start before it.
+	/// Replace the peer's advertisement for `suffix` with another instance or epoch: an
+	/// end and a fresh start, so the peer mints another instance for it.
 	fn restart(
 		&mut self,
 		stream: &mut Stream<Transport, Version>,
 		suffix: crate::Path,
 		hops: Hops,
 		cost: crate::origin::Cost,
-		route: Served,
 		absolute: &crate::Path,
 	) -> Result<(), Error> {
 		tracing::debug!(route = %absolute, "restart");
-		let id = self.live.get(&suffix).and_then(|advertised| advertised.id);
-		match id {
-			Some(id) if self.version.has_announce_restart() => {
-				self.live.insert(
-					suffix,
-					Advertised {
-						id: Some(id),
-						hops,
-						cost,
-						served: route.clone(),
-					},
-				);
-				let (instance, epoch) = route;
-				stream.writer.buffer(&lite::AnnounceBroadcast::Restart {
-					id,
-					instance,
-					epoch,
-					cost,
-					hops: crate::Hops::new(),
-					above: 0,
-				})?;
-				self.sent(stream)?;
-			}
-			_ => {
-				self.retract(stream, suffix.clone(), absolute)?;
-				self.start(stream, suffix, hops, cost, route)?;
-			}
-		}
+		self.retract(stream, suffix.clone(), absolute)?;
+		self.start(stream, suffix, hops, cost)?;
 		Ok(())
 	}
 
@@ -1459,7 +1410,7 @@ impl AnnounceRun {
 				let absolute = origin.root().rejoin(&suffix);
 				let (hops, cost) = self.outgoing(&update.route, &absolute)?;
 				tracing::debug!(route = %absolute, "announce");
-				Some((suffix, hops, cost, served(&update.route)))
+				Some((suffix, hops, cost))
 			})
 			.collect();
 		match self.version {
@@ -1467,16 +1418,8 @@ impl AnnounceRun {
 				let suffixes = initial.iter().map(|(suffix, ..)| suffix.clone()).collect();
 				stream.writer.buffer(&lite::AnnounceInit { suffixes })?;
 				// The peer holds these now, so a later retraction or narrower grant ends them.
-				for (suffix, hops, cost, served) in initial {
-					self.live.insert(
-						suffix,
-						Advertised {
-							id: None,
-							hops,
-							cost,
-							served,
-						},
-					);
+				for (suffix, hops, cost) in initial {
+					self.live.insert(suffix, Advertised { id: None, hops, cost });
 				}
 			}
 			_ => {
@@ -1484,8 +1427,8 @@ impl AnnounceRun {
 					origin: self.self_origin,
 					active: initial.len() as u64,
 				})?;
-				for (suffix, hops, cost, served) in initial {
-					self.start(stream, suffix, hops, cost, served)?;
+				for (suffix, hops, cost) in initial {
+					self.start(stream, suffix, hops, cost)?;
 				}
 			}
 		}
@@ -1623,9 +1566,9 @@ impl AnnounceRun {
 
 			match self.outgoing(&update.route, &absolute) {
 				Some((hops, cost)) if restart && self.live.contains_key(&suffix) => {
-					self.restart(stream, suffix, hops, cost, served(&update.route), &absolute)?;
+					self.restart(stream, suffix, hops, cost, &absolute)?;
 				}
-				Some((hops, cost)) => self.advertise(stream, suffix, hops, cost, served(&update.route), &absolute)?,
+				Some((hops, cost)) => self.advertise(stream, suffix, hops, cost, &absolute)?,
 				// The chain must not be forwarded (reflected, or full): retract
 				// whatever the peer holds.
 				None => self.retract(stream, suffix, &absolute)?,
@@ -1684,7 +1627,7 @@ trait Request: Sized {
 	/// The origin node the request names (lite-07), or 0 to let this side select, and
 	/// how many leading segments of its broadcast make up the prefix of the route it
 	/// follows.
-	fn node(msg: &Self::Message) -> (u64, u64);
+	fn node(msg: &Self::Message) -> Option<crate::route::NodeId>;
 
 	/// Start answering, once the broadcast resolves. `track` is the name [`Request::take_track`]
 	/// moved out of `msg`, which no longer holds it.
@@ -1962,7 +1905,10 @@ impl<R: Request> RequestServe<R> {
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
 						let path = R::target(msg).0.clone();
-						let Some(origin) = self.shared.node_filter(origin, &path, R::node(msg)) else {
+						let filtered =
+							self.shared
+								.poll_node_filter(origin, &path, R::instance(msg), R::node(msg), waiter);
+						let Some(origin) = ready!(filtered) else {
 							return Poll::Ready(Err(Error::Unroutable));
 						};
 						*requesting = Some(origin.lookup(path, R::instance(msg)).into_inner());
@@ -2136,8 +2082,8 @@ impl Request for TrackInfoServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> (u64, u64) {
-		(msg.node, msg.depth)
+	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
+		msg.node
 	}
 
 	fn start(
@@ -2252,8 +2198,8 @@ impl Request for TracksServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> (u64, u64) {
-		(msg.node, msg.depth)
+	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
+		msg.node
 	}
 
 	fn start(shared: &Shared, _: Self::Message, _: &str, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
@@ -2365,8 +2311,8 @@ impl Request for SubscribeServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> (u64, u64) {
-		(msg.node, msg.depth)
+	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
+		msg.node
 	}
 
 	fn start(
@@ -2964,8 +2910,8 @@ impl Request for DatagramServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> (u64, u64) {
-		(msg.node, msg.depth)
+	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
+		msg.node
 	}
 
 	fn start(
@@ -3120,8 +3066,8 @@ impl Request for FetchServe {
 		msg.instance.as_ref()
 	}
 
-	fn node(msg: &Self::Message) -> (u64, u64) {
-		(msg.node, msg.depth)
+	fn node(msg: &Self::Message) -> Option<crate::route::NodeId> {
+		msg.node
 	}
 
 	fn start(
@@ -3653,10 +3599,10 @@ mod announce_test {
 		);
 	}
 
-	/// A lite-07 peer edits one request at a time, names only prefixes in effect, and
-	/// asks for no prefix at or below another: each is a protocol violation.
+	/// A lite-07 peer sends one edit at a time, names only prefixes its edits leave in
+	/// effect, and asks for no prefix at or below another: each is a protocol violation.
 	#[test]
-	fn a_lite07_request_out_of_turn_or_nested_is_a_violation() {
+	fn a_lite07_request_naming_no_prefix_or_nested_is_a_violation() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
 		let origin = Hop::new(1).unwrap().produce();
 		let answer = || super::routed::Answer::alone(origin.consume());
@@ -3677,16 +3623,21 @@ mod announce_test {
 			wire.take_announces()
 		};
 
-		// A second edit before the first is answered.
+		// One edit at a time: a second before the first is answered, whole or its first
+		// part, is refused, so a peer that never reads its answers leaves one edit here.
 		let mut first = answer();
 		first.request(false, Vec::new(), vec![(path("a"), false)]).unwrap();
-		let again = first.request(false, Vec::new(), vec![(path("b"), false)]);
-		assert!(matches!(again, Err(Error::ProtocolViolation)), "{again:?}");
-
-		// Answered, the next edit goes.
-		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
+		for more in [false, true] {
+			let refused = first.request(more, Vec::new(), vec![(path("z"), false)]);
+			assert!(matches!(refused, Err(Error::ProtocolViolation)), "{refused:?}");
+		}
+		let oks = |answers: &[lite::AnnounceBroadcast]| {
+			let oks = answers.iter().filter(|msg| **msg == lite::AnnounceBroadcast::Ok);
+			oks.count()
+		};
+		assert_eq!(oks(&sent(&mut first)), 1);
 		first.request(false, vec![0], vec![(path("b"), false)]).unwrap();
-		assert_eq!(sent(&mut first)[0], lite::AnnounceBroadcast::Ok);
+		assert_eq!(oks(&sent(&mut first)), 1);
 
 		// A prefix that is not in effect, one asked for twice, and one below another.
 		for (remove, add) in [
@@ -3733,8 +3684,8 @@ mod announce_test {
 	}
 
 	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
-	/// Hidden opt-in does, keeps what a mount beneath it presents: the mount's route
-	/// and claim carry over to the new Prefix ID, and nothing ends.
+	/// Hidden opt-in does, tells what a mount beneath it presents again under the new
+	/// Prefix ID: both ends dropped the claim with the prefix, so nothing ends.
 	#[kio::test]
 	async fn a_lite07_prefix_asked_again_keeps_its_mount() {
 		let origin = Hop::new(1).unwrap().produce();
@@ -3768,105 +3719,39 @@ mod announce_test {
 			.unwrap();
 		kio::clock::sim::yield_now().await;
 		let first = sent(&mut answer);
-		assert!(
-			first
+		let told = |msgs: &[lite::AnnounceBroadcast]| {
+			let starts = msgs
 				.iter()
-				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { .. })),
-			"{first:?}"
-		);
-
-		let ends = |msgs: &[lite::AnnounceBroadcast]| {
-			msgs.iter().any(|msg| {
-				matches!(
-					msg,
-					lite::AnnounceBroadcast::RouteEnd { .. } | lite::AnnounceBroadcast::EndedId { .. }
-				)
-			})
+				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+			let ends = msgs
+				.iter()
+				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { .. }));
+			(starts.count(), ends.count())
 		};
+		assert_eq!(told(&first), (1, 0), "{first:?}");
+
 		answer.request(false, vec![0], vec![(shared, true)]).unwrap();
 		kio::clock::sim::yield_now().await;
 		let again = sent(&mut answer);
 		assert_eq!(again[0], lite::AnnounceBroadcast::Ok);
-		assert!(!ends(&again), "{again:?}");
+		assert_eq!(told(&again), (1, 0), "{again:?}");
 
-		// Widened past the mount point, the mount's stream stays, and so does its route,
-		// which its ROUTE_START marked as lying at its own prefix: nothing ends or starts.
+		// Widened past the mount point, the claim is told once more, at the wider prefix.
 		answer
 			.request(false, vec![1], vec![(crate::Path::empty(), true)])
 			.unwrap();
 		kio::clock::sim::yield_now().await;
 		let wider = sent(&mut answer);
-		assert_eq!(
-			wider,
-			[
-				lite::AnnounceBroadcast::Ok,
-				lite::AnnounceBroadcast::Synced { prefix: 2 }
-			]
-		);
+		assert_eq!(wider[0], lite::AnnounceBroadcast::Ok);
+		assert_eq!(told(&wider), (1, 0), "{wider:?}");
+		assert_eq!(wider.last(), Some(&lite::AnnounceBroadcast::Synced { prefix: 2 }));
 	}
 
-	/// A lite-07 mount's route at its mount point, asked for exactly there, starts
-	/// marked exact, and a route the session's own key presents there is not.
+	/// A lite-07 edit drops every claim within a prefix it removes at both ends, so a
+	/// narrowing to a mount point and a widening back each tell the mount's claim again
+	/// between the ANNOUNCE_OK and the SYNCED, and never end it.
 	#[kio::test]
-	async fn a_lite07_mount_point_route_starts_exact() {
-		let origin = Hop::new(1).unwrap().produce();
-		let _cam = origin
-			.announce("tenant-a/public/cam", origin::RouteInfo::new())
-			.unwrap();
-		let consumer = (origin.mount("tenant-b/shared", "tenant-a/public").unwrap())
-			.scope("tenant-b", &crate::Patterns::from(crate::Pattern::all()))
-			.unwrap()
-			.consume();
-		let _own = origin.announce("tenant-b/own", origin::RouteInfo::new()).unwrap();
-		let mut answer = super::routed::Answer::alone(consumer);
-		let log = Log::default();
-		let mut wire = Wire {
-			writes: log.writes.clone(),
-			cursor: 0,
-			version: Version::Lite07,
-		};
-		let mut writer = Writer::new(
-			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
-			Version::Lite07,
-		);
-		let waiter = kio::Waiter::noop();
-		let mut sent = |answer: &mut super::routed::Answer| {
-			answer.drain(&mut writer).unwrap();
-			assert!(writer.poll_flush(&waiter).is_ready());
-			wire.take_announces()
-		};
-		let starts = |msgs: &[lite::AnnounceBroadcast]| -> Vec<(u64, bool)> {
-			(msgs.iter())
-				.filter_map(|msg| match msg {
-					lite::AnnounceBroadcast::RouteStart { prefix, exact, .. } => Some((*prefix, *exact)),
-					_ => None,
-				})
-				.collect()
-		};
-		answer
-			.request(
-				false,
-				Vec::new(),
-				vec![
-					(crate::Path::from_static("shared"), false),
-					(crate::Path::from_static("own"), false),
-				],
-			)
-			.unwrap();
-		kio::clock::sim::yield_now().await;
-		let mut first = sent(&mut answer);
-		kio::clock::sim::yield_now().await;
-		first.extend(sent(&mut answer));
-		let mut starts = starts(&first);
-		starts.sort_unstable();
-		assert_eq!(starts, [(0, true), (1, false)], "{first:?}");
-	}
-
-	/// A lite-07 mount's route starts exact below the requested prefix too, so a
-	/// narrowing to its mount point and a widening back carry it over with nothing
-	/// ended or started again.
-	#[kio::test]
-	async fn a_lite07_mount_route_stays_through_a_narrowing_and_a_widening() {
+	async fn a_lite07_mount_claim_is_told_again_after_a_narrowing_and_a_widening() {
 		let origin = Hop::new(1).unwrap().produce();
 		let _cam = origin
 			.announce("tenant-a/public/cam", origin::RouteInfo::new())
@@ -3900,30 +3785,33 @@ mod announce_test {
 		kio::clock::sim::yield_now().await;
 		first.extend(sent(&mut answer));
 		let shared = crate::Path::from_static("shared");
-		assert!(
-			first.iter().any(|msg| matches!(
-				msg,
-				lite::AnnounceBroadcast::RouteStart { suffix, exact: true, .. } if *suffix == shared
-			)),
-			"{first:?}"
-		);
+		let told = |msgs: &[lite::AnnounceBroadcast]| {
+			(msgs.iter())
+				.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }))
+				.count()
+		};
+		assert_eq!(told(&first), 1, "{first:?}");
 
 		// Narrowed to the mount point, then widened back to the root.
 		for (remove, add, prefix) in [(0, shared.clone(), 1), (1, crate::Path::empty(), 2)] {
 			answer.request(false, vec![remove], vec![(add, true)]).unwrap();
 			kio::clock::sim::yield_now().await;
+			let sent = sent(&mut answer);
+			assert_eq!(sent.first(), Some(&lite::AnnounceBroadcast::Ok), "{sent:?}");
 			assert_eq!(
-				sent(&mut answer),
-				[lite::AnnounceBroadcast::Ok, lite::AnnounceBroadcast::Synced { prefix }]
+				sent.last(),
+				Some(&lite::AnnounceBroadcast::Synced { prefix }),
+				"{sent:?}"
 			);
+			assert_eq!((told(&sent), sent.len()), (1, 3), "{sent:?}");
 		}
 	}
 
 	/// A lite-07 claim covering the requested prefix from above is presented there with
-	/// how far above it is, and a narrowing carries it to the narrower prefix with nothing
-	/// sent for it: the peer adds the distance to its Above as this side does.
+	/// how far above it is, and a narrowing tells it again at the narrower prefix, one
+	/// further above.
 	#[kio::test]
-	async fn a_lite07_narrowing_carries_a_covering_claim_further_above() {
+	async fn a_lite07_narrowing_tells_a_covering_claim_further_above() {
 		let origin = Hop::new(1).unwrap().produce();
 		let _a = origin.announce("a", origin::RouteInfo::new()).unwrap();
 		let mut answer = super::routed::Answer::alone(origin.consume());
@@ -3950,32 +3838,35 @@ mod announce_test {
 		let mut first = sent(&mut answer);
 		kio::clock::sim::yield_now().await;
 		first.extend(sent(&mut answer));
-		assert!(
-			first
-				.iter()
-				.any(|msg| matches!(msg, lite::AnnounceBroadcast::Active { above: 1, .. })),
-			"{first:?}"
-		);
+		let above = |msgs: &[lite::AnnounceBroadcast]| -> Vec<u64> {
+			(msgs.iter())
+				.filter_map(|msg| match msg {
+					lite::AnnounceBroadcast::Start { claim, .. } => Some(claim.item.above),
+					_ => None,
+				})
+				.collect()
+		};
+		assert_eq!(above(&first), [1], "{first:?}");
 
 		answer
 			.request(false, vec![0], vec![(crate::Path::from_static("a/b/c"), false)])
 			.unwrap();
 		kio::clock::sim::yield_now().await;
+		let sent = sent(&mut answer);
+		assert_eq!(sent.first(), Some(&lite::AnnounceBroadcast::Ok), "{sent:?}");
+		assert_eq!(above(&sent), [2], "{sent:?}");
 		assert_eq!(
-			sent(&mut answer),
-			[
-				lite::AnnounceBroadcast::Ok,
-				lite::AnnounceBroadcast::Synced { prefix: 1 }
-			]
+			sent.last(),
+			Some(&lite::AnnounceBroadcast::Synced { prefix: 1 }),
+			"{sent:?}"
 		);
 	}
 
-	/// A lite-07 stream holds a route on the wire only while it shows one of the
-	/// route's claims: an origin whose only claim is hidden from the peer starts no
-	/// route, the route ends after the floor once its last shown claim goes, and it
-	/// starts again under a new Route ID with the next one.
+	/// A lite-07 stream to a peer that exchanges no routes tells each claim it shows as
+	/// the claim starts and ends, with no route or floor: a claim hidden from the peer
+	/// is never told, and one its publisher withdrew ends as withdrawn, not lost.
 	#[kio::test]
-	async fn a_lite07_route_goes_only_with_a_shown_claim() {
+	async fn a_lite07_claim_is_told_only_while_shown() {
 		let origin = Hop::new(1).unwrap().produce();
 		let _stats = origin.announce(".stats/node", origin::RouteInfo::new()).unwrap();
 		let mut answer = super::routed::Answer::alone(origin.consume());
@@ -4012,44 +3903,19 @@ mod announce_test {
 		kio::clock::sim::yield_now().await;
 		let announces = sent(&mut answer);
 		assert!(
-			matches!(
-				announces.as_slice(),
-				[
-					lite::AnnounceBroadcast::RouteStart { prefix: 0, .. },
-					lite::AnnounceBroadcast::Active { route: 0, .. },
-					lite::AnnounceBroadcast::Floor { id: 0, .. },
-				]
-			),
+			matches!(announces.as_slice(), [lite::AnnounceBroadcast::Start { .. }]),
 			"{announces:?}"
 		);
 
 		drop(shown);
 		kio::clock::sim::yield_now().await;
-		let announces = sent(&mut answer);
-		assert!(
-			matches!(
-				announces.as_slice(),
-				[
-					lite::AnnounceBroadcast::EndedId { .. },
-					lite::AnnounceBroadcast::Floor { id: 0, .. },
-					lite::AnnounceBroadcast::RouteEnd { id: 0 },
-				]
-			),
-			"{announces:?}"
-		);
+		assert_eq!(sent(&mut answer), [lite::AnnounceBroadcast::End { id: 0, lost: false }]);
 
 		let _again = origin.announce("y", origin::RouteInfo::new()).unwrap();
 		kio::clock::sim::yield_now().await;
 		let announces = sent(&mut answer);
 		assert!(
-			matches!(
-				announces.as_slice(),
-				[
-					lite::AnnounceBroadcast::RouteStart { prefix: 0, .. },
-					lite::AnnounceBroadcast::Active { route: 1, .. },
-					lite::AnnounceBroadcast::Floor { id: 1, .. },
-				]
-			),
+			matches!(announces.as_slice(), [lite::AnnounceBroadcast::Start { .. }]),
 			"{announces:?}"
 		);
 	}
@@ -4212,7 +4078,7 @@ mod announce_test {
 		match initial.as_slice() {
 			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
 				assert_eq!(suffix.rest.as_str(), "cam");
-				assert_eq!(hops, &chain(version, pub_hops()));
+				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(7));
 			}
 			other => panic!("expected the initial announce, got {other:?}"),
@@ -4263,14 +4129,7 @@ mod announce_test {
 		kio::clock::sleep(crate::origin::Config::default().update_hold).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
-			[
-				lite::AnnounceBroadcast::Update {
-					id: 0,
-					hops,
-					cost,
-					above: 0,
-				},
-			] => {
+			[lite::AnnounceBroadcast::Update { id: 0, hops, cost }] => {
 				assert_eq!(hops, &pub_hops());
 				assert_eq!(*cost, crate::origin::Cost::new(3));
 			}
@@ -10744,8 +10603,7 @@ mod tests {
 				for close in [Close::Fin, Close::Reset] {
 					let track = lite::Track {
 						instance: None,
-						node: 0,
-						depth: 0,
+						node: None,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 					};
@@ -10754,8 +10612,7 @@ mod tests {
 					let subscribe = lite::Subscribe {
 						order: crate::track::Order::Descending,
 						instance: None,
-						node: 0,
-						depth: 0,
+						node: None,
 						id: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
@@ -10768,8 +10625,7 @@ mod tests {
 
 					let fetch = lite::Fetch {
 						instance: None,
-						node: 0,
-						depth: 0,
+						node: None,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
@@ -10818,8 +10674,7 @@ mod tests {
 			lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -10885,8 +10740,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 		}
@@ -10962,8 +10816,7 @@ mod tests {
 	fn legacy_track() -> lite::Track<'static> {
 		lite::Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
 		}
@@ -10973,8 +10826,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "events".into(),
@@ -11168,8 +11020,7 @@ mod tests {
 					let mut script = Vec::new();
 					lite::Track {
 						instance: None,
-						node: 0,
-						depth: 0,
+						node: None,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
 					}
@@ -11317,8 +11168,7 @@ mod tests {
 					let msg = lite::Subscribe {
 						order: crate::track::Order::Ascending,
 						instance: None,
-						node: 0,
-						depth: 0,
+						node: None,
 						id: 0,
 						broadcast: crate::Path::from_static("room"),
 						track: "video".into(),
@@ -11452,8 +11302,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -11583,8 +11432,7 @@ mod tests {
 		lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -11838,8 +11686,7 @@ mod tests {
 			&publisher.shared,
 			lite::Fetch {
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				broadcast: crate::Path::new("room").unwrap(),
 				track: Default::default(),
 				priority: 0,
@@ -11909,8 +11756,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Fetch {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
@@ -11986,8 +11832,7 @@ mod tests {
 		let mut script = Vec::new();
 		lite::Fetch {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 			priority: 0,
@@ -12111,8 +11956,7 @@ mod tests {
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -12171,8 +12015,7 @@ mod tests {
 		let request = lite::Tracks {
 			broadcast: crate::Path::from_static("room"),
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 		};
 		let request = request.encode_bytes(version).unwrap().to_vec();
 		let session = ScriptedSession::per_stream(vec![request.clone(), request]);
@@ -12227,8 +12070,7 @@ mod tests {
 			let request = lite::Subscribe {
 				order: crate::track::Order::Descending,
 				instance: None,
-				node: 0,
-				depth: 0,
+				node: None,
 				id: 0,
 				broadcast: crate::Path::from_static("room"),
 				track: "video".into(),
@@ -12297,8 +12139,7 @@ mod tests {
 		let request = lite::Subscribe {
 			order: crate::track::Order::Ascending,
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			id: 0,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
@@ -12462,8 +12303,7 @@ mod tests {
 		let msg = lite::Subscribe {
 			order: crate::track::Order::Descending,
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			id: 0,
 			broadcast: crate::Path::new(broadcast).unwrap(),
 			track: track.into(),

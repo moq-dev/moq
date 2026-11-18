@@ -13,7 +13,7 @@ function setup(maxDelay = 100) {
 	const track = new Track.Producer("video");
 	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(30_000) } }), {
 		format: new Format("video"),
-		delay: { max: Duration.millis(maxDelay) },
+		delay: { min: null, max: Duration.millis(maxDelay) },
 	});
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
