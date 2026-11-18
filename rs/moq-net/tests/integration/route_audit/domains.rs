@@ -38,7 +38,7 @@ async fn meshes(ring: bool) -> Mesh {
 async fn joined_meshes(ring: bool) {
 	let mesh = meshes(ring).await;
 	let source = Source::new(1, None);
-	let feed = Feed::start(vec![source.track.clone()], "P");
+	let _feed = Feed::start(vec![source.track.clone()], "P");
 	let _push = source.push(&mesh.relays[0], lite07(), 1).await;
 	quiesce().await;
 	let mut watched = Vec::new();
@@ -60,7 +60,7 @@ async fn joined_meshes(ring: bool) {
 		let seen = watched[i].seen();
 		assert_eq!(seen, [], "ring {ring}: R{i} settled");
 	}
-	assert_eq!(mesh.doubled(feed.written()), [], "ring {ring}");
+	assert_eq!(mesh.doubled(), [], "ring {ring}");
 
 	let ended = kio::clock::now();
 	source.route.withdraw();

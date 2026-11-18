@@ -20,7 +20,7 @@ async fn detour(count: usize, r1_r2: u64, held: bool) {
 		mesh.join(i, (i + 1) % count, Join::peer(cost)).await;
 	}
 	let source = Source::new(1, None);
-	let feed = Feed::start(vec![source.track.clone()], "P");
+	let _feed = Feed::start(vec![source.track.clone()], "P");
 	let _push = source.push(&mesh.relays[0], lite07(), 1).await;
 	quiesce().await;
 	let mut readers = readers(&mesh).await;
@@ -36,7 +36,7 @@ async fn detour(count: usize, r1_r2: u64, held: bool) {
 		}
 		assert!(report.seamless(), "{case}: R{i}: {report:?}");
 	}
-	assert_eq!(mesh.doubled(feed.written()), [], "ring of {count}, R1-R2 at {r1_r2}");
+	assert_eq!(mesh.doubled(), [], "ring of {count}, R1-R2 at {r1_r2}");
 }
 
 /// `R1` holds another route to `R0` when its session closes: in a ring of three `R2`
@@ -76,7 +76,7 @@ async fn a_silent_relay_is_routed_around_as_its_neighbours_notice() {
 		mesh.join(a, b, Join::peer(1)).await;
 	}
 	let source = Source::new(1, None);
-	let feed = Feed::start(vec![source.track.clone()], "P");
+	let _feed = Feed::start(vec![source.track.clone()], "P");
 	let x_push = source.push(&mesh.relays[0], lite07(), 1).await;
 	let _y_push = source.push(&mesh.relays[1], lite07(), 1).await;
 	quiesce().await;
@@ -98,7 +98,7 @@ async fn a_silent_relay_is_routed_around_as_its_neighbours_notice() {
 	for (i, report) in reports.iter().enumerate().skip(1) {
 		assert!(report.seamless(), "R{i}: {report:?}");
 	}
-	assert_eq!(mesh.doubled(feed.written()), []);
+	assert_eq!(mesh.doubled(), []);
 }
 
 /// One seeded case of [`failures_at_one_instant`]: a ring of `relays` with as many chords,
@@ -125,7 +125,7 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 	}
 	let ingests = [0, relays / 2];
 	let source = Source::new(1, None);
-	let feed = Feed::start(vec![source.track.clone()], "P");
+	let _feed = Feed::start(vec![source.track.clone()], "P");
 	let mut pushes = Vec::new();
 	for &ingest in &ingests {
 		pushes.push(source.push(&mesh.relays[ingest], lite07(), 1).await);
@@ -181,10 +181,13 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 		}
 	}
 	// Pinned, not endorsed, until [the resend fix](/quest/m2/multicast/resend.md): a route
-	// moving behind an unchanged next hop sends that hop the newest group again.
-	let doubled = mesh.doubled(feed.written());
-	let once = |&(_, _, groups, frames): &(usize, usize, u64, u64)| groups.max(frames) == feed.written() + 1;
-	assert!(doubled.iter().all(once), "seed {seed:#x}: {doubled:?}");
+	// moving behind an unchanged next hop sends that hop the newest group again, once.
+	let doubled = mesh.doubled();
+	let links: BTreeSet<_> = doubled.iter().map(|&(from, to, _, _)| (from, to)).collect();
+	assert!(
+		links.len() == doubled.len() && doubled.iter().all(|doubled| doubled.3 == 2),
+		"seed {seed:#x}: {doubled:?}"
+	);
 	worst
 }
 
@@ -212,7 +215,7 @@ async fn a_route_moving_behind_one_next_hop_resends_a_group() {
 	mesh.join(1, 2, Join::peer(2)).await;
 	mesh.join(2, 3, Join::peer(1)).await;
 	let source = Source::new(1, None);
-	let feed = Feed::start(vec![source.track.clone()], "P");
+	let _feed = Feed::start(vec![source.track.clone()], "P");
 	let _x = source.push(&mesh.relays[0], lite07(), 1).await;
 	let _y = source.push(&mesh.relays[1], lite07(), 1).await;
 	quiesce().await;
@@ -224,8 +227,11 @@ async fn a_route_moving_behind_one_next_hop_resends_a_group() {
 	for (i, report) in reports(&mut readers, since, "X-A cut").iter().enumerate().skip(2) {
 		assert!(report.seamless(), "R{i}: {report:?}");
 	}
-	let written = feed.written();
-	assert_eq!(mesh.doubled(written), [(2, 3, written + 1, written + 1)]);
+	let doubled = mesh.doubled();
+	assert!(
+		matches!(doubled.as_slice(), [(2, 3, _, 2)]),
+		"one group crosses A-B twice: {doubled:?}"
+	);
 }
 
 /// A ring of six with a publisher on `R0` and a reader on every relay. A link from `R0` to
@@ -236,7 +242,7 @@ async fn a_route_moving_behind_one_next_hop_resends_a_group() {
 async fn moving_routes_carry_no_group_twice_over_a_link() {
 	let mut mesh = ring(6).await;
 	let source = Source::new(1, None);
-	let feed = Feed::start(vec![source.track.clone()], "P");
+	let _feed = Feed::start(vec![source.track.clone()], "P");
 	let _push = source.push(&mesh.relays[0], lite07(), 1).await;
 	quiesce().await;
 	let mut readers = readers(&mesh).await;
@@ -252,5 +258,5 @@ async fn moving_routes_carry_no_group_twice_over_a_link() {
 	for (i, report) in reports(&mut readers, since, "R0-R3 flapping").iter().enumerate() {
 		assert!(report.seamless(), "R{i}: {report:?}");
 	}
-	assert_eq!(mesh.doubled(feed.written()), []);
+	assert_eq!(mesh.doubled(), []);
 }

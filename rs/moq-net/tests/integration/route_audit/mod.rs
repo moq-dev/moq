@@ -15,10 +15,11 @@ mod domains;
 mod failures;
 mod ingest;
 
-use crate::path_routes::{cut, land, lite07};
+use crate::path_routes::{DEBOUNCE, HOLD, cut, land, lite07};
 use crate::route_change::{produce_origin, timed};
 use crate::support;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
 	Arc,
 	atomic::{AtomicBool, Ordering},
@@ -27,10 +28,7 @@ use std::time::Duration;
 
 use futures::channel::mpsc;
 use moq_net::{
-	Instance, Timestamp, Version, group, origin,
-	stats::{Registry, Role, SessionInfo, Tier},
-	track,
-};
+	Instance, Timestamp, Version, group, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// How often a publisher writes a group.
@@ -73,11 +71,12 @@ struct Link {
 	pair: MockPair,
 }
 
-/// Relays by index and the sessions between them, each direction counting what it carries.
+/// Relays by index and the sessions between them.
 pub(super) struct Mesh {
 	pub relays: Vec<origin::Producer>,
 	links: Vec<Link>,
-	registry: Registry,
+	/// What each closed session carried: the uni streams relay `from` opened to relay `to`.
+	closed: Vec<(usize, usize, Vec<Vec<u8>>)>,
 }
 
 impl Mesh {
@@ -86,19 +85,8 @@ impl Mesh {
 		Self {
 			relays: (0..count as u64).map(|i| produce_origin(100 + i)).collect(),
 			links: Vec::new(),
-			registry: Registry::new(Default::default()),
+			closed: Vec::new(),
 		}
-	}
-
-	/// The tier counting what relay `from` sends relay `to`.
-	fn tier(from: usize, to: usize) -> Tier {
-		Tier::new(moq_net::Path::try_from(format!("{from}to{to}")).unwrap())
-	}
-
-	fn stats(&self, from: usize, to: usize) -> moq_net::stats::Session {
-		self.registry
-			.tier(Self::tier(from, to))
-			.session(SessionInfo::new(moq_net::Path::empty()))
 	}
 
 	/// Relay `a` dials relay `b` over lite-07, configured by `join`.
@@ -114,8 +102,6 @@ impl Mesh {
 		options.server_publish = Some(acceptor.consume().with_hidden(true));
 		options.server_subscribe = Some(acceptor);
 		options.cost = Some(join.cost);
-		options.client_stats = self.stats(a, b);
-		options.server_stats = self.stats(b, a);
 		let pair = connect_mock(options).await;
 		self.links.push(Link {
 			ends: [a, b],
@@ -141,16 +127,34 @@ impl Mesh {
 
 	/// Close the session between `a` and `b` at both ends, and forget it.
 	pub fn cut(&mut self, a: usize, b: usize) {
-		cut(self.link(a, b));
-		self.links.retain(|link| link.ends != [a, b] && link.ends != [b, a]);
+		self.close(|link| link.ends == [a, b] || link.ends == [b, a]);
 	}
 
 	/// Relay `relay` dies: every session it holds closes at once.
 	pub fn kill(&mut self, relay: usize) {
-		for link in self.links.iter().filter(|link| link.ends.contains(&relay)) {
+		self.close(|link| link.ends.contains(&relay));
+	}
+
+	/// Close every session `which` picks at both ends, keeping what it carried.
+	fn close(&mut self, which: impl Fn(&Link) -> bool) {
+		let (closed, open) = std::mem::take(&mut self.links).into_iter().partition(which);
+		self.links = open;
+		for link in closed {
 			cut(&link.pair);
+			self.closed.extend(Self::carried(&link));
 		}
-		self.links.retain(|link| !link.ends.contains(&relay));
+	}
+
+	/// The uni streams each direction of `link` opened so far, as `(from, to, streams)`.
+	fn carried(link: &Link) -> [(usize, usize, Vec<Vec<u8>>); 2] {
+		let [a, b] = link.ends;
+		let streams = |transport: &crate::support::mock::MockSession| {
+			(0..=u8::MAX).flat_map(|kind| transport.uni_writes(kind)).collect()
+		};
+		[
+			(a, b, streams(&link.pair.client_transport)),
+			(b, a, streams(&link.pair.server_transport)),
+		]
 	}
 
 	/// The relays at the far end of each link `relay` holds.
@@ -188,31 +192,45 @@ impl Mesh {
 		distance
 	}
 
-	/// The groups and frames relay `from` sent relay `to`, over every session between them
-	/// so far.
-	fn carried(&self, from: usize, to: usize) -> (u64, u64) {
-		let tier = Self::tier(from, to);
-		(self.registry.snapshot().traffic().into_iter())
-			.filter(|(row, role, _)| *row == tier && *role == Role::Publisher)
-			.fold((0, 0), |(groups, frames), (_, _, traffic)| {
-				(groups + traffic.groups, frames + traffic.frames)
-			})
-	}
-
-	/// Every direction of every link that carried more groups or frames than `written`, one
-	/// frame to a group, as `(from, to, groups, frames)`: a group crossed it twice.
-	pub fn doubled(&self, written: u64) -> Vec<(usize, usize, u64, u64)> {
-		let mut doubled = Vec::new();
-		for from in 0..self.relays.len() {
-			for to in 0..self.relays.len() {
-				let (groups, frames) = self.carried(from, to);
-				if groups.max(frames) > written {
-					doubled.push((from, to, groups, frames));
+	/// Every group that crossed one direction of a link more than once, over every session
+	/// between the two relays so far, as `(from, to, group, times)`. A group is known by its
+	/// frame, `{tag}:{key}`, in the group streams the sending relay opened.
+	pub fn doubled(&self) -> Vec<(usize, usize, String, usize)> {
+		let open = self.links.iter().flat_map(Self::carried);
+		let mut times = BTreeMap::<_, usize>::new();
+		for (from, to, streams) in self.closed.iter().cloned().chain(open) {
+			for stream in streams {
+				for group in groups(&stream) {
+					*times.entry((from, to, group)).or_default() += 1;
 				}
 			}
 		}
-		doubled
+		(times.into_iter())
+			.filter(|(_, times)| *times > 1)
+			.map(|((from, to, group), times)| (from, to, group, times))
+			.collect()
 	}
+}
+
+/// The groups `stream` carries, each known by its [`Feed`] frame's `{tag}:{key}`.
+fn groups(stream: &[u8]) -> BTreeSet<String> {
+	let digits = |from: usize| (stream[from..].iter()).take_while(|byte| byte.is_ascii_digit()).count();
+	let mut found = BTreeSet::new();
+	for start in 0..stream.len() {
+		if start > 0 && stream[start - 1].is_ascii_uppercase() {
+			continue;
+		}
+		let tag = (stream[start..].iter()).take_while(|byte| byte.is_ascii_uppercase()).count();
+		let key = start + tag + 1;
+		if tag == 0 || stream.get(key - 1) != Some(&b':') || digits(key) == 0 {
+			continue;
+		}
+		let end = key + digits(key);
+		if stream.get(end) == Some(&b':') && digits(end + 1) > 0 {
+			found.insert(String::from_utf8_lossy(&stream[start..end]).into_owned());
+		}
+	}
+	found
 }
 
 /// An endpoint publishing [`PATH`] with one [`TRACK`], pushed to relays as a client.
@@ -254,7 +272,6 @@ impl Source {
 /// A writer adding a group to its tracks every [`CADENCE`] until dropped.
 pub(super) struct Feed {
 	stop: Arc<AtomicBool>,
-	written: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Feed {
@@ -262,8 +279,7 @@ impl Feed {
 	/// `tracks`: one encoder, or synchronized encoders writing the same bytes.
 	pub fn start(tracks: Vec<track::Producer>, tag: &'static str) -> Self {
 		let stop = Arc::new(AtomicBool::new(false));
-		let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
-		let (stopped, count) = (stop.clone(), written.clone());
+		let stopped = stop.clone();
 		kio::clock::sim::spawn(async move {
 			let mut key = 0u64;
 			while !stopped.load(Ordering::Relaxed) {
@@ -277,16 +293,10 @@ impl Feed {
 					group.finish().unwrap();
 				}
 				key += 1;
-				count.store(key, Ordering::Relaxed);
 				kio::clock::sleep(CADENCE).await;
 			}
 		});
-		Self { stop, written }
-	}
-
-	/// How many groups it wrote so far.
-	pub fn written(&self) -> u64 {
-		self.written.load(Ordering::Relaxed)
+		Self { stop }
 	}
 }
 
@@ -403,6 +413,8 @@ impl Reader {
 		report
 			.runs
 			.extend(got.iter().filter(|got| got.at >= since).map(|got| got.run));
+		let settled = now.checked_sub(HOLD + DEBOUNCE).unwrap_or(since).max(since);
+		report.current = got.iter().any(|got| got.written >= settled);
 		for pair in got.windows(2) {
 			let [before, after] = [&pair[0], &pair[1]];
 			if before.run != after.run {
@@ -447,8 +459,12 @@ pub(super) struct Report {
 	pub lag: Duration,
 	/// Frames read since the failure.
 	pub after: usize,
+	/// It read a group written after the last failure. Every case reports right after
+	/// [`quiesce`](crate::path_routes::quiesce) following its last failure, so this is a
+	/// group written in the [`HOLD`] and [`DEBOUNCE`] before the report.
+	pub current: bool,
 	/// The broadcasts it read from the last before the failure on: more than one is a restart.
-	pub runs: std::collections::BTreeSet<usize>,
+	pub runs: BTreeSet<usize>,
 	/// Groups skipped within one broadcast.
 	pub missed: Vec<u64>,
 	/// Groups read again within one broadcast.
@@ -460,7 +476,7 @@ pub(super) struct Report {
 impl Report {
 	/// Read on across the failure in one broadcast, every group once and from one stream.
 	pub fn seamless(&self) -> bool {
-		self.after > 0 && self.runs.len() == 1 && self.clean()
+		self.current && self.runs.len() == 1 && self.clean()
 	}
 
 	/// Nothing missed, repeated, or spliced within a broadcast.

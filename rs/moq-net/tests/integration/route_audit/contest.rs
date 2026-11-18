@@ -56,7 +56,7 @@ fn nearest(mesh: &Mesh) -> Vec<Option<usize>> {
 async fn opposite_claims_each_serve_their_nearest() {
 	let mut mesh = grid().await;
 	let sources = [Source::new(1, None), Source::new(2, None)];
-	let feeds = [
+	let _feeds = [
 		Feed::start(vec![sources[0].track.clone()], "A"),
 		Feed::start(vec![sources[1].track.clone()], "B"),
 	];
@@ -82,8 +82,7 @@ async fn opposite_claims_each_serve_their_nearest() {
 			);
 		}
 	}
-	let written = feeds.iter().map(Feed::written).max().unwrap();
-	assert_eq!(mesh.doubled(written), [], "no group crosses a link twice");
+	assert_eq!(mesh.doubled(), [], "no group crosses a link twice");
 
 	let since = kio::clock::now();
 	mesh.cut(0, 1);

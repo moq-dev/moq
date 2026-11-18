@@ -44,7 +44,7 @@ enum Redundant {
 async fn redundant(redundant: Redundant, lost: usize, how: Loss) {
 	let mesh = ring(6).await;
 	let instance = Instance::random();
-	let (sources, feed) = match redundant {
+	let (sources, _feed) = match redundant {
 		Redundant::OneEncoder => {
 			let source = Source::new(1, None);
 			let feed = Feed::start(vec![source.track.clone()], "P");
@@ -71,7 +71,7 @@ async fn redundant(redundant: Redundant, lost: usize, how: Loss) {
 	for (i, report) in reports(&mut readers, since, &case).iter().enumerate() {
 		assert!(report.seamless(), "{case}: R{i}: {report:?}");
 	}
-	assert_eq!(mesh.doubled(feed.written()), [], "{redundant:?} R{lost} {how:?}");
+	assert_eq!(mesh.doubled(), [], "{redundant:?} R{lost} {how:?}");
 }
 
 #[kio::test]
@@ -150,7 +150,7 @@ const HANDOVER: Duration = Duration::from_secs(2);
 async fn handover(drain: Drain) {
 	let mut mesh = ring(6).await;
 	let source = Source::new(1, None);
-	let feed = Feed::start(vec![source.track.clone()], "P");
+	let _feed = Feed::start(vec![source.track.clone()], "P");
 	let old = source.push(&mesh.relays[0], lite07(), 1).await;
 	quiesce().await;
 	let mut readers = readers(&mesh).await;
@@ -183,7 +183,7 @@ async fn handover(drain: Drain) {
 		}
 		assert!(report.seamless(), "{drain:?}: R{i}: {report:?}");
 	}
-	assert_eq!(mesh.doubled(feed.written()), [], "{drain:?}");
+	assert_eq!(mesh.doubled(), [], "{drain:?}");
 }
 
 #[kio::test]
