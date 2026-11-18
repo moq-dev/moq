@@ -10721,7 +10721,6 @@ impl TrackServe {
 		let msg = lite::Subscribe {
 			instance: self.instance.clone(),
 			node: self.node,
-			depth: self.depth,
 			id: u64::MAX,
 			broadcast: self.path.clone(),
 			track: self.name.as_str().into(),
