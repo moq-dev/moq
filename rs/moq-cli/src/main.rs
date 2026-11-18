@@ -508,7 +508,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
 	let cluster = moq.cluster()?;
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
-	// Before anything binds: a signal sent once a listener is up would otherwise
+	// Before the stage listeners bind: a signal sent once one is up would otherwise
 	// take the default action and kill the process before it shuts down.
 	tasks.spawn(shutdown_signal()?);
 	// The stdin/capture pipelines run on this thread instead of the JoinSet: the
