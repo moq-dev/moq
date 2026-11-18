@@ -6,6 +6,8 @@
 //! claim. An event returns a [`RouteTally`] of what it cost the relay.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::Path;
 use crate::route::NodeId;
@@ -38,8 +40,9 @@ pub struct RouteTally {
 	pub claims: usize,
 	/// Claim changes told to the watchers, each an ANNOUNCE_* message.
 	pub told: usize,
-	/// Writes into the origin: a claim served, served differently, or let go, and each one
-	/// a closing session marks unavailable as it leaves it behind.
+	/// Writes into the origin: a claim served, served differently, or let go, each one a
+	/// closing session marks unavailable as it leaves it behind, and each such orphan the
+	/// node releases.
 	pub writes: usize,
 }
 
@@ -66,11 +69,13 @@ struct Upstream {
 	served: HashMap<ServedKey, Held>,
 }
 
-/// A claim a closed session left behind, held until the node lets it go.
-struct Left(crate::origin::Claim);
+/// A claim a closed session left behind, held until the node lets it go, which counts as
+/// a write into the origin.
+struct Left(crate::origin::Claim, Arc<AtomicUsize>);
 
 impl node::Orphan for Left {
 	fn release(self: Box<Self>, ended: bool) {
+		self.1.fetch_add(1, Ordering::Relaxed);
 		if ended {
 			self.0.withdrawn();
 		}
@@ -86,6 +91,8 @@ pub struct RouteMesh {
 	node: node::Node,
 	origin: crate::origin::Producer,
 	_driver: crate::origin::Driver,
+	/// Orphans the node released since the last [`Self::collect`].
+	released: Arc<AtomicUsize>,
 	shape: RouteShape,
 	instance: crate::Instance,
 	next_tag: u64,
@@ -109,6 +116,7 @@ impl RouteMesh {
 			node: node::Node::new(route_id(2), true, route_clock()),
 			origin,
 			_driver: driver,
+			released: Arc::default(),
 			shape,
 			instance: crate::Instance::random(),
 			next_tag: 1,
@@ -232,7 +240,7 @@ impl RouteMesh {
 			let route = held.route.with_available(false);
 			held.claim.update(route).unwrap();
 			tally.writes += 1;
-			up.stream.orphan(origin, &(path, instance), Box::new(Left(held.claim)));
+			up.stream.orphan(origin, &(path, instance), Box::new(Left(held.claim, self.released.clone())));
 		}
 		drop(up.stream);
 		tally += self.collect();
@@ -347,6 +355,7 @@ impl RouteMesh {
 			}
 			tally.writes += wrote;
 		}
+		tally.writes += self.released.swap(0, Ordering::Relaxed);
 		tally
 	}
 

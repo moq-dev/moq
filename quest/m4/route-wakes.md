@@ -43,10 +43,12 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   shared record per route in the origin that its broadcasts refer to, so a
   re-price is one write, and what each write wakes. `routes/reopen/spare`
   measures the route side (moq-dev/moq#9114): an upstream reopening twice
-  in a row costs 8 origin writes per broadcast behind it, 2.3 s at 16
+  in a row costs 10 origin writes per broadcast behind it, 2.8 s at 16
   routes of 4,096 broadcasts, linear in each axis; `routes/drain` costs 2
-  per broadcast, 480 ms at the same shape. A route that moves at the same
-  rank already rewrites nothing.
+  per broadcast, 480 ms at the same shape. A route that moves to another
+  path at the same rank through the same session already rewrites nothing;
+  one that moves to another session at the same rank relanes every
+  broadcast its node claims.
 
 Decisions:
 
