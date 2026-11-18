@@ -48,4 +48,3 @@ none beyond it.
 ## Required
 
 - [Metadata-only subscriptions](/quest/m3/route-health/meta.md) - what the standby observes
-- [The switch](/quest/m2/multicast/switch.md) - the routes the standby chooses among

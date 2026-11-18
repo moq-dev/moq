@@ -24,13 +24,14 @@ until the maintainer calls the cut. This quest is the mechanical rename and
 checks done at that call; the Required list is the work already known to land
 first, not a closed freeze set.
 
-The route layer of [Cluster routing](/quest/m3/cluster-routing/README.md)
-(ROUTE_START/UPDATE/END, path-less ANNOUNCE, the native hop list dropped) lands in
-lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
-announce compression along with the hop list, and moq.pro's lite-07 rollout
-has to plan for a lite-07 without native hop lists; only the temporary Lite-06
-Chain, negotiated by its Setup Parameter, rides announcements until the lite-07
-to lite-08 migration. Only
+A route layer lands in lite-07, decided 2026-10-05 and redesigned 2026-11-15
+(below). As shipped by [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987),
+relays exchange ROUTE, ROUTE_END, DEAD, and DRAIN, every claim belongs to the
+relay that announces it, and the native hop list is gone, with
+`Path Base`/`Path Keep` compression in place of `Hop Base`/`Hop Keep`; a claim
+from a lite-06 peer or across a scoped grant carries a chain instead, and
+moq.pro's lite-07 rollout plans for that wire
+([lite07-mesh](/quest/m5/lite07-mesh.md)). Only
 [Routes and announces](/quest/m2/cluster-routes/README.md) gates the cut,
 not the later federation/P2P integrations. Decided 2026-10-13: routes now
 owns the tier/partition correctness tests, so they run before the cut.
@@ -41,8 +42,9 @@ wip is current when they land. Decided 2026-10-25: no routing identity proof
 gates the cut, and lite-07 routing identities stay declared and unverified
 (2026-11-02: peer grants are dropped and no key proof is planned). Reversed
 2026-11-04 (maintainer, /quest-unblock): a peer proves a route key before the
-cut, which landed as lite-07's Route Key Setup Parameter; its routes are filed
-under it in [Routes and announces](/quest/m2/cluster-routes/README.md). Decided 2026-10-26
+cut, which landed as lite-07's Route Key Setup Parameter. Reversed again
+2026-11-15 by the redesign below, which removed the parameter in
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987). Decided 2026-10-26
 (maintainer): receivers do not stamp per-session identities either, since
 that splits one origin into several identities across a relay mesh.
 
@@ -123,6 +125,7 @@ moq-net): ✅ the cut waits for the symbolic model of the Route Key Parameter
 (rejected: neither proof gating, as the TLA+ models do not; the inductive
 routing invariant gating too, which sits behind the mesh model). The signed
 transcript freezes at the cut and a flaw in it can only be fixed on the wire.
+Ended 2026-11-15 with the Route Key (below).
 
 Decided 2026-11-14 (the m2 triage before the cut, under /quest-afk; the
 maintainer picked these on
@@ -137,7 +140,7 @@ would need a breaking release had it landed right after the cut:
   still waits on it (maintainer, /quest-complete on
   [moq-dev/moq#8768](https://github.com/moq-dev/moq/pull/8768); rejected:
   moving it to m3 and fixing late routing flaws in lite-08).
-- ✅ [The Playwright bump](/quest/m1/playwright-pin.md) moved to m1 and
+- ✅ The Playwright bump moved to m1 and
   gates [the release cut](/quest/m3/release/cut.md) instead of this: the cut
   PR's interop lane runs with `CI_STRICT` (`.github/workflows/interop.yml`),
   which fails the route key lane on a Chromium below 158, so only the pinned
@@ -147,7 +150,9 @@ would need a breaking release had it landed right after the cut:
   the PR. If the tab fails, stop and report it, since only the wire can fix
   the signed transcript. Rejected: keeping the pin in m2, where the freeze
   waits on nixpkgs as well as the cut; dropping the check, which would find a
-  transcript flaw only after the freeze.
+  transcript flaw only after the freeze. Ended with the route key lane in
+  [moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987): the
+  Playwright quest was deleted, since no lane needs Chromium 158.
 - ✅ The wire half of group drops split out as its own quest, which this
   waited on in place of the public drop signal,
   an API change that doesn't touch the wire. It settled without a
@@ -161,8 +166,8 @@ lite-07 carries the redesigned route layer of
 for it (rejected: freezing lite-07 with the path rule and redesigning in
 lite-08; freezing lite-07 with no route layer). That redesign removes the
 Route Key Parameter, so the 2026-11-10 wait on its symbolic model and the
-route key lane's early signal above end when
-[the switch](/quest/m2/multicast/switch.md) lands.
+route key lane's early signal above ended when
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) landed.
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit, which also
 audited the lite-07 draft for what it could lose):
@@ -197,7 +202,7 @@ the version that ships them.
 ## Required
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - lite-07 carries the redesigned route layer: routes to forwarding nodes, no holds or doubt, claims crossing trust boundaries by a chain, and no Route Key
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the native hop list gone (only the temporary lite-06 compatibility chain remains)
+- [Routes and announces](/quest/m2/cluster-routes/README.md) - the route layer's fixtures pass on real lite-07 sessions, and the lite-06 churn mitigations they replace are retired
 
 ## Related
 

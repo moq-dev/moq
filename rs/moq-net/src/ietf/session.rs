@@ -50,8 +50,8 @@ pub struct Config {
 	/// falling back to 1; that is what a server accepting a connection passes, since it
 	/// has no per-peer configuration of its own.
 	///
-	/// A peer that does not negotiate the MoQ Cluster extension carries no cost at all, so
-	/// nothing is charged and its routes rank on hop count alone.
+	/// A peer that does not negotiate the MoQ Cluster extension carries no route cost, so
+	/// its routes cost this link alone.
 	pub cost: Option<u64>,
 
 	pub version: Version,

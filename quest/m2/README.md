@@ -32,11 +32,11 @@ removal, a rename, or a wire, catalog, or format change that is free until
   returned from m4, and the two moq-transport interop quests in m3 were
   deleted. Kept as they are: datagram tracks with their lite-05/06 bridge,
   all seven lite versions, the hidden `.` path prefix, and the route plan
-  of [cache-aware multicast](/quest/m2/multicast/README.md), whose
-  [switch](/quest/m2/multicast/switch.md) settled the public route API in
+  of [cache-aware multicast](/quest/m2/multicast/README.md), whose switch
+  settled the public route API in
   [moq-dev/moq#9053](https://github.com/moq-dev/moq/pull/9053). The
-  [moq-cluster draft](/quest/m2/moq-cluster-draft.md) stays, since
-  third-party relays ship it.
+  moq-cluster draft stays, since third-party relays ship it, rewritten to
+  what the binding sends.
 - **moq-net API.** [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
 - **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
@@ -103,7 +103,9 @@ Decided 2026-11-12 (maintainer, /quest-audit before the cut):
   the capture selections. None
   is on the routes chain, which stays the critical path.
 - ✅ Under the path rule a route keeps one sticky down-only flag beside its
-  path; see the [routes epic](/quest/m2/cluster-routes/README.md).
+  path; see the [routes epic](/quest/m2/cluster-routes/README.md). The
+  route layer that replaced it keeps the flag as a route's mark
+  ([cache-aware multicast](/quest/m2/multicast/README.md) item 6).
 
 Carried from m1's Plan before the re-cut, where "m1" means the whole pre-cut
 milestone, now m1 and m2:
@@ -289,9 +291,10 @@ what would need a breaking release had it landed right after the cut:
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4
   (low-priority compatibility, no named consumer), until it returned to m2
   on 2026-11-16; and the
-  [Playwright bump](/quest/m1/playwright-pin.md) to m1, which the release
-  cut requires in place of lite07-finalize (its strict interop lane needs
-  Chromium 158), with lite07-finalize checking Chromium 158 once by hand. The E2EE nonce
+  Playwright bump to m1, which the release cut required in place of
+  lite07-finalize (its strict interop lane needed Chromium 158), with
+  lite07-finalize checking Chromium 158 once by hand; deleted with the route
+  key lane it served. The E2EE nonce
   quest was removed: the nonce already binds the wire ID, which becomes the
   start, and lite-07 by start rewords the draft. Rejected for each: staying
   in m2.

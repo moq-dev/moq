@@ -792,11 +792,11 @@ impl Routed {
 		if !self.permit.within_limit(path.as_str()) {
 			return false;
 		}
-		// The chain a claim travels to a lite-06 peer: the relays that announced it again,
-		// then the node claiming it, so a relay it reaches back through recognizes it. A
-		// chain already naming this node looped back across lite-06, and the hop limit
-		// bounds the whole path across both versions.
-		// A node that adopted the claim from an endpoint already ends the chain.
+		// The chain a claim travels to a lite-06 peer: the relays it entered or left a
+		// routing domain by, then the node claiming it, so a relay it reaches back through
+		// recognizes it. A chain already naming this node looped back across lite-06, and
+		// the hop limit bounds the whole path across both versions.
+		// A forwarding node that announced the claim already ends the chain.
 		let claimant = (*origin != self.me && !served.chain.contains(&origin.relay)).then_some(origin.relay);
 		let relays = (served.chain.iter().copied())
 			.chain(claimant)

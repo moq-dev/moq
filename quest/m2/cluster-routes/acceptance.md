@@ -26,21 +26,19 @@ fixing late routing flaws in lite-08). A flaw found here is fixed on
 lite-07-wip before it freezes.
 
 The fixtures landed in [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832),
-and the reference model is deleted: forwarding on the router
-(`rs/moq-net/src/route/tests/forward.rs`), and on real sessions with time mocked
-the topology and prior-art fixtures (`tests/integration/route_acceptance.rs`),
+and the reference model is deleted. On real sessions with time mocked: the
+topology and prior-art fixtures (`tests/integration/route_acceptance.rs`),
 failover liveness and the live-graph tests of
 [moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644) (`route_failover.rs`),
 the tiered cluster, partition, and scoped-interest checks (`route_cluster.rs`),
-mount continuity (`mount.rs`), and operation-count regressions
-(`route/tests/cost.rs`, `route/node/tests.rs`). They found the flaws the
-quests under Required fix; the tests that pin each flaw say so in their docs.
-
-Reordered 2026-11-15 (maintainer, /quest-plan on
-[cache-aware multicast](/quest/m2/multicast/README.md)): the retirement below
-waits for [the switch](/quest/m2/multicast/switch.md), which rewrites these
-fixtures' assertions for the new rule and deletes the Required quests it
-makes moot.
+and mount continuity (`mount.rs`).
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) put lite-07 on
+`route::relay::Router` and rewrote their assertions for it; the old
+router's forwarding and operation-count fixtures went with it, and
+`route/tests/multicast*.rs` covers the new one. The route fan-out quest
+those pinned was deleted
+with the old rule, its one surviving cost moved to
+[route benches](/quest/m3/route-benches.md).
 
 Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): the
 switch makes `origin::Config::update_hold` crate-private, since nothing
@@ -54,8 +52,8 @@ path is part of retiring them below.
 
 What remains:
 
-- Retire the quarantine, the dedup, and the hold once the Required quests
-  turn their pinned fixtures into the contract's behaviour. The quarantine
+- Retire the quarantine, the dedup, and the hold, now that the fixtures
+  run on the route layer that replaces them. The quarantine
   is what turns the flaws into a 2 s gap: a relay that shows a held claim
   offline announces it again only after `RETRACT_QUARANTINE`. The hold and
   the quarantine sit on the announce cursor, which every version shares, so
@@ -70,11 +68,6 @@ What remains:
 - A request naming Node ID 0 on a lite-07 session: Rust clients always name
   a node, so only publisher unit tests cover a relay answering 0. Cover it
   where `js/net` sends it, in `just test interop`.
-
-## Required
-
-- [The switch](/quest/m2/multicast/switch.md) - the rule whose fixtures replace the mitigations, once the new route layer is on the wire
-- [Route fan-out](/quest/m2/cluster-routes/route-fanout.md) - a route change costs only the streams and broadcasts it touches
 
 ## Related
 
