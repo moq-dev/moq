@@ -222,7 +222,7 @@ pub struct SubscribeArgs {
 	/// overriding the catalog's recorded multiplex rate.
 	pub mux_rate: Option<u64>,
 
-	/// Write the `m2ts` passthrough track back out instead of muxing the media (TS only).
+	/// Write the passthrough track back out instead of muxing the media (TS only).
 	pub passthrough: bool,
 
 	/// The file to record to (MP4 only); the other formats write to stdout.
@@ -567,7 +567,7 @@ impl Subscribe {
 		}
 	}
 
-	/// Write the multiplex the broadcast's `m2ts` track carries, each run of packets as its
+	/// Write the multiplex the broadcast's passthrough track carries, each run of packets as its
 	/// time on the source's PCR comes round.
 	async fn run_ts_passthrough(self) -> anyhow::Result<()> {
 		let mut stdout = tokio::io::stdout();

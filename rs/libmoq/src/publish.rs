@@ -816,7 +816,7 @@ impl Publish {
 	/// Insert or replace a top-level application catalog section by name.
 	///
 	/// `value` is any JSON document. Errors if `name` is a HANG root (`video`, `audio`, `sync`, `text`,
-	/// `json`, `binary`, `stats`, `echo`, `include`, `m2ts`, or the retired `archive`, `clock`,
+	/// `json`, `binary`, `stats`, `echo`, `include`, or the retired `archive`, `clock`,
 	/// `media`, and `timeline`) or an MSF root (`version`,
 	/// `generatedAt`, `isComplete`, `tracks`, or `initDataList`). The catalog is republished
 	/// automatically.

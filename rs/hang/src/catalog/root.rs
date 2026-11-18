@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 ///
 /// The base catalog carries the media sections (`video`, `audio`, `text`), the optional `sync`
 /// section (the broadcast's one wall-clock mapping and join interval), the data sections
-/// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
-/// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
-/// `echo` soliciting viewer feedback under a relative broadcast prefix, and `include` naming
-/// whole broadcasts for explicit selection.
-/// Applications extend it with their own root sections (e.g. `com.example.scte35`) through `E`. The catalog
+/// (`json`, `binary`) for application tracks that aren't media, plus `stats` naming the
+/// publisher's media snapshot track, `echo` soliciting viewer feedback under a relative broadcast
+/// prefix, and `include` naming whole broadcasts for explicit selection.
+/// Applications extend it with their own root sections (e.g. `com.example.scte35`, or moq-mux's
+/// `mpegts`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
 ///
@@ -65,10 +65,6 @@ pub struct Catalog<E = ()> {
 	///
 	/// Omitted from the wire when empty, so a media-only catalog is unchanged.
 	pub binary: Binary,
-
-	/// A transport stream carried whole rather than demultiplexed: the one track holding its
-	/// packets, verbatim. See [`M2ts`](crate::catalog::M2ts). Omitted from the wire when absent.
-	pub m2ts: Option<crate::catalog::M2ts>,
 
 	/// The publisher's optional media snapshot track.
 	pub stats: Option<crate::catalog::Stats>,
@@ -149,9 +145,6 @@ struct Wire<E> {
 	binary: Binary,
 
 	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
-	m2ts: Option<crate::catalog::M2ts>,
-
-	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
 	stats: Option<crate::catalog::Stats>,
 
 	#[serde(default, deserialize_with = "crate::catalog::deserialize_some")]
@@ -199,7 +192,6 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			text,
 			json,
 			binary,
-			m2ts,
 			stats,
 			echo,
 			include,
@@ -213,7 +205,6 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			text,
 			json,
 			binary,
-			m2ts,
 			stats,
 			echo,
 			include,
@@ -1160,32 +1151,6 @@ mod test {
 		assert_eq!(catalog, plain);
 		assert_eq!(catalog.sync, crate::catalog::Timeline::default());
 		assert_eq!(catalog.to_json().unwrap(), plain.to_json().unwrap());
-	}
-
-	/// A section with the wrong shape refuses the catalog rather than reading as absent. The shared
-	/// parity fixture holds the cases for every section both languages read; `m2ts` is Rust's alone.
-	#[test]
-	fn a_mis_shaped_m2ts_refuses_the_catalog() {
-		for value in ["null", "5", r#""0.m2ts""#, r#"["0.m2ts"]"#, "{}", r#"{"track":5}"#] {
-			Catalog::<()>::from_str(&format!(r#"{{"m2ts":{value}}}"#)).expect_err(value);
-		}
-	}
-
-	#[test]
-	fn m2ts_roundtrips_at_the_root() {
-		let mut m2ts = crate::catalog::M2ts::new("0.m2ts");
-		m2ts.random_access = true;
-		let catalog = Catalog::<()> {
-			m2ts: Some(m2ts.clone()),
-			..Default::default()
-		};
-
-		let json = catalog.to_json().expect("failed to encode");
-		assert_eq!(json, r#"{"m2ts":{"track":"0.m2ts","randomAccess":true}}"#);
-		assert_eq!(
-			Catalog::<()>::from_str(&json).expect("failed to decode").m2ts,
-			Some(m2ts)
-		);
 	}
 
 	#[test]
