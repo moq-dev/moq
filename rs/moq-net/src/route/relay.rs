@@ -1752,14 +1752,13 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		if withdraws && self.sent_to.contains_key(&origin) {
 			self.advertise_stale(Some(origin));
 		}
-		// A neighbour `origin`'s route no longer goes to, such as an upstream once the route
-		// turned marked, loses it before it hears another claim of it. An end brings no
-		// claims, so unlike a start it can go now.
+		// A neighbour that holds `origin`'s route hears what changed of it before another
+		// claim of it: an upstream loses a route that turned marked, and any other neighbour
+		// hears the mark, so neither passes the claim on as unmarked. Only a start brings
+		// claims, and a neighbour that holds the route gets no start, so this can go now.
 		if self.stale.contains(&origin) {
-			let ended: Vec<N> = (self.sent_to.get(&origin).into_iter().flatten().copied())
-				.filter(|&peer| self.offer_for(origin, peer).is_none())
-				.collect();
-			for peer in ended {
+			let held: Vec<N> = self.sent_to.get(&origin).into_iter().flatten().copied().collect();
+			for peer in held {
 				self.advertise_to(origin, peer);
 			}
 		}
@@ -3964,6 +3963,90 @@ mod tests {
 			told.is_none_or(|told| told > ended.unwrap()),
 			"told a claim first: {out:?}"
 		);
+	}
+
+	/// A neighbour that keeps a route that turned marked hears the mark before another
+	/// claim of it, so it never passes the claim to its own upstream as unmarked.
+	#[test]
+	fn a_route_turning_marked_is_remarked_before_its_claims() {
+		let mut router = relay(1);
+		open(&mut router, 3, Role::Routing(node(3)));
+		open(&mut router, 5, Role::Routing(node(5)));
+		router
+			.connect(
+				4,
+				Port {
+					upstream: true,
+					..port(Role::Routing(node(4)))
+				},
+			)
+			.unwrap();
+		router.recv(4, Msg::Edited).unwrap();
+		router
+			.edit(
+				4,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		router.drain();
+
+		let route = |via: Id| Msg::Route {
+			origin: node(9),
+			offer: Some(Offer {
+				path: vec![
+					Hop {
+						node: node(9),
+						session: 0,
+					},
+					Hop {
+						node: node(via),
+						session: 1,
+					},
+				]
+				.into(),
+				draining: false,
+				priority: i8::MAX,
+				cost: 1,
+				marked: false,
+			}),
+		};
+		let claims = |broadcast: (Path, u64), floor| Msg::Claims {
+			origin: node(9),
+			changes: vec![(broadcast, live(0))],
+			floor,
+		};
+		router.recv(3, route(3)).unwrap();
+		router.recv(4, route(4)).unwrap();
+		router.recv(3, claims((p("live"), 7), 1)).unwrap();
+		router.drain();
+
+		router
+			.recv(
+				3,
+				Msg::Route {
+					origin: node(9),
+					offer: None,
+				},
+			)
+			.unwrap();
+		router.recv(4, claims((p("more"), 7), 2)).unwrap();
+		let out: Vec<_> = (router.drain().into_iter())
+			.filter(|(to, _)| *to == 5)
+			.map(|(_, msg)| msg)
+			.collect();
+		let remarked = out.iter().position(
+			|msg| matches!(msg, Msg::Route { origin, offer: Some(offer) } if *origin == node(9) && offer.marked),
+		);
+		let told = out.iter().position(
+			|msg| matches!(msg, Msg::Claims { origin, changes, .. } if *origin == node(9) && !changes.is_empty()),
+		);
+		let (Some(remarked), Some(told)) = (remarked, told) else {
+			panic!("the change was not told: {out:?}");
+		};
+		assert!(remarked < told, "told a claim before the mark: {out:?}");
 	}
 
 	/// A route that turns marked at the same rank re-tells a scoped neighbour each claim
