@@ -31,8 +31,9 @@ the implementation before lite-07 freezes, as the maintainer decided for the
 path rule on 2026-11-14.
 
 [Route layer acceptance](/quest/m2/cluster-routes/acceptance.md) owns the
-fixtures that exist, which the [switch](/quest/m2/multicast/switch.md)
-rewrites for the new rule; this adds the cases above beside them in
+fixtures that exist, which
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987) rewrote for
+the new rule; this adds the cases above beside them in
 `rs/moq-net/tests/integration/`. Impair links with bufferbloat, not random
 loss. Where a case needs `js/net`, run it in `just test interop --all`.
 
@@ -40,7 +41,3 @@ A case that fails is a flaw to fix on lite-07-wip, in the quest that owns
 the code, before the cut.
 
 Public API: none. Wire: none expected.
-
-## Required
-
-- [The switch](/quest/m2/multicast/switch.md) - the sessions these cases run on

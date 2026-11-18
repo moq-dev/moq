@@ -54,4 +54,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer it proves
-- [What the route switch left](/quest/m2/multicast/switch.md) - where these came from

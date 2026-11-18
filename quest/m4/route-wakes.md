@@ -26,9 +26,20 @@ Facts from `main` (`rs/moq-net/src/model/origin.rs`, since Wildcard landed in
   `select` under the table read lock (`retain_routes`, then `best_route`,
   which hashes every pool member), then the driver polls every track and
   rescans deadlines. `Pin` is gone (#4741).
-- `route_order` is rendezvous-style: FNV over the path and hop ids, lowest
-  wins. A join moves only paths the newcomer wins, a leave only paths the
-  leaver was winning.
+- `route_order` ranks, in order: the most specific claim; the claim the
+  route layer marks primary; a route neither draining nor unavailable; the
+  higher link priority; an identified hop chain before an anonymous one,
+  whatever the cost; the cheaper cost; a broadcast published on this origin;
+  the shorter hop chain; then, on lite-07, the draft's Rendezvous Hash of
+  the path and the claim's Instance (`rendezvous`) and the claimant's
+  relay, or on older versions a hash of the Instance and then of the chain,
+  lowest first; and last the newest entry. A broadcast published here for
+  exactly the path skips both hashes. A join moves only paths the newcomer
+  wins, a leave only paths the leaver was winning.
+- On lite-07 the route layer writes into this table through `route::node`,
+  one write per broadcast whose way changed; a change to one route rewrites
+  every broadcast behind it, which [route benches](/quest/m3/route-benches.md)
+  owns. This quest is the fronts' half: what each write wakes.
 
 Decisions:
 
@@ -53,24 +64,25 @@ Decisions:
   paths.
 - A serving front follows the best route among those it may resume across
   (decided 2026-10-04, replacing Stay; narrowed 2026-10-07 after #4942 and
-  Restart): routes with its epoch. A
-  front resolved without one, or replaced by a newer epoch, stays on its route
-  for its subscribers until that route goes and never splices onto another
-  (maintainer, 2026-10-08); new requests take a fresh front on the winner
-  instead of waking it. An idle front (every track
+  Restart; restated for lite-07's Instance): claims of its Instance, at the
+  newest Epoch among them. A front whose Instance another Broadcast replaced
+  at the path stays on its claims for its subscribers until they go and never
+  splices onto another Instance (maintainer, 2026-10-08); new requests take a
+  fresh front on the winner instead of waking it. An idle front (every track
   forgotten, no consumer holding its broadcast, not waiting for coverage)
-  ends instead of moving. A join or re-price must rehash
-  every epoch front below the prefix, since rendezvous moves exactly the paths
-  the changed route now wins; only those fronts re-select. A leave wakes only
+  ends instead of moving. A join or re-price must rehash every front below
+  the prefix that may resume, since rendezvous moves exactly the paths the
+  changed route now wins; only those fronts re-select. A leave wakes only
   the fronts the leaver served or was requesting through.
 - Builds on fronts keyed by effective exclusion, so the index hangs off the final front
   identity. (2026-09-30)
 
-Decided 2026-10-13: coordinate the index with the per-origin route model and
-per-track active/standby selection. Routes and announces records identity
-and the filtered candidate views. Do not build a second route table per track or
-turn one origin metric update into per-broadcast mutations. Whichever
-implementation lands first preserves these operation-count tests for the next.
+Decided 2026-10-13: coordinate the index with the route model and per-track
+active/standby selection. Do not build a second route table per track or
+turn one route's cost change into per-broadcast mutations. Whichever
+implementation lands first, this or the origin record in
+[route benches](/quest/m3/route-benches.md), preserves these operation-count
+tests for the next.
 
 Verification: `origin/pool_churn` leaves flat in served paths at every pool
 width it already sweeps, and a unit test that counts `select` calls per
@@ -82,4 +94,8 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - settles the source-selection model the index serves, so it is built once on the final selection
+- [Cache-aware routing](/quest/m3/cache-routing/README.md) - adds the warm pick to how a relay chooses its source, so the index is built once on the final selection
+
+## Related
+
+- [Route benches](/quest/m3/route-benches.md) - the route layer's side: one origin record per route instead of a write per broadcast

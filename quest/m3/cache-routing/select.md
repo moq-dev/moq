@@ -46,8 +46,9 @@ Decided 2026-11-17 (maintainer, same comment): ✅ **warmth ships in the next
 wip version, after the lite-07 cut** (rejected: holding lite-07 for the
 port; freezing the rank and advert fields in lite-07 before the port has
 exercised them). The 2026-11-14 decision stands: lite-07 freezes without a
-warm wire. The cut waits on [the switch](/quest/m2/multicast/switch.md), and
-this port is the first item after it.
+warm wire. The route layer it ranks on shipped in
+[moq-dev/moq#8987](https://github.com/moq-dev/moq/pull/8987), and this port
+is the first item after the cut.
 
 **Why ranked readers settle.** A relay's choice reads only copies feeding
 lower ranks, and what those feed never depends on a higher rank's choice.
@@ -232,7 +233,7 @@ outright.
 - **The path and the mark.** Every offer names the relays the data passes
   from the publisher's relay to the sender, and carries the mark: set once
   the copy came down a link its receiver marked upstream anywhere on that
-  path, and kept on every hop after, as a route's down-only flag is.
+  path, and kept on every hop after, as a route's mark is.
 - **Adverts.** While R has demand for an Instance besides N, N has not
   marked R upstream, and R has not both marked N upstream and a copy whose
   mark is set, it tells N its offer and the lowest rank it feeds besides N on
@@ -412,7 +413,6 @@ lite-07 freezes changes.
 
 ## Required
 
-- [The switch](/quest/m2/multicast/switch.md) - the route layer it ranks on
 - [Lite-07 finalized](/quest/m2/lite07-finalize.md) - warmth's wire lands in the first wip version after the cut (maintainer, 2026-11-17)
 
 ## Related
