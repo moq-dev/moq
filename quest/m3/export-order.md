@@ -57,6 +57,13 @@ the number of skips:
 - a sustained deficit on bufferbloat: a rate below the multiplex behind a
   deep but finite queue that overflows.
 
+Measure a third case for `ts`: since
+[moq-dev/moq#9067](https://github.com/moq-dev/moq/pull/9067) the TS export
+states its whole delay to the relay but still skips a stalled group locally
+once the group after it runs D/2 past it. Under Descending, a whole-path stall
+between D/2 and D that spans a group boundary drains the newer group first, so
+the older group's tail is skipped though it would land within D.
+
 Ship the order that loses less video for each kind, and record the numbers
 here or in the PR. Trace the relay's send order after the return with its
 qlog, which confirms or refutes the arithmetic above. The reporter offered to

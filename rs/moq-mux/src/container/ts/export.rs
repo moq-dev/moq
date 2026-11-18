@@ -4546,10 +4546,6 @@ fn video_kind(config: &VideoConfig, name: &str) -> Result<Kind> {
 	}
 }
 
-/// Start a media track's source at the live edge, the newest group, so the export does not
-/// begin on a group up to a delay old and carry that lag ever after; unless `replay`.
-/// Verbatim streams are sparse, and anything of theirs ahead of the first keyframe is
-/// dropped anyway, so they reach back as far as the skip budget allows.
 /// The delay a track subscription states for an export running `delay` behind: all of it, as both
 /// bounds, so a relay resets a group only once it is that old.
 pub(super) fn subscribed(delay: Duration) -> moq_net::track::Delay {
@@ -4564,6 +4560,10 @@ pub(super) fn skipping(source: ExportSource, delay: Duration) -> ExportSource {
 	source.skipping_at(moq_net::track::Delay::default().with_min(None).with_max(delay / 2))
 }
 
+/// Start a media track's source at the live edge, the newest group, so the export does not
+/// begin on a group up to a delay old and carry that lag ever after; unless `replay`.
+/// Verbatim streams are sparse, and anything of theirs ahead of the first keyframe is
+/// dropped anyway, so they reach back as far as the skip budget allows.
 fn at_edge(source: ExportSource, replay: bool) -> ExportSource {
 	match replay {
 		true => source,
