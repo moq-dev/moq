@@ -335,6 +335,8 @@ interface Copy {
 	 * had them when this one was subscribed, until this one resolves them itself.
 	 */
 	resolved?: (Resolved | undefined)[];
+	/** The reader's replaced ranges as this copy's cache resolved them, unclamped. */
+	replacedRanges?: (Resolved | undefined)[];
 	/** Replaced by a newer route. */
 	replaced: boolean;
 	/**
@@ -375,6 +377,11 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 /** Take a copy's next group, in sequence or arrival order. */
 function take(copy: Copy, ordered: boolean, floor?: bigint): Recv {
 	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, false);
+}
+
+/** Whether the placed range `at` holds group `key`. */
+function within(at: Resolved, key: bigint): boolean {
+	return key >= at.start && (at.end === undefined || key < at.end);
 }
 
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
@@ -627,6 +634,7 @@ class Reader implements ResumeSource {
 			// Replaced ranges resolve against its cache now, as any subscriber's do.
 			copy.from = ranges;
 			copy.resolved = hooks.resolveRanges(copy.sub, { ...preferences, ranges });
+			copy.replacedRanges = copy.resolved;
 		} else if (copy.from === undefined || !sameRanges(copy.from, ranges)) {
 			// A new copy starts from where the reader's ranges resolved.
 			copy.from = ranges;
@@ -648,6 +656,14 @@ class Reader implements ResumeSource {
 			if (copy.floor !== undefined || copy.until !== undefined) continue;
 			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
 			const own = hooks.servingResolved(copy.sub);
+			placed.resolved = ranges.map((_, index) => placed.resolved[index] ?? own[index]);
+		}
+		// Replaced ranges resolved against each copy's cache before its floor or cap raised them,
+		// the newest first. Mirrors the Rust `Reader::sync`.
+		for (let index = this.#copies.length - 1; index >= 0; index--) {
+			const copy = this.#copies[index];
+			if (!copy.replacedRanges || !copy.from || !sameRanges(copy.from, ranges)) continue;
+			const own = copy.replacedRanges;
 			placed.resolved = ranges.map((_, index) => placed.resolved[index] ?? own[index]);
 		}
 		return placed.resolved;
@@ -811,6 +827,41 @@ class Reader implements ResumeSource {
 		return (end === undefined || key < end) && !delivered.has(key);
 	}
 
+	/**
+	 * The reader's ranges as {@link #placed} resolved them, each `undefined` while no copy placed
+	 * it: such a range admits every group, as a pending Rust `Window` does.
+	 */
+	#window(): (Resolved | undefined)[] {
+		const ranges = (this.#shell.subscription.peek() ?? track.Subscription.default()).ranges ?? [{}];
+		return this.#placed(ranges);
+	}
+
+	/**
+	 * Whether `copy`'s next group `key` is one to hand out: deliverable, and in the reader's ranges.
+	 * A copy resolves a time start against the groups it holds, which may place it below where the
+	 * reader's ranges were placed: those decide. Mirrors the Rust `Reader::poll_lowest`.
+	 */
+	#admits(copy: Copy, key: bigint, delivered: Delivered): boolean {
+		return this.#deliverable(copy, key, delivered) && this.#window().some((at) => !at || within(at, key));
+	}
+
+	/**
+	 * Whether an ordered `copy`'s next group `key`, outside the reader's ranges, stays where it is:
+	 * passing it would lose a group they still owe below, which may yet land on this copy. Mirrors
+	 * the Rust `Reader::owes_below`.
+	 */
+	#held(copy: Copy, key: bigint, ordered: boolean, delivered: Delivered): boolean {
+		if (!ordered || !this.#deliverable(copy, key, delivered)) return false;
+		const window = this.#window();
+		if (window.some((at) => !at || within(at, key))) return false;
+		const floor = this.#newest === undefined ? 0n : this.#newest + 1n;
+		return window.some((at) => {
+			if (!at) return false;
+			const end = at.end === undefined ? key : min(at.end, key);
+			return delivered.gaps(max(at.start, floor), end).length > 0;
+		});
+	}
+
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
 		this.#delivered = delivered;
 		this.sync();
@@ -841,9 +892,12 @@ class Reader implements ResumeSource {
 			const copy = this.#copies[index];
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
+				const floor = this.#newest === undefined ? undefined : this.#newest + 1n;
+				const peeked = ordered ? hooks.peekGroup(copy.sub, ordered, floor) : undefined;
+				if (peeked !== undefined && this.#held(copy, peeked, ordered, delivered)) break;
+				const recv = take(copy, ordered, floor);
 				if (recv.kind === "group") {
-					if (!this.#deliverable(copy, recv.group.start, delivered)) {
+					if (!this.#admits(copy, recv.group.start, delivered)) {
 						recv.group.close();
 						continue;
 					}
@@ -993,12 +1047,13 @@ class Reader implements ResumeSource {
 					this.#newest === undefined ? undefined : this.#newest + 1n,
 				);
 				if (key === undefined) break;
-				if (this.#deliverable(copy, key, delivered)) {
+				if (this.#admits(copy, key, delivered)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
 					// bounds the copies it replaced.
 					if (!lowest || key <= lowest.key) lowest = { copy, key: key };
 					break;
 				}
+				if (this.#held(copy, key, ordered, delivered)) break;
 				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
 				if (recv.kind !== "group") break;
 				recv.group.close();

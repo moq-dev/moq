@@ -1445,6 +1445,43 @@ fn regressions() {
 			],
 			finish: false,
 		},
+		// A failover's backfill under a ranged read's resume point keeps to where the range
+		// resolved, though the new route gets the groups below it first.
+		Case {
+			ops: vec![
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, Some((1, 4)), false),
+				},
+				Op::Write {
+					instance: 0,
+					slot: 0,
+					group: None,
+					frames: 1,
+				},
+				Op::Up { instance: 0, slot: 1 },
+				Op::Down { instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
 	];
 	for case in cases {
 		if let Err(err) = run(&case) {

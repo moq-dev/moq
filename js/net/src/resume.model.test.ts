@@ -1079,6 +1079,23 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A failover's backfill under a ranged read's resume point keeps to where the range resolved.
+		{
+			ops: [
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 4], false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "down", instance: 0, slot: 0 },
+			],
+			finish: false,
+		},
+		{"ops": [{"kind": "join", "reader": 0, "spec": {"ordered": false, "budget": "hour", "range": undefined, "drops": false}}, {"kind": "write", "instance": 0, "slot": 0, "group": 3, "frames": 1}, {"kind": "expire"}, {"kind": "up", "instance": 0, "slot": 1}, {"kind": "ranges", "reader": 0, "range": [3, 5]}, {"kind": "write", "instance": 0, "slot": 0, "group": undefined, "frames": 1}], "finish": false},
+		{"ops": [{"kind": "join", "reader": 0, "spec": {"ordered": false, "budget": "hour", "range": [1, 2], "drops": false}}, {"kind": "up", "instance": 0, "slot": 2}, {"kind": "giveUp", "instance": 0, "slot": 2, "group": 1}, {"kind": "end", "instance": 0, "slot": 0}], "finish": false},
+		{"ops": [{"kind": "join", "reader": 0, "spec": {"ordered": false, "budget": "hour", "range": [6, 7], "drops": false}}, {"kind": "up", "instance": 0, "slot": 1}, {"kind": "write", "instance": 0, "slot": 0, "group": 6, "frames": 1}, {"kind": "write", "instance": 0, "slot": 1, "group": undefined, "frames": 1}, {"kind": "down", "instance": 0, "slot": 0}], "finish": false},
+		{"ops": [{"kind": "up", "instance": 1, "slot": 0}, {"kind": "write", "instance": 1, "slot": 0, "group": undefined, "frames": 1}, {"kind": "join", "reader": 0, "spec": {"ordered": false, "budget": "hour", "range": undefined, "drops": false}}, {"kind": "up", "instance": 1, "slot": 1}, {"kind": "ranges", "reader": 0, "range": [2, 3]}, {"kind": "down", "instance": 1, "slot": 1}, {"kind": "up", "instance": 1, "slot": 1}], "finish": false},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {
