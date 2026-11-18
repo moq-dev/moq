@@ -5396,6 +5396,12 @@ impl Producer {
 		ledger::grace(clamp_max_delay(budget, self.state.read().max_age_bound()))
 	}
 
+	/// An empty bill against this track's cache account, for a subscription's tail ledger.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn tail_bill(&self) -> cache::Reader {
+		self.state.read().cache.tail()
+	}
+
 	/// Create a [`Requests`] handle that serves on-demand fetches of uncached
 	/// (old) groups. Most producers never need this; a relay creates one to fetch
 	/// past groups from upstream.

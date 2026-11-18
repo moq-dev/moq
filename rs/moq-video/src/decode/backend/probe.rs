@@ -25,6 +25,10 @@ pub(crate) const NAME: &str = "probe";
 /// A test decoder that holds one picture until the next call or a flush.
 pub(crate) const BUFFERED_NAME: &str = "probe-buffered";
 
+/// A test decoder that holds one picture like [`BUFFERED_NAME`], whose flush
+/// readies it and then fails, as a codec that errors partway through a drain.
+pub(crate) const FAILING_FLUSH_NAME: &str = "probe-failing-flush";
+
 /// A test decoder that reorders like B-frames do: it holds two pictures and
 /// returns the earliest once it has a third. It hands pictures back at
 /// nanosecond scale, as MediaCodec does, whatever scale the access unit came in.
@@ -148,6 +152,7 @@ pub(crate) const SIZE: Size = Size {
 pub(crate) struct Probe(VecDeque<Frame>);
 
 pub(crate) struct Buffered {
+	name: &'static str,
 	held: Option<Frame>,
 	ready: VecDeque<Frame>,
 }
@@ -180,6 +185,15 @@ impl Probe {
 impl Buffered {
 	pub(crate) fn open(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self {
+			name: BUFFERED_NAME,
+			held: None,
+			ready: VecDeque::new(),
+		}))
+	}
+
+	pub(crate) fn open_failing_flush(_stream: &Stream, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self {
+			name: FAILING_FLUSH_NAME,
 			held: None,
 			ready: VecDeque::new(),
 		}))
@@ -381,11 +395,14 @@ impl Backend for Buffered {
 
 	fn flush(&mut self) -> Result<(), Error> {
 		self.ready.extend(self.held.take());
+		if self.name == FAILING_FLUSH_NAME {
+			return Err(anyhow::anyhow!("probe: flush failed").into());
+		}
 		Ok(())
 	}
 
 	fn name(&self) -> &str {
-		BUFFERED_NAME
+		self.name
 	}
 }
 

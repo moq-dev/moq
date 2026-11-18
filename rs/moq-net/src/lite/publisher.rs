@@ -184,7 +184,8 @@ impl Shared {
 	/// the node `node` that claims it: this node's own when it serves the claim itself,
 	/// else the claim it follows to `node`. `None` when nothing reaches that node or the
 	/// way would lead back to the peer. A request naming no node resolves through any
-	/// route. Waits while the session the request would leave on has yet to serve the claim.
+	/// route. Waits while the session the request would leave on has yet to serve the claim,
+	/// whether or not the request names a node.
 	fn poll_node_filter(
 		&self,
 		origin: origin::Consumer,
@@ -193,14 +194,24 @@ impl Shared {
 		node: Option<crate::route::NodeId>,
 		waiter: &kio::Waiter,
 	) -> Poll<Option<origin::Consumer>> {
+		let claim = origin.resolve(broadcast).zip(instance.cloned());
 		let Some(node) = node else {
+			// The node shows a peer's claim to the sessions it reaches before the session
+			// serving it lands its route in the origin, each on its own task. A peer that
+			// asks the moment it hears must find that route, not an origin without one.
+			if let Some(claim) = claim {
+				let _ = ready!(
+					origin
+						.route_node()
+						.poll_forward(self.peer_setup.tag(), None, &claim, waiter)
+				);
+			}
 			return Poll::Ready(Some(origin));
 		};
 		// A node is named for the claim of one instance.
-		let (Some(path), Some(instance)) = (origin.resolve(broadcast), instance) else {
+		let Some(claim) = claim else {
 			return Poll::Ready(None);
 		};
-		let claim = (path, instance.clone());
 		let via = ready!(
 			origin
 				.route_node()

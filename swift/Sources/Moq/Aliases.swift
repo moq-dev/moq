@@ -99,8 +99,9 @@ public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
 /// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
 /// field keeps its default, zero means zero (retry at once, or give up at the
-/// first failure), and `maxUnlimited` lifts the ceiling. Until a session has
-/// stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+/// first failure), and `maxUnlimited` lifts the ceiling. Until the peer has
+/// accepted a session's credential or drained a session with a GOAWAY
+/// (or, on moq-lite 03/04, which never answer it, a session stayed up 1s), a failed dial or a closed
 /// session, such as a refused credential, ends the connection with its error
 /// rather than retrying.
 public typealias Backoff = MoqFFI.MoqBackoff

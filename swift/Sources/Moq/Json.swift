@@ -110,6 +110,7 @@ extension Json {
         /// its delay, so a superseded snapshot it may still need stays deliverable that long and
         /// `next()` yields it.
         public init(broadcast: BroadcastConsumer, name: String, priority: Int8 = 0, delay: TimeInterval = 0) throws {
+            try checkDuration(delay, "delay")
             let config = MoqJsonSnapshotConsumerConfig(priority: priority, delay: delay)
             ffi = try MoqJsonSnapshotConsumer(broadcast: broadcast.ffi, name: name, config: config)
         }

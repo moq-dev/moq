@@ -80,6 +80,9 @@ type ProducerOptions struct {
 
 // NewProducer opens a video track on the catalog's broadcast and registers its rendition.
 func NewProducer(catalog *media.CatalogProducer, options ProducerOptions) (*Producer, error) {
+	if err := bridge.NonNegative(options.Output.Join, "join"); err != nil {
+		return nil, err
+	}
 	var bw **ffi.MoqAllocator
 	if options.Bandwidth != nil {
 		raw := bridge.Allocator(options.Bandwidth)
@@ -142,6 +145,9 @@ type Encoder struct{ inner *ffi.MoqVideoEncoder }
 
 // NewEncoder opens a codec-only encoder.
 func NewEncoder(input EncoderInput, output EncoderOutput) (*Encoder, error) {
+	if err := bridge.NonNegative(output.Join, "join"); err != nil {
+		return nil, err
+	}
 	inner, err := ffi.NewMoqVideoEncoder(input, output)
 	if err != nil {
 		return nil, err

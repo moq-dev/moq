@@ -36,6 +36,7 @@ public enum Audio {
             track: String? = nil,
             bandwidth: Allocator? = nil
         ) throws {
+            try checkDuration(output.frameDuration, "frameDuration")
             ffi = try MoqAudioProducer(
                 catalog: catalog.ffi,
                 options: MoqAudioProducerOptions(
@@ -97,7 +98,9 @@ public enum Audio {
             rendition: Media.Audio,
             output: DecoderOutput
         ) async throws -> Consumer {
-            Consumer(
+            try checkAudio(rendition)
+            try checkDelay(output.delay)
+            return Consumer(
                 try await MoqAudioConsumer.subscribe(
                     broadcast: broadcast.ffi,
                     id: id,
@@ -134,7 +137,10 @@ public enum Audio {
         let ffi: MoqAudioEncoder
 
         /// Open a codec-only encoder.
-        public init(output: EncoderOutput) throws { ffi = try MoqAudioEncoder(output: output) }
+        public init(output: EncoderOutput) throws {
+            try checkDuration(output.frameDuration, "frameDuration")
+            ffi = try MoqAudioEncoder(output: output)
+        }
 
         /// Samples per channel each `encode` call takes.
         public var frameSize: UInt64 {

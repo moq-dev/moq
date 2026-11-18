@@ -973,9 +973,10 @@ mod tests {
 			.unwrap();
 		received.push(first);
 
-		// The publisher declares a break and continues forward.
+		// The publisher declares a break and continues forward, with half a second written at
+		// once: a longer burst would leave the marker's group stale before the egress reads it.
 		producer.discontinuity().unwrap();
-		write(&mut producer, 30, OFFSET + 3_000_000);
+		write(&mut producer, 5, OFFSET + 3_000_000);
 
 		// Drain until the muxer flags the break, which it does exactly once, on the new
 		// generation's leading clock packet.

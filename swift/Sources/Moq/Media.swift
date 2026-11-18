@@ -163,7 +163,8 @@ public enum Media {
             broadcast: BroadcastConsumer,
             delay: TimeInterval = 0
         ) async throws -> CatalogConsumer {
-            CatalogConsumer(try await MoqMediaCatalogConsumer.subscribe(broadcast: broadcast.ffi, delay: delay))
+            try checkDuration(delay, "delay")
+            return CatalogConsumer(try await MoqMediaCatalogConsumer.subscribe(broadcast: broadcast.ffi, delay: delay))
         }
         init(_ ffi: MoqMediaCatalogConsumer) {
             self.ffi = ffi
@@ -196,7 +197,9 @@ public enum Media {
 
         /// Subscribe to a catalog rendition and decode its container, following its broadcast and track.
         public static func subscribe(broadcast: BroadcastConsumer, config: TrackConfig) async throws -> TrackConsumer {
-            TrackConsumer(try await MoqMediaTrackConsumer.subscribe(broadcast: broadcast.ffi, config: config))
+            try checkRendition(config.rendition)
+            try checkSubscription(config.subscription)
+            return TrackConsumer(try await MoqMediaTrackConsumer.subscribe(broadcast: broadcast.ffi, config: config))
         }
         init(_ ffi: MoqMediaTrackConsumer) {
             self.ffi = ffi
@@ -230,7 +233,9 @@ public enum Media {
 
         /// Fetch and decode exactly one group of a catalog rendition, following its broadcast and track.
         public static func fetch(broadcast: BroadcastConsumer, config: GroupConfig) async throws -> GroupConsumer {
-            GroupConsumer(try await MoqMediaGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
+            try checkRendition(config.rendition)
+            try checkFetch(config.options)
+            return GroupConsumer(try await MoqMediaGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
         }
         init(_ ffi: MoqMediaGroupConsumer) {
             self.ffi = ffi

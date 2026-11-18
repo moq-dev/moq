@@ -60,8 +60,9 @@ final class ConnectOptions {
   /// The WebSocket fallback raced against QUIC for `http(s)` URLs.
   final WebSocketConfig? websocket;
 
-  /// Set true for a one-shot dial. By default a session that stayed up past 1s
-  /// or was drained by a GOAWAY redials with backoff whenever the transport
+  /// Set true for a one-shot dial. By default a session whose credential the peer accepted,
+  /// or that the peer drained with a GOAWAY (or, on moq-lite 03/04, which never answer it,
+  /// that stayed up 1s), redials with backoff whenever the transport
   /// drops; before then, a failed dial or a closed session, such as a refused
   /// credential, ends it with that error instead.
   final bool once;

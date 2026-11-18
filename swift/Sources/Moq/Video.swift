@@ -90,6 +90,7 @@ public enum Video {
             bandwidth: Allocator? = nil,
             lower: Producer? = nil
         ) throws {
+            try checkDuration(output.join, "join")
             ffi = try MoqVideoProducer(
                 catalog: catalog.ffi,
                 options: MoqVideoProducerOptions(
@@ -171,7 +172,8 @@ public enum Video {
             rendition: Media.Video,
             output: DecoderOutput = DecoderOutput()
         ) async throws -> Consumer {
-            Consumer(
+            try checkDelay(output.delay)
+            return Consumer(
                 try await MoqVideoConsumer.subscribe(
                     broadcast: broadcast.ffi,
                     id: id,
@@ -205,6 +207,7 @@ public enum Video {
 
         /// Open a codec-only encoder.
         public init(input: EncoderInput, output: EncoderOutput) throws {
+            try checkDuration(output.join, "join")
             ffi = try MoqVideoEncoder(input: input, output: output)
         }
 

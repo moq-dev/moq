@@ -42,6 +42,7 @@ public final class TrackConsumer: AsyncSequence, Sendable {
     /// Change this subscriber's delivery preferences. Throws on a time anchor the track
     /// can't serve.
     public func update(subscription: Subscription) throws {
+        try checkSubscription(subscription)
         try ffi.update(subscription: subscription)
     }
 
@@ -162,7 +163,8 @@ public final class TrackProducer: Sendable {
     /// A read handle for this track (local pub/sub, no origin needed).
     /// `subscription` tunes delivery priority, group range, and staleness; omit for defaults.
     public func consume(subscription: Subscription? = nil) throws -> TrackConsumer {
-        TrackConsumer(try ffi.consume(subscription: subscription))
+        try checkSubscription(subscription)
+        return TrackConsumer(try ffi.consume(subscription: subscription))
     }
 
     /// A watch-only handle to the track's name and whether it has subscribers.

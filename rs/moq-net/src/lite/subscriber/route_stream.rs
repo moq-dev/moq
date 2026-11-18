@@ -371,6 +371,11 @@ impl Running {
 			match self.answer.poll_mounts(&mut self.writer, waiter) {
 				Poll::Ready(res) => res?,
 				Poll::Pending => {
+					// A grant change can buffer claims with nothing queued behind them, and the
+					// wakeup that brought it is spent: flush before resting.
+					if matches!(self.sending, Sending::Open | Sending::Ending) && !self.writer.is_flushed() {
+						continue;
+					}
 					// Everything the node queued is served, so what the peer synced shows.
 					self.routed.release();
 					break;
