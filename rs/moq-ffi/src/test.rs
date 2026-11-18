@@ -1945,8 +1945,17 @@ async fn subscriber_refresh_returns_once_sent() {
 /// A standalone broadcast drives its own cache pool, so a refresh its track's interval defers
 /// still goes out once the interval passes, even after the broadcast handle drops without a
 /// close and leaves the track to end on its own.
-#[tokio::test]
-async fn standalone_refresh_waits_out_the_interval() {
+#[test]
+fn standalone_refresh_waits_out_the_interval() {
+	// Nextest runs each test in its own process, so this one starts the runtime, on a clock
+	// only it moves.
+	assert!(
+		crate::ffi::start_test_clock(),
+		"the runtime already started: run under nextest"
+	);
+	let clock = crate::ffi::test_clock().unwrap();
+	// Every read on this thread, such as a group's arrival, on that clock too.
+	let _runtime = crate::ffi::enter();
 	const INTERVAL: Duration = Duration::from_millis(200);
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let info = MoqTrackInfo {
@@ -1960,24 +1969,32 @@ async fn standalone_refresh_waits_out_the_interval() {
 	let demand = track.demand().unwrap();
 	let consumer = track.consume(None).unwrap();
 	drop(broadcast);
-	let started = kio::clock::now();
 	track.append_group(us(0)).unwrap().finish().unwrap();
 
-	// Separate tasks, so one's timeout never re-polls the other past the deadline.
-	let sent = tokio::spawn(async move { kio::clock::timeout(TIMEOUT, consumer.refresh()).await });
-	let asked = tokio::spawn(async move { kio::clock::timeout(TIMEOUT, demand.refresh()).await });
-	asked
-		.await
-		.unwrap()
-		.expect("timed out waiting for the request")
-		.unwrap();
-	sent.await.unwrap().expect("timed out waiting for the send").unwrap();
-	let elapsed = started.elapsed();
-	assert!(elapsed >= INTERVAL, "deferred until the interval passed");
-	assert!(
-		elapsed < TIMEOUT / 2,
-		"sent once the interval passed, not on a later poll"
-	);
+	struct Woken(std::sync::Mutex<std::sync::mpsc::Sender<()>>);
+	impl std::task::Wake for Woken {
+		fn wake(self: Arc<Self>) {
+			let _ = self.0.lock().unwrap().send(());
+		}
+	}
+	let (wake, woken) = std::sync::mpsc::channel();
+	let waker = std::task::Waker::from(Arc::new(Woken(std::sync::Mutex::new(wake))));
+	let mut cx = std::task::Context::from_waker(&waker);
+	let mut sent = std::pin::pin!(consumer.refresh());
+	let mut asked = std::pin::pin!(demand.refresh());
+	assert!(sent.as_mut().poll(&mut cx).is_pending(), "deferred");
+	clock.advance(INTERVAL - Duration::from_millis(1)).unwrap();
+	assert!(asked.as_mut().poll(&mut cx).is_pending(), "not due yet");
+	assert!(sent.as_mut().poll(&mut cx).is_pending());
+
+	while woken.try_recv().is_ok() {}
+	clock.advance(Duration::from_millis(1)).unwrap();
+	// Only the pool's driver fires the deadline that wakes the waiting publisher.
+	woken
+		.recv_timeout(TIMEOUT)
+		.expect("the driver wakes the publisher once due");
+	assert!(matches!(asked.as_mut().poll(&mut cx), std::task::Poll::Ready(Ok(()))));
+	assert!(matches!(sent.as_mut().poll(&mut cx), std::task::Poll::Ready(Ok(()))));
 }
 
 #[tokio::test]

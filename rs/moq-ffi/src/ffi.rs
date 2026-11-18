@@ -29,7 +29,7 @@ pub(crate) struct Runtime {
 	/// Work submitted by local handles, closed and drained with the root.
 	pending: kio::Shared<Option<Vec<Child>>>,
 	/// The clock a test drives, when the runtime started with one.
-	#[cfg(feature = "testing")]
+	#[cfg(any(test, feature = "testing"))]
 	clock: Option<kio::clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
@@ -72,7 +72,7 @@ pub(crate) fn runtime() -> &'static Runtime {
 /// Start the runtime on a [`kio::clock::Manual`] clock that only a test moves.
 ///
 /// False when the runtime already started, since its timers are armed on the host clock.
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn start_test_clock() -> bool {
 	let mut started = false;
 	RUNTIME.get_or_init(|| {
@@ -83,7 +83,7 @@ pub(crate) fn start_test_clock() -> bool {
 }
 
 /// The clock [`start_test_clock`] installed, if it did.
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub(crate) fn test_clock() -> Option<&'static kio::clock::Installed> {
 	RUNTIME.get()?.clock.as_ref()
 }
@@ -91,7 +91,7 @@ pub(crate) fn test_clock() -> Option<&'static kio::clock::Installed> {
 impl Runtime {
 	fn new(
 		#[cfg_attr(
-			not(feature = "testing"),
+			not(any(test, feature = "testing")),
 			allow(unused_variables, reason = "only the `testing` feature uses it")
 		)]
 		test_clock: bool,
@@ -103,7 +103,7 @@ impl Runtime {
 			.unwrap();
 		let handle = runtime.handle().clone();
 		// Before any task runs, so every read and timer lands on it.
-		#[cfg(feature = "testing")]
+		#[cfg(any(test, feature = "testing"))]
 		let clock = test_clock.then(|| kio::clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
 		let pending = kio::Shared::new(Some(Vec::new()));
@@ -141,7 +141,7 @@ impl Runtime {
 		Runtime {
 			handle,
 			pending,
-			#[cfg(feature = "testing")]
+			#[cfg(any(test, feature = "testing"))]
 			clock,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
 			stopped: kio::Producer::new(()),
