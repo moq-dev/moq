@@ -4949,9 +4949,18 @@ export class Subscriber {
 	}
 
 	// Take every run the record gave up into the gaps waiting, in whatever order they come. A drop
-	// replaces what it overlaps, and a skip was never a group, so it removes them.
+	// replaces what it overlaps, and a skip was never a group, so it removes them. Runs come lowest
+	// first, so one past every gap waiting is appended without copying the rest.
 	#findGaps(items: Items): void {
 		for (let dropped = this.#tryDrop(); dropped; dropped = this.#tryDrop()) {
+			const last = items.gaps.at(-1);
+			if (!last || last.end <= dropped.start) {
+				if (dropped.skip) continue;
+				const gap = { start: dropped.start, end: dropped.end, error: dropped.error };
+				if (last && last.end === gap.start && sameHole(last, gap)) last.end = gap.end;
+				else items.gaps.push(gap);
+				continue;
+			}
 			items.gaps = dropped.skip
 				? removeRun(items.gaps, dropped.start, dropped.end)
 				: insertDrop(items.gaps, dropped.start, dropped.end, { error: dropped.error });
