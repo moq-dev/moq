@@ -207,9 +207,10 @@ async fn rejoined_quiet_catalog_survives_cache_expiry() {
 
 /// A quiet track's latest group outlives the cache window across a publisher takeover.
 ///
-/// The publisher reconnects while a reader holds the catalog: the relay retires the old
-/// upstream copy and resumes from the new one past the cached group, which must stay
-/// protected as the live edge.
+/// The publisher reconnects while a reader holds the catalog. The relay never stitches
+/// the new connection's copy into the old front: the holder's subscription ends, and a
+/// later reader gets a fresh front whose latest catalog must stay protected as the
+/// live edge.
 #[tokio::test(start_paused = true)]
 async fn taken_over_quiet_catalog_survives_cache_expiry() {
 	for version in ["moq-lite-05", "moq-lite-06"] {
@@ -276,7 +277,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		};
 
 		tokio::time::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
-		let (mut later, _later_remote, _later_pair) = session(5).await;
+		let (mut later, later_remote, _later_pair) = session(5).await;
 		let mut group = tokio::time::timeout(Duration::from_secs(1), later.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version} takeover={takeover}: late reader lost the latest catalog"))
@@ -284,6 +285,19 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			.unwrap();
 		assert_eq!(read_all(&mut group).await.unwrap(), [b"catalog"], "{version}");
 		drop(group);
+
+		// After a takeover the holder read the old front, which ended; the later reader
+		// holds the fresh one.
+		let (mut holder, holder_remote) = if takeover {
+			let end = tokio::time::timeout(Duration::from_secs(1), holder.recv_group()).await;
+			assert!(
+				!matches!(end, Ok(Ok(Some(_)))),
+				"{version}: the takeover was stitched into the old front"
+			);
+			(later, later_remote)
+		} else {
+			(holder, holder_remote)
+		};
 
 		// A newer catalog supersedes it, so the old one expires like any other group.
 		let mut newer = track.append_group().unwrap();

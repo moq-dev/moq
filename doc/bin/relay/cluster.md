@@ -32,12 +32,15 @@ follow the current best route immediately; only the announcement waits. For
 publisher that a peer still hunting offers, instead of announcing the
 broadcast again.
 
-Failover routes must carry copies of the same broadcast. For each track, the
-relay requires matching timescale, retention window, publisher priority, and
-group ordering. A source with different properties is refused before its groups
-are spliced in. If no compatible source remains, the track fails with
-`Unsupported`. New immutable properties require a new track name or broadcast
-identity.
+A relay never splices a second route into a broadcast it serves. Two routes
+from the same publisher can carry different broadcasts under one path, such as
+one the publisher re-created with its group numbers starting over. So when the
+serving route closes, or another route becomes the best, the relay ends the
+broadcast and re-announces its path: a retraction, then the route again.
+Subscribers then request the broadcast afresh through the current best route,
+which costs viewers a brief restart on every failover, a relay drain included.
+A path announced only through a covering prefix is not re-announced, since that
+would restart the prefix's other broadcasts too.
 
 A route whose original publisher (its first hop) changes is updated in place on
 both wire protocols, so the broadcast never briefly vanishes downstream.

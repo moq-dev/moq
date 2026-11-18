@@ -122,6 +122,11 @@ pub(super) enum Action {
 	Abort { track: Arc<str>, err: Error },
 	/// Arm (or clear) the deadline the front wants to be woken at.
 	Arm { at: Option<Instant> },
+	/// Re-announce the path to its announce consumers, a retraction then the
+	/// route again. Precedes the [`Action::End`] of a front that served while a
+	/// route may still serve the path: the table alone shows those consumers no
+	/// change, so nothing else tells them the broadcast they hold has ended.
+	Bounce,
 	/// The front is over: reject the parked requesters with `err`, leave each
 	/// read track to end with the copy it is spliced from or still waiting on,
 	/// abort the rest with `err`, and drop every source.
@@ -359,6 +364,7 @@ impl Front {
 			// relay advertises. The front ends, and readers re-request through the
 			// table's choice.
 			Some(_) if self.serving.is_some() => {
+				actions.push(Action::Bounce);
 				self.end(Error::Dropped, actions);
 			}
 			// Already asking through it.
@@ -466,8 +472,7 @@ impl Front {
 			return;
 		}
 		// A standing route can outlive the source it produced. Asking it again
-		// would re-request the broadcast that just ended; another route to the
-		// same publisher may still resume it.
+		// would re-request the broadcast that just ended.
 		self.refused.insert(route);
 		self.serving = None;
 		self.serving_closing = false;
@@ -483,6 +488,7 @@ impl Front {
 		// The source's broadcast is over. Another route, even to the same publisher,
 		// may carry a different broadcast under the same path and group numbers, so
 		// nothing resumes it: the front ends and a newcomer gets a fresh one.
+		actions.push(Action::Bounce);
 		self.end(Error::Dropped, actions);
 	}
 
@@ -839,7 +845,7 @@ mod tests {
 				best: Some(remote(2, 10)),
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -874,7 +880,11 @@ mod tests {
 		let mut front = serving(remote(1, 10), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[
+				Action::Detach { source: 100 },
+				Action::Bounce,
+				Action::End { err: Error::Dropped },
+			],
 		);
 		assert!(front.ended());
 	}
@@ -930,7 +940,11 @@ mod tests {
 		assert_eq!(front.pin(), Pin::Route(1));
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[
+				Action::Detach { source: 100 },
+				Action::Bounce,
+				Action::End { err: Error::Dropped },
+			],
 		);
 	}
 
@@ -1252,7 +1266,7 @@ mod tests {
 				best: Some(local(2)),
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -1264,7 +1278,7 @@ mod tests {
 				best: Some(local(2)),
 				serving_closing: true,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::Bounce, Action::End { err: Error::Dropped }],
 		);
 	}
 
@@ -1273,7 +1287,11 @@ mod tests {
 		let mut front = serving(local(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
+			&[
+				Action::Detach { source: 100 },
+				Action::Bounce,
+				Action::End { err: Error::Dropped },
+			],
 		);
 	}
 

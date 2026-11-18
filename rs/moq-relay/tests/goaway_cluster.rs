@@ -250,9 +250,9 @@ async fn spawn_upstream(
 }
 
 /// An upstream GOAWAY with a redirect migrates the cluster dial to the sibling.
-/// The draining session keeps serving through the handover window, and the path
-/// never retracts on the cluster origin (route re-pricing and the sibling's
-/// announce surface as metadata updates, not churn).
+/// The draining session keeps serving through the handover window. The front
+/// never stitches the sibling's copy in: it ends and bounces the path (a
+/// retraction, then the route again), which ends announced.
 async fn cluster_migrates_on_upstream_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -311,9 +311,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 			b"g0"[..]
 		);
 
-		// Watch for retraction during the swap: the migration must never
-		// unannounce the path (metadata updates are expected: the drain
-		// re-prices the old route and the sibling announces its own).
+		// Watch the path through the swap: it may bounce, but ends announced.
 		let mut announcements = cluster.origin.consume().announced();
 		let first = announcements.next().await.expect("initial announce");
 		assert_eq!(first.prefix.as_str(), "cam");
@@ -349,16 +347,17 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// handover window at the latest).
 		session_a.closed().await;
 
-		// No retraction leaked to the origin during the whole swap. Metadata
-		// updates (the drain re-pricing, the sibling's route) are expected and
-		// harmless; an inactive event means the path flapped.
+		// The front ended rather than stitch the sibling's copy in, so the path may
+		// have bounced, but it never stays retracted.
+		let mut active = true;
 		loop {
 			match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
 				Err(_) => break,
-				Ok(Some(update)) if update.kind.is_active() => continue,
-				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
+				Ok(Some(update)) => active = update.kind.is_active(),
+				Ok(None) => panic!("the cluster origin's announcements ended"),
 			}
 		}
+		assert!(active, "the migration left the path retracted on the cluster origin");
 
 		cluster_run.abort();
 	})
@@ -442,11 +441,11 @@ async fn spawn_relay_with_upstream(
 ///    gated: MID-B's first inbound connection can only be that reconnect).
 /// 3. The draining MID-A leg keeps serving through the handover window, so
 ///    every group published across the swap arrives exactly once.
-/// 4. Once the old leg closes, the SAME subscription keeps flowing: both legs'
-///    routes share TOP as their first hop, so BOTTOM's front re-splices onto
-///    the MID-B leg at a group boundary instead of ending the subscription.
-/// 5. No GOAWAY leaks to the subscriber's own session, and the path never
-///    retracts under the subscriber.
+/// 4. Once the old leg closes, BOTTOM's front ends rather than stitch the MID-B
+///    leg's copy in, even though both legs name TOP as the publisher: the
+///    subscription ends, and a fresh request reads the MID-B leg.
+/// 5. No GOAWAY leaks to the subscriber's own session, and the path ends
+///    announced under the subscriber (it may bounce).
 async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -523,7 +522,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		.expect("origin closed before the announce");
 	assert_eq!(first.prefix.as_str(), "diamond");
 
-	let bc = within("broadcast resolves on the subscriber origin", async {
+	let bc_old = within("broadcast resolves on the subscriber origin", async {
 		let consumer = sub_origin.consume();
 		consumer.routed("diamond").await?;
 		consumer.request_broadcast("diamond").await.ok()
@@ -541,7 +540,8 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// must preserve is that every group arrives, exactly once, with its frames intact.
 	let mut sub = within(
 		"subscribe to the video track",
-		bc.track("video")
+		bc_old
+			.track("video")
 			.expect("track handle")
 			.subscribe(moq_net::track::Subscription::default().with_max_age(Duration::from_secs(60))),
 	)
@@ -617,10 +617,9 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// BOTTOM, positively proving the new leg carries the resubscribe.
 	drop(mid_a_upstream);
 
-	// The subscription was served through the MID-A leg, but its close does not
-	// end it: both legs' routes name TOP as their first hop, so BOTTOM's front
-	// re-splices onto the MID-B leg at a group boundary and the subscription
-	// rides through. Keep publishing and keep reading the SAME subscription.
+	// The subscription was served through the MID-A leg, and its close ends it:
+	// BOTTOM never stitches the MID-B leg's copy in. Keep publishing, and read
+	// through a fresh request, as the bounce tells a subscriber to.
 	const POST_DRAIN_LAST: u64 = LAST_GROUP + 40;
 	let post_publisher = tokio::spawn(async move {
 		for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
@@ -635,19 +634,41 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		}
 	});
 
-	// Three distinct post-drain groups on the same subscription, every frame
-	// verified, proves the new leg carries it: MID-A is severed, so they can
-	// only have flowed TOP -> MID-B -> BOTTOM.
+	// The old subscription ends without a post-drain group.
+	while let Ok(Some(group)) = within("the old subscription ends", sub.recv_group()).await {
+		assert!(
+			group.sequence <= LAST_GROUP,
+			"group {} reached the old subscription after the drain",
+			group.sequence
+		);
+	}
+	let bc = within("a fresh request resolves through the MID-B leg", async {
+		let consumer = sub_origin.consume();
+		loop {
+			if let Ok(bc) = consumer.request_broadcast("diamond").await
+				&& !bc.is_clone(&bc_old)
+			{
+				return bc;
+			}
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await;
+	let mut sub = within(
+		"subscribe through the MID-B leg",
+		bc.track("video").expect("track handle").subscribe(None),
+	)
+	.await
+	.expect("subscribe");
+
+	// Three distinct post-drain groups, every frame verified, proves the new leg
+	// carries it: MID-A is severed, so they can only have flowed TOP -> MID-B ->
+	// BOTTOM.
 	let mut post = BTreeSet::new();
 	while post.iter().filter(|seq| **seq > LAST_GROUP).count() < 3 {
 		collect_group(&mut sub, &mut post, FRAMES_PER_GROUP, "post-drain (MID-B leg only)").await;
 	}
 	post_publisher.abort();
-	// The splice must not re-deliver anything the old leg already served.
-	assert!(
-		post.iter().all(|seq| *seq > LAST_GROUP),
-		"the splice re-delivered pre-failover groups: {post:?}"
-	);
 
 	// ── no GOAWAY cascade to the downstream subscriber ───────────────────
 	assert!(
@@ -666,15 +687,16 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 		"downstream subscriber received a GOAWAY (the relay should absorb it): {leaked:?}"
 	);
 
-	// ── announcement stability: the path never retracted under the swap ──
-	// Metadata updates (route re-pricing, the new leg's hops) are expected.
+	// ── announcement: the path may bounce under the swap, but ends announced ──
+	let mut active = true;
 	loop {
 		match tokio::time::timeout(Duration::from_millis(500), announcements.next()).await {
 			Err(_) => break,
-			Ok(Some(update)) if update.kind.is_active() => continue,
-			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
+			Ok(Some(update)) => active = update.kind.is_active(),
+			Ok(None) => panic!("the subscriber's announcements ended"),
 		}
 	}
+	assert!(active, "the failover left the path retracted under the subscriber");
 }
 
 /// Receive the next group, assert every frame's payload and the exact frame count

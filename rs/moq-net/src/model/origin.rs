@@ -1322,6 +1322,19 @@ impl TableCursor {
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&entry.prefix))
 	}
 
+	/// Re-deliver the route at this presented prefix as a retraction then an
+	/// announce, if it was announced at exactly `path`. See [`OriginState::bounce`].
+	fn bounce(&mut self, presented: &PathOwned, path: &Path) {
+		let Some(current) = self.current.get(presented).filter(|current| current.prefix == *path) else {
+			return;
+		};
+		if let Ok(mut state) = self.state.write() {
+			let at = self.under.join(presented);
+			state.apply_unannounce(at.clone(), current.meta.clone(), current.captures.clone());
+			state.apply_announce(at, current.meta.clone(), current.captures.clone());
+		}
+	}
+
 	/// Deliver a changed winner at this presented prefix.
 	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>) {
 		let Some(entry) = best else {
@@ -3083,6 +3096,7 @@ async fn run_front(task: FrontTask) {
 						}
 					}
 					Action::Arm { at } => deadline.set(at),
+					Action::Bounce => shared.lock().bounce(&path.as_path()),
 					Action::End { err } => {
 						if let Ok(mut pending) = request.write() {
 							pending.resolved.get_or_insert(Err(err.clone()));
@@ -3782,6 +3796,26 @@ impl OriginState {
 		}
 		// The fronts and requesters under the prefix re-select from the table.
 		routes.poke_below(prefix);
+	}
+
+	/// Re-announce `path` on every cursor presenting a route at exactly `path`:
+	/// a retraction, then the same route again. A front at `path` is ending while
+	/// a route may still serve it, and the cursors would otherwise see no change,
+	/// so a consumer holding the ended broadcast would never request a fresh one.
+	/// A cursor seeing `path` only through a covering prefix is left alone, since
+	/// a bounce there would restart the prefix's other broadcasts too.
+	fn bounce(&mut self, path: &Path) {
+		let Ok(claim) = prefix_claim(path) else {
+			return;
+		};
+		for id in self.routes.cursors_touching(path) {
+			let Some(cursor) = self.cursors.get_mut(&id) else {
+				continue;
+			};
+			if let Some(presented) = cursor.presented(path, &claim) {
+				cursor.bounce(&presented, path);
+			}
+		}
 	}
 
 	/// Register a [`Watch`] on the routes covering `path`.
@@ -8061,6 +8095,69 @@ mod tests {
 			.expect("track ended early");
 		let frame = group.read_frame().await.expect("read frame").expect("frame");
 		assert_eq!(&frame.payload[..], b"new");
+	}
+
+	/// A front that ends while a route still serves its path re-announces the path,
+	/// a retraction then the route again, so a consumer holding the ended broadcast
+	/// (a browser, a downstream relay) requests a fresh one. Whether the source
+	/// closed under a route that stays or another route won, the table alone shows
+	/// the announce cursors no change.
+	#[tokio::test]
+	async fn an_ended_front_bounces_its_announce() {
+		for source_closes in [true, false] {
+			let producer = origin(1).produce();
+			let consumer = producer.consume();
+			let mut view = consumer.announced();
+			let incumbent = producer
+				.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(5))
+				.unwrap();
+			view.assert_next_active("room/alice");
+
+			let pending = consumer.request_broadcast("room/alice");
+			let source = broadcast::Info::new().produce();
+			queued(&incumbent).await.accept(&source);
+			let resolved = pending.await.expect("resolves");
+
+			// The same publisher is back on an identical route, which the cursor never
+			// sees, before the old one leaves; or a cheaper route from it wins.
+			let cost = if source_closes { 5 } else { 0 };
+			let other = producer
+				.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(cost))
+				.unwrap();
+			let _incumbent = if source_closes {
+				drop(incumbent);
+				drop(source);
+				None
+			} else {
+				// The cheaper route's metadata waits out the update hold, and the bounce
+				// below takes its place.
+				Some((incumbent, source))
+			};
+
+			tokio::time::timeout(Duration::from_secs(10), resolved.closed())
+				.await
+				.expect("the front ends");
+			view.assert_next_ended("room/alice");
+			view.assert_next_active("room/alice");
+			view.assert_next_wait();
+			drop(other);
+		}
+	}
+
+	/// A front at a path served only through a covering prefix bounces nothing:
+	/// re-announcing the prefix would restart its other broadcasts too.
+	#[tokio::test]
+	async fn a_covering_route_is_never_bounced() {
+		let (rig, incumbent, source) = ResumeRig::new(&[10]).await;
+		let mut view = rig.producer.consume().announced();
+		view.assert_next_active("room");
+		let _returned = rig.standby(&[10]);
+		drop(incumbent);
+		drop(source);
+		tokio::time::timeout(Duration::from_secs(10), rig.resolved.closed())
+			.await
+			.expect("the front ends");
+		view.assert_next_wait();
 	}
 
 	#[tokio::test]
