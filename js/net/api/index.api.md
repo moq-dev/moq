@@ -748,6 +748,16 @@ export namespace Track {
 	export interface InfoOptions {
 		signal?: AbortSignal;
 	}
+	export type Item = {
+		group: Group.Consumer;
+		kind: "group";
+	} | {
+		end: bigint;
+		error: Error;
+		group?: never;
+		kind: "gap";
+		start: bigint;
+	};
 	export type Order = "ascending" | "descending";
 	export class Ordered {
 		close(abort?: Error): void;
@@ -757,7 +767,7 @@ export namespace Track {
 		isSkipped(start: bigint, end: bigint): boolean;
 		largest(): Promise<Track.Position | undefined>;
 		readonly name: string;
-		nextGroup(): Promise<Group.Consumer | undefined>;
+		nextGroup(): Promise<Track.Item | undefined>;
 		readFrame(): Promise<{
 			frame: number;
 			group: bigint;
@@ -765,7 +775,7 @@ export namespace Track {
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
-		tryNextGroup(): Group.Consumer | undefined;
+		tryNextGroup(): Track.Item | undefined;
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}

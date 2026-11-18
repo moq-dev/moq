@@ -8,11 +8,11 @@ import * as Ietf from "./ietf/index.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
+import { nextGroup } from "./ordered.test-util.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { wireOf } from "./wire.ts";
-import { nextGroup } from "./ordered.test-util.ts";
 
 const url = new URL("https://localhost:4443/test");
 

@@ -6,11 +6,11 @@ import * as cache from "./cache.ts";
 import { NotFound, StreamCode, TooFarBehind, toStreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
+import { nextGroup } from "./ordered.test-util.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { wireOf } from "./wire.ts";
-import { nextGroup } from "./ordered.test-util.ts";
 
 // The public API mints consumers internally (Producer.consume, the wire layers); tests act
 // as a wire layer by subclassing, the same way lite's ConsumeBroadcast does.

@@ -22,6 +22,7 @@ import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame, waitFor } from "./mock.ts";
+import { nextGroup } from "./ordered.test-util.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
@@ -31,7 +32,6 @@ import type { Position, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
-import { nextGroup } from "./ordered.test-util.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcastRoute = origin.route(path);

@@ -14,6 +14,7 @@ import { ALPN as IetfALPN } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair, type MockTransport, manual, textFrame, waitFor } from "../mock.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Stream } from "../stream.ts";
@@ -24,7 +25,6 @@ import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
 import { type Backoff, pumpAnnounced, Redirects, Reload, type ReloadProps } from "./reload.ts";
 import type { Session } from "./session.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });

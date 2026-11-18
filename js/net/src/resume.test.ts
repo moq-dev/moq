@@ -12,6 +12,7 @@ import { Version as IetfVersion } from "./ietf/version.ts";
 import * as Instance from "./instance.ts";
 import { hooks, staleHole } from "./internal.ts";
 import type { Lister } from "./listing.ts";
+import { nextGroup, tryNextGroup } from "./ordered.test-util.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front, routeFailed } from "./resume.ts";
@@ -19,7 +20,6 @@ import { Timestamp } from "./time.ts";
 import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
-import { nextGroup, tryNextGroup } from "./ordered.test-util.ts";
 
 const INFO: track.Info = { compression: "none", timescale: null, maxAge: null, priority: 0, refresh: null };
 

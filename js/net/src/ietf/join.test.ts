@@ -6,6 +6,7 @@ import { StreamCode } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
@@ -23,7 +24,6 @@ import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version, versionName } from "./version.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 
 const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 const VERSION = Version.DRAFT_18;

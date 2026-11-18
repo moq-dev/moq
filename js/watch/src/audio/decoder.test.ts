@@ -1664,6 +1664,7 @@ async function livePlayback(burst: number) {
 			counts.inserted = insert.mock.calls.reduce((sum, [, data]) => sum + (data as Float32Array[])[0].length, 0);
 		},
 		async close() {
+			owed?.close();
 			decoder.close();
 			source.close();
 			sync.close();

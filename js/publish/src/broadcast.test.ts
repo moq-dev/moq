@@ -409,7 +409,7 @@ test("a re-announce continues the catalog's group sequence", async () => {
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 	const first = net.track(Broadcast.CATALOG_TRACK).subscribe().ordered();
-	const start = ((await first.nextGroup())?.group)?.start;
+	const start = (await first.nextGroup())?.group?.start;
 	if (start === undefined) throw new Error("expected the first catalog");
 	const instance = announced?.active.peek()?.instance;
 	expect(instance).toBeDefined();

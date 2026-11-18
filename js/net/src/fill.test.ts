@@ -10,12 +10,12 @@ import type { Consumer as GroupConsumer } from "./group.ts";
 import { hooks, staleHole } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair, groupsOf, requestedGroups } from "./mock.ts";
+import { nextGroup } from "./ordered.test-util.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import type { FillGroups, Producer, Requests, Subscription } from "./track.ts";
 import { wireOf } from "./wire.ts";
-import { nextGroup } from "./ordered.test-util.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

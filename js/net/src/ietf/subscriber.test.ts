@@ -7,6 +7,7 @@ import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.t
 import { type Hop, toHop, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin } from "../mock.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
@@ -27,7 +28,6 @@ import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDon
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 
 const VERSION = Version.DRAFT_18;
 

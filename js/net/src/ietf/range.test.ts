@@ -2,6 +2,7 @@ import { expect, onTestFinished, test } from "bun:test";
 import { StreamCode, StreamError } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { type Subscription, Producer as TrackProducer } from "../track.ts";
@@ -13,7 +14,6 @@ import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { Subscriber } from "./subscriber.ts";
 import { TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 
 const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 const ALPNS = {

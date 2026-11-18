@@ -685,7 +685,11 @@ export class Decoder {
 		});
 	}
 
-	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, { config, failure, path, key, ordered }: Attempt): void {
+	#runLegacyDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure, path, key, ordered }: Attempt,
+	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(

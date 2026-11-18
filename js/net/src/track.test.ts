@@ -8,12 +8,12 @@ import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./gro
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks, skipHole, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
+import { nextGroup, tryNextGroup } from "./ordered.test-util.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
 import { Timescale, Timestamp } from "./time.ts";
 import { authoredInfo, Subscription, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { LIVE, rangesStart } from "./window.ts";
-import { nextGroup, tryNextGroup } from "./ordered.test-util.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

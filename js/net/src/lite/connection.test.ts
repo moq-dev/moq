@@ -8,6 +8,7 @@ import { inspect } from "../connection/stats.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { acceptBudget, Readers, Stream, Writer } from "../stream.ts";
@@ -42,7 +43,6 @@ import {
 	Version,
 	versionName,
 } from "./version.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 
 /** A transport whose `getStats` behaves as described, or is absent entirely. */
 function transport(getStats?: () => Promise<unknown>): WebTransport {

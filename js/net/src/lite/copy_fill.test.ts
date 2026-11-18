@@ -13,6 +13,7 @@ import type { Consumer as GroupConsumer } from "../group.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, requestedGroups } from "../mock.ts";
 import { lines } from "../open.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Timescale, Timestamp } from "../time.ts";
@@ -21,7 +22,6 @@ import { wireOf } from "../wire.ts";
 import * as Lite from "./index.ts";
 import { Publisher as LitePublisher } from "./publisher.ts";
 import { Subscriber as LiteSubscriber } from "./subscriber.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

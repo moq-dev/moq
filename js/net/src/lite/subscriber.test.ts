@@ -25,6 +25,7 @@ import { type Hop, isAnonymous, MAX_HOPS, toHop, UNKNOWN_HOP, WireRoute } from "
 import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
+import { nextGroup } from "../ordered.test-util.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -63,7 +64,6 @@ import {
 import { Minted, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { hasLengthFirst, Version, versionName } from "./version.ts";
-import { nextGroup } from "../ordered.test-util.ts";
 
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;

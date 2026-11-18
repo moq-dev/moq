@@ -5,8 +5,8 @@ import { StreamCode, StreamError } from "./error.ts";
 import { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
-import * as Path from "./path.ts";
 import { nextGroup } from "./ordered.test-util.ts";
+import * as Path from "./path.ts";
 
 test("cache identity follows the serving announcement, preserving held tracks", async () => {
 	const cache = new BroadcastCache();

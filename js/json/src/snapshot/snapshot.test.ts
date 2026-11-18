@@ -679,8 +679,8 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 
 	// Two groups, a self-contained snapshot each, rather than one whose frame 0 was evicted.
 	const subscriber = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
-	expect(((await subscriber.nextGroup())?.group)?.start).toBe(0n);
-	expect(((await subscriber.nextGroup())?.group)?.start).toBe(1n);
+	expect((await subscriber.nextGroup())?.group?.start).toBe(0n);
+	expect((await subscriber.nextGroup())?.group?.start).toBe(1n);
 	expect((await subscriber.nextGroup())?.group).toBeUndefined();
 
 	// The newest value is readable with no earlier frame to apply it to.
@@ -762,7 +762,8 @@ test("a scale-less snapshot at a key not past the newest group is refused", asyn
 
 	const ordered = track.subscribe({ delay: { max: REPLAY_LATENCY } }).ordered();
 	const sequences: bigint[] = [];
-	for (let group = (await ordered.nextGroup())?.group; group; group = (await ordered.nextGroup())?.group) sequences.push(group.start);
+	for (let group = (await ordered.nextGroup())?.group; group; group = (await ordered.nextGroup())?.group)
+		sequences.push(group.start);
 	expect(sequences).toEqual([5n, 8n]);
 	expect(await drain(track)).toEqual([{ n: 1 }]);
 });
