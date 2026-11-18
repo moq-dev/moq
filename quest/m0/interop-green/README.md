@@ -21,9 +21,9 @@ so it only needs to stay green.
   default on Chromium, and its child quest restores it on Firefox. Decided 2026-11-09 (maintainer, AFK, accepting the
   recommendation): close this quest on a pass, which the maintainer set with
   those cases skipped; the pass that closes it runs all but `replacement`.
-  Release remeasure now updates stale planned-break pins after publication
-  and requests landing through the main merge queue. Check its run and PR
-  when a scheduled run reports stale pins.
+  Release remeasure measures stale planned-break pins after publication. Its
+  [update branch](/quest/m0/remeasure-update-branch.md) currently prevents it from
+  opening the pin PR. Check the run and refresh the pins manually until the fix lands.
 
 ## Plan
 
