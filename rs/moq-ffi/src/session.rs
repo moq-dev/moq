@@ -737,7 +737,8 @@ pub enum MoqConnectionPhase {
 		/// The latest failed dial, or none before the first one fails.
 		failure: Option<MoqError>,
 	},
-	/// A session is serving.
+	/// A session is serving: its peer accepted the credential, or on moq-lite 03/04, which
+	/// never answer it, the session stayed up 1s. A refused session never reaches this phase.
 	Connected {
 		/// The live session's negotiated version, spelled like `moq-lite-03`.
 		version: String,

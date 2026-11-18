@@ -46,7 +46,9 @@ type ConnectionPhaseConnecting struct {
 	Failure error
 }
 
-// ConnectionPhaseConnected means a session is serving.
+// ConnectionPhaseConnected means a session is serving: its peer accepted the
+// credential, or on moq-lite 03/04, which never answer it, the session stayed up 1s.
+// A refused session never reaches this phase.
 type ConnectionPhaseConnected struct {
 	// Version names the live session's negotiated protocol, like "moq-lite-03".
 	Version string

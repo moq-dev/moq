@@ -949,10 +949,10 @@ async fn the_handover_takes_the_earlier_deadline() {
 	);
 }
 
-/// A replacement that connects after the predecessor retired mid-dial serves, so the
-/// offline the retirement queued no longer holds and is never reported.
+/// A replacement that connects after the predecessor retired mid-dial does not serve until
+/// it is established, so the offline the retirement queued is still reported first.
 #[kio::test]
-async fn a_connect_cancels_the_offline_a_retirement_queued() {
+async fn a_retirement_mid_dial_is_offline_until_the_replacement_is_established() {
 	const HANDOVER: Duration = Duration::from_millis(500);
 	let peer = url("tcp://peer:1/");
 	let mut config = Config::default();
@@ -973,12 +973,10 @@ async fn a_connect_cancels_the_offline_a_retirement_queued() {
 
 	let (client, _server) = handshake().await;
 	machine.connected(kio::clock::now(), client);
-	assert!(
-		kio::clock::timeout(Duration::from_secs(60), next(&mut machine))
-			.await
-			.is_err(),
-		"a stale offline followed the connect"
-	);
+	let action = next_any(&mut machine).await;
+	assert!(matches!(action, Action::Offline(None)), "{action:?}");
+	let action = next_any(&mut machine).await;
+	assert!(matches!(action, Action::Established), "{action:?}");
 	assert!(machine.session().is_some());
 }
 

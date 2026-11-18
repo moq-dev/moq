@@ -659,7 +659,10 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 						true => handover,
 						false => earliest(Some(healthy), handover),
 					};
-					match live.probe.as_mut().map(|probe| probe.poll(now)) {
+					// Only an established session is left for the preferred transport: one that may
+					// still be a refusal is no session to hand over.
+					let probe = live.probe.as_mut().filter(|_| live.established);
+					match probe.map(|probe| probe.poll(now)) {
 						None => return Action::Wait(handover),
 						Some(ProbePoll::Wait(at)) => return Action::Wait(earliest(at, handover)),
 						Some(ProbePoll::Abandon) => return Action::Abandon,
@@ -703,9 +706,6 @@ impl<A: Target, E: Clone + std::fmt::Display + From<Error> + From<Failure>> Reco
 		if let Some(tokens) = &self.tokens {
 			tokens.connected(&session);
 		}
-		// A predecessor that retired mid-dial queued an offline this session now contradicts.
-		// Its `Retired` stays, so the caller still drops the predecessor.
-		self.queue.retain(|action| !matches!(action, Action::Offline(_)));
 		self.walk = Walk::default();
 		self.phase = Phase::Live(Box::new(Live {
 			goaway: Some(session.draining()),

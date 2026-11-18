@@ -1187,7 +1187,8 @@ pub struct moq_announce_event {
 pub enum moq_connection_phase {
 	/// No connection has been established yet.
 	MOQ_CONNECTION_PHASE_CONNECTING = 0,
-	/// A connection is serving.
+	/// A connection is serving: its peer accepted the credential, or on moq-lite 03/04, which
+	/// never answer it, the session stayed up 1s. A refused session never reaches this phase.
 	MOQ_CONNECTION_PHASE_CONNECTED = 1,
 	/// No connection is serving while the session redials.
 	MOQ_CONNECTION_PHASE_DISCONNECTED = 2,

@@ -219,7 +219,11 @@ export class Reload {
 	 */
 	tokens: Signal<readonly string[]>;
 
-	/** Current connection status. */
+	/**
+	 * Current connection status. A session reads as connected only once its peer accepts the
+	 * credential (on moq-lite-03/04, which never answer it, once it stays up past the healthy
+	 * bar), so a refused one never does.
+	 */
 	status = new Signal<ReloadStatus>("disconnected");
 
 	/**
