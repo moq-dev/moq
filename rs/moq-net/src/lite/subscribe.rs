@@ -846,8 +846,11 @@ pub(crate) struct LiveRanges {
 	initial: u64,
 	/// The live ranges [`Self::apply`] last returned, until one changes, so an edit that
 	/// changes nothing costs nothing.
-	snapshot: Option<std::sync::Arc<[(u64, Range)]>>,
+	snapshot: Option<Snapshot>,
 }
+
+/// Every live range with its Range ID, shared while none changes.
+pub(crate) type Snapshot = std::sync::Arc<[(u64, Range)]>;
 
 impl LiveRanges {
 	/// The ranges a SUBSCRIBE carried.
@@ -932,7 +935,7 @@ impl LiveRanges {
 
 	/// Resolve a received edit, returning every live range with its Range ID: the same
 	/// snapshot as last time while nothing changed.
-	pub fn apply(&mut self, edit: RangeEdit) -> Result<std::sync::Arc<[(u64, Range)]>, DecodeError> {
+	pub fn apply(&mut self, edit: RangeEdit) -> Result<Snapshot, DecodeError> {
 		match edit {
 			RangeEdit::Replace(ranges) if !self.version.has_ranges() => {
 				*self = Self::new(self.version, &ranges);
@@ -1030,8 +1033,14 @@ impl LiveRanges {
 		// Checked before anything changes, so a refused edit leaves the ranges as last sent.
 		let form = self.version.into();
 		let size = |range: &Range| range_size(range, form).unwrap_or(usize::MAX);
-		let removed = remove.iter().map(|id| size(&self.live[id])).fold(0, usize::saturating_add);
-		let size = add.iter().map(size).fold(self.size.saturating_sub(removed), usize::saturating_add);
+		let removed = remove
+			.iter()
+			.map(|id| size(&self.live[id]))
+			.fold(0, usize::saturating_add);
+		let size = add
+			.iter()
+			.map(size)
+			.fold(self.size.saturating_sub(removed), usize::saturating_add);
 		if size > super::message::MAX_MESSAGE_SIZE {
 			return Err(EncodeError::TooLarge);
 		}

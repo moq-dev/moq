@@ -163,9 +163,16 @@ async fn a_union_too_large_for_one_message_asks_a_covering_superset() {
 	write_group(&track, BASE + 2 * VIEWERS + 2);
 	write_group(&track, key);
 	for want in [BASE + 2, BASE + 2 * VIEWERS + 2] {
-		let got = kio::clock::timeout(TIMEOUT, readers[1].recv_group()).await.unwrap().unwrap();
+		let got = kio::clock::timeout(TIMEOUT, readers[1].recv_group())
+			.await
+			.unwrap()
+			.unwrap();
 		assert_eq!(got.map(|group| group.start), Some(want));
 	}
 	let got = kio::clock::timeout(TIMEOUT, live.recv_group()).await.unwrap().unwrap();
-	assert_eq!(got.map(|group| group.start), Some(key), "the plain viewer keeps receiving");
+	assert_eq!(
+		got.map(|group| group.start),
+		Some(key),
+		"the plain viewer keeps receiving"
+	);
 }

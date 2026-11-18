@@ -3465,9 +3465,9 @@ mod tests {
 					.await
 					.unwrap();
 			} else {
-				let begin = h
-					.serve
-					.begin_subscription(&mut track, &mut Sub::None, lowered, &mut RangeFills::default(), true);
+				let begin =
+					h.serve
+						.begin_subscription(&mut track, &mut Sub::None, lowered, &mut RangeFills::default(), true);
 				assert!(matches!(begin, Ok(Begin::Establish(_))));
 			}
 

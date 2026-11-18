@@ -151,7 +151,9 @@ pub(super) fn fit(
 	let [spans, fills] = lists;
 	let mut ranges: Vec<Range> = spans.ranges().map(|(start, end)| span(start, end)).collect();
 	ranges.extend(others);
-	let groups = fills.ranges().map(|(start, end)| start.group..end.expect("fills are bounded").group);
+	let groups = fills
+		.ranges()
+		.map(|(start, end)| start.group..end.expect("fills are bounded").group);
 	Ok((ranges, groups.collect()))
 }
 
@@ -215,7 +217,11 @@ impl Spans {
 	fn gaps(&self, tag: bool) -> impl Iterator<Item = ((bool, u64), bool, usize)> + '_ {
 		self.spans.windows(2).enumerate().map(move |(index, pair)| {
 			let end = pair[0].1.expect("only the last is open");
-			((self.last[index], pair[1].0.group.saturating_sub(end.group)), tag, index)
+			(
+				(self.last[index], pair[1].0.group.saturating_sub(end.group)),
+				tag,
+				index,
+			)
 		})
 	}
 
@@ -288,7 +294,12 @@ mod tests {
 
 	fn total(budget: Budget, ranges: &[Range], groups: &RangeSet<u64>) -> usize {
 		let fills = FillAsk::wire(groups);
-		ranges.iter().copied().chain(fills).map(|range| budget.cost(&range).unwrap()).sum()
+		ranges
+			.iter()
+			.copied()
+			.chain(fills)
+			.map(|range| budget.cost(&range).unwrap())
+			.sum()
 	}
 
 	/// Whether `outer` asks for everything `inner` does, judged without the latest group.
@@ -360,7 +371,10 @@ mod tests {
 			}
 			assert!(total(budget, &ranges, &groups) <= budget.bytes, "step {step}");
 			for range in &demand {
-				assert!(ranges.iter().any(|outer| covers(outer, range)), "step {step}: {range:?}");
+				assert!(
+					ranges.iter().any(|outer| covers(outer, range)),
+					"step {step}: {range:?}"
+				);
 			}
 			for run in fills.iter() {
 				assert!(groups.gaps(run).next().is_none(), "step {step}: {run:?}");
@@ -441,7 +455,9 @@ mod tests {
 		let (_, got) = fit(Vec::new(), &fills, &RangeSet::new(), budget(fits)).unwrap();
 		assert_eq!(got, groups(&[0..3, 100..104, 1_000..1_001]));
 		// A gap the fills avoid closes last, however narrow.
-		let (_, got) = fit(Vec::new(), &fills, &groups(&[1..2]), budget(fits)).unwrap();
+		let mut avoid = RangeSet::new();
+		avoid.insert(1..2);
+		let (_, got) = fit(Vec::new(), &fills, &avoid, budget(fits)).unwrap();
 		assert_eq!(got, groups(&[0..1, 2..104, 1_000..1_001]));
 	}
 }

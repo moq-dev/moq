@@ -1771,7 +1771,7 @@ impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate {
 }
 
 /// A SUBSCRIBE_UPDATE resolved to every live range, by Range ID.
-type LiveUpdate = lite::SubscribeUpdate<std::sync::Arc<[(u64, lite::Range)]>>;
+type LiveUpdate = lite::SubscribeUpdate<lite::Snapshot>;
 
 /// Serves one request stream: decode the request, resolve its broadcast, drive the
 /// kind's reply, then FIN.
@@ -4923,7 +4923,7 @@ struct TrackRun {
 	refused: Option<Error>,
 	/// The live ranges the last update applied and the model subscription made of them, so
 	/// an update leaving every range live costs nothing for them.
-	applied: Option<(std::sync::Arc<[(u64, lite::Range)]>, crate::track::Subscription)>,
+	applied: Option<(lite::Snapshot, crate::track::Subscription)>,
 	// Where delivery starts, which SUBSCRIBE_START reports.
 	start: Start,
 	end_sent: bool,
