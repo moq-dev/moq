@@ -569,7 +569,8 @@ impl VideoEncoder {
 		let ceiling = *self.ceiling.read();
 		let reservation = Arc::new(allocator.reserve(&self.producer.demand(), ceiling));
 		let (stop, stopped) = oneshot::channel();
-		let follower = crate::ffi::Background::new({
+		// Its own thread: retuning blocks on the codec, and on this lock while a caller encodes.
+		let follower = crate::ffi::Background::thread("libmoq-rate", {
 			let shared = shared.clone();
 			let lower = self.lower.clone();
 			let consumer = reservation.consume();
@@ -1705,7 +1706,7 @@ mod tests {
 		let mut config = moq_video::encode::Config::new(320, 240, moq_video::FrameRate::new(30, 1).unwrap());
 		config.kind = moq_video::encode::Kind::Software;
 		let encoder = moq_video::encode::Sink::open(&config).await.unwrap();
-		let follower = crate::ffi::Background::new(async { panic!("injected rate follower panic") });
+		let follower = crate::ffi::Background::thread("libmoq-rate", async { panic!("injected rate follower panic") });
 		assert!(matches!(follower.finished().await, Err(Error::Panic)));
 		let estimate = moq_net::bandwidth::Producer::new();
 		let allocator = moq_net::bandwidth::Allocator::new(estimate.consume());

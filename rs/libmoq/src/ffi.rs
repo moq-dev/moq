@@ -94,6 +94,28 @@ impl Background {
 		Self { result: Some(receiver) }
 	}
 
+	/// Spawn an owned operation on a thread of its own, for one that blocks, such as on a
+	/// codec, which would stall every session sharing the runtime thread.
+	pub fn thread(
+		name: &str,
+		future: impl std::future::Future<Output = Result<(), Error>> + Send + 'static,
+	) -> Self {
+		let result = kio::Producer::new(None);
+		let receiver = result.consume();
+		std::thread::Builder::new()
+			.name(name.into())
+			.spawn(move || {
+				// The runtime's context without running on it, for anything the operation spawns.
+				let _guard = RUNTIME.enter();
+				let completed = pollster::block_on(run(future));
+				*result
+					.write()
+					.unwrap_or_else(|_| unreachable!("only the background thread closes its completion")) = Some(completed);
+			})
+			.expect("failed to spawn background thread");
+		Self { result: Some(receiver) }
+	}
+
 	/// Own a model driver until its completion has been reported.
 	pub fn driver(mut driver: impl moq_net::time::Driver + Send + 'static) -> Self {
 		let result = kio::Producer::new(None);

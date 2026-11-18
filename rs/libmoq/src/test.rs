@@ -8406,6 +8406,57 @@ fn encode_video_ceiling_wakes_a_rung_above() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// A rate follower waiting on its encoder, as it does while a caller encodes, leaves the
+/// runtime every session shares free to run.
+#[test]
+fn encode_video_follower_never_stalls_the_runtime() {
+	let (bandwidth, estimate) = test_allocator();
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"rate");
+	let input = moq_video_encoder_input {
+		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
+		width: 320,
+		height: 240,
+		framerate: moq_video_frame_rate {
+			numerator: 30,
+			denominator: 1,
+		},
+	};
+	let output = moq_video_encoder_output {
+		codec: moq_video_codec::MOQ_VIDEO_CODEC_H264 as u32,
+		bitrate: 2_000_000,
+		join_us: 0,
+		kind: moq_video_encoder_kind::MOQ_VIDEO_ENCODER_KIND_SOFTWARE as u32,
+		encoder: std::ptr::null(),
+		encoder_len: 0,
+	};
+	let options = moq_video_encode_options { bandwidth, lower: 0 };
+	let video = id(unsafe { moq_encode_video(broadcast, &input, &output, &options) });
+	let shared = State::lock().video.producer(Id::try_from(video).unwrap()).unwrap();
+
+	let (done, probed) = mpsc::channel();
+	{
+		// Held as a caller's encode holds it, while the grant moves and wakes the follower.
+		let guard = shared.lock();
+		estimate.set(Some(moq_net::bandwidth::Rate::from_kbps(500))).unwrap();
+		crate::ffi::RUNTIME.spawn(async move {
+			// Yield long enough for the woken follower to run ahead of this task.
+			for _ in 0..1000 {
+				tokio::task::yield_now().await;
+			}
+			done.send(()).unwrap();
+		});
+		let probed = probed.recv_timeout(TIMEOUT);
+		drop(guard);
+		probed.expect("the runtime stalled behind the rate follower");
+	}
+
+	assert_eq!(moq_encode_video_finish(video), 0);
+	assert_eq!(moq_allocator_close(bandwidth), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 /// Listen on an ephemeral loopback port with a generated certificate.
 fn listen(cb: &Callback) -> (u32, String, String) {
 	let bind = "127.0.0.1:0";
