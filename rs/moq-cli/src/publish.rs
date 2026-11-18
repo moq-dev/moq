@@ -764,7 +764,7 @@ async fn publish_audio(
 	(config, encode, retain): (moq_audio::capture::Config, moq_audio::encode::Options, bool),
 ) -> anyhow::Result<anyhow::Result<()>> {
 	// A failed track keeps serving its retained audio until it is served or expires, up to
-	// `--max-age`, without holding up the reopen. Dropping the set cancels them.
+	// `--max-age`, without holding up the reopen or the report.
 	let mut draining = tokio::task::JoinSet::new();
 	let mut reopen = Reopen::default();
 	let mut published = false;
@@ -804,13 +804,9 @@ async fn publish_audio(
 			None => break Err(err.context(format!("audio capture kept failing for {:?}", Reopen::BUDGET))),
 		}
 	};
-	while let Some(joined) = draining.join_next().await {
-		if let Err(err) = joined
-			&& err.is_panic()
-		{
-			std::panic::resume_unwind(err.into_panic());
-		}
-	}
+	// Report at once: the failed tracks keep draining in the background while the video runs,
+	// each ending with its error, and are dropped when the command exits.
+	draining.detach_all();
 	Ok(result)
 }
 
