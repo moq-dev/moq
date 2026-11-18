@@ -5,7 +5,7 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
-import type { Producer as GroupProducer } from "../group.ts";
+import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame } from "../mock.ts";
@@ -1696,6 +1696,32 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(response.start.starts[0]).toBe(3n);
 			expect(await sub.servedSequence()).toBe(6n);
 		} finally {
+			await sub.close();
+		}
+	});
+
+	// A subscription that ends while a group waits for the START has no one to read it, so the
+	// held group is closed, not left for a relay to keep reading upstream.
+	test(`lite ${version}: a subscription ending before the upstream START closes the group it held`, async () => {
+		const sub = await servedSubscription({ version, startGroup: 2n });
+		const closed: bigint[] = [];
+		const close = GroupConsumer.prototype.close;
+		const spy = spyOn(GroupConsumer.prototype, "close").mockImplementation(function (this: GroupConsumer) {
+			closed.push(this.start);
+			close.call(this);
+		});
+		try {
+			hooks.receiveTrack(sub.track);
+			hooks.startTrack(sub.track, { requested: 2n });
+			sub.serve(6n);
+			await flush();
+			expect(closed).not.toContain(6n);
+
+			sub.client.close();
+			await sub.serving;
+			expect(closed).toContain(6n);
+		} finally {
+			spy.mockRestore();
 			await sub.close();
 		}
 	});
