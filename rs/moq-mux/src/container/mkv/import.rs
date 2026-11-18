@@ -155,6 +155,16 @@ struct MkvTrack {
 	default_duration: Option<std::time::Duration>,
 	kind: TrackKind,
 	track: Media,
+	/// An H.264/H.265 record held unpublished until the track's first keyframe commits, whose
+	/// bytes say whether the parameter sets also ride in band. The rendition withholds the catalog
+	/// meanwhile.
+	record: Option<Record>,
+}
+
+struct Record {
+	config: VideoConfig,
+	/// The scan of the first keyframe's bytes so far, once it opens.
+	keyframe: Option<crate::codec::video::InBand>,
 }
 
 enum Media {
@@ -208,6 +218,14 @@ impl Media {
 		match self {
 			Self::Video(track) => track.abort(err),
 			Self::Audio(track) => track.abort(err),
+		}
+	}
+
+	/// Publish a video track's config.
+	fn configure(&mut self, config: VideoConfig) -> crate::Result<()> {
+		match self {
+			Self::Video(track) => track.set(config),
+			Self::Audio(_) => unreachable!("only a video track holds a record"),
 		}
 	}
 }
@@ -651,16 +669,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				TrackKind::Audio => crate::container::Kind::Audio,
 			},
 		)?;
-		let media = match kind {
+		let (media, record) = match kind {
 			TrackKind::Video => {
 				let mut config = build_video_config(&codec_id, codec_private.as_ref(), video_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Video(reserved.video(track, wire, config)?)
+				match config.codec {
+					VideoCodec::H264(_) | VideoCodec::H265(_) => {
+						let record = Record { config, keyframe: None };
+						(Media::Video(reserved.video(track, wire, None)?), Some(record))
+					}
+					_ => (Media::Video(reserved.video(track, wire, config)?), None),
+				}
 			}
 			TrackKind::Audio => {
 				let mut config = build_audio_config(&codec_id, codec_private.as_ref(), audio_children.as_deref())?;
 				config.container = self.container.clone();
-				Media::Audio(reserved.audio(track, wire, config)?)
+				(Media::Audio(reserved.audio(track, wire, config)?), None)
 			}
 		};
 
@@ -670,6 +694,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				default_duration,
 				kind,
 				track: media,
+				record,
 			},
 		);
 
@@ -835,14 +860,23 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					};
 					let size = usize::try_from(size).map_err(|_| moq_net::Error::FrameTooLarge)?;
 					frames.index += 1;
-					frames
-						.open
-						.insert(track.track.open(timestamp, keyframe, frames.duration, size)?)
+					let frame = track.track.open(timestamp, keyframe, frames.duration, size)?;
+					if keyframe && let Some(record) = &mut track.record {
+						// A keyframe a failed block cut short starts over.
+						record.keyframe = Some(crate::codec::video::InBand::new(&record.config)?);
+					}
+					frames.open.insert(frame)
 				}
 			};
 			let (bytes, rest) = chunk.split_at(frame.remaining().min(chunk.len()));
 			if !bytes.is_empty() {
 				frame.write(bytes)?;
+				if let Some(Record {
+					keyframe: Some(scan), ..
+				}) = &mut track.record
+				{
+					scan.scan(bytes);
+				}
 			}
 			chunk = rest;
 			if frame.remaining() > 0 {
@@ -850,6 +884,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			let frame = frames.open.take().expect("a frame is open");
 			track.track.commit(frame)?;
+			if let Some(Record {
+				mut config,
+				keyframe: Some(scan),
+			}) = track.record.take_if(|record| record.keyframe.is_some())
+			{
+				scan.apply(&mut config);
+				track.track.configure(config)?;
+			}
 		}
 		Ok(total - chunk.len())
 	}
@@ -928,7 +970,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// A frame cut short fails its group with the reason, rather than waiting for the rest.
 			self.abort_block(err.reason());
 		}
-		// No frame follows to anchor the clock, so publish the declared track set now.
+		// No frame follows to anchor the clock, so publish the declared track set now, with a track
+		// whose record no keyframe followed as the record stands.
+		for track in self.tracks.values_mut() {
+			if let Some(record) = track.record.take() {
+				result = result.and_then(|()| track.track.configure(record.config));
+			}
+		}
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
 			// End every track even on refusal, keeping the first error. A track whose finish fails
@@ -2024,6 +2072,8 @@ mod tests {
 					assert!(hvcc.retained() <= 2 * canonical.len(), "{}", hvcc.retained());
 				}
 			}
+			// No keyframe follows, so the record publishes as it stands at finish.
+			let _finished = import.finish().unwrap();
 			let config = catalog.snapshot().video.renditions.into_values().next().unwrap();
 			assert_eq!(config.description.as_deref(), Some(canonical.as_slice()));
 		}

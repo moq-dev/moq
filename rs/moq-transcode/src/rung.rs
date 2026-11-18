@@ -275,7 +275,7 @@ pub(crate) fn serve(rung: Rung, request: moq_net::track::Request) -> impl Future
 /// change seen through [`moq_net::track::Demand::wanted`] instead is never missed.
 async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net::Result<()> {
 	let mut demand = demand.clone();
-	while demand.wanted_changed().await?.is_some() != wanted {}
+	while demand.wanted_changed().await? != wanted {}
 	Ok(())
 }
 
@@ -301,7 +301,7 @@ impl Want {
 	fn now(&self, edge: Option<u64>) -> bool {
 		match &self.subscribers {
 			Some(track) => track.subscription().is_some_and(|sub| reaches_live(&sub, edge)),
-			None => self.demand.wanted().is_some(),
+			None => self.demand.wanted(),
 		}
 	}
 
@@ -1556,7 +1556,7 @@ mod tests {
 		// The track is admitted before `serve` is polled; the feed's subscription proves the
 		// live path is parked waiting for media rather than never started.
 		let mut demand = video.demand();
-		while demand.wanted_changed().await.unwrap().is_none() {}
+		while !demand.wanted_changed().await.unwrap() {}
 		running.abort();
 		assert!(running.await.unwrap_err().is_cancelled());
 		assert!(matches!(track.recv_group().await, Err(moq_net::Error::Cancel)));

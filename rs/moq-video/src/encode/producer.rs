@@ -548,7 +548,7 @@ impl Producer {
 	/// encoder that cannot retune at all costs one attempt per step while the grant moves.
 	async fn follow(&mut self) {
 		if self.lower.is_none() {
-			let watched = self.demand.wanted().is_some();
+			let watched = self.demand.wanted();
 			let rested = self.watched && !watched;
 			self.watched = watched;
 			if rested {

@@ -1474,7 +1474,7 @@ mod tests {
 			snapshot.video.renditions.contains_key("video/120p")
 		})
 		.await;
-		assert_eq!(demand.wanted(), None, "the published ladder holds its source");
+		assert!(!demand.wanted(), "the published ladder holds its source");
 
 		// A held query is demand, so the rung starts encoding and subscribes to the
 		// source.
@@ -1482,7 +1482,7 @@ mod tests {
 		let mut query = rung.info();
 		(&mut query).await.unwrap();
 		let wanted = async {
-			while demand.wanted_changed().await?.is_none() {}
+			while !demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(std::time::Duration::from_secs(5), wanted)
@@ -1493,7 +1493,7 @@ mod tests {
 		// Its task outlives the viewer, idle until the next one.
 		drop(query);
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(std::time::Duration::from_secs(5), unwanted)
@@ -1761,14 +1761,11 @@ mod tests {
 		// The only demand ends with output group 0 still open.
 		drop(fetching);
 		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
-		assert!(
-			source_demand.wanted().is_some(),
-			"the live path left its source mid-group"
-		);
+		assert!(source_demand.wanted(), "the live path left its source mid-group");
 
 		// Once the source group ends, the live path finishes its copy and leaves.
 		group.finish().unwrap();
-		while source_demand.wanted_changed().await.unwrap().is_some() {}
+		while source_demand.wanted_changed().await.unwrap() {}
 
 		// Read from the cache after the live path left.
 		let mut fetched = rung.fetch_group(0, None).await.unwrap();
@@ -1867,7 +1864,7 @@ mod tests {
 			// Leaving clears the source's demand; opening group 1 puts it on the
 			// rung and holds that demand for as long as the group stays open.
 			let unwanted = async {
-				while source_demand.wanted_changed().await?.is_some() {}
+				while source_demand.wanted_changed().await? {}
 				moq_net::Result::Ok(())
 			};
 			let opened = async {
@@ -1945,7 +1942,7 @@ mod tests {
 		// A viewer is the rung's demand, so its live path attaches to the feed.
 		let _viewer = subscribe(&consumer, "video/120p").await;
 		let mut source_demand = source._track.demand();
-		while source_demand.wanted_changed().await.unwrap().is_none() {}
+		while !source_demand.wanted_changed().await.unwrap() {}
 		// What the hop upstream acts on: a superseded group is still worth
 		// delivering, so its tail is not given up just because the next one began,
 		// but the publisher's history is not: a cold start begins at the live edge.

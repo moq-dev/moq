@@ -459,6 +459,17 @@ async fn import_multitrack_video_many_codecs() {
 	);
 	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
 
+	// A record publishes at its track's first keyframe.
+	let idr = vec![0, 0, 0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let frames = multitrack_video_body(
+		super::FRAME_TYPE_KEY,
+		super::MULTITRACK_MANY_TRACKS_MANY_CODECS,
+		super::VIDEO_PACKET_CODED_FRAMES,
+		None,
+		&[(0, *b"avc1", idr.clone()), (1, *b"avc1", idr)],
+	);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &frames);
+
 	let mut producer = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
 	let mut importer = Import::new(producer, catalog.reserve());
@@ -466,6 +477,82 @@ async fn import_multitrack_video_many_codecs() {
 	let _finished = importer.finish().unwrap();
 
 	assert_eq!(catalog.snapshot().video.renditions.len(), 2);
+}
+
+/// FLV video tags: an AVC sequence header carrying `avcc()`, then one keyframe of `nalus`.
+fn avc_session(nalus: &[u8]) -> (Vec<u8>, Vec<u8>) {
+	let mut headers = flv_header(0x05);
+	let mut vseq = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	vseq.extend_from_slice(&avcc());
+	write_tag(&mut headers, super::TAG_VIDEO, 0, &vseq);
+	let mut aseq = vec![super::AAC_AUDIO_TAG_HEADER, super::AAC_SEQUENCE_HEADER];
+	aseq.extend_from_slice(&ASC);
+	write_tag(&mut headers, super::TAG_AUDIO, 0, &aseq);
+
+	let mut keyframe = Vec::new();
+	let mut vframe = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_NALU,
+		0,
+		0,
+		0,
+	];
+	vframe.extend_from_slice(nalus);
+	write_tag(&mut keyframe, super::TAG_VIDEO, 0, &vframe);
+	(headers, keyframe)
+}
+
+/// An avcC whose keyframes repeat the SPS in band lands as `avc3`; one whose keyframes don't stays
+/// `avc1`. The record holds the catalog until the keyframe, even past an earlier audio frame.
+#[tokio::test(start_paused = true)]
+async fn avc_keyframe_decides_where_parameter_sets_live() {
+	let idr = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let mut in_band = vec![0, 0, 0, 4, 0x67, 0x42, 0xc0, 0x1f];
+	in_band.extend_from_slice(&idr);
+
+	for (nalus, inline) in [(idr.to_vec(), false), (in_band, true)] {
+		let (headers, keyframe) = avc_session(&nalus);
+		let mut audio = Vec::new();
+		write_tag(
+			&mut audio,
+			super::TAG_AUDIO,
+			0,
+			&[super::AAC_AUDIO_TAG_HEADER, super::AAC_RAW, 0xde, 0xad],
+		);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+		let mut importer = Import::new(broadcast, catalog.reserve());
+
+		importer.decode(&headers).unwrap();
+		importer.decode(&audio).unwrap();
+		assert_eq!(
+			clocks.drain(),
+			vec![],
+			"the record withholds the catalog until its keyframe"
+		);
+
+		importer.decode(&keyframe).unwrap();
+		assert!(!clocks.drain().is_empty(), "the keyframe publishes the catalog");
+		let _finished = importer.finish().unwrap();
+
+		let snap = catalog.snapshot();
+		assert_eq!(snap.audio.renditions.len(), 1);
+		let video = snap.video.renditions.values().next().expect("a video rendition");
+		let VideoCodec::H264(codec) = &video.codec else {
+			panic!("{:?}", video.codec);
+		};
+		assert_eq!(codec.inline, inline, "{}", video.codec);
+		assert_eq!(video.description.as_deref(), Some(avcc().as_slice()));
+	}
 }
 
 /// A publisher that keeps changing its audio and video config replaces each track under a fresh
@@ -1037,4 +1124,138 @@ async fn an_unmappable_restart_refuses_later_input() {
 		matches!(err, crate::Error::UnmappableTimestamp(_)),
 		"refused with the cause: {err:?}"
 	);
+}
+
+/// A newer sequence header replaces an AVC record still waiting for its keyframe, so the stale
+/// record never claims the new codec's keyframe.
+#[tokio::test(start_paused = true)]
+async fn a_newer_sequence_header_supersedes_a_held_record() {
+	let (mut out, _) = avc_session(&[]);
+	let mut seq = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_SEQUENCE_START];
+	seq.extend_from_slice(b"av01");
+	seq.extend_from_slice(&AV1C);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &seq);
+	let mut frame = vec![super::VIDEO_EX_HEADER | (super::FRAME_TYPE_KEY << 4) | super::VIDEO_PACKET_CODED_FRAMES_X];
+	frame.extend_from_slice(b"av01");
+	frame.extend_from_slice(&[0x12, 0x00, 0x34, 0x56]);
+	write_tag(&mut out, super::TAG_VIDEO, 0, &frame);
+
+	let mut producer = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut producer, crate::catalog::Config::default()).unwrap();
+	let mut importer = Import::new(producer, catalog.reserve());
+	importer.decode(&out).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let codecs: Vec<_> = catalog
+		.snapshot()
+		.video
+		.renditions
+		.into_values()
+		.map(|v| v.codec)
+		.collect();
+	assert!(matches!(codecs[..], [VideoCodec::AV1(_)]), "{codecs:?}");
+}
+
+/// A seek made while a record waits for its keyframe keys the group that keyframe opens, even when
+/// the sequence header repeats in between.
+#[tokio::test(start_paused = true)]
+async fn a_seek_reaches_a_track_waiting_for_its_keyframe() {
+	let (headers, keyframe) = avc_session(&[0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00]);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	importer.decode(&headers).unwrap();
+	importer.seek(100).unwrap();
+	// The same sequence headers again, past the FLV file header.
+	importer.decode(&headers[flv_header(0).len()..]).unwrap();
+	importer.decode(&keyframe).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let replay = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+	let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
+	let mut starts = Vec::new();
+	while let Some(group) = track.recv_group().await.unwrap() {
+		starts.push(group.start);
+	}
+	assert_eq!(starts, [100]);
+}
+
+/// A changed sequence header on a live track skips the deltas before its keyframe, which can't
+/// decode against the old record and whose timestamps the old track never checks, and a seek in
+/// between keys the group that keyframe opens.
+#[tokio::test(start_paused = true)]
+async fn a_changed_sequence_header_waits_for_its_keyframe() {
+	let video = |frame_type: u8, nalus: &[u8], ms: u32, cts: i32| {
+		let cts = cts.to_be_bytes();
+		let mut body = vec![
+			(frame_type << 4) | super::VIDEO_CODEC_AVC,
+			super::AVC_NALU,
+			cts[1],
+			cts[2],
+			cts[3],
+		];
+		body.extend_from_slice(nalus);
+		let mut out = Vec::new();
+		write_tag(&mut out, super::TAG_VIDEO, ms, &body);
+		out
+	};
+	let idr = [0, 0, 0, 5, 0x65, 0x88, 0x84, 0x21, 0x00];
+	let delta = [0, 0, 0, 5, 0x41, 0x9a, 0x02, 0x03, 0x04];
+	let (headers, keyframe) = avc_session(&idr);
+	let mut changed = vec![
+		(super::FRAME_TYPE_KEY << 4) | super::VIDEO_CODEC_AVC,
+		super::AVC_SEQUENCE_HEADER,
+		0,
+		0,
+		0,
+	];
+	changed.extend_from_slice(&avcc_level(0x28));
+	let mut header = Vec::new();
+	write_tag(&mut header, super::TAG_VIDEO, 133, &changed);
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = Import::new(broadcast, catalog.reserve());
+	let replay = || {
+		moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)))
+	};
+	importer.decode(&headers).unwrap();
+	importer.decode(&keyframe).unwrap();
+	importer.decode(&video(2, &delta, 33, 0)).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 80, 0)).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 100, 0)).unwrap();
+	let old = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+	let mut old = consumer.track(&old).unwrap().subscribe(replay()).await.unwrap();
+
+	importer.decode(&header).unwrap();
+	// Presented before the old track's 80 ms group, the floor a delta is checked against, which
+	// would refuse it as a rewind.
+	importer.decode(&video(2, &delta, 133, -60)).unwrap();
+	importer.seek(200).unwrap();
+	importer.decode(&video(super::FRAME_TYPE_KEY, &idr, 200, 0)).unwrap();
+	let _finished = importer.finish().unwrap();
+
+	let mut deltas = 0;
+	while let Some(mut group) = old.recv_group().await.unwrap() {
+		while let Some(frame) = group.read_frame().await.unwrap() {
+			deltas += usize::from(frame.payload.ends_with(&delta));
+		}
+	}
+	assert_eq!(deltas, 1, "the delta after the new header never reaches the old track");
+
+	let snapshot = catalog.snapshot();
+	let name = snapshot.video.renditions.keys().next().unwrap();
+	let mut track = consumer.track(name).unwrap().subscribe(replay()).await.unwrap();
+	let mut starts = Vec::new();
+	while let Some(group) = track.recv_group().await.unwrap() {
+		starts.push(group.start);
+	}
+	assert_eq!(starts, [200]);
 }

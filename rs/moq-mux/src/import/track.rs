@@ -148,13 +148,13 @@ fn not_video(format: AudioFormat) -> crate::Error {
 }
 
 enum TrackKind {
-	/// H.264 avc3 (Annex-B, inline SPS/PPS). The split owns byte parsing; the
-	/// import publishes.
+	/// H.264 Annex-B with inline SPS/PPS, published as avc3. The split owns byte
+	/// parsing; the import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
 		import: crate::codec::h264::Import,
 	},
-	/// H.264 avc1 (length-prefixed NALU, out-of-band avcC). No splitter: each
+	/// H.264 length-prefixed NALU with an avcC, published as avc1 or avc3. No splitter: each
 	/// access unit is wrapped directly. `length_size` is the NALU length prefix
 	/// width read from the avcC.
 	Avc1 {
@@ -165,7 +165,7 @@ enum TrackKind {
 		split: crate::codec::h265::Split,
 		import: crate::codec::h265::Import,
 	},
-	/// H.265 hvc1 (length-prefixed NALU, out-of-band hvcC). No splitter: each
+	/// H.265 length-prefixed NALU with an hvcC, published as hvc1 or hev1. No splitter: each
 	/// access unit is wrapped directly. `length_size` is the NALU length prefix
 	/// width read from the hvcC.
 	Hvc1 {
@@ -614,7 +614,7 @@ impl From<crate::codec::mp3::Import> for Track {
 }
 
 enum TrackStreamKind {
-	/// H.264 in avc3 wire shape (Annex-B with inline SPS/PPS). The split owns
+	/// H.264 Annex-B with inline SPS/PPS, published as avc3. The split owns
 	/// byte parsing; the import publishes.
 	Avc3 {
 		split: crate::codec::h264::Split,
@@ -1523,24 +1523,30 @@ mod tests {
 		assert_eq!(video.label.as_deref(), Some("Main camera"));
 	}
 
-	/// hvc1 publishes the catalog up front from the out-of-band hvcC: dimensions
-	/// from the parsed SPS and the record itself as the `description`.
+	/// An hvcC publishes the catalog at the first keyframe, which says whether the
+	/// parameter sets also ride in band: dimensions from the parsed SPS and the record
+	/// itself as the `description`.
 	#[tokio::test(start_paused = true)]
 	async fn existing_track_hvc1_uses_existing_name_in_catalog() {
 		let hvcc = crate::codec::h265::fixtures::hvcc();
 		let (broadcast, catalog) = new_broadcast();
 		let request = broadcast.reserve_track("camera").unwrap();
 
-		let import = Track::video(
+		let mut import = Track::video(
 			request,
 			catalog.reserve(),
 			VideoInit::new(VideoFormat::Hvc1, hvcc.clone()),
 		)
 		.unwrap();
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let mut au = (idr.len() as u32).to_be_bytes().to_vec();
+		au.extend_from_slice(idr);
+		import.decode(&au, Some(Timestamp::from_micros(0).unwrap())).unwrap();
 
 		assert_eq!(import.name(), "camera");
 		let snapshot = catalog.snapshot();
 		let video = snapshot.video.renditions.get("camera").unwrap();
+		assert_eq!(video.codec.to_string().get(..4), Some("hvc1"));
 		assert_eq!(video.coded_width, Some(1280));
 		assert_eq!(video.coded_height, Some(720));
 		assert_eq!(video.description.as_deref(), Some(hvcc.as_ref()));

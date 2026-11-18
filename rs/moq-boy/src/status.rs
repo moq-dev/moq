@@ -46,7 +46,7 @@ impl StatusPublisher {
 			moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MILLI)
 				// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
-				.with_refresh(8),
+				.with_refresh(moq_net::track::Refresh::default().with_ratio(8)),
 		)?;
 
 		Ok(Self {

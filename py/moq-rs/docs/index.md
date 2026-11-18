@@ -239,6 +239,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    AudioEncoderInput
    Subscription
    TrackInfo
+   TrackRefresh
    FetchGroupOptions
    RouteInfo
    Instance

@@ -16,8 +16,8 @@ Decided 2026-11-17 (maintainer, `/quest-import` of
 `avc3`/`hev1` say where parameter sets live, not how NAL units are framed:
 inside a frame, NAL units are still split by start codes or length
 prefixes. Naming the Annex B input after them taught the conflation that
-became the native decoder bug in
-[video-framing](/quest/m1/video-framing.md). The names follow ffmpeg's raw
+became the native decoder bug fixed in
+[moq-dev/moq#9066](https://github.com/moq-dev/moq/pull/9066). The names follow ffmpeg's raw
 `h264` / `hevc` formats; `h264` already aliases `avc3`.
 
 Where the names live: `rs/moq-mux/src/import/format.rs` (the enum, its doc
@@ -30,7 +30,3 @@ No alias for the old names.
 The catalog's codec strings are not import formats and keep `avc3`/`hev1`.
 
 Public API: breaking, as above. Wire: none.
-
-## Required
-
-- [Video framing](/quest/m1/video-framing.md) - settles the framing contract the new names and docs describe

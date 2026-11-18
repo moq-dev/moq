@@ -1420,7 +1420,7 @@ impl Default for Messages {
 				starts: vec![Some(1_234)],
 			}),
 			lite_info: lite::TrackInfo {
-				refresh: None,
+				refresh: crate::track::Refresh::default(),
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
 				timescale: Some(crate::Timescale::MICRO),

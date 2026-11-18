@@ -687,7 +687,8 @@ export namespace Track {
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
-		get wanted(): Signals.Getter<bigint | undefined>;
+		get refresh(): Signals.Getter<boolean>;
+		get wanted(): Signals.Getter<boolean>;
 	}
 	export interface FetchGroupOptions {
 		maxDelay?: Clock.Duration;
@@ -739,11 +740,12 @@ export namespace Track {
 		compression: Track.Compression;
 		maxAge: Clock.Duration | null;
 		priority: number;
-		refresh: number | null;
+		refresh: Track.Refresh;
 		timescale: Time.Timescale | null;
 	}
-	export interface InfoInit extends Partial<Track.Info> {
+	export interface InfoInit extends Partial<Omit<Track.Info, "refresh">> {
 		maxAge?: Clock.Duration | null;
+		refresh?: Partial<Track.Refresh>;
 	}
 	export interface InfoOptions {
 		signal?: AbortSignal;
@@ -775,6 +777,7 @@ export namespace Track {
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryNextGroup(): Group.Consumer | undefined;
 		tryNextItem(): Track.Item | undefined;
@@ -812,6 +815,13 @@ export namespace Track {
 		end?: Track.Anchor;
 		start?: Track.Anchor;
 	}
+	export interface Refresh {
+		interval: Clock.Duration | null;
+		ratio: number | null;
+	}
+	export interface RefreshOptions {
+		signal?: AbortSignal;
+	}
 	export class Requests {
 		[Symbol.dispose](): void;
 		close(): void;
@@ -830,6 +840,7 @@ export namespace Track {
 		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		update(options: Track.Subscription): void;

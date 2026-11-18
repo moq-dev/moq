@@ -12349,7 +12349,7 @@ mod tests {
 
 		// Parked: the source copy goes, the delivered group stays warm. The source
 		// then tears its idle track down, so a returning reader asks it afresh.
-		kio::clock::timeout(Duration::from_secs(1), source.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), source.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -15530,7 +15530,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("source unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15552,7 +15552,7 @@ mod tests {
 			.expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted))
 			.await
 			.expect("returning reader re-splices the source")
 			.expect("source closed");
@@ -15603,7 +15603,7 @@ mod tests {
 		assert_eq!(&tail.payload[..], b"tail");
 		let end = kio::clock::timeout(Duration::from_secs(1), reading.read_frame()).await;
 		assert!(matches!(end, Ok(Ok(None))), "the group should finish: {end:?}");
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("the front lets the source go once the held group ends")
 			.expect("source closed");
@@ -15689,7 +15689,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15703,7 +15703,7 @@ mod tests {
 			)
 			.await
 			.expect("resubscribe");
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted))
 			.await
 			.expect("resubscribe should reach the leaf")
 			.expect("source open");
@@ -15718,7 +15718,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("second chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15731,7 +15731,7 @@ mod tests {
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted))
 			.await
 			.expect("fetch should reach the leaf")
 			.expect("source open");
@@ -15840,7 +15840,7 @@ mod tests {
 			.expect("request");
 
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("the draining source stays subscribed with nobody reading")
 			.expect("open");
@@ -16315,7 +16315,7 @@ mod tests {
 		drop(group);
 
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16360,7 +16360,7 @@ mod tests {
 		let mut open = old.append_next().unwrap();
 		open.write_frame(open.key_time(), b"open".as_ref()).unwrap();
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16391,7 +16391,7 @@ mod tests {
 		let (producer, _server, _upstream, old, subscription) = remote_front().await;
 		let resolved = producer.consume().request("room/alice", None).await.unwrap();
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16802,7 +16802,7 @@ mod tests {
 			.unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted))
 			.await
 			.expect("the front subscribed the source")
 			.unwrap();
@@ -16813,7 +16813,7 @@ mod tests {
 		drop(broadcast);
 		settle(|| resolved.is_closed()).await;
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("the ended copy must not keep the source subscribed")
 			.unwrap();

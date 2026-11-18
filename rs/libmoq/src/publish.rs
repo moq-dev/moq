@@ -9,10 +9,12 @@ use crate::ffi::OnStatus;
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, State, moq_demand};
 
-/// A demand watcher's task, plus a handle to peek the wanted group from its callback.
+/// A demand watcher's task, plus a handle to read and wait on its track's demand.
 struct DemandEntry {
 	task: Task,
 	demand: moq_net::track::Demand,
+	/// Dropped with the entry once the watcher ends, which ends its refresh waits.
+	alive: kio::Producer<()>,
 }
 
 /// A subscriber's request for a track the broadcast has not declared, kept with the
@@ -866,8 +868,8 @@ impl Publish {
 
 	/// Watch a track's subscriber demand, reporting the current state and every change.
 	///
-	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change of the
-	/// wanted group, then once with a terminal code: `0` when the track ends or the watcher is
+	/// `on_demand` fires with a [`moq_demand`] value immediately and again on each change, then
+	/// once with a terminal code: `0` when the track ends or the watcher is
 	/// closed, negative when the track aborts. Seeding with the current state is what makes a late
 	/// registration safe: a track that went unused before the watcher existed still reports it.
 	pub fn demand(&mut self, demand: moq_net::track::Demand, on_demand: OnStatus) -> Result<Id, Error> {
@@ -875,6 +877,7 @@ impl Publish {
 		let id = self.demand.insert(DemandEntry {
 			task,
 			demand: demand.clone(),
+			alive: kio::Producer::new(()),
 		})?;
 
 		tokio::spawn(async move {
@@ -913,8 +916,8 @@ impl Publish {
 				}
 			};
 			let state = match next {
-				Ok(Some(_)) => moq_demand::MOQ_DEMAND_WANTED,
-				Ok(None) => moq_demand::MOQ_DEMAND_UNWANTED,
+				Ok(true) => moq_demand::MOQ_DEMAND_WANTED,
+				Ok(false) => moq_demand::MOQ_DEMAND_UNWANTED,
 				Err(moq_net::Error::Dropped) => return Ok(()),
 				Err(err) => return Err(err.into()),
 			};
@@ -922,9 +925,41 @@ impl Publish {
 		}
 	}
 
-	/// The group a demand watcher's subscribers want right now, until its terminal callback.
-	pub fn demand_wanted(&self, watcher: Id) -> Result<Option<u64>, Error> {
+	/// Whether anyone consumes a demand watcher's track right now, until its terminal callback.
+	pub fn demand_wanted(&self, watcher: Id) -> Result<bool, Error> {
 		Ok(self.demand.get(watcher).ok_or(Error::NotFound)?.demand.wanted())
+	}
+
+	/// Call `on_refresh` once a subscriber of a demand watcher's track asks for a new group:
+	/// [`moq_demand::MOQ_DEMAND_REFRESH`], or `0` once the watcher ended first, or negative once
+	/// the track aborted.
+	pub fn demand_refresh(&self, watcher: Id, on_refresh: OnStatus) -> Result<(), Error> {
+		let entry = self.demand.get(watcher).ok_or(Error::NotFound)?;
+		let demand = entry.demand.clone();
+		let alive = entry.alive.consume();
+		tokio::spawn(async move {
+			let res = crate::ffi::run(async move {
+				tokio::select! {
+					biased;
+					// The watcher's end first, so a cancelled wait never takes a later request.
+					// A track that aborted still reports why, read without waiting.
+					_ = alive.closed() => match demand.poll_closed(&kio::Waiter::noop()) {
+						std::task::Poll::Ready(Err(moq_net::Error::Dropped)) => Ok(0),
+						std::task::Poll::Ready(Err(err)) => Err(err.into()),
+						_ => Ok(0),
+					},
+					res = demand.refresh() => match res {
+						Ok(()) => Ok(moq_demand::MOQ_DEMAND_REFRESH as i32),
+						// The track ended without an abort, as the watcher reports it.
+						Err(moq_net::Error::Dropped) => Ok(0),
+						Err(err) => Err(err.into()),
+					},
+				}
+			})
+			.await;
+			on_refresh.call(res);
+		});
+		Ok(())
 	}
 
 	/// Stop a demand watcher. The task still delivers its terminal callback.
@@ -1298,7 +1333,7 @@ impl Publish {
 		let mut info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_compression(moq_net::track::Compression::Deflate);
-		info.refresh = refresh;
+		info.refresh = moq_net::track::Refresh::default().with_ratio(refresh);
 		let track = broadcast.producer.create_track(name, info)?;
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {

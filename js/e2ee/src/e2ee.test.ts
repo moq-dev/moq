@@ -435,7 +435,7 @@ test("grouped authentication failure ends the track", async () => {
 test("grouped failure wakes pending reads and releases demand", async () => {
 	const p = await pair("video");
 	const demand = p.net.demand();
-	expect(demand.wanted.peek()).toBeDefined();
+	expect(demand.wanted.peek()).toBe(true);
 
 	// One authentic frame, then silence. The group and the track stay open.
 	const open = p.net.createGroup(0n);
@@ -460,7 +460,7 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	await p.dg.producer.append(ms(3), text("independent"));
 	expect(datagramText(await datagram)).toBe("independent");
 
-	expect(demand.wanted.peek()).toBeUndefined();
+	expect(demand.wanted.peek()).toBe(false);
 	expect(badDemand.wanted.peek()).toBe(false);
 	expect(open.demand().wanted.peek()).toBe(false);
 	expect(p.net.closed.peek()).toBeUndefined();
@@ -526,7 +526,7 @@ test("closing the track consumer releases demand while a group is held", async (
 	const group = await recvGroup(p.consumer);
 	p.consumer.close();
 	// The unsubscribe lands on the next microtask.
-	while (demand.wanted.peek() !== undefined) await Promise.resolve();
+	while (demand.wanted.peek()) await Promise.resolve();
 
 	// The held group is not failed by the unsubscribe: it ends after what it holds, as in @moq/net.
 	expect(await readText(group)).toBe("ok");
@@ -547,11 +547,11 @@ test("a bad datagram stays an event and keeps demand", async () => {
 	const frame = good.readFrame();
 
 	expect(await p.dg.consumer.recv()).toEqual({ kind: "authentication", sequence: 1n });
-	expect(demand.wanted.peek()).toBeDefined();
+	expect(demand.wanted.peek()).toBe(true);
 
 	await p.dg.producer.insert(2n, ms(3), text("next"));
 	expect(datagramText(await p.dg.consumer.recv())).toBe("next");
-	expect(demand.wanted.peek()).toBeDefined();
+	expect(demand.wanted.peek()).toBe(true);
 
 	await open.writeFrame(ms(4), text("still"));
 	expect(decoder.decode((await frame)?.plaintext)).toBe("still");

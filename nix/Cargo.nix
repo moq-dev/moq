@@ -19249,6 +19249,11 @@ rec {
         ];
         devDependencies = [
           {
+            name = "kio";
+            packageId = "kio";
+            features = [ "manual" ];
+          }
+          {
             name = "libc";
             packageId = "libc";
             target = { target, features }: (target."unix" or false);

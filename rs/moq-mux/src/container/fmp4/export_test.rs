@@ -2367,6 +2367,47 @@ async fn a_changed_catalog_profile_fails() {
 	);
 }
 
+/// A Legacy avc3 track with a full avcC, as the fMP4 import publishes an avc3 sample entry,
+/// passes its samples through with their in-band parameter sets, so it exports as avc3 again.
+#[tokio::test(start_paused = true)]
+async fn avc3_with_a_record_exports_as_avc3() {
+	use hang::catalog::{Container, H264, VideoConfig};
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap();
+	let description = avcc.clone();
+	let mut live = Live::new(".avc3", move |catalog, name| {
+		let mut config = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.framerate = Some(30.0);
+		config.container = Container::Legacy;
+		config.description = Some(description);
+		catalog.modify().unwrap().video.renditions.insert(name, config);
+	});
+	live.track
+		.write(crate::container::Frame {
+			timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+			payload: length_prefixed(&[SPS, PPS, IDR]).into(),
+			keyframe: true,
+			duration: None,
+		})
+		.unwrap();
+	live.track.end_with(None).unwrap();
+
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
+		.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
+	let init = chunk_now(&mut exporter).await.init().expect("init");
+	let mp4_atom::Codec::Avc3(avc3) = video_codec(&init) else {
+		panic!("expected an avc3 sample entry");
+	};
+	assert_eq!(avc3.avcc.sequence_parameter_sets[0].as_slice(), SPS);
+}
+
 /// High 10 cannot be described from the codec string, so the init waits for the
 /// SPS and then declares avc1 with that SPS inside the avcC.
 #[tokio::test(start_paused = true)]

@@ -732,9 +732,19 @@ pub struct moq_track_info {
 
 	/// A joining subscriber asks for a new group once the newest group's bytes after its
 	/// first frame exceed `refresh` times that frame. `0` asks once any frame follows the first.
+	/// [moq_publish_demand_refresh] reports the request.
 	pub refresh: u32,
-	/// Whether `refresh` is set. When false, a joining subscriber never asks for a new group.
+	/// Whether `refresh` is set. When false, a join asks only when `refresh_interval_present`
+	/// is set, and then on every join.
 	pub refresh_present: bool,
+
+	/// How long after the newest group arrived a request for a new group may take effect, in
+	/// microseconds: a join asking sooner waits until then, which caps how often the publisher
+	/// makes groups however many subscribers ask. Sent as milliseconds.
+	/// Ignored unless `refresh_interval_present` is set.
+	pub refresh_interval_us: u64,
+	/// Whether `refresh_interval_us` is set. When false, a request takes effect at once.
+	pub refresh_interval_present: bool,
 
 	/// `moq_compression` discriminant: how each group is compressed on the wire to peers that
 	/// support it. Zero sends frames as written. Readers always see the original frames.
@@ -764,9 +774,13 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 		if info.timescale_present {
 			out = out.with_timescale(moq_net::Timescale::new(info.timescale)?);
 		}
-		if info.refresh_present {
-			out = out.with_refresh(info.refresh);
-		}
+		let refresh = moq_net::track::Refresh::default()
+			.with_ratio(info.refresh_present.then_some(info.refresh))
+			.with_interval(
+				info.refresh_interval_present
+					.then(|| std::time::Duration::from_micros(info.refresh_interval_us)),
+			);
+		out = out.with_refresh(refresh);
 		let compression = match info.compression {
 			v if v == moq_compression::MOQ_COMPRESSION_NONE as u32 => moq_net::track::Compression::None,
 			v if v == moq_compression::MOQ_COMPRESSION_DEFLATE as u32 => moq_net::track::Compression::Deflate,
@@ -779,16 +793,28 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 /// Whether a published track has subscribers, as reported by a demand watcher.
 ///
 /// The positive values an `on_demand` callback receives; `0` and negative codes are
-/// the terminal statuses every callback shares. [moq_publish_demand_wanted] reads which
-/// group the subscribers want.
+/// the terminal statuses every callback shares. [moq_publish_demand_refresh] waits for a
+/// subscriber to ask for a new group.
 #[repr(C)]
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
-	/// At least one subscriber wants the track. Repeats when the wanted group moves.
+	/// At least one subscriber wants the track.
 	MOQ_DEMAND_WANTED = 1,
 	/// No subscriber wants the track.
 	MOQ_DEMAND_UNWANTED = 2,
+	/// A subscriber asks for a new group; only [moq_publish_demand_refresh] reports it.
+	MOQ_DEMAND_REFRESH = 3,
+}
+
+/// What a [moq_consume_track_refresh] callback receives besides the terminal statuses every
+/// callback shares.
+#[repr(C)]
+#[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_refresh {
+	/// The request was sent, or there was nothing to send.
+	MOQ_REFRESH_SENT = 1,
 }
 
 /// How far behind the live edge a subscriber or media consumer plays: where it starts, and how
@@ -3185,8 +3211,7 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 /// the encode, but leaves nothing from before the first subscriber.
 ///
 /// `on_demand` fires right away with the current [moq_demand] state, again on every
-/// change, including a move of the wanted group that [moq_publish_demand_wanted] reads,
-/// then exactly once more with a terminal code: `0` (the track ended or the watcher was
+/// change, then exactly once more with a terminal code: `0` (the track ended or the watcher was
 /// stopped with [moq_publish_demand_cancel]) or a negative error. After the terminal
 /// (`<= 0`) callback, `user_data` is never touched again. Reporting the current state
 /// first means a track that went unused before the watcher existed still reports it.
@@ -3244,26 +3269,47 @@ pub extern "C" fn moq_publish_demand_cancel(watcher: u32) -> i32 {
 	})
 }
 
-/// Read the group a demand watcher's subscribers want, typically from its `on_demand` callback.
-///
-/// `present` is false while nobody subscribes. Otherwise subscribers want `group` or later:
-/// once `group` passes the largest group written, start a new one (a keyframe). `group`
-/// never goes back, so once a group reaches it nothing is pending until a joiner asks again.
+/// Read whether anyone consumes a demand watcher's track right now: a subscription, fetch, or a
+/// group one of them was handed and has not finished reading.
 ///
 /// Returns zero on success, or a negative code once the watcher's terminal callback fired.
 ///
 /// # Safety
-/// - `group` and `present` must be valid pointers.
+/// - `wanted` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_demand_wanted(watcher: u32, group: *mut u64, present: *mut bool) -> i32 {
+pub unsafe extern "C" fn moq_publish_demand_wanted(watcher: u32, wanted: *mut bool) -> i32 {
 	ffi::enter(move || {
 		let watcher = ffi::parse_id(watcher)?;
-		let group = unsafe { group.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let present = unsafe { present.as_mut() }.ok_or(Error::InvalidPointer)?;
-		let wanted = State::lock().publish.demand_wanted(watcher)?;
-		*group = wanted.unwrap_or(0);
-		*present = wanted.is_some();
+		let wanted = unsafe { wanted.as_mut() }.ok_or(Error::InvalidPointer)?;
+		*wanted = State::lock().publish.demand_wanted(watcher)?;
 		Ok(())
+	})
+}
+
+/// Wait until a subscriber of a demand watcher's track asks for a new group: the first group of
+/// a track with none, or a join judged by the [moq_track_info] `refresh` fields once the
+/// interval passed.
+///
+/// `on_refresh` fires exactly once: `MOQ_DEMAND_REFRESH` once a new group is asked for, at once
+/// while a request is pending; `0` when the watcher ended first (cancelled, or the track ended);
+/// or a negative code when the track aborted. The next group written answers the request, so a
+/// publisher writes a group starting with a keyframe or a snapshot, then waits again.
+///
+/// Returns zero once the wait started, or a negative code, in which case `on_refresh` never
+/// fires.
+///
+/// # Safety
+/// - `on_refresh` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_publish_demand_refresh(
+	watcher: u32,
+	on_refresh: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let watcher = ffi::parse_id(watcher)?;
+		let on_refresh = unsafe { ffi::OnStatus::new(user_data, on_refresh)? };
+		State::lock().publish.demand_refresh(watcher, on_refresh)
 	})
 }
 
@@ -3818,8 +3864,7 @@ pub extern "C" fn moq_publish_track_finish_at(track: u32, final_start: u64) -> i
 /// The newest content a raw track holds: its newest group, at that group's newest frame.
 ///
 /// `present` is false before any group was written; `frame` is 0 while the newest group is
-/// empty. A publisher compares it with [moq_publish_demand_wanted]'s group to tell whether a
-/// join is already served by a group it wrote. Returns zero, or a negative code on failure.
+/// empty. Returns zero, or a negative code on failure.
 ///
 /// # Safety
 /// - `group`, `frame`, and `present` must point at writable values.
@@ -5051,6 +5096,50 @@ pub extern "C" fn moq_consume_track_frame_free(frame: u32) -> i32 {
 	ffi::enter(move || {
 		let frame = ffi::parse_id(frame)?;
 		State::lock().consume.raw_frame_close(frame)
+	})
+}
+
+/// Ask a raw track's publisher for a group starting after the newest one held, judged by the
+/// track's [moq_track_info] `refresh` fields. The new group arrives through the
+/// [moq_consume_track] callback like any other.
+///
+/// The request is sent once the newest group is old enough, when whatever serves the track
+/// reads it: the session forwarding it upstream, or a local publisher waiting in
+/// [moq_publish_demand_refresh]. Concurrent calls share one request.
+///
+/// `on_refresh` fires exactly once: `MOQ_REFRESH_SENT` once the request is sent, or at once
+/// when there is nothing to send (a track that does not refresh, a ratio the newest group is
+/// under, a subscription with no group yet, or a request already sent), or when a newer group
+/// lands first; `0` once [moq_consume_track_refresh_cancel] withdrew it or the subscription
+/// ended first; or a negative code when the track aborted.
+///
+/// Returns a non-zero handle to the wait, or a negative code, in which case `on_refresh` never
+/// fires.
+///
+/// # Safety
+/// - `on_refresh` must be non-NULL, and `user_data` valid until it fires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_track_refresh(
+	track: u32,
+	on_refresh: ffi::moq_status_callback,
+	user_data: *mut c_void,
+) -> i32 {
+	ffi::enter(move || {
+		let track = ffi::parse_id(track)?;
+		let on_refresh = unsafe { ffi::OnStatus::new(user_data, on_refresh)? };
+		State::lock().consume.raw_track_refresh(track, on_refresh)
+	})
+}
+
+/// Withdraw a [moq_consume_track_refresh] request not yet sent. One already sent stays sent.
+///
+/// Returns zero on success, or a negative code if the wait already ended. Its `on_refresh`
+/// still fires once, with `0` unless the request was sent first.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_consume_track_refresh_cancel(refresh: u32) -> i32 {
+	ffi::enter(move || {
+		let refresh = ffi::parse_id(refresh)?;
+		State::lock().consume.raw_track_refresh_close(refresh)
 	})
 }
 

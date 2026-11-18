@@ -1392,29 +1392,29 @@ mod tests {
 		let mut demand = producer.demand();
 
 		assert_eq!(demand.name(), "audio");
-		assert_eq!(demand.wanted(), None);
+		assert!(!demand.wanted());
 		let subscriber = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		let wanted = async {
-			while demand.wanted_changed().await?.is_none() {}
+			while !demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(Duration::from_secs(1), wanted)
 			.await
 			.expect("subscription demand")
 			.unwrap();
-		assert_eq!(demand.wanted(), Some(0));
+		assert!(demand.wanted());
 
 		drop(subscriber);
 		drop(consumer);
 		let unwanted = async {
-			while demand.wanted_changed().await?.is_some() {}
+			while demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("subscription released")
 			.unwrap();
-		assert_eq!(demand.wanted(), None);
+		assert!(!demand.wanted());
 
 		drop(producer.finish().unwrap());
 		let closed = kio::clock::timeout(Duration::from_secs(1), demand.closed())
