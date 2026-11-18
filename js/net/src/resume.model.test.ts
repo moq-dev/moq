@@ -1108,6 +1108,73 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// A copy places a time start against the groups it holds, which may put it below where the
+		// reader's window did: the window decides, so the read hands out no group under it.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: 1, frames: 2 },
+				{ kind: "write", instance: 0, slot: 0, group: 0, frames: 1 },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// After a failover, ranges replaced resolve from the newest copy to answer them, not from a
+		// replaced one whose cache lacks the group they start at.
+		{
+			ops: [
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", instance: 0, slot: 2 },
+				{ kind: "write", instance: 0, slot: 2, group: 2, frames: 1 },
+				{ kind: "ranges", reader: 2, range: [2, 3] },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
+		// Ranges replaced once the only route went down resolve on the closed copy, which places them
+		// against the groups it holds, so the read hands out no buffered group they leave out.
+		{
+			ops: [
+				{ kind: "up", instance: 1, slot: 1 },
+				{ kind: "write", instance: 1, slot: 1, group: 3, frames: 1 },
+				{ kind: "join", reader: 1, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "write", instance: 1, slot: 1, group: 2, frames: 1 },
+				{ kind: "down", instance: 1, slot: 1 },
+				{ kind: "ranges", reader: 1, range: [1, 2] },
+			],
+			finish: false,
+		},
+		// After a failover, a range moved back resolves from the first copy to answer it, even a
+		// replaced one under a failover cap, so the groups below that cap stay owed. Mirrors the
+		// Rust case.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 2, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 1, group: 7, frames: 2 },
+				{ kind: "up", instance: 0, slot: 0 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 2, range: [1, 8] },
+			],
+			finish: false,
+		},
+		// Ranges widened below the serving copy's resume point ask its route for the groups they
+		// newly cover, as a route change does.
+		{
+			ops: [
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 3, spec: spec(false, "hour", [1, 3], false) },
+				{ kind: "write", instance: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: undefined, frames: 1 },
+				{ kind: "down", instance: 0, slot: 1 },
+				{ kind: "ranges", reader: 3, range: undefined },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {
