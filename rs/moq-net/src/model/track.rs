@@ -5949,6 +5949,7 @@ impl Demand {
 
 	/// The group start consumers ask for when it is past every key written, whether or not
 	/// anyone consumes now.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn asked(&self) -> Option<u64> {
 		self.check_asked(None)
 	}
@@ -23610,10 +23611,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
-		assert!(
-			!producer.demand().wanted(),
-			"a clone reading the end ends it for all"
-		);
+		assert!(!producer.demand().wanted(), "a clone reading the end ends it for all");
 		drop(other);
 	}
 
@@ -23633,7 +23631,11 @@ mod test {
 		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
 		assert!(matches!(capped.poll_read_frame(&waiter), Poll::Ready(Ok(None))));
 		assert!(matches!(capped.poll_finished(&waiter), Poll::Ready(Ok(1))));
-		assert_eq!(producer.demand().wanted_start(), Some(0), "the cap is not the group's end");
+		assert_eq!(
+			producer.demand().wanted_start(),
+			Some(0),
+			"the cap is not the group's end"
+		);
 		drop(group);
 		let producer = producer
 			.abort_unwanted(Error::Cancel)
@@ -28746,7 +28748,11 @@ mod test {
 		assert_eq!(producer.demand().wanted_start(), Some(1), "the reader asked");
 
 		let _joined = producer.subscribe(None);
-		assert_eq!(producer.demand().wanted_start(), Some(1), "a join asks for the same group");
+		assert_eq!(
+			producer.demand().wanted_start(),
+			Some(1),
+			"a join asks for the same group"
+		);
 	}
 
 	/// The frame a read takes right now, as its number in [`numbered`].
@@ -29140,7 +29146,10 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_refused_flight_falls_back_to_refresh() {
-		let producer = track_producer("test", Info::default().with_refresh(Refresh::default().with_ratio(1_000_000)));
+		let producer = track_producer(
+			"test",
+			Info::default().with_refresh(Refresh::default().with_ratio(1_000_000)),
+		);
 		let requests = producer.requests();
 		// Joined before the group grew, so the join asks for nothing.
 		let _subscriber = producer.subscribe(None);
@@ -29154,7 +29163,11 @@ mod test {
 		assert_eq!(producer.demand().wanted_start(), Some(0), "nothing refreshed yet");
 		asked(&requests).expect("a flight").refuse_groups(0..1, Error::NotFound);
 		assert!(matches!(late.read_frame().now_or_never().unwrap(), Err(Error::Evicted)));
-		assert_eq!(producer.demand().wanted_start(), Some(1), "the reader asked for a new group");
+		assert_eq!(
+			producer.demand().wanted_start(),
+			Some(1),
+			"the reader asked for a new group"
+		);
 	}
 
 	/// A rider that falls off its flight's tail never holds the flight's writer back, and

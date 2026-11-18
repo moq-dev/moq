@@ -243,10 +243,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 		.unwrap_or_else(|_| panic!("{label}: no group arrived"))
 		.unwrap()
 		.expect("the track is live");
-	assert!(
-		track.demand().wanted(),
-		"{label}: the subscription is not demand"
-	);
+	assert!(track.demand().wanted(), "{label}: the subscription is not demand");
 	drop(subscriber);
 	kio::clock::timeout(TIMEOUT, crate::support::unwanted(track.demand()))
 		.await

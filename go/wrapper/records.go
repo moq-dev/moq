@@ -163,13 +163,28 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 	return &out, err
 }
 
+// TrackRefresh says when a subscriber asks a track's publisher for a new group,
+// which TrackDemand.Refresh reports. The zero value asks for nothing.
+//
+// A track opting in starts each group with an independent frame (a keyframe or a
+// snapshot), so a new group is something the publisher can make on request.
+type TrackRefresh struct {
+	// Ratio is how many times its first frame a group's later bytes may grow before
+	// a joining subscriber asks for a new group. Zero asks on any join once a frame
+	// follows the first; nil leaves joins to Interval alone.
+	Ratio *uint32
+	// Interval is how long after the newest group arrived a request may ask for
+	// another, or nil for no wait. It caps how often the publisher makes groups
+	// however many subscribers ask.
+	Interval *time.Duration
+}
+
 // TrackInfo holds publisher-side track properties: priority, how long a
-// superseded group stays fresh, how many times its first frame a group's later
-// bytes may grow before a joining subscriber asks for a new group (nil never
-// asks), and the timescale in ticks per second (nil means untimed on both publish
-// and receive). Priority is higher first; the zero Priority is the midpoint a nil
-// TrackInfo uses. Compression compresses each group on the wire to peers that
-// support it, nil sending frames as written; readers always see the original frames.
+// superseded group stays fresh, when a subscriber asks for a new group, and the
+// timescale in ticks per second (nil means untimed on both publish and receive).
+// Priority is higher first; the zero Priority is the midpoint a nil TrackInfo
+// uses. Compression compresses each group on the wire to peers that support it,
+// nil sending frames as written; readers always see the original frames.
 type TrackInfo struct {
 	Priority int8
 	// MaxAge is how long a superseded group stays fresh. Zero, the default, serves
@@ -178,7 +193,7 @@ type TrackInfo struct {
 	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
 	// cache to bound how long a superseded group is served: the ffi record's null MaxAge.
 	MaxAgeUnlimited bool
-	Refresh         *uint32
+	Refresh         TrackRefresh
 	Timescale       *uint64
 	Compression     *Compression
 }
@@ -188,23 +203,32 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	out := &ffi.MoqTrackInfo{
-		Priority:    info.Priority,
-		Refresh:     info.Refresh,
+		Priority: info.Priority,
+		Refresh: ffi.MoqTrackRefresh{
+			Ratio:    info.Refresh.Ratio,
+			Interval: info.Refresh.Interval,
+		},
 		Timescale:   info.Timescale,
 		Compression: optional(info.Compression),
 	}
 	if !info.MaxAgeUnlimited {
 		out.MaxAge = &info.MaxAge
 	}
-	return out, bridge.NonNegative(out.MaxAge, "max age")
+	if err := bridge.NonNegative(out.MaxAge, "max age"); err != nil {
+		return nil, err
+	}
+	return out, bridge.NonNegative(info.Refresh.Interval, "refresh interval")
 }
 
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 	out := TrackInfo{
 		Priority:        info.Priority,
 		MaxAgeUnlimited: info.MaxAge == nil,
-		Refresh:         info.Refresh,
-		Timescale:       info.Timescale,
+		Refresh: TrackRefresh{
+			Ratio:    info.Refresh.Ratio,
+			Interval: info.Refresh.Interval,
+		},
+		Timescale: info.Timescale,
 	}
 	if info.MaxAge != nil {
 		out.MaxAge = *info.MaxAge

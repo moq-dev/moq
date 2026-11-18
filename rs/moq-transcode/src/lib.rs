@@ -1761,10 +1761,7 @@ mod tests {
 		// The only demand ends with output group 0 still open.
 		drop(fetching);
 		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
-		assert!(
-			source_demand.wanted(),
-			"the live path left its source mid-group"
-		);
+		assert!(source_demand.wanted(), "the live path left its source mid-group");
 
 		// Once the source group ends, the live path finishes its copy and leaves.
 		group.finish().unwrap();

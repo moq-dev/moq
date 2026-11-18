@@ -194,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
 					_finished = Some(track.finish()?);
 				} else if !cached {
 					let mut demand = track.demand();
-					while demand.wanted_changed().await?.is_none() {}
+					while !demand.wanted_changed().await? {}
 					write(&mut track, mode)?;
 				}
 				// A finished track is not a drained transport. Keep the session alive

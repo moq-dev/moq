@@ -1568,10 +1568,11 @@ The live Ranges after the edit MUST NOT be empty, and MUST fit in one SUBSCRIBE:
 A publisher closes the session with a PROTOCOL_VIOLATION otherwise.
 
 **Wanted Start**:
-The newest group start the subscriber's live-edge joins want, plus one; `0` means none.
+The group start the subscriber's readers want, plus one; `0` means none.
+A value past every start the subscriber holds asks for a new group (see [Refresh](#track-info)).
 Like the other fields, it is subscription state: every SUBSCRIBE_UPDATE restates it, and the latest one applies.
-A publisher MUST ignore a value at or below its largest group's start, and otherwise evaluate it as a new SUBSCRIBE under the Track's Refresh ratio.
-A new SUBSCRIBE itself counts as a join and needs no Wanted Start field.
+A publisher MUST ignore a value at or below its largest group's start, and otherwise evaluate it as a refresh request under the Track's Refresh Interval, or under its Refresh ratio when it declares no interval.
+A new SUBSCRIBE itself counts as a live-edge join and needs no Wanted Start field.
 
 ## TRACK
 TRACK is sent by a subscriber to request a Track's immutable publisher properties.
@@ -1622,6 +1623,7 @@ TRACK_INFO Message {
   Publisher Max Age (i)
   Timescale (i)
   Refresh (i)
+  Refresh Interval (i)
   Compression (i)
 }
 ~~~
@@ -1652,12 +1654,15 @@ See the [Expiration](#expiration) section for more information.
 The number of timestamp units per second for frame timestamps and Group starts on this Track, or `0` for a scale-less Track, whose timestamps are bare numbers (see [Frame](#frame)).
 Common values include `1000` (milliseconds), `1000000` (microseconds), `48000` (audio sample rate), and `90000` (RTP video clock).
 
-**Refresh**:
-An optional unsigned 32-bit byte ratio, encoded as the ratio plus one; `0` disables refresh.
-On a live-edge join, a publisher asks for a group beyond every start already produced when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes.
-Joins coalesce until the requested group arrives.
-The request does not hold back delivery: the joiner still receives the newest cached group while it is pending.
-A relay forwards its joins' demand in SUBSCRIBE_UPDATE's `Wanted Start`.
+**Refresh** and **Refresh Interval**:
+When a reader asks for a group beyond every start already produced.
+Refresh is an optional unsigned 32-bit byte ratio, encoded as the ratio plus one, and Refresh Interval an optional duration encoded like `Publisher Max Age`; `0` omits either, and a Track omitting both never refreshes.
+A live-edge join asks when the newest group's bytes after its first frame exceed the ratio times that first frame's bytes, or always when there is no ratio.
+A reader's explicit request asks regardless of the ratio when the Track declares an interval, and like a join otherwise.
+Either request takes effect only once the newest group arrived at least the interval ago, measured on the judging endpoint's monotonic clock from when it received (or produced) that group; one made sooner waits until then.
+Requests coalesce until a group beyond the newest arrives, which answers them all, so the interval caps how often the publisher produces groups however many readers ask.
+A request does not hold back delivery: the reader still receives the newest cached group while it is pending.
+Every hop judges a request against its own cache, and a relay forwards the requests it judged in SUBSCRIBE_UPDATE's `Wanted Start`.
 
 **Compression**:
 How each Group of this Track is compressed: none (0x0), or DEFLATE (0x1), each Group one DEFLATE stream as specified by {{moqflate}}.
@@ -2288,7 +2293,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response.
 - Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
-- Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Start`, carrying ratio-based refresh demand through relays.
+- Added TRACK_INFO `Refresh` and `Refresh Interval`, and SUBSCRIBE_UPDATE `Wanted Start`, carrying refresh requests through relays: a live-edge join judged by the byte ratio, or a reader's explicit request, either one waiting out the interval.
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME carries an `Inflated Size` when it is not none.
 - A `Timescale` of 0 in TRACK_INFO declares a scale-less Track, whose timestamps and Group starts are bare numbers; each of its frames carries its Group's start as its timestamp.
 - A publisher must not start a Group's frame 0 at or before that of a Group with a lower start, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.

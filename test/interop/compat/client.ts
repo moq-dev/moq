@@ -335,12 +335,16 @@ if (command === "sign") {
 	process.once("SIGTERM", () => void connection.close());
 	console.log("published");
 	// `demand()` replaced the producer's own `used` after @moq/net 0.4.2, then `wanted`
-	// replaced `demand().used`, and this one client runs against each package.
+	// replaced `demand().used`, first as the wanted group and then as a boolean, and this one
+	// client runs against each package.
 	type Watch = { peek(): unknown; changed(): Promise<unknown> };
 	const demand = ("demand" in track ? track.demand() : track) as unknown as { used?: Watch; wanted?: Watch };
 	const watch = demand.wanted ?? demand.used;
 	if (!watch) throw new Error("track has no demand");
-	const wanted = () => (demand.wanted ? watch.peek() !== undefined : watch.peek() === true);
+	const wanted = () => {
+		const value = watch.peek();
+		return value === true || typeof value === "bigint";
+	};
 	while (!wanted()) await watch.changed();
 	// The group starts at its frame's time; a released package's appendGroup takes no start.
 	const timestamp = Moq.Time.Timestamp.fromMicros(1 as TimestampMicros);

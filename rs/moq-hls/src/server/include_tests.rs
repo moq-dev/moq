@@ -474,10 +474,7 @@ async fn listing_is_catalog_only_and_requests_own_the_lazy_media_lifetime() {
 		.unwrap();
 	assert_eq!(held.status(), StatusCode::OK);
 	tokio::time::advance(Duration::from_secs(21)).await;
-	assert!(
-		include.video.demand().wanted(),
-		"a slow body still holds demand"
-	);
+	assert!(include.video.demand().wanted(), "a slow body still holds demand");
 	drop(held);
 	// The reload window starts at completion, and another request renews it.
 	tokio::time::advance(Duration::from_secs(19)).await;

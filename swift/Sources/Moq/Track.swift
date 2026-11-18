@@ -100,7 +100,8 @@ public final class GroupConsumer: AsyncSequence, Sendable {
     }
 }
 
-/// A watch-only handle to whether a published track has subscribers.
+/// A watch-only handle to whether a published track has subscribers, and when they ask for a
+/// new group.
 ///
 /// Returned by a producer's `demand()`. Weak: holding it neither keeps the track open nor locks
 /// the producer, so a wait can park here while the producer keeps publishing. Waits throw
@@ -117,17 +118,25 @@ public final class TrackDemand: Sendable {
         ffi.name()
     }
 
-    /// The group subscribers want next, or nil while nobody subscribes. A value past the
-    /// newest group asks for a new group now, typically a keyframe.
-    public var wanted: UInt64? {
+    /// Whether anyone consumes the track: a subscription, fetch, or a group one of them is
+    /// still reading.
+    public var wanted: Bool {
         ffi.wanted()
     }
 
     /// Suspend until `wanted` changes and return it. The first call returns at once.
     /// End a track nobody wants with `TrackProducer.abortUnwanted(errorCode:)`, which keeps it
     /// for a reader that joined since.
-    public func wantedChanged() async throws -> UInt64? {
+    public func wantedChanged() async throws -> Bool {
         try await ffi.wantedChanged()
+    }
+
+    /// Suspend until a subscriber asks for a new group: the first group of a track with none,
+    /// or a join judged by the track's `TrackRefresh` once its interval passed. Returns at once
+    /// while the request is pending, and the next group written answers it, so loop: wait
+    /// here, then write a group that starts with a keyframe or a snapshot.
+    public func refresh() async throws {
+        try await ffi.refresh()
     }
 }
 
@@ -190,7 +199,7 @@ public final class TrackProducer: Sendable {
     }
 
     /// Abort the track with an application error code, but only while nobody wants it: call it
-    /// once `TrackDemand.wantedChanged()` returns nil. Returns true once the track is closed,
+    /// once `TrackDemand.wantedChanged()` returns false. Returns true once the track is closed,
     /// and false, leaving the track open, when a reader joined since; keep serving and wait for
     /// the next nil on a fresh `demand()`: one that already returned nil misses a reader
     /// that came and went, and waits on.

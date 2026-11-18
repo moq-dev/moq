@@ -78,9 +78,14 @@ public typealias Subscription = MoqFFI.MoqSubscription
 public typealias Delay = MoqFFI.MoqDelay
 /// Options for fetching one complete group by start.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
-/// Publisher-side track properties: priority, group ordering, max age,
-/// and timescale.
+/// Publisher-side track properties: priority, max age, refresh, timescale,
+/// and compression.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
+/// When a subscriber asks a track's publisher for a new group, which `TrackDemand.refresh()`
+/// reports: a join once the newest group outweighs `ratio` times its first frame (any join
+/// when `nil`), waiting out `interval` (`nil` for no wait), which caps how often the publisher
+/// makes groups however many subscribers ask. A bare `TrackRefresh()` asks for nothing.
+public typealias TrackRefresh = MoqFFI.MoqTrackRefresh
 /// How a track's frames are compressed on the wire: `Compression.deflate()`, or `nil` in `TrackInfo`
 /// for none. Compare a received one with `==` or by `name()`.
 public typealias Compression = MoqFFI.MoqCompression

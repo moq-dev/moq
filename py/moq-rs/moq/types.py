@@ -83,6 +83,7 @@ from ._records import (
     Subscription,
     Timestamp,
     TrackInfo,
+    TrackRefresh,
     VideoDecodedFrame,
     WebSocketConfig,
 )
@@ -117,6 +118,7 @@ __all__ = [
     "Subscription",
     "Timestamp",
     "TrackInfo",
+    "TrackRefresh",
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",

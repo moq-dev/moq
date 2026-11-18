@@ -135,8 +135,14 @@ const INFO_FIELDS = Object.keys({
 function compatible(a: track.Info, b: track.Info): boolean {
 	return INFO_FIELDS.every((field) => {
 		const [l, r] = [a[field], b[field]];
+		if (field === "refresh") return sameRefresh(a.refresh, b.refresh);
 		return l instanceof Duration && r instanceof Duration ? l.eq(r) : l === r;
 	});
+}
+
+function sameRefresh(a: track.Refresh, b: track.Refresh): boolean {
+	const interval = a.interval === null || b.interval === null ? a.interval === b.interval : a.interval.eq(b.interval);
+	return a.ratio === b.ratio && interval;
 }
 
 /**
@@ -1524,10 +1530,9 @@ class Reader implements ResumeSource {
 		}
 	}
 
-	join(): void {
+	refresh(): void {
 		this.sync();
-		const serving = this.#serving();
-		if (serving) hooks.joinSubscriber(serving.sub);
+		this.#serving()?.sub.refresh();
 	}
 
 	fork(options?: track.Subscription): track.Subscriber {

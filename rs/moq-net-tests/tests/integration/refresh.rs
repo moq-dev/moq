@@ -1,7 +1,7 @@
 //! Refresh joins traverse real protocol hops, judged independently from each cache.
 use crate::support::harness::{MockConnectOptions, connect_mock, peer, spawn, subscribed};
-use moq_net::{Version, origin, track};
 use futures::FutureExt;
+use moq_net::{Version, origin, track};
 use std::time::Duration;
 
 fn origin(hop: u64) -> origin::Producer {
@@ -54,7 +54,10 @@ async fn json_snapshot_refresh_crosses_a_two_relay_cluster() {
 			.unwrap();
 		let remote = remote.track("state").unwrap();
 		let mut baseline = remote.subscribe(None).await.unwrap();
-		assert_eq!(baseline.info().refresh, moq_net::track::Refresh::default().with_ratio(ratio));
+		assert_eq!(
+			baseline.info().refresh,
+			moq_net::track::Refresh::default().with_ratio(ratio)
+		);
 		subscribed(&track).await;
 
 		let at = |n| Timestamp::from_millis(100 + n).unwrap();
@@ -159,7 +162,10 @@ async fn ratio_joins_cross_two_relays() {
 		let broadcast = source.route("room", origin::RouteOptions::hidden()).unwrap();
 		let producer = broadcast
 			.broadcast()
-			.create_track("data", track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)))
+			.create_track(
+				"data",
+				track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+			)
 			.unwrap();
 		broadcast.announce().unwrap();
 		let mut links = Vec::new();
@@ -179,7 +185,10 @@ async fn ratio_joins_cross_two_relays() {
 			.unwrap();
 		let remote = remote.track("data").unwrap();
 		let mut baseline = remote.subscribe(None).await.unwrap();
-		assert_eq!(baseline.info().refresh, moq_net::track::Refresh::default().with_ratio((name == "moq-lite-07-wip").then_some(1)));
+		assert_eq!(
+			baseline.info().refresh,
+			moq_net::track::Refresh::default().with_ratio((name == "moq-lite-07-wip").then_some(1))
+		);
 		crate::support::harness::subscribed(&producer).await;
 		let mut group = producer.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 		group.write_frame(moq_net::Timestamp::unscaled(0), &b"key"[..]).unwrap();
@@ -189,7 +198,10 @@ async fn ratio_joins_cross_two_relays() {
 		assert_eq!(received.read_frame().await.unwrap().unwrap().payload.len(), 3);
 		let mut under = remote.subscribe(None).await.unwrap();
 		let _under_group = under.recv_group().await.unwrap().unwrap();
-		assert!(producer.demand().poll_refresh(&kio::Waiter::noop()).is_pending(), "ratio equality does not refresh");
+		assert!(
+			producer.demand().poll_refresh(&kio::Waiter::noop()).is_pending(),
+			"ratio equality does not refresh"
+		);
 		group.write_frame(moq_net::Timestamp::unscaled(0), &b"d"[..]).unwrap();
 		assert_eq!(received.read_frame().await.unwrap().unwrap().payload.len(), 1);
 		let mut joins = Vec::new();
@@ -200,7 +212,10 @@ async fn ratio_joins_cross_two_relays() {
 		}
 		if name == "moq-lite-07-wip" {
 			let demand = producer.demand();
-			kio::clock::timeout(Duration::from_secs(1), demand.refresh()).await.unwrap().unwrap();
+			kio::clock::timeout(Duration::from_secs(1), demand.refresh())
+				.await
+				.unwrap()
+				.unwrap();
 		} else {
 			// Drain runnable protocol tasks on simulated time, without a wall-clock sleep.
 			kio::clock::sleep(Duration::from_millis(1)).await;
@@ -281,7 +296,10 @@ async fn interval_caps_refreshes_across_two_relays() {
 	let made = made.borrow().clone();
 	assert!(made.len() >= 6, "each interval answers the readers: {made:?}");
 	for pair in made.windows(2) {
-		assert!(pair[1].saturating_duration_since(pair[0]) >= interval, "a group made within the interval: {made:?}");
+		assert!(
+			pair[1].saturating_duration_since(pair[0]) >= interval,
+			"a group made within the interval: {made:?}"
+		);
 	}
 	let newest = made.len() as u64 - 1;
 	let mut last = None;

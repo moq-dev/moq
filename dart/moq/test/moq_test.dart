@@ -30,7 +30,7 @@ void main() {
     expect(request.priority(), 12);
     final producer = request.accept(info: null);
     expect(producer.priority(), 12);
-    expect(stream.demand().wanted(), isNull);
+    expect(stream.demand().wanted(), isFalse);
     producer.insert(
       datagram: Datagram(
         sequence: 7,
@@ -139,7 +139,7 @@ void main() {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(name: 'status', info: null);
     final demand = track.demand();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
 
     final late = track.consume(subscription: null);
     expect(track.abortUnwanted(errorCode: 7), isFalse);
@@ -152,9 +152,9 @@ void main() {
     final frame = await late.readFrame().timeout(timeout);
     expect(utf8.decode(frame!.payload), 'still serving');
 
-    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    while (!await demand.wantedChanged().timeout(timeout)) {}
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
     expect(track.abortUnwanted(errorCode: 7), isTrue);
     expect(
       () => track.abortUnwanted(errorCode: 7),
@@ -211,6 +211,50 @@ void main() {
         .consume(subscription: null)
         .info();
     expect(unlimited.maxAge, isNull);
+    broadcast.close();
+  });
+
+  test(
+    'a refresh reads back as published and an omitted one asks for nothing',
+    () {
+      final broadcast = BroadcastProducer();
+      final refreshed = broadcast
+          .publishTrack(
+            name: 'refresh',
+            info: TrackInfo(
+              refresh: TrackRefresh(
+                ratio: 2,
+                interval: const Duration(milliseconds: 500),
+              ),
+            ),
+          )
+          .consume(subscription: null)
+          .info()
+          .refresh;
+      expect(refreshed.ratio, 2);
+      expect(refreshed.interval, const Duration(milliseconds: 500));
+      final plain = broadcast
+          .publishTrack(name: 'plain', info: TrackInfo())
+          .consume(subscription: null)
+          .info()
+          .refresh;
+      expect(plain.ratio, isNull);
+      expect(plain.interval, isNull);
+      broadcast.close();
+    },
+  );
+
+  test('refresh returns once the first subscriber asks for a group', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(
+      name: 'status',
+      info: TrackInfo(refresh: TrackRefresh(ratio: 0)),
+    );
+    final demand = track.demand();
+    final consumer = track.consume(subscription: null);
+    await demand.refresh().timeout(timeout);
+    consumer.cancel();
+    track.finish();
     broadcast.close();
   });
 
@@ -538,7 +582,7 @@ void main() {
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
     final demand = track.demand();
-    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    while (!await demand.wantedChanged().timeout(timeout)) {}
 
     final producer = track.appendGroup(start: Duration.zero.toTimestamp());
     producer.writeFrame(
@@ -991,11 +1035,11 @@ void main() {
       broadcast: broadcast,
       track: broadcast.publishTrack(
         name: 'events',
-        info: MoqTrackInfo(timescale: 1000000),
+        info: MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh()),
       ),
     );
     final demand = producer.demand();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
 
     final late = moq_json.StreamConsumer(
       track: await broadcast
@@ -1011,9 +1055,9 @@ void main() {
     final record = await late.next().timeout(timeout);
     expect(jsonDecode(record!.value), 'still serving');
 
-    while (await demand.wantedChanged().timeout(timeout) == null) {}
+    while (!await demand.wantedChanged().timeout(timeout)) {}
     late.cancel();
-    while (await demand.wantedChanged().timeout(timeout) != null) {}
+    while (await demand.wantedChanged().timeout(timeout)) {}
     expect(producer.abortUnwanted(errorCode: 7), isTrue);
     expect(
       () => producer.abortUnwanted(errorCode: 7),

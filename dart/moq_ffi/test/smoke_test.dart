@@ -49,7 +49,7 @@ void main() {
     final broadcast = MoqBroadcastProducer();
     final track = broadcast.publishTrack(
       name: 'events',
-      info: MoqTrackInfo(timescale: 1000000),
+      info: MoqTrackInfo(timescale: 1000000, refresh: MoqTrackRefresh()),
     );
     final consumer = track.consume(subscription: null);
     final nextGroup = consumer.nextGroup();

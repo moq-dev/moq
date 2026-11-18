@@ -4,11 +4,11 @@ import 'package:moq_ffi/moq_ffi.dart';
 // them the way the Rust API does. These are type aliases, not wrappers: the
 // values are the exact same objects, so every generated method applies
 // unchanged and the prefixed names stay valid. `Delay`, `Subscription`,
-// `TrackInfo`, and `Timestamp` are extension types instead, which are the same
-// objects too but add constructors: an omitted delay bound or max age is the
-// zero moq-net defaults to, where the generated record leaves it null (no
-// limit), and a timestamp is built either scaled or [Timestamp.unscaled], as in
-// Rust.
+// `TrackInfo`, `TrackRefresh`, and `Timestamp` are extension types instead,
+// which are the same objects too but add constructors: an omitted delay bound or
+// max age is the zero moq-net defaults to, where the generated record leaves it
+// null (no limit), an omitted refresh asks for nothing, and a timestamp is built
+// either scaled or [Timestamp.unscaled], as in Rust.
 //
 // Four types are deliberately not aliased, because the unprefixed name is
 // already taken where this package is used:
@@ -221,21 +221,34 @@ typedef FetchGroupOptions = MoqFetchGroupOptions;
 /// [TrackInfo] for none. Compare a received one by `name()`.
 typedef Compression = MoqCompression;
 
-/// Delivery settings for a raw track: priority, ordering, latency budget, and timescale.
+/// When a subscriber asks a track's publisher for a new group, which
+/// `TrackDemand.refresh()` reports.
+extension type TrackRefresh._(MoqTrackRefresh _refresh)
+    implements MoqTrackRefresh {
+  /// A join asks once the newest group outweighs `ratio` times its first frame
+  /// (any join when null), waiting out `interval` (null for no wait), which caps
+  /// how often the publisher makes groups however many subscribers ask. A bare
+  /// `TrackRefresh()` asks for nothing.
+  TrackRefresh({int? ratio, Duration? interval})
+    : this._(MoqTrackRefresh(ratio: ratio, interval: interval));
+}
+
+/// Delivery settings for a raw track: priority, max age, refresh, timescale, and compression.
 extension type TrackInfo._(MoqTrackInfo _info) implements MoqTrackInfo {
   /// `maxAge` is how long a superseded group stays fresh, defaulting to zero, moq-net's
   /// default, which serves only the live edge. An explicit null sets no publisher limit.
+  /// An omitted `refresh` asks for nothing.
   TrackInfo({
     int priority = 0,
     Duration? maxAge = Duration.zero,
-    int? refresh,
+    MoqTrackRefresh? refresh,
     int? timescale,
     MoqCompression? compression,
   }) : this._(
          MoqTrackInfo(
            priority: priority,
            maxAge: maxAge,
-           refresh: refresh,
+           refresh: refresh ?? TrackRefresh(),
            timescale: timescale,
            compression: compression,
          ),

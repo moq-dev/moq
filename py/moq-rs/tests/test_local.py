@@ -17,7 +17,7 @@ FROM_GROUP_0 = [moq.Range(start=moq.Anchor.ABSOLUTE(group=0))]
 
 async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
     """Wait until some subscriber wants the track, or none does."""
-    while (await demand.wanted_changed() is not None) != wanted:
+    while await demand.wanted_changed() != wanted:
         pass
 
 
@@ -134,7 +134,7 @@ async def test_datagram_tracks_have_independent_sequences_and_priority():
     consumer = track.consume()
     consumer.set_priority(7)
     assert track.priority() == 7
-    assert stream.demand().wanted() is None
+    assert not stream.demand().wanted()
     track.insert(moq.Datagram(sequence=7, payload=b"seven", timestamp=moq.Timestamp.unscaled(7)))
     datagram = await asyncio.wait_for(consumer.recv(), 5)
     assert datagram is not None
@@ -584,6 +584,36 @@ def test_track_info_max_age():
     broadcast.close()
 
 
+def test_track_info_reads_refresh_back():
+    """A received refresh republishes unchanged, and a bare one asks for nothing."""
+    broadcast = moq.BroadcastProducer()
+    refresh = moq.TrackRefresh(ratio=2, interval=timedelta(milliseconds=500))
+    got = broadcast.publish_track("refresh", moq.TrackInfo(refresh=refresh)).consume().info()
+    assert got.refresh == refresh
+    assert broadcast.publish_track("plain").consume().info().refresh == moq.TrackRefresh()
+    broadcast.close()
+
+
+async def test_demand_refresh_waits_for_a_group_request():
+    """The first subscriber of a track with no group asks for one, and the next group answers it."""
+    broadcast = moq.BroadcastProducer()
+    track = broadcast.publish_track("status", moq.TrackInfo(refresh=moq.TrackRefresh(ratio=0)))
+    demand = track.demand()
+    pending = asyncio.ensure_future(demand.refresh())
+    await polled()
+    assert not pending.done(), "nobody asks"
+
+    consumer = track.consume()
+    await asyncio.wait_for(pending, timeout=5.0)
+    track.write_frame(b"key", moq.Timestamp.unscaled(0))
+    pending = asyncio.ensure_future(demand.refresh())
+    await polled()
+    assert not pending.done(), "the group answered it"
+    pending.cancel()
+    del consumer
+    track.finish()
+
+
 def test_track_info_reads_compression_back():
     """A received compression compares equal to the selector and names itself."""
     broadcast = moq.BroadcastProducer()
@@ -766,7 +796,7 @@ async def test_json_window_cut_restates_the_window():
 
 async def test_json_window_skips_records_outside_the_checkpoint():
     broadcast = moq.BroadcastProducer()
-    track = broadcast.publish_track("log", moq.TrackInfo(refresh=1, timescale=1_000))
+    track = broadcast.publish_track("log", moq.TrackInfo(refresh=moq.TrackRefresh(ratio=1), timescale=1_000))
     producer = moq.json.WindowProducer(track, checkpoint_records=2)
     for n in range(5):
         producer.push({"n": n}, moq.Timestamp(n, 1_000))
@@ -800,14 +830,14 @@ async def test_json_producers_report_demand():
     snapshot_demand = snapshot.demand()
     stream_demand = stream.demand()
     assert snapshot_demand.name == "status"
-    assert snapshot_demand.wanted() is None
+    assert not snapshot_demand.wanted()
 
     consumer = broadcast.consume()
     snapshot_consumer = moq.json.SnapshotConsumer(consumer, "status")
     stream_consumer = moq.json.StreamConsumer(await consumer.subscribe_track("events"))
     await asyncio.wait_for(until_wanted(snapshot_demand), timeout=5.0)
     await asyncio.wait_for(until_wanted(stream_demand), timeout=5.0)
-    assert snapshot_demand.wanted() == 0
+    assert snapshot_demand.wanted()
 
     snapshot_consumer.cancel()
     stream_consumer.cancel()
@@ -830,7 +860,7 @@ async def test_dynamic_track_request():
     request = await asyncio.wait_for(dynamic.requested_track(), timeout=5.0)
     assert request.name == "events"
     demand = request.demand()
-    assert demand.wanted() is not None
+    assert demand.wanted()
 
     # Accept the request as a raw track (which unblocks the subscribe), then write.
     track = request.accept()

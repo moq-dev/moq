@@ -7673,7 +7673,11 @@ mod serve_group_test {
 			.unwrap();
 		group.finish().unwrap();
 		run.replace(update(Some(1)));
-		assert_eq!(track.demand().wanted_start(), Some(1), "answered request stays answered");
+		assert_eq!(
+			track.demand().wanted_start(),
+			Some(1),
+			"answered request stays answered"
+		);
 		run.replace(update(Some(2)));
 		assert_eq!(track.demand().wanted_start(), Some(1), "new hop judges its own ratio");
 	}
@@ -11339,7 +11343,8 @@ mod tests {
 			.now_or_never()
 			.expect("track requested")
 			.unwrap();
-		let track = request.accept(crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)));
+		let track =
+			request.accept(crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)));
 		let mut group = track.create_group(group::Info { start: 1 }).unwrap();
 		for frame in [&b"key"[..], b"abc", b"d"] {
 			group.write_frame(group.key_time(), frame).unwrap();

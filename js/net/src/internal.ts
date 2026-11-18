@@ -41,8 +41,21 @@ export const NO_MAX_DELAY = Varint.MAX_U53;
 
 /** A datagram track's properties as the stream track info a wire answers with: no groups, so no age, refresh, or compression. */
 export function datagramTrackInfo(info: datagram.Info): Info {
-	return { compression: "none", timescale: info.timescale, maxAge: null, priority: info.priority, refresh: null };
+	return {
+		compression: "none",
+		timescale: info.timescale,
+		maxAge: null,
+		priority: info.priority,
+		refresh: { ratio: null, interval: null },
+	};
 }
+
+/**
+ * What asks a track for a new group, mirroring the Rust `track::Ask`: a reader joining at the
+ * live edge (judged by the ratio), a {@link Subscriber.refresh} or a peer's Wanted Start past
+ * the largest, or a reader of the newest group reaching a frame its copy shed.
+ */
+export type Ask = "join" | "refresh" | "shed";
 
 /** A subscription's {@link Delay.max} in milliseconds as the wire carries it: null for no limit, omitted for zero. */
 export function maxDelayOf(subscription: Pick<Subscription, "delay">): number {
@@ -467,8 +480,8 @@ export interface Land {
 export interface ResumeSource {
 	/** Observe a serving copy's abort, including delivery failures a resumable reader waits past. */
 	watchError(fn: (error: Error) => void): Dispose;
-	/** Re-evaluate a live-edge join at the serving copy. */
-	join(): void;
+	/** Ask the serving copy for a new group; see `Subscriber.refresh`. */
+	refresh(): void;
 	/**
 	 * The next group not in `delivered`, in arrival or sequence order, without waiting. With
 	 * `dispositions`, a run no copy may still deliver is reported once as a `drop`.
@@ -622,6 +635,12 @@ export const hooks: {
 	trackReleased: (producer: Producer) => GetPromise<Error | null>;
 	/** {@link trackReleased} for a demand handle. Assigned by `track.ts`. */
 	demandReleased: (demand: Demand) => GetPromise<Error | null>;
+	/**
+	 * The group start subscribers ask for while it is past every key written, whether or not
+	 * anyone subscribes now: what a relay forwards upstream as SUBSCRIBE_UPDATE's Wanted Start.
+	 * Mirrors the Rust `Demand::asked`; assigned by `track.ts`.
+	 */
+	demandAsked: (demand: Demand) => Getter<bigint | undefined>;
 	/** Whether the producer declared the track's end, released or not. Assigned by `track.ts`. */
 	trackFinished: (producer: Producer) => boolean;
 	/**
@@ -683,9 +702,8 @@ export const hooks: {
 	 * `skipped_below`; assigned by `track.ts`.
 	 */
 	skippedBelow: (subscriber: Subscriber, key: bigint) => bigint;
-	joinSubscriber: (subscriber: Subscriber) => void;
-	/** Re-evaluate a live-edge join at a producer. */
-	joinProducer: (producer: Producer) => void;
+	/** Ask a producer for a new group, judged by its {@link Info.refresh}; mirrors the Rust `TrackState::ask`. */
+	askProducer: (producer: Producer, ask: Ask) => void;
 
 	/**
 	 * Declare the first group a wire subscription's live feed serves (lite SUBSCRIBE_START, or
@@ -1058,6 +1076,9 @@ export const hooks: {
 	demandReleased: () => {
 		throw new Error("track.ts not loaded");
 	},
+	demandAsked: () => {
+		throw new Error("track.ts not loaded");
+	},
 	trackFinished: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -1073,7 +1094,7 @@ export const hooks: {
 	producerLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
-	joinProducer: () => {
+	askProducer: () => {
 		throw new Error("track.ts not loaded");
 	},
 	subscriberEnd: () => {
@@ -1083,9 +1104,6 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	skippedBelow: () => {
-		throw new Error("track.ts not loaded");
-	},
-	joinSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
 	startTrack: () => {

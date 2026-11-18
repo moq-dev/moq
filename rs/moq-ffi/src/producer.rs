@@ -47,11 +47,11 @@ pub struct MoqTrackInfo {
 	/// publisher-side half of [`MoqDelay::max`](crate::consumer::MoqDelay::max), which reads
 	/// null the same way.
 	pub max_age: Option<std::time::Duration>,
-	/// How many times its first frame a group's later bytes may grow before a joining
-	/// subscriber asks for a new group, or null to never ask. See
-	/// [`MoqTrackDemand::wanted`](crate::demand::MoqTrackDemand::wanted).
-	#[uniffi(default = None)]
-	pub refresh: Option<u32>,
+	/// When a subscriber asks for a new group, which the publisher hears through
+	/// [`MoqTrackDemand::refresh`](crate::demand::MoqTrackDemand::refresh). The default never
+	/// asks.
+	#[uniffi(default)]
+	pub refresh: MoqTrackRefresh,
 	/// Per-frame timescale in ticks per second, or null for an untimed track.
 	#[uniffi(default = None)]
 	pub timescale: Option<u64>,
@@ -59,6 +59,43 @@ pub struct MoqTrackInfo {
 	/// frames as written. Readers always see the original frames.
 	#[uniffi(default = None)]
 	pub compression: Option<Arc<MoqCompression>>,
+}
+
+/// When a subscriber asks a track's publisher for a new group, mirroring
+/// [`moq_net::track::Refresh`]. The default asks for nothing.
+///
+/// A track opting in starts each group with an independent frame (a keyframe or a snapshot), so
+/// a new group is something the publisher can make on request. A live join asks once the newest
+/// group outweighs `ratio`, or on any join without one. Either way the request waits out
+/// `interval`, which caps how often the publisher makes groups however many subscribers ask.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct MoqTrackRefresh {
+	/// How many times its first frame a group's later bytes may grow before a joining subscriber
+	/// asks for a new group. Zero asks on any join once a frame follows the first; null leaves
+	/// joins to `interval` alone.
+	#[uniffi(default = None)]
+	pub ratio: Option<u32>,
+	/// How long after the newest group arrived a request may ask for another, or null for no
+	/// wait. A request made sooner takes effect then. Sent as milliseconds.
+	#[uniffi(default = None)]
+	pub interval: Option<std::time::Duration>,
+}
+
+impl From<MoqTrackRefresh> for moq_net::track::Refresh {
+	fn from(refresh: MoqTrackRefresh) -> Self {
+		moq_net::track::Refresh::default()
+			.with_ratio(refresh.ratio)
+			.with_interval(refresh.interval)
+	}
+}
+
+impl From<moq_net::track::Refresh> for MoqTrackRefresh {
+	fn from(refresh: moq_net::track::Refresh) -> Self {
+		Self {
+			ratio: refresh.ratio,
+			interval: refresh.interval.map(crate::ffi::duration),
+		}
+	}
 }
 
 /// How a track's frames are compressed, mirroring [`moq_net::track::Compression`]; an
@@ -94,7 +131,7 @@ impl TryFrom<MoqTrackInfo> for moq_net::track::Info {
 	fn try_from(info: MoqTrackInfo) -> Result<Self, MoqError> {
 		let mut out = moq_net::track::Info::default()
 			.with_priority(info.priority)
-			.with_refresh(info.refresh)
+			.with_refresh(info.refresh.into())
 			.with_max_age(info.max_age);
 		if let Some(ticks) = info.timescale {
 			let scale = moq_net::Timescale::new(ticks).map_err(|_| MoqError::Codec {
@@ -120,7 +157,7 @@ impl From<&moq_net::track::Info> for MoqTrackInfo {
 		Self {
 			priority: info.priority,
 			max_age: info.max_age.map(crate::ffi::duration),
-			refresh: info.refresh,
+			refresh: info.refresh.into(),
 			timescale: info.timescale.map(|timescale| timescale.as_u64()),
 			compression: (info.compression != moq_net::track::Compression::None)
 				.then(|| Arc::new(MoqCompression(info.compression))),
@@ -1166,7 +1203,7 @@ mod metadata_tests {
 		let info = |max_age| MoqTrackInfo {
 			priority: 0,
 			max_age,
-			refresh: None,
+			refresh: MoqTrackRefresh::default(),
 			timescale: None,
 			compression: None,
 		};

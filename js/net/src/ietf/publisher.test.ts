@@ -566,7 +566,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		const track = await trackRequest;
 		if (!track) throw new Error("no request for video");
 		expect(track.name).toBe("video");
-		expect(track.demand().wanted.peek()).toBeDefined();
+		expect(track.demand().wanted.peek()).toBe(true);
 		late.withdraw();
 		await subscribing;
 		expect(late.written).toEqual([]);
@@ -621,7 +621,7 @@ test("a SUBSCRIBE withdrawn while resuming releases its demand", async () => {
 			if (version <= Version.DRAFT_18) client.writer.close();
 			else client.reader.stop(new Error("cancel"));
 			await serving;
-			expect(resumed.demand().wanted.peek()).toBeUndefined();
+			expect(resumed.demand().wanted.peek()).toBe(false);
 		} finally {
 			client.close();
 			fx.close();
@@ -2575,7 +2575,7 @@ test("draft-22: a filter starting past a group's end claims no END_OF_GROUP", as
 /** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
 test("draft-22: an absolute subscribe is no join", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, refresh: 0 });
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, refresh: { ratio: 0 } });
 	writeGroup(track, 3);
 
 	const { client } = await runSubscribe(
@@ -2590,7 +2590,7 @@ test("draft-22: an absolute subscribe is no join", async () => {
 	);
 
 	try {
-		expect(track.demand().wanted.peek()).toBe(0n);
+		expect(hooks.demandAsked(track.demand()).peek()).toBeUndefined();
 	} finally {
 		fx.close();
 		client.close();
@@ -4961,7 +4961,13 @@ for (const endObject of [BigInt(Number.MAX_SAFE_INTEGER), (1n << 60n) + 1n]) {
 
 test("a max age is never sent as MAX_CACHE_DURATION", () => {
 	const properties = trackProperties(
-		{ compression: "none", timescale: null, maxAge: Duration.millis(7000), priority: 0, refresh: null },
+		{
+			compression: "none",
+			timescale: null,
+			maxAge: Duration.millis(7000),
+			priority: 0,
+			refresh: { ratio: null, interval: null },
+		},
 		true,
 	);
 	expect(properties.maxCacheDuration).toBeUndefined();

@@ -84,7 +84,7 @@ class SmokeTest {
             assertEquals(12.toByte(), request.priority())
             val producer = request.accept(null)
             assertEquals(12.toByte(), producer.priority())
-            assertNull(stream.demand().wanted())
+            assertFalse(stream.demand().wanted())
             producer.insert(Datagram(7uL, Timestamp.unscaled(7uL), "seven".encodeToByteArray()))
             val datagram = assertNotNull(consumer.recv())
             assertEquals(7uL, datagram.sequence)
@@ -388,7 +388,7 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("status", null)
             val demand = track.demand()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
 
             val late = track.consume(null)
             assertFalse(track.abortUnwanted(7u))
@@ -400,9 +400,9 @@ class SmokeTest {
             )
             assertEquals("still serving", late.readFrame()?.payload?.decodeToString())
 
-            while (demand.wantedChanged() == null) {}
+            while (!demand.wantedChanged()) {}
             late.cancel()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
             assertTrue(track.abortUnwanted(7u))
             assertFailsWith<MoqException.Closed> { track.abortUnwanted(7u) }
         }
@@ -456,6 +456,34 @@ class SmokeTest {
             val unlimited =
                 broadcast.publishTrack("unlimited", TrackInfo(maxAge = null)).consume(null).info()
             assertNull(unlimited.maxAge)
+        }
+    }
+
+    @Test
+    fun `a refresh reads back as published and a bare one asks for nothing`() {
+        BroadcastProducer().use { broadcast ->
+            val refresh = TrackRefresh(ratio = 2u, interval = java.time.Duration.ofMillis(500))
+            val info = TrackInfo(maxAge = java.time.Duration.ZERO, refresh = refresh)
+            assertEquals(
+                refresh,
+                broadcast.publishTrack("refresh", info).consume(null).info().refresh,
+            )
+            assertEquals(
+                TrackRefresh(),
+                broadcast.publishTrack("plain", null).consume(null).info().refresh,
+            )
+        }
+    }
+
+    @Test
+    fun `refresh returns once the first subscriber asks for a group`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val info =
+                TrackInfo(maxAge = java.time.Duration.ZERO, refresh = TrackRefresh(ratio = 0u))
+            val track = broadcast.publishTrack("status", info)
+            val demand = track.demand()
+            track.consume(null).use { demand.refresh() }
+            track.finish()
         }
     }
 
@@ -678,16 +706,16 @@ class SmokeTest {
                 )
             val producer = StreamProducer(broadcast, track)
             val demand = producer.demand()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
 
             val late = StreamConsumer(broadcast.consume().subscribeTrack("events", null))
             assertFalse(producer.abortUnwanted(7u))
             producer.append("\"still serving\"", Timestamp(0uL, 1_000uL))
             assertEquals("\"still serving\"", late.next()?.value)
 
-            while (demand.wantedChanged() == null) {}
+            while (!demand.wantedChanged()) {}
             late.cancel()
-            while (demand.wantedChanged() != null) {}
+            while (demand.wantedChanged()) {}
             assertTrue(producer.abortUnwanted(7u))
             assertFailsWith<MoqException.Closed> { producer.abortUnwanted(7u) }
         }
@@ -749,12 +777,12 @@ class SmokeTest {
             SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 assertEquals("status", demand.name())
-                assertEquals(null, demand.wanted())
+                assertFalse(demand.wanted())
 
                 val consumer = SnapshotConsumer(broadcast.consume(), "status")
-                while (demand.wantedChanged() == null) {}
+                while (!demand.wantedChanged()) {}
                 consumer.cancel()
-                while (demand.wantedChanged() != null) {}
+                while (demand.wantedChanged()) {}
             }
         }
     }
@@ -774,11 +802,11 @@ class SmokeTest {
                 producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
 
                 val consumer = SnapshotConsumer(broadcast.consume(), "status")
-                while (demand.wantedChanged() == null) {}
+                while (!demand.wantedChanged()) {}
                 // `first` cancels the collection, which must release the subscription without an
                 // explicit cancel.
                 assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
-                while (demand.wantedChanged() != null) {}
+                while (demand.wantedChanged()) {}
             }
         }
     }

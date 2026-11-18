@@ -434,29 +434,42 @@ keep receiving and shedding.
 
 ### Refresh
 
-A publisher can opt a track into refresh by setting its byte ratio. A new
-subscriber asks for a fresh group only when the current group's bytes after
-its first frame exceed that ratio times the first frame's size. A ratio of 2,
-for example, permits two snapshots' worth of deltas before a join asks for a
-new snapshot. Equality does not trigger it, and neither elapsed time nor more
-deltas trigger it without a join.
+A publisher can opt a track into refresh, so a reader can ask it for a fresh
+group: a new keyframe or complete snapshot. Two settings decide when.
 
-The request does not hold back cached groups: a joiner may receive the old
-group before the publisher answers. The ratio is a refresh trigger, not a cap
-on the bytes that joiner downloads.
+A **byte ratio** judges a new subscriber: it asks only when the current group's
+bytes after its first frame exceed that ratio times the first frame's size. A
+ratio of 2, for example, permits two snapshots' worth of deltas before a join
+asks for a new snapshot. Equality does not trigger it.
 
-The publisher drives the track's `Demand::wanted`: when it passes the largest
-group written, open a new group with a keyframe or complete snapshot. A Rust
-moq-json snapshot producer answers this by driving its `refresh()` alongside
-updates. It restates the current value in a new group at its newest source
-timestamp. Existing readers continue into that group too.
+An **interval** caps how often anyone asks. A request takes effect only once the
+newest group arrived at least that long ago; one made sooner waits until then,
+and every request made meanwhile is answered by the same group. A track with an
+interval and no ratio, such as a one-frame thumbnail, gets a fresh group when a
+reader arrives and never more often than the interval, however many readers
+ask behind however many relays.
 
-Each relay judges a join from its own cache and forwards fresh-group demand
-upstream when needed, all the way to the publisher. Preserving the ratio across
+A reader can also ask outright with `refresh()` on its track subscriber
+(`Subscriber::refresh` in Rust, `subscriber.refresh()` in TypeScript). On a
+track with an interval only the interval judges it; on a track with only a
+ratio, the ratio does, like a join. The answer is the first group the reader
+receives that starts after the newest it held, which may be a group already on
+its way, so a reader that must see a frame made after its request marks the
+frame itself.
+
+A request does not hold back cached groups: the reader receives the old group
+before the publisher answers. The publisher waits on the track's
+`Demand::refresh` (`demand.refresh` in TypeScript) and opens a new group each
+time it fires. A Rust moq-json snapshot producer answers it by driving its
+`refresh()` alongside updates. It restates the current value in a new group at
+its newest source timestamp. Existing readers continue into that group too.
+
+Each relay judges a request against its own cache and clock and forwards it
+upstream when needed, all the way to the publisher. Carrying refresh across
 sessions requires opt-in moq-lite 07 (`moq-lite-07-wip`) at every hop. Older
 moq-lite versions do not carry refresh; moq-transport's dynamic-groups feature
 carries it with a ratio of zero, so any join after a delta asks for a new group.
-Tracks without a ratio, JSON append streams, and importers that cannot force
+Tracks that opt out, JSON append streams, and importers that cannot force
 keyframes do not use this mechanism.
 
 ## Datagrams

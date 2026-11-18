@@ -139,7 +139,8 @@ func (r *TrackRequest) Reject(errorCode uint16) error {
 	return r.inner.Reject(errorCode)
 }
 
-// TrackDemand watches the group a published track's subscribers want next.
+// TrackDemand watches whether a published track has subscribers, and when they
+// ask for a new group.
 //
 // It is weak: holding it neither keeps the track open nor locks the producer, so
 // a wait can park here while the producer keeps publishing. Waits return
@@ -153,17 +154,26 @@ func (d *TrackDemand) Name() string {
 	return d.inner.Name()
 }
 
-// Wanted is the group subscribers want next, or nil while nobody subscribes. A
-// value past the newest group asks for a new group now, typically a keyframe.
-func (d *TrackDemand) Wanted() *uint64 {
+// Wanted reports whether anyone consumes the track: a subscription, fetch, or a
+// group one of them is still reading.
+func (d *TrackDemand) Wanted() bool {
 	return d.inner.Wanted()
 }
 
 // WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
 // End a track nobody wants with TrackProducer.AbortUnwanted, which keeps it for a
 // reader that joined since.
-func (d *TrackDemand) WantedChanged(ctx context.Context) (*uint64, error) {
+func (d *TrackDemand) WantedChanged(ctx context.Context) (bool, error) {
 	return d.inner.WantedChanged(ctx)
+}
+
+// Refresh blocks until a subscriber asks for a new group: the first group of a
+// track with none, or a join judged by the track's TrackRefresh once its interval
+// passed. It returns at once while the request is pending, and the next group
+// written answers it, so loop: wait here, then write a group that starts with a
+// keyframe or a snapshot.
+func (d *TrackDemand) Refresh(ctx context.Context) error {
+	return d.inner.Refresh(ctx)
 }
 
 // TrackProducer writes arbitrary byte payloads with no codec required.
@@ -233,7 +243,7 @@ func (t *TrackProducer) Abort(errorCode uint16) error {
 }
 
 // AbortUnwanted closes the track with an application error code, but only while
-// nobody wants it: call it once TrackDemand.WantedChanged returns nil. It returns
+// nobody wants it: call it once TrackDemand.WantedChanged returns false. It returns
 // true once the track is closed, and false, leaving the track open, when a reader
 // joined since; keep serving and wait for the next nil on a fresh Demand():
 // one that already returned nil misses a reader that came and went, and waits on.

@@ -203,7 +203,8 @@ function tracksEvent(event: broadcast.TracksEvent, version: Version): TracksMess
 function trackInfoMessage(info: track.Info, version: Version): TrackInfoMessage {
 	return new TrackInfoMessage({
 		priority: info.priority,
-		refresh: info.refresh ?? undefined,
+		refresh: info.refresh.ratio ?? undefined,
+		refreshInterval: info.refresh.interval?.asMillis(),
 		// Publisher Max Age: the publisher's staleness bound, advertised so relays re-serve
 		// with the same bound.
 		maxAge: info.maxAge?.asMillis(),
@@ -1095,11 +1096,11 @@ export class Publisher {
 						Object.assign(update, spanOf(this.version, ranges));
 						positions = new Map(live.map(({ id }, index) => [id, index]));
 					}
-					// Every update restates the wanted group. Past our largest it is a join, which
+					// Every update restates the wanted group. Past our largest it is a refresh, which
 					// repeats the pending ask; at or below it the group already exists.
 					const largest = hooks.peekLargest(track).largest?.group;
 					if (update.wantedGroup !== undefined && (largest === undefined || update.wantedGroup > largest))
-						hooks.joinSubscriber(track);
+						track.refresh();
 					track.update({
 						priority: update.priority,
 						order: update.order,

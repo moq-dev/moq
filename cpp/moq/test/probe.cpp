@@ -173,6 +173,25 @@ void timestamp_roundtrip()
 	ok(broadcast->close(), "close timestamp broadcast");
 }
 
+// A refresh reads back as published, and the first subscriber of a track with no group asks
+// for one.
+void track_refresh()
+{
+	auto broadcast = ok(moq::BroadcastProducer::init(), "refresh broadcast");
+	moq::TrackInfo info;
+	info.max_age = std::chrono::nanoseconds::zero();
+	info.refresh.ratio = 0;
+	info.refresh.interval = std::chrono::milliseconds(500);
+	auto track = ok(broadcast->publish_track("refresh", info), "publish refreshed track");
+	auto demand = ok(track->demand(), "refresh demand");
+	auto consumer = ok(track->consume(std::nullopt), "consume refreshed track");
+	auto got = consumer->info();
+	CHECK(got.refresh.ratio == uint32_t(0));
+	CHECK(got.refresh.interval == std::chrono::nanoseconds(std::chrono::milliseconds(500)));
+	ok(demand->refresh().get(), "refresh");
+	ok(broadcast->close(), "close refresh broadcast");
+}
+
 // Only the defaults carry moq-net's zero delay; a bare record leaves both bounds unset.
 void subscription_defaults()
 {
@@ -326,6 +345,7 @@ void minted_instance()
 int main()
 {
 	timestamp_roundtrip();
+	track_refresh();
 	datagram_tracks();
 	subscription_defaults();
 	audio_roundtrip();

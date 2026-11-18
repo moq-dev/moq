@@ -15,7 +15,6 @@ import {
 	Signal,
 } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
-import { watched } from "../internal";
 import { Estimator, type Order } from "../order";
 import { Slot } from "../publication";
 import { hardwareReliable } from "../support/video";
@@ -378,7 +377,7 @@ export class Encoder {
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
-			const demanded = watched(track, effect);
+			const demanded = track.demand().wanted;
 			effect.run((effect) => {
 				if (!effect.get(demanded)) return;
 
@@ -424,8 +423,12 @@ export class Encoder {
 		// the encoder. A join over the refresh ratio asks for one past the largest, which the next frame
 		// opens; any other join is served by a group already written, encoded with or without demand.
 		let answered: bigint | undefined;
+		// The group past the largest while a subscriber asks for one, named so that requests made while
+		// the keyframe is still in the encoder ask for the same group and coalesce into it.
+		const asked = (): bigint | undefined =>
+			demand.refresh.peek() ? (track.largest()?.group ?? -1n) + 1n : undefined;
 		const answer = () => {
-			const wanted = demand.wanted.peek();
+			const wanted = asked();
 			if (wanted !== undefined && (answered === undefined || wanted > answered)) answered = wanted;
 		};
 		const covered = () => {
@@ -551,7 +554,7 @@ export class Encoder {
 							// caller asked for one, or a join wants a group past the largest. No spacing: the
 							// refresh ratio already rate-limits joins by the bytes a group holds.
 							const since = lastKeyframe === undefined ? undefined : frame.timestamp - lastKeyframe;
-							const wanted = demand.wanted.peek();
+							const wanted = asked();
 							const keyFrame =
 								resized ||
 								since === undefined ||

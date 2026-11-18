@@ -63,11 +63,7 @@ impl<T: serde::Serialize> ReportTrack<T> {
 
 	/// Publish `value`, unless nobody subscribes.
 	fn update(&mut self, value: &T) {
-		if self
-			.track
-			.as_ref()
-			.is_some_and(|track| track.demand().wanted())
-		{
+		if self.track.as_ref().is_some_and(|track| track.demand().wanted()) {
 			self.write(value);
 		}
 	}
@@ -663,7 +659,10 @@ mod tests {
 		}
 
 		let mut late = track.consume();
-		assert!(track.demand().poll_refresh(&kio::Waiter::noop()).is_ready(), "the join asks for a fresh group");
+		assert!(
+			track.demand().poll_refresh(&kio::Waiter::noop()).is_ready(),
+			"the join asks for a fresh group"
+		);
 		report.write(&serde_json::json!({ "n": 100 }));
 		assert_eq!(late.largest().await.map(|position| position.group), Some(1));
 	}

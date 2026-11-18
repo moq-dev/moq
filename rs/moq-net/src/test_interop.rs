@@ -548,7 +548,12 @@ fn lite_tracks_interop() {
 					assert_eq!(info.timescale, Some(crate::Timescale::MILLI));
 					assert_eq!(info.max_age, Some(std::time::Duration::from_secs(3)));
 					assert_eq!(info.priority, 9);
-					assert_eq!(info.refresh, crate::track::Refresh::default().with_ratio(4));
+					assert_eq!(
+						info.refresh,
+						crate::track::Refresh::default()
+							.with_ratio(4)
+							.with_interval(std::time::Duration::from_millis(1500))
+					);
 				}
 				format!("+{name}")
 			}
@@ -569,7 +574,9 @@ fn lite_tracks_interop() {
 	assert_eq!(events, ["+a", "+b", "+d:a", "synced", "-a", "~d:a"]);
 
 	let info = lite::TrackInfo {
-		refresh: crate::track::Refresh::default().with_ratio(4),
+		refresh: crate::track::Refresh::default()
+			.with_ratio(4)
+			.with_interval(std::time::Duration::from_millis(1500)),
 		priority: 3,
 		max_age: Some(std::time::Duration::from_secs(2)),
 		timescale: Some(crate::Timescale::MICRO),

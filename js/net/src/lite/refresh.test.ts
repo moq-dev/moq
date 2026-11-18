@@ -18,7 +18,8 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 	const b = new Producer();
 	const broadcastRoute = source.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("data", { refresh: 1 });
+	const producer = broadcast.createTrack("data", { refresh: { ratio: 1 } });
+	const asked = hooks.demandAsked(producer.demand());
 	const pair = createMockTransportPair(alpn);
 	const url = new URL("https://localhost/refresh");
 	const updates: bigint[] = [];
@@ -43,7 +44,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		while ((await announcements.next())?.kind !== "start") {}
 		const request = b.request(Path.from("room"));
 		const remote = (await request.broadcast()).track("data");
-		expect((await remote.info()).refresh).toBe(alpn === ALPN_07_WIP ? 1 : null);
+		expect((await remote.info()).refresh).toEqual({ ratio: alpn === ALPN_07_WIP ? 1 : null, interval: null });
 		const baseline = remote.subscribe();
 		const group = hooks.appendNext(producer);
 		group.writeFrame({ payload: new Uint8Array(3), timestamp: Timestamp.unscaled(group.start) });
@@ -54,16 +55,16 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		const joins = [remote.subscribe()];
 		await clock.advance(Duration.nanos(0));
-		expect(producer.demand().wanted.peek()).toBe(0n);
+		expect(asked.peek()).toBeUndefined();
 		updates.length = 0;
 		group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.start) });
 		expect((await received.readFrame())?.payload.length).toBe(1);
 		for (let i = 0; i < 8; i++) joins.push(remote.subscribe());
 		await clock.advance(Duration.nanos(0));
 		if (alpn === ALPN_07_WIP) {
-			while (producer.demand().wanted.peek() !== 1n) await producer.demand().wanted.changed();
+			while (asked.peek() !== 1n) await asked.changed();
 		}
-		expect(producer.demand().wanted.peek()).toBe(alpn === ALPN_07_WIP ? 1n : 0n);
+		expect(asked.peek()).toBe(alpn === ALPN_07_WIP ? 1n : undefined);
 		// Concurrent local joins coalesce into one upstream update.
 		expect(updates).toEqual(alpn === ALPN_07_WIP ? [1n] : []);
 		// A parameter change restates the wanted group rather than clearing it.

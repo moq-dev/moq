@@ -50,7 +50,7 @@ fn timed_info() -> MoqTrackInfo {
 	MoqTrackInfo {
 		priority: 0,
 		max_age: Some(Duration::ZERO),
-		refresh: None,
+		refresh: Default::default(),
 		timescale: Some(1_000_000),
 		compression: None,
 	}
@@ -1202,7 +1202,10 @@ async fn raw_track_info_reports_publisher_properties() {
 	let info = MoqTrackInfo {
 		priority: 7,
 		max_age: Some(Duration::from_millis(2_500)),
-		refresh: Some(2),
+		refresh: MoqTrackRefresh {
+			ratio: Some(2),
+			interval: Some(Duration::from_millis(500)),
+		},
 		timescale: Some(90_000),
 		compression: Some(MoqCompression::deflate()),
 	};
@@ -1212,7 +1215,13 @@ async fn raw_track_info_reports_publisher_properties() {
 	let got = consumer.info();
 	assert_eq!(got.priority, 7);
 	assert_eq!(got.max_age, Some(Duration::from_millis(2_500)));
-	assert_eq!(got.refresh, Some(2));
+	assert_eq!(
+		got.refresh,
+		MoqTrackRefresh {
+			ratio: Some(2),
+			interval: Some(Duration::from_millis(500)),
+		}
+	);
 	assert_eq!(got.timescale, Some(90_000));
 	assert_eq!(got.compression.unwrap().name(), "deflate");
 }
@@ -1286,7 +1295,7 @@ async fn data_writes_preserve_the_callers_timestamp() {
 				Some(MoqTrackInfo {
 					priority: 0,
 					max_age: Some(Duration::ZERO),
-					refresh: None,
+					refresh: Default::default(),
 					timescale: timestamp.scale,
 					compression: None,
 				}),
@@ -1390,7 +1399,7 @@ async fn json_snapshot_roundtrip() {
 		priority: 0,
 		max_age: Some(Duration::ZERO),
 		timescale: Some(1_000_000),
-		refresh: None,
+		refresh: Default::default(),
 		compression: Some(MoqCompression::deflate()),
 	};
 	let track = broadcast.publish_track("meta".into(), Some(info)).unwrap();
@@ -1462,7 +1471,10 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: Some(Duration::ZERO),
-				refresh: Some(1),
+				refresh: MoqTrackRefresh {
+					ratio: Some(1),
+					interval: None,
+				},
 				timescale: Some(1_000_000),
 				compression: None,
 			}),
@@ -1693,7 +1705,10 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 			Some(MoqTrackInfo {
 				priority: 127,
 				max_age: Some(Duration::ZERO),
-				refresh: Some(1),
+				refresh: MoqTrackRefresh {
+					ratio: Some(1),
+					interval: None,
+				},
 				timescale: Some(1_000_000),
 				compression: None,
 			}),
@@ -1826,6 +1841,63 @@ async fn demand_handle_outlives_finish() {
 		.expect("timed out waiting for the finished media track");
 	assert!(matches!(track_err, Err(MoqError::Closed)), "{track_err:?}");
 	assert!(matches!(media_err, Err(MoqError::Closed)), "{media_err:?}");
+}
+
+/// A demand's refresh resolves while a subscriber asks for a new group: the first group of a
+/// track with none, then a join over the ratio. The next group answers each, and a finished
+/// track ends the wait.
+#[tokio::test]
+async fn demand_refresh_asks_for_a_group() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let info = MoqTrackInfo {
+		refresh: MoqTrackRefresh {
+			ratio: Some(0),
+			interval: None,
+		},
+		..timed_info()
+	};
+	let track = broadcast.publish_track("status".into(), Some(info)).unwrap();
+	let demand = track.demand().unwrap();
+	let noop = || std::task::Context::from_waker(std::task::Waker::noop());
+	assert!(
+		Box::pin(demand.refresh()).as_mut().poll(&mut noop()).is_pending(),
+		"nobody asks"
+	);
+
+	let first = track.consume(None).unwrap();
+	kio::clock::timeout(TIMEOUT, demand.refresh())
+		.await
+		.expect("timed out waiting for the first group to be asked for")
+		.unwrap();
+	let group = track.append_group(us(0)).unwrap();
+	for (at, payload) in [(0, &b"key"[..]), (1, b"delta")] {
+		group
+			.write_frame(MoqFrame {
+				payload: payload.to_vec(),
+				timestamp: us(at),
+			})
+			.unwrap();
+	}
+	assert!(
+		Box::pin(demand.refresh()).as_mut().poll(&mut noop()).is_pending(),
+		"the group answered it"
+	);
+
+	let join = track.consume(None).unwrap();
+	kio::clock::timeout(TIMEOUT, demand.refresh())
+		.await
+		.expect("timed out waiting for the join to ask for a group")
+		.unwrap();
+
+	drop((first, join));
+	group.finish().unwrap();
+	track.finish().unwrap();
+	drop(track);
+	broadcast.close().unwrap();
+	let err = kio::clock::timeout(TIMEOUT, demand.refresh())
+		.await
+		.expect("timed out waiting for the finished track");
+	assert!(matches!(err, Err(MoqError::Closed)), "{err:?}");
 }
 
 #[tokio::test]
@@ -2994,7 +3066,7 @@ async fn fill_goes_unwanted_when_the_fetcher_leaves() {
 		.expect("timed out waiting for the abandoned fetch to become unwanted")
 		.unwrap();
 	assert_eq!(wanted, None);
-	assert!(!fill.wanted());
+	assert_eq!(fill.wanted(), None);
 	kio::clock::timeout(TIMEOUT, fill.unwanted(5))
 		.await
 		.expect("an unwanted fill wants none of its groups")
@@ -3050,7 +3122,7 @@ async fn dynamic_track_rejects_fetch_miss() {
 		.expect("timed out waiting for fill")
 		.unwrap();
 	fill.drop_groups(5, 6);
-	assert!(!fill.wanted(), "the dropped group is answered");
+	assert_eq!(fill.wanted(), None, "the dropped group is answered");
 
 	let result = kio::clock::timeout(TIMEOUT, fetch)
 		.await
@@ -9933,7 +10005,7 @@ async fn demand_cancelled_before_free_leaves_the_change() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
 	let demand = track.demand().unwrap();
-	assert_eq!(demand.wanted_changed().await.unwrap(), None);
+	assert!(!demand.wanted_changed().await.unwrap());
 	let mut abandoned = Box::pin(demand.wanted_changed());
 	assert!(
 		abandoned
@@ -9947,7 +10019,7 @@ async fn demand_cancelled_before_free_leaves_the_change() {
 		.await
 		.expect("the abandoned wait stole the change")
 		.unwrap();
-	assert!(wanted.is_some());
+	assert!(wanted);
 	drop(abandoned);
 	drop(consumer);
 }
@@ -10021,7 +10093,7 @@ async fn audio_subscribe_configuration_boundary() {
 			Some(MoqTrackInfo {
 				priority: 0,
 				max_age: Some(Duration::from_millis(10)),
-				refresh: None,
+				refresh: Default::default(),
 				timescale: None,
 				compression: None,
 			}),

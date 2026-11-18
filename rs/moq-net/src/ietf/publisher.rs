@@ -10693,7 +10693,10 @@ mod serve_tests {
 	async fn a_subscribe_joins_under_the_refresh_ratio() {
 		for version in [Version::Draft22] {
 			for refresh in [Some(1), None] {
-				let h = serve_track(version, crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(refresh)));
+				let h = serve_track(
+					version,
+					crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(refresh)),
+				);
 				let _group = refresh_group(&h);
 				let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 					.await
@@ -10721,7 +10724,10 @@ mod serve_tests {
 	#[kio::test]
 	async fn an_absolute_subscribe_is_no_join() {
 		let version = Version::Draft22;
-		let h = serve_track(version, crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)));
+		let h = serve_track(
+			version,
+			crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)),
+		);
 		let _group = refresh_group(&h);
 		let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 			.await
@@ -10744,7 +10750,10 @@ mod serve_tests {
 	async fn an_absolute_subscribe_with_a_new_group_request_joins() {
 		let version = Version::Draft22;
 		for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
-			let h = serve_track(version, crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)));
+			let h = serve_track(
+				version,
+				crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)),
+			);
 			let _group = refresh_group(&h);
 			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
 				.await
@@ -10771,7 +10780,10 @@ mod serve_tests {
 	async fn a_new_group_update_joins_a_refreshing_track() {
 		for version in [Version::Draft22] {
 			for (value, wanted) in [(0, 5), (5, 5), (4, 0)] {
-				let h = serve_track(version, crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)));
+				let h = serve_track(
+					version,
+					crate::track::Info::timed().with_refresh(crate::track::Refresh::default().with_ratio(1)),
+				);
 				let session = ScriptedSession::new(new_group_update(version, 10, value));
 				let mut stream = Stream::open(&crate::driver::Transport::new(session.clone()), version)
 					.await

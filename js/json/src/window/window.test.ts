@@ -237,7 +237,7 @@ test("a joiner over the ratio gets a fresh header", async () => {
 		[2, [3]],
 		[3, [4, 1]],
 	] as const) {
-		const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
+		const track = new Track.Producer("test").accept({ refresh: { ratio: 1 }, maxAge: null });
 		const producer = new Producer<Rec>({ track });
 		producer.push({ n: 1000 }, key());
 		for (let n = 0; n < pushes; n++) producer.push({ n }, key());
@@ -252,7 +252,11 @@ test("a joiner over the ratio gets a fresh header", async () => {
 });
 
 test("a window refresh reuses the newest timestamp", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		refresh: { ratio: 0 },
+		maxAge: null,
+	});
 	const producer = new Producer<Rec>({ track });
 	producer.push({ n: 0 }, Time.Timestamp.fromMillis(10));
 	producer.push({ n: 1 }, Time.Timestamp.fromMillis(20));
@@ -279,7 +283,11 @@ test("a window refresh reuses the newest timestamp", async () => {
 // edit, then restates the window there. (Mirrors the Rust
 // `a_refresh_after_older_edits_waits_for_a_later_one`.)
 test("a window refresh after an older edit waits for a later one", async () => {
-	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
+	const track = new Track.Producer("test").accept({
+		timescale: Time.Timescale.MILLI,
+		refresh: { ratio: 0 },
+		maxAge: null,
+	});
 	const producer = new Producer<Rec>({ track });
 	producer.push({ n: 0 }, Time.Timestamp.fromMillis(30));
 	// Ops may carry timestamps older than their group's first frame.

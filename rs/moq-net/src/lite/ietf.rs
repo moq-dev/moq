@@ -922,7 +922,12 @@ mod hop_tests {
 			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
 				(info.max_age, info.timescale, info.priority, info.refresh),
-				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, crate::track::Refresh::default().with_ratio(0)),
+				(
+					Some(Duration::from_secs(7)),
+					Some(Timescale::MILLI),
+					9,
+					crate::track::Refresh::default().with_ratio(0)
+				),
 				"{offer:?}"
 			);
 			match negotiated {

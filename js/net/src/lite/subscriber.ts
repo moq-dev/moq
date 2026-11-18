@@ -1490,11 +1490,7 @@ export class Subscriber {
 			let reason_: unknown;
 			for (;;) {
 				reason_ = await race([done, unwanted(demand).then(() => idle)]);
-				if (
-					reason_ === idle &&
-					hooks.demandReleased(demand).peek() === undefined &&
-					demand.wanted.peek() !== undefined
-				)
+				if (reason_ === idle && hooks.demandReleased(demand).peek() === undefined && demand.wanted.peek())
 					continue;
 				break;
 			}
@@ -1794,7 +1790,10 @@ export class Subscriber {
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? null : Duration.millis(info.maxAge),
 			priority: info.priority,
-			refresh: info.refresh ?? null,
+			refresh: {
+				ratio: info.refresh ?? null,
+				interval: info.refreshInterval === undefined ? null : Duration.millis(info.refreshInterval),
+			},
 			compression: info.compress ? "deflate" : "none",
 			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
 			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
@@ -2701,17 +2700,17 @@ export class Subscriber {
 		};
 
 		// The wanted group is subscription state: an update announces each new one past our
-		// largest, and every later update restates it. Joins asking for the same group
+		// largest, and every later update restates it. Requests asking for the same group
 		// coalesce into that one update.
 		let sentWanted: bigint | undefined;
 		// What the fills asked with the last update, and the priority it carried.
 		let sentFills: Run[] = [];
 		let sentPriority = msg.priority;
-		const demand = track.demand();
+		const asked = hooks.demandAsked(track.demand());
 		const edge = hooks.producerLargest(track);
 		for (;;) {
 			const largest = edge.peek()?.group;
-			const wanted = demand.wanted.peek();
+			const wanted = asked.peek();
 			const refresh =
 				hasRefresh(this.version) &&
 				largest !== undefined &&
@@ -2735,7 +2734,7 @@ export class Subscriber {
 			) {
 				// Each wake releases the quiet signals too, including when termination wins.
 				const next = await race([
-					Signal.race(hooks.requested(track), demand.wanted, edge, entry.fillsChanged),
+					Signal.race(hooks.requested(track), asked, edge, entry.fillsChanged),
 					stopped,
 				]);
 				if (next === null) return;
