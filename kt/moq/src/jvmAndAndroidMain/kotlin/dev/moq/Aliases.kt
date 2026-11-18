@@ -221,9 +221,8 @@ typealias Subscription = uniffi.moq.MoqSubscription
  * decoder starts it as zero and waits a missing group for `max`, except an audio decoder, which
  * floors it at zero and waits only its playout estimate, which can be larger; a catalog warmup or
  * an audio decoder's playout delay still states a `min` to the publisher), and `max`, null for no
- * subscriber limit,
- * is how far a non-latest group may fall behind before it is skipped. A `min` past `max` starts at
- * `max`.
+ * subscriber limit, is how far a non-latest group may fall behind before it is skipped. A `min`
+ * past `max` starts at `max`.
  */
 typealias Delay = uniffi.moq.MoqDelay
 
