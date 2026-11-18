@@ -112,7 +112,7 @@ pub(crate) struct Hop {
 }
 
 /// A route's rank, lower first: draining, then the lowest priority, then the cost.
-type Rank = (bool, Reverse<i8>, Metric);
+pub(crate) type Rank = (bool, Reverse<i8>, Metric);
 
 /// How claims of one precedence order, as [`claim_order`] keys them.
 pub(crate) type ClaimOrder = (Rank, bool, usize, NodeId);
@@ -133,7 +133,7 @@ pub(crate) struct Offer {
 }
 
 impl Offer {
-	fn rank(&self) -> Rank {
+	pub(crate) fn rank(&self) -> Rank {
 		(self.draining, Reverse(self.priority), self.cost)
 	}
 
@@ -265,7 +265,7 @@ fn pairs(path: &[Hop]) -> impl Iterator<Item = ((Id, Id), (u64, u64))> + '_ {
 
 /// The pair of relays `hop`'s session joins, as the floor files it, and where the session
 /// stands in that pair's order.
-fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), (u64, u64)) {
+pub(crate) fn floor_of(hop: Hop, far: NodeId) -> ((Id, Id), (u64, u64)) {
 	((hop.node.relay, far.relay), (hop.node.start, hop.session))
 }
 
@@ -306,7 +306,7 @@ impl<A: Item> Claim<A> {
 		(self.draining, Reverse(self.priority), self.cost)
 	}
 
-	fn lowered(&self, by: u64) -> Self {
+	pub(crate) fn lowered(&self, by: u64) -> Self {
 		Self {
 			item: self.item.lowered(by),
 			..self.clone()
@@ -407,7 +407,7 @@ pub(crate) fn claim_order<A: Item>(claim: &Claim<A>, route: Option<&Offer>, orig
 /// Which claims of one Instance at one path may serve it, lower first: the one closest to
 /// its own path, then the newest epoch. A route's rank chooses only among claims that tie
 /// here, so an older run never stands in for a newer one that lost its route.
-fn precedence<A: Item>(item: &A) -> (u64, Reverse<u64>) {
+pub(crate) fn precedence<A: Item>(item: &A) -> (u64, Reverse<u64>) {
 	(item.above(), Reverse(item.epoch()))
 }
 
