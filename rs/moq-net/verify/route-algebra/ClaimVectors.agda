@@ -812,18 +812,8 @@ _ : extend (step true 9 0 false false false false 0 nothing (0 , just 0) (8 , 1)
 _ = refl
 
 _ : extend (step true 4 0 false true true true 1 nothing (2 , just 1) (8 , 1) 1) (8 , 5) (valid (route (1 , just 1) false 122 0 false ((5 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 1)))
-  ⊕ extend (step true 4 0 false true true true 1 nothing (2 , just 1) (8 , 1) 2) (8 , 2) (valid (route (1 , just 1) false 122 0 false ((2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 1)))
-  ≡ valid (route (2 , just 1) false 122 4 true ((8 , 5) ∷ (5 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 1))
-_ = refl
-
-_ : extend (step true 11 128 false false false false 0 nothing (0 , just 2) (7 , 2) 0) (7 , 9) (valid (route (0 , just 2) false 128 1 true ((9 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 1)))
-  ⊕ extend (step true 11 128 false false false false 0 nothing (0 , just 2) (7 , 2) 0) (7 , 3) (valid (route (0 , just 2) false 128 1 true ((3 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 1)))
-  ≡ valid (route (0 , just 2) false 128 12 true ((7 , 3) ∷ (3 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 0))
-_ = refl
-
-_ : extend (step true 5 127 false false false false 0 nothing (0 , just 2) (3 , 1) 0) (3 , 2) (valid (route (0 , just 2) true 128 4 true ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 1)))
-  ⊕ extend (step true 5 127 false false false false 0 nothing (0 , just 2) (3 , 1) 0) (3 , 6) (valid (route (0 , just 2) true 128 4 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 1)))
-  ≡ valid (route (0 , just 2) true 128 9 true ((3 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 0))
+  ⊕ extend (step true 1 128 false true false true 0 nothing (2 , just 1) (8 , 1) 6) (8 , 7) (valid (route (1 , just 0) false 255 16 false ((7 , 2) ∷ (2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0)))
+  ≡ valid (route (1 , just 0) false 255 17 true ((8 , 7) ∷ (7 , 2) ∷ (2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 6))
 _ = refl
 
 _ : extend (step true 2 127 false true false true 0 nothing (2 , just 1) (8 , 1) 2) (8 , 2) (valid (route (1 , just 1) false 127 12 false ((2 , 4) ∷ (4 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 0)))
@@ -832,68 +822,68 @@ _ : extend (step true 2 127 false true false true 0 nothing (2 , just 1) (8 , 1)
 _ = refl
 
 _ : extend (step true 4 0 false false false true 0 nothing (0 , just 1) (9 , 2) 1) (9 , 3) (valid (route (0 , just 1) true 255 17 false ((3 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0)))
-  ⊕ extend (step true 4 0 false false false true 0 nothing (0 , just 1) (9 , 2) 2) (9 , 6) (valid (route (0 , just 1) true 255 17 false ((6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0)))
-  ≡ valid (route (0 , just 1) true 255 21 false ((9 , 3) ∷ (3 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 1))
+  ⊕ extend (step true 8 122 false true false false 0 nothing (0 , just 1) (9 , 2) 0) (9 , 2) (valid (route (0 , just 2) false 122 3 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 5)))
+  ≡ valid (route (0 , just 2) false 122 11 true ((9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 1 128 false false false true 1 nothing (2 , just 2) (6 , 2) 8) (6 , 3) (valid (route (1 , just 2) false 0 6 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 6)))
-  ⊕ extend (step true 1 128 false false false true 1 nothing (2 , just 2) (6 , 2) 9) (6 , 4) (valid (route (1 , just 2) false 0 6 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 6)))
-  ≡ valid (route (2 , just 2) false 128 7 false ((6 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 8))
+_ : extend (step true 4 0 false false false true 0 nothing (0 , just 0) (5 , 2) 4) (5 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ⊕ extend (step true 6 255 false false false false 0 nothing (0 , just 0) (5 , 2) 0) (5 , 8) (valid (route (0 , just 2) false 0 3 true ((8 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 4)))
+  ≡ valid (route (0 , just 2) false 255 9 true ((5 , 8) ∷ (8 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 0))
 _ = refl
 
-_ : extend (step true 3 122 false false false false 0 nothing (1 , just 0) (6 , 2) 0) (6 , 7) (valid (route (1 , just 0) false 122 2 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 9)))
-  ⊕ extend (step true 1 127 true true false true 1 nothing (1 , just 0) (6 , 2) 4) (6 , 7) (valid (route (1 , just 2) false 0 0 false ((7 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 5)))
-  ≡ valid (route (1 , just 0) false 122 5 false ((6 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0))
+_ : extend (step true 11 0 false true false false 0 nothing (1 , just 2) (9 , 2) 0) (9 , 8) (valid (route (1 , just 2) false 127 4 false ((8 , 4) ∷ (4 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 7)))
+  ⊕ extend (step true 4 127 false true false false 0 nothing (1 , just 2) (9 , 2) 0) (9 , 6) (valid (route (1 , just 2) false 122 7 true ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 8)))
+  ≡ valid (route (1 , just 2) false 127 11 true ((9 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 0))
 _ = refl
 
-_ : extend (step true 4 128 false false false true 0 nothing (1 , just 2) (8 , 2) 6) (8 , 3) (valid (route (0 , just 2) false 0 0 false ((3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 3)))
-  ⊕ extend (step true 3 0 true false false true 0 nothing (1 , just 2) (8 , 2) 5) (8 , 5) (valid (route (1 , just 2) true 127 8 false ((5 , 4) ∷ (4 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 2)))
-  ≡ valid (route (0 , just 2) false 128 4 false ((8 , 3) ∷ (3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 6))
+_ : extend (step true 4 122 false false false false 0 nothing (0 , just 2) (4 , 2) 0) (4 , 2) (valid (route (0 , just 2) true 0 10 false ((2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 5)))
+  ⊕ extend (step true 4 122 false true false false 0 nothing (0 , just 2) (4 , 2) 0) (4 , 6) (valid (route (0 , just 2) true 0 10 false ((6 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 5)))
+  ≡ valid (route (0 , just 2) true 122 14 false ((4 , 2) ∷ (2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 3 128 false true false true 0 nothing (0 , just 1) (6 , 1) 5) (6 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 7 127 false false false false 0 nothing (0 , just 1) (6 , 1) 0) (6 , 3) (valid (route (1 , just 2) false 122 0 true ((3 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 1)))
-  ≡ valid (route (0 , just 1) false 128 3 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 5))
+_ : extend (step true 3 128 true true true true 1 nothing (0 , just 1) (7 , 2) 3) (7 , 3) (valid (route (0 , just 2) false 122 12 true ((3 , 2) ∷ (2 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0)))
+  ⊕ extend (step true 3 128 true true true true 1 nothing (0 , just 1) (7 , 2) 4) (7 , 6) (valid (route (0 , just 2) false 122 12 true ((6 , 2) ∷ (2 , 8) ∷ (8 , 172) ∷ (172 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0)))
+  ≡ invalid
 _ = refl
 
-_ : extend (step true 1 122 false false false true 0 nothing (0 , just 1) (9 , 1) 1) (9 , 7) (valid (route (0 , just 1) true 127 10 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
-  ⊕ extend (step true 1 122 false false false true 0 nothing (0 , just 1) (9 , 1) 2) (9 , 2) (valid (route (0 , just 1) true 127 10 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 1)))
-  ≡ valid (route (0 , just 1) true 127 11 false ((9 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 1))
+_ : extend (step true 4 127 false false false false 0 nothing (1 , just 1) (2 , 2) 0) (2 , 7) (valid (route (1 , just 1) false 127 0 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 8)))
+  ⊕ extend (step true 4 127 false false false false 0 nothing (1 , just 1) (2 , 2) 0) (2 , 6) (valid (route (1 , just 1) false 127 0 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 8)))
+  ≡ valid (route (1 , just 1) false 127 4 false ((2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 3 127 false false false false 0 nothing (0 , just 2) (4 , 2) 0) (4 , 3) (valid (route (0 , just 2) false 0 4 false ((3 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 3)))
-  ⊕ extend (step true 10 127 false false false false 0 nothing (0 , just 2) (4 , 2) 0) (4 , 2) (valid (route (1 , just 2) true 122 6 false ((2 , 9) ∷ (9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 7)))
-  ≡ valid (route (0 , just 2) false 127 7 false ((4 , 3) ∷ (3 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 0))
+_ : extend (step true 3 0 false false false true 0 nothing (1 , just 1) (8 , 2) 5) (8 , 4) (valid (route (1 , just 1) false 255 9 true ((4 , 6) ∷ (6 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 0)))
+  ⊕ extend (step true 3 0 false false false true 0 nothing (1 , just 1) (8 , 2) 6) (8 , 7) (valid (route (1 , just 1) false 255 9 true ((7 , 6) ∷ (6 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 0)))
+  ≡ valid (route (1 , just 1) false 255 12 true ((8 , 4) ∷ (4 , 6) ∷ (6 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 5))
 _ = refl
 
-_ : extend (step true 1 255 false false false false 0 nothing (0 , just 0) (9 , 2) 0) (9 , 3) (valid (route (0 , just 0) false 255 7 false ((3 , 5) ∷ (5 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 9)))
-  ⊕ extend (step true 1 255 false true false true 0 nothing (0 , just 0) (9 , 2) 6) (9 , 1) (valid (route (0 , just 2) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 255 1 true ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 1) , 6))
+_ : extend (step true 4 255 true false false false 0 nothing (0 , just 3) (9 , 2) 0) (9 , 7) (valid (route (0 , just 2) false 122 10 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 3)))
+  ⊕ extend (step true 3 127 false true false true 1 nothing (0 , just 3) (9 , 2) 6) (9 , 6) (valid (route (1 , just 1) false 122 0 true ((6 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 3)))
+  ≡ invalid
 _ = refl
 
-_ : extend (step true 4 122 false false false true 0 nothing (0 , just 1) (9 , 1) 2) (9 , 4) (valid (route (0 , just 1) true 128 10 false ((4 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0)))
-  ⊕ extend (step true 1 122 false false false true 0 nothing (0 , just 1) (9 , 1) 4) (9 , 1) (valid (route (0 , just 2) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 122 1 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 4))
+_ : extend (step true 5 127 false false false false 0 nothing (0 , just 2) (5 , 1) 0) (5 , 6) (valid (route (0 , just 1) false 128 8 true ((6 , 8) ∷ (8 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 7)))
+  ⊕ extend (step true 1 255 false true false false 0 nothing (0 , just 2) (5 , 1) 0) (5 , 6) (valid (route (1 , just 2) false 0 9 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 8)))
+  ≡ invalid
 _ = refl
 
-_ : extend (step true 7 127 false true false false 0 nothing (1 , just 2) (9 , 1) 0) (9 , 6) (valid (route (1 , just 2) true 255 3 true ((6 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 6)))
-  ⊕ extend (step true 12 255 false true false false 0 nothing (1 , just 2) (9 , 1) 0) (9 , 5) (valid (route (1 , just 1) false 0 2 true ((5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 6)))
-  ≡ valid (route (1 , just 2) true 255 10 true ((9 , 6) ∷ (6 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 0))
+_ : extend (step true 2 0 false false false true 1 nothing (2 , just 0) (2 , 2) 6) (2 , 6) (valid (route (0 , just 0) true 128 11 false ((6 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 1)))
+  ⊕ extend (step true 4 0 false true false false 0 nothing (2 , just 0) (2 , 2) 0) (2 , 9) (valid (route (0 , just 0) false 0 8 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 6)))
+  ≡ valid (route (0 , just 0) false 0 12 true ((2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 9 255 false false false false 0 nothing (1 , just 1) (8 , 1) 0) (8 , 9) (valid (route (1 , just 1) true 0 0 false ((9 , 4) ∷ (4 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 5)))
-  ⊕ extend (step true 9 255 false false false false 0 nothing (1 , just 1) (8 , 1) 0) (8 , 7) (valid (route (1 , just 1) true 0 0 false ((7 , 4) ∷ (4 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 5)))
-  ≡ valid (route (1 , just 1) true 255 9 false ((8 , 7) ∷ (7 , 4) ∷ (4 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0))
+_ : extend (step true 5 122 true true false false 0 nothing (0 , just 1) (7 , 1) 0) (7 , 3) (valid (route (1 , just 1) false 122 11 true ((3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 6)))
+  ⊕ extend (step true 5 122 true true false false 0 nothing (0 , just 1) (7 , 1) 0) (7 , 4) (valid (route (1 , just 1) false 122 11 true ((4 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 6)))
+  ≡ invalid
 _ = refl
 
-_ : extend (step true 1 122 false false false true 0 nothing (0 , just 0) (6 , 1) 8) (6 , 9) (valid (route (0 , just 0) false 128 4 false ((9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 5)))
-  ⊕ extend (step true 1 122 false false false true 0 nothing (0 , just 0) (6 , 1) 9) (6 , 5) (valid (route (0 , just 0) false 128 4 false ((5 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 5)))
-  ≡ valid (route (0 , just 0) false 128 5 false ((6 , 9) ∷ (9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 8))
+_ : extend (step true 1 255 true false false true 0 nothing (1 , just 0) (5 , 2) 5) (5 , 7) (valid (route (0 , just 0) false 122 4 false ((7 , 9) ∷ (9 , 60) ∷ (60 , 18) ∷ (18 , 35) ∷ (35 , 23) ∷ (23 , 25) ∷ (25 , 47) ∷ (47 , 27) ∷ (27 , 8) ∷ (8 , 34) ∷ (34 , 33) ∷ (33 , 11) ∷ (11 , 10) ∷ (10 , 26) ∷ (26 , 48) ∷ (48 , 36) ∷ (36 , 44) ∷ (44 , 56) ∷ (56 , 14) ∷ (14 , 38) ∷ (38 , 37) ∷ (37 , 22) ∷ (22 , 53) ∷ (53 , 46) ∷ (46 , 32) ∷ (32 , 24) ∷ (24 , 21) ∷ (21 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 5)))
+  ⊕ extend (step true 1 255 true false false true 0 nothing (1 , just 0) (5 , 2) 6) (5 , 2) (valid (route (0 , just 0) false 122 4 false ((2 , 9) ∷ (9 , 60) ∷ (60 , 18) ∷ (18 , 35) ∷ (35 , 23) ∷ (23 , 25) ∷ (25 , 47) ∷ (47 , 27) ∷ (27 , 8) ∷ (8 , 34) ∷ (34 , 33) ∷ (33 , 11) ∷ (11 , 10) ∷ (10 , 26) ∷ (26 , 48) ∷ (48 , 36) ∷ (36 , 44) ∷ (44 , 56) ∷ (56 , 14) ∷ (14 , 38) ∷ (38 , 37) ∷ (37 , 22) ∷ (22 , 53) ∷ (53 , 46) ∷ (46 , 32) ∷ (32 , 24) ∷ (24 , 21) ∷ (21 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 5)))
+  ≡ valid (route (0 , just 0) true 255 5 false ((5 , 7) ∷ (7 , 9) ∷ (9 , 60) ∷ (60 , 18) ∷ (18 , 35) ∷ (35 , 23) ∷ (23 , 25) ∷ (25 , 47) ∷ (47 , 27) ∷ (27 , 8) ∷ (8 , 34) ∷ (34 , 33) ∷ (33 , 11) ∷ (11 , 10) ∷ (10 , 26) ∷ (26 , 48) ∷ (48 , 36) ∷ (36 , 44) ∷ (44 , 56) ∷ (56 , 14) ∷ (14 , 38) ∷ (38 , 37) ∷ (37 , 22) ∷ (22 , 53) ∷ (53 , 46) ∷ (46 , 32) ∷ (32 , 24) ∷ (24 , 21) ∷ (21 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 5))
 _ = refl
 
-_ : extend (step true 5 0 false false false false 0 nothing (1 , just 0) (7 , 1) 0) (7 , 8) (valid (route (1 , just 0) false 255 4 false ((8 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 5)))
-  ⊕ extend (step true 5 0 false false false false 0 nothing (1 , just 0) (7 , 1) 0) (7 , 3) (valid (route (1 , just 0) false 255 4 false ((3 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 5)))
-  ≡ valid (route (1 , just 0) false 255 9 false ((7 , 3) ∷ (3 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 0))
+_ : extend (step true 1 0 true false false true 0 nothing (1 , just 1) (3 , 1) 8) (3 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ⊕ extend (step true 2 0 false false false true 1 nothing (1 , just 1) (3 , 1) 6) (3 , 2) (valid (route (0 , just 2) false 255 6 false ((2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 3)))
+  ≡ valid (route (0 , just 1) true 0 1 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 8))
 _ = refl
 
 _ : extend (step true 1 0 true true false true 0 nothing (0 , just 2) (6 , 2) 8) (6 , 3) (valid (route (0 , just 2) false 127 14 false ((3 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 0)))
@@ -902,313 +892,293 @@ _ : extend (step true 1 0 true true false true 0 nothing (0 , just 2) (6 , 2) 8)
 _ = refl
 
 _ : extend (step true 7 128 false true false false 0 nothing (2 , just 0) (5 , 2) 0) (5 , 7) (valid (route (1 , just 0) false 122 3 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 9)))
-  ⊕ extend (step true 2 128 true false false true 1 nothing (2 , just 0) (5 , 2) 8) (5 , 6) (valid (route (0 , just 0) false 255 13 false ((6 , 8) ∷ (8 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 0)))
-  ≡ valid (route (1 , just 0) false 128 10 true ((5 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0))
+  ⊕ extend (step true 7 128 false true false false 0 nothing (2 , just 0) (5 , 2) 0) (5 , 6) (valid (route (1 , just 0) false 122 3 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 9)))
+  ≡ valid (route (1 , just 0) false 128 10 true ((5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 2 127 false true false true 1 nothing (1 , just 2) (4 , 1) 4) (4 , 9) (valid (route (0 , just 2) false 127 6 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 9)))
-  ⊕ extend (step true 1 122 false false false false 0 nothing (1 , just 2) (4 , 1) 0) (4 , 9) (valid (route (0 , just 1) false 128 8 false ((9 , 33) ∷ (33 , 12) ∷ (12 , 41) ∷ (41 , 25) ∷ (25 , 46) ∷ (46 , 11) ∷ (11 , 59) ∷ (59 , 3) ∷ (3 , 44) ∷ (44 , 48) ∷ (48 , 15) ∷ (15 , 7) ∷ (7 , 23) ∷ (23 , 61) ∷ (61 , 18) ∷ (18 , 34) ∷ (34 , 27) ∷ (27 , 5) ∷ (5 , 54) ∷ (54 , 10) ∷ (10 , 16) ∷ (16 , 55) ∷ (55 , 30) ∷ (30 , 52) ∷ (52 , 22) ∷ (22 , 51) ∷ (51 , 45) ∷ (45 , 13) ∷ (13 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 4)))
-  ≡ valid (route (0 , just 1) false 128 9 false ((4 , 9) ∷ (9 , 33) ∷ (33 , 12) ∷ (12 , 41) ∷ (41 , 25) ∷ (25 , 46) ∷ (46 , 11) ∷ (11 , 59) ∷ (59 , 3) ∷ (3 , 44) ∷ (44 , 48) ∷ (48 , 15) ∷ (15 , 7) ∷ (7 , 23) ∷ (23 , 61) ∷ (61 , 18) ∷ (18 , 34) ∷ (34 , 27) ∷ (27 , 5) ∷ (5 , 54) ∷ (54 , 10) ∷ (10 , 16) ∷ (16 , 55) ∷ (55 , 30) ∷ (30 , 52) ∷ (52 , 22) ∷ (22 , 51) ∷ (51 , 45) ∷ (45 , 13) ∷ (13 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 0))
+_ : extend (step true 2 0 false true false false 0 nothing (2 , just 2) (2 , 2) 0) (2 , 9) (valid (route (1 , just 2) false 0 8 false ((9 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 3)))
+  ⊕ extend (step true 2 0 false true false false 0 nothing (2 , just 2) (2 , 2) 0) (2 , 6) (valid (route (1 , just 2) false 0 8 false ((6 , 7) ∷ (7 , 136) ∷ (136 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 3)))
+  ≡ valid (route (1 , just 2) false 0 10 true ((2 , 9) ∷ (9 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 1 128 false false false true 1 nothing (1 , just 1) (7 , 1) 3) (7 , 4) (valid (route (1 , just 1) false 128 1 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 5)))
-  ⊕ extend (step true 8 255 false false false false 0 nothing (1 , just 1) (7 , 1) 0) (7 , 4) (valid (route (1 , just 0) false 122 0 true ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 8)))
+_ : extend (step true 1 0 false false true true 1 nothing (0 , just 2) (8 , 2) 6) (8 , 5) (valid (route (0 , just 0) false 122 20 true ((5 , 2) ∷ (2 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0)))
+  ⊕ extend (step true 1 0 false false true true 1 nothing (0 , just 2) (8 , 2) 7) (8 , 9) (valid (route (0 , just 0) false 122 20 true ((9 , 2) ∷ (2 , 4) ∷ (4 , 137) ∷ (137 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 4 255 false false false true 1 nothing (1 , just 2) (7 , 1) 9) (7 , 4) (valid (route (0 , just 2) false 128 7 false ((4 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0)))
-  ⊕ extend (step true 1 128 false true true true 1 nothing (1 , just 2) (7 , 1) 5) (7 , 6) (valid (route (1 , just 2) false 255 10 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 2)))
-  ≡ valid (route (1 , just 2) false 255 11 false ((7 , 4) ∷ (4 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 9))
+_ : extend (step true 9 0 false false false false 0 nothing (1 , just 1) (4 , 2) 0) (4 , 7) (valid (route (1 , just 1) true 0 7 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 2)))
+  ⊕ extend (step true 9 0 false false false false 0 nothing (1 , just 1) (4 , 2) 0) (4 , 2) (valid (route (1 , just 1) true 0 7 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 2)))
+  ≡ valid (route (1 , just 1) true 0 16 false ((4 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 3 128 true false true true 1 nothing (0 , just 1) (5 , 1) 3) (5 , 6) (valid (route (1 , just 1) true 122 10 true ((6 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 2)))
-  ⊕ extend (step true 12 127 false false false false 0 nothing (0 , just 1) (5 , 1) 0) (5 , 3) (valid (route (0 , just 2) false 255 8 false ((3 , 8) ∷ (8 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 4)))
-  ≡ valid (route (0 , just 2) false 255 20 false ((5 , 3) ∷ (3 , 8) ∷ (8 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
+_ : extend (step true 3 255 false false true true 0 nothing (0 , just 1) (6 , 2) 2) (6 , 7) (valid (route (0 , just 1) false 0 9 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 3)))
+  ⊕ extend (step true 3 255 false false true true 0 nothing (0 , just 1) (6 , 2) 3) (6 , 3) (valid (route (0 , just 1) false 0 9 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 3)))
+  ≡ valid (route (0 , just 1) false 255 12 false ((6 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 2))
 _ = refl
 
-_ : extend (step true 2 127 false false false true 1 nothing (0 , just 0) (2 , 2) 5) (2 , 5) (valid (route (0 , just 0) false 255 13 true ((5 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 0)))
-  ⊕ extend (step true 5 255 true false false false 0 nothing (0 , just 0) (2 , 2) 0) (2 , 7) (valid (route (0 , just 1) true 255 1 false ((7 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 2)))
-  ≡ valid (route (0 , just 1) true 255 6 false ((2 , 7) ∷ (7 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0))
+_ : extend (step true 12 127 true true false false 0 nothing (1 , just 1) (7 , 2) 0) (7 , 2) (valid (route (1 , just 1) false 127 4 false ((2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 5)))
+  ⊕ extend (step true 12 127 true true false false 0 nothing (1 , just 1) (7 , 2) 0) (7 , 5) (valid (route (1 , just 1) false 127 4 false ((5 , 6) ∷ (6 , 187) ∷ (187 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 5)))
+  ≡ valid (route (1 , just 1) true 127 16 true ((7 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 8 122 false true false false 0 nothing (1 , just 0) (4 , 1) 0) (4 , 5) (valid (route (1 , just 0) false 127 8 false ((5 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 5)))
-  ⊕ extend (step true 8 122 false true false false 0 nothing (1 , just 0) (4 , 1) 0) (4 , 9) (valid (route (1 , just 0) false 127 8 false ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 5)))
-  ≡ valid (route (1 , just 0) false 127 16 true ((4 , 5) ∷ (5 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 0))
+_ : extend (step true 4 128 false false false false 0 nothing (1 , just 1) (9 , 2) 0) (9 , 6) (valid (route (1 , just 1) true 127 5 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 8)))
+  ⊕ extend (step true 4 128 false false false false 0 nothing (1 , just 1) (9 , 2) 0) (9 , 4) (valid (route (1 , just 1) true 127 5 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 8)))
+  ≡ valid (route (1 , just 1) true 128 9 false ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 4 127 false false false false 0 nothing (2 , just 0) (5 , 1) 0) (5 , 9) (valid (route (1 , just 0) false 255 0 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 9)))
-  ⊕ extend (step true 4 127 false false false false 0 nothing (2 , just 0) (5 , 1) 0) (5 , 8) (valid (route (1 , just 0) false 255 0 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 9)))
-  ≡ valid (route (1 , just 0) false 255 4 false ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 0))
+_ : extend (step true 1 122 false false false false 0 nothing (2 , just 0) (2 , 2) 0) (2 , 6) (valid (route (1 , just 0) true 128 10 false ((6 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 7)))
+  ⊕ extend (step true 7 0 false false false false 0 nothing (2 , just 0) (2 , 2) 0) (2 , 5) (valid (route (0 , just 0) false 127 6 false ((5 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 8)))
+  ≡ valid (route (0 , just 0) false 127 13 false ((2 , 5) ∷ (5 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 2 127 true false true true 1 nothing (1 , just 2) (8 , 2) 1) (8 , 4) (valid (route (0 , just 0) false 255 7 true ((4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 0)))
-  ⊕ extend (step true 2 255 false false false true 1 nothing (1 , just 2) (8 , 2) 2) (8 , 3) (valid (route (1 , just 1) true 127 3 true ((3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 1) , 3)))
+_ : extend (step true 5 122 true true false false 0 nothing (2 , just 1) (6 , 2) 0) (6 , 4) (valid (route (1 , just 1) true 255 1 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 1)))
+  ⊕ extend (step true 5 122 true true false false 0 nothing (2 , just 1) (6 , 2) 0) (6 , 9) (valid (route (1 , just 1) true 255 1 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 1)))
+  ≡ valid (route (1 , just 1) true 255 6 true ((6 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 5 0 true false false false 0 nothing (0 , just 2) (7 , 2) 0) (7 , 4) (valid (route (0 , just 2) false 122 1 true ((4 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 7)))
+  ⊕ extend (step true 5 0 true false false false 0 nothing (0 , just 2) (7 , 2) 0) (7 , 6) (valid (route (0 , just 2) false 122 1 true ((6 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 7)))
+  ≡ valid (route (0 , just 2) true 122 6 true ((7 , 4) ∷ (4 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 0))
+_ = refl
+
+_ : extend (step true 11 0 false false false false 0 nothing (0 , just 1) (9 , 2) 0) (9 , 4) (valid (route (0 , just 1) false 128 4 false ((4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 2)))
+  ⊕ extend (step true 6 255 false false false false 0 nothing (0 , just 1) (9 , 2) 0) (9 , 5) (valid (route (0 , just 2) true 122 6 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 7)))
+  ≡ valid (route (0 , just 2) true 255 12 false ((9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 6 255 false false false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 4) (valid (route (0 , just 1) false 122 10 false ((4 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 1)))
+  ⊕ extend (step true 6 255 false true false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 7) (valid (route (0 , just 1) false 122 10 false ((7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
+  ≡ valid (route (0 , just 1) false 255 16 false ((6 , 4) ∷ (4 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 1 255 false true false true 1 nothing (1 , just 0) (4 , 1) 2) (4 , 9) (valid (route (0 , just 0) false 255 5 true ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 1) , 1)))
+  ⊕ extend (step true 1 255 false false false true 1 nothing (1 , just 0) (4 , 1) 3) (4 , 6) (valid (route (0 , just 0) false 255 5 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 1)))
+  ≡ valid (route (1 , just 0) false 255 6 true ((4 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 2))
+_ = refl
+
+_ : extend (step true 8 255 false false false false 0 nothing (0 , just 0) (5 , 2) 0) (5 , 3) (valid (route (0 , just 0) false 122 3 false ((3 , 8) ∷ (8 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5)))
+  ⊕ extend (step true 8 255 false false false false 0 nothing (0 , just 0) (5 , 2) 0) (5 , 2) (valid (route (0 , just 0) false 122 3 false ((2 , 8) ∷ (8 , 7) ∷ (7 , 176) ∷ (176 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 5)))
+  ≡ valid (route (0 , just 0) false 255 11 false ((5 , 3) ∷ (3 , 8) ∷ (8 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 4 127 false false true true 1 nothing (0 , just 2) (3 , 2) 4) (3 , 8) (valid (route (1 , just 0) false 255 21 true ((8 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 0)))
+  ⊕ extend (step true 4 127 false true true true 1 nothing (0 , just 2) (3 , 2) 5) (3 , 5) (valid (route (1 , just 0) false 255 21 true ((5 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 0)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 1 122 false false true true 0 nothing (2 , just 0) (7 , 1) 4) (7 , 5) (valid (route (1 , just 0) true 127 5 false ((5 , 3) ∷ (3 , 6) ∷ (6 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0)))
-  ⊕ extend (step true 8 255 false false false false 0 nothing (2 , just 0) (7 , 1) 0) (7 , 3) (valid (route (0 , just 0) false 122 3 false ((3 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5)))
-  ≡ valid (route (0 , just 0) false 255 11 false ((7 , 3) ∷ (3 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
+_ : extend (step true 4 127 false true false true 1 nothing (1 , just 1) (3 , 2) 6) (3 , 6) (valid (route (1 , just 1) false 255 6 false ((6 , 9) ∷ (9 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 1)))
+  ⊕ extend (step true 4 127 false false false true 0 nothing (1 , just 1) (3 , 2) 7) (3 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 1) false 127 4 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 7))
 _ = refl
 
-_ : extend (step true 4 127 false true false true 1 nothing (2 , just 2) (5 , 1) 4) (5 , 6) (valid (route (1 , just 2) true 255 9 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 5)))
-  ⊕ extend (step true 4 255 false false false true 1 nothing (2 , just 2) (5 , 1) 2) (5 , 2) (valid (route (1 , just 0) false 127 11 true ((2 , 6) ∷ (6 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 4)))
-  ≡ valid (route (2 , just 2) true 255 13 true ((5 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 4))
+_ : extend (step true 3 127 false false false true 0 nothing (1 , just 1) (4 , 1) 2) (4 , 6) (valid (route (1 , just 1) false 127 1 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 5)))
+  ⊕ extend (step true 3 127 false true false true 0 nothing (1 , just 1) (4 , 1) 3) (4 , 9) (valid (route (1 , just 1) false 127 1 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 5)))
+  ≡ valid (route (1 , just 1) false 127 4 false ((4 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 2))
 _ = refl
 
-_ : extend (step true 9 0 false true false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 5) (valid (route (0 , just 0) true 122 9 true ((5 , 7) ∷ (7 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 8)))
-  ⊕ extend (step true 4 127 false true false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 9) (valid (route (0 , just 0) true 127 2 false ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 5)))
+_ : extend (step true 6 127 false true false false 0 nothing (0 , just 1) (3 , 1) 0) (3 , 2) (valid (route (0 , just 1) true 255 3 true ((2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 6)))
+  ⊕ extend (step true 10 255 false true false false 0 nothing (0 , just 1) (3 , 1) 0) (3 , 6) (valid (route (0 , just 0) true 122 4 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 5)))
+  ≡ valid (route (0 , just 1) true 255 9 true ((3 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0))
+_ = refl
+
+_ : extend (step true 6 127 false false false false 0 nothing (1 , just 1) (2 , 1) 0) (2 , 4) (valid (route (1 , just 1) false 122 7 false ((4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 6)))
+  ⊕ extend (step true 6 127 false false false false 0 nothing (1 , just 1) (2 , 1) 0) (2 , 5) (valid (route (1 , just 1) false 122 7 false ((5 , 3) ∷ (3 , 183) ∷ (183 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 6)))
+  ≡ valid (route (1 , just 1) false 127 13 false ((2 , 4) ∷ (4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 0))
+_ = refl
+
+_ : extend (step true 9 128 true false false false 0 nothing (1 , just 1) (3 , 2) 0) (3 , 9) (valid (route (1 , just 1) true 0 9 true ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 6)))
+  ⊕ extend (step true 4 122 false true false false 0 nothing (1 , just 1) (3 , 2) 0) (3 , 6) (valid (route (0 , just 1) false 128 0 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 6)))
+  ≡ valid (route (0 , just 1) false 128 4 true ((3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 0))
+_ = refl
+
+_ : extend (step true 12 122 false false false false 0 nothing (1 , just 0) (2 , 1) 0) (2 , 6) (valid (route (1 , just 0) false 122 3 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 2)))
+  ⊕ extend (step true 12 122 false true false false 0 nothing (1 , just 0) (2 , 1) 0) (2 , 3) (valid (route (1 , just 0) false 122 3 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 2)))
+  ≡ valid (route (1 , just 0) false 122 15 false ((2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 1 127 false true false true 1 nothing (2 , just 2) (9 , 2) 3) (9 , 8) (valid (route (1 , just 2) false 255 7 true ((8 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0)))
+  ⊕ extend (step true 2 122 false false true true 1 nothing (2 , just 2) (9 , 2) 6) (9 , 6) (valid (route (1 , just 1) false 122 4 true ((6 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 9)))
+  ≡ valid (route (2 , just 2) false 255 8 true ((9 , 8) ∷ (8 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 1) , 3))
+_ = refl
+
+_ : extend (step true 2 0 true false false true 1 nothing (2 , just 2) (3 , 2) 1) (3 , 2) (valid (route (1 , just 2) false 255 3 true ((2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 0)))
+  ⊕ extend (step true 2 0 true false false true 1 nothing (2 , just 2) (3 , 2) 2) (3 , 4) (valid (route (1 , just 2) false 255 3 true ((4 , 6) ∷ (6 , 174) ∷ (174 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 0)))
+  ≡ valid (route (2 , just 2) true 255 5 true ((3 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 1) , 1))
+_ = refl
+
+_ : extend (step true 5 122 false true false false 0 nothing (2 , just 1) (7 , 2) 0) (7 , 4) (valid (route (1 , just 1) false 127 11 false ((4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 7)))
+  ⊕ extend (step true 5 122 false true false false 0 nothing (2 , just 1) (7 , 2) 0) (7 , 9) (valid (route (1 , just 1) false 127 11 false ((9 , 8) ∷ (8 , 144) ∷ (144 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 7)))
+  ≡ valid (route (1 , just 1) false 127 16 true ((7 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 0))
+_ = refl
+
+_ : extend (step true 4 127 false false false true 1 nothing (1 , just 0) (4 , 2) 4) (4 , 2) (valid (route (0 , just 0) true 255 14 true ((2 , 7) ∷ (7 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0)))
+  ⊕ extend (step true 4 127 false false false true 1 nothing (1 , just 0) (4 , 2) 5) (4 , 9) (valid (route (0 , just 0) true 255 14 true ((9 , 7) ∷ (7 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0)))
+  ≡ valid (route (1 , just 0) true 255 18 true ((4 , 2) ∷ (2 , 7) ∷ (7 , 3) ∷ (3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 4))
+_ = refl
+
+_ : extend (step true 5 0 true false false false 0 nothing (1 , just 0) (3 , 1) 0) (3 , 7) (valid (route (1 , just 0) false 122 4 false ((7 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
+  ⊕ extend (step true 2 255 false false false true 0 nothing (1 , just 0) (3 , 1) 8) (3 , 9) (valid (route (1 , just 2) false 0 3 true ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 6)))
+  ≡ valid (route (1 , just 2) false 255 5 true ((3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 8))
+_ = refl
+
+_ : extend (step true 2 255 false true false false 0 nothing (0 , just 2) (9 , 1) 0) (9 , 3) (valid (route (0 , just 2) false 122 11 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 2)))
+  ⊕ extend (step true 2 255 false true false false 0 nothing (0 , just 2) (9 , 1) 0) (9 , 6) (valid (route (0 , just 2) false 122 11 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 2)))
+  ≡ valid (route (0 , just 2) false 255 13 true ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 2 122 true false false true 1 nothing (0 , just 1) (9 , 1) 8) (9 , 7) (valid (route (0 , just 1) false 127 18 true ((7 , 2) ∷ (2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 0)))
+  ⊕ extend (step true 8 0 true true false false 0 nothing (0 , just 1) (9 , 1) 0) (9 , 8) (valid (route (0 , just 1) false 0 3 true ((8 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 2)))
+  ≡ valid (route (0 , just 1) true 0 11 true ((9 , 8) ∷ (8 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 0))
+_ = refl
+
+_ : extend (step true 2 122 false false false true 1 nothing (2 , just 1) (5 , 2) 3) (5 , 6) (valid (route (1 , just 1) false 128 0 true ((6 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 2)))
+  ⊕ extend (step true 4 0 false false false false 0 nothing (2 , just 1) (5 , 2) 0) (5 , 2) (valid (route (1 , just 1) false 127 1 true ((2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 5)))
+  ≡ valid (route (1 , just 1) false 127 5 true ((5 , 2) ∷ (2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 0))
+_ = refl
+
+_ : extend (step true 4 255 false false false true 0 nothing (0 , just 1) (9 , 2) 5) (9 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ⊕ extend (step true 4 128 true false false false 0 nothing (0 , just 1) (9 , 2) 0) (9 , 5) (valid (route (0 , just 2) true 128 9 false ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 1)))
+  ≡ valid (route (0 , just 2) true 128 13 false ((9 , 5) ∷ (5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 0))
+_ = refl
+
+_ : extend (step true 2 0 false false true true 1 nothing (2 , just 1) (3 , 1) 7) (3 , 4) (valid (route (1 , just 1) true 255 11 false ((4 , 7) ∷ (7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0)))
+  ⊕ extend (step true 2 0 false true true true 1 nothing (2 , just 1) (3 , 1) 8) (3 , 8) (valid (route (1 , just 1) true 255 11 false ((8 , 7) ∷ (7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0)))
+  ≡ valid (route (2 , just 1) true 255 13 false ((3 , 4) ∷ (4 , 7) ∷ (7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 7))
+_ = refl
+
+_ : extend (step true 3 255 false true false true 0 nothing (0 , just 1) (5 , 2) 8) (5 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ⊕ extend (step true 8 127 false false false false 0 nothing (0 , just 1) (5 , 2) 0) (5 , 3) (valid (route (0 , just 0) false 255 1 false ((3 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 3)))
+  ≡ valid (route (0 , just 1) false 255 3 true ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 8))
+_ = refl
+
+_ : extend (step true 1 128 true false false true 1 nothing (1 , just 2) (4 , 2) 6) (4 , 7) (valid (route (0 , just 2) false 128 5 true ((7 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 8)))
+  ⊕ extend (step true 1 128 true false false true 1 nothing (1 , just 2) (4 , 2) 7) (4 , 2) (valid (route (0 , just 2) false 128 5 true ((2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 8)))
+  ≡ valid (route (1 , just 2) true 128 6 true ((4 , 7) ∷ (7 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 6))
+_ = refl
+
+_ : extend (step true 1 127 false false false true 1 nothing (2 , just 2) (7 , 1) 9) (7 , 9) (valid (route (1 , just 2) false 128 14 false ((9 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
+  ⊕ extend (step true 1 127 false false false true 1 nothing (2 , just 2) (7 , 1) 1) (7 , 5) (valid (route (1 , just 2) false 128 14 false ((5 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
+  ≡ valid (route (2 , just 2) false 128 15 false ((7 , 5) ∷ (5 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1))
+_ = refl
+
+_ : extend (step true 2 128 false true false true 1 nothing (2 , just 2) (5 , 2) 8) (5 , 3) (valid (route (1 , just 2) false 127 1 false ((3 , 2) ∷ (2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 4)))
+  ⊕ extend (step true 4 128 true false false true 0 nothing (2 , just 2) (5 , 2) 2) (5 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 1) true 128 4 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 2))
+_ = refl
+
+_ : extend (step true 1 0 true false false true 0 nothing (0 , just 1) (9 , 2) 7) (9 , 6) (valid (route (0 , just 1) false 122 8 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 8)))
+  ⊕ extend (step true 4 128 false false false true 0 nothing (0 , just 1) (9 , 2) 2) (9 , 5) (valid (route (1 , just 2) false 0 8 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 7)))
+  ≡ valid (route (0 , just 1) true 122 9 false ((9 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 7))
+_ = refl
+
+_ : extend (step true 12 0 false false false false 0 nothing (1 , just 0) (8 , 2) 0) (8 , 3) (valid (route (0 , just 0) false 0 7 false ((3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 1)))
+  ⊕ extend (step true 2 0 false false false false 0 nothing (1 , just 0) (8 , 2) 0) (8 , 7) (valid (route (0 , just 0) false 127 5 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 5)))
+  ≡ valid (route (0 , just 0) false 0 19 false ((8 , 3) ∷ (3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 0))
+_ = refl
+
+_ : extend (step true 4 122 false false false true 1 nothing (0 , just 2) (5 , 2) 6) (5 , 8) (valid (route (0 , just 2) false 255 13 false ((8 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0)))
+  ⊕ extend (step true 4 122 false false false true 1 nothing (0 , just 2) (5 , 2) 7) (5 , 3) (valid (route (0 , just 2) false 255 13 false ((3 , 6) ∷ (6 , 100) ∷ (100 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 1 122 true true false false 0 nothing (1 , just 0) (9 , 1) 0) (9 , 6) (valid (route (1 , just 0) false 255 2 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 6)))
-  ⊕ extend (step true 3 0 false false false true 0 nothing (1 , just 0) (9 , 1) 6) (9 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 0) false 0 3 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 6))
-_ = refl
-
-_ : extend (step true 3 127 false false false false 0 nothing (2 , just 2) (2 , 1) 0) (2 , 7) (valid (route (1 , just 2) false 255 0 true ((7 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 4)))
-  ⊕ extend (step true 3 127 false false false false 0 nothing (2 , just 2) (2 , 1) 0) (2 , 6) (valid (route (1 , just 2) false 255 0 true ((6 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 4)))
-  ≡ valid (route (1 , just 2) false 255 3 true ((2 , 6) ∷ (6 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 0))
-_ = refl
-
-_ : extend (step true 1 128 true false false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 3) (valid (route (0 , just 1) false 128 2 false ((3 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 9)))
-  ⊕ extend (step true 1 128 true false false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 9) (valid (route (0 , just 1) false 128 2 false ((9 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 9)))
-  ≡ valid (route (0 , just 1) true 128 3 false ((6 , 3) ∷ (3 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 11 122 false false false false 0 nothing (1 , just 0) (8 , 2) 0) (8 , 4) (valid (route (1 , just 0) true 127 3 false ((4 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 7)))
-  ⊕ extend (step true 3 127 false true false true 0 nothing (1 , just 0) (8 , 2) 2) (8 , 4) (valid (route (1 , just 1) false 128 9 true ((4 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 1)))
-  ≡ valid (route (1 , just 1) false 128 12 true ((8 , 4) ∷ (4 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 2))
-_ = refl
-
-_ : extend (step true 4 127 false false false false 0 nothing (0 , just 2) (5 , 1) 0) (5 , 4) (valid (route (0 , just 2) false 122 2 false ((4 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 7)))
-  ⊕ extend (step true 4 127 false false false false 0 nothing (0 , just 2) (5 , 1) 0) (5 , 3) (valid (route (0 , just 2) false 122 2 false ((3 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 7)))
-  ≡ valid (route (0 , just 2) false 127 6 false ((5 , 3) ∷ (3 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 9 127 false true false false 0 nothing (1 , just 0) (3 , 1) 0) (3 , 2) (valid (route (0 , just 0) false 255 2 false ((2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 6)))
-  ⊕ extend (step true 2 128 true false false false 0 nothing (1 , just 0) (3 , 1) 0) (3 , 8) (valid (route (1 , just 1) true 122 10 false ((8 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 3)))
-  ≡ valid (route (0 , just 0) false 255 11 true ((3 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 12 255 false false false false 0 nothing (0 , just 3) (8 , 2) 0) (8 , 3) (valid (route (0 , just 2) true 128 11 false ((3 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5)))
-  ⊕ extend (step true 5 255 false false false false 0 nothing (0 , just 3) (8 , 2) 0) (8 , 7) (valid (route (1 , just 1) false 128 1 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 6)))
+_ : extend (step true 3 0 false false false false 0 nothing (0 , just 2) (6 , 1) 0) (6 , 9) (valid (route (1 , just 2) false 127 6 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 5)))
+  ⊕ extend (step true 3 0 false false true true 1 nothing (0 , just 2) (6 , 1) 2) (6 , 5) (valid (route (1 , just 0) false 127 15 true ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 0)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 3 128 false true false true 0 nothing (0 , just 0) (6 , 2) 9) (6 , 5) (valid (route (0 , just 0) false 0 9 true ((5 , 3) ∷ (3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 9)))
-  ⊕ extend (step true 3 0 false false false true 0 nothing (0 , just 0) (6 , 2) 4) (6 , 1) (valid (route (0 , just 2) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 0 3 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 4))
+_ : extend (step true 12 127 false false false false 0 nothing (0 , just 1) (6 , 1) 0) (6 , 7) (valid (route (0 , just 1) true 255 7 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 2)))
+  ⊕ extend (step true 12 127 false false false false 0 nothing (0 , just 1) (6 , 1) 0) (6 , 2) (valid (route (0 , just 1) true 255 7 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 2)))
+  ≡ valid (route (0 , just 1) true 255 19 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 2 128 false false false true 1 nothing (2 , just 2) (3 , 1) 1) (3 , 9) (valid (route (1 , just 2) false 122 3 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 2)))
-  ⊕ extend (step true 2 128 false false false true 1 nothing (2 , just 2) (3 , 1) 2) (3 , 5) (valid (route (1 , just 2) false 122 3 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 2)))
-  ≡ valid (route (2 , just 2) false 128 5 false ((3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 1))
+_ : extend (step true 3 255 false true false true 0 nothing (1 , just 1) (8 , 1) 3) (8 , 7) (valid (route (1 , just 1) false 128 10 true ((7 , 5) ∷ (5 , 3) ∷ (3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 0)))
+  ⊕ extend (step true 4 255 false false false true 0 nothing (1 , just 1) (8 , 1) 2) (8 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 1) false 255 4 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 2))
 _ = refl
 
-_ : extend (step true 2 122 false false true true 1 nothing (1 , just 1) (2 , 1) 6) (2 , 6) (valid (route (1 , just 1) false 122 4 true ((6 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 9)))
-  ⊕ extend (step true 1 127 true false false true 0 nothing (1 , just 1) (2 , 1) 4) (2 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 1) true 127 1 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 4))
+_ : extend (step true 3 128 true false false false 0 nothing (0 , just 1) (6 , 1) 0) (6 , 3) (valid (route (0 , just 1) true 127 7 false ((3 , 9) ∷ (9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 6)))
+  ⊕ extend (step true 7 127 false true false false 0 nothing (0 , just 1) (6 , 1) 0) (6 , 7) (valid (route (0 , just 2) false 255 0 false ((7 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 7)))
+  ≡ valid (route (0 , just 2) false 255 7 true ((6 , 7) ∷ (7 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 1 127 false true false true 0 nothing (0 , just 1) (2 , 1) 4) (2 , 8) (valid (route (0 , just 0) false 0 6 false ((8 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 9)))
-  ⊕ extend (step true 2 122 false false false true 0 nothing (0 , just 1) (2 , 1) 5) (2 , 5) (valid (route (1 , just 1) false 127 11 false ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 7)))
-  ≡ invalid
+_ : extend (step true 12 122 false false false false 0 nothing (1 , just 2) (3 , 1) 0) (3 , 9) (valid (route (1 , just 2) false 128 11 false ((9 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 5)))
+  ⊕ extend (step true 12 122 false false false false 0 nothing (1 , just 2) (3 , 1) 0) (3 , 8) (valid (route (1 , just 2) false 128 11 false ((8 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 5)))
+  ≡ valid (route (1 , just 2) false 128 23 false ((3 , 8) ∷ (8 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 3 122 false false true true 0 nothing (1 , just 1) (4 , 1) 4) (4 , 3) (valid (route (1 , just 2) false 255 8 true ((3 , 6) ∷ (6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 0)))
-  ⊕ extend (step true 3 122 false false true true 0 nothing (1 , just 1) (4 , 1) 5) (4 , 2) (valid (route (1 , just 2) false 255 8 true ((2 , 6) ∷ (6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 0)))
-  ≡ invalid
+_ : extend (step true 5 0 false false false false 0 nothing (0 , just 2) (2 , 1) 0) (2 , 4) (valid (route (0 , just 2) false 127 9 false ((4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 3)))
+  ⊕ extend (step true 5 0 false false false false 0 nothing (0 , just 2) (2 , 1) 0) (2 , 9) (valid (route (0 , just 2) false 127 9 false ((9 , 3) ∷ (3 , 183) ∷ (183 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 3)))
+  ≡ valid (route (0 , just 2) false 127 14 false ((2 , 4) ∷ (4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 4 255 false true false false 0 nothing (0 , just 0) (3 , 2) 0) (3 , 9) (valid (route (0 , just 0) true 255 10 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 1)))
-  ⊕ extend (step true 4 255 false true false false 0 nothing (0 , just 0) (3 , 2) 0) (3 , 7) (valid (route (0 , just 0) true 255 10 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 1)))
-  ≡ valid (route (0 , just 0) true 255 14 true ((3 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0))
+_ : extend (step true 4 128 false true false true 1 nothing (2 , just 2) (8 , 1) 6) (8 , 4) (valid (route (1 , just 2) false 255 15 true ((4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 0)))
+  ⊕ extend (step true 4 128 false true false true 1 nothing (2 , just 2) (8 , 1) 7) (8 , 2) (valid (route (1 , just 2) false 255 15 true ((2 , 3) ∷ (3 , 156) ∷ (156 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 0)))
+  ≡ valid (route (2 , just 2) false 255 19 true ((8 , 4) ∷ (4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 6))
 _ = refl
 
-_ : extend (step true 11 255 true false false false 0 nothing (0 , just 0) (3 , 1) 0) (3 , 5) (valid (route (0 , just 0) false 0 10 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 5)))
-  ⊕ extend (step true 3 127 false true false true 0 nothing (0 , just 0) (3 , 1) 5) (3 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 1) false 127 3 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 5))
+_ : extend (step true 2 127 true false false true 0 nothing (0 , just 0) (5 , 2) 2) (5 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ⊕ extend (step true 8 127 false false false false 0 nothing (0 , just 0) (5 , 2) 0) (5 , 4) (valid (route (1 , just 0) false 122 0 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 1)))
+  ≡ valid (route (0 , just 0) true 127 2 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 2))
 _ = refl
 
-_ : extend (step true 2 127 false true true true 1 nothing (2 , just 2) (6 , 2) 5) (6 , 4) (valid (route (0 , just 2) false 127 1 false ((4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 2)))
-  ⊕ extend (step true 2 128 true false false true 0 nothing (2 , just 2) (6 , 2) 6) (6 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 1) true 128 2 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 6))
+_ : extend (step true 1 127 false false true true 1 nothing (2 , just 2) (9 , 2) 6) (9 , 7) (valid (route (1 , just 2) false 255 7 false ((7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 3)))
+  ⊕ extend (step true 1 127 false false true true 1 nothing (2 , just 2) (9 , 2) 7) (9 , 4) (valid (route (1 , just 2) false 255 7 false ((4 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 3)))
+  ≡ valid (route (2 , just 2) false 255 8 false ((9 , 7) ∷ (7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 6))
 _ = refl
 
-_ : extend (step true 7 122 false false false false 0 nothing (2 , just 1) (9 , 2) 0) (9 , 7) (valid (route (1 , just 1) true 0 11 true ((7 , 54) ∷ (54 , 17) ∷ (17 , 28) ∷ (28 , 47) ∷ (47 , 50) ∷ (50 , 16) ∷ (16 , 19) ∷ (19 , 36) ∷ (36 , 18) ∷ (18 , 35) ∷ (35 , 34) ∷ (34 , 37) ∷ (37 , 44) ∷ (44 , 55) ∷ (55 , 53) ∷ (53 , 42) ∷ (42 , 27) ∷ (27 , 25) ∷ (25 , 33) ∷ (33 , 21) ∷ (21 , 8) ∷ (8 , 11) ∷ (11 , 23) ∷ (23 , 61) ∷ (61 , 15) ∷ (15 , 10) ∷ (10 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 2)))
-  ⊕ extend (step true 7 122 false false false false 0 nothing (2 , just 1) (9 , 2) 0) (9 , 2) (valid (route (1 , just 1) true 0 11 true ((2 , 54) ∷ (54 , 17) ∷ (17 , 28) ∷ (28 , 47) ∷ (47 , 50) ∷ (50 , 16) ∷ (16 , 19) ∷ (19 , 36) ∷ (36 , 18) ∷ (18 , 35) ∷ (35 , 34) ∷ (34 , 37) ∷ (37 , 44) ∷ (44 , 55) ∷ (55 , 53) ∷ (53 , 42) ∷ (42 , 27) ∷ (27 , 25) ∷ (25 , 33) ∷ (33 , 21) ∷ (21 , 8) ∷ (8 , 11) ∷ (11 , 23) ∷ (23 , 61) ∷ (61 , 15) ∷ (15 , 10) ∷ (10 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 2)))
-  ≡ valid (route (1 , just 1) true 122 18 true ((9 , 2) ∷ (2 , 54) ∷ (54 , 17) ∷ (17 , 28) ∷ (28 , 47) ∷ (47 , 50) ∷ (50 , 16) ∷ (16 , 19) ∷ (19 , 36) ∷ (36 , 18) ∷ (18 , 35) ∷ (35 , 34) ∷ (34 , 37) ∷ (37 , 44) ∷ (44 , 55) ∷ (55 , 53) ∷ (53 , 42) ∷ (42 , 27) ∷ (27 , 25) ∷ (25 , 33) ∷ (33 , 21) ∷ (21 , 8) ∷ (8 , 11) ∷ (11 , 23) ∷ (23 , 61) ∷ (61 , 15) ∷ (15 , 10) ∷ (10 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0))
+_ : extend (step true 8 122 false false false false 0 nothing (0 , just 0) (3 , 2) 0) (3 , 9) (valid (route (0 , just 0) true 255 5 false ((9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 9)))
+  ⊕ extend (step true 8 122 false false false false 0 nothing (0 , just 0) (3 , 2) 0) (3 , 8) (valid (route (0 , just 0) true 255 5 false ((8 , 6) ∷ (6 , 152) ∷ (152 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 9)))
+  ≡ valid (route (0 , just 0) true 255 13 false ((3 , 9) ∷ (9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 1 255 false false false false 0 nothing (0 , just 2) (2 , 2) 0) (2 , 7) (valid (route (1 , just 2) false 255 5 false ((7 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 5)))
-  ⊕ extend (step true 1 255 false false false false 0 nothing (0 , just 2) (2 , 2) 0) (2 , 3) (valid (route (1 , just 2) false 255 5 false ((3 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5)))
-  ≡ invalid
+_ : extend (step true 3 122 true false false false 0 nothing (0 , just 1) (9 , 1) 0) (9 , 7) (valid (route (0 , just 1) false 128 0 false ((7 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 2)))
+  ⊕ extend (step true 9 255 false true false false 0 nothing (0 , just 1) (9 , 1) 0) (9 , 3) (valid (route (0 , just 2) false 127 10 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 1) , 3)))
+  ≡ valid (route (0 , just 2) false 255 19 true ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 1) , 0))
 _ = refl
 
-_ : extend (step true 2 255 false false false true 0 nothing (0 , just 2) (9 , 1) 6) (9 , 2) (valid (route (0 , just 2) false 255 1 false ((2 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 8)))
-  ⊕ extend (step true 3 255 false false false true 0 nothing (0 , just 2) (9 , 1) 2) (9 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 255 3 false ((9 , 2) ∷ (2 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 6))
+_ : extend (step true 3 127 true false false true 0 nothing (0 , just 1) (6 , 2) 5) (6 , 4) (valid (route (0 , just 1) false 255 8 false ((4 , 3) ∷ (3 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 1)))
+  ⊕ extend (step true 3 128 false true false true 1 nothing (0 , just 1) (6 , 2) 3) (6 , 9) (valid (route (0 , just 0) false 122 8 true ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 2)))
+  ≡ valid (route (0 , just 1) true 255 11 false ((6 , 4) ∷ (4 , 3) ∷ (3 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 5))
 _ = refl
 
-_ : extend (step true 4 255 true false true true 1 nothing (0 , just 1) (9 , 2) 1) (9 , 8) (valid (route (1 , just 1) false 0 8 true ((8 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 7)))
-  ⊕ extend (step true 7 127 true false false false 0 nothing (0 , just 1) (9 , 2) 0) (9 , 2) (valid (route (1 , just 2) true 128 7 true ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 2)))
-  ≡ invalid
+_ : extend (step true 2 127 false false false true 1 nothing (2 , just 2) (7 , 2) 4) (7 , 5) (valid (route (1 , just 2) true 255 12 false ((5 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0)))
+  ⊕ extend (step true 2 127 false false false true 1 nothing (2 , just 2) (7 , 2) 5) (7 , 8) (valid (route (1 , just 2) true 255 12 false ((8 , 9) ∷ (9 , 160) ∷ (160 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0)))
+  ≡ valid (route (2 , just 2) true 255 14 false ((7 , 5) ∷ (5 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 4))
 _ = refl
 
-_ : extend (step true 4 0 false false false false 0 nothing (2 , just 1) (8 , 1) 0) (8 , 2) (valid (route (1 , just 1) false 127 1 true ((2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 5)))
-  ⊕ extend (step true 4 0 false false false true 0 nothing (2 , just 1) (8 , 1) 1) (8 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 0) false 0 4 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 1))
+_ : extend (step true 3 0 true true true true 1 nothing (2 , just 0) (2 , 2) 2) (2 , 7) (valid (route (1 , just 0) true 0 11 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 2)))
+  ⊕ extend (step true 1 127 true true false true 1 nothing (2 , just 0) (2 , 2) 3) (2 , 4) (valid (route (0 , just 2) false 255 1 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 3)))
+  ≡ valid (route (1 , just 2) true 255 2 true ((2 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 3))
 _ = refl
 
-_ : extend (step true 7 255 false true false false 0 nothing (0 , just 1) (2 , 2) 0) (2 , 3) (valid (route (1 , just 1) false 255 3 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 5)))
-  ⊕ extend (step true 3 122 false false false true 0 nothing (0 , just 1) (2 , 2) 5) (2 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ invalid
+_ : extend (step true 11 127 true false false false 0 nothing (1 , just 0) (2 , 2) 0) (2 , 7) (valid (route (0 , just 0) false 122 0 false ((7 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 8)))
+  ⊕ extend (step true 1 122 false false false true 0 nothing (1 , just 0) (2 , 2) 8) (2 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 0) false 122 1 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 8))
 _ = refl
 
-_ : extend (step true 1 128 false false false true 1 nothing (2 , just 1) (9 , 2) 6) (9 , 7) (valid (route (1 , just 1) false 122 11 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
-  ⊕ extend (step true 8 127 true true false false 0 nothing (2 , just 1) (9 , 2) 0) (9 , 8) (valid (route (1 , just 0) false 255 11 true ((8 , 50) ∷ (50 , 24) ∷ (24 , 49) ∷ (49 , 54) ∷ (54 , 25) ∷ (25 , 57) ∷ (57 , 2) ∷ (2 , 22) ∷ (22 , 47) ∷ (47 , 12) ∷ (12 , 27) ∷ (27 , 37) ∷ (37 , 7) ∷ (7 , 43) ∷ (43 , 23) ∷ (23 , 15) ∷ (15 , 20) ∷ (20 , 31) ∷ (31 , 40) ∷ (40 , 60) ∷ (60 , 41) ∷ (41 , 13) ∷ (13 , 14) ∷ (14 , 44) ∷ (44 , 45) ∷ (45 , 58) ∷ (58 , 21) ∷ (21 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 2)))
-  ≡ valid (route (1 , just 0) true 255 19 true ((9 , 8) ∷ (8 , 50) ∷ (50 , 24) ∷ (24 , 49) ∷ (49 , 54) ∷ (54 , 25) ∷ (25 , 57) ∷ (57 , 2) ∷ (2 , 22) ∷ (22 , 47) ∷ (47 , 12) ∷ (12 , 27) ∷ (27 , 37) ∷ (37 , 7) ∷ (7 , 43) ∷ (43 , 23) ∷ (23 , 15) ∷ (15 , 20) ∷ (20 , 31) ∷ (31 , 40) ∷ (40 , 60) ∷ (60 , 41) ∷ (41 , 13) ∷ (13 , 14) ∷ (14 , 44) ∷ (44 , 45) ∷ (45 , 58) ∷ (58 , 21) ∷ (21 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 0))
+_ : extend (step true 1 122 false false false true 1 nothing (1 , just 1) (8 , 1) 2) (8 , 5) (valid (route (0 , just 1) false 128 4 true ((5 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 8)))
+  ⊕ extend (step true 1 122 false false false true 1 nothing (1 , just 1) (8 , 1) 3) (8 , 4) (valid (route (0 , just 1) false 128 4 true ((4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 8)))
+  ≡ valid (route (1 , just 1) false 128 5 true ((8 , 5) ∷ (5 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 2))
 _ = refl
 
-_ : extend (step true 3 128 false true false false 0 nothing (0 , just 1) (3 , 2) 0) (3 , 9) (valid (route (0 , just 1) false 128 6 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 3)))
-  ⊕ extend (step true 3 128 false true false false 0 nothing (0 , just 1) (3 , 2) 0) (3 , 6) (valid (route (0 , just 1) false 128 6 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 3)))
-  ≡ valid (route (0 , just 1) false 128 9 true ((3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0))
+_ : extend (step true 2 127 false false false true 1 nothing (3 , just 2) (5 , 1) 9) (5 , 9) (valid (route (1 , just 2) false 0 1 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 1)))
+  ⊕ extend (step true 2 127 false true false true 1 nothing (3 , just 2) (5 , 1) 1) (5 , 4) (valid (route (1 , just 2) false 0 1 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 1)))
+  ≡ valid (route (2 , just 2) false 127 3 false ((5 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 9))
 _ = refl
 
-_ : extend (step true 2 122 true false false true 0 nothing (0 , just 0) (2 , 2) 8) (2 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 3 122 false true true true 1 nothing (0 , just 0) (2 , 2) 5) (2 , 5) (valid (route (1 , just 2) true 0 1 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 4)))
-  ≡ valid (route (0 , just 0) true 122 2 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 8))
+_ : extend (step true 1 255 false false false false 0 nothing (0 , just 1) (9 , 1) 0) (9 , 4) (valid (route (0 , just 1) false 128 7 true ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 1)))
+  ⊕ extend (step true 4 255 false false false true 1 nothing (0 , just 1) (9 , 1) 8) (9 , 5) (valid (route (0 , just 1) false 128 5 false ((5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 4)))
+  ≡ valid (route (0 , just 1) false 255 8 true ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 0))
 _ = refl
 
-_ : extend (step true 3 128 false true false false 0 nothing (1 , just 2) (4 , 1) 0) (4 , 8) (valid (route (0 , just 2) false 127 6 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 6)))
-  ⊕ extend (step true 1 255 false false true true 0 nothing (1 , just 2) (4 , 1) 5) (4 , 5) (valid (route (0 , just 0) true 255 15 false ((5 , 8) ∷ (8 , 7) ∷ (7 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 128 9 true ((4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 0))
+_ : extend (step true 4 127 false false false true 1 nothing (1 , just 2) (5 , 1) 5) (5 , 7) (valid (route (0 , just 2) false 122 9 false ((7 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 3)))
+  ⊕ extend (step true 3 128 true true false true 0 nothing (1 , just 2) (5 , 1) 1) (5 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 0) true 128 3 true ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 1))
 _ = refl
 
-_ : extend (step true 12 127 false true false false 0 nothing (0 , just 3) (6 , 2) 0) (6 , 8) (valid (route (0 , just 2) false 128 5 true ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 8)))
-  ⊕ extend (step true 7 128 false true false false 0 nothing (0 , just 3) (6 , 2) 0) (6 , 9) (valid (route (1 , just 1) false 0 6 false ((9 , 5) ∷ (5 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 7)))
-  ≡ invalid
-_ = refl
-
-_ : extend (step true 6 0 false false false false 0 nothing (0 , just 1) (3 , 1) 0) (3 , 9) (valid (route (0 , just 1) false 255 1 true ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 2)))
-  ⊕ extend (step true 4 128 false true false true 1 nothing (0 , just 1) (3 , 1) 2) (3 , 7) (valid (route (0 , just 2) true 128 7 false ((7 , 8) ∷ (8 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 1)))
-  ≡ valid (route (0 , just 1) false 255 7 true ((3 , 9) ∷ (9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 0))
-_ = refl
-
-_ : extend (step true 4 127 true false false false 0 nothing (1 , just 2) (9 , 2) 0) (9 , 6) (valid (route (1 , just 2) false 127 9 false ((6 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 7)))
-  ⊕ extend (step true 4 128 false true false false 0 nothing (1 , just 2) (9 , 2) 0) (9 , 8) (valid (route (1 , just 2) false 0 9 true ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 1)))
-  ≡ valid (route (1 , just 2) false 128 13 true ((9 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 0))
-_ = refl
-
-_ : extend (step true 1 127 false false false true 0 nothing (0 , just 0) (4 , 1) 7) (4 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 2 128 false false false true 1 nothing (0 , just 0) (4 , 1) 9) (4 , 9) (valid (route (0 , just 2) false 128 15 false ((9 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0)))
-  ≡ valid (route (0 , just 0) false 127 1 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 7))
-_ = refl
-
-_ : extend (step true 2 0 false false true true 0 nothing (0 , just 1) (6 , 2) 9) (6 , 8) (valid (route (0 , just 1) false 255 8 false ((8 , 9) ∷ (9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 0)))
-  ⊕ extend (step true 9 255 true false false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 7) (valid (route (0 , just 2) true 128 11 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 6)))
-  ≡ valid (route (0 , just 2) true 255 20 false ((6 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 6 127 false false false false 0 nothing (1 , just 2) (6 , 1) 0) (6 , 9) (valid (route (1 , just 2) false 128 2 true ((9 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 2)))
-  ⊕ extend (step true 1 0 true false false true 0 nothing (1 , just 2) (6 , 1) 2) (6 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 1) true 0 1 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 2))
-_ = refl
-
-_ : extend (step true 3 128 true false false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 3) (valid (route (0 , just 1) true 127 7 false ((3 , 9) ∷ (9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 6)))
-  ⊕ extend (step true 3 128 true false false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 8) (valid (route (0 , just 1) true 127 7 false ((8 , 9) ∷ (9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 6)))
-  ≡ valid (route (0 , just 1) true 128 10 false ((6 , 3) ∷ (3 , 9) ∷ (9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 6 127 true true false false 0 nothing (0 , just 2) (2 , 2) 0) (2 , 8) (valid (route (1 , just 2) true 128 4 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 8)))
-  ⊕ extend (step true 4 122 false false false true 0 nothing (0 , just 2) (2 , 2) 9) (2 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ invalid
-_ = refl
-
-_ : extend (step true 9 255 false false false false 0 nothing (0 , just 2) (6 , 2) 0) (6 , 5) (valid (route (0 , just 1) false 0 4 false ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 9)))
-  ⊕ extend (step true 4 255 false true true true 1 nothing (0 , just 2) (6 , 2) 4) (6 , 7) (valid (route (0 , just 2) true 128 1 true ((7 , 52) ∷ (52 , 24) ∷ (24 , 2) ∷ (2 , 8) ∷ (8 , 22) ∷ (22 , 16) ∷ (16 , 33) ∷ (33 , 39) ∷ (39 , 23) ∷ (23 , 45) ∷ (45 , 31) ∷ (31 , 28) ∷ (28 , 53) ∷ (53 , 58) ∷ (58 , 13) ∷ (13 , 49) ∷ (49 , 56) ∷ (56 , 60) ∷ (60 , 5) ∷ (5 , 44) ∷ (44 , 20) ∷ (20 , 37) ∷ (37 , 34) ∷ (34 , 19) ∷ (19 , 10) ∷ (10 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 1) , 5)))
-  ≡ invalid
-_ = refl
-
-_ : extend (step true 8 127 false false false false 0 nothing (1 , just 0) (2 , 1) 0) (2 , 4) (valid (route (1 , just 0) false 122 0 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 1)))
-  ⊕ extend (step true 4 128 false false false true 0 nothing (1 , just 0) (2 , 1) 5) (2 , 1) (valid (route (0 , just 2) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 128 4 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 5))
-_ = refl
-
-_ : extend (step true 4 255 false false false true 0 nothing (2 , just 2) (8 , 1) 7) (8 , 9) (valid (route (1 , just 2) false 127 17 false ((9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
-  ⊕ extend (step true 4 255 false false false true 0 nothing (2 , just 2) (8 , 1) 8) (8 , 7) (valid (route (1 , just 2) false 127 17 false ((7 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
-  ≡ valid (route (1 , just 2) false 255 21 false ((8 , 9) ∷ (9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 7))
-_ = refl
-
-_ : extend (step true 7 122 false false false false 0 nothing (0 , just 2) (5 , 2) 0) (5 , 3) (valid (route (0 , just 1) true 122 7 false ((3 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 1)))
-  ⊕ extend (step true 7 122 false false false false 0 nothing (0 , just 2) (5 , 2) 0) (5 , 6) (valid (route (0 , just 1) true 122 7 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 1)))
-  ≡ invalid
-_ = refl
-
-_ : extend (step true 4 128 false true false true 0 nothing (1 , just 1) (2 , 1) 2) (2 , 5) (valid (route (1 , just 1) true 0 8 false ((5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 5)))
-  ⊕ extend (step true 4 128 false true false true 0 nothing (1 , just 1) (2 , 1) 3) (2 , 8) (valid (route (1 , just 1) true 0 8 false ((8 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 5)))
-  ≡ valid (route (1 , just 1) true 128 12 true ((2 , 5) ∷ (5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 2))
-_ = refl
-
-_ : extend (step true 5 255 false false false false 0 nothing (1 , just 2) (2 , 1) 0) (2 , 8) (valid (route (1 , just 2) true 255 0 true ((8 , 49) ∷ (49 , 33) ∷ (33 , 27) ∷ (27 , 14) ∷ (14 , 30) ∷ (30 , 40) ∷ (40 , 61) ∷ (61 , 9) ∷ (9 , 56) ∷ (56 , 4) ∷ (4 , 21) ∷ (21 , 26) ∷ (26 , 32) ∷ (32 , 55) ∷ (55 , 24) ∷ (24 , 47) ∷ (47 , 51) ∷ (51 , 10) ∷ (10 , 39) ∷ (39 , 48) ∷ (48 , 13) ∷ (13 , 20) ∷ (20 , 29) ∷ (29 , 59) ∷ (59 , 60) ∷ (60 , 41) ∷ (41 , 42) ∷ (42 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 9)))
-  ⊕ extend (step true 12 255 false true false false 0 nothing (1 , just 2) (2 , 1) 0) (2 , 9) (valid (route (0 , just 0) false 127 1 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 4)))
-  ≡ valid (route (0 , just 0) false 255 13 true ((2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0))
-_ = refl
-
-_ : extend (step true 4 128 false false false false 0 nothing (0 , just 3) (4 , 1) 0) (4 , 6) (valid (route (0 , just 2) true 128 6 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 1)))
-  ⊕ extend (step true 2 127 false false false true 1 nothing (0 , just 3) (4 , 1) 5) (4 , 6) (valid (route (1 , just 0) false 255 5 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 9)))
-  ≡ invalid
-_ = refl
-
-_ : extend (step true 10 255 true false false false 0 nothing (1 , just 2) (2 , 1) 0) (2 , 7) (valid (route (1 , just 2) true 0 10 false ((7 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
-  ⊕ extend (step true 10 255 true false false false 0 nothing (1 , just 2) (2 , 1) 0) (2 , 4) (valid (route (1 , just 2) true 0 10 false ((4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 1)))
-  ≡ valid (route (1 , just 2) true 255 20 false ((2 , 4) ∷ (4 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 0))
-_ = refl
-
-_ : extend (step true 1 122 false true false false 0 nothing (1 , just 0) (2 , 2) 0) (2 , 7) (valid (route (1 , just 0) false 128 11 false ((7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 9)))
-  ⊕ extend (step true 3 0 true true true true 1 nothing (1 , just 0) (2 , 2) 2) (2 , 7) (valid (route (1 , just 0) true 0 11 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 2)))
-  ≡ valid (route (1 , just 0) false 128 12 true ((2 , 7) ∷ (7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 1 128 false true false true 0 nothing (0 , just 0) (4 , 1) 3) (4 , 3) (valid (route (1 , just 0) true 255 1 false ((3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 7)))
-  ⊕ extend (step true 11 127 true false false false 0 nothing (0 , just 0) (4 , 1) 0) (4 , 7) (valid (route (0 , just 0) false 122 0 false ((7 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 8)))
-  ≡ valid (route (0 , just 0) true 127 11 false ((4 , 7) ∷ (7 , 2) ∷ (2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 4 127 false false false false 0 nothing (0 , just 2) (4 , 1) 0) (4 , 2) (valid (route (0 , just 2) true 127 3 true ((2 , 6) ∷ (6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 6)))
-  ⊕ extend (step true 4 127 false false false true 0 nothing (0 , just 2) (4 , 1) 7) (4 , 3) (valid (route (0 , just 0) false 128 1 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 9)))
-  ≡ valid (route (0 , just 2) true 127 7 true ((4 , 2) ∷ (2 , 6) ∷ (6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 0))
-_ = refl
-
-_ : extend (step true 3 122 true false false false 0 nothing (1 , just 2) (3 , 2) 0) (3 , 5) (valid (route (1 , just 2) false 122 5 false ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 3)))
-  ⊕ extend (step true 3 122 true false false false 0 nothing (1 , just 2) (3 , 2) 0) (3 , 4) (valid (route (1 , just 2) false 122 5 false ((4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 3)))
-  ≡ valid (route (1 , just 2) true 122 8 false ((3 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 0))
-_ = refl
-
-_ : extend (step true 6 122 false false false false 0 nothing (2 , just 2) (4 , 2) 0) (4 , 6) (valid (route (1 , just 2) true 255 6 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 4)))
-  ⊕ extend (step true 6 122 false false false false 0 nothing (2 , just 2) (4 , 2) 0) (4 , 2) (valid (route (1 , just 2) true 255 6 true ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 4)))
-  ≡ valid (route (1 , just 2) true 255 12 true ((4 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 0))
-_ = refl
-
-_ : extend (step true 1 127 true false false true 1 nothing (1 , just 1) (2 , 2) 6) (2 , 7) (valid (route (1 , just 1) false 122 5 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 5)))
-  ⊕ extend (step true 1 127 true false false true 1 nothing (1 , just 1) (2 , 2) 7) (2 , 4) (valid (route (1 , just 1) false 122 5 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 5)))
-  ≡ invalid
-_ = refl
-
-_ : extend (step true 4 128 false false false true 0 nothing (0 , just 1) (3 , 1) 2) (3 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 2 122 false false false false 0 nothing (0 , just 1) (3 , 1) 0) (3 , 8) (valid (route (0 , just 2) false 122 9 false ((8 , 4) ∷ (4 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 3)))
-  ≡ valid (route (0 , just 2) false 122 11 false ((3 , 8) ∷ (8 , 4) ∷ (4 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 0))
-_ = refl
-
-_ : extend (step true 4 0 false false true true 0 nothing (0 , just 3) (9 , 2) 1) (9 , 7) (valid (route (0 , just 2) false 255 9 false ((7 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0)))
-  ⊕ extend (step true 4 0 false false true true 0 nothing (0 , just 3) (9 , 2) 2) (9 , 3) (valid (route (0 , just 2) false 255 9 false ((3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0)))
-  ≡ invalid
-_ = refl
-
-_ : extend (step true 3 255 true false false true 1 nothing (1 , just 2) (9 , 2) 3) (9 , 8) (valid (route (0 , just 2) false 255 9 true ((8 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 0)))
-  ⊕ extend (step true 8 255 false false false false 0 nothing (1 , just 2) (9 , 2) 0) (9 , 4) (valid (route (0 , just 2) false 128 5 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 5)))
-  ≡ valid (route (0 , just 2) false 255 13 false ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 0))
+_ : extend (step true 1 255 true false false true 0 nothing (0 , just 2) (2 , 2) 7) (2 , 4) (valid (route (0 , just 2) true 127 8 true ((4 , 9) ∷ (9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 4)))
+  ⊕ extend (step true 1 255 true false false true 0 nothing (0 , just 2) (2 , 2) 8) (2 , 8) (valid (route (0 , just 2) true 127 8 true ((8 , 9) ∷ (9 , 5) ∷ (5 , 103) ∷ (103 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 4)))
+  ≡ valid (route (0 , just 2) true 255 9 true ((2 , 4) ∷ (4 , 9) ∷ (9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 7))
 _ = refl
 
 _ : extend (step true 7 255 false false false false 0 nothing (1 , just 0) (4 , 1) 0) (4 , 2) (valid (route (1 , just 0) false 122 6 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 2)))
@@ -1216,197 +1186,227 @@ _ : extend (step true 7 255 false false false false 0 nothing (1 , just 0) (4 , 
   ≡ valid (route (1 , just 0) false 255 10 false ((4 , 5) ∷ (5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 2 127 true false false true 1 nothing (2 , just 0) (2 , 2) 9) (2 , 4) (valid (route (0 , just 0) false 127 1 false ((4 , 8) ∷ (8 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 1)))
-  ⊕ extend (step true 2 255 false true true true 0 nothing (2 , just 0) (2 , 2) 8) (2 , 8) (valid (route (1 , just 1) false 127 1 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 6)))
-  ≡ valid (route (1 , just 1) false 255 3 true ((2 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 8))
+_ : extend (step true 7 255 true false false false 0 nothing (1 , just 1) (5 , 1) 0) (5 , 9) (valid (route (1 , just 1) false 127 1 false ((9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 6)))
+  ⊕ extend (step true 1 127 false false false true 0 nothing (1 , just 1) (5 , 1) 7) (5 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 1) false 127 1 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 7))
 _ = refl
 
-_ : extend (step true 7 0 true false false false 0 nothing (0 , just 2) (3 , 1) 0) (3 , 5) (valid (route (0 , just 2) false 255 10 false ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 6)))
-  ⊕ extend (step true 7 0 true false false false 0 nothing (0 , just 2) (3 , 1) 0) (3 , 7) (valid (route (0 , just 2) false 255 10 false ((7 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 6)))
-  ≡ valid (route (0 , just 2) true 255 17 false ((3 , 5) ∷ (5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0))
+_ : extend (step true 2 122 false false false true 0 nothing (0 , just 2) (2 , 2) 4) (2 , 9) (valid (route (0 , just 2) false 0 3 false ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 4)))
+  ⊕ extend (step true 4 127 false true false false 0 nothing (0 , just 2) (2 , 2) 0) (2 , 5) (valid (route (0 , just 0) false 127 8 false ((5 , 9) ∷ (9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 1)))
+  ≡ valid (route (0 , just 2) false 122 5 false ((2 , 9) ∷ (9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 4))
 _ = refl
 
-_ : extend (step true 4 255 true true false true 0 nothing (1 , just 1) (8 , 1) 6) (8 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 12 255 false true false false 0 nothing (1 , just 1) (8 , 1) 0) (8 , 9) (valid (route (1 , just 2) false 122 3 true ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 8)))
-  ≡ valid (route (0 , just 1) true 255 4 true ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 6))
+_ : extend (step true 8 122 false true false false 0 nothing (0 , just 0) (4 , 1) 0) (4 , 2) (valid (route (0 , just 0) false 122 1 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 1)))
+  ⊕ extend (step true 2 122 false true false false 0 nothing (0 , just 0) (4 , 1) 0) (4 , 3) (valid (route (0 , just 0) true 128 4 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 9)))
+  ≡ valid (route (0 , just 0) false 122 9 true ((4 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 4 122 false true false true 0 nothing (0 , just 2) (4 , 2) 8) (4 , 1) (valid (route (0 , just 2) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 4 0 false true false false 0 nothing (0 , just 2) (4 , 2) 0) (4 , 3) (valid (route (0 , just 1) false 127 11 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5)))
-  ≡ valid (route (0 , just 2) false 122 4 true ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 8))
+_ : extend (step true 4 0 false false false true 0 nothing (1 , just 2) (7 , 1) 2) (7 , 2) (valid (route (1 , just 2) false 127 6 true ((2 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 1) , 0)))
+  ⊕ extend (step true 2 122 false false false true 0 nothing (1 , just 2) (7 , 1) 8) (7 , 9) (valid (route (0 , just 2) true 0 1 true ((9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 8)))
+  ≡ valid (route (0 , just 2) true 122 3 true ((7 , 9) ∷ (9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 8))
 _ = refl
 
-_ : extend (step true 1 122 false false false true 0 nothing (1 , just 0) (6 , 2) 8) (6 , 9) (valid (route (1 , just 0) true 122 11 false ((9 , 7) ∷ (7 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0)))
-  ⊕ extend (step true 1 122 false false false true 0 nothing (1 , just 0) (6 , 2) 9) (6 , 3) (valid (route (1 , just 0) true 122 11 false ((3 , 7) ∷ (7 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0)))
-  ≡ valid (route (1 , just 0) true 122 12 false ((6 , 9) ∷ (9 , 7) ∷ (7 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 8))
+_ : extend (step true 6 122 false false false false 0 nothing (0 , just 2) (3 , 2) 0) (3 , 8) (valid (route (0 , just 2) false 128 3 true ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 2)))
+  ⊕ extend (step true 2 122 false true false true 0 nothing (0 , just 2) (3 , 2) 7) (3 , 1) (valid (route (0 , just 2) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 2) false 122 2 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 1) , 7))
 _ = refl
 
-_ : extend (step true 10 122 false false false false 0 nothing (0 , just 0) (8 , 2) 0) (8 , 4) (valid (route (0 , just 0) true 128 8 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 2)))
-  ⊕ extend (step true 1 255 true true false true 0 nothing (0 , just 0) (8 , 2) 3) (8 , 2) (valid (route (0 , just 2) true 255 19 true ((2 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 0)))
-  ≡ valid (route (0 , just 2) true 255 20 true ((8 , 2) ∷ (2 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 3))
+_ : extend (step true 2 127 true true false true 0 nothing (1 , just 0) (7 , 2) 6) (7 , 3) (valid (route (1 , just 0) false 255 4 false ((3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5)))
+  ⊕ extend (step true 3 127 false false false true 0 nothing (1 , just 0) (7 , 2) 5) (7 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 0) false 127 3 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 5))
 _ = refl
 
-_ : extend (step true 3 122 true false false false 0 nothing (1 , just 0) (2 , 2) 0) (2 , 8) (valid (route (1 , just 0) false 255 7 false ((8 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 6)))
-  ⊕ extend (step true 4 0 false true false true 1 nothing (1 , just 0) (2 , 2) 1) (2 , 8) (valid (route (0 , just 1) true 128 23 true ((8 , 4) ∷ (4 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 0)))
-  ≡ valid (route (1 , just 1) true 128 27 true ((2 , 8) ∷ (8 , 4) ∷ (4 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 1) , 1))
+_ : extend (step true 1 127 false false false false 0 nothing (0 , just 1) (5 , 1) 0) (5 , 8) (valid (route (0 , just 1) false 122 5 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 5)))
+  ⊕ extend (step true 10 122 false true false false 0 nothing (0 , just 1) (5 , 1) 0) (5 , 6) (valid (route (1 , just 1) false 255 4 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 9)))
+  ≡ valid (route (0 , just 1) false 127 6 false ((5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 6 127 false false false false 0 nothing (1 , just 2) (4 , 1) 0) (4 , 3) (valid (route (1 , just 2) false 0 10 false ((3 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 6)))
-  ⊕ extend (step true 4 255 false false false true 0 nothing (1 , just 2) (4 , 1) 9) (4 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 1) false 255 4 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 9))
+_ : extend (step true 2 128 false true false false 0 nothing (0 , just 1) (2 , 1) 0) (2 , 7) (valid (route (0 , just 1) false 255 7 true ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 1) , 9)))
+  ⊕ extend (step true 2 128 false true false false 0 nothing (0 , just 1) (2 , 1) 0) (2 , 8) (valid (route (0 , just 1) false 255 7 true ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 9)))
+  ≡ valid (route (0 , just 1) false 255 9 true ((2 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 1) , 0))
 _ = refl
 
-_ : extend (step true 2 127 true false true true 0 nothing (1 , just 1) (2 , 2) 9) (2 , 3) (valid (route (0 , just 0) true 255 16 true ((3 , 7) ∷ (7 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 0)))
-  ⊕ extend (step true 3 127 false false false true 0 nothing (1 , just 1) (2 , 2) 4) (2 , 1) (valid (route (0 , just 2) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 127 3 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 4))
+_ : extend (step true 3 127 false false false true 1 nothing (2 , just 0) (7 , 1) 4) (7 , 8) (valid (route (1 , just 0) true 128 13 true ((8 , 5) ∷ (5 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 0)))
+  ⊕ extend (step true 1 128 false true true true 0 nothing (2 , just 0) (7 , 1) 8) (7 , 5) (valid (route (0 , just 0) true 255 2 false ((5 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 7)))
+  ≡ valid (route (0 , just 0) true 255 3 true ((7 , 5) ∷ (5 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 8))
 _ = refl
 
-_ : extend (step true 3 255 false false false true 0 nothing (1 , just 0) (5 , 2) 7) (5 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 3 128 false true false true 0 nothing (1 , just 0) (5 , 2) 9) (5 , 6) (valid (route (1 , just 0) true 255 8 true ((6 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 5)))
-  ≡ valid (route (0 , just 0) false 255 3 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 7))
+_ : extend (step true 6 127 false false false false 0 nothing (0 , just 0) (6 , 2) 0) (6 , 4) (valid (route (0 , just 0) true 0 2 true ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 8)))
+  ⊕ extend (step true 6 127 false false false false 0 nothing (0 , just 0) (6 , 2) 0) (6 , 7) (valid (route (0 , just 0) true 0 2 true ((7 , 160) ∷ (160 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 8)))
+  ≡ valid (route (0 , just 0) true 127 8 true ((6 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 0))
 _ = refl
 
-_ : extend (step true 2 127 false false false true 0 nothing (0 , just 1) (5 , 1) 9) (5 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 11 127 true false false false 0 nothing (0 , just 1) (5 , 1) 0) (5 , 2) (valid (route (0 , just 0) false 255 4 true ((2 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 9)))
-  ≡ valid (route (0 , just 1) false 127 2 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 9))
+_ : extend (step true 1 122 false true false true 0 nothing (1 , just 0) (6 , 2) 3) (6 , 5) (valid (route (0 , just 0) false 128 8 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 2)))
+  ⊕ extend (step true 1 122 false false false false 0 nothing (1 , just 0) (6 , 2) 0) (6 , 4) (valid (route (1 , just 2) false 122 9 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 7)))
+  ≡ valid (route (0 , just 0) false 128 9 true ((6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 3))
 _ = refl
 
-_ : extend (step true 7 127 false false false false 0 nothing (0 , just 0) (2 , 2) 0) (2 , 5) (valid (route (0 , just 0) false 127 1 true ((5 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 1)))
-  ⊕ extend (step true 10 127 false true false false 0 nothing (0 , just 0) (2 , 2) 0) (2 , 3) (valid (route (1 , just 1) false 127 10 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 1) , 4)))
-  ≡ valid (route (0 , just 0) false 127 8 true ((2 , 5) ∷ (5 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 0))
-_ = refl
-
-_ : extend (step true 1 255 true true false true 0 nothing (0 , just 0) (8 , 1) 1) (8 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 1 0 false true false true 1 nothing (0 , just 0) (8 , 1) 3) (8 , 9) (valid (route (1 , just 0) false 255 9 false ((9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
-  ≡ valid (route (0 , just 0) true 255 1 true ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 1) , 1))
-_ = refl
-
-_ : extend (step true 11 0 false false false false 0 nothing (0 , just 2) (8 , 2) 0) (8 , 9) (valid (route (1 , just 2) false 127 3 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 8)))
-  ⊕ extend (step true 11 0 false false false false 0 nothing (0 , just 2) (8 , 2) 0) (8 , 3) (valid (route (1 , just 2) false 127 3 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 8)))
+_ : extend (step true 4 0 false false false true 0 nothing (0 , just 2) (5 , 1) 5) (5 , 8) (valid (route (0 , just 1) false 128 9 false ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 3)))
+  ⊕ extend (step true 4 0 false false false true 0 nothing (0 , just 2) (5 , 1) 6) (5 , 9) (valid (route (0 , just 1) false 128 9 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 3)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 3 128 false true false false 0 nothing (0 , just 1) (2 , 1) 0) (2 , 6) (valid (route (0 , just 0) false 128 5 false ((6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 7)))
-  ⊕ extend (step true 9 0 true false false false 0 nothing (0 , just 1) (2 , 1) 0) (2 , 8) (valid (route (1 , just 1) false 255 1 false ((8 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 1)))
+_ : extend (step true 9 127 true true false false 0 nothing (0 , just 0) (6 , 2) 0) (6 , 7) (valid (route (0 , just 0) false 255 10 true ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 1) , 7)))
+  ⊕ extend (step true 2 128 true false false false 0 nothing (0 , just 0) (6 , 2) 0) (6 , 4) (valid (route (0 , just 1) false 128 11 true ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 1)))
+  ≡ valid (route (0 , just 1) true 128 13 true ((6 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 0))
+_ = refl
+
+_ : extend (step true 12 128 false false false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 5) (valid (route (0 , just 1) false 122 7 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 4)))
+  ⊕ extend (step true 12 128 false true false false 0 nothing (0 , just 1) (6 , 2) 0) (6 , 3) (valid (route (0 , just 1) false 122 7 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 4)))
+  ≡ valid (route (0 , just 1) false 128 19 false ((6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 2 128 false true true true 0 nothing (1 , just 0) (3 , 1) 7) (3 , 6) (valid (route (0 , just 2) false 255 1 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 5)))
+  ⊕ extend (step true 2 128 false false true true 0 nothing (1 , just 0) (3 , 1) 8) (3 , 7) (valid (route (0 , just 2) false 255 1 true ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 5)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 12 122 false true false false 0 nothing (0 , just 2) (9 , 1) 0) (9 , 2) (valid (route (0 , just 2) false 0 5 true ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 7)))
-  ⊕ extend (step true 1 0 false false false true 1 nothing (0 , just 2) (9 , 1) 2) (9 , 3) (valid (route (0 , just 1) false 255 19 true ((3 , 6) ∷ (6 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
-  ≡ valid (route (0 , just 2) false 122 17 true ((9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0))
-_ = refl
-
-_ : extend (step true 1 0 true false false false 0 nothing (0 , just 1) (9 , 1) 0) (9 , 4) (valid (route (0 , just 1) false 255 9 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 6)))
-  ⊕ extend (step true 2 128 true true false true 0 nothing (0 , just 1) (9 , 1) 1) (9 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 1) true 255 10 false ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 0))
-_ = refl
-
-_ : extend (step true 2 0 false true false false 0 nothing (0 , just 0) (2 , 1) 0) (2 , 3) (valid (route (0 , just 0) false 122 5 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 1)))
-  ⊕ extend (step true 2 0 false true false false 0 nothing (0 , just 0) (2 , 1) 0) (2 , 7) (valid (route (0 , just 0) false 122 5 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
-  ≡ valid (route (0 , just 0) false 122 7 true ((2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 0))
-_ = refl
-
-_ : extend (step true 4 255 false false false true 0 nothing (1 , just 0) (9 , 2) 3) (9 , 7) (valid (route (1 , just 0) false 128 9 false ((7 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
-  ⊕ extend (step true 10 128 false false false false 0 nothing (1 , just 0) (9 , 2) 0) (9 , 8) (valid (route (0 , just 1) true 127 2 false ((8 , 50) ∷ (50 , 31) ∷ (31 , 19) ∷ (19 , 25) ∷ (25 , 17) ∷ (17 , 38) ∷ (38 , 39) ∷ (39 , 13) ∷ (13 , 10) ∷ (10 , 45) ∷ (45 , 55) ∷ (55 , 11) ∷ (11 , 36) ∷ (36 , 33) ∷ (33 , 60) ∷ (60 , 21) ∷ (21 , 51) ∷ (51 , 18) ∷ (18 , 61) ∷ (61 , 41) ∷ (41 , 4) ∷ (4 , 56) ∷ (56 , 14) ∷ (14 , 54) ∷ (54 , 30) ∷ (30 , 44) ∷ (44 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 3)))
-  ≡ valid (route (0 , just 1) true 128 12 false ((9 , 8) ∷ (8 , 50) ∷ (50 , 31) ∷ (31 , 19) ∷ (19 , 25) ∷ (25 , 17) ∷ (17 , 38) ∷ (38 , 39) ∷ (39 , 13) ∷ (13 , 10) ∷ (10 , 45) ∷ (45 , 55) ∷ (55 , 11) ∷ (11 , 36) ∷ (36 , 33) ∷ (33 , 60) ∷ (60 , 21) ∷ (21 , 51) ∷ (51 , 18) ∷ (18 , 61) ∷ (61 , 41) ∷ (41 , 4) ∷ (4 , 56) ∷ (56 , 14) ∷ (14 , 54) ∷ (54 , 30) ∷ (30 , 44) ∷ (44 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 0))
-_ = refl
-
-_ : extend (step true 11 255 true false false false 0 nothing (0 , just 3) (4 , 2) 0) (4 , 2) (valid (route (0 , just 2) false 0 11 false ((2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 8)))
-  ⊕ extend (step true 2 127 false false false false 0 nothing (0 , just 3) (4 , 2) 0) (4 , 2) (valid (route (1 , just 0) false 255 8 false ((2 , 8) ∷ (8 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 7)))
+_ : extend (step true 2 0 true false true true 1 nothing (0 , just 0) (5 , 1) 9) (5 , 4) (valid (route (0 , just 2) false 127 7 true ((4 , 8) ∷ (8 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 0) , 0)))
+  ⊕ extend (step true 2 0 false true false false 0 nothing (0 , just 0) (5 , 1) 0) (5 , 3) (valid (route (1 , just 0) false 255 8 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 7)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 4 122 false false true true 1 nothing (1 , just 1) (5 , 2) 1) (5 , 7) (valid (route (0 , just 2) false 255 9 true ((7 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 0)))
-  ⊕ extend (step true 10 122 false false false false 0 nothing (1 , just 1) (5 , 2) 0) (5 , 6) (valid (route (0 , just 1) false 255 5 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 5)))
-  ≡ valid (route (0 , just 1) false 255 15 false ((5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0))
+_ : extend (step true 10 255 true false false false 0 nothing (1 , just 1) (2 , 1) 0) (2 , 5) (valid (route (1 , just 1) false 128 7 false ((5 , 9) ∷ (9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 6)))
+  ⊕ extend (step true 10 255 true false false false 0 nothing (1 , just 1) (2 , 1) 0) (2 , 7) (valid (route (1 , just 1) false 128 7 false ((7 , 9) ∷ (9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 6)))
+  ≡ valid (route (1 , just 1) true 255 17 false ((2 , 5) ∷ (5 , 9) ∷ (9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 10 122 true false false false 0 nothing (0 , just 0) (5 , 2) 0) (5 , 9) (valid (route (1 , just 0) false 0 8 true ((9 , 6) ∷ (6 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 1) , 4)))
-  ⊕ extend (step true 10 255 false false false false 0 nothing (0 , just 0) (5 , 2) 0) (5 , 2) (valid (route (0 , just 2) true 122 8 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 5)))
-  ≡ valid (route (0 , just 2) true 255 18 false ((5 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0))
+_ : extend (step true 2 127 true true false true 0 nothing (0 , just 0) (6 , 2) 2) (6 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ⊕ extend (step true 9 122 false true false false 0 nothing (0 , just 0) (6 , 2) 0) (6 , 7) (valid (route (1 , just 2) false 0 6 false ((7 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 5)))
+  ≡ valid (route (0 , just 0) true 127 2 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 2))
 _ = refl
 
-_ : extend (step true 3 128 false true false true 0 nothing (0 , just 1) (7 , 2) 7) (7 , 8) (valid (route (0 , just 1) true 122 13 false ((8 , 5) ∷ (5 , 49) ∷ (49 , 32) ∷ (32 , 11) ∷ (11 , 38) ∷ (38 , 23) ∷ (23 , 28) ∷ (28 , 53) ∷ (53 , 58) ∷ (58 , 54) ∷ (54 , 25) ∷ (25 , 46) ∷ (46 , 17) ∷ (17 , 4) ∷ (4 , 44) ∷ (44 , 18) ∷ (18 , 30) ∷ (30 , 15) ∷ (15 , 59) ∷ (59 , 48) ∷ (48 , 29) ∷ (29 , 51) ∷ (51 , 42) ∷ (42 , 9) ∷ (9 , 47) ∷ (47 , 39) ∷ (39 , 57) ∷ (57 , 27) ∷ (27 , 36) ∷ (36 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 0)))
-  ⊕ extend (step true 3 122 true true false true 0 nothing (0 , just 1) (7 , 2) 5) (7 , 9) (valid (route (0 , just 2) false 255 2 false ((9 , 10) ∷ (10 , 8) ∷ (8 , 2) ∷ (2 , 4) ∷ (4 , 55) ∷ (55 , 20) ∷ (20 , 51) ∷ (51 , 46) ∷ (46 , 22) ∷ (22 , 45) ∷ (45 , 34) ∷ (34 , 14) ∷ (14 , 47) ∷ (47 , 35) ∷ (35 , 41) ∷ (41 , 33) ∷ (33 , 56) ∷ (56 , 13) ∷ (13 , 61) ∷ (61 , 53) ∷ (53 , 26) ∷ (26 , 3) ∷ (3 , 5) ∷ (5 , 60) ∷ (60 , 57) ∷ (57 , 31) ∷ (31 , 29) ∷ (29 , 52) ∷ (52 , 30) ∷ (30 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 3)))
-  ≡ valid (route (0 , just 2) true 255 5 true ((7 , 9) ∷ (9 , 10) ∷ (10 , 8) ∷ (8 , 2) ∷ (2 , 4) ∷ (4 , 55) ∷ (55 , 20) ∷ (20 , 51) ∷ (51 , 46) ∷ (46 , 22) ∷ (22 , 45) ∷ (45 , 34) ∷ (34 , 14) ∷ (14 , 47) ∷ (47 , 35) ∷ (35 , 41) ∷ (41 , 33) ∷ (33 , 56) ∷ (56 , 13) ∷ (13 , 61) ∷ (61 , 53) ∷ (53 , 26) ∷ (26 , 3) ∷ (3 , 5) ∷ (5 , 60) ∷ (60 , 57) ∷ (57 , 31) ∷ (31 , 29) ∷ (29 , 52) ∷ (52 , 30) ∷ (30 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 1) , 5))
+_ : extend (step true 3 127 false false false false 0 nothing (1 , just 2) (9 , 1) 0) (9 , 2) (valid (route (1 , just 2) false 128 5 false ((2 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 1)))
+  ⊕ extend (step true 10 255 true false false false 0 nothing (1 , just 2) (9 , 1) 0) (9 , 4) (valid (route (1 , just 0) false 0 9 false ((4 , 5) ∷ (5 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 1)))
+  ≡ valid (route (1 , just 2) false 128 8 false ((9 , 2) ∷ (2 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 3 122 false false false true 1 nothing (1 , just 2) (2 , 1) 2) (2 , 8) (valid (route (0 , just 2) false 255 11 false ((8 , 3) ∷ (3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0)))
-  ⊕ extend (step true 1 127 true false false true 0 nothing (1 , just 2) (2 , 1) 9) (2 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ≡ valid (route (0 , just 1) true 127 1 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 9))
+_ : extend (step true 3 127 false true false false 0 nothing (1 , just 0) (3 , 1) 0) (3 , 5) (valid (route (1 , just 0) false 255 8 true ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 2)))
+  ⊕ extend (step true 3 127 false true false false 0 nothing (1 , just 0) (3 , 1) 0) (3 , 8) (valid (route (1 , just 0) false 255 8 true ((8 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 2)))
+  ≡ valid (route (1 , just 0) false 255 11 true ((3 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 0))
 _ = refl
 
-_ : extend (step true 4 127 true false false true 0 nothing (1 , just 0) (3 , 2) 1) (3 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 3 255 true true true true 0 nothing (1 , just 0) (3 , 2) 4) (3 , 6) (valid (route (1 , just 2) false 255 6 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 4)))
-  ≡ valid (route (0 , just 0) true 127 4 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 1))
+_ : extend (step true 2 128 false false false false 0 nothing (0 , just 1) (9 , 2) 0) (9 , 2) (valid (route (0 , just 1) false 0 0 true ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 6)))
+  ⊕ extend (step true 10 128 true false false false 0 nothing (0 , just 1) (9 , 2) 0) (9 , 4) (valid (route (1 , just 0) true 122 5 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 5)))
+  ≡ valid (route (0 , just 1) false 128 2 true ((9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 0))
 _ = refl
 
-_ : extend (step true 10 255 false false false false 0 nothing (1 , just 0) (2 , 1) 0) (2 , 6) (valid (route (1 , just 0) false 255 2 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 8)))
-  ⊕ extend (step true 10 255 false false false false 0 nothing (1 , just 0) (2 , 1) 0) (2 , 3) (valid (route (1 , just 0) false 255 2 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 8)))
-  ≡ valid (route (1 , just 0) false 255 12 false ((2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
+_ : extend (step true 3 122 true false false true 1 nothing (3 , just 0) (6 , 2) 6) (6 , 9) (valid (route (1 , just 0) true 128 11 false ((9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0)))
+  ⊕ extend (step true 3 122 true false false true 1 nothing (3 , just 0) (6 , 2) 7) (6 , 4) (valid (route (1 , just 0) true 128 11 false ((4 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0)))
+  ≡ valid (route (2 , just 0) true 128 14 false ((6 , 9) ∷ (9 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 6))
 _ = refl
 
-_ : extend (step true 1 0 false false false true 1 nothing (2 , just 0) (3 , 2) 1) (3 , 7) (valid (route (1 , just 0) false 128 10 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 8)))
-  ⊕ extend (step true 3 127 false false false true 0 nothing (2 , just 0) (3 , 2) 5) (3 , 9) (valid (route (1 , just 1) false 255 4 false ((9 , 5) ∷ (5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 3)))
-  ≡ valid (route (1 , just 1) false 255 7 false ((3 , 9) ∷ (9 , 5) ∷ (5 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5))
+_ : extend (step true 1 122 false true false false 0 nothing (1 , just 2) (2 , 1) 0) (2 , 7) (valid (route (1 , just 2) false 127 4 false ((7 , 6) ∷ (6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 5)))
+  ⊕ extend (step true 7 0 false false false false 0 nothing (1 , just 2) (2 , 1) 0) (2 , 5) (valid (route (1 , just 2) false 122 1 false ((5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 5)))
+  ≡ valid (route (1 , just 2) false 122 8 false ((2 , 5) ∷ (5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 3 0 true false false false 0 nothing (0 , just 1) (6 , 1) 0) (6 , 2) (valid (route (0 , just 1) false 128 11 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 3)))
-  ⊕ extend (step true 1 127 false false false true 0 nothing (0 , just 1) (6 , 1) 7) (6 , 4) (valid (route (0 , just 0) false 0 0 true ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 9)))
-  ≡ valid (route (0 , just 1) true 128 14 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0))
+_ : extend (step true 7 255 true true false false 0 nothing (1 , just 1) (9 , 1) 0) (9 , 5) (valid (route (0 , just 1) false 128 7 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 1)))
+  ⊕ extend (step true 10 122 false false false false 0 nothing (1 , just 1) (9 , 1) 0) (9 , 6) (valid (route (0 , just 1) false 255 5 false ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 5)))
+  ≡ valid (route (0 , just 1) false 255 15 false ((9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0))
 _ = refl
 
-_ : extend (step true 7 255 false false false false 0 nothing (0 , just 2) (2 , 2) 0) (2 , 9) (valid (route (1 , just 2) true 255 9 true ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 1) , 1)))
-  ⊕ extend (step true 4 122 false true false true 0 nothing (0 , just 2) (2 , 2) 4) (2 , 8) (valid (route (1 , just 2) false 127 18 true ((8 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 1) , 0)))
+_ : extend (step true 1 128 false true false true 1 nothing (2 , just 1) (4 , 2) 4) (4 , 7) (valid (route (0 , just 1) false 0 11 true ((7 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 5)))
+  ⊕ extend (step true 1 128 false true false true 1 nothing (2 , just 1) (4 , 2) 5) (4 , 3) (valid (route (0 , just 1) false 0 11 true ((3 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 1) , 5)))
+  ≡ valid (route (1 , just 1) false 128 12 true ((4 , 7) ∷ (7 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 4))
+_ = refl
+
+_ : extend (step true 2 0 false false false false 0 nothing (1 , just 0) (3 , 1) 0) (3 , 7) (valid (route (0 , just 0) false 128 10 false ((7 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 1)))
+  ⊕ extend (step true 1 128 true false true true 1 nothing (1 , just 0) (3 , 1) 4) (3 , 5) (valid (route (1 , just 1) true 122 1 true ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 2)))
+  ≡ valid (route (0 , just 0) false 128 12 false ((3 , 7) ∷ (7 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 0))
+_ = refl
+
+_ : extend (step true 3 128 false false false true 1 nothing (1 , just 0) (5 , 1) 8) (5 , 9) (valid (route (0 , just 0) false 127 1 false ((9 , 2) ∷ (2 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 4)))
+  ⊕ extend (step true 3 128 false false false true 1 nothing (1 , just 0) (5 , 1) 9) (5 , 6) (valid (route (0 , just 0) false 127 1 false ((6 , 2) ∷ (2 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 4)))
+  ≡ valid (route (1 , just 0) false 128 4 false ((5 , 9) ∷ (9 , 2) ∷ (2 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 8))
+_ = refl
+
+_ : extend (step true 8 0 true true false false 0 nothing (1 , just 0) (2 , 2) 0) (2 , 5) (valid (route (1 , just 0) false 255 0 true ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 1)))
+  ⊕ extend (step true 8 0 true true false false 0 nothing (1 , just 0) (2 , 2) 0) (2 , 6) (valid (route (1 , just 0) false 255 0 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 1)))
+  ≡ valid (route (1 , just 0) true 255 8 true ((2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 1) , 0))
+_ = refl
+
+_ : extend (step true 2 122 false false false true 0 nothing (1 , just 1) (3 , 1) 1) (3 , 4) (valid (route (1 , just 1) true 122 7 false ((4 , 9) ∷ (9 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0)))
+  ⊕ extend (step true 2 122 false false false true 0 nothing (1 , just 1) (3 , 1) 2) (3 , 2) (valid (route (1 , just 1) true 122 7 false ((2 , 9) ∷ (9 , 8) ∷ (8 , 110) ∷ (110 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0)))
+  ≡ valid (route (1 , just 1) true 122 9 false ((3 , 4) ∷ (4 , 9) ∷ (9 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 1))
+_ = refl
+
+_ : extend (step true 2 255 true true false true 0 nothing (0 , just 0) (2 , 2) 5) (2 , 5) (valid (route (0 , just 0) false 128 4 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 1)))
+  ⊕ extend (step true 4 255 false false false true 0 nothing (0 , just 0) (2 , 2) 1) (2 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ≡ valid (route (0 , just 0) false 255 4 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 1))
+_ = refl
+
+_ : extend (step true 2 0 false false false true 0 nothing (0 , just 0) (5 , 2) 7) (5 , 3) (valid (route (1 , just 0) false 0 2 true ((3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 6)))
+  ⊕ extend (step true 2 0 false false false true 0 nothing (0 , just 0) (5 , 2) 8) (5 , 8) (valid (route (1 , just 0) false 0 2 true ((8 , 4) ∷ (4 , 140) ∷ (140 , 1) ∷ (1 , 0) ∷ []) ((8 , 2 , 1) , 6)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 3 127 false false false false 0 nothing (1 , just 1) (2 , 2) 0) (2 , 3) (valid (route (1 , just 1) true 255 6 true ((3 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 9)))
-  ⊕ extend (step true 9 127 false false false false 0 nothing (1 , just 1) (2 , 2) 0) (2 , 6) (valid (route (0 , just 2) false 122 3 true ((6 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 5)))
-  ≡ valid (route (0 , just 2) false 127 12 true ((2 , 6) ∷ (6 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 1) , 0))
-_ = refl
-
-_ : extend (step true 4 122 true false false true 1 nothing (1 , just 2) (8 , 2) 7) (8 , 5) (valid (route (1 , just 2) true 127 1 true ((5 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 1) , 8)))
-  ⊕ extend (step true 4 122 true false false true 1 nothing (1 , just 2) (8 , 2) 8) (8 , 7) (valid (route (1 , just 2) true 127 1 true ((7 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 8)))
+_ : extend (step true 4 122 false true true true 0 nothing (0 , just 1) (2 , 2) 3) (2 , 7) (valid (route (0 , just 0) false 128 7 true ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 5)))
+  ⊕ extend (step true 4 122 false true true true 0 nothing (0 , just 1) (2 , 2) 4) (2 , 3) (valid (route (0 , just 0) false 128 7 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 5)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 2 128 false false true true 0 nothing (1 , just 2) (2 , 1) 2) (2 , 5) (valid (route (0 , just 2) false 128 17 true ((5 , 6) ∷ (6 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
-  ⊕ extend (step true 2 128 false false true true 0 nothing (1 , just 2) (2 , 1) 3) (2 , 8) (valid (route (0 , just 2) false 128 17 true ((8 , 6) ∷ (6 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((6 , 2 , 0) , 0)))
+_ : extend (step true 9 127 false false false false 0 nothing (1 , just 1) (3 , 2) 0) (3 , 7) (valid (route (1 , just 1) false 0 4 false ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 0) , 7)))
+  ⊕ extend (step true 9 127 false false false false 0 nothing (1 , just 1) (3 , 2) 0) (3 , 2) (valid (route (1 , just 1) false 0 4 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 7)))
+  ≡ valid (route (1 , just 1) false 127 13 false ((3 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0))
+_ = refl
+
+_ : extend (step true 3 122 false false false true 1 nothing (0 , just 1) (4 , 1) 4) (4 , 6) (valid (route (0 , just 1) true 128 14 false ((6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 0) , 0)))
+  ⊕ extend (step true 8 122 false true false false 0 nothing (0 , just 1) (4 , 1) 0) (4 , 3) (valid (route (0 , just 0) false 255 5 true ((3 , 40) ∷ (40 , 43) ∷ (43 , 52) ∷ (52 , 58) ∷ (58 , 8) ∷ (8 , 51) ∷ (51 , 32) ∷ (32 , 12) ∷ (12 , 29) ∷ (29 , 2) ∷ (2 , 7) ∷ (7 , 35) ∷ (35 , 37) ∷ (37 , 28) ∷ (28 , 9) ∷ (9 , 19) ∷ (19 , 13) ∷ (13 , 53) ∷ (53 , 17) ∷ (17 , 56) ∷ (56 , 45) ∷ (45 , 31) ∷ (31 , 59) ∷ (59 , 54) ∷ (54 , 16) ∷ (16 , 34) ∷ (34 , 50) ∷ (50 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 6)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 1 0 false true false true 1 nothing (0 , just 2) (2 , 1) 8) (2 , 4) (valid (route (0 , just 2) false 128 7 true ((4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 5)))
-  ⊕ extend (step true 4 255 false true false true 0 nothing (0 , just 2) (2 , 1) 6) (2 , 9) (valid (route (1 , just 0) false 122 10 false ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 3)))
+_ : extend (step true 3 0 false true false true 0 nothing (0 , just 1) (2 , 1) 9) (2 , 1) (valid (route (0 , just 1) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
+  ⊕ extend (step true 1 0 false true false false 0 nothing (0 , just 1) (2 , 1) 0) (2 , 6) (valid (route (0 , just 2) false 127 5 false ((6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 6)))
+  ≡ valid (route (0 , just 2) false 127 6 true ((2 , 6) ∷ (6 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0))
+_ = refl
+
+_ : extend (step true 7 0 false false false false 0 nothing (0 , just 0) (6 , 2) 0) (6 , 2) (valid (route (1 , just 0) false 128 10 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 7)))
+  ⊕ extend (step true 7 0 false false false false 0 nothing (0 , just 0) (6 , 2) 0) (6 , 8) (valid (route (1 , just 0) false 128 10 false ((8 , 115) ∷ (115 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 7)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 4 122 false true false true 0 nothing (1 , just 1) (3 , 1) 5) (3 , 2) (valid (route (1 , just 1) false 0 5 true ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 2)))
-  ⊕ extend (step true 4 122 false true false true 0 nothing (1 , just 1) (3 , 1) 6) (3 , 6) (valid (route (1 , just 1) false 0 5 true ((6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 2)))
-  ≡ valid (route (1 , just 1) false 122 9 true ((3 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 5))
+_ : extend (step true 2 127 false true false false 0 nothing (1 , just 2) (3 , 2) 0) (3 , 7) (valid (route (1 , just 2) false 128 2 true ((7 , 1) ∷ (1 , 0) ∷ []) ((7 , 1 , 1) , 7)))
+  ⊕ extend (step true 7 122 false false false false 0 nothing (1 , just 2) (3 , 2) 0) (3 , 4) (valid (route (0 , just 1) false 0 5 true ((4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 2)))
+  ≡ valid (route (0 , just 1) false 122 12 true ((3 , 4) ∷ (4 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 1) , 0))
 _ = refl
 
-_ : extend (step true 4 127 false true false true 0 nothing (0 , just 0) (4 , 1) 2) (4 , 5) (valid (route (0 , just 0) false 127 21 false ((5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 0) , 0)))
-  ⊕ extend (step true 1 122 false false false true 1 nothing (0 , just 0) (4 , 1) 7) (4 , 3) (valid (route (1 , just 0) false 128 2 true ((3 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 8)))
-  ≡ valid (route (0 , just 0) false 127 25 true ((4 , 5) ∷ (5 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 2))
+_ : extend (step true 8 122 false true false false 0 nothing (1 , just 1) (8 , 2) 0) (8 , 4) (valid (route (1 , just 1) false 0 6 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 2)))
+  ⊕ extend (step true 8 122 false true false false 0 nothing (1 , just 1) (8 , 2) 0) (8 , 9) (valid (route (1 , just 1) false 0 6 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 2)))
+  ≡ valid (route (1 , just 1) false 122 14 true ((8 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 0) , 0))
 _ = refl
 
-_ : extend (step true 2 128 false true false true 0 nothing (0 , just 1) (4 , 2) 8) (4 , 1) (valid (route (0 , just 0) false 0 0 false ((1 , 0) ∷ []) ((0 , 0 , 0) , 0)))
-  ⊕ extend (step true 5 127 false true false false 0 nothing (0 , just 1) (4 , 2) 0) (4 , 9) (valid (route (1 , just 2) true 122 11 false ((9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 5)))
+_ : extend (step true 3 122 false false false true 1 nothing (1 , just 1) (6 , 1) 9) (6 , 2) (valid (route (1 , just 1) true 122 10 false ((2 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 3)))
+  ⊕ extend (step true 9 0 true true false false 0 nothing (1 , just 1) (6 , 1) 0) (6 , 3) (valid (route (0 , just 2) false 0 3 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 2)))
+  ≡ valid (route (0 , just 2) true 0 12 true ((6 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 0))
+_ = refl
+
+_ : extend (step true 4 255 false true false false 0 nothing (0 , just 1) (3 , 2) 0) (3 , 5) (valid (route (0 , just 0) true 0 8 false ((5 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 1)))
+  ⊕ extend (step true 4 255 false true false false 0 nothing (0 , just 1) (3 , 2) 0) (3 , 9) (valid (route (0 , just 0) true 0 8 false ((9 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 1)))
   ≡ invalid
 _ = refl
 
-_ : extend (step true 3 122 false true false false 0 nothing (0 , just 1) (7 , 1) 0) (7 , 2) (valid (route (0 , just 0) false 127 4 true ((2 , 9) ∷ (9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((2 , 1 , 1) , 7)))
-  ⊕ extend (step true 6 255 false false false false 0 nothing (0 , just 1) (7 , 1) 0) (7 , 5) (valid (route (0 , just 1) false 128 4 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 4)))
-  ≡ valid (route (0 , just 1) false 255 10 false ((7 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 0))
+_ : extend (step true 1 0 false false false true 1 nothing (2 , just 2) (9 , 1) 9) (9 , 5) (valid (route (1 , just 2) true 122 7 false ((5 , 1) ∷ (1 , 0) ∷ []) ((5 , 1 , 0) , 2)))
+  ⊕ extend (step true 1 0 false true false true 1 nothing (2 , just 2) (9 , 1) 1) (9 , 4) (valid (route (1 , just 2) true 122 7 false ((4 , 1) ∷ (1 , 0) ∷ []) ((4 , 2 , 0) , 2)))
+  ≡ valid (route (2 , just 2) true 122 8 false ((9 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 9))
 _ = refl
 
-_ : extend (step true 4 255 false false true true 1 nothing (2 , just 1) (9 , 1) 6) (9 , 2) (valid (route (1 , just 1) true 128 2 false ((2 , 7) ∷ (7 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 3)))
-  ⊕ extend (step true 7 127 true false false false 0 nothing (2 , just 1) (9 , 1) 0) (9 , 3) (valid (route (0 , just 0) true 127 10 false ((3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 5)))
-  ≡ valid (route (0 , just 0) true 127 17 false ((9 , 3) ∷ (3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((3 , 2 , 0) , 0))
+_ : extend (step true 11 127 false false false false 0 nothing (0 , just 0) (8 , 2) 0) (8 , 3) (valid (route (1 , just 0) false 122 3 false ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 0) , 7)))
+  ⊕ extend (step true 11 127 false false false false 0 nothing (0 , just 0) (8 , 2) 0) (8 , 7) (valid (route (1 , just 0) false 122 3 false ((7 , 192) ∷ (192 , 1) ∷ (1 , 0) ∷ []) ((7 , 2 , 0) , 7)))
+  ≡ invalid
 _ = refl
 
-_ : extend (step true 1 0 false false false true 1 nothing (1 , just 2) (5 , 2) 9) (5 , 8) (valid (route (0 , just 2) false 127 11 false ((8 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((9 , 1 , 0) , 0)))
-  ⊕ extend (step true 1 127 false false true true 0 nothing (1 , just 2) (5 , 2) 8) (5 , 7) (valid (route (1 , just 0) true 128 17 true ((7 , 6) ∷ (6 , 2) ∷ (2 , 1) ∷ (1 , 0) ∷ []) ((6 , 1 , 1) , 0)))
-  ≡ valid (route (1 , just 2) false 127 12 false ((5 , 8) ∷ (8 , 9) ∷ (9 , 1) ∷ (1 , 0) ∷ []) ((5 , 2 , 0) , 9))
+_ : extend (step true 4 255 true false false false 0 nothing (0 , just 2) (2 , 2) 0) (2 , 3) (valid (route (0 , just 2) false 255 1 true ((3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 6)))
+  ⊕ extend (step true 1 128 true true false false 0 nothing (0 , just 2) (2 , 2) 0) (2 , 9) (valid (route (1 , just 2) true 255 11 false ((9 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 5)))
+  ≡ valid (route (0 , just 2) true 255 5 true ((2 , 3) ∷ (3 , 1) ∷ (1 , 0) ∷ []) ((3 , 1 , 1) , 0))
+_ = refl
+
+_ : extend (step true 4 122 false false true true 1 nothing (1 , just 0) (5 , 1) 1) (5 , 2) (valid (route (1 , just 0) false 128 8 false ((2 , 8) ∷ (8 , 1) ∷ (1 , 0) ∷ []) ((8 , 1 , 0) , 0)))
+  ⊕ extend (step true 4 0 true false false false 0 nothing (1 , just 0) (5 , 1) 0) (5 , 2) (valid (route (0 , just 1) false 122 0 false ((2 , 3) ∷ (3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 8)))
+  ≡ valid (route (0 , just 1) true 122 4 false ((5 , 2) ∷ (2 , 3) ∷ (3 , 4) ∷ (4 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 0))
+_ = refl
+
+_ : extend (step true 1 255 false true true true 1 nothing (3 , just 2) (4 , 1) 1) (4 , 8) (valid (route (1 , just 2) true 122 8 false ((8 , 9) ∷ (9 , 6) ∷ (6 , 1) ∷ (1 , 0) ∷ []) ((9 , 2 , 0) , 0)))
+  ⊕ extend (step true 1 128 false true true true 0 nothing (3 , just 2) (4 , 1) 5) (4 , 2) (valid (route (1 , just 2) false 128 9 false ((2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((2 , 2 , 0) , 9)))
+  ≡ valid (route (1 , just 2) false 128 10 true ((4 , 2) ∷ (2 , 5) ∷ (5 , 1) ∷ (1 , 0) ∷ []) ((4 , 1 , 1) , 5))
 _ = refl

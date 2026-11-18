@@ -477,17 +477,33 @@ fn route_vectors() -> String {
 			continue;
 		}
 		let one = (held(&mut rng, a), link(&mut rng, a));
-		// Half the pairs offer the same route over the same kind of link, so only the
-		// neighbour breaks the tie.
-		let two = match rng.one_in(2) {
-			true => (
-				Held {
-					node: b,
-					..one.0.clone()
-				},
-				one.1.clone(),
-			),
-			false => (held(&mut rng, b), link(&mut rng, b)),
+		// A third of the pairs offer the same route over the same kind of link, so only the
+		// neighbour breaks the tie, and a third the same with the other mark or one more
+		// hop, so that decides.
+		let two = match rng.below(3) {
+			0 => (held(&mut rng, b), link(&mut rng, b)),
+			tweak => {
+				let mut two = (
+					Held {
+						node: b,
+						..one.0.clone()
+					},
+					one.1.clone(),
+				);
+				if tweak == 2 {
+					match &mut two.0.holds {
+						Holds::Learned(best) if rng.one_in(2) && best.path.len() < MAX_HOPS - 3 => {
+							let hop = Hop {
+								node: NodeId::new(100 + rng.below(100), 1),
+								session: 1,
+							};
+							best.path = best.path.iter().copied().chain([hop]).collect();
+						}
+						_ => two.1.port.upstream = !two.1.port.upstream,
+					}
+				}
+				two
+			}
 		};
 		let picked = pick(&[
 			(a, one.1.session, cross(&state, &one.1, &one.0)),
@@ -1017,22 +1033,32 @@ fn claim_vectors() -> String {
 	while picks < 120 {
 		let to = relay(&mut rng, 8);
 		let one = taken(&mut rng, to);
-		// Half the pairs take the same claim the same way from another giver or announcer,
-		// so only the claimant or the giver breaks the tie.
-		let mut two = match rng.one_in(2) {
-			true => {
+		// A third of the pairs take the same claim the same way from another giver or
+		// announcer, so only the claimant or the giver breaks the tie, and a third the same
+		// with the other mark or one more relay on the chain, so that decides.
+		let mut two = match rng.below(3) {
+			0 => taken(&mut rng, to),
+			tweak => {
 				let mut two = one.clone();
 				let other = relay(&mut rng, 8);
 				let (Step::Adopt { from, .. } | Step::Over { from, .. }) = &mut two.step;
 				if !moved(from, to, other) {
 					continue;
 				}
+				if tweak == 2 && rng.one_in(2) {
+					// A relay outside every chain here, which no step refuses.
+					from.claim.chain.insert(0, 100 + rng.below(100));
+				} else if tweak == 2 {
+					match &mut two.step {
+						Step::Adopt { port, .. } => port.upstream = !port.upstream,
+						Step::Over { route, .. } => route.marked = !route.marked,
+					}
+				}
 				if let Step::Adopt { giver, .. } = &mut two.step {
 					*giver = 1 + (*giver % 9);
 				}
 				two
 			}
-			false => taken(&mut rng, to),
 		};
 		two.top = one.top;
 		// One holder takes a claim from a giver once, and one claimant has one claim.
