@@ -212,8 +212,24 @@ impl TryFrom<Object<Grant>> for crate::Grant {
 
 /// A present field, refusing an explicit `null` rather than reading it as absent,
 /// so a `null` can't hide one encoding from the mixed-encoding check.
-fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
+pub(crate) fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(deserializer: D) -> Result<Option<T>, D::Error> {
 	T::deserialize(deserializer).map(Some)
+}
+
+/// A present `revalidate` in whole seconds, refusing `null` as [`present`] does.
+mod revalidate {
+	use super::*;
+
+	pub(super) fn serialize<S: serde::Serializer>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error> {
+		match value {
+			Some(value) => serializer.serialize_u64(value.as_secs()),
+			None => serializer.serialize_none(),
+		}
+	}
+
+	pub(super) fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Duration>, D::Error> {
+		<DurationSeconds<u64> as serde_with::DeserializeAs<'de, Duration>>::deserialize_as(deserializer).map(Some)
+	}
 }
 
 /// A present time in whole unix seconds, from the epoch to the clock's last second, which
@@ -300,14 +316,17 @@ pub(crate) struct Grant {
 	publish: Access,
 	#[serde(skip_serializing_if = "Access::is_unset")]
 	subscribe: Access,
+	#[serde(deserialize_with = "present")]
 	root: Option<String>,
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
 	mounts: BTreeMap<String, String>,
 	#[serde(with = "seconds", skip_serializing_if = "Option::is_none")]
 	expires: Option<kio::clock::Wall>,
-	#[serde_as(as = "Option<DurationSeconds<u64>>")]
+	#[serde(with = "revalidate", skip_serializing_if = "Option::is_none")]
 	revalidate: Option<Duration>,
+	#[serde(deserialize_with = "present")]
 	tier: Option<String>,
+	#[serde(deserialize_with = "present")]
 	label: Option<String>,
 	#[serde(deserialize_with = "present")]
 	link: Option<Link>,

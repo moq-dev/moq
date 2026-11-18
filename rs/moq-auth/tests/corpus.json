@@ -302,6 +302,11 @@
 			},
 			"valid": false
 		},
+		{ "name": "a_null_scope", "jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "scope": null }, "valid": false },
+		{ "name": "a_null_kid", "jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "kid": null }, "valid": false },
+		{ "name": "a_null_key_ops", "jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "key_ops": null }, "valid": false },
+		{ "name": "a_null_scope_root", "jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "scope": { "root": null, "publish": ["**"] } }, "valid": false },
+		{ "name": "a_null_okp_private_key", "jwk": { "kty": "OKP", "alg": "EdDSA", "crv": "Ed25519", "x": "UiU9fT_SdBBpkFtJPRCY0gX1jK_Dr9syYLFuEz4QUM4", "d": null }, "valid": false },
 		{
 			"name": "short_secret",
 			"jwk": { "kty": "oct", "alg": "HS256", "k": "c2hvcnQ" },
@@ -617,6 +622,12 @@
 		},
 		{ "name": "unknown_link", "grant": { "publish": ["**"], "link": "downstream" }, "valid": false },
 		{ "name": "null_link", "grant": { "publish": ["**"], "link": null }, "valid": false },
+		{ "name": "null_root", "grant": { "publish": ["**"], "root": null }, "valid": false },
+		{ "name": "null_revalidate", "grant": { "publish": ["**"], "revalidate": null }, "valid": false },
+		{ "name": "null_tier", "grant": { "publish": ["**"], "tier": null }, "valid": false },
+		{ "name": "null_label", "grant": { "publish": ["**"], "label": null }, "valid": false },
+		{ "name": "null_mounts", "grant": { "publish": ["**"], "mounts": null }, "valid": false },
+		{ "name": "null_peer", "grant": { "publish": ["**"], "peer": null }, "valid": false },
 		{ "name": "positional", "grant": [["**"]], "valid": false },
 		{ "name": "null_grant", "grant": null, "valid": false }
 	]

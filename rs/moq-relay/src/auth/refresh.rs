@@ -109,9 +109,6 @@ impl Refresh {
 			Err(lease::Reason::Expired) => return Err(moq_net::Error::Expired),
 			Err(_) => return Err(moq_net::Error::Unauthorized),
 		}
-		if lease.pacer.is_none() && Caps::of(&initial.grant).is_capped() {
-			return Err(moq_net::Error::Unauthorized);
-		}
 		initial.initial = true;
 		// The connection applies the first caps itself, with the window it opens.
 		let caps = Caps::of(&initial.grant);
@@ -133,6 +130,10 @@ impl Refresh {
 			pacer: lease.pacer.clone(),
 			caps,
 		};
+		// The same root, mounts, link, role, and cap checks a refreshed grant passes.
+		if !this.valid(&this.credentials[&0].grant) {
+			return Err(moq_net::Error::Unauthorized);
+		}
 		this.authorize();
 		Ok(this)
 	}
@@ -654,6 +655,23 @@ mod tests {
 			SessionError::Unauthorized,
 		)
 		.await;
+	}
+
+	/// Setup holds the grant it reads to the root, mounts, and link admission bound the session to.
+	#[tokio::test(start_paused = true)]
+	async fn a_moved_root_mount_or_link_before_protocol_setup_is_refused() {
+		let _clock = manual();
+		type Change = fn(&mut moq_auth::Grant);
+		let changes: [Change; 3] = [
+			|grant| grant.root = Some("elsewhere".into()),
+			|grant| {
+				grant.mounts.insert("m".into(), "other".into());
+			},
+			|grant| grant.link = Some(moq_auth::Link::Peer),
+		];
+		for change in changes {
+			refused_before_setup(change, SessionError::Unauthorized).await;
+		}
 	}
 
 	#[tokio::test(start_paused = true)]

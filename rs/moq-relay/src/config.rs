@@ -355,6 +355,7 @@ impl Config {
 		self.check_runtime()?;
 		self.check_handoff()?;
 		self.stats.check(&self.cluster)?;
+		self.cluster.check_dials()?;
 		self.check_lan()?;
 
 		self.quic
@@ -995,6 +996,23 @@ max_streams = 64
 			resolve(cluster);
 		}
 		resolve("[stats]\nenabled = true\n");
+
+		// A setting only a dialed peer or API reads is refused with none to read it.
+		refuse("[cluster.api]\nroot = [\"api.pem\"]\n", "--cluster-api-root requires --cluster-api-url");
+		resolve("[cluster.api]\nurl = \"https://api.example/peers\"\nroot = [\"api.pem\"]\n");
+		for alone in [
+			"[cluster]\ntoken = \"cluster.jwt\"\n",
+			"[cluster]\nnode = \"https://a.example\"\nconnect = [\"https://a.example\"]\ntoken = \"cluster.jwt\"\n",
+			"[cluster]\ntoken = \"cluster.jwt\"\n[cluster.lan]\nenabled = true\n",
+		] {
+			refuse(alone, "--cluster-token requires a peer to dial");
+		}
+		for peers in [
+			"connect = [\"https://b.example\"]\n",
+			"api.url = \"https://api.example/peers\"\n",
+		] {
+			resolve(&format!("[cluster]\ntoken = \"cluster.jwt\"\n{peers}"));
+		}
 
 		// Embedders build a cluster without resolving, so it refuses the same.
 		let cluster: cluster::Config = toml::from_str("node = \"https://a.example\"\n").expect("parse");

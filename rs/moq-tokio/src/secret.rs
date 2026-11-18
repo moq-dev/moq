@@ -15,6 +15,10 @@ pub enum Error {
 	/// The file could not be read.
 	#[error("failed to read secret file {0}")]
 	Read(PathBuf, #[source] std::io::Error),
+
+	/// The key itself was given where its file belongs. The error never repeats it.
+	#[error("the secret must be the path of a file holding it, not the key itself (`openssl rand -hex 32 > secret.key`)")]
+	Inline,
 }
 
 /// A random 32-byte secret.
@@ -29,7 +33,10 @@ impl Secret {
 	/// followed by one newline, as `openssl rand -hex 32` writes it.
 	pub fn read(path: impl AsRef<Path>) -> Result<Self, Error> {
 		let path = path.as_ref();
-		let contents = std::fs::read(path).map_err(|err| Error::Read(path.to_path_buf(), err))?;
+		let contents = std::fs::read(path).map_err(|err| match is_key(path) {
+			true => Error::Inline,
+			false => Error::Read(path.to_path_buf(), err),
+		})?;
 		let hex = contents.strip_suffix(b"\n").unwrap_or(&contents);
 		let mut secret = [0; 32];
 		hex::decode_to_slice(hex, &mut secret).map_err(|_| Error::Invalid(path.to_path_buf()))?;
@@ -40,6 +47,13 @@ impl Secret {
 	pub fn as_bytes(&self) -> &[u8; 32] {
 		&self.0
 	}
+}
+
+/// Whether `path` spells a key, so an error never prints it into a log.
+fn is_key(path: &Path) -> bool {
+	let mut key = [0; 32];
+	path.to_str()
+		.is_some_and(|path| hex::decode_to_slice(path, &mut key).is_ok())
 }
 
 impl From<[u8; 32]> for Secret {
@@ -94,5 +108,14 @@ mod tests {
 			Secret::read(dir.path().join("missing.key")),
 			Err(Error::Read(..))
 		));
+	}
+
+	/// A key given where its file belongs is refused without echoing it, as an
+	/// upgrade from the inline form would otherwise print it into the log.
+	#[test]
+	fn an_inline_key_is_refused_without_echoing_it() {
+		let err = Secret::read(KEY).unwrap_err();
+		assert!(matches!(err, Error::Inline), "{err:?}");
+		assert!(!err.to_string().contains(KEY) && !format!("{err:?}").contains(KEY));
 	}
 }

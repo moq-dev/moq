@@ -856,6 +856,19 @@ impl Config {
 			|| self.api.url.is_some()
 	}
 
+	/// Refuse a setting that only a dialed peer or API reads, set with none to read it.
+	pub fn check_dials(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.api.root.is_empty() || self.api.url.is_some(),
+			"--cluster-api-root requires --cluster-api-url"
+		);
+		anyhow::ensure!(
+			self.token.is_none() || self.dials_statics(),
+			"--cluster-token requires a peer to dial: --cluster-connect naming another relay, or --cluster-api-url (LAN peers never receive it)"
+		);
+		Ok(())
+	}
+
 	/// Released spellings this config was parsed from, each paired with what replaced it.
 	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
 		let mut found = moq_tokio::cli::Deprecated::default();
@@ -1459,6 +1472,7 @@ impl Cluster {
 		crate::configured_tier(config.tier.clone()).context("invalid --cluster-tier")?;
 		peer.quic.validate()?;
 		config.lan.validate()?;
+		config.check_dials()?;
 		stats.check(&config)?;
 		let mut work = kio::Tasks::new();
 		let mut origin_config = origin::Config::default();
@@ -2136,38 +2150,31 @@ impl Cluster {
 		token: ClusterToken,
 		dial: &crate::nodes::Dial,
 	) -> anyhow::Result<()> {
-		// Sessions shorter than this are treated as churn: we keep backing off
-		// instead of resetting, otherwise a peer that rejects us instantly would
-		// turn into a tight reconnect loop.
-		let stable_threshold = std::time::Duration::from_secs(10);
-
 		let mut redial = Redial::default();
 
 		loop {
-			let started = kio::clock::now();
+			let mut connected = false;
 			let (result, presented) = match Self::dial_addrs(target, &token) {
-				Ok((addrs, presented)) => (self.run_remote_once(&addrs, target, dial).await, presented),
+				Ok((addrs, presented)) => (
+					self.run_remote_once(&addrs, target, dial, &mut connected).await,
+					presented,
+				),
 				Err(err) => (Err(err), None),
 			};
 			dial.disconnected();
-			let elapsed = started.elapsed();
 
-			match result {
-				Ok(()) if elapsed >= stable_threshold => redial = Redial::default(),
-				Ok(()) => tracing::warn!(?elapsed, "cluster peer session closed cleanly but quickly; backing off"),
-				Err(err) => {
-					tracing::warn!(%err, "cluster peer error; will retry");
-					// The session's own reconnects reuse the token it started with, so a
-					// failure after the file rotated is most likely that token expiring:
-					// present the new one at once instead of after a backoff.
-					if presented.is_some() && token.read().ok().flatten() != presented {
-						tracing::info!("cluster token rotated; redialing with it");
-						continue;
-					}
-				}
+			// An attempt only ends in an error: its own reconnects retry until they give up.
+			let Err(err) = result;
+			tracing::warn!(%err, "cluster peer error; will retry");
+			// The session's own reconnects reuse the token it started with, so a
+			// failure after the file rotated is most likely that token expiring:
+			// present the new one at once instead of after a backoff.
+			if presented.is_some() && token.read().ok().flatten() != presented {
+				tracing::info!("cluster token rotated; redialing with it");
+				continue;
 			}
 
-			let wait = redial.next(&mut kio::clock::rng());
+			let wait = redial.next(connected, &mut kio::clock::rng());
 			kio::clock::sleep(wait).await;
 		}
 	}
@@ -2196,18 +2203,20 @@ impl Cluster {
 		Ok((addrs, presented))
 	}
 
-	/// One session to `target` over `addrs`, which carry any credential.
+	/// One session to `target` over `addrs`, which carry any credential. It runs until the
+	/// session gives up, and sets `connected` once the peer has accepted it.
 	async fn run_remote_once(
 		&self,
 		addrs: &moq_tokio::Addrs,
 		target: &DialTarget,
 		dial: &crate::nodes::Dial,
-	) -> anyhow::Result<()> {
+		connected: &mut bool,
+	) -> anyhow::Result<std::convert::Infallible> {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
 		// A panic fails this attempt like any other error, so the peer is redialed.
-		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target, dial))
+		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target, dial, connected))
 			.instrument(tracing::info_span!("conn", id))
 			.await
 			.context("cluster peer session panicked")?
@@ -2219,7 +2228,8 @@ impl Cluster {
 		addrs: &moq_tokio::Addrs,
 		target: &DialTarget,
 		dial: &crate::nodes::Dial,
-	) -> anyhow::Result<()> {
+		connected: &mut bool,
+	) -> anyhow::Result<std::convert::Infallible> {
 		// The peer URL may carry the cluster JWT in its query, so neither the log
 		// line nor the node label below may show the raw URL.
 		let first = addrs.as_slice().first().expect("Addrs is non-empty").url();
@@ -2293,6 +2303,7 @@ impl Cluster {
 		let mut observation = monitor.state();
 		loop {
 			dial.observe(id, &observation);
+			*connected |= observation.connects > 0;
 			observation = monitor.state_changed(observation.revision).await?;
 		}
 	}
@@ -2535,7 +2546,12 @@ impl Redial {
 	const CAP: std::time::Duration = std::time::Duration::from_secs(30);
 
 	/// A wait drawn uniformly below the ceiling, which then doubles up to [`Self::CAP`].
-	fn next(&mut self, rng: &mut impl rand::RngExt) -> std::time::Duration {
+	/// An attempt that `connected` starts over at [`Self::FIRST`]: the peer was reachable,
+	/// so what ended it is new, not the outage the ceiling grew through.
+	fn next(&mut self, connected: bool, rng: &mut impl rand::RngExt) -> std::time::Duration {
+		if connected {
+			*self = Self::default();
+		}
 		let wait = self.ceiling.mul_f64(rng.random());
 		self.ceiling = (self.ceiling * 2).min(Self::CAP);
 		wait
@@ -2884,7 +2900,7 @@ mod tests {
 		let ceilings = [1, 2, 4, 8, 16, 30, 30].map(std::time::Duration::from_secs);
 		let mut redials: Vec<Redial> = (0..1000).map(|_| Redial::default()).collect();
 		for ceiling in ceilings {
-			let waits: Vec<_> = redials.iter_mut().map(|redial| redial.next(&mut rng)).collect();
+			let waits: Vec<_> = redials.iter_mut().map(|redial| redial.next(false, &mut rng)).collect();
 			assert!(waits.iter().all(|wait| *wait <= ceiling), "a wait passed {ceiling:?}");
 			// Uniform over the range: every tenth of it is hit, so none is a lockstep.
 			for tenth in 0..10 {
@@ -2895,6 +2911,21 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	/// A peer that was reachable redials from the first ceiling, so a flap after a
+	/// long outage does not wait out the 30 s the outage grew it to.
+	#[test]
+	fn redial_resets_after_an_attempt_that_connected() {
+		use rand::SeedableRng;
+		let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+		let mut redial = Redial::default();
+		for _ in 0..8 {
+			redial.next(false, &mut rng);
+		}
+		assert_eq!(redial.ceiling, Redial::CAP);
+		assert!(redial.next(true, &mut rng) <= Redial::FIRST);
+		assert_eq!(redial.ceiling, Redial::FIRST * 2);
 	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
