@@ -641,11 +641,11 @@ export class AudioBuffer {
 	 * Whether media at `timestamp`, in microseconds, trails the shared clock past the bound, so the ring
 	 * would skip it unheard, as a publisher's replayed backlog does on a rejoin. The decoder still
 	 * decodes it to warm the codec, but writes none of it: a ring anchored on it would play catch-up
-	 * instead of the live edge. Audio before a declared end is never stale, since the ring plays a
+	 * instead of the live edge. Audio up to a declared end is never stale, since the ring plays a
 	 * finite tail out rather than skip it.
 	 */
 	stale(timestamp: number): boolean {
-		if (this.#tail !== undefined && timestamp < this.#tail) return false;
+		if (this.#tail !== undefined && timestamp <= this.#tail) return false;
 		const position = this.#sync?.position();
 		if (position === undefined) return false;
 		return position * 1000 - timestamp > Math.max(this.#bound.asMicros(), WINDOW);

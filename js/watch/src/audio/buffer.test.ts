@@ -689,6 +689,8 @@ describe("AudioBuffer steering", () => {
 			// A finite tail plays out however far it trails the clock, through the next utterance too.
 			buffer.end(ms(2800));
 			expect(buffer.stale(ms(2700))).toBe(false);
+			// The decoder asks with where its output ends, which for the last packet is the end itself.
+			expect(buffer.stale(ms(2800))).toBe(false);
 			buffer.next();
 			expect(buffer.stale(ms(2700))).toBe(false);
 			expect(buffer.stale(ms(2790))).toBe(false);
