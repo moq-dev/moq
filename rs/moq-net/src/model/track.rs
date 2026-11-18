@@ -6583,6 +6583,28 @@ impl Consumer {
 		})
 	}
 
+	/// How many groups arrived here so far; see [`Self::poll_arrived`].
+	pub(super) fn arrived(&self) -> usize {
+		self.with_state(|state| state.map_or(0, |state| state.read().next_arrival))
+	}
+
+	/// Ready once more than `seen` groups arrived here. A received copy still takes the groups
+	/// in flight below an end its readers stopped waiting at. Pending for good once the track closes.
+	pub(super) fn poll_arrived(&self, seen: usize, waiter: &kio::Waiter) -> Poll<()> {
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Pending;
+			};
+			match state.poll(waiter, |state| match state.next_arrival > seen {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(())) => Poll::Ready(()),
+				_ => Poll::Pending,
+			}
+		})
+	}
+
 	/// Whether a group in `groups` may still land here; see `TrackState::may_land`. Never
 	/// once no producer is left to write one. Parks `waiter` until its gap folds.
 	pub(super) fn may_land(

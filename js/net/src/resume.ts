@@ -350,8 +350,12 @@ interface Copy {
 	 * groups the newer one may never have.
 	 */
 	until?: bigint | null;
-	/** The group channel ran out: cleanly (`null`) or failed. */
-	done?: Error | null;
+	/**
+	 * The group channel ran out: failed, or cleanly with how many groups had arrived on the copy
+	 * by then, since one arriving later is still in flight below its end, which a read still open
+	 * takes.
+	 */
+	done?: Error | number;
 	/**
 	 * When a newer group superseded every group under the bound: the newer copy's first group, or
 	 * the track's end. What the reader still lacks from it is waited for from here, for no longer
@@ -824,6 +828,7 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		if (this.#closed) return { kind: "done" };
 		this.#groupsRead = true;
+		this.#reopen();
 		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
@@ -860,10 +865,11 @@ class Reader implements ResumeSource {
 				// Drained: the track ended as the copy did, which is not cleanly when its
 				// session went away short of the declared end.
 				if (recv.kind === "done") {
-					copy.done = copy.sub.closed.peek() ?? null;
-					if (copy.done === null && hooks.subscriberEnd(copy.sub)) this.#settled = true;
+					const closed = copy.sub.closed.peek();
+					copy.done = closed instanceof Error ? closed : hooks.arrived(copy.sub);
+					if (!(closed instanceof Error) && hooks.subscriberEnd(copy.sub)) this.#settled = true;
 				} else if (recv.kind === "error") copy.done = recv.error;
-				else if (this.#drained(copy, delivered)) copy.done = null;
+				else if (this.#drained(copy, delivered)) copy.done = hooks.arrived(copy.sub);
 				break;
 			}
 		}
@@ -873,7 +879,7 @@ class Reader implements ResumeSource {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
-		return this.#end((copy) => copy.done);
+		return this.#end((copy) => (typeof copy.done === "number" ? null : copy.done));
 	}
 
 	/**
@@ -979,6 +985,19 @@ class Reader implements ResumeSource {
 		if (end === undefined || hooks.awaitsFill(copy.sub)) return false;
 		const start = max(this.#shell.cursor.peek().start, copy.floor ?? 0n);
 		return hooks.spent(copy.sub, start, end, delivered);
+	}
+
+	// A copy that ran out cleanly still takes a group in flight below its end while the read stays
+	// open, as a cursor still reading it would. One landing on the serving copy may lie under its
+	// resume point, which is not that copy's to read, and a backfill that already ran out was let
+	// go: ask its route again. Mirrors the Rust `Reader::poll_lowest`.
+	#reopen(): void {
+		const serving = this.#serving();
+		for (const copy of this.#copies) {
+			if (typeof copy.done !== "number" || hooks.arrived(copy.sub) <= copy.done) continue;
+			copy.done = undefined;
+			if (copy === serving && !copy.replaced && copy.floor !== undefined) this.#resumed = true;
+		}
 	}
 
 	// Whether `copy` may still feed groups: its channel has not run out, and what it holds is
