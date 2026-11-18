@@ -1,47 +1,30 @@
-# [M] Keep the browser publisher under the cap without a per-frame quantizer
+# [S] Keep a constant-bitrate rendition alive at a zero grant
 
 ## Goal
 
-`js/publish` never sends more than the rendition's cap on a browser and codec
-that lack an honored per-frame quantizer. `"constant"` doesn't hold the cap in
-practice. Measured in Chrome 156 on 720p30 clips (Xiph `park_joy`, cut to a
-static frame for the scene-cut case) during
-[moq-dev/moq#9026](https://github.com/moq-dev/moq/pull/9026):
+A `"constant"` rendition in `js/publish` (a browser and codec without an
+honored per-frame quantizer, such as Firefox or Chrome's software H.264)
+survives a zero bandwidth grant. The allocator gives one once higher priorities
+take the estimate, and today `configure()` rejects bitrate 0 and fails the
+rendition. Found in review of
+[moq-dev/moq#9026](https://github.com/moq-dev/moq/pull/9026); the bug predates
+it.
 
-- Chrome's software H.264 (OpenH264, the codec Linux and Windows Chrome pick
-  without a hardware encoder) produces identical output for `"constant"` and
-  `"variable"`. On high motion it averages 1.13x the cap, and at a 1 Mbps grant
-  3.55x, with 25 s queued at the grant.
-- Chrome's software VP9, AV1, and VP8 in `"constant"` reach 2.1 to 3.3x a
-  1 Mbps grant on high motion: their quantizer range stops short.
-- macOS VideoToolbox H.264 in `"constant"` at 1 Mbps drops 37% of frames and
-  still peaks at 2.1x over a second.
-- Firefox ignores the per-frame quantizer, so it always runs `"constant"`.
-- A zero grant, which the allocator gives once higher priorities take the
-  estimate, fails a `"constant"` rendition: `configure()` rejects bitrate 0.
-  Quantizer mode holds frames back instead.
-
-The quantizer path holds 1.00x with at most 0.3 s queued in all of these
-cases, short of a scene cut.
+Non-goal: holding `"constant"` under the cap. It doesn't in practice (Chrome's
+OpenH264 matches `"variable"`, libvpx and libaom overshoot at low grants, and
+VideoToolbox drops frames), and the browser fallback doesn't need an accurate
+hard cap.
 
 ## Plan
 
-Options:
+Decided with the maintainer on 2026-11-17
+([comment](https://github.com/moq-dev/moq/pull/9026#issuecomment-6966230347)):
 
-- Within each probe pass, rank codecs whose encoder honors a per-frame
-  quantizer ahead of those that don't, so Chrome without a hardware encoder
-  picks software VP9 over software H.264. Measured cost at 720p on the fedora
-  host: VP9 takes 5.5 ms per frame on the talking head and 12.7 ms on high
-  motion, against H.264's 3.5 and 5.7 ms. VP9 is already first in the hardware
-  pass, so viewers already decode it.
-- Wrap `"constant"` in an outer loop over the measured output: lower the
-  configured bitrate while output overshoots, and skip frames while the
-  backlog passes the window. This covers Firefox and VideoToolbox too, but each
-  reconfigure reinitializes OpenH264.
+- ✅ Drop the hard-cap goal for the `"constant"` fallback (rejected: ranking
+  codecs with an honored quantizer first, which would pick software VP9 over
+  H.264 at about 1.5 to 2.2x the encode CPU; an outer feedback loop around
+  `"constant"`, which reconfigures the encoder as output overshoots).
 
-## Waiting
-
-- Maintainer: pick the approach. Recommended: rank quantizer codecs first,
-  since it also gains constant quality (talking head at 22% of the cap instead
-  of 99%). Add the outer loop only if Firefox's overshoot measures as a problem.
-  An agent can't make this call: it trades publisher CPU against the cap.
+At a zero grant, hold every frame back without reconfiguring, counting them in
+`skipped` as quantizer mode does, and configure again once the grant rises.
+Cover it in `encoder.test.ts` with a grant that drops to 0 and recovers.
