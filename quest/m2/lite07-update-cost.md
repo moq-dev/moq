@@ -30,3 +30,22 @@ one small message to buy, not unbounded work.
 Recommended: key the model's ranges and their resolutions by an id the
 caller assigns, so a publisher passes the edit straight through, and measure
 an update stream against a 16k-range subscription before and after.
+
+The rework is internal-only: no public API changes in `moq-net`, `moq-ffi`, or
+`@moq/net` (checked when the range union fix landed, the condition for leaving
+this to m2). Keep it that way:
+
+- Rust: add a crate-private edit entry point on `track::Subscriber` (retired
+  ids, added `(id, Range)` pairs, and the preferences) beside the public
+  `update(Subscription)`. The per-subscriber ranges and the window's
+  resolutions become keyed; `Window` is `pub(in crate::model)`, and
+  `Resolved`, `resolved()`, and `Preferences` are crate-private already. The
+  public `update` stays a whole-set replacement, costing what its caller
+  passes, and `subscription()` keeps returning ranges in the order last given.
+  `Subscription`, `Range`, and the aggregate getters keep their shapes.
+- JS: reach the edit through an internal `hooks.*` accessor, as the lite
+  publisher already does for the track, and keep the per-producer union
+  incremental behind the existing `Subscription` signal. `Subscriber.update`
+  and the exported types stay as they are.
+- If the work turns up a need for a public change after all, stop and ask:
+  the maintainer's condition was that this rework stays internal.
