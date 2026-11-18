@@ -236,11 +236,10 @@ shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and lef
 Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
 in turn, then publish from each side, discover it from the other, fetch and compare a frame, and
 observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited main at d0ce553674.
-Re-run the existing cut checks on the resolved merge and version bump.
+Re-run the existing cut checks on the resolved merge and version bump. After publication,
+use the manual `just test wire-compat --remeasure` procedure while the automated update is broken.
 
 ## Required
-
-- [Release remeasurement](/quest/m0/remeasure-update-branch.md) - compatibility pins reflect the published packages
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
 - [rind 0.4 adapters](/quest/m0/rind-adapters.md) - `UnsupportedCpu`, which exists only for rind 0.3, never publishes
