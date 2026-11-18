@@ -1505,6 +1505,7 @@ A value of 0 is a PROTOCOL_VIOLATION, since a subscription that asks for nothing
 A span of the Track to deliver, from its `Start` up to its `End`.
 The subscription is the union of its Ranges: the publisher delivers each Group inside any of them once, in `Group Order` across all of them, and accounts with SUBSCRIBE_SKIP or SUBSCRIBE_DROP for every Group it will not deliver.
 Each Range implicitly takes the next Range ID on the stream, starting at 0, which a [SUBSCRIBE_UPDATE](#subscribe-update) uses to retire it.
+A relay asking for the union of several subscriptions' Ranges, whose exact union does not fit one SUBSCRIBE, SHOULD ask for fewer Ranges covering it, joining the Ranges separated by the narrowest gaps, rather than refuse a subscription: each reader still reads only its own Ranges from the relay's copy.
 
 **Anchor Type**:
 Which fields follow, and what the Anchor names:
