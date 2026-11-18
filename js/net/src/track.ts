@@ -2632,6 +2632,10 @@ type Drift = {
 // the highest key returned, as a group or the end of a gap.
 type Items = { held?: GroupConsumer; gaps: DropRun[]; at: bigint };
 
+// The most runs an ordered read's record keeps before it folds the older half into its floor.
+// Audio keyed by timestamp leaves a run per group, so without it the record grows with playback.
+const RECORD_RUNS = 1024;
+
 // A group that landed after an ordered read passed its key.
 function late(): Hole {
 	return { error: new StreamError(StreamCode.Old, { message: "group landed after the read passed it" }) };
@@ -2785,6 +2789,10 @@ export class Subscriber {
 		coverage?: Coverage;
 	};
 	#reported = new Runs<Reported>(sameReport);
+	// Everything below was settled for good and folded out of #reported: handed out, told, or
+	// passed, so nothing there is reported again. Mirrors the Rust `Record::floor`, which folds
+	// under pool pressure; an ordered read folds once its record passes RECORD_RUNS.
+	#floor = 0n;
 	// What an ordered read owes before its next group; unset before its first read. See #tryItem.
 	#items?: Items;
 	// The group the frame-level helpers are currently draining, acquired through the
@@ -4591,7 +4599,7 @@ export class Subscriber {
 	// The first part of `[from, to)` nothing already reported blocks, now reported, with why,
 	// replacing what it goes out over. Mirrors the Rust `Record::report`.
 	#reportRun(from: bigint, to: bigint, hole: Hole): (Recv & { kind: "drop" }) | undefined {
-		const start = from;
+		const start = max(from, this.#floor);
 		if (start >= to) return undefined;
 		const blocked = this.#reported.overlapping(start, to).filter((reported) => blocksHole(reported, hole));
 		const [gap] = runGaps(blocked, start, to);
@@ -4840,6 +4848,7 @@ export class Subscriber {
 			// The drop record starts before the first read, so the cursor keeps what it gives up.
 			this.#findGaps(items);
 		}
+		this.#fold(items);
 		const read = this.#readHeld(items);
 		this.#findGaps(items);
 		switch (read.kind) {
@@ -4886,11 +4895,15 @@ export class Subscriber {
 		if (held) {
 			items.held = undefined;
 			if (this.#covered(held.start, held.start + 1n).length > 0) return { kind: "group", group: held };
-			// The bounds moved off it. With nothing they cover above, it waits for them to widen again;
-			// otherwise the read passes it.
+			// The bounds moved off it. With nothing they cover above, it waits for them to widen again,
+			// still polling the cursor so the read sees the track or itself end; otherwise the read
+			// passes it.
 			if (this.#covered(held.start, UNBOUNDED).length === 0) {
-				items.held = held;
-				return { kind: "idle" };
+				const read = this.#tryNextGroup();
+				// A clean end keeps it, as the buffer keeps a group past the cap, for a raise to read.
+				if (read.kind === "error") held.close();
+				else items.held = held;
+				return read.kind === "done" || read.kind === "error" ? read : { kind: "idle" };
 			}
 			held.close();
 		}
@@ -4937,6 +4950,14 @@ export class Subscriber {
 		items.at = max(items.at, given.end);
 		// Told once: no later drop of these keys is a gap again.
 		this.#settled(given.start, given.end);
+		// Passed for good: no group there is handed out after it, whether it lands late here or on
+		// a resumed reader's copy.
+		this.#delivered.addRun(given.start, given.end);
+		if (!this.#resume && this.#nextKey < given.end) {
+			const passed = this.#nextKey;
+			this.#nextKey = given.end;
+			this.#stoppedReading(passed, given.end);
+		}
 		return { kind: "gap", start: given.start, end: given.end, error };
 	}
 
@@ -4952,7 +4973,20 @@ export class Subscriber {
 
 	// Record `[start, end)` as settled: handed out, or told as a gap.
 	#settled(start: bigint, end: bigint): void {
-		this.#reported.set(start, end, { start, end, kind: "settled" });
+		start = max(start, this.#floor);
+		if (start < end) this.#reported.set(start, end, { start, end, kind: "settled" });
+	}
+
+	// Fold the older half of the record into the floor once it passes RECORD_RUNS, never past
+	// where the read is, so the record costs a bounded number of runs however long it plays. A
+	// group landing below the floor, which no read could take, is then told as nothing.
+	#fold(items: Items): void {
+		const runs = this.#reported.all;
+		if (runs.length <= RECORD_RUNS) return;
+		const floor = min(runs[runs.length - RECORD_RUNS / 2].start, items.at);
+		if (floor <= this.#floor) return;
+		this.#floor = floor;
+		this.#reported.set(0n, floor);
 	}
 
 	// The key cursor passes `[start, end)` to hand out the group at `end`. Each key there that the
@@ -5062,6 +5096,8 @@ export class Subscriber {
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {
+				// Passing it passes the owed keys below it too, which the budget gives up with it.
+				this.#passOwed(start, group.start, drift);
 				this.#giveUp({ start: group.start, end: group.start + 1n }, staleHole(drift.budget));
 				const passed = this.#nextKey;
 				this.#pass(groups, index);
@@ -5082,7 +5118,8 @@ export class Subscriber {
 					this.#fillWait = true;
 					return { kind: "idle" };
 				}
-				// Given up: past it, as past any group no fill can serve.
+				// Given up: past it, as past any group no fill can serve, and the owed keys below it.
+				this.#passOwed(start, group.start, drift);
 				this.#giveUp({ start: group.start, end: group.start + 1n }, headless());
 				const passed = this.#nextKey;
 				this.#pass(groups, index);

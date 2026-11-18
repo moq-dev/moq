@@ -1,7 +1,7 @@
 // What an ordered read returns: groups in key order, and a gap for every group it gives up on.
 // Ports the Rust `track::Ordered` item tests, so both read the same.
 import { expect, test } from "bun:test";
-import { Duration } from "@moq/clock";
+import { Duration, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks } from "./internal.ts";
@@ -200,3 +200,67 @@ test("a local track waits for what it asked a fill for, and reports a gap once t
 		expect(items(ordered)).toEqual(["gap 3..4 (old)", "group 4"]);
 		requests.close();
 	}));
+
+test("a gap moves the read past it, so a group landing there after is no group", () => {
+	const producer = new TrackProducer("test");
+	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	put(producer, 0n);
+	expect(items(ordered)).toEqual(["group 0"]);
+	drop(producer, 1n, 2n);
+	expect(items(ordered)).toEqual(["gap 1..2 (delivery timeout)"]);
+	put(producer, 1n);
+	expect(items(ordered)).toEqual([]);
+	put(producer, 2n);
+	expect(items(ordered)).toEqual(["group 2"]);
+});
+
+test("a group held past a gap, under a cap lowered off it, still sees the read end", async () => {
+	const producer = new TrackProducer("test");
+	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	put(producer, 0n);
+	drop(producer, 1n, 2n);
+	put(producer, 2n);
+	expect((await ordered.nextGroup())?.group?.start).toBe(0n);
+	expect((await ordered.nextGroup())?.kind).toBe("gap");
+	ordered.withRange({ end: { excluded: 2n } });
+	expect(ordered.tryNextGroup()).toBeUndefined();
+	const pending = ordered.nextGroup();
+	ordered.close();
+	const ended = await Promise.race([
+		pending.then(
+			() => "ended",
+			() => "ended",
+		),
+		sleep(Duration.millis(100)).then(() => "hung"),
+	]);
+	expect(ended).toBe("ended");
+});
+
+test("a stale group passes the owed holes below it as gaps", () =>
+	withClock((clock) => {
+		const producer = receivedTrack();
+		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		put(producer, 0n, false);
+		expect(items(ordered)).toEqual(["group 0"]);
+		// Group 1 is owed; group 3 lands, then group 2 after it, which turns stale while the wall
+		// clock still spares the hole at 1.
+		put(producer, 3n, false);
+		clock.jump(Duration.millis(30));
+		put(producer, 2n, false);
+		clock.jump(Duration.millis(30));
+		expect(items(ordered)).toEqual(["gap 1..3 (old)", "group 3"]);
+	}));
+
+test("an ordered read's record folds, so it costs a bounded number of runs", () => {
+	const producer = new TrackProducer("test");
+	const ordered = producer.subscribe({ delay: { max: null } }).ordered();
+	// Keyed apart, as audio by timestamp is: each group is a run of its own.
+	for (let i = 0n; i < 3000n; i++) {
+		put(producer, i * 20n);
+		expect(items(ordered)).toEqual([`group ${i * 20n}`]);
+	}
+	// A group landing far below the floor is told as nothing; one above it is still a gap.
+	put(producer, 10n);
+	put(producer, 2990n * 20n + 10n);
+	expect(items(ordered)).toEqual([`gap ${2990n * 20n + 10n}..${2990n * 20n + 11n} (old)`]);
+});
