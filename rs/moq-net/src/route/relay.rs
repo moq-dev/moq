@@ -3208,7 +3208,13 @@ mod tests {
 		let mut moved = route(5, 2, 1);
 		if let Msg::Route { offer: Some(offer), .. } = &mut moved {
 			let mut path = offer.path.to_vec();
-			path.insert(1, Hop { node: node(4), session: 1 });
+			path.insert(
+				1,
+				Hop {
+					node: node(4),
+					session: 1,
+				},
+			);
 			offer.path = path.into();
 		}
 		router.recv(2, moved).unwrap();

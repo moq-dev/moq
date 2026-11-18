@@ -204,7 +204,13 @@ impl RouteMesh {
 					((path, self.instance.clone()), Change::Live(route_claim(0, 0)))
 				})
 				.collect();
-			stream.recv(Msg::Claims { origin, changes, floor: 1 }).unwrap();
+			stream
+				.recv(Msg::Claims {
+					origin,
+					changes,
+					floor: 1,
+				})
+				.unwrap();
 		}
 		stream.flush();
 		if self.up.len() <= i {
@@ -226,8 +232,7 @@ impl RouteMesh {
 			let route = held.route.with_available(false);
 			held.claim.update(route).unwrap();
 			tally.writes += 1;
-			up.stream
-				.orphan(origin, &(path, instance), Box::new(Left(held.claim)));
+			up.stream.orphan(origin, &(path, instance), Box::new(Left(held.claim)));
 		}
 		drop(up.stream);
 		tally += self.collect();
@@ -253,14 +258,17 @@ impl RouteMesh {
 			Self::VIA => Self::VIA + 1,
 			_ => Self::VIA,
 		};
-		let offers: Vec<_> = (0..self.shape.relays).map(|r| (Self::relay(r), self.offer(i, r))).collect();
+		let offers: Vec<_> = (0..self.shape.relays)
+			.map(|r| (Self::relay(r), self.offer(i, r)))
+			.collect();
 		let stream = &self.up[i].as_ref().expect("an open upstream").stream;
 		for (origin, offer) in offers {
-			stream.recv(Msg::Route {
-				origin,
-				offer: Some(offer),
-			})
-			.unwrap();
+			stream
+				.recv(Msg::Route {
+					origin,
+					offer: Some(offer),
+				})
+				.unwrap();
 		}
 		stream.flush();
 		self.collect()
@@ -301,8 +309,7 @@ impl RouteMesh {
 	pub fn remark(&mut self) -> RouteTally {
 		self.marked = !self.marked;
 		let broadcast = (Path::new("own/0").unwrap(), self.instance.clone());
-		self.node
-			.own(self.marked, broadcast, Change::Live(route_claim(0, 0)));
+		self.node.own(self.marked, broadcast, Change::Live(route_claim(0, 0)));
 		self.collect()
 	}
 
