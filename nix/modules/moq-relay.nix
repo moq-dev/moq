@@ -260,6 +260,9 @@ in
       after = [ "network.target" ];
       before = [ "moq-relay.service" ];
       requiredBy = [ "moq-relay.service" ];
+      # A stop would propagate to the relay and cut its sessions. A restart propagates as a
+      # restart, which keeps them only when `handoff` is on; otherwise it is a cold restart.
+      stopIfChanged = false;
 
       preStart = ''
         ${lib.optionalString (cfg.auth.keyFile == null) ''
