@@ -3508,7 +3508,11 @@ async fn reconnect_ends_on_a_first_session_rejection() {
 			.await
 			.unwrap_or_else(|_| panic!("{code:?} kept the loop redialing"))
 			.expect_err("a rejected first session must surface as an error");
-		assert_eq!(connection.connects(), 0, "{code:?} showed the refused session as connected");
+		assert_eq!(
+			connection.connects(),
+			0,
+			"{code:?} showed the refused session as connected"
+		);
 		server_handle.abort();
 		let mut count = 0;
 		while accepts.try_recv().is_ok() {

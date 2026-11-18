@@ -7709,7 +7709,9 @@ async fn session_state_names_a_failing_first_dial() {
 	// an outage the client redials rather than a refusal.
 	let dropped = kio::clock::timeout(
 		TIMEOUT,
-		wait_phase(&session, |phase| matches!(phase, MoqConnectionPhase::Disconnected { .. })),
+		wait_phase(&session, |phase| {
+			matches!(phase, MoqConnectionPhase::Disconnected { .. })
+		}),
 	)
 	.await
 	.unwrap()

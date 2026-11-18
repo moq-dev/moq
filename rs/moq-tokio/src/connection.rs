@@ -1270,24 +1270,27 @@ impl Connection {
 	/// Poll until a session is established (the first connect, or the current one).
 	///
 	/// `Ready(Ok(session))` while a session is live (during a GOAWAY handover this is the
-	/// old session, which still serves), `Ready(Err)` once the loop has stopped, `Pending`
+	/// old session, which still serves), or once the loop has stopped after one was, since
+	/// a peer can accept a one-shot session and end it before this is polled. `Ready(Err)`
+	/// once the loop has stopped without one, as on a refused credential, `Pending`
 	/// otherwise.
 	pub fn poll_established(&self, waiter: &kio::Waiter) -> Poll<crate::Result<()>> {
 		match ready!(self.state.poll(waiter, |state| match &state.lifecycle {
 			Lifecycle::Live(_) => Poll::Ready(Ok(())),
-			Lifecycle::Closed(_) => Poll::Ready(Err(terminal(state))),
+			Lifecycle::Closed(_) => Poll::Ready(stopped(state)),
 			Lifecycle::Connecting { .. } | Lifecycle::Offline { .. } => Poll::Pending,
 		})) {
 			Ok(res) => Poll::Ready(res),
-			Err(state) => Poll::Ready(Err(terminal(&state))),
+			Err(state) => Poll::Ready(stopped(&state)),
 		}
 	}
 
 	/// Wait until a session is established, handing the connection back.
 	///
 	/// Returns once a session reports [`Status::Connected`], so the first call waits out the
-	/// initial dial and the peer's answer to its credential, surfacing the error if the loop
-	/// gives up instead, e.g. when the peer refuses the credential or in one-shot mode. Useful when a caller wants dial errors up front rather than through
+	/// initial dial and the peer's answer to its credential. If the loop gives up before any
+	/// session did, as when the peer refuses the credential, it returns that error instead.
+	/// Useful when a caller wants dial errors up front rather than through
 	/// [`closed`](Self::closed).
 	///
 	/// It consumes and returns the connection so the reconnecting chain,
@@ -1580,6 +1583,14 @@ fn poll_forward(bw: &mut Option<BandwidthConsumer>, out: &BandwidthProducer, wai
 /// this reports [`Error::Stopped`]: [`Connection::closed`] treats that as the `Ok`
 /// it is, and a watcher that only has an error to go on can still tell it apart
 /// from a connection that failed.
+/// What [`Connection::poll_established`] reports for a stopped loop: whether any session was.
+fn stopped(state: &State) -> crate::Result<()> {
+	match state.connects {
+		0 => Err(terminal(state)),
+		_ => Ok(()),
+	}
+}
+
 fn terminal(state: &State) -> Error {
 	match &state.lifecycle {
 		Lifecycle::Closed(Some(err)) => err.clone(),

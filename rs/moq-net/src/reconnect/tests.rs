@@ -904,7 +904,11 @@ async fn an_unanswered_replacement_does_not_serve() {
 	assert_eq!(run.events, ["established", "migrating"]);
 	assert!(matches!(next_any(&mut machine).await, Action::Retired));
 	assert!(matches!(next_any(&mut machine).await, Action::Offline(None)));
-	assert_eq!(kio::clock::now() - connected, HANDOVER, "the idle predecessor closed early");
+	assert_eq!(
+		kio::clock::now() - connected,
+		HANDOVER,
+		"the idle predecessor closed early"
+	);
 	assert!(matches!(next_any(&mut machine).await, Action::Established));
 	assert_eq!(kio::clock::now() - connected, healthy);
 }
