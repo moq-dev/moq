@@ -222,7 +222,9 @@ mod revalidate {
 
 	pub(super) fn serialize<S: serde::Serializer>(value: &Option<Duration>, serializer: S) -> Result<S::Ok, S::Error> {
 		match value {
-			Some(value) => serializer.serialize_u64(value.as_secs()),
+			// Rounded to the nearest second, as `DurationSeconds` writes it: a `750ms` interval
+			// must not truncate to a zero the relay refuses.
+			Some(value) => <DurationSeconds<u64> as serde_with::SerializeAs<Duration>>::serialize_as(value, serializer),
 			None => serializer.serialize_none(),
 		}
 	}
