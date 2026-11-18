@@ -45,6 +45,12 @@ public final class Client: Sendable {
         publish: OriginProducer? = nil,
         consume: OriginProducer? = nil
     ) throws {
+        try checkDuration(timeout, "timeout")
+        try checkDuration(race, "race")
+        try checkDuration(resolutionDelay, "resolutionDelay")
+        try checkQuic(quic)
+        try checkDuration(websocket.delay, "websocket.delay")
+        try checkBackoff(backoff)
         ffi = try MoqClient(
             config: MoqClientConfig(
                 bind: bind,
