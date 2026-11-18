@@ -817,10 +817,15 @@ class Reader implements ResumeSource {
 		const end = min(passed, resumed);
 		// An ordered reader never goes back, nor does any reader past its budget.
 		if (this.#delivered.covers(start, end)) return;
-		// A floor lowered again asks once.
+		// A floor lowered again asks once. A copy that dropped a group from `start` on no longer
+		// offers it, so it asks for nothing there.
 		const closed = newest.source.from.closed;
-		const asks = (copy: Copy) =>
-			copy.source.from.closed === closed && copy.floor !== undefined && copy.floor <= start;
+		const asks = (copy: Copy) => {
+			const point = resumePoint(copy);
+			return (
+				copy.source.from.closed === closed && copy.floor !== undefined && point !== undefined && point <= start
+			);
+		};
 		if (this.#copies.some((copy) => asks(copy) && (copyEnd(copy) ?? UNBOUNDED) >= end)) return;
 		// A later resume point widens the route's backfill rather than asking again, so flaps over
 		// a gap keep one per route. Waited for as long as a new one would be.

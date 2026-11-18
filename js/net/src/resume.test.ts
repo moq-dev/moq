@@ -345,6 +345,49 @@ test("a resumed reader's replaced ranges reach its serving copy", async () => {
 	}
 });
 
+test("a group the window dropped above the serving copy's resume point is backfilled once ranges widen to it", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const front = new Front();
+	const sources = [new BroadcastProducer(), new BroadcastProducer()];
+	const handles = sources.map((source) => source.consume());
+	const [ta, tb] = sources.map(copy);
+	const delay = { max: Duration.millis(3_600_000) };
+	ta.write(10n);
+	ta.write(50n);
+	front.serve(handles[0]);
+	const sub = front.consumer.track("seq").subscribe({
+		delay,
+		ranges: [
+			{ start: { time: 10n }, end: { time: 10n } },
+			{ start: { time: 50n }, end: { time: 50n } },
+		],
+	});
+	try {
+		await clock.advance(Duration.ZERO);
+		const first = sub.tryRecvGroup();
+		expect(first?.start).toBe(10n);
+		first?.close();
+		// The new copy resumes at group 10 and places time 50 at group 40, the newest it holds at
+		// or before it, which the reader's window leaves out: dropped above that resume point.
+		front.serve(handles[1]);
+		await clock.advance(Duration.ZERO);
+		tb.write(40n);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([50n]);
+		sub.update({ delay, ranges: [{ start: { time: 40n }, end: { time: 60n } }] });
+		await clock.advance(Duration.ZERO);
+		await clock.advance(Duration.ZERO);
+		expect(drain(sub)).toEqual([40n]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		for (const handle of handles) handle.close();
+		for (const source of sources) source.close();
+		installed.close();
+	}
+});
+
 /**
  * A group below the replacement's resume point that the reader never got is asked of the new
  * route, as one cursor on the logical track would still get it late.
