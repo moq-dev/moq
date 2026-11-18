@@ -183,6 +183,7 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 	// Pinned, not endorsed, until [the resend fix](/quest/m2/multicast/resend.md): a route
 	// moving behind an unchanged next hop sends that hop the newest group again, once.
 	let doubled = mesh.doubled();
+	eprintln!("measured failures at one instant, seed {seed:#x}: groups sent twice {doubled:?}");
 	let links: BTreeSet<_> = doubled.iter().map(|&(from, to, _, _)| (from, to)).collect();
 	assert!(
 		links.len() == doubled.len() && doubled.iter().all(|doubled| doubled.3 == 2),
