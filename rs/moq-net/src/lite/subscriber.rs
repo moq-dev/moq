@@ -9374,6 +9374,7 @@ mod tests {
 				origin: publish.consume(),
 				auth: auth.clone(),
 				withdrawal: Default::default(),
+				routing: false,
 			},
 		);
 		let written = || session.log.writes.lock().unwrap().len();
