@@ -2839,7 +2839,8 @@ impl TrackState {
 		}
 		self.cache.advance_largest(Position::group(key));
 		let wakes = self.subscriptions.lock().wrote(key, answers);
-		self.deferred.extend(wakes.into_iter().filter(|wakes| !wakes.is_empty()));
+		self.deferred
+			.extend(wakes.into_iter().filter(|wakes| !wakes.is_empty()));
 	}
 
 	/// Take the wakes [`Self::advance`] deferred, to fire once the state guard is released.
@@ -24127,8 +24128,14 @@ mod test {
 		elapse(&producer, Duration::from_secs(3));
 		assert!(!sent(&mut first), "due, but nothing has read it");
 		assert!(refreshing(&demand), "the publisher reads it");
-		assert!(sent(&mut first) && sent(&mut second) && sent(&mut third), "one send resolves all");
-		assert!(sent(&mut subscriber.refresh()), "a later caller joins the request already sent");
+		assert!(
+			sent(&mut first) && sent(&mut second) && sent(&mut third),
+			"one send resolves all"
+		);
+		assert!(
+			sent(&mut subscriber.refresh()),
+			"a later caller joins the request already sent"
+		);
 		assert_eq!(demand.asked(), Some(1), "one group answers them all");
 	}
 

@@ -766,7 +766,7 @@ export namespace Track {
 		} & Group.Frame | undefined>;
 		readJson(): Promise<unknown | undefined>;
 		readString(): Promise<string | undefined>;
-		refresh(): void;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		tryNextGroup(): Group.Consumer | undefined;
 		update(options: Track.Subscription): void;
@@ -807,6 +807,9 @@ export namespace Track {
 		interval: Clock.Duration | null;
 		ratio: number | null;
 	}
+	export interface RefreshOptions {
+		signal?: AbortSignal;
+	}
 	export class Requests {
 		[Symbol.dispose](): void;
 		close(): void;
@@ -825,7 +828,7 @@ export namespace Track {
 		nextInRange(from: bigint): bigint | undefined;
 		ordered(): Track.Ordered;
 		recvGroup(): Promise<Group.Consumer | undefined>;
-		refresh(): void;
+		refresh(options?: Track.RefreshOptions): Promise<void>;
 		start(): Promise<bigint | undefined>;
 		get subscription(): Signals.Getter<Track.Subscription | undefined>;
 		update(options: Track.Subscription): void;

@@ -1852,7 +1852,7 @@ export class Producer {
 		pending.kept ||= kept;
 		if (!kept) pending.callers++;
 		// Only a new request, or an earlier one, changes what is asked for.
-		if (current && current.at.le(at)) return pending;
+		if (current?.at.le(at)) return pending;
 		pending.at = at;
 		this.#reportWanted();
 		return pending;
@@ -2771,7 +2771,10 @@ export class Producer {
 		this.#refreshTimer?.abort.abort();
 		this.#refreshTimer = undefined;
 		this.#endRefresh(
-			abort ?? new StreamError(StreamCode.Cancel, { message: `track ${this.name} closed before the refresh was sent` }),
+			abort ??
+				new StreamError(StreamCode.Cancel, {
+					message: `track ${this.name} closed before the refresh was sent`,
+				}),
 		);
 		closeTrackState(this.#state, abort);
 		if (this.#keptDrops() > kept) this.#rearmDrops(kept);
