@@ -113,8 +113,10 @@ impl Default for Config {
 /// rollup. A node that resumes after its departure closed its open pairs
 /// reopens them as new starts rather than lowering their ends. A bucket's
 /// per-path traffic also reopens pairs when a node resumes without regressing,
-/// but keeps the reset contract of a single node: one that returns within the
-/// grace with a lower counter regresses the merged counter.
+/// but keeps the reset contract of a single node: a new counter epoch on a
+/// node it keeps reading regresses the merged counter. A minted node that
+/// returns within the grace from a restart is the exception: its first frame
+/// folds the earlier run into the rollup, as an expired grace would.
 pub struct Consumer {
 	origin: origin::Consumer,
 	config: Config,
@@ -824,7 +826,8 @@ struct Merged<S: Shape> {
 	last_announced: HashMap<Path, Instance>,
 	/// How long a departed node waits before folding into `retired`.
 	grace: Duration,
-	/// The summed last frames of every node whose grace elapsed.
+	/// The summed last frames of every node whose grace elapsed, plus each
+	/// minted takeover's earlier run once its first frame shows a restart.
 	retired: S::Merged,
 }
 
