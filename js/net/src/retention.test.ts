@@ -3,6 +3,7 @@ import { type Dispose, Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import type * as Group from "./group.ts";
 import * as Ietf from "./ietf/index.ts";
+import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -115,7 +116,7 @@ for (const [name, alpn] of [
 ]) {
 	test(`${name}: the frames of one long group leave no listener behind`, async () => {
 		const { producer, track, close } = await session(alpn);
-		const group = producer.appendGroup();
+		const group = hooks.appendNext(producer);
 
 		group.writeFrame(frame(0));
 		const consumer = await track.nextGroup();
@@ -138,7 +139,7 @@ for (const [name, alpn] of [
 
 		const send = async (count: number, offset: number) => {
 			for (let i = 0; i < count; i++) {
-				const group = producer.appendGroup();
+				const group = hooks.appendNext(producer);
 				group.writeFrame(frame(offset + i));
 				group.finish();
 				const consumer = await track.nextGroup();

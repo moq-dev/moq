@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { FakeObs, type FakeOptions } from "./fake.test-util.ts";
-import { ConnectError, connect, type Ignored, type Publish, RequestError } from "./index.ts";
+import { type Config, ConnectError, connect, type Ignored, RequestError } from "./index.ts";
 
 let clock: Manual;
 let installed: { close(): void };
@@ -34,11 +34,11 @@ async function reason(promise: Promise<unknown>): Promise<string> {
 	return error.reason;
 }
 
-const MOQ: Publish = {
-	destination: { kind: "moq", url: "https://relay.example/anon", broadcast: "me.hang", layers: 3 },
+const MOQ: Config = {
+	destination: { kind: "moq", url: "https://relay.example/anon", broadcast: "me.hang", renditions: 3 },
 };
 
-const RTMP: Publish["destination"] = { kind: "rtmp", server: "rtmps://live.example/app", key: "key" };
+const RTMP: Config["destination"] = { kind: "rtmp", server: "rtmps://live.example/app", key: "key" };
 
 test("authenticates with the password", async () => {
 	obs({ password: "secret" });
@@ -116,7 +116,7 @@ test("puts a MoQ destination in a new profile and reloads it for the layers", as
 	const client = await connect();
 	const configured = await client.configure({
 		...MOQ,
-		destination: { ...MOQ.destination, kind: "moq", token: "jwt" } as Publish["destination"],
+		destination: { ...MOQ.destination, kind: "moq", token: "jwt" } as Config["destination"],
 		video: { size: { width: 1280, height: 720 }, fps: 60, bitrate: 3000 },
 		audio: { bitrate: 128 },
 	});
@@ -249,7 +249,7 @@ test("leaves an up-to-date profile alone", async () => {
 	// A token change rewrites the service but needs no reload or video reset.
 	await client.configure({
 		...publish,
-		destination: { ...MOQ.destination, kind: "moq", token: "new" } as Publish["destination"],
+		destination: { ...MOQ.destination, kind: "moq", token: "new" } as Config["destination"],
 	});
 	const types = fake.log.map((entry) => entry.type);
 	expect(types).not.toContain("SetCurrentProfile");
@@ -277,12 +277,12 @@ test("a video change with layers reloads the profile so the layers follow it", a
 	// One layer has nothing to go stale, so it skips the reload.
 	await client.configure({
 		...MOQ,
-		destination: { ...MOQ.destination, kind: "moq", layers: 1 } as Publish["destination"],
+		destination: { ...MOQ.destination, kind: "moq", renditions: 1 } as Config["destination"],
 	});
 	fake.log = [];
 	await client.configure({
 		...MOQ,
-		destination: { ...MOQ.destination, kind: "moq", layers: 1 } as Publish["destination"],
+		destination: { ...MOQ.destination, kind: "moq", renditions: 1 } as Config["destination"],
 		video: { fps: 60 },
 	});
 	expect(fake.log.map((entry) => entry.type)).not.toContain("SetCurrentProfile");
@@ -320,7 +320,7 @@ test("puts an RTMP destination in the profile with one rendition", async () => {
 });
 
 test("names the low-latency settings an encoder keeps", async () => {
-	const cases: [Publish["destination"], string, Ignored[]][] = [
+	const cases: [Config["destination"], string, Ignored[]][] = [
 		[MOQ.destination, "nvenc_hevc", []],
 		[MOQ.destination, "qsv_av1", []],
 		[MOQ.destination, "amd", []],
@@ -370,11 +370,11 @@ test("rejects invalid settings before touching OBS", async () => {
 	obs();
 	const client = await connect();
 	fake.log = [];
-	const layers = (layers: number) => ({ destination: { ...MOQ.destination, layers } }) as Publish;
-	await expect(client.configure(layers(0))).rejects.toThrow(RangeError);
-	await expect(client.configure(layers(1.5))).rejects.toThrow(RangeError);
+	const renditions = (renditions: number) => ({ destination: { ...MOQ.destination, renditions } }) as Config;
+	await expect(client.configure(renditions(0))).rejects.toThrow(RangeError);
+	await expect(client.configure(renditions(1.5))).rejects.toThrow(RangeError);
 	// libobs holds 10 video encoders per output.
-	await expect(client.configure(layers(11))).rejects.toThrow(RangeError);
+	await expect(client.configure(renditions(11))).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, video: { fps: 29.97 } })).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, audio: { bitrate: -1 } })).rejects.toThrow(RangeError);
 	await expect(client.configure({ ...MOQ, video: { size: { width: 8192, height: 4320 } } })).rejects.toThrow(

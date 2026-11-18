@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { accept, connect } from "../connection/index.ts";
 import { ProtocolViolation, SessionCode } from "../error.ts";
+import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin } from "../mock.ts";
 import { Producer as Origin } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -10,7 +11,7 @@ import { Timescale, Timestamp } from "../time.ts";
 import { Budget } from "../util/yield.ts";
 import { wireOf } from "../wire.ts";
 import { Connection } from "./connection.ts";
-import { ObjectDatagram } from "./datagram.ts";
+import { encodeDatagram, ObjectDatagram } from "./datagram.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 const ALL: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
@@ -36,6 +37,20 @@ test("roundtrips on every draft", async () => {
 		const bytes = datagram.encode(version);
 		expect(bytes[0]).toBe(0x07); // properties, end of group, object 0
 		expect(await ObjectDatagram.decode(bytes, version)).toEqual(datagram);
+	}
+});
+
+test("a published datagram carries no properties, a timed one included", async () => {
+	for (const version of ALL) {
+		const bytes = await encodeDatagram(
+			{ sequence: 42n, timestamp: Timestamp.fromMillis(1234), payload: new TextEncoder().encode("hello") },
+			{ trackAlias: 3n, publisherPriority: 7 },
+			version,
+		);
+		expect(bytes[0]).toBe(0x06); // end of group, object 0, no properties
+		expect(await ObjectDatagram.decode(bytes, version)).toEqual(
+			new ObjectDatagram({ ...single(7), properties: undefined }),
+		);
 	}
 });
 
@@ -160,7 +175,8 @@ test("a datagram track round-trips over moq-transport", async () => {
 		datagrams.insert({ sequence: 4n, timestamp: Timestamp.fromMillis(9), payload: new Uint8Array([7]) });
 		const received = await reader.recv();
 		expect(received?.sequence).toBe(4n);
-		expect(received?.timestamp?.asMillis()).toBe(9);
+		// No Timestamp goes out, so its time is its sequence in the track's units.
+		expect(received?.timestamp?.asMillis()).toBe(4);
 		expect(received?.payload).toEqual(new Uint8Array([7]));
 		datagrams.finish();
 		// The end waits out the grace a late datagram gets.
@@ -213,12 +229,13 @@ test("a relay shares one IETF subscription across stream and datagram readers", 
 		expect(upstream.client.sendStreams.bidi.length).toBe(before);
 		try {
 			datagrams.insert({ sequence: 4n, timestamp: Timestamp.fromMillis(9), payload: Uint8Array.of(7) });
-			const group = track.appendGroup();
+			const group = hooks.appendNext(track);
 			group.writeFrame({ timestamp: Timestamp.fromMillis(10), payload: Uint8Array.of(8) });
 			group.finish();
 			const received = await reader.recv();
 			expect(received?.payload).toEqual(Uint8Array.of(7));
-			expect(received?.timestamp?.asMillis()).toBe(9);
+			// Its sequence in the stream track's TIMESCALE, which the datagrams share.
+			expect(received?.timestamp?.asMillis()).toBe(4);
 			const receivedGroup = await subscriber.recvGroup();
 			expect((await receivedGroup?.readFrame())?.payload).toEqual(Uint8Array.of(8));
 			receivedGroup?.close();

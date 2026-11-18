@@ -1,996 +1,331 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use super::*;
+use crate::route::relay::{Edit, Hop, Offer, Role};
 
-fn p(path: &'static str) -> Path {
-	Path::from_static(path)
+fn id(relay: u64) -> NodeId {
+	NodeId { relay, start: 1 }
 }
 
-fn claim(instance: &Instance, cost: u64) -> Claim {
-	Claim {
-		instance: instance.clone(),
-		epoch: 0,
-		cost,
+fn node() -> (Node, Deadlines) {
+	let clock = Deadlines::new(Instant::now());
+	(Node::new(id(1), clock.clone()), clock)
+}
+
+/// A link to a neighbour in `role`.
+fn port(role: Role) -> Port {
+	Port {
+		cost: 1,
+		priority: 0,
 		upstream: false,
-		learned: false,
-		above: 0,
-		chain: crate::Hops::new(),
+		role,
 	}
 }
 
-fn clock() -> Deadlines {
-	Deadlines::new(Instant::ZERO)
+/// A neighbour that forwards nothing and is asked for everything.
+fn publisher(node: &Node, tag: u64) -> Stream {
+	let stream = node.connect(tag, port(Role::Scoped(vec![Path::empty()]))).unwrap();
+	assert!(matches!(stream.try_wire(), Some(Msg::Ask(_))), "the node asks at once");
+	stream.recv(Msg::Edited).unwrap();
+	stream
 }
 
-fn peer(tag: u64, node: Id) -> Peer {
-	Peer { tag, node }
+/// A neighbour that forwards nothing, is asked for nothing, and asks for everything.
+fn viewer(node: &Node, tag: u64) -> Stream {
+	let stream = node.connect(tag, port(Role::Scoped(Vec::new()))).unwrap();
+	let ask = Edit {
+		remove: Vec::new(),
+		add: vec![Path::empty()],
+	};
+	stream.recv(Msg::Ask(ask)).unwrap();
+	stream.flush();
+	stream
 }
 
-fn outputs(stream: &Stream) -> Vec<Output> {
-	std::iter::from_fn(|| stream.try_wire()).collect()
+fn cast(path: &str) -> Broadcast {
+	(Path::new(path).unwrap(), "i".parse().unwrap())
 }
 
-/// Deliver everything `from` would send on the wire to the stream receiving it,
-/// returning what else it queued.
-fn pump(from: &Stream, to: &Stream) -> Vec<Output> {
-	let mut rest = Vec::new();
-	for output in outputs(from) {
-		match output {
-			Output::Route { id, prefix, reach } => to.route(id, prefix, reach),
-			Output::Batch {
-				id,
-				prefix,
-				changes,
-				floor,
-			} => to.batch(id, prefix, changes, floor),
-			Output::Dead(dead) => to.dead(dead),
-			other => rest.push(other),
-		}
-	}
-	rest
+fn live(epoch: u64) -> Change {
+	Change::Live(Claim {
+		item: Attr { epoch, above: 0 },
+		cost: 0,
+		priority: i8::MAX,
+		draining: false,
+		unavailable: false,
+		chain: Vec::new(),
+	})
 }
 
-/// The serve commands among a stream's outputs.
-fn served(outputs: Vec<Output>) -> Vec<Output> {
-	(outputs.into_iter())
-		.filter(|output| matches!(output, Output::Serve { .. } | Output::Unserve { .. }))
+/// `stream`'s peer announces `change` to `broadcast`.
+fn announce(stream: &Stream, broadcast: &Broadcast, change: Change) {
+	let changes = vec![(broadcast.clone(), change)];
+	stream.recv(Msg::Announce { changes }).unwrap();
+	stream.flush();
+}
+
+/// The claims queued for `stream`'s peer: each path, and whether it is live.
+fn told(stream: &Stream) -> Vec<(String, bool)> {
+	std::iter::from_fn(|| stream.try_wire())
+		.filter_map(|msg| match msg {
+			Msg::Announce { changes } => Some(changes),
+			_ => None,
+		})
+		.flatten()
+		.map(|((path, _), change)| (path.to_string(), matches!(change, Change::Live(_))))
 		.collect()
 }
 
-/// The wire messages among a stream's outputs.
-fn wire(outputs: Vec<Output>) -> Vec<Output> {
-	(outputs.into_iter())
-		.filter(|output| !matches!(output, Output::Serve { .. } | Output::Unserve { .. }))
-		.collect()
+fn serves(stream: &Stream) -> Vec<Output> {
+	std::iter::from_fn(|| stream.try_serve()).collect()
 }
 
-/// The claim as a relay (node 2) serves it through the origin's (node 1) route.
-fn served_at(claim: Claim, metric: Metric, primary: bool) -> Served {
-	Served {
-		claim,
-		metric,
-		available: true,
-		draining: false,
-		priority: 0,
-		primary,
-		selected: true,
-		path: std::sync::Arc::new([1, 2]),
-	}
-}
-
-#[test]
-fn a_claim_is_served_through_the_stream_its_route_arrived_on() {
-	let instance = Instance::random();
-	let (origin, relay) = (Node::new(1, 1, clock()), Node::new(2, 2, clock()));
-	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-	origin.own(p("live/x"), Some(claim(&instance, 5)));
-	pump(&answer, &receive);
-	assert_eq!(
-		served(outputs(&receive)),
-		[Output::Serve {
-			id: 1,
-			named: 1,
-			claim: p("live/x"),
-			prefix: Path::empty(),
-			served: served_at(claim(&instance, 5), 1, true),
-		}]
-	);
-
-	origin.own(p("live/x"), None);
-	pump(&answer, &receive);
-	assert_eq!(
-		served(outputs(&receive)),
-		[Output::Unserve {
-			id: 1,
-			claim: p("live/x"),
-			prefix: Path::empty(),
-			ended: true
-		}]
-	);
-}
-
-/// A claim covered by routes at two prefixes is served along both, and a reader follows
-/// the narrower one.
-#[test]
-fn the_narrowest_live_route_is_primary() {
-	let instance = Instance::random();
-	let (origin, relay) = (Node::new(1, 1, clock()), Node::new(2, 2, clock()));
-	let wide = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	let narrow = origin.answer(peer(2, 2), Link::default(), p("live")).unwrap();
-	let via_wide = relay.receive(peer(1, 1), Link::default()).unwrap();
-	let via_narrow = relay.receive(peer(2, 1), Link::default()).unwrap();
-	origin.own(p("live/x"), Some(claim(&instance, 0)));
-	pump(&wide, &via_wide);
-	pump(&narrow, &via_narrow);
-	let serve = |prefix: &'static str, primary| Output::Serve {
-		id: 1,
-		named: 1,
-		claim: p("live/x"),
-		prefix: p(prefix),
-		served: served_at(claim(&instance, 0), 1, primary),
-	};
-	assert_eq!(served(outputs(&via_wide)), [serve("", false)]);
-	assert_eq!(served(outputs(&via_narrow)), [serve("live", true)]);
-
-	assert_eq!(
-		relay.forward(3, 1, &p("live/x"), &Path::empty()),
-		None,
-		"no stream answers that session"
-	);
-	assert_eq!(origin.forward(1, 1, &p("live/x"), &Path::empty()), Some(Via::Here));
-}
-
-/// A scoped neighbour is asked for one prefix per region, so it answers at each region
-/// and no route wider than a region is filed onto another's key. A region inside both a
-/// broad and a narrow route of one node stays online through whichever still lives, and
-/// goes offline only once both ended.
-#[test]
-fn a_region_inside_two_routes_stays_online_through_either() {
-	let instance = Instance::random();
-	let (origin, relay, leaf) = (
-		Node::new(1, 1, clock()),
-		Node::new(2, 2, clock()),
-		Node::new(3, 3, clock()),
-	);
-	let wide = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	let narrow = origin.answer(peer(2, 2), Link::default(), p("live")).unwrap();
-	let via_wide = relay.receive(peer(1, 1), Link::default()).unwrap();
-	let via_narrow = relay.receive(peer(2, 1), Link::default()).unwrap();
-	origin.own(p("live/a/x"), Some(claim(&instance, 0)));
-	// The relay serves what it hears, and so forwards it.
-	let hear = || {
-		pump(&wide, &via_wide);
-		pump(&narrow, &via_narrow);
-		serve_all(&via_wide);
-		serve_all(&via_narrow);
-	};
-	hear();
-
-	// The leaf confines the relay to two regions, and asks it for each.
-	let regions = vec![p("live/a"), p("live/b")];
-	let scope = crate::route::Scope {
-		regions: regions.clone(),
-		qualify: crate::route::qualifier([7; 32]),
-	};
-	let link = Link {
-		scope: Some(scope),
-		..Default::default()
-	};
-	let up = leaf.connect(peer(3, 2), link).unwrap();
-	let asked = std::iter::from_fn(|| up.try_output())
-		.find_map(|output| match output {
-			Output::Ask(edit) => Some(edit),
-			_ => None,
-		})
-		.expect("the leaf asks the relay");
-	assert_eq!(asked.add, regions);
-	let answering = Link {
-		interest: Default::default(),
-		..Default::default()
-	};
-	let down = relay.connect(peer(3, 3), answering).unwrap();
-	down.edit(asked).unwrap();
-	up.edited(Default::default());
-	pump(&down, &up);
-	let online = || (leaf.shown().iter()).any(|((_, path), (_, available))| *path == p("live/a/x") && *available);
-	assert!(online(), "{:?}", leaf.shown());
-
-	// The origin ends the narrow route: the broad one still covers the region.
-	via_narrow.route(1, p("live"), None);
-	serve_all(&via_wide);
-	pump(&down, &up);
-	assert!(online(), "the broad route still reaches the region: {:?}", leaf.shown());
-
-	via_wide.route(1, Path::empty(), None);
-	pump(&down, &up);
-	assert!(!online(), "{:?}", leaf.shown());
-}
-
-/// A request a peer sends follows the route this node offered it under the prefix it names.
-#[test]
-fn a_forwarded_request_follows_the_route_it_names() {
-	let instance = Instance::random();
-	let (origin, relay) = (Node::new(1, 1, clock()), Node::new(2, 2, clock()));
-	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-	let downstream = relay.answer(peer(5, 3), Link::default(), Path::empty()).unwrap();
-	origin.own(p("live/x"), Some(claim(&instance, 0)));
-	pump(&answer, &receive);
-	outputs(&receive)
-		.into_iter()
-		.filter_map(|output| match output {
-			Output::Serve {
-				id,
-				claim,
-				prefix,
-				served,
-				..
-			} => Some((id, claim, prefix, served)),
-			_ => None,
-		})
-		.for_each(|(id, claim, prefix, served)| receive.serving(id, &claim, &prefix, &served.claim));
-	assert!(!wire(outputs(&downstream)).is_empty(), "the relay offers its route");
-	assert_eq!(
-		relay.forward(5, 1, &p("live/x"), &Path::empty()),
-		Some(Via::Route { prefix: Path::empty() })
-	);
-}
-
-/// A session's key lives as long as the session, so dropping it is the session
-/// closing: the hop is reported dead to every neighbour sent a route through it. A
-/// mount's key dropped while its session stays up ends its routes quietly.
-#[test]
-fn only_a_closed_session_reports_its_hop_dead() {
-	for closed in [false, true] {
-		let instance = Instance::random();
-		let (origin, relay, leaf) = (
-			Node::new(1, 1, clock()),
-			Node::new(2, 2, clock()),
-			Node::new(3, 3, clock()),
-		);
-		let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-		let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-		let down = relay.answer(peer(2, 3), Link::default(), Path::empty()).unwrap();
-		let up = leaf.receive(peer(1, 2), Link::default()).unwrap();
-		origin.own(p("live/x"), Some(claim(&instance, 0)));
-		pump(&answer, &receive);
-		for output in served(outputs(&receive)) {
-			if let Output::Serve {
-				id,
-				claim,
-				prefix,
-				served,
-				..
-			} = output
-			{
-				receive.serving(id, &claim, &prefix, &served.claim);
-			}
-		}
-		pump(&down, &up);
-		outputs(&up);
-
-		// A mount of the session answers the leaf nothing new, and goes quietly.
-		let mount = down.mount(p("elsewhere")).unwrap();
-		match closed {
-			true => drop(receive),
-			false => drop(mount),
-		}
-		let sent = wire(outputs(&down));
-		let dead = sent
-			.iter()
-			.any(|output| matches!(output, Output::Dead(Dead::Closed { .. })));
-		assert_eq!(dead, closed, "{sent:?}");
-		assert_eq!(
-			relay.lock().router.deadline().is_some(),
-			closed,
-			"only a closed session casts doubt"
-		);
-	}
-}
-
-/// A route started and ended while the reader stalled leaves it nothing to read.
-#[test]
-fn a_route_ended_unread_leaves_nothing() {
-	let instance = Instance::random();
-	let origin = Node::new(1, 1, clock());
-	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	outputs(&answer);
-	origin.own(p("live/x"), Some(claim(&instance, 0)));
-	origin.own(p("live/x"), None);
-	// The origin's own route stays for the prefix; its claims net out.
-	let read = outputs(&answer);
-	let starts = (read.iter())
-		.filter(
-			|output| matches!(output, Output::Batch { changes, .. } if changes.iter().any(|(_, claim)| claim.is_some())),
-		)
-		.count();
-	assert_eq!(starts, 0, "{read:?}");
-}
-
-/// However many changes queue while the reader stalls, it reads the net change.
-#[test]
-fn a_stalled_reader_holds_the_net_change() {
-	let origin = Node::new(1, 1, clock());
-	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	outputs(&answer);
-	let instance = Instance::random();
-	for cost in 0..1000 {
-		origin.own(p("live/x"), Some(claim(&instance, cost)));
-	}
-	let read = outputs(&answer);
-	let batches: Vec<_> = (read.iter())
-		.filter_map(|output| match output {
-			Output::Batch { changes, .. } => Some(changes.clone()),
-			_ => None,
-		})
-		.collect();
-	assert_eq!(batches, [vec![(p("live/x"), Some(claim(&instance, 999)))]]);
-}
-
-/// A DEAD applies to the routes the peer holds when it reads it, so no route change
-/// queued after it is read before it.
-#[test]
-fn nothing_moves_across_a_dead() {
-	let offer = |metric| Offer {
-		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: 0,
-		metric,
-		down_only: false,
-	};
-	let mut outbox = Outbox::default();
-	let mut waiting = Waiting::default();
-	let key = (1, Path::empty());
-	outbox.route(7, key.clone(), Some(Reach::Finite(offer(1))), &mut waiting);
-	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
-	outbox.route(7, key.clone(), Some(Reach::Finite(offer(2))), &mut waiting);
-	let read: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
-	let route = |metric| Output::Route {
-		id: 1,
-		prefix: Path::empty(),
-		reach: Some(Reach::Finite(offer(metric))),
-	};
-	assert_eq!(read, [route(1), Output::Dead(Dead::Draining { node: 1 }), route(2)]);
-}
-
-/// A reader that falls behind repeated failures of the routes it holds overruns its
-/// stream, while one behind a failure of every hop a path can cross does not, and
-/// reading what was queued clears it. A route a DEAD ends counts no longer, so neither
-/// does a publisher that came and went.
-#[test]
-fn a_reader_behind_repeated_failures_overruns() {
-	use super::super::path::Hop;
-	let offer = |session| Offer {
-		path: [Hop { node: 1, session: 0 }, Hop { node: 2, session }].into(),
-		draining: false,
-		priority: 0,
-		metric: 1,
-		down_only: false,
-	};
-	let dead = |session, gone| Dead::Closed {
-		hop: Hop { node: 2, session },
-		far: 3,
-		moved: Vec::new(),
-		gone,
-	};
-
-	// One route whose hop keeps failing, the route moving on after each.
-	let mut outbox = Outbox::default();
-	let mut waiting = Waiting::default();
-	let key = (1, Path::empty());
-	outbox.route(7, key.clone(), Some(Reach::Finite(offer(0))), &mut waiting);
-	let mut failures = 0;
-	while !outbox.overrun() {
-		failures += 1;
-		outbox.dead(7, dead(failures, false), &mut waiting);
-		outbox.route(7, key.clone(), Some(Reach::Finite(offer(failures))), &mut waiting);
-	}
-	assert!(failures > MAX_HOPS as u64, "overran {failures} failures behind");
-	assert_eq!(std::iter::from_fn(|| outbox.pop()).count() as u64, 2 * failures + 1);
-	assert!(!outbox.overrun());
-	assert_eq!(outbox.sealed, 0, "everything read");
-
-	// Publishers that each come and go with their session, the DEAD ending each route.
-	let mut outbox = Outbox::default();
-	let mut publishers = 0;
-	while !outbox.overrun() {
-		publishers += 1;
-		assert!(publishers < 1000, "a reader holding no route never overran");
-		let key = (publishers, Path::empty());
-		outbox.route(7, key, Some(Reach::Finite(offer(publishers))), &mut waiting);
-		outbox.dead(7, dead(publishers, true), &mut waiting);
-	}
-	assert!(outbox.known.is_empty(), "every route ended with its DEAD");
-
-	// Many routes through one hop queued unread, which one DEAD ends together: a
-	// single failure, however many routes it ends, never overruns.
-	let mut outbox = Outbox::default();
-	let routes = 4 * MAX_HOPS as u64;
-	for id in 1..=routes {
-		outbox.route(7, (id, Path::empty()), Some(Reach::Finite(offer(1))), &mut waiting);
-	}
-	outbox.dead(7, dead(1, true), &mut waiting);
-	assert!(!outbox.overrun(), "{} sealed", outbox.sealed);
-	let read = std::iter::from_fn(|| outbox.pop()).count() as u64;
-	assert_eq!(read, routes + 1, "each route's start, then the DEAD that ends it");
-	assert_eq!(outbox.sealed, 0, "everything read");
-
-	// The same routes sealed by an earlier DEAD, which leaves them up, then ended by a
-	// later one: what the first sealed stops counting once they end.
-	let mut outbox = Outbox::default();
-	for id in 1..=routes {
-		outbox.route(7, (id, Path::empty()), Some(Reach::Finite(offer(1))), &mut waiting);
-	}
-	outbox.dead(7, Dead::Draining { node: 9 }, &mut waiting);
-	outbox.dead(7, dead(1, true), &mut waiting);
-	assert!(!outbox.overrun(), "{} sealed", outbox.sealed);
-	let read = std::iter::from_fn(|| outbox.pop()).count() as u64;
-	assert_eq!(read, routes + 2, "each route's start, then both DEADs");
-	assert_eq!(outbox.sealed, 0, "everything read");
-	assert!(outbox.sealing.is_empty());
-}
-
-/// An edit adding many prefixes queues a SYNCED for each, which a momentarily slow
-/// reader holds unread: none of it, nor this side's own edit, counts toward an overrun.
-#[test]
-fn an_edit_of_many_prefixes_never_overruns() {
-	use super::super::path::Hop;
-	let mut outbox = Outbox::default();
-	let mut waiting = Waiting::default();
-	let offer = Offer {
-		path: [Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: 0,
-		metric: 1,
-		down_only: false,
-	};
-	outbox.route(7, (1, Path::empty()), Some(Reach::Finite(offer)), &mut waiting);
-	let prefixes = 100 * MAX_HOPS;
-	for i in 0..prefixes {
-		outbox.seal(Barrier::Synced(Path::new(&format!("p/{i}")).unwrap()));
-	}
-	outbox.seal(Barrier::Ask(Default::default()));
-	assert!(!outbox.overrun(), "{} sealed", outbox.sealed);
-	assert_eq!(outbox.sealed, 0);
-	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), prefixes + 2);
-}
-
-/// A claim started and withdrawn before the reader read it leaves nothing queued, so a
-/// route whose claims churn at fresh paths keeps only its live ones however slowly the
-/// peer reads. A withdrawal of a claim the reader holds still goes, and so does one of a
-/// claim sent ahead of a DEAD the reader has yet to read.
-#[test]
-fn a_claim_started_and_withdrawn_unread_leaves_nothing() {
-	let offer = Offer {
-		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: 0,
-		metric: 1,
-		down_only: false,
-	};
-	let instance = Instance::random();
-	let mut outbox = Outbox::default();
-	let mut waiting = Waiting::default();
-	let key = (1, Path::empty());
-	let mut batch = |outbox: &mut Outbox, path: Path, claim: Option<Claim>, floor| {
-		let changes = (vec![(path, claim)], Some(floor));
-		outbox.batch(7, key.clone(), changes, |_, _| None, &mut waiting);
-	};
-	let read = |changes: Vec<(Path, Option<Claim>)>, floor| Output::Batch {
-		id: 1,
-		prefix: Path::empty(),
-		changes,
-		floor: Some(floor),
-	};
-	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut Waiting::default());
-	batch(&mut outbox, p("live/held"), Some(claim(&instance, 0)), 1);
-	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), 2);
-
-	for n in 0..100 {
-		let path = Path::new(format!("live/{n}").as_str()).unwrap();
-		batch(&mut outbox, path.clone(), Some(claim(&instance, 0)), 2 + 2 * n);
-		batch(&mut outbox, path, None, 3 + 2 * n);
-	}
-	batch(&mut outbox, p("live/held"), None, 500);
-	let sent: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
-	assert_eq!(sent, [read(vec![(p("live/held"), None)], 500)]);
-	assert!(outbox.claims.is_empty(), "the reader holds no claim");
-
-	batch(&mut outbox, p("live/a"), Some(claim(&instance, 0)), 501);
-	outbox.dead(7, Dead::Draining { node: 1 }, &mut Waiting::default());
-	batch(&mut outbox, p("live/a"), None, 502);
-	let sent: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
-	assert_eq!(
-		sent,
-		[
-			read(vec![(p("live/a"), Some(claim(&instance, 0)))], 501),
-			Output::Dead(Dead::Draining { node: 1 }),
-			read(vec![(p("live/a"), None)], 502),
-		]
-	);
-}
-
-/// A route the reader read ends even when its ROUTE_END is queued alone, with no batch
-/// withdrawing its claims ahead of it, as when a hold ends.
-#[test]
-fn a_read_route_ends_alone() {
-	let offer = Offer {
-		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: 0,
-		metric: 1,
-		down_only: false,
-	};
-	let mut outbox = Outbox::default();
-	let mut waiting = Waiting::default();
-	let key = (1, Path::empty());
-	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut waiting);
-	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
-	assert_eq!(std::iter::from_fn(|| outbox.pop()).count(), 2);
-	outbox.route(7, key, None, &mut waiting);
-	let read: Vec<Output> = std::iter::from_fn(|| outbox.pop()).collect();
-	assert_eq!(
-		read,
-		[Output::Route {
-			id: 1,
-			prefix: Path::empty(),
-			reach: None
-		}]
-	);
-}
-
-/// A relay sends a claim on only once a stream serving it confirmed its instance, so a
-/// peer never names an instance this relay's origin cannot route yet.
-#[test]
-fn a_claim_goes_on_only_once_served() {
-	let instance = Instance::random();
-	let (origin, relay) = (Node::new(1, 1, clock()), Node::new(2, 2, clock()));
-	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-	let down = relay.answer(peer(2, 3), Link::default(), Path::empty()).unwrap();
-	outputs(&down);
-	origin.own(p("live/x"), Some(claim(&instance, 0)));
-	pump(&answer, &receive);
-	let claims = |read: Vec<Output>| -> Vec<Path> {
-		(read.into_iter())
-			.filter_map(|output| match output {
-				Output::Batch { changes, .. } => Some(changes),
-				_ => None,
-			})
-			.flatten()
-			.filter_map(|(path, claim)| claim.map(|_| path))
-			.collect()
-	};
-	assert!(claims(outputs(&down)).is_empty(), "held back until served");
-	for output in served(outputs(&receive)) {
+/// Confirm every claim `stream` was handed, returning how many there were.
+fn confirm(stream: &Stream) -> usize {
+	let serves = serves(stream);
+	for serve in &serves {
 		if let Output::Serve {
-			id,
-			claim,
-			prefix,
-			served,
-			..
-		} = output
+			origin, path, instance, ..
+		} = serve
 		{
-			receive.serving(id, &claim, &prefix, &served.claim);
+			stream.serving(*origin, &(path.clone(), instance.clone()), true);
 		}
 	}
-	assert_eq!(claims(outputs(&down)), [p("live/x")]);
+	serves.len()
 }
 
-/// The router's next timer reaches the task that fires it, and firing it lifts the doubt.
-#[test]
-fn the_doubt_timer_fires_on_the_origins_clock() {
-	let instance = Instance::random();
-	let clock = clock();
-	let (origin, relay) = (
-		Node::new(1, 1, Deadlines::new(Instant::ZERO)),
-		Node::new(2, 2, clock.clone()),
-	);
-	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-	origin.own(p("live/x"), Some(claim(&instance, 0)));
-	pump(&answer, &receive);
-	drop(receive);
-	let waiter = kio::Waiter::noop();
-	let Poll::Ready(Some(at)) = relay.poll_deadline(None, &waiter) else {
-		panic!("a doubt is timed");
+/// Fire the node's next timer.
+fn expire(node: &Node, clock: &Deadlines) {
+	let Poll::Ready(Some(at)) = node.poll_deadline(None, &kio::Waiter::noop()) else {
+		panic!("no timer is armed");
 	};
-	assert_eq!(at, Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
 	clock.advance(at);
-	relay.timeout();
-	assert_eq!(relay.poll_deadline(Some(at), &waiter), Poll::Ready(None));
+	node.timeout();
 }
 
-/// A route the peer could not extend is not forwarded: with this node's hop it leaves
-/// no room for the peer's, which would refuse it, and one already at the limit would
-/// take it past what any peer can decode, so a session never fails to encode one. One
-/// hop fewer forwards, a hop short of the limit.
-#[test]
-fn a_route_at_the_hop_limit_is_not_forwarded() {
-	use crate::route::MAX_HOPS;
-	for (hops, forwarded) in [
-		(MAX_HOPS - 2, Some(MAX_HOPS - 1)),
-		(MAX_HOPS - 1, None),
-		(MAX_HOPS, None),
-	] {
-		let relay = Node::new(2, 2, clock());
-		let from_a = relay.receive(peer(1, 100 + hops as Id - 1), Link::default()).unwrap();
-		let to_b = relay.answer(peer(2, 3), Link::default(), Path::empty()).unwrap();
-		let offer = Offer {
-			path: (0..hops as Id)
-				.map(|i| super::super::path::Hop {
-					node: 100 + i,
-					session: 1,
-				})
-				.collect(),
-			draining: false,
-			priority: i8::MAX,
-			metric: 1,
-			down_only: false,
-		};
-		from_a.route(100, Path::empty(), Some(Reach::Finite(offer)));
-		// A route goes on the wire only with a claim it shows, once that is served.
-		let live = claim(&Instance::random(), 0);
-		from_a.batch(100, Path::empty(), vec![(p("live"), Some(live.clone()))], Some(0));
-		from_a.serving(100, &p("live"), &Path::empty(), &live);
-		let sent: Vec<Offer> = (outputs(&to_b).into_iter())
-			.filter_map(|output| match output {
-				Output::Route {
-					reach: Some(Reach::Finite(offer)),
-					..
-				} => Some(offer),
-				_ => None,
-			})
-			.collect();
-		assert_eq!(
-			sent.iter().map(|offer| offer.path.len()).max(),
-			forwarded,
-			"{hops} hops"
-		);
-		for offer in sent {
-			let start = crate::lite::AnnounceBroadcast::RouteStart {
-				prefix: 0,
-				node: 100,
-				suffix: Path::empty(),
-				exact: false,
-				offer,
-			};
-			crate::coding::Encode::encode_bytes(&start, crate::lite::Version::Lite07).unwrap();
-		}
+/// What a closed session left behind, and how the node let go of it.
+struct Left(Arc<AtomicU8>);
+
+impl Left {
+	const HELD: u8 = 0;
+	const RELEASED: u8 = 1;
+	const ENDED: u8 = 2;
+}
+
+impl Orphan for Left {
+	fn release(self: Box<Self>, ended: bool) {
+		let how = if ended { Self::ENDED } else { Self::RELEASED };
+		self.0.store(how, Ordering::SeqCst);
 	}
 }
 
-/// Serve every claim a stream's outputs ask it to, as its session would.
-fn serve_all(stream: &Stream) {
-	for output in served(outputs(stream)) {
+/// The origin's own claims are told to a session that asks for them, and are never
+/// handed to a session to serve: the origin's table already holds them.
+#[test]
+fn own_claims_are_told_and_never_served() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	node.own(false, room.clone(), live(0));
+	let viewer = viewer(&node, 1);
+	assert_eq!(told(&viewer), [("room".to_string(), true)]);
+	assert!(serves(&viewer).is_empty());
+
+	node.own(false, room, Change::Ended);
+	assert_eq!(told(&viewer), [("room".to_string(), false)]);
+}
+
+/// A claim a neighbour announces is handed back to that session to serve, naming no
+/// node, since the neighbour is where requests for it go.
+#[test]
+fn a_claim_is_served_through_the_session_that_gave_it() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let publisher = publisher(&node, 1);
+	let viewer = viewer(&node, 2);
+	announce(&publisher, &room, live(0));
+
+	let serves = serves(&publisher);
+	let [Output::Serve { path, served, .. }] = serves.as_slice() else {
+		panic!("one claim to serve: {serves:?}");
+	};
+	assert_eq!((path, served.named, served.available), (&room.0, None, true));
+	assert_eq!(told(&viewer), [("room".to_string(), true)]);
+	assert!(self::serves(&viewer).is_empty(), "a viewer serves nothing");
+	// It is never told back to the session it came from.
+	assert!(told(&publisher).is_empty());
+}
+
+/// A request naming no node goes to the session serving the claim, once that session
+/// confirmed it, and never back to the session it came from.
+#[test]
+fn a_request_waits_for_the_session_to_serve_the_claim() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let waiter = kio::Waiter::noop();
+	let publisher = publisher(&node, 1);
+	let _viewer = viewer(&node, 2);
+	announce(&publisher, &room, live(0));
+	assert!(node.poll_forward(2, None, &room, &waiter).is_pending());
+
+	assert_eq!(confirm(&publisher), 1);
+	let Poll::Ready(Some(Via::Route { node: named })) = node.poll_forward(2, None, &room, &waiter) else {
+		panic!("the request follows the claim");
+	};
+	assert_eq!(named, node.me(), "a claim adopted from an endpoint is this node's");
+	assert_eq!(node.poll_forward(1, None, &room, &waiter), Poll::Ready(None));
+	assert_eq!(node.poll_forward(2, None, &cast("other"), &waiter), Poll::Ready(None));
+}
+
+/// A session refused a claim it may not carry leaves the request unroutable instead of
+/// waiting forever.
+#[test]
+fn a_refused_claim_answers_the_request() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let publisher = publisher(&node, 1);
+	announce(&publisher, &room, live(0));
+	for serve in serves(&publisher) {
 		if let Output::Serve {
-			id,
-			claim,
-			prefix,
-			served,
-			..
-		} = output
+			origin, path, instance, ..
+		} = serve
 		{
-			stream.serving(id, &claim, &prefix, &served.claim);
+			publisher.serving(origin, &(path, instance), false);
 		}
 	}
+	assert_eq!(
+		node.poll_forward(2, None, &room, &kio::Waiter::noop()),
+		Poll::Ready(None)
+	);
 }
 
-/// What a stream holds back leaves nothing waiting once it goes, whether withdrawn,
-/// confirmed, or closed with the stream, so nothing builds up as claims churn.
+/// A forwarding neighbour's claim is served naming the node that claims it, and a
+/// request naming that node follows the session the route leaves on.
 #[test]
-fn a_held_claim_leaves_nothing_waiting_once_it_goes() {
-	let instance = Instance::random();
-	let (origin, relay) = (Node::new(1, 1, clock()), Node::new(2, 2, clock()));
-	let answer = origin.answer(peer(1, 2), Link::default(), Path::empty()).unwrap();
-	let receive = relay.receive(peer(1, 1), Link::default()).unwrap();
-	let waiting = || -> usize {
-		(relay.lock().waiting.values())
-			.flat_map(BTreeMap::values)
-			.map(BTreeSet::len)
-			.sum()
+fn a_routed_claim_names_its_node() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let far = id(9);
+	let relay = node.connect(1, port(Role::Routing(id(7)))).unwrap();
+	relay.recv(Msg::Edited).unwrap();
+	let offer = Offer {
+		path: [
+			Hop { node: far, session: 0 },
+			Hop {
+				node: id(7),
+				session: 4,
+			},
+		]
+		.into(),
+		draining: false,
+		priority: i8::MAX,
+		cost: 3,
+		marked: false,
 	};
-
-	let edge = relay.answer(peer(2, 3), Link::default(), Path::empty()).unwrap();
-	origin.own(p("live"), Some(claim(&instance, 0)));
-	pump(&answer, &receive);
-	assert_eq!(waiting(), 1);
-	serve_all(&receive);
-	assert_eq!(waiting(), 0, "confirmed");
-
-	// The route stays up through the confirmed claim while the one below churns.
-	origin.own(p("live/a"), Some(claim(&instance, 0)));
-	pump(&answer, &receive);
-	assert_eq!(waiting(), 1);
-	origin.own(p("live/a"), None);
-	pump(&answer, &receive);
-	assert_eq!(waiting(), 0, "withdrawn");
-
-	origin.own(p("live/a"), Some(claim(&instance, 0)));
-	pump(&answer, &receive);
-	assert_eq!(waiting(), 1);
-	drop(edge);
-	assert_eq!(waiting(), 0, "closed");
-}
-
-/// A peer's GOAWAY moves the route this node forwards onto another stream at once.
-#[test]
-fn a_goaway_moves_the_forwarded_route_to_another_stream() {
-	let instance = Instance::random();
-	let relay = Node::new(2, 2, clock());
-	let edge = relay.answer(peer(3, 3), Link::default(), Path::empty()).unwrap();
-	let first = relay.receive(peer(1, 10), Link::default()).unwrap();
-	let second = relay.receive(peer(2, 20), Link::default()).unwrap();
-	for (stream, node, metric) in [(&first, 10, 1), (&second, 20, 2)] {
-		let offer = Offer {
-			path: [Hop { node: 5, session: 0 }, Hop { node, session: 1 }].into(),
-			draining: false,
-			priority: i8::MAX,
-			metric,
-			down_only: false,
-		};
-		let live = claim(&instance, 0);
-		stream.route(5, Path::empty(), Some(Reach::Finite(offer)));
-		stream.batch(5, Path::empty(), vec![(p("live/x"), Some(live.clone()))], Some(1));
-		stream.serving(5, &p("live/x"), &Path::empty(), &live);
-	}
-	let paths = |stream: &Stream| -> Vec<Vec<Id>> {
-		(outputs(stream).into_iter())
-			.filter_map(|output| match output {
-				Output::Route {
-					id: 5,
-					reach: Some(Reach::Finite(offer)),
-					..
-				} => Some(offer.path.iter().map(|hop| hop.node).collect()),
-				_ => None,
-			})
-			.collect()
+	let offer = Some(offer);
+	relay.recv(Msg::Route { origin: far, offer }).unwrap();
+	let changes = vec![(room.clone(), live(0))];
+	let claims = Msg::Claims {
+		origin: far,
+		changes,
+		floor: 1,
 	};
-	assert_eq!(paths(&edge), [vec![5, 10, 2]]);
+	relay.recv(claims).unwrap();
+	relay.flush();
 
-	first.goaway();
-	assert_eq!(paths(&edge), [vec![5, 20, 2]]);
+	let serves = serves(&relay);
+	let [Output::Serve { origin, served, .. }] = serves.as_slice() else {
+		panic!("one claim to serve: {serves:?}");
+	};
+	assert_eq!((*origin, served.named), (far, Some(far)));
+	// The link's cost is added to the route's.
+	assert_eq!(served.cost, 4);
+	relay.serving(far, &room, true);
+	let waiter = kio::Waiter::noop();
+	assert_eq!(
+		node.poll_forward(2, Some(far), &room, &waiter),
+		Poll::Ready(Some(Via::Route { node: far }))
+	);
+	assert_eq!(node.poll_forward(2, Some(id(8)), &room, &waiter), Poll::Ready(None));
 }
 
-/// A session's mounts go with it: dropping its key disconnects them together, and a
-/// mount dropped after that has nothing left to retire.
+/// A session that closes leaves what it served as an orphan, which the node holds while
+/// the reader still shows the claim and releases, not ended, once the debounce runs out.
 #[test]
-fn a_closed_session_takes_its_mounts() {
-	let instance = Instance::random();
-	let relay = Node::new(2, 2, clock());
-	relay.own(p("live/x"), Some(claim(&instance, 0)));
-	let session = relay.answer(peer(1, 3), Link::default(), p("other")).unwrap();
-	let mount = session.mount(p("live")).unwrap();
+fn an_orphan_is_released_when_the_reader_lets_go() {
+	let (node, clock) = node();
+	let room = cast("room");
+	let publisher = publisher(&node, 1);
+	announce(&publisher, &room, live(0));
+	assert_eq!(confirm(&publisher), 1);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	publisher.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(publisher);
+	assert_eq!(
+		left.load(Ordering::SeqCst),
+		Left::HELD,
+		"the reader still shows the claim"
+	);
+
+	expire(&node, &clock);
+	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+}
+
+/// A session that returns before the debounce runs out takes the claim over: the orphan
+/// is released only once the new session serves it, so the origin never drops the claim.
+#[test]
+fn an_orphan_is_released_once_another_session_serves_the_claim() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let first = publisher(&node, 1);
+	announce(&first, &room, live(0));
+	assert_eq!(confirm(&first), 1);
+	let left = Arc::new(AtomicU8::new(Left::HELD));
+	first.orphan(node.me(), &room, Box::new(Left(left.clone())));
+	drop(first);
+
+	let second = publisher(&node, 2);
+	announce(&second, &room, live(0));
+	assert_eq!(left.load(Ordering::SeqCst), Left::HELD, "nothing serves the claim yet");
+	assert_eq!(confirm(&second), 1);
+	assert_eq!(left.load(Ordering::SeqCst), Left::RELEASED);
+}
+
+/// A claim its publisher withdraws stops being served as ended, so the origin withdraws
+/// it rather than showing it offline.
+#[test]
+fn a_withdrawn_claim_is_unserved_as_ended() {
+	let (node, _clock) = node();
+	let room = cast("room");
+	let publisher = publisher(&node, 1);
+	announce(&publisher, &room, live(0));
+	assert_eq!(confirm(&publisher), 1);
+	announce(&publisher, &room, Change::Ended);
+	let serves = serves(&publisher);
 	assert!(
-		wire(outputs(&mount))
-			.iter()
-			.any(|output| matches!(output, Output::Batch { .. })),
-		"the mount is sent what its target holds"
+		matches!(serves.as_slice(), [Output::Unserve { ended: true, .. }]),
+		"{serves:?}"
 	);
+}
+
+/// A mount is a key of its own on the session: it is told what it asks for, and closing
+/// the session closes it too.
+#[test]
+fn a_mount_asks_on_its_own_key() {
+	let (node, _clock) = node();
+	node.own(false, cast("a/x"), live(0));
+	node.own(false, cast("b/y"), live(0));
+	let session = node.connect(1, port(Role::Scoped(Vec::new()))).unwrap();
+	let mount = session.mount().unwrap();
+	let ask = Edit {
+		remove: Vec::new(),
+		add: vec![Path::new("b").unwrap()],
+	};
+	mount.recv(Msg::Ask(ask)).unwrap();
+	mount.flush();
+	assert_eq!(told(&mount), [("b/y".to_string(), true)]);
+	assert!(told(&session).is_empty());
+
 	drop(session);
-	assert_eq!(
-		relay.lock().router.neighbors(),
-		0,
-		"the mount's key went with the session"
-	);
-	drop(mount);
-	assert_eq!(relay.lock().router.neighbors(), 0);
-}
-
-/// The origin declares its hop id, without the qualified marker, or a random
-/// identity when nothing is left of it.
-#[test]
-fn the_origin_declares_its_hop_id_unqualified() {
-	let id = |id| std::num::NonZeroU64::new(id).unwrap();
-	assert_eq!(Node::origin(id(5), clock()).declared(), 5);
-	assert_eq!(Node::origin(id(QUALIFIED | 5), clock()).declared(), 5);
-	let drawn = Node::origin(id(QUALIFIED), clock()).declared();
-	assert!((1..=GENERATED).contains(&drawn), "{drawn}");
-}
-
-/// A declared identity travels as itself on a lite-06 wire, and each qualified key
-/// as its own hop id within the bits a generated one keeps, so a relay recognizes
-/// only its own routes coming back.
-#[test]
-fn an_identity_travels_as_its_own_hop() {
-	assert_eq!(hop(5).id(), 5);
-	assert_eq!(hop(GENERATED + 1).id(), GENERATED + 1);
-	let hops: BTreeSet<u64> = (0..256).map(|key| hop(QUALIFIED | key).id()).collect();
-	assert_eq!(hops.len(), 256, "one hop per key");
-	assert!(hops.iter().all(|id| (1..=GENERATED).contains(id)), "{hops:?}");
-}
-
-/// A claim held back for confirmation when a DEAD seals its batch goes after the DEAD
-/// once confirmed, so the sealed batch's floor certifies nothing, since it cannot cover
-/// a claim read only later, and the release closes with that floor instead.
-#[test]
-fn a_floor_sealed_while_a_claim_is_held_back_certifies_nothing() {
-	let offer = Offer {
-		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: 0,
-		metric: 1,
-		down_only: false,
-	};
-	let instance = Instance::random();
-	let mut outbox = Outbox::default();
-	let mut waiting = Waiting::default();
-	let key = (1, Path::empty());
-	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut waiting);
-	let changes = vec![
-		(p("live/x"), Some(claim(&instance, 0))),
-		(p("live/y"), Some(claim(&instance, 0))),
-	];
-	let awaits = |path: &Path, _: &Claim| Some(*path == p("live/y"));
-	outbox.batch(7, key.clone(), (changes, Some(5)), awaits, &mut waiting);
-	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
-	outbox.release(&key, &p("live/y"));
-
-	let batches: Vec<(Vec<Path>, Option<Rev>)> = (std::iter::from_fn(|| outbox.pop()))
-		.filter_map(|output| match output {
-			Output::Batch { changes, floor, .. } => Some((changes.into_iter().map(|(path, _)| path).collect(), floor)),
-			_ => None,
-		})
-		.collect();
-	assert_eq!(batches.len(), 2, "{batches:?}");
-	assert_eq!(
-		batches[0],
-		(vec![p("live/x")], None),
-		"sealed before live/y was confirmed"
-	);
-	assert_eq!(
-		batches[1],
-		(vec![p("live/y")], Some(5)),
-		"the release closes with the sealed floor"
-	);
-}
-
-/// The floor a held-back claim's release closes with is the newest batch's, whatever
-/// order the reader reads the older batches in: reading a batch sealed before the one
-/// that held the claim back does not take the release's floor back.
-#[test]
-fn a_release_closes_with_the_newest_floor_after_older_batches_are_read() {
-	let offer = Offer {
-		path: [super::super::path::Hop { node: 1, session: 0 }].into(),
-		draining: false,
-		priority: 0,
-		metric: 1,
-		down_only: false,
-	};
-	let instance = Instance::random();
-	let mut outbox = Outbox::default();
-	let mut waiting = Waiting::default();
-	let key = (1, Path::empty());
-	let awaits = |path: &Path, _: &Claim| Some(*path == p("live/y"));
-	outbox.route(7, key.clone(), Some(Reach::Finite(offer)), &mut waiting);
-	let x = vec![(p("live/x"), Some(claim(&instance, 0)))];
-	outbox.batch(7, key.clone(), (x, Some(5)), awaits, &mut waiting);
-	outbox.dead(7, Dead::Draining { node: 1 }, &mut waiting);
-	let y = vec![(p("live/y"), Some(claim(&instance, 0)))];
-	outbox.batch(7, key.clone(), (y, Some(6)), awaits, &mut waiting);
-	outbox.dead(7, Dead::Draining { node: 2 }, &mut waiting);
-
-	// The reader reads up to the first DEAD, and live/y is confirmed only then.
-	let mut read = Vec::new();
-	while let Some(output) = outbox.pop() {
-		let first = matches!(output, Output::Dead(Dead::Draining { node: 1 }));
-		read.push(output);
-		if first {
-			break;
-		}
-	}
-	outbox.release(&key, &p("live/y"));
-	read.extend(std::iter::from_fn(|| outbox.pop()));
-	let last = (read.into_iter()).rev().find_map(|output| match output {
-		Output::Batch { changes, floor, .. } => {
-			Some((changes.into_iter().map(|(path, _)| path).collect::<Vec<_>>(), floor))
-		}
-		_ => None,
-	});
-	assert_eq!(last, Some((vec![p("live/y")], Some(6))));
-}
-
-/// What one repath makes a relay do, behind an origin with `claims` claims beside another
-/// origin with `others`: the serve commands its session applies to the origin, and the
-/// ROUTE and other messages a stream watching the root is sent.
-fn reserved(claims: usize, others: usize) -> (usize, usize, usize) {
-	let instance = Instance::random();
-	let relay = Node::new(2, 2, clock());
-	let edge = relay.answer(peer(3, 3), Link::default(), Path::empty()).unwrap();
-	let up = relay.receive(peer(1, 10), Link::default()).unwrap();
-	let offer = |id: Id, far: Id| {
-		let path = [
-			Hop { node: id, session: 0 },
-			Hop { node: far, session: 1 },
-			Hop { node: 10, session: 1 },
-		];
-		let offer = Offer {
-			path: path.into(),
-			draining: false,
-			priority: i8::MAX,
-			metric: 1,
-			down_only: false,
-		};
-		Some(Reach::Finite(offer))
-	};
-	let live = claim(&instance, 0);
-	for (id, count) in [(5, claims), (6, others)] {
-		let prefix = Path::new(&format!("o{id}")).unwrap();
-		up.route(id, prefix.clone(), offer(id, 500));
-		let changes = (0..count)
-			.map(|i| (Path::new(&format!("o{id}/{i}")).unwrap(), Some(live.clone())))
-			.collect();
-		up.batch(id, prefix, changes, Some(1));
-	}
-	serve_all(&up);
-	outputs(&edge);
-	up.route(5, p("o5"), offer(5, 501));
-	let repath = served(outputs(&up)).len();
-	let sent = wire(outputs(&edge));
-	let routes = (sent.iter()).filter(|out| matches!(out, Output::Route { .. })).count();
-	(repath, routes, sent.len() - routes)
-}
-
-/// A route update re-serves every claim behind it: the session rewrites the origin's
-/// route table once per broadcast, each a `sync_route` that wakes the fronts and cursors
-/// below it, though no claim changed. The wire stays flat: a stream watching the route
-/// is sent one ROUTE per update and no claim, and a repath leaves other origins alone.
-/// This should be one write per route, which its broadcasts refer to.
-#[test]
-fn residual_a_route_update_reserves_every_claim() {
-	for claims in [1, 8, 64] {
-		for others in [0, 64] {
-			let (repath, routes, other) = reserved(claims, others);
-			assert_eq!(repath, claims, "{claims} claims, {others} beside");
-			assert_eq!((routes, other), (1, 0), "one ROUTE, and no claim");
-		}
-	}
-}
-
-/// Each closed session is remembered until the doubt timer, even one that sent this node
-/// no route, as a viewer's does: a dead hop for its session, and a doubt on its node when
-/// it declared one. Viewer churn grows both by the sessions closed inside one timer. A
-/// session no route was learned on has no hop any path can name, so it need not be
-/// remembered.
-#[test]
-fn residual_each_closed_session_is_remembered_until_the_doubt_timer() {
-	const CLOSED: u64 = 64;
-	for declared in [false, true] {
-		let instance = Instance::random();
-		let clock = clock();
-		let relay = Node::new(2, 2, clock.clone());
-		let up = relay.receive(peer(1, 10), Link::default()).unwrap();
-		let offer = Offer {
-			path: [Hop { node: 5, session: 0 }, Hop { node: 10, session: 1 }].into(),
-			draining: false,
-			priority: i8::MAX,
-			metric: 1,
-			down_only: false,
-		};
-		up.route(5, Path::empty(), Some(Reach::Finite(offer)));
-		up.batch(
-			5,
-			Path::empty(),
-			vec![(p("live/x"), Some(claim(&instance, 0)))],
-			Some(1),
-		);
-		serve_all(&up);
-		for viewer in 0..CLOSED {
-			let node = if declared { 1000 + viewer } else { 0 };
-			let stream = (relay.answer(peer(100 + viewer, node), Link::default(), Path::empty())).unwrap();
-			outputs(&stream);
-			// The session's only stream: dropping it closes the session.
-			drop(stream);
-		}
-		let kept = relay.lock().router.retained();
-		let doubts = if declared { CLOSED as usize } else { 1 };
-		assert_eq!(
-			(kept.dead, kept.doubt),
-			(CLOSED as usize, doubts),
-			"declared {declared}"
-		);
-		clock.advance(Instant::ZERO.saturating_add(Doubt::DEFAULT.timer));
-		relay.timeout();
-		let kept = relay.lock().router.retained();
-		assert_eq!((kept.dead, kept.doubt), (0, 0), "declared {declared}");
-	}
+	node.own(false, cast("b/z"), live(0));
+	assert!(told(&mount).is_empty(), "the mount closed with its session");
 }

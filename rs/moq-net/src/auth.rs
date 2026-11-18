@@ -596,30 +596,6 @@ impl Permit {
 		covers(&self.granted) && covers(&self.limit)
 	}
 
-	/// Whether the limit alone allows every path at or beneath `prefix`, judged
-	/// pattern by pattern, so a `false` may be spurious but a `true` never is.
-	#[cfg(feature = "async")]
-	pub(crate) fn within_limit_subtree(&self, prefix: &str) -> bool {
-		let Ok(subtree) = moq_pattern::Pattern::subtree(prefix) else {
-			return false;
-		};
-		self.limit.as_ref().is_none_or(|limit| limit.contains(&subtree))
-	}
-
-	/// The prefixes this confines the peer to, or `None` when it confines nothing: the
-	/// heads of the scope's patterns, which grants this side issued. What the peer
-	/// granted this side limits only what this side does, so a client never scopes the
-	/// relay that answered its token.
-	#[cfg(feature = "async")]
-	pub(crate) fn regions(&self) -> Option<Vec<crate::Path>> {
-		let limit = self.limit.as_ref()?;
-		let everything = moq_pattern::Pattern::subtree("").ok()?;
-		if limit.contains(&everything) {
-			return None;
-		}
-		Some(crate::model::interest_prefixes(limit))
-	}
-
 	/// The prefixes the peer's grant confines this direction to, or `None` while it
 	/// grants everything: asking for one of them, rather than a prefix above it, is a
 	/// request the peer's floors can certify.
@@ -631,12 +607,6 @@ impl Permit {
 			return None;
 		}
 		Some(crate::model::interest_prefixes(granted))
-	}
-
-	/// The limit this side set on the peer, or `None` while unrestricted.
-	#[cfg(feature = "async")]
-	pub(crate) fn limit(&self) -> Option<&Patterns> {
-		self.limit.as_ref()
 	}
 
 	/// Whether both set the same limit on the peer, whatever either was granted.
@@ -3062,30 +3032,6 @@ mod tests {
 		}
 	}
 
-	/// Only a grant this side issued confines the peer's claims: a client scoped by the
-	/// relay that answered its token leaves the relay's own routes unscoped.
-	#[cfg(feature = "async")]
-	#[test]
-	fn regions_come_from_the_issued_scope_alone() {
-		let earned = Permit {
-			granted: Some(patterns(&[".socket"])),
-			limit: None,
-		};
-		assert_eq!(earned.regions(), None, "the peer's grant to us scoped the peer");
-
-		let issued = Permit {
-			granted: None,
-			limit: Some(patterns(&[".socket/bob"])),
-		};
-		assert_eq!(issued.regions(), Some(vec![crate::Path::from_static(".socket/bob")]));
-
-		let everything = Permit {
-			granted: Some(patterns(&[".socket"])),
-			limit: Some(patterns(&[""])),
-		};
-		assert_eq!(everything.regions(), None, "a root grant confines nothing");
-	}
-
 	/// What the peer granted confines the prefixes asked of it, whatever the limit is.
 	#[cfg(feature = "async")]
 	#[test]
@@ -3332,7 +3278,7 @@ mod tests {
 		));
 
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		link.drain_with(std::sync::Arc::new(goaway));
 		assert!(matches!(
 			link.present(Bytes::from_static(b"late"), false),
@@ -3347,7 +3293,7 @@ mod tests {
 		let handle = Handle::new();
 		let draining = Link::attach(&handle, false, false).unwrap();
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 		let successor = Link::attach(&handle, true, false).unwrap();
 
@@ -3370,7 +3316,7 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
@@ -3391,7 +3337,7 @@ mod tests {
 		let auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let successor = Link::attach(&handle, true, false).unwrap();
@@ -3424,7 +3370,7 @@ mod tests {
 		let busy = Error::Session(SessionError::TooManyRequests);
 		assert_eq!(link.retry(id, &busy), Some(RETRY_INITIAL));
 
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		assert!(!link.active());
 		let err = link.reopen(id).unwrap_err();
 		assert!(matches!(err, Error::GoingAway), "{err:?}");
@@ -3481,7 +3427,7 @@ mod tests {
 		let _auth = handle.add(Bytes::from_static(b"jwt")).unwrap();
 		let id = opened(&draining);
 		let (goaway, _protocol) = crate::goaway::Handle::new(false);
-		goaway.producer().send(crate::goaway::Goaway::new()).unwrap();
+		goaway.send(crate::goaway::Goaway::new()).unwrap();
 		draining.drain_with(std::sync::Arc::new(goaway));
 
 		let busy = Error::Session(SessionError::TooManyRequests);

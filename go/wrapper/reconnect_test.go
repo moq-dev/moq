@@ -82,9 +82,8 @@ func dialWorker(t *testing.T, ctx context.Context, url string) *moq.Client {
 	client, err := moq.Dial(ctx, url, moq.ClientConfig{
 		TLS: moq.ClientTLS{Insecure: true},
 		Backoff: moq.Backoff{
-			Initial: 50 * time.Millisecond,
-			Max:     time.Second,
-			Timeout: moq.RetryForever,
+			Initial: ptr(50 * time.Millisecond),
+			Max:     ptr(time.Second),
 		},
 	})
 	if err != nil {
@@ -167,7 +166,7 @@ func TestListenKeylogRequiresSSLKEYLOGFILE(t *testing.T) {
 	}
 }
 
-// A Go worker survives a relay restart the way a moq-c worker does: the session
+// A Go worker survives a relay restart the way a libmoq worker does: the session
 // redials with backoff, the publisher re-announces its broadcast to the fresh
 // relay, and the subscriber's subscription receives frames again. The connect count
 // pairs with Status so a worker can log each reconnect.
@@ -331,7 +330,7 @@ func TestDialConnectionOptions(t *testing.T) {
 			KeepAlive:         ptr(time.Duration(0)),
 			GSO:               ptr(false),
 			MTUDiscovery:      ptr(true),
-			CongestionControl: moq.LossCongestionControl(),
+			CongestionControl: moq.CubicCongestionControl(),
 		},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
 	})
@@ -360,7 +359,7 @@ func TestFirstDialState(t *testing.T) {
 		Timeout:   ptr(100 * time.Millisecond),
 		TLS:       moq.ClientTLS{Insecure: true},
 		WebSocket: moq.WebSocketConfig{Enabled: ptr(false)},
-		Backoff:   moq.Backoff{Initial: 50 * time.Millisecond, Max: 50 * time.Millisecond, Timeout: moq.RetryForever},
+		Backoff:   moq.Backoff{Initial: ptr(50 * time.Millisecond), Max: ptr(50 * time.Millisecond)},
 	})
 	if err != nil {
 		t.Fatal(err)

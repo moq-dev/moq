@@ -324,7 +324,7 @@ done.
      "enforcement": "active",
      "conditions": {"ref_name": {"exclude": [], "include": [
        "refs/tags/moq-relay-v*", "refs/tags/moq-cli-v*",
-       "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*",
+       "refs/tags/libmoq-v*", "refs/tags/moq-gst-v*",
        "refs/tags/moq-ffi-v*", "refs/tags/moq-dart-v*"
      ]}},
      "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
@@ -349,7 +349,7 @@ done.
    bootstrap created:
 
    ```bash
-   for tag in 'moq-relay-v*' 'moq-cli-v*' 'moq-c-v*' 'moq-gst-v*'; do
+   for tag in 'moq-relay-v*' 'moq-cli-v*' 'libmoq-v*' 'moq-gst-v*'; do
      gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
        -f name="$tag" -f type=tag
    done

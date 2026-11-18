@@ -48,7 +48,7 @@ async fn closes_stalled_goaway(version: Version, writes: bool) {
 	}
 	let started = kio::clock::now();
 	let timeout = Duration::from_secs(1);
-	pair.server.drain().send(Goaway::new().with_timeout(timeout)).unwrap();
+	pair.server.goaway(Goaway::new().with_timeout(Some(timeout))).unwrap();
 	let reason = kio::clock::timeout(timeout * 2, pair.server.closed())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: a stalled GOAWAY held the session past its deadline"));
@@ -97,8 +97,7 @@ async fn goaway_send_receive_all_versions() {
 
 			// Server -> client.
 			pair.server
-				.drain()
-				.send(Goaway::redirect("https://new.example.com"))
+				.goaway(Goaway::redirect("https://new.example.com"))
 				.expect("send goaway");
 
 			let goaway = pair
@@ -116,8 +115,7 @@ async fn goaway_send_receive_all_versions() {
 			// swapped in behind the peer's back.
 			let err = pair
 				.server
-				.drain()
-				.send(Goaway::redirect("https://second.example.com"))
+				.goaway(Goaway::redirect("https://second.example.com"))
 				.expect_err("a session sends one GOAWAY");
 			assert!(matches!(err, moq_net::Error::Duplicate), "version {version}");
 
@@ -139,8 +137,7 @@ async fn goaway_wire_timeout_moq_transport() {
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		pair.server
-			.drain()
-			.send(Goaway::redirect("moqt://relay.example/").with_timeout(Duration::from_secs(5)))
+			.goaway(Goaway::redirect("moqt://relay.example/").with_timeout(Some(Duration::from_secs(5))))
 			.expect("send goaway");
 
 		let goaway = pair
@@ -166,7 +163,7 @@ async fn goaway_client_to_server_moq_lite_04() {
 		let version: Version = "moq-lite-04".parse().unwrap();
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
-		pair.client.drain().send(Goaway::new()).expect("send goaway");
+		pair.client.goaway(Goaway::new()).expect("send goaway");
 
 		let goaway = pair
 			.server
@@ -194,8 +191,7 @@ async fn goaway_drains_without_a_wire_message_moq_lite_03() {
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		pair.server
-			.drain()
-			.send(Goaway::new().with_timeout(Duration::from_secs(1)))
+			.goaway(Goaway::new().with_timeout(Some(Duration::from_secs(1))))
 			.expect("drain is available on every version");
 
 		// Nothing reaches the peer, since this version has no GOAWAY message.
@@ -222,17 +218,16 @@ async fn goaway_client_redirect_refused_moq_transport_18() {
 
 		let err = pair
 			.client
-			.drain()
-			.send(Goaway::redirect("https://elsewhere.example/"))
+			.goaway(Goaway::redirect("https://elsewhere.example/"))
 			.expect_err("a client may not name a redirect URI");
 		assert!(matches!(err, moq_net::Error::ProtocolViolation));
 		// The refusal is local, so nothing was claimed: the client may still send the
 		// empty-URI GOAWAY it was always allowed to send.
-		pair.client.drain().send(Goaway::new()).expect("an empty URI is legal");
+		pair.client.goaway(Goaway::new()).expect("an empty URI is legal");
 
 		// An empty URI ("I am leaving") is what a client may send. Check it from the
 		// server side, which is the direction allowed to redirect at all.
-		pair.server.drain().send(Goaway::new()).expect("send goaway");
+		pair.server.goaway(Goaway::new()).expect("send goaway");
 		let goaway = pair
 			.client
 			.draining()
@@ -254,8 +249,7 @@ async fn goaway_timeout_force_close_moq_transport_17() {
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 
 		pair.server
-			.drain()
-			.send(Goaway::redirect("moqt://relay.example/").with_timeout(Duration::from_millis(100)))
+			.goaway(Goaway::redirect("moqt://relay.example/").with_timeout(Some(Duration::from_millis(100))))
 			.expect("send goaway");
 
 		// The client observes the GOAWAY but deliberately does NOT leave.
@@ -388,7 +382,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		audio_group
 			.write_frame(audio_group.at_start(), b"audio".as_ref())
 			.expect("write frame");
-		audio_group.close().expect("finish group");
+		audio_group.finish().expect("finish group");
 
 		// Client consumes into its own origin.
 		let sub_origin = produce_origin();
@@ -413,7 +407,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		group
 			.write_frame(group.at_start(), b"before".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()
@@ -425,8 +419,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 
 		// Server drains; the client observes the GOAWAY.
 		server
-			.drain()
-			.send(moq_net::goaway::Goaway::redirect("https://elsewhere.example/"))
+			.goaway(moq_net::goaway::Goaway::redirect("https://elsewhere.example/"))
 			.expect("send goaway");
 		client.draining().recv().await.expect("goaway");
 		assert!(client.draining().peek().is_some());
@@ -452,7 +445,7 @@ async fn goaway_keeps_new_subscribes(version: Version) {
 		group
 			.write_frame(group.at_start(), b"after".as_ref())
 			.expect("write frame");
-		group.close().expect("finish group");
+		group.finish().expect("finish group");
 
 		let mut group_sub = existing
 			.recv_group()
@@ -511,7 +504,7 @@ async fn goaway_drains_routes(version: Version) {
 		let (standby_origin, _standby) = publish();
 		let mut opts = MockConnectOptions::new(version);
 		opts.server_publish = Some(standby_origin.consume());
-		opts.client_subscribe = Some(sub_origin.clone().with_preference(moq_net::origin::Preference::new(-1)));
+		opts.client_subscribe = Some(sub_origin.clone().with_priority(moq_net::origin::Priority::new(-1)));
 		let _standby_pair = connect_mock(opts).await;
 		let standby = route_at(&mut announced, |_| true).await.instance().clone();
 
@@ -523,7 +516,7 @@ async fn goaway_drains_routes(version: Version) {
 		let MockPair { client, server, .. } = connect_mock(opts).await;
 		route_at(&mut announced, |route| *route.instance() != standby).await;
 
-		server.drain().send(Goaway::new()).expect("send goaway");
+		server.goaway(Goaway::new()).expect("send goaway");
 		client.draining().recv().await.expect("goaway");
 
 		// Nothing else is sent on the announce stream, so this only resolves if the

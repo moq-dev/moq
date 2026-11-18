@@ -28,7 +28,6 @@ export interface ConsumerProps {
 	format: Format;
 	playhead?: Playhead;
 	predecessor?: Consumer;
-	wait?: Signals.GetterInit<Net.Clock.Duration | undefined>;
 	warmup?: Net.Clock.Duration;
 }
 

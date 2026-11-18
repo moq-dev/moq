@@ -1,11 +1,11 @@
 import { Duration } from "@moq/clock";
-import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
+import { closeReason, ProtocolViolation, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
+import { IetfSessionCode } from "../ietf/error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Message from "../ietf/message.ts";
 import * as Lite from "../lite/index.ts";
 import { acceptBudget, Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
-import * as Extensions from "./extensions.ts";
 
 /** Default bound on a connection attempt, including its SETUP exchange. @internal */
 export const DEFAULT_TIMEOUT = Duration.millis(30_000);
@@ -20,8 +20,8 @@ export const DEFAULT_TIMEOUT = Duration.millis(30_000);
  * {@link receiveSetup}), plus what the peer's SETUP declared: whether it requires
  * solicitation, which decides whether we announce namespaces unprompted (see the MoQ Solicit
  * extension) and its Hop ID (see the MoQ Cluster extension), plus the implementation it
- * advertised. We declare our Hop ID on every session, and Solicit unless `extensions`
- * declines it: we send SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
+ * advertised. We declare our Hop ID and Solicit on every session: we send
+ * SUBSCRIBE_NAMESPACE for each prefix we want, so an unsolicited advertisement
  * can tell us nothing we won't have asked for, and a peer that knows our Hop ID can withhold
  * the advertisements that already flowed through us.
  */
@@ -29,22 +29,30 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	{ client, extensions, token }: { client: boolean; extensions: Extensions.Offered; token?: Uint8Array },
+	{
+		client,
+		token,
+		solicit = true,
+	}: {
+		client: boolean;
+		token?: Uint8Array;
+		/** Declare MoQ Solicit. `false` only in a test acting as a peer without it. */
+		solicit?: boolean;
+	},
 ): Promise<{
 	control: Stream;
 	early: Reader[];
 	solicit: boolean | undefined;
+	declaredSolicit: boolean;
 	hidden: boolean;
-	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	peerImplementation: string | undefined;
 }> {
 	const params = new Ietf.SetupOptions();
 	Ietf.implementationIntoSetup(params, implementation);
-	Extensions.intoSetup(params, extensions);
+	if (solicit) Ietf.solicitIntoSetup(params);
 	Ietf.hiddenIntoSetup(params);
-	Ietf.maxAgeIntoSetup(params);
 	Ietf.activeCountIntoSetup(params);
 	// Only a client presents a connection credential.
 	if (client && token) Ietf.tokenIntoSetup(params, { kind: Ietf.TOKEN_OUT_OF_BAND, value: token });
@@ -74,8 +82,8 @@ export async function exchangeSetup(
 		control: new Stream({ writer, reader: received.reader }),
 		early: received.early,
 		solicit: received.solicit,
+		declaredSolicit: solicit,
 		hidden: received.hidden,
-		maxAge: received.maxAge,
 		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
 		peerImplementation: received.implementation,
@@ -105,7 +113,6 @@ async function receiveSetup(
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
-	maxAge: boolean;
 	activeCount: boolean;
 	cluster: Hop | undefined;
 	implementation: string | undefined;
@@ -154,10 +161,10 @@ async function receiveSetup(
 
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
-		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
+		throw new ProtocolViolation("server SETUP carries PATH", { code: IetfSessionCode.InvalidPath });
 	}
 	if (client && setup.parameters.getBytes(Ietf.SetupOption.Authority) !== undefined) {
-		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
+		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: IetfSessionCode.InvalidAuthority });
 	}
 	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
 	// session (draft-22 section 8.9).
@@ -168,7 +175,6 @@ async function receiveSetup(
 		early,
 		solicit: Ietf.solicitFromSetup(setup.parameters),
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
-		maxAge: Ietf.maxAgeFromSetup(setup.parameters),
 		activeCount: Ietf.activeCountFromSetup(setup.parameters),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters),
 		implementation: Ietf.implementationFromSetup(setup.parameters),

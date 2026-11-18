@@ -1,5 +1,5 @@
-//! The bake-off: the multicast epic's rule ([`multi::Router`]) beside today's
-//! [`path::Router`] on the same meshes and failure schedules.
+//! The bake-off: the multicast epic's rule as prototyped ([`multi::Router`]) beside
+//! the router that ships, on the same meshes and failure schedules.
 //!
 //! Every arm builds the same [`Mesh`], sees the same failure at the same instant, and
 //! is measured by the same [`Lab`]: messages, hops of delay until every relay's
@@ -16,7 +16,6 @@ use super::*;
 /// The arms measured, in the report's order.
 fn arms() -> Vec<Arm> {
 	vec![
-		Arm::TODAY,
 		Arm::PLAIN,
 		Arm::with(|tune| tune.suspect = Suspect::Flagged),
 		Arm::with(|tune| tune.suspect = Suspect::Local),
@@ -36,6 +35,7 @@ fn arms() -> Vec<Arm> {
 		Arm::TUNED,
 		Arm::LEAN,
 		Arm::KEPT,
+		Arm::RELAY,
 		Arm::with(|tune| tune.claimed = true),
 		Arm::with(|tune| {
 			tune.suspect = Suspect::Flagged;
@@ -47,19 +47,16 @@ fn arms() -> Vec<Arm> {
 }
 
 /// The prototype's arms.
-const MULTI: [Arm; 4] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT];
+pub(super) const MULTI: [Arm; 4] = [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT];
 
 /// How long a silent death takes its neighbours to notice, in hops of delay: an idle
 /// timeout of 3 s.
-const IDLE: usize = 120;
+pub(super) const IDLE: usize = 120;
 
-/// A mesh to measure, and whether today's rule can run it.
-struct Shape {
-	name: &'static str,
-	mesh: Mesh,
-	/// Today's rule qualifies an identity across one scoped link and refuses to
-	/// again, so a publisher two grants away is never seen.
-	today: bool,
+/// A mesh to measure.
+pub(super) struct Shape {
+	pub name: &'static str,
+	pub mesh: Mesh,
 }
 
 fn pair(a: Node, b: Node) -> (Node, Node) {
@@ -75,7 +72,7 @@ fn spread(relays: &[Node], publishers: usize) -> Vec<Node> {
 /// to both cores of the regions beside it, and every edge on both of its region's
 /// cores, which it marks as upstream. Edges of one region peer when `peered`.
 /// Publishers join edges.
-fn tiers(regions: usize, edges: usize, peered: bool, publishers: usize) -> Mesh {
+pub(super) fn tiers(regions: usize, edges: usize, peered: bool, publishers: usize) -> Mesh {
 	let core = |region: usize, side: usize| 2 * (region % regions) + side;
 	let edge = |region: usize, index: usize| 2 * regions + region * edges + index;
 	let mut links = BTreeSet::new();
@@ -111,7 +108,7 @@ fn tiers(regions: usize, edges: usize, peered: bool, publishers: usize) -> Mesh 
 }
 
 /// A ring with a chord from every relay at each power of two: log N of them.
-fn chords(relays: usize, publishers: usize) -> Mesh {
+pub(super) fn chords(relays: usize, publishers: usize) -> Mesh {
 	let mut links = BTreeSet::new();
 	let mut step = 1;
 	while step <= relays / 2 {
@@ -141,7 +138,7 @@ fn sparse(relays: usize, publishers: usize, rng: &mut XorShift) -> Mesh {
 	}
 }
 
-fn clique(relays: usize, publishers: usize) -> Mesh {
+pub(super) fn clique(relays: usize, publishers: usize) -> Mesh {
 	Mesh {
 		homes: spread(&(0..relays).collect::<Vec<_>>(), publishers),
 		claims: 1,
@@ -206,15 +203,10 @@ fn joined(count: usize, size: usize, joins: usize, ring: bool, publishers: usize
 }
 
 /// Every shape, at about `relays` relays each.
-fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
+pub(super) fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 	let mut rng = XorShift(0x6d6f_7100 + relays as u64);
-	let open = |name, mesh| Shape {
-		name,
-		mesh,
-		today: true,
-	};
-	// Today's rule cannot run three meshes: a qualified identity crosses one grant.
-	let grants = |name, today, mesh: Option<Mesh>| mesh.map(|mesh| Shape { name, mesh, today });
+	let open = |name, mesh| Shape { name, mesh };
+	let grants = |name, mesh: Option<Mesh>| mesh.map(|mesh| Shape { name, mesh });
 	let (regions, edges) = match relays {
 		..12 => (2, 2),
 		12..24 => (3, 3),
@@ -232,18 +224,10 @@ fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 	// A mesh too small for its gateways is left out.
 	shapes.extend(
 		[
-			grants(
-				"two_meshes_one_grant",
-				true,
-				joined(2, relays / 2, 1, false, publishers),
-			),
-			grants(
-				"two_meshes_two_grants",
-				true,
-				joined(2, relays / 2, 2, false, publishers),
-			),
-			grants("three_meshes_chain", false, joined(3, relays / 3, 1, false, publishers)),
-			grants("three_meshes_ring", false, joined(3, relays / 3, 1, true, publishers)),
+			grants("two_meshes_one_grant", joined(2, relays / 2, 1, false, publishers)),
+			grants("two_meshes_two_grants", joined(2, relays / 2, 2, false, publishers)),
+			grants("three_meshes_chain", joined(3, relays / 3, 1, false, publishers)),
+			grants("three_meshes_ring", joined(3, relays / 3, 1, true, publishers)),
 		]
 		.into_iter()
 		.flatten(),
@@ -253,7 +237,7 @@ fn shapes(relays: usize, publishers: usize) -> Vec<Shape> {
 
 /// The failures measured, each from a settled mesh.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Failure {
+pub(super) enum Failure {
 	/// A link relays route over closes cleanly, and every relay still has a path.
 	Close,
 	/// It returns.
@@ -291,7 +275,7 @@ enum Failure {
 }
 
 impl Failure {
-	fn as_str(self) -> &'static str {
+	pub fn as_str(self) -> &'static str {
 		match self {
 			Self::Close => "link_closes",
 			Self::Reopen => "link_reopens",
@@ -316,18 +300,24 @@ impl Failure {
 
 /// What one failure cost and showed.
 #[derive(Clone, Debug)]
-struct Row {
-	cost: Cost,
-	faults: Faults,
+pub(super) struct Row {
+	pub cost: Cost,
+	pub faults: Faults,
 	/// Dead hops, doubts, and suspected nodes left once it settled.
-	pending: usize,
+	pub pending: usize,
 	/// Pairs of nodes with a session known closed, kept for good.
-	lasting: usize,
+	pub lasting: usize,
 	/// The hops every relay's request crosses once it settled, summed.
-	hops: usize,
+	pub hops: usize,
 	/// Whether every relay with a path routed to its publisher once it settled.
-	right: Result<(), String>,
+	pub right: Result<(), String>,
+	/// Per publisher and relay, the nodes its request visits once it settled, and
+	/// whether it reached the publisher.
+	pub answers: Vec<Vec<Option<Chased>>>,
 }
+
+/// The nodes a request visits, and whether it reached its publisher.
+pub(super) type Chased = (Vec<Node>, bool);
 
 fn observe(lab: &mut Lab, change: &dyn Fn(&mut Lab)) -> Row {
 	let before = lab.net.faults();
@@ -346,11 +336,17 @@ fn observe(lab: &mut Lab, change: &dyn Fn(&mut Lab)) -> Row {
 			true => lab.check(),
 			false => Err("never settled".into()),
 		},
+		answers: (0..lab.mesh.homes.len())
+			.map(|index| {
+				let (_, id) = lab.mesh.publisher(index);
+				(0..lab.mesh.relays).map(|relay| lab.net.chase(relay, id)).collect()
+			})
+			.collect(),
 	}
 }
 
 /// The relay the most others route through toward the first publisher, its own aside.
-fn transit(mesh: &Mesh, tree: &[Option<Node>]) -> Option<Node> {
+pub(super) fn transit(mesh: &Mesh, tree: &[Option<Node>]) -> Option<Node> {
 	let mut through = vec![0; mesh.relays];
 	for relay in 0..mesh.relays {
 		let mut at = relay;
@@ -372,7 +368,7 @@ fn depths(tree: &[Option<Node>]) -> Vec<usize> {
 }
 
 /// Run every failure on `mesh` under `arm`, each from a settled mesh.
-fn fail(arm: Arm, mesh: &Mesh, coarse: bool) -> Vec<(Failure, Row)> {
+pub(super) fn fail(arm: Arm, mesh: &Mesh, coarse: bool) -> Vec<(Failure, Row)> {
 	let tree = mesh.tree();
 	let depth = depths(&tree);
 	let fresh = || {
@@ -519,7 +515,7 @@ fn the_prototype_settles_after_churn() {
 /// routes to its publisher, and no reader sees an end the publisher never made or a
 /// life it had seen end. On three meshes in a ring that includes the chain stopping
 /// a claim circling: once the publisher leaves, every relay lets go.
-fn carries(arm: Arm, relays: usize) {
+pub(super) fn carries(arm: Arm, relays: usize) {
 	for shape in shapes(relays, 2) {
 		for (failure, row) in fail(arm, &shape.mesh, relays > 16) {
 			let case = format!("{}: {} on {}", arm.name(), failure.as_str(), shape.name);
@@ -572,22 +568,26 @@ fn an_endpoint_changes_no_route() {
 /// for a moment announces it again, its first claim.
 #[test]
 fn a_first_claim_starts_a_route() {
-	let (mut echoed, mut started) = (0, 0);
-	for shape in shapes(9, 2) {
-		let scoped = shape.mesh.ties.values().any(|tie| *tie == Tie::Scoped);
-		for (failure, row) in fail(Arm::LEAN, &shape.mesh, false) {
-			let case = format!("{} on {}", failure.as_str(), shape.name);
-			match failure {
-				Failure::Leave | Failure::LoseOne | Failure::LoseBoth if scoped => echoed += row.cost.sent.msgs,
-				Failure::Leave | Failure::LoseOne | Failure::LoseBoth => assert_eq!(row.cost.sent.msgs, 0, "{case}"),
-				// Unless the relay it moves to has announced before.
-				Failure::Move => started += row.cost.sent.msgs,
-				_ => {}
+	for arm in [Arm::LEAN, Arm::RELAY] {
+		let (mut echoed, mut started) = (0, 0);
+		for shape in shapes(9, 2) {
+			let scoped = shape.mesh.ties.values().any(|tie| *tie == Tie::Scoped);
+			for (failure, row) in fail(arm, &shape.mesh, false) {
+				let case = format!("{} on {} under {}", failure.as_str(), shape.name, arm.name());
+				match failure {
+					Failure::Leave | Failure::LoseOne | Failure::LoseBoth if scoped => echoed += row.cost.sent.msgs,
+					Failure::Leave | Failure::LoseOne | Failure::LoseBoth => {
+						assert_eq!(row.cost.sent.msgs, 0, "{case}")
+					}
+					// Unless the relay it moves to has announced before.
+					Failure::Move => started += row.cost.sent.msgs,
+					_ => {}
+				}
 			}
 		}
+		assert!(started > 0, "no move started a route under {}", arm.name());
+		assert!(echoed > 0, "no gateway announced an echo under {}", arm.name());
 	}
-	assert!(started > 0, "no move started a route");
-	assert!(echoed > 0, "no gateway announced an echo");
 }
 
 /// A relay with nothing to announce costs no route anywhere: the routes a mesh
@@ -599,26 +599,26 @@ fn a_relay_with_no_claim_offers_no_route() {
 		lab.net.held()
 	};
 	for publishers in [1, 2, 9] {
-		let (all, lean, today) = (
-			held(Arm::TUNED, publishers),
-			held(Arm::LEAN, publishers),
-			held(Arm::TODAY, publishers),
-		);
-		println!("{publishers} publishers: {all:?} {lean:?} {today:?}");
-		assert!(
-			lean.offers * 15 <= all.offers * publishers.min(9) + all.offers,
-			"{publishers}"
-		);
-		assert!(lean.routes <= today.routes, "{publishers}");
+		let all = held(Arm::TUNED, publishers);
+		for arm in [Arm::LEAN, Arm::RELAY] {
+			let lean = held(arm, publishers);
+			println!("{publishers} publishers: {all:?} {lean:?} under {}", arm.name());
+			assert!(
+				lean.offers * 15 <= all.offers * publishers.min(9) + all.offers,
+				"{publishers} under {}",
+				arm.name()
+			);
+		}
 	}
 }
 
 /// A failure costs route messages per forwarding node, never per publisher behind it.
+/// Every relay is one under the prototype as tuned; under the router, every relay a
+/// publisher joins is, so it is measured with the same relays behind more publishers.
 #[test]
 fn a_failure_costs_the_same_with_more_publishers() {
-	let cost = |publishers: usize| {
-		let mesh = tiers(3, 3, true, publishers);
-		let rows = fail(Arm::TUNED, &mesh, false);
+	let cost = |arm: Arm, mesh: &Mesh| {
+		let rows = fail(arm, mesh, false);
 		let of = |failure: Failure| {
 			rows.iter()
 				.find(|(found, _)| *found == failure)
@@ -626,7 +626,14 @@ fn a_failure_costs_the_same_with_more_publishers() {
 		};
 		(of(Failure::Close), of(Failure::Partition))
 	};
-	assert_eq!(cost(1), cost(12));
+	let mesh = |publishers: usize| tiers(3, 3, true, publishers);
+	assert_eq!(cost(Arm::TUNED, &mesh(1)), cost(Arm::TUNED, &mesh(12)));
+	let few = mesh(3);
+	let many = Mesh {
+		homes: few.homes.iter().cycle().take(12).copied().collect(),
+		..few.clone()
+	};
+	assert_eq!(cost(Arm::RELAY, &few), cost(Arm::RELAY, &many));
 }
 
 /// Remembering the highest session closed between a pair of nodes stops a stale
@@ -668,7 +675,7 @@ fn quiesce(net: &mut MultiSim) {
 fn tune(arm: Arm) -> multi::Tune {
 	match arm {
 		Arm::Multi(tune) => tune,
-		Arm::Path(_) => panic!("today's rule"),
+		Arm::Relay(_) => panic!("not the prototype"),
 	}
 }
 
@@ -826,8 +833,7 @@ fn benchmark_bakeoff_failures() {
 				// Without the session floor and a burst read first, a 32-relay mesh
 				// hunts through millions of messages: the 12-relay rows show it.
 				let hunts = matches!(arm, Arm::Multi(tune) if !(tune.floor && tune.batch));
-				if (arm == Arm::TODAY && !shape.today)
-					|| (relays > 16 && hunts && std::env::var("MOQ_BAKEOFF_ARMS").is_err())
+				if (relays > 16 && hunts && std::env::var("MOQ_BAKEOFF_ARMS").is_err())
 					|| unwanted("MOQ_BAKEOFF_ARMS", &arm.name())
 					|| unwanted("MOQ_BAKEOFF_SHAPES", shape.name)
 				{
@@ -890,7 +896,7 @@ fn benchmark_bakeoff_growth() {
 	cases.extend([1, 8, 64].map(|claims| ("broadcasts", tiers_of(32, 8, claims))));
 	cases.extend([8, 16, 32].map(|relays| ("links", clique(relays, 8))));
 	for (grows, mesh) in cases {
-		for arm in [Arm::TODAY, Arm::TUNED, Arm::LEAN, Arm::KEPT] {
+		for arm in [Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
 			let tree = mesh.tree();
 			let mut lab = Lab::new(arm, &mesh);
 			lab.coarse = true;
@@ -924,13 +930,13 @@ fn benchmark_bakeoff_growth() {
 	}
 }
 
-/// The cases the routes epic measured today's rule on, for both.
+/// The cases the routes epic measured the rule it shipped on, for each arm.
 #[test]
 #[ignore = "a sweep; Nightly runs it from test/route-sweep.sh"]
 fn benchmark_bakeoff_baseline() {
 	println!("case,rule,route_messages,claim_items,settle_ms,fed_ms,loops,stale,dark");
 	let ms = |rounds: f64| rounds * HOP.as_secs_f64() * 1000.0;
-	for arm in [Arm::TODAY, Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT] {
+	for arm in [Arm::PLAIN, Arm::TUNED, Arm::LEAN, Arm::KEPT, Arm::RELAY] {
 		let mut rng = XorShift(0x6d6f_7100 + 24);
 		let sparse: Vec<Mesh> = (0..16).map(|_| Mesh::sparse(24, &mut rng)).collect();
 		let groups = [

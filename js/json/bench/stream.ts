@@ -14,7 +14,7 @@ for (const records of [64, 1024]) {
 				const track = new Track.Producer("stream-bench").accept({ compression: compress ? "deflate" : "none" });
 				const producer = new Producer<{ n: number; text: string }>({ track });
 				const text = "x".repeat(bytes);
-				for (let n = 0; n < records; n++) producer.append({ value: { n, text }, at });
+				for (let n = 0; n < records; n++) producer.append({ n, text }, at);
 				producer.finish();
 
 				const consumer = new Consumer<{ n: number; text: string }>({ track: track.subscribe() });

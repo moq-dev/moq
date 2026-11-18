@@ -1,27 +1,28 @@
 //! What a node's announcement reader sees, and the events it logs as that changes:
-//! one implementation for every route rule.
+//! one implementation for every route rule, keyed by whatever names a claim's owner
+//! there (a publisher under the path rule, an Instance under the relay rule).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Path;
 
-use super::view::ancestors;
+use super::prefix::ancestors;
 use super::{Event, Id, Kind, Shown};
 
 /// How the reader sees each claim, and the events not yet taken.
 #[derive(Clone, Debug)]
-pub(crate) struct Reader<A> {
-	shown: BTreeMap<(Id, Path), Shown<A>>,
+pub(crate) struct Reader<A, K = Id> {
+	shown: BTreeMap<(K, Path), Shown<A>>,
 	/// The identities recomputed since [`Self::changed`] last took them, each with
 	/// the claims whose shown state changed.
-	changed: BTreeMap<Id, BTreeSet<Path>>,
-	events: Vec<Event<A>>,
+	changed: BTreeMap<K, BTreeSet<Path>>,
+	events: Vec<Event<A, K>>,
 	/// Per claim this node has shown, how many times it forgot that claim.
 	#[cfg(test)]
-	forgot: BTreeMap<(Id, Path), u32>,
+	forgot: BTreeMap<(K, Path), u32>,
 }
 
-impl<A> Default for Reader<A> {
+impl<A, K> Default for Reader<A, K> {
 	fn default() -> Self {
 		Self {
 			shown: BTreeMap::new(),
@@ -33,57 +34,25 @@ impl<A> Default for Reader<A> {
 	}
 }
 
-impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
-	pub fn shown(&self) -> &BTreeMap<(Id, Path), Shown<A>> {
+impl<A: Clone + Eq + std::fmt::Debug, K: Clone + Ord + std::fmt::Debug> Reader<A, K> {
+	pub fn shown(&self) -> &BTreeMap<(K, Path), Shown<A>> {
 		&self.shown
 	}
 
 	/// How the reader sees `claim` of `id`.
-	pub fn get(&self, id: Id, claim: &Path) -> Option<&Shown<A>> {
+	pub fn get(&self, id: K, claim: &Path) -> Option<&Shown<A>> {
 		self.shown.get(&(id, claim.clone()))
-	}
-
-	/// The claims of `id` the reader sees.
-	pub fn claims(&self, id: Id) -> impl Iterator<Item = &Path> {
-		self.shown
-			.range((id, Path::empty())..)
-			.take_while(move |((key, _), _)| *key == id)
-			.map(|((_, claim), _)| claim)
 	}
 
 	/// Take the identities recomputed since the last call, each with the claims whose
 	/// shown state changed.
-	pub fn changed(&mut self) -> BTreeMap<Id, BTreeSet<Path>> {
+	pub fn changed(&mut self) -> BTreeMap<K, BTreeSet<Path>> {
 		std::mem::take(&mut self.changed)
 	}
 
 	/// Take the events, in order.
-	pub fn events(&mut self) -> Vec<Event<A>> {
+	pub fn events(&mut self) -> Vec<Event<A, K>> {
 		std::mem::take(&mut self.events)
-	}
-
-	/// Count a forget against each claim of `id` this node has shown that `kept` does not keep.
-	#[cfg_attr(not(test), allow(unused_variables, reason = "only fixtures count forgets"))]
-	pub fn forget(&mut self, id: Id, kept: impl Fn(&Path) -> bool) {
-		#[cfg(test)]
-		for ((key, claim), count) in self.forgot.iter_mut() {
-			if *key == id && !kept(claim) {
-				*count += 1;
-			}
-		}
-	}
-
-	/// Assert that `now`, recomputed for some claims of `id`, agrees with `full`,
-	/// recomputed for all of them.
-	#[cfg(test)]
-	pub fn check(&self, id: Id, now: &BTreeMap<Path, Option<Shown<A>>>, full: BTreeMap<Path, Option<Shown<A>>>) {
-		for (claim, full) in full {
-			let got = match now.get(&claim) {
-				Some(got) => got.as_ref(),
-				None => self.get(id, &claim),
-			};
-			assert_eq!(got, full.as_ref(), "incremental reader view of {id} {claim:?}");
-		}
 	}
 
 	/// The reader now sees each claim of `id` in `now` as it says, where `watched`. Log
@@ -91,18 +60,18 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 	/// as far as this node knows, and went offline if the node let go of it instead.
 	pub fn apply(
 		&mut self,
-		id: Id,
+		id: K,
 		watched: impl Fn(&Path) -> bool,
 		now: BTreeMap<Path, Option<Shown<A>>>,
 		ended: impl Fn(&Path) -> bool,
 	) {
 		let shown = |claim: &Path| match now.get(claim) {
 			Some(now) => now.as_ref(),
-			None => self.get(id, claim),
+			None => self.get(id.clone(), claim),
 		};
 		let mut events = Vec::new();
 		for (claim, now) in &now {
-			let Some(was) = self.get(id, claim) else {
+			let Some(was) = self.get(id.clone(), claim) else {
 				continue;
 			};
 			match now {
@@ -122,9 +91,11 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 					// A claim presented at a narrower region moved up to the claim it
 					// stood for, which is still shown. That claim may have changed
 					// meanwhile, so a presented claim needs only something shown above it.
-					let moved = ancestors(claim)
-						.filter(|above| above != claim)
-						.any(|above| shown(&above).is_some_and(|now| was.presented || now.item == was.item));
+					// A claim its origin announced there is its own, whatever is above it.
+					let moved = was.presented
+						&& ancestors(claim)
+							.filter(|above| above != claim)
+							.any(|above| shown(&above).is_some());
 					let kind = if !watched(claim) {
 						Kind::Unwatched
 					} else if !moved && ended(claim) {
@@ -138,7 +109,7 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 		}
 		for (claim, now) in &now {
 			if let Some(now) = now
-				&& self.get(id, claim).is_none()
+				&& self.get(id.clone(), claim).is_none()
 			{
 				events.push((claim, Kind::Start, &now.item));
 			}
@@ -147,13 +118,13 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 			.map(|(claim, kind, item)| (claim.clone(), kind, item.clone()))
 			.collect();
 		for (claim, kind, item) in events {
-			self.log(id, claim, kind, item);
+			self.log(id.clone(), claim, kind, item);
 		}
 		// Named as recomputed whether or not anything it shows changed, so a driver
 		// serves its claims through the routes it has now.
-		let changed = self.changed.entry(id).or_default();
+		let changed = self.changed.entry(id.clone()).or_default();
 		for (claim, now) in now {
-			let key = (id, claim);
+			let key = (id.clone(), claim);
 			if self.shown.get(&key) == now.as_ref() {
 				continue;
 			}
@@ -169,9 +140,9 @@ impl<A: Clone + Eq + std::fmt::Debug> Reader<A> {
 		}
 	}
 
-	fn log(&mut self, id: Id, claim: Path, kind: Kind, item: A) {
+	fn log(&mut self, id: K, claim: Path, kind: Kind, item: A) {
 		#[cfg(test)]
-		let forgot = *self.forgot.entry((id, claim.clone())).or_insert(0);
+		let forgot = *self.forgot.entry((id.clone(), claim.clone())).or_insert(0);
 		self.events.push(Event {
 			id,
 			claim,

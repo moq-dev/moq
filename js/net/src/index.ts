@@ -35,13 +35,11 @@ export * as Instance from "./instance.ts";
 export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
 export * as Path from "./path.ts";
-/** Point-to-point track sessions through an origin. */
-export * as Socket from "./socket.ts";
 /** Presentation timestamps and their timescales; durations live in {@link Clock}. */
 export * as Time from "./time.ts";
 /** A value paired with its frame's timestamp: when it was captured, or a scale-less track's group key. */
 export type { Timed } from "./timed.ts";
 /** Track role handles. */
 export * as Track from "./track.ts";
-/** Varint encoding and decoding, in QUIC's format and moq-transport's leading-ones format. */
+/** QUIC varint encoding and decoding (RFC 9000 Section 16). */
 export * as Varint from "./varint.ts";

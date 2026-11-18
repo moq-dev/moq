@@ -45,7 +45,7 @@ public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
 /// A CPU pixel layout (I420 or RGBA): fed to a `Video.Producer`, or delivered
 /// by a `Video.Consumer`.
 public typealias VideoPixelFormat = MoqFFI.MoqVideoPixelFormat
-/// A video codec identifier (H.264 or H.265).
+/// Selects the video encoder codec. Build one with `VideoCodec.h264()` or `VideoCodec.h265()`.
 public typealias VideoCodec = MoqFFI.MoqVideoCodec
 /// Which encoder implementation to use: automatic, hardware, software, or one
 /// named backend.
@@ -71,17 +71,21 @@ public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
 /// Per-subscription delivery preferences: priority, delay, the ranges of the track to
 /// deliver, and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
-/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency and
-/// where a cold join starts, `nil` to leave it unstated (a decoder plays it as zero), and `max`,
+/// How far behind the live edge a subscriber or decoder plays: `min` is the target latency, where a
+/// cold join starts, and how long a decoder waits for a missing group, `nil` to leave it unstated
+/// (a decoder starts it as zero and waits a missing group for `max`, except an audio decoder, which
+/// floors it at zero and waits only its playout estimate, which can be larger; a catalog warmup or
+/// an audio decoder's playout delay still states a `min` to the publisher), and `max`,
 /// `nil` for no subscriber limit, is how far a non-latest group may fall behind before it is
 /// skipped. A `min` past `max` starts at `max`.
 public typealias Delay = MoqFFI.MoqDelay
-/// Options for fetching one complete group by sequence.
+/// Options for fetching one complete group by start.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
 /// Publisher-side track properties: priority, group ordering, max age,
 /// and timescale.
 public typealias TrackInfo = MoqFFI.MoqTrackInfo
-/// How a track's frames are compressed on the wire: `.deflate`, or `nil` in `TrackInfo` for none.
+/// How a track's frames are compressed on the wire: `Compression.deflate()`, or `nil` in `TrackInfo`
+/// for none. Compare a received one with `==` or by `name()`.
 public typealias Compression = MoqFFI.MoqCompression
 
 /// A snapshot of connection statistics (RTT, bandwidth estimates, byte/packet
@@ -89,9 +93,11 @@ public typealias Compression = MoqFFI.MoqCompression
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
 /// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
-/// field keeps its default. Until a session has stayed up past 1s or been drained
-/// by a GOAWAY, a failed dial or a closed session, such as a refused credential,
-/// ends the connection with its error rather than retrying.
+/// field keeps its default, zero means zero (retry at once, or give up at the
+/// first failure), and `maxUnlimited` lifts the ceiling. Until a session has
+/// stayed up past 1s or been drained by a GOAWAY, a failed dial or a closed
+/// session, such as a refused credential, ends the connection with its error
+/// rather than retrying.
 public typealias Backoff = MoqFFI.MoqBackoff
 
 /// Certificate trust and the mTLS identity for a `Client`.
@@ -103,8 +109,8 @@ public typealias ServerTls = MoqFFI.MoqServerTls
 /// QUIC transport tuning, such as the peer's inbound stream cap.
 public typealias QuicConfig = MoqFFI.MoqQuicConfig
 
-/// The congestion control family for a QUIC connection. Build one with `CongestionControl.delay()`,
-/// `.loss()`, or `.none()`; a new algorithm joins as a new constructor.
+/// The congestion control algorithm for a QUIC connection. Build one with `CongestionControl.bbr()`,
+/// `.cubic()`, or `.unlimited()`; a new algorithm joins as a new constructor named after it.
 public typealias CongestionControl = MoqFFI.MoqCongestionControl
 
 /// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
@@ -116,7 +122,8 @@ public typealias ConnectionPhase = MoqFFI.MoqConnectionPhase
 /// One coherent connection lifecycle snapshot.
 public typealias ConnectionState = MoqFFI.MoqConnectionState
 
-/// The network transport carrying an incoming session.
+/// The network transport carrying an incoming session, or `.unknown` for one this version cannot
+/// name yet.
 public typealias Transport = MoqFFI.MoqTransport
 
 /// The error thrown by every throwing call in this package. Already conforms to
@@ -132,7 +139,7 @@ public typealias ProtocolKind = MoqFFI.MoqProtocolKind
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 public typealias ProtocolError = MoqFFI.MoqProtocolError
 
-/// A location within a track: a group sequence and a frame index in it.
+/// A location within a track: a group start and a frame index in it.
 public typealias Position = MoqFFI.MoqPosition
 
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`

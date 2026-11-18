@@ -327,7 +327,7 @@ async fn execute(version: Version, ops: &[Op]) -> Result<(), Failure> {
 		match *op {
 			Op::Write => write(&mut group, &mut written, &mut readers, &format!("d{step}")),
 			Op::NewGroup => {
-				group.close().unwrap();
+				group.finish().unwrap();
 				group = track.append_next().unwrap();
 				written.clear();
 				write(&mut group, &mut written, &mut readers, "snapshot");

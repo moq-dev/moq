@@ -4,8 +4,8 @@ import { toNumber } from "../util/bigint.ts";
 import type { IetfVersion } from "./version.ts";
 
 // TIMESCALE (0x08), from the MOQ Properties registry shared with draft-ietf-moq-loc-04.
-// Track scope: it declares the units of every object Timestamp on the track, and its
-// presence is what opts the track into timestamps at all.
+// Track scope: it declares the units of the track's Group IDs, which are its groups' starts,
+// and its presence is what makes the track timed at all.
 const TIMESCALE = 0x08n;
 
 // DEFAULT_PUBLISHER_GROUP_ORDER (0x22), the publisher's delivery preference for the track.
@@ -26,7 +26,7 @@ export interface Properties {
 	/** The publisher's cache window in milliseconds, omitted when unconstrained. */
 	maxCacheDuration?: bigint;
 
-	/// The track's Timescale, which declares the units of every object Timestamp on it.
+	/// The track's Timescale, which declares the units of its Group IDs.
 	///
 	/// `undefined` declares no timeline, so the track and its objects are untimed.
 	timescale?: Timescale;

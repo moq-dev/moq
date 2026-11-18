@@ -54,11 +54,11 @@ use prometheus_client::{
 /// list is always empty there and the renderer skips itself, rather than
 /// `cfg`-ing the two fields, the two struct literals that fill them, and the
 /// renderer's signature separately.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 type UringWorker = moq_uring::metrics::Metrics;
 
 /// One io_uring worker's counters. See the io_uring build's alias.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(uring))]
 type UringWorker = std::convert::Infallible;
 
 /// Configuration for the internal (ops) listener.
@@ -229,7 +229,7 @@ impl Internal {
 	/// Register them before the threads start, so a worker that never came up
 	/// (or has died) still has a series that has stopped moving rather than no
 	/// series at all.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	pub(crate) fn with_uring(mut self, workers: impl IntoIterator<Item = UringWorker>) -> Self {
 		self.uring.extend(workers);
 		self
@@ -883,7 +883,7 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 /// exists for. The pool gauges are the buffer space each worker has allocated,
 /// which stays at its high-water mark after a burst; only the pages datagrams
 /// have touched count toward RSS.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std::fmt::Result {
 	use moq_uring::metrics::Snapshot;
 
@@ -1046,17 +1046,17 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 
 /// Off the io_uring path there are no workers to describe, and [`UringWorker`]
 /// is uninhabited, so the list handed here is always empty.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(uring))]
 fn encode_uring(_encoder: &mut DescriptorEncoder, _workers: &[UringWorker]) -> std::fmt::Result {
 	Ok(())
 }
 
 /// An io_uring worker's histogram, whose cumulative buckets the encoder takes as
 /// per-bucket counts.
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 struct Distribution(moq_uring::metrics::Histogram);
 
-#[cfg(target_os = "linux")]
+#[cfg(uring)]
 impl EncodeMetric for Distribution {
 	fn encode(&self, mut encoder: prometheus_client::encoding::MetricEncoder) -> std::fmt::Result {
 		let mut below = 0;
@@ -1409,7 +1409,7 @@ mod tests {
 	/// yet is empty rather than zero, so an alert on a worker whose receive pool
 	/// has started running dry is unwritable until it has already happened. A
 	/// worker that never started has to publish stuck zeros, not nothing.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	#[test]
 	fn uring_metrics_list_every_worker_from_zero() {
 		let workers = vec![
@@ -1490,7 +1490,7 @@ mod tests {
 	}
 
 	/// A worker's cumulative buckets come out cumulative again, not summed twice.
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	#[test]
 	fn uring_histograms_keep_cumulative_buckets() {
 		let histogram = moq_uring::metrics::Histogram {
@@ -1817,7 +1817,10 @@ mod tests {
 		let mut egress_sub = bc.track("video").unwrap().subscribe(None).await.unwrap();
 		{
 			let mut group = pub_track
-				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(pub_track.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
 				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 12])
@@ -1825,16 +1828,18 @@ mod tests {
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 34])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		{
 			let mut group = pub_track
-				.append_group(pub_track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					Timestamp::from_millis(pub_track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.unwrap();
 			group
 				.write_frame(Timestamp::from_millis(10_000).unwrap(), vec![0u8; 1234])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 		let mut group = egress_sub.recv_group().await.unwrap().unwrap();
 		while group.read_frame().await.unwrap().is_some() {}
@@ -1842,12 +1847,15 @@ mod tests {
 		// Write 56 ingress bytes into the regional-tier broadcast.
 		{
 			let mut group = sub_track
-				.append_group(sub_track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(sub_track.largest().map_or(0, |largest| largest.group + 1))
+						.unwrap(),
+				)
 				.unwrap();
 			group
 				.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), vec![0u8; 56])
 				.unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 		}
 
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
@@ -1908,12 +1916,14 @@ mod tests {
 			readers.push(bc.track("catalog.json").unwrap().subscribe(None).await.unwrap());
 		}
 		let mut group = track
-			.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+			.append_group(
+				moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+			)
 			.unwrap();
 		group
 			.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), payload.clone())
 			.unwrap();
-		group.close().unwrap();
+		group.finish().unwrap();
 		for reader in &mut readers {
 			let mut group = reader.recv_group().await.unwrap().unwrap();
 			assert_eq!(group.read_frame().await.unwrap().unwrap().payload, payload.as_bytes());
@@ -2012,9 +2022,9 @@ mod tests {
 			refusals: Some(refusals),
 			sessions: crate::session::Registry::new(),
 			listeners: vec![moq_tokio::accept::Health::new("tcp")],
-			#[cfg(target_os = "linux")]
+			#[cfg(uring)]
 			uring: vec![moq_uring::metrics::Metrics::default()],
-			#[cfg(not(target_os = "linux"))]
+			#[cfg(not(uring))]
 			uring: Vec::new(),
 			demux: Some(moq_tokio::quic::demux::Counters::default()),
 			shutdown: Some(shutdown),
@@ -2032,7 +2042,7 @@ mod tests {
 		actual.remove(panics);
 
 		let mut expected: Vec<String> = EXPECTED_SERIES.trim().lines().map(str::to_string).collect();
-		#[cfg(target_os = "linux")]
+		#[cfg(uring)]
 		expected.extend(EXPECTED_URING_SERIES.trim().lines().map(str::to_string));
 		expected.extend(EXPECTED_DEMUX_SERIES.trim().lines().map(str::to_string));
 		expected.sort();
@@ -2125,7 +2135,7 @@ gauge moq_relay_sessions_connected{state="active",tier="edge"} 0
 gauge moq_relay_sessions_connected{state="idle",tier="edge"} 1
 "#;
 
-	#[cfg(target_os = "linux")]
+	#[cfg(uring)]
 	const EXPECTED_URING_SERIES: &str = r#"
 # TYPE moq_relay_uring_completions_total counter
 # TYPE moq_relay_uring_cqes_per_enter histogram

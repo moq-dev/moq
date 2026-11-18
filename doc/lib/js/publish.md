@@ -32,7 +32,7 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `versions` | Protocol versions to offer, most preferred first, comma-separated like `moq-transport-18,moq-lite-06`. Every stable version by default. |
 | `source` | `camera`, `screen`, or `file`. |
 | `muted`, `invisible` | Stop sending audio, or stop publishing video. A muted rendition stays in the catalog and its listeners stay subscribed, so the next word reaches them at once, as push-to-talk needs; they play the pause as comfort noise. By default the microphone and camera stay open, so unmuting or unhiding is instant and the browser's capture indicators stay lit. |
-| `capture` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
+| `idle` | What a muted or invisible track does with its device: `hold` (default) keeps it open, `release` closes it so its capture indicator goes dark, and resuming reopens it. A screen share or file stops once both tracks are off. Clearing `source` or removing the element releases everything either way. |
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
@@ -62,7 +62,7 @@ busy, and the target bitrate. Its `transport` carries only the PROBE round-trip
 time, since browsers report no usable WebTransport statistics. The encoders'
 `out.stats` and the stats panel read the same counters, and a custom producer
 reports through its rendition's `stats` signal. The `Broadcast` takes the same
-options as `stats`, `probe`, and `echo` inputs.
+options as `stats`, `probe`, and `echoPath` inputs.
 
 `echo-path` only asks for feedback: a `<moq-watch echo="alice">` that reads the
 catalog publishes `room/viewers/alice.echo`, and `moq export echo` or a dashboard
@@ -76,7 +76,8 @@ Video encodes while enabled, so its recent groups wait in the track's cache for
 a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
 30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
 may reach into it. Audio keeps raw PCM while nobody listens, then encodes the part of
-that history within the subscribers' max delay ahead of live audio when one arrives. Raw audio keeps up to
+that history a subscriber wants ahead of live audio when one arrives: from a live join's
+min delay (its playout delay plus the codec's warmup), or else within its max delay. Raw audio keeps up to
 `maxAge`, which for media defaults to 30 seconds (about 11.5 MB for 48 kHz
 stereo f32). With `maxAge: null`, which sets no publisher limit on the media, raw
 audio still keeps 30 seconds, since raw history needs a bound. The catalog and
@@ -90,6 +91,20 @@ encoder's `muted` instead: it sends nothing, keeps the rendition enabled, and
 marks where each utterance ends, so listeners stay subscribed and treat the gap
 as intentional silence.
 
+A `voice` source, which the microphone is, does the same on its own while its
+talker is silent. Each frame is scored as libopus scores it for DTX at the
+complexity browsers and the Rust publisher encode with: its tonality analysis
+tells speech from steady noise, so a fan switched on mid-call stops sending
+within a second or so (SILK's detector decides alone at 8 and 12 kHz). Once it has
+scored 200 ms of silence nothing more is sent and the end is declared, so
+listeners play comfort noise instead of receiving encoded silence. Noise as
+loud as the talker, within 25 dB of their speech, keeps sending, as it does in
+libopus; so does any noise before they first speak, since the analysis's first
+scored frame sets the level it is judged against. Speech reopens the gate with the 20 ms before it, which keeps most soft
+onsets the detector scores late; a faint one it misses entirely is still
+clipped.
+Music and sources without a kind always send.
+
 Pass `onDemand: "off"` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: "all"` also gates video, which then loses its unsubscribed past.
 Bandwidth reservations still follow subscriptions; unwatched video uses its
@@ -97,13 +112,18 @@ configured bitrate.
 
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
+Where the browser honors a per-frame quantizer (Chrome's VP9 and AV1, and its
+hardware H.264 and HEVC on macOS), it encodes at constant quality under a hard
+peak at that bitrate: a calm or static scene sends a fraction of it, and a busy
+one reaches it while queueing at most about a quarter second at that rate, short
+of a scene cut. Elsewhere it asks the browser for a constant bitrate.
 Codec, resolution, framerate, and bitrate are tunable through
 `el.video.config`, and `el.video.cut()` asks for an extra keyframe. A viewer
 who joins once a group's deltas outweigh twice its keyframe gets a fresh one,
 so `join` is only the longest a group runs. Through a moq-lite
 relay, only the join that opens the relay's upstream subscription counts.
 The broadcast declares the longest group among its renditions as the catalog's
-`media.join.interval` when it first lists one, which an HLS or DASH export cuts
+`sync.interval` when it first lists one, which an HLS or DASH export cuts
 its segments on. It stays fixed for the network broadcast, so raising
 `join` later overruns that grid. Size,
 bitrate, and framerate change in place, while a codec or audio format change
@@ -119,7 +139,7 @@ relay keep fewer streams, at the cost of coarser loss: a viewer that falls
 behind skips a whole group. Frames still forward as they are encoded.
 
 Timestamps are `@moq/clock`'s `now()` since its origin, a `Duration`, so every
-source shares one timeline. The catalog's `media.clock` maps it to wall time. Stamp your own tracks
+source shares one timeline. The catalog's `sync.clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
 ## Custom tracks
@@ -150,7 +170,7 @@ signals.run((effect) => {
     });
 
     const meta = new Json.Snapshot.Producer<Meta>({ track });
-    meta.update({ value: current, at: Moq.Time.Timestamp.now() });
+    meta.update(current, Moq.Time.Timestamp.now());
 });
 ```
 

@@ -167,26 +167,21 @@ export interface WireRoute {
 	/** See {@link RouteInfo.available}; unset means available. */
 	readonly available?: boolean;
 	/**
-	 * The origin node a lite-07 route reaches, which every request through it names. Unset on a
-	 * route announced here and on every other version. Local: requests name it, readers never
-	 * see it.
+	 * A claim a lite-07 peer sent, one per instance at a path, which a reader asking for every
+	 * claim reports as a route of its own. Unset on a route announced here and on every other
+	 * version. Local: readers never see it.
 	 */
-	readonly node?: bigint;
+	readonly claimed?: boolean;
 	/**
-	 * How many leading segments of a requested path make up the prefix of the lite-07 route to
-	 * {@link node}, which every request through it names. Local, as `node` is.
-	 */
-	readonly depth?: number;
-	/**
-	 * The lowest priority of a link on the path of the lite-07 route to {@link node}: higher
-	 * ranks first, after drain and before cost, as routes to one node rank. Unset ranks as 0, the
-	 * priority of a link no one set. Local, as `node` is.
+	 * The lowest priority of a link on the way to a lite-07 claim's publisher: higher ranks
+	 * first, after drain and before cost. Unset ranks as 0, the priority of a link no one set.
+	 * Local, as `claimed` is.
 	 */
 	readonly priority?: number;
 	/**
 	 * How many segments broader the lite-07 claim is than the path it is presented at: a claim
 	 * exactly at a path outranks every broader one shown there, before anything else. Unset ranks
-	 * as 0. Local, as `node` is.
+	 * as 0. Local, as `claimed` is.
 	 */
 	readonly above?: bigint;
 }
@@ -210,8 +205,7 @@ export const WireRoute = {
 			auth: route.auth,
 			draining: route.draining,
 			available: route.available,
-			node: route.node,
-			depth: route.depth,
+			claimed: route.claimed,
 			priority: route.priority,
 			above: route.above,
 		};
@@ -232,7 +226,7 @@ export function isAnonymous(route: WireRoute): boolean {
 
 /**
  * Whether two routes name the same instance, epoch, hop chain, cost, auth, drain state,
- * availability, origin node, route depth, priority, and how far above its path a claim is.
+ * availability, whether a lite-07 peer claimed it, priority, and how far above its path a claim is.
  *
  * @internal
  */
@@ -246,8 +240,7 @@ export function routesEqual(a: WireRoute | undefined, b: WireRoute | undefined):
 		a.auth === b.auth &&
 		(a.draining ?? false) === (b.draining ?? false) &&
 		(a.available ?? true) === (b.available ?? true) &&
-		a.node === b.node &&
-		a.depth === b.depth &&
+		(a.claimed ?? false) === (b.claimed ?? false) &&
 		(a.priority ?? 0) === (b.priority ?? 0) &&
 		(a.above ?? 0n) === (b.above ?? 0n) &&
 		a.hops.length === b.hops.length &&

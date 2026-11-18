@@ -1,11 +1,8 @@
 import type * as Moq from "@moq/net";
-import type { Time, Timed } from "@moq/net";
+import type { Time } from "@moq/net";
 
-import { frameTime, openGroup, startsPast } from "../time.ts";
-import { type Config, type Encoded, Encoder } from "./encoder.ts";
-
-/** Window producer options, including the destination track. */
-export type ProducerConfig = Config & { track: Moq.Track.Producer };
+import { frameTime, startsPast } from "../time.ts";
+import { type Config as CodecConfig, type Encoded, Encoder } from "./encoder.ts";
 
 /**
  * A window its producer finished: its records can still be read, but not edited.
@@ -58,7 +55,7 @@ export class Producer<T> {
 	#deferred = false;
 
 	/** Wrap a track to publish a window into it. */
-	constructor(config: ProducerConfig) {
+	constructor(config: Producer.Config) {
 		this.#track = config.track;
 		this.#encoder = new Encoder(config);
 
@@ -106,7 +103,7 @@ export class Producer<T> {
 	 * is {@link Time.Timestamp.unscaled} at a group key instead: a header opens its group there, which
 	 * must pass every group the track holds, and an op carries the open group's key.
 	 */
-	push({ value, at }: Timed<T>): void {
+	push(value: T, at: Time.Timestamp): void {
 		this.#assertOpen();
 		this.#write(this.#encoder.push(value), at);
 		this.#advance(at);
@@ -145,8 +142,8 @@ export class Producer<T> {
 		if (encoded.keyframe) {
 			// Opened before the previous group finishes, so a key at or before the newest group's is
 			// refused with the previous group still open.
-			const group = openGroup(this.#track, at);
-			this.#largest = group.sequence;
+			const group = this.#track.appendGroup(at);
+			this.#largest = group.start;
 
 			// The previous group is complete; no more frames will be appended to it.
 			this.#group?.finish();
@@ -215,4 +212,10 @@ export class Producer<T> {
 			this.#track.close();
 		}
 	}
+}
+
+/** Types for {@link Producer}. */
+export namespace Producer {
+	/** Window producer options, including the destination track. */
+	export type Config = CodecConfig & { track: Moq.Track.Producer };
 }

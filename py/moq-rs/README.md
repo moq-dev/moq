@@ -141,7 +141,7 @@ client = moq.Client(
     - `fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `insecure=True`.
     - `cert`, `key`. Paired PEM certificate chain and private key paths for mTLS.
     - `host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
-  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` uses the default), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`, such as `CongestionControl.delay()`), and `qlog` (a trace directory, which must exist). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
+  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` uses the default), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`: `CongestionControl.bbr()`, `.cubic()`, or `.unlimited()`), and `qlog` (a trace directory, which must exist). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
   - `websocket=WebSocketConfig(...)`. The fallback raced against QUIC: `enabled=False` turns it off, and `delay` is QUIC's head start.
   - `once`, `backoff`. Redial with a `Backoff` when the transport drops; `once=True` dials once.
   - `.session`. The connecting or connected `Session` (or `None` before entering / after exit).
@@ -180,10 +180,10 @@ client = moq.Client(
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp)` writes a payload with its capture time; on a scale-less track (no `timescale`) the timestamp is `Timestamp.unscaled(key)` at the frame's group key.
   - `await .ready(size)` (`GroupProducer`) waits until a frame of `size` bytes fits a window ahead of the fastest reader. Await it before each write for backpressure. A writer that doesn't wait sheds the front of the group instead.
-  - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
+  - `.create_group(start)` creates a sparse or replayed group at an explicit start.
   - `.skip_groups(start, end)` (`TrackProducer`) declares groups `start` up to the exclusive `end` will never be produced, so readers move past them; creating one there then fails.
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
-  - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
+  - `.finish_at(final_start)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.largest() -> Position | None` (`TrackProducer`) reports the newest group written, at its newest frame. Datagrams are numbered apart from groups and never move it.
 
@@ -211,7 +211,7 @@ client = moq.Client(
   decodes live media from a catalog rendition: its ID (catalog key) and its `Video` or `Audio`
   config. It follows the rendition's `broadcast` and `track` itself and yields `MediaFrame`,
   `Gap`, or `End`. An encoder end is not iterator EOF; media can resume after it.
-- `await media.GroupConsumer.fetch(broadcast, id, rendition, sequence, *, options=None)`
+- `await media.GroupConsumer.fetch(broadcast, id, rendition, start, *, options=None)`
   fetches and decodes exactly one group of a catalog rendition.
 - `media.GroupConsumer(group, container)` decodes a raw group, such as one from
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
@@ -219,7 +219,7 @@ client = moq.Client(
 
 `media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as a
 `Timestamp`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
-subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()` ends the import.
+subscriber waits. `.cut()` / `.seek(start)` draw group boundaries; `.finish()` ends the import.
 
 ### Data
 
@@ -232,16 +232,16 @@ and `.cut()` ends its open group so the next edit opens one restating the window
 no window mode, so `WindowProducer` takes only the track.
 A raw frame on a scale-less track carries `Timestamp.unscaled` at its group key, but every JSON
 write takes a time on the broadcast clock. Publish JSON tracks with
-`TrackInfo(compression=moq.Compression.DEFLATE)`: the track compresses each group on the wire, and consumers read it the
+`TrackInfo(compression=moq.Compression.deflate())`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 
 ### Subscribing
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
-- **`TrackConsumer`**. Async iterator of raw groups, in sequence order.
-  - `await .next_group() → GroupConsumer | None`. Sequence order; what the default iteration yields.
-  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
+- **`TrackConsumer`**. Async iterator of raw groups, in start order.
+  - `await .next_group() → GroupConsumer | None`. Start order; what the default iteration yields.
+  - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of start order. Prefer it when latency matters more than order.
   - `.groups_as_arrived()`. Async iterator over `recv_group()`.
   - `.read_frame() -> Frame | None` returns the first frame of the next group. Empty groups are skipped; `None` is track EOF.
   - `.info() → TrackInfo`
@@ -250,29 +250,6 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
 Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`Route`, `Claim`, `BroadcastRequests`, `TrackRequests`).
-
-### Sockets
-
-`from moq import socket` exposes `socket.Endpoint(origin, prefix, id)`. Use the
-same origin as the session's publish and consume sides. Hold the endpoint while
-sessions run, or use it as an async context manager. Its first dial announces
-`<prefix>/.client/<id>` and its first accept `<prefix>/.server/<id>`, so grants
-decide whether it may be a client, a server, or both; keep each session id private.
-
-- `await endpoint.dial_track(peer, info=None)` dials a server, and `await endpoint.accept_track()` takes the next dial.
-- An incoming dial has `peer` and `session`; `await incoming.accept(info=None)` verifies
-  return routability, and `incoming.reject()` refuses it.
-- `TrackStream` exposes `producer: TrackProducer`, `consumer: TrackConsumer`, `peer`,
-  and `session`. Its subscription starts reliable and ascending, and omitted
-  `info` keeps messages without a publisher age limit. Hold or cancel the consumer
-  to retain or release that subscription. A message no hop will deliver, such as
-  one a cache reclaimed after 30 s unread or a refused fetch, is skipped rather
-  than ending the session.
-
-Cancelling a dial or its acceptance resets that dial. Cancelling an accept wait
-leaves the endpoint listening. `endpoint.close()` resets sessions and pending dials.
-The [socket convention](https://doc.moq.dev/concept/socket) needs lite-07 or
-moq-transport on every relay hop; this API does not add pre-07 capability detection.
 
 ### Origin (advanced)
 
@@ -287,7 +264,7 @@ moq-transport on every relay hop; this API does not add pre-07 capability detect
 - **`Claim`**. A prefix route on an origin. Hold it: dropping or cancelling it retracts it and rejects the requests still waiting.
   - `.instance → Instance`. The stream it serves now, kept across `withdraw()` and `announce()`. Unless one is named, it moves to a fresh one each time a job holding it ends.
   - `.announce()`, `.withdraw()`, `.set_cost(cost)`, `.set_auth(credential)`. Show, hide, re-price, or swap its request credential (`None` for the session's scope) in place.
-  - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous sequence space, `.route(hidden=..., ...)` for the path's own route, which continues the claim's instance until the job ends and then moves the claim to a fresh one (unless either names an instance: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
+  - `await .requested() → BroadcastRequest | None`, or async iteration. Call `.serve(consumer)` to answer with held content under the claim's continuous group starts, `.route(hidden=..., ...)` for the path's own route, which continues the claim's instance until the job ends and then moves the claim to a fresh one (unless either names an instance: a named claim lends none, and a named job keeps its own), or `.reject(code)` to fail the requester.
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventPresent`, `AnnounceEventUnavailable`, `AnnounceEventAvailable`, `AnnounceEventAbsent`, or `AnnounceEventOffline`, each carrying an `Announce` whose `.route.instance` names the stream; another instance taking a path over keeps it present, so `follow` the path to see that); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards
   - `.follow(path, instance=None) → Following` (awaitable, waits until something serves the path, then returns each stream that takes over, or `None` once the path goes offline; an `instance` follows only that stream)

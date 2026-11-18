@@ -219,12 +219,15 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   method to an existing binding object, which the API diff counts as a
   break once 0.22 is published.
 - ✅ End-to-end encryption does not publish at this cut
-  ([its own unpublished crate](/quest/m2/e2ee-crate.md)), so `moq-e2ee` is
-  no longer a retired name, and the paragraph above about publishing a
-  pointer above 0.0.25 no longer applies: the name is held for
-  [the finished format](/quest/m3/e2ee-format.md).
-- ✅ The hand-written C API publishes as `libmoq` 0.22
-  ([its final line](/quest/m2/libmoq-name.md)), reversing 2026-10-25, so the
+  ([its own unpublished crate](https://github.com/moq-dev/moq/pull/8947)),
+  so `moq-e2ee` is no longer a retired name, and the paragraph above about
+  publishing a pointer above 0.0.25 no longer applies: the name is held for
+  [the finished format](/quest/m3/e2ee-format.md). `release` still holds
+  `rs/moq-e2ee` at 0.0.25 and publishes it; once the cut merges `main` into
+  `release`, its copy is `publish = false` at 0.0.26. Check that
+  release-plz proposes nothing for `moq-e2ee`.
+- ✅ The hand-written C API publishes as `libmoq` 0.22, its final line,
+  reversing 2026-10-25, so the
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
   quests for a code-free `libmoq` stub were deleted.
 
@@ -240,3 +243,4 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
 - [The Playwright bump](/quest/m1/playwright-pin.md) - the cut PR's interop lane runs with `CI_STRICT`, which fails the route key lane on a Chromium below 158
+- [Pre-cut correctness fixes](/quest/m1/precut-fixes/README.md) - the cut publishes none of the defects the 2026-11-17 correctness audit found

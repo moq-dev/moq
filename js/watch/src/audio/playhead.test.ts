@@ -53,10 +53,11 @@ it("applies the output latency before media zero's turn, when the ring already r
 		audio.received(Duration.ZERO);
 		span.set({ start: Duration.ZERO, end: Duration.millis(180), lead: Duration.millis(120) });
 		await clock.advance(Duration.millis(50));
-		// 70 ms short of media zero's turn, which the clock reads as zero, the ring renders 50 ms.
+		// 70 ms short of media zero's turn, which the clock reads as zero, the ring renders 50 ms, and
+		// plays audio trailing it by its 30 ms window even with the stretch off.
 		expect(sync.now()).toEqual(Duration.ZERO);
 		expect(sync.position()).toBe(-70);
-		expect(playhead.now()).toEqual(Duration.millis(50));
+		expect(playhead.now()).toEqual(Duration.millis(20));
 	} finally {
 		audio.close();
 		sync.close();

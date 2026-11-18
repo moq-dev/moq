@@ -99,12 +99,8 @@ fn drain_session_with_zero_timeout_closes_at_once() {
 	memory::run(drain_session_with_zero_timeout_closes_at_once_inner);
 }
 
-/// A zero drain window means no grace, so `drain_session` closes the session
-/// rather than sending a GOAWAY the peer has no time to act on.
-///
-/// The regression it guards: `Goaway::with_timeout(ZERO)` means "no deadline" on
-/// the wire, so passing the window straight through left the session with no
-/// force-close at all and `drain_session` awaiting a peer that never leaves.
+/// A zero drain window means no grace, so `drain_session` closes the session at
+/// once rather than awaiting a peer under no deadline to leave.
 async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 	let net = Net::new();
 	let mut accepted = net.upstream("upstream", &sim::origin());
@@ -119,8 +115,7 @@ async fn drain_session_with_zero_timeout_closes_at_once_inner() {
 
 	let (_trigger, shutdown) = shutdown::Observer::new(Duration::ZERO);
 
-	// The assertion is that this resolves at all: with the window passed through as
-	// a wire timeout it would await a peer under no deadline to leave.
+	// The assertion is that this resolves at all.
 	within("drain_session returns", shutdown.drain_session(&server_session)).await;
 
 	// The peer observes the close rather than being left connected.
@@ -175,7 +170,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	// The first group is open, its first frame read, when A redirects to B.
 	let mut split = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	write(&mut split, "a");
 	let mut reading = within("recv the split group", sub.recv_group())
@@ -195,8 +190,7 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 		other => panic!("expected A's route, got {other:?}"),
 	};
 	session_a
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect(net.url("b")))
+		.goaway(moq_net::goaway::Goaway::redirect(net.url("b")))
 		.expect("send goaway");
 	let _session_b = accept("B accepts", &mut accepted_b).await;
 	within("routed via B", async {
@@ -218,15 +212,15 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	.await;
 
 	write(&mut split, "b");
-	split.close().expect("finish");
+	split.finish().expect("finish");
 	assert_eq!(read(&mut reading).await, (0, Some("b".into())));
 	assert_eq!(read(&mut reading).await, (0, None));
 
 	let mut after = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	write(&mut after, "c");
-	after.close().expect("finish");
+	after.finish().expect("finish");
 	let mut next = within("recv the next group", sub.recv_group())
 		.await
 		.expect("recv")
@@ -274,12 +268,12 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		.expect("subscribe");
 
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g0".as_ref())
 		.expect("write frame");
-	group.close().expect("finish");
+	group.finish().expect("finish");
 
 	let mut g0 = within("recv g0", sub.recv_group())
 		.await
@@ -301,8 +295,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 	// ── sibling A drains with a redirect to sibling B ────────────────
 	session_a
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect(net.url("b")))
+		.goaway(moq_net::goaway::Goaway::redirect(net.url("b")))
 		.expect("send goaway");
 
 	// The cluster reconnects: sibling B accepts a session.
@@ -311,12 +304,12 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 	// New content lands after the swap (both siblings serve the same
 	// origin, so B has it).
 	let mut group = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::from_millis(group.start).unwrap(), b"g1".as_ref())
 		.expect("write frame");
-	group.close().expect("finish");
+	group.finish().expect("finish");
 
 	let mut g1 = within("recv g1", sub.recv_group())
 		.await
@@ -463,14 +456,14 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// ── group 0 flows through the MID-A leg (all frames verified) ──
 	const FRAMES_PER_GROUP: u64 = 3;
 	let mut g = track
-		.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+		.append_group(moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap())
 		.expect("append group");
 	for f in 0..FRAMES_PER_GROUP {
 		let payload = format!("diamond_g0_f{f}");
 		g.write_frame(moq_net::Timestamp::from_millis(g.start).unwrap(), payload.as_bytes())
 			.expect("write frame");
 	}
-	g.close().expect("finish");
+	g.finish().expect("finish");
 
 	let mut seen = BTreeSet::new();
 	collect_group(&mut sub, &mut seen, FRAMES_PER_GROUP, "pre-failover (via MID-A)").await;
@@ -483,14 +476,16 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let publisher = kio::clock::sim::spawn(async move {
 		for seq in 1..=LAST_GROUP {
 			let mut g = track
-				.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.expect("append group");
 			for f in 0..FRAMES_PER_GROUP {
 				let payload = format!("diamond_g{seq}_f{f}");
 				g.write_frame(moq_net::Timestamp::from_millis(g.start).unwrap(), payload.as_bytes())
 					.expect("write frame");
 			}
-			g.close().expect("finish");
+			g.finish().expect("finish");
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 		// Hand the track back so the post-drain phase can keep publishing.
@@ -499,8 +494,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 
 	// ── TRIGGER: MID-A drains BOTTOM with a redirect to MID-B ───────────
 	session_bottom_on_a
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect(net.url("mid-b")).with_timeout(Duration::from_secs(5)))
+		.goaway(moq_net::goaway::Goaway::redirect(net.url("mid-b")).with_timeout(Some(Duration::from_secs(5))))
 		.expect("send goaway");
 
 	// Positive gate: MID-B's first inbound connection can only be BOTTOM's
@@ -540,14 +534,16 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let post_publisher = kio::clock::sim::spawn(async move {
 		for seq in (LAST_GROUP + 1)..=POST_DRAIN_LAST {
 			let mut g = track
-				.append_group(track.largest().map_or(0, |largest| largest.group + 1))
+				.append_group(
+					moq_net::Timestamp::from_millis(track.largest().map_or(0, |largest| largest.group + 1)).unwrap(),
+				)
 				.expect("append group");
 			for f in 0..FRAMES_PER_GROUP {
 				let payload = format!("diamond_g{seq}_f{f}");
 				g.write_frame(moq_net::Timestamp::from_millis(g.start).unwrap(), payload.as_bytes())
 					.expect("write frame");
 			}
-			g.close().expect("finish");
+			g.finish().expect("finish");
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	});
@@ -683,8 +679,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	// Send the client somewhere that will never finish handshaking. No wire timeout:
 	// our own `--connect-goaway-handover` is then the only thing bounding the old session.
 	server_session
-		.drain()
-		.send(moq_net::goaway::Goaway::redirect(net.url("black-hole")))
+		.goaway(moq_net::goaway::Goaway::redirect(net.url("black-hole")))
 		.expect("send goaway");
 	let sent = kio::clock::now();
 

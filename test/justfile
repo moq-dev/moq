@@ -60,7 +60,7 @@ harness:
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
 # sanity check). `interop --all` runs the full matrix: rust + python + go +
 # browser + C++ publish; everyone subscribes (incl. native node/bun JS, the
-# moq-c C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
+# libmoq C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
 # Finite track tails run too; `--tail` selects just the CLI FETCH close and Rust/Node/Bun tail checks.
 # `--versions ietf` reruns them with every client pinned to each even moq-transport draft.
@@ -68,7 +68,7 @@ harness:
 [positional-arguments]
 interop *args:
     uv run --no-project python ../sh/js/install.py frozen
-    just rs test -p moq-net -p moq-crypto --lib \
+    just rs test -p moq-net --features moq-net/async --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
@@ -315,9 +315,9 @@ resume-model:
 tla *paths:
     bash ../sh/tla.sh {{ paths }}
 
-# Prove the route key model, and that each variant breaks the lemmas it names.
-route-key-model:
-    bash route-key-model.sh
+# Type-check the route rule's convergence proof (rs/moq-net/verify/route-algebra) with its own pinned Agda.
+route-proof:
+    nix build ..#route-proof --no-link --print-build-logs
 
 # Check random lite-07 meshes against the route rules from a fresh replayable seed.
 route-sweep:

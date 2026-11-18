@@ -56,7 +56,7 @@ export async function refusedWebSocket(relay: string): Promise<CloseState> {
 	const connection = new Connection({
 		url,
 		share: false,
-		delay: { initial: Duration.millis(10), max: Duration.millis(10), timeout: null },
+		backoff: { initial: Duration.millis(10), max: Duration.millis(10), timeout: null },
 	});
 	// The refused session counted as connected first; a second one means the handle redialed.
 	let connected = 0;

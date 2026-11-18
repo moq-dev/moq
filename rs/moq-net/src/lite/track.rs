@@ -21,12 +21,9 @@ pub struct Track<'a> {
 	/// The instance the subscriber expects; see [`crate::origin::RouteInfo::instance`].
 	/// Lite07+ only.
 	pub instance: Option<crate::Instance>,
-	/// The Node ID of the origin that serves the request, or 0 for whichever the
+	/// The forwarding node whose claim the request follows, or `None` for whichever the
 	/// publisher selects. Lite07+ only.
-	pub node: u64,
-	/// How many leading segments of the broadcast path make up the prefix of the route
-	/// the request follows (lite-07); 0 with no node named.
-	pub depth: u64,
+	pub node: Option<crate::route::NodeId>,
 	pub track: Cow<'a, str>,
 }
 
@@ -37,7 +34,6 @@ impl Track<'_> {
 			broadcast: self.broadcast,
 			instance: self.instance,
 			node: self.node,
-			depth: self.depth,
 			track: Cow::Owned(self.track.into_owned()),
 		}
 	}
@@ -52,14 +48,13 @@ impl<'a> Message<'a> for Track<'a> {
 
 		let broadcast = Path::decode(r, version)?;
 		let instance = super::instance::decode_pin(r, version)?;
-		let (node, depth) = super::instance::decode_node(r, version, &broadcast)?;
+		let node = super::instance::decode_node(r, version)?;
 		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
 			instance,
 			node,
-			depth,
 			track,
 		})
 	}
@@ -71,7 +66,7 @@ impl<'a> Message<'a> for Track<'a> {
 
 		self.broadcast.encode(w, version)?;
 		super::instance::encode_pin(w, version, self.instance.as_ref())?;
-		super::instance::encode_node(w, version, self.node, self.depth)?;
+		super::instance::encode_node(w, version, self.node)?;
 		w.string(&self.track)?;
 		Ok(())
 	}
@@ -132,7 +127,8 @@ impl From<TrackInfo> for crate::track::Info {
 /// `ietf` extension, TRACK_PROPERTIES.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Framing {
-	/// The units of every frame Timestamp on the wire, or `None` when frames carry none.
+	/// The units of every frame Timestamp on the wire, or `None` when frames carry none or,
+	/// on lite-07, a scale-less track's bare number (see [`Self::stamped`]).
 	pub timescale: Option<Timescale>,
 	/// The draft the track's moq-transport publisher spoke, which serialized its objects'
 	/// properties, or `None` for a moq-lite one, which carries no moq-transport state.
@@ -154,6 +150,13 @@ impl Framing {
 			compressed: info.compressed(),
 			length_first: version.has_length_first(),
 		}
+	}
+
+	/// Whether every FRAME carries a timestamp: lite-05/06 always declare a timescale, and
+	/// lite-07, which leads with the length, stamps a scale-less track's frames with their
+	/// group's start.
+	pub fn stamped(&self) -> bool {
+		self.timescale.is_some() || self.length_first
 	}
 }
 
@@ -510,34 +513,41 @@ mod test {
 		));
 	}
 
-	/// Lite-07 names the origin node right after the instance; older versions carry
-	/// none, so the publisher always selects.
+	/// Lite-07 names the node right after the instance; older versions carry none, so
+	/// the publisher always selects.
 	#[test]
 	fn track_request_names_its_node_on_lite07_only() {
 		let msg = Track {
 			instance: None,
-			node: 5,
-			depth: 0,
+			node: Some(crate::route::NodeId { relay: 5, start: 9 }),
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("v"),
 		};
 		let buf = msg.encode_bytes(Version::Lite07).unwrap();
-		// Length, the path, an empty unminted instance, the node and its route's depth,
-		// then the track name.
-		assert_eq!(&buf[..], [11, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 0, 1, b'v']);
-		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, 5);
+		// Length, the path, an empty unminted instance, the node and its start, then the
+		// track name.
+		assert_eq!(&buf[..], [11, 4, b'r', b'o', b'o', b'm', 0, 0, 5, 9, 1, b'v']);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, msg.node);
+
+		// No node is a Node ID of 0, which nothing follows.
+		let unnamed = Track {
+			node: None,
+			..msg.clone()
+		};
+		let buf = unnamed.encode_bytes(Version::Lite07).unwrap();
+		assert_eq!(&buf[..], [10, 4, b'r', b'o', b'o', b'm', 0, 0, 0, 1, b'v']);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite07).unwrap().0.node, None);
 
 		let buf = msg.encode_bytes(Version::Lite06).unwrap();
 		assert_eq!(&buf[..], [7, 4, b'r', b'o', b'o', b'm', 1, b'v']);
-		assert_eq!(Track::decode_slice(&buf, Version::Lite06).unwrap().0.node, 0);
+		assert_eq!(Track::decode_slice(&buf, Version::Lite06).unwrap().0.node, None);
 	}
 
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};
@@ -554,8 +564,7 @@ mod test {
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
 			instance: None,
-			node: 0,
-			depth: 0,
+			node: None,
 			broadcast: Path::from_static("room"),
 			track: Cow::Borrowed("video"),
 		};

@@ -76,11 +76,15 @@ type DatagramInfo = ffi.MoqDatagramInfo
 // starts at the newest group and skips a superseded group at once.
 type Delay struct {
 	// Min is the target latency: the playout or jitter-buffer delay held behind the live edge,
-	// and where a cold join starts. A Min past Max starts at Max, since the publisher serves
-	// nothing older. moq-lite-07 sends it upstream.
+	// where a cold join starts, and how long a decoder waits for a missing group. A Min past Max
+	// starts and waits at Max, since the publisher serves nothing older. moq-lite-07 sends it
+	// upstream.
 	Min time.Duration
-	// MinUnstated leaves Min unstated, ignoring it. A decoder plays it as zero, while the
-	// subscription keeps it unstated, so it never pulls the aggregate across subscribers to zero.
+	// MinUnstated leaves Min unstated, ignoring it. A decoder starts it as zero and waits a
+	// missing group for Max (an audio decoder floors it at zero and waits only its playout
+	// estimate, which can be larger), while the subscription keeps it unstated, so it never
+	// pulls the aggregate across subscribers to zero, unless a catalog warmup or an audio
+	// decoder's playout delay states one.
 	MinUnstated bool
 	// Max is how far a non-latest group may fall behind the live edge before it is skipped. Zero
 	// skips immediately; a larger value tolerates that much reordering. It caps every range,
@@ -176,7 +180,7 @@ type TrackInfo struct {
 	// only the live edge.
 	MaxAge time.Duration
 	// MaxAgeUnlimited ignores MaxAge and sets no publisher limit, leaving only the
-	// cache to bound how long a superseded group is served.
+	// cache to bound how long a superseded group is served: the ffi record's null MaxAge.
 	MaxAgeUnlimited bool
 	Refresh         *uint32
 	Timescale       *uint64
@@ -188,11 +192,10 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 		return nil, nil
 	}
 	out := &ffi.MoqTrackInfo{
-		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
-		Refresh:         info.Refresh,
-		Timescale:       info.Timescale,
-		Compression:     info.Compression,
+		Priority:    info.Priority,
+		Refresh:     info.Refresh,
+		Timescale:   info.Timescale,
+		Compression: optional(info.Compression),
 	}
 	if !info.MaxAgeUnlimited {
 		out.MaxAge = &info.MaxAge
@@ -203,13 +206,15 @@ func trackInfoFFI(info *TrackInfo) (*ffi.MoqTrackInfo, error) {
 func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 	out := TrackInfo{
 		Priority:        info.Priority,
-		MaxAgeUnlimited: info.MaxAgeUnlimited,
+		MaxAgeUnlimited: info.MaxAge == nil,
 		Refresh:         info.Refresh,
 		Timescale:       info.Timescale,
-		Compression:     info.Compression,
 	}
-	if info.MaxAge != nil && !info.MaxAgeUnlimited {
+	if info.MaxAge != nil {
 		out.MaxAge = *info.MaxAge
+	}
+	if info.Compression != nil {
+		out.Compression = *info.Compression
 	}
 	return out
 }

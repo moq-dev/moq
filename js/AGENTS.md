@@ -4,7 +4,7 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 
 `@moq/signals` is the reactive core; read `signals/src/index.ts` before touching reactive code.
 
-- `Signal` equality is deep for plain data but identity for class instances, except clock values (by value); `set(v, true)` forces a notify.
+- `Signal` equality is deep for plain data but identity for class instances, except clock values (by value). `set` and `update` notify only on a change, `mutate` always notifies, and `set(v, true)` forces a notify.
 - `Computed` is `undefined` until its first run and after `close()`. Close standalone ones; `effect.computed()` closes with its parent.
 - An `Effect` rerun waits for every `effect.spawn` task from the previous run to settle, so register `effect.cleanup` unconditionally.
 - Use the scoped helpers (`effect.interval`, `timer`, `event`, `subscribe`, ...) over raw timers and listeners, and nested `effect.run` over one giant effect.
@@ -23,6 +23,7 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 
 # Conventions
 
+- Only TypeScript callers are supported, so don't add runtime checks for misuse the types already rule out (extra or wrong-typed arguments, impossible variants). Validate only data that crosses a trust boundary: wire, JSON (zod schemas), and user input such as element attributes.
 - Only browser performance counts; accept a small regression that shows only on node or bun.
 - Give each entrypoint a `@module` block. Hide deprecated exports with `@internal` or drop them; never annotate "use X".
 - `just js check` includes the build, since declaration emit catches errors `--noEmit` misses, and rejects importing a `@moq/*` package the manifest doesn't declare.

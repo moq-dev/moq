@@ -29,8 +29,6 @@ pub enum MoqProtocolKind {
 	Unauthorized,
 	/// The peer broke a protocol rule; the session is unusable.
 	ProtocolViolation,
-	/// A key-value pair was malformed or repeated more than allowed.
-	KeyValueFormatting,
 	/// The peer did not close within the GOAWAY drain deadline.
 	GoawayTimeout,
 	/// A control message took too long.
@@ -61,26 +59,15 @@ pub enum MoqProtocolKind {
 	TimestampMismatch,
 	/// An application-chosen code, offset into the 64+ range on the wire.
 	App,
-	/// A code this version does not recognize; [`MoqProtocolError::code`] is the value.
+	/// A code moq-lite does not name, such as one only moq-transport defines;
+	/// [`MoqProtocolError::code`] is the value.
 	Unknown,
 	/// The session exceeded its announcement or subscription cap.
 	TooManyRequests,
 	/// The authorization token expired and can be refreshed. Session 0x18.
 	Expired,
-	/// A token registration exceeded the advertised cache size.
-	AuthTokenCacheOverflow,
 	/// The peer could not parse an authorization token.
 	MalformedAuthToken,
-	/// A token referred to an alias that was never registered.
-	UnknownAuthTokenAlias,
-	/// The peer reused or sent an invalid request ID.
-	InvalidRequestId,
-	/// The peer sent a path it may not send.
-	InvalidPath,
-	/// The peer sent an authority it may not send.
-	InvalidAuthority,
-	/// The peer exceeded its outstanding request update limit.
-	TooManyRequestUpdates,
 }
 
 /// A protocol failure a peer sent (or this side will send): scope, verbatim code, kind,
@@ -134,18 +121,11 @@ fn session_kind(err: &moq_net::SessionError) -> MoqProtocolKind {
 		moq_net::SessionError::Unauthorized => MoqProtocolKind::Unauthorized,
 		moq_net::SessionError::Expired => MoqProtocolKind::Expired,
 		moq_net::SessionError::ProtocolViolation => MoqProtocolKind::ProtocolViolation,
-		moq_net::SessionError::KeyValueFormatting => MoqProtocolKind::KeyValueFormatting,
 		moq_net::SessionError::GoawayTimeout => MoqProtocolKind::GoawayTimeout,
 		moq_net::SessionError::Timeout => MoqProtocolKind::Timeout,
 		moq_net::SessionError::Version => MoqProtocolKind::Version,
 		moq_net::SessionError::TooManyRequests => MoqProtocolKind::TooManyRequests,
-		moq_net::SessionError::AuthTokenCacheOverflow => MoqProtocolKind::AuthTokenCacheOverflow,
 		moq_net::SessionError::MalformedAuthToken => MoqProtocolKind::MalformedAuthToken,
-		moq_net::SessionError::UnknownAuthTokenAlias => MoqProtocolKind::UnknownAuthTokenAlias,
-		moq_net::SessionError::InvalidRequestId => MoqProtocolKind::InvalidRequestId,
-		moq_net::SessionError::InvalidPath => MoqProtocolKind::InvalidPath,
-		moq_net::SessionError::InvalidAuthority => MoqProtocolKind::InvalidAuthority,
-		moq_net::SessionError::TooManyRequestUpdates => MoqProtocolKind::TooManyRequestUpdates,
 		moq_net::SessionError::App(_) => MoqProtocolKind::App,
 		moq_net::SessionError::Unknown(_) => MoqProtocolKind::Unknown,
 		_ => MoqProtocolKind::Unknown,
@@ -345,7 +325,7 @@ pub enum MoqError {
 
 	/// This track or group already committed to another way of reading it.
 	///
-	/// A track is read in arrival order, in sequence order, or by a typed reader such as a
+	/// A track is read in arrival order, in start order, or by a typed reader such as a
 	/// JSON consumer, never two of them, and the first group read picks the order. A group is
 	/// read raw or by a media group consumer, and the first frame read picks raw. Reaching
 	/// for another one afterwards is this error rather than [`Self::Unsupported`]: each works
@@ -565,24 +545,28 @@ mod tests {
 			(0x1, MoqProtocolKind::Internal),
 			(0x2, MoqProtocolKind::Unauthorized),
 			(0x3, MoqProtocolKind::ProtocolViolation),
-			(0x4, MoqProtocolKind::InvalidRequestId),
-			(0x6, MoqProtocolKind::KeyValueFormatting),
 			(0x7, MoqProtocolKind::TooManyRequests),
-			(0x8, MoqProtocolKind::InvalidPath),
 			(0x10, MoqProtocolKind::GoawayTimeout),
 			(0x11, MoqProtocolKind::Timeout),
-			(0x13, MoqProtocolKind::AuthTokenCacheOverflow),
 			(0x15, MoqProtocolKind::Version),
 			(0x16, MoqProtocolKind::MalformedAuthToken),
-			(0x17, MoqProtocolKind::UnknownAuthTokenAlias),
 			(0x18, MoqProtocolKind::Expired),
-			(0x19, MoqProtocolKind::InvalidAuthority),
-			(0x1b, MoqProtocolKind::TooManyRequestUpdates),
 		] {
 			let error = MoqProtocolError::from_session(&moq_net::SessionError::from_code(code));
 			assert_eq!(error.scope, MoqErrorScope::Session);
 			assert_eq!(error.code, code);
 			assert_eq!(error.kind, kind, "session code {code:#x}");
+		}
+	}
+
+	/// A code only moq-transport defines is no kind of ours, and keeps its number.
+	#[test]
+	fn moq_transport_session_codes_are_unknown() {
+		for code in [0x4, 0x6, 0x8, 0x13, 0x17, 0x19, 0x1b] {
+			let error = MoqProtocolError::from_session(&moq_net::SessionError::from_code(code));
+			assert_eq!(error.scope, MoqErrorScope::Session);
+			assert_eq!(error.code, code);
+			assert_eq!(error.kind, MoqProtocolKind::Unknown, "session code {code:#x}");
 		}
 	}
 

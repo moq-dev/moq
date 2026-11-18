@@ -100,20 +100,8 @@ pub(crate) struct Relay {
 /// Serve `cluster` on `addr` through `auth`: each session the server accepts runs a relay
 /// [`Connection`] on its own simulator task.
 pub(crate) async fn serve(network: &Network, addr: SocketAddr, cluster: &cluster::Cluster, auth: &auth::Auth) -> Relay {
-	serve_versions(network, addr, cluster, auth, Vec::new()).await
-}
-
-/// [`serve`], accepting only `versions`, or every default one when empty.
-async fn serve_versions(
-	network: &Network,
-	addr: SocketAddr,
-	cluster: &cluster::Cluster,
-	auth: &auth::Auth,
-	versions: Vec<moq_net::Version>,
-) -> Relay {
 	let _ = rind_rustls::default_provider().unwrap().install_default();
 	let mut config = moq_tokio::server::Config::default();
-	config.listen.version = versions;
 	config.listen.bind = Some(moq_tokio::listen::Bind::Addr(addr));
 	config.listen.tls.generate = vec!["localhost".into()];
 	config.sim = Some(network.host(addr.ip()));
@@ -162,7 +150,7 @@ async fn deliver(network: &Network, publish: &Relay, subscribe: &Relay) -> Vec<u
 			let mut group = source.create_group(moq_net::group::Info { start: sequence }).unwrap();
 			let timestamp = moq_net::Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
-			group.close().unwrap();
+			group.finish().unwrap();
 			kio::clock::sleep(INTERVAL).await;
 		}
 		let _source = source.finish().unwrap();
@@ -234,41 +222,47 @@ fn lossy(network: &Network, a: SocketAddr, b: SocketAddr) {
 	network.path(b, a, |p| *p = path);
 }
 
-/// The bytes a socket session carries in one group: past the 32 MB live tail, so a hop that
-/// sheds rather than paces loses some
+/// The bytes the bulk transfer carries in one group: past the 32 MB live tail, so a hop
+/// that sheds rather than paces loses some
 const BULK: usize = 40 * 1024 * 1024;
 /// The size of each frame of [`BULK`]
 const CHUNK: usize = 8 * 1024;
-/// The only moq-lite that carries hidden broadcasts, which socket endpoints need at every hop
-const LITE_07: &str = "moq-lite-07-wip";
 
-/// A socket session's group carries a bulk transfer through a relay without loss: the writer
-/// waits on `ready` before each frame, and the reader drains at its own pace, slower than
-/// the writer, so every hop has to pace its ingest to that reader rather than shed.
+/// A group carries a bulk transfer through a relay without loss: the writer waits on `ready`
+/// before each frame, and the reader drains at its own pace, slower than the writer, so
+/// every hop has to pace its ingest to that reader rather than shed.
 ///
 /// A paused stream must hold no more than the credit its session reserves for it, or the
 /// connection window fills with bytes nobody takes and the transport evicts the stream.
 #[test]
-fn a_socket_session_carries_a_bulk_transfer_losslessly() {
+fn a_group_carries_a_bulk_transfer_losslessly() {
 	memory::run(|| async {
 		let network = Network::new(0);
 		let auth = memory::public(&["**"], &[], &[]);
 		let cluster = memory::start(memory::cluster(), moq_tokio::connect::Config::default()).await;
-		let lite = vec![LITE_07.parse().unwrap()];
-		let relay = serve_versions(&network, SocketAddr::new(ip(1), PORT), &cluster, &auth, lite).await;
+		let relay = serve(&network, SocketAddr::new(ip(1), PORT), &cluster, &auth).await;
 
-		let (writer, _writing) = endpoint(&network, PUBLISHER, &relay, "writer");
-		let (reader, _reading) = endpoint(&network, SUBSCRIBER, &relay, "reader");
+		let origin = moq_tokio::origin::spawn();
+		let broadcast = origin
+			.route("bulk", moq_net::origin::RouteOptions::default())
+			.expect("route");
+		let mut track = broadcast
+			.broadcast()
+			.create_track("data", moq_net::track::Info::default())
+			.expect("track");
+		broadcast.announce().expect("announce");
+		let _publisher = client(&network, PUBLISHER, &relay)
+			.with_publisher(&origin)
+			.connect(url(&relay));
 
-		let dial = reader.dial_track(writer.id(), None).unwrap();
-		let accept = async { writer.accept_track().await?.accept(None).await };
-		let (dialed, accepted) = kio::clock::timeout(TIMEOUT, async { futures::join!(dial, accept) })
-			.await
-			.expect("connect timeout");
-		let (dialed, accepted) = (dialed.expect("dial"), accepted.expect("accept"));
+		let viewer = moq_tokio::origin::spawn();
+		let _subscriber = client(&network, SUBSCRIBER, &relay)
+			.with_subscriber(viewer.clone())
+			.connect(url(&relay));
 
 		let write = async {
-			let mut group = accepted.producer.append_group(0).unwrap();
+			while track.subscription_changed().await.unwrap().is_none() {}
+			let mut group = track.append_group(moq_net::Timestamp::unscaled(0)).unwrap();
 			let info = moq_net::frame::Info {
 				size: CHUNK as u64,
 				timestamp: moq_net::Timestamp::unscaled(0),
@@ -279,11 +273,32 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 					.write_frame(moq_net::Timestamp::unscaled(0), vec![index as u8; CHUNK])
 					.unwrap();
 			}
-			group.close().unwrap();
+			group.finish().unwrap();
 		};
 		let read = async {
-			let mut ordered = dialed.consumer.ordered();
-			let mut group = ordered.next_group().await.unwrap().expect("a group");
+			let remote = loop {
+				match viewer.consume().request("bulk", None).await {
+					Ok(remote) => break remote,
+					// Not announced through the relay yet.
+					Err(_) => kio::clock::sleep(Duration::from_millis(50)).await,
+				}
+			};
+			let consumer = remote
+				.track("data")
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(600))),
+				)
+				.await
+				.unwrap();
+			let mut ordered = consumer.ordered();
+			let mut group = ordered
+				.next_group()
+				.await
+				.unwrap()
+				.and_then(moq_net::track::Item::group)
+				.expect("a group");
 			let mut read = 0;
 			while let Some(frame) = group
 				.read_frame()
@@ -307,29 +322,4 @@ fn a_socket_session_carries_a_bulk_transfer_losslessly() {
 			.expect("the transfer stalled");
 		assert_eq!(read, BULK);
 	});
-}
-
-/// A socket endpoint `id` on the host at `ip`, publishing and subscribing through `relay`.
-fn endpoint(
-	network: &Network,
-	ip: IpAddr,
-	relay: &Relay,
-	id: &str,
-) -> (moq_net::socket::Endpoint, moq_tokio::Connection) {
-	let origin = moq_tokio::origin::spawn();
-	let mut connect = moq_tokio::connect::Config::default();
-	connect.bind = Some(SocketAddr::new(ip, CLIENT_PORT));
-	connect.tls.fingerprint = relay.fingerprints.clone();
-	// Every hop between two socket endpoints carries hidden broadcasts.
-	connect.version = vec![LITE_07.parse().unwrap()];
-	let mut config = moq_tokio::client::Config::default();
-	config.connect = connect;
-	config.sim = Some(network.host(ip));
-	let connection = config
-		.init()
-		.expect("init client")
-		.with_publisher(&origin)
-		.with_subscriber(origin.clone())
-		.connect(url(relay));
-	(moq_net::socket::Endpoint::new(&origin, "room", id).unwrap(), connection)
 }

@@ -34,7 +34,6 @@ interface Heard {
 	start: bigint;
 	end: bigint;
 	error?: number;
-	update?: bigint;
 }
 
 /**
@@ -64,7 +63,6 @@ function tap() {
 			start: msg.start,
 			end: msg.end,
 			error: msg.error,
-			update: msg.update,
 		};
 		heard.push(entry);
 		if (hold?.(entry)) await new Promise<void>((release) => held.push(release));
@@ -87,12 +85,12 @@ function tap() {
 		heard,
 		updates,
 		held,
-		/** The drops and skips heard on `hop` from entry `from` on, as `[kind, start, end, code, update]`. */
+		/** The drops and skips heard on `hop` from entry `from` on, as `[kind, start, end, code]`. */
 		on(hop: Hop, from = 0) {
 			return heard
 				.slice(from)
 				.filter((entry) => entry.hop === hop)
-				.map((entry) => [entry.kind, entry.start, entry.end, entry.error, entry.update]);
+				.map((entry) => [entry.kind, entry.start, entry.end, entry.error]);
 		},
 		hold(fn: ((heard: Heard) => boolean) | undefined) {
 			hold = fn;
@@ -107,10 +105,10 @@ function tap() {
 /**
  * A publisher's session on `up` to a relay, and the relay's session on `down` to a viewer. The
  * relay serves the viewer from its received copy of the publisher's broadcast, as a JS relay does.
- * The publisher's track caches into a pool that ages a group out only past `expiry`, never by
- * default, so it still holds what the relay and the viewer evict on the manual clock.
+ * The publisher's track caches into a pool that never ages a group out, so it still holds what the
+ * relay and the viewer evict on the manual clock.
  */
-async function chain(up: Version, down: Version, expiry?: Duration) {
+async function chain(up: Version, down: Version) {
 	const alpn = (version: Version) => (version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_06);
 	const upstream = createMockTransportPair(alpn(up));
 	const downstream = createMockTransportPair(alpn(down));
@@ -136,15 +134,15 @@ async function chain(up: Version, down: Version, expiry?: Duration) {
 	})();
 	const broadcast = source.route(path).broadcast;
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
-	hooks.poolTrack(track, new cache.Pool({ expiry }));
+	hooks.poolTrack(track, new cache.Pool({}));
 	const remote = wireOf(viewer).consume(path);
 
 	return {
 		track,
 		remote,
 		/** Write group `sequence` presenting at `millis`, with `size` bytes of payload. */
-		write(sequence: bigint, millis: number, size = 1) {
-			const group = track.createGroup(sequence);
+		write(key: bigint, millis: number, size = 1) {
+			const group = track.createGroup(key);
 			group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.fromMillis(millis) });
 			group.finish();
 		},
@@ -218,7 +216,7 @@ function settled(recv: Recv | undefined): unknown[] {
 	if (!recv) return ["nothing"];
 	switch (recv.kind) {
 		case "group":
-			return ["group", recv.group.sequence];
+			return ["group", recv.group.start];
 		case "drop":
 			return [recv.skip ? "skip" : "drop", recv.start, recv.end, toStreamCode(recv.error)];
 		case "error":
@@ -247,91 +245,19 @@ function groupsOf(rows: unknown[][]): unknown[] {
 		.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
-const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: { absolute: 0n } }] };
+const WIDE: Subscription = { delay: { max: null }, order: "ascending", ranges: [{ start: { time: 0n } }] };
 
 // Groups 1 to 4 after group 0 at 0s: 1 and 2 end 3s and 4s behind the 6s edge, and 3 starts 3s
 // behind it, so a 1.5s budget gives up 1 and 2 and still takes 3.
-function behindTheEdge(write: (sequence: bigint, millis: number) => void) {
-	for (const [sequence, millis] of [
+function behindTheEdge(write: (key: bigint, millis: number) => void) {
+	for (const [key, millis] of [
 		[1n, 1000],
 		[2n, 2000],
 		[3n, 3000],
 		[4n, 6000],
 	] as const)
-		write(sequence, millis);
+		write(key, millis);
 }
-
-// Short enough for the publisher to age out what the relay and the viewer still hold.
-const PUBLISHER_EXPIRY = Duration.millis(10_000);
-
-// A reader with a 1.5s budget is reported groups 1 and 2 stale through the relay, and those OLD
-// drops are still in flight to the viewer when it widens to 10s, which the publisher, having
-// evicted both, can only drop again. With `prompt`, that re-drop goes out under the widening
-// before the track ends; otherwise the publisher's end sweep names it.
-async function widening(prompt: boolean): Promise<void> {
-	using clock = manual();
-	const wire = tap();
-	const chained = await chain(Version.DRAFT_07, Version.DRAFT_07, PUBLISHER_EXPIRY);
-	const reader = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(1500) } });
-	await chained.reached();
-	chained.write(0n, 0);
-	expect(settled(await next(reader))).toEqual(["group", 0n]);
-
-	wire.hold((heard) => heard.hop === "down" && heard.update === 0n);
-	behindTheEdge(chained.write);
-	expect([settled(await next(reader)), settled(await next(reader))]).toEqual([
-		["group", 3n],
-		["group", 4n],
-	]);
-	await until(clock, () => wire.held.length > 0);
-	expect(wire.on("up")).toEqual([
-		["drop", 1n, 2n, StreamCode.Old, 0n],
-		["drop", 2n, 3n, StreamCode.Old, 0n],
-	]);
-
-	// The publisher no longer holds them: everything but its live edge ages out.
-	await clock.advance(PUBLISHER_EXPIRY.mul(2));
-	chained.write(5n, 6100);
-	expect(settled(await next(reader))).toEqual(["group", 5n]);
-
-	// The widening reaches both hops before the old drops land, which then settle nothing.
-	reader.update({ delay: { max: Duration.millis(10_000) } });
-	await until(clock, () => wire.updates.length >= 2);
-	expect(wire.updates.map((update) => update.update)).toEqual([1n, 1n]);
-	wire.hold((heard) => heard.hop === "down" && heard.update === 1n);
-	wire.release();
-	await until(clock, () => wire.on("down").length >= 2);
-	expect(hooks.staleHeld(reader, 1n, 3n)).toEqual([]);
-	expect(hooks.tryRecvGroup(reader, true).kind).toBe("idle");
-
-	// The re-drop under the widening's own number settles the widened reader for good.
-	if (!prompt) chained.track.finish();
-	await until(clock, () => wire.held.length > 0);
-	expect(wire.on("down")).toEqual([
-		["drop", 1n, 2n, StreamCode.Old, 0n],
-		["drop", 2n, 3n, StreamCode.Old, 0n],
-		["drop", 1n, 3n, StreamCode.NotFound, 1n],
-	]);
-	expect(hooks.tryRecvGroup(reader, true).kind).toBe("idle");
-	wire.hold(undefined);
-	wire.release();
-	expect(settled(await next(reader))).toEqual(["drop", 1n, 3n, StreamCode.NotFound]);
-	if (prompt) chained.track.finish();
-	expect(await drain(clock, reader)).toEqual([["done"]]);
-	expect(chained.ended()).toBe(false);
-
-	reader.close();
-	await chained.close();
-}
-
-// Mirrors Rust `after_a_widening_the_old_updates_drop_settles_no_reader` in
-// rs/moq-net/tests/integration/drop_record.rs.
-test("a drop under the narrower update settles no reader once the widening is sent, and the end's re-drop under it does", () =>
-	widening(false));
-
-// Mirrors Rust `after_a_widening_the_old_updates_drop_settles_no_reader` in
-// rs/moq-net/tests/integration/drop_record.rs.
-test("a widening drops again at once what the publisher evicted", () => widening(true));
 
 // Readers on the viewer while the publisher still holds groups 0 to 5 and the relay and the
 // viewer evicted all but group 5: `owed` subscribed before the eviction and read nothing, `fresh`
@@ -345,7 +271,7 @@ async function relayEvicted(readers: ("owed" | "fresh" | "widened")[]): Promise<
 	const first = chained.remote.track("video").subscribe(WIDE);
 	const owed = chained.remote.track("video").subscribe(WIDE);
 	await chained.reached();
-	for (let sequence = 0n; sequence < 5n; sequence++) chained.write(sequence, Number(sequence) * 1000);
+	for (let key = 0n; key < 5n; key++) chained.write(key, Number(key) * 1000);
 	const read: unknown[][] = [];
 	for (let i = 0; i < 5; i++) read.push(settled(await next(first)));
 	expect(groupsOf(read)).toEqual([0n, 1n, 2n, 3n, 4n]);
@@ -429,8 +355,8 @@ test("an origin's evicted drops cross the relay unchanged, and no update re-offe
 	]);
 	for (const hop of ["up", "down"] as const) {
 		expect(wire.on(hop)).toEqual([
-			["drop", 1n, 2n, StreamCode.Evicted, 0n],
-			["drop", 3n, 4n, StreamCode.Evicted, 0n],
+			["drop", 1n, 2n, StreamCode.Evicted],
+			["drop", 3n, 4n, StreamCode.Evicted],
 		]);
 	}
 
@@ -470,8 +396,8 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 			["drop", 2n, 3n, StreamCode.Old],
 		]);
 		expect(wire.on("up")).toEqual([
-			["drop", 1n, 2n, 0, 0n],
-			["drop", 2n, 3n, 0, 0n],
+			["drop", 1n, 2n, 0],
+			["drop", 2n, 3n, 0],
 		]);
 
 		// A widened reader and a new one each find groups 1 and 2 still dropped, though the
@@ -504,8 +430,8 @@ for (const down of [Version.DRAFT_06, Version.DRAFT_07]) {
 test("through a lite-06 upstream, a group reported dropped as it lands is fetched for a widened lite-07 viewer", async () => {
 	using clock = manual();
 	const chained = await chain(Version.DRAFT_06, Version.DRAFT_07);
-	for (let sequence = 0n; sequence < 10n; sequence++) {
-		if (sequence !== 7n) chained.write(sequence, Number(sequence) * 1000);
+	for (let key = 0n; key < 10n; key++) {
+		if (key !== 7n) chained.write(key, Number(key) * 1000);
 	}
 	// Reaches groups 5 and up by media time.
 	const first = chained.remote.track("video").subscribe({ delay: { max: Duration.millis(3500) }, ranges: [{}] });
@@ -519,9 +445,9 @@ test("through a lite-06 upstream, a group reported dropped as it lands is fetche
 	chained.write(7n, 7000);
 	expect(groupsOf(await drain(clock, first))).toEqual([]);
 
-	// Reaches every group: the relay forwards the drop to the lite-07 viewer as a stale one, so
-	// the widening reopens it, and the widened reader fills 0 to 4 and 7 from the publisher, as
-	// a later reader does.
+	// Reaches every group: the relay forwards the drop to the lite-07 viewer as a stale one, which
+	// holds only for a budget no wider than its own, so the widened reader fills 0 to 4 and 7 from
+	// the publisher, as a later reader does.
 	const all = [0n, 1n, 2n, 3n, 4n, 5n, 6n, 7n, 8n, 9n];
 	first.update({ delay: { max: Duration.millis(60_000) }, ranges: [{}] });
 	expect(groupsOf(await drain(clock, first))).toEqual([0n, 1n, 2n, 3n, 4n, 7n]);
@@ -542,8 +468,7 @@ test("through a lite-06 upstream, a group reported dropped as it lands is fetche
 // pool's idle window. The readers in `readers` subscribe next:
 // a narrow one is judged stale for groups 1 and 2 while the viewer still holds the run, and takes
 // them once every hop forgot it, and a wide one is filled them through the relay from
-// the publisher, which still holds them: fetched once the viewer's copy forgot the run too, and
-// re-offered over both subscriptions by the widening update while it still holds it stale.
+// the publisher, which still holds them.
 async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 	using clock = manual();
 	const wire = tap();
@@ -566,15 +491,13 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 	expect(settled(await next(reader))).toEqual(["group", 5n]);
 	const before = chained.fetches();
 	const heard = wire.heard.length;
-	let received: bigint[] = [];
 
 	for (const name of readers) {
 		if (name === "wide") {
 			const wide = chained.remote.track("video").subscribe(WIDE);
 			const filled = await drain(clock, wide);
 			expect(filled.filter((row) => row[0] !== "group")).toEqual([]);
-			received = groupsOf(filled) as bigint[];
-			expect(received).toEqual(expect.arrayContaining([1n, 2n]));
+			expect(groupsOf(filled)).toEqual(expect.arrayContaining([1n, 2n]));
 			expect(chained.fetches().up).toBeGreaterThan(before.up);
 			wide.close();
 		} else {
@@ -583,29 +506,16 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 			// reader takes the stale history: no hop still holds a newer group to judge it by.
 			const narrow = chained.remote.track("video").subscribe({
 				delay: { max: Duration.millis(1500) },
-				ranges: [{ start: { absolute: 1n } }],
+				ranges: [{ start: { time: 1n } }],
 			});
 			expect(groupsOf(await drain(clock, narrow))).toEqual([1n, 2n, 3n, 4n, 5n]);
 			narrow.close();
 		}
 	}
-	// Nothing a narrow budget gave up is named dropped for good on the wire, where it would settle
-	// every reader, wide ones too: a stale drop is reopened by the next update. The update asking
-	// for a recovered run may re-offer a group its recovery already delivered, whose duplicate
-	// stream the relay resets, which settles no reader.
+	// Nothing a narrow budget gave up is named dropped with anything but OLD on the wire, which
+	// would settle every reader, wide ones too.
 	if (readers.includes("wide")) {
-		const final = wire.heard
-			.slice(heard)
-			.filter((row) => row.kind !== "drop" || row.error !== StreamCode.Old)
-			.filter(
-				(row) =>
-					!(
-						row.kind === "drop" &&
-						row.error !== StreamCode.NotFound &&
-						row.end === row.start + 1n &&
-						received.includes(row.start)
-					),
-			);
+		const final = wire.heard.slice(heard).filter((row) => row.kind !== "drop" || row.error !== StreamCode.Old);
 		expect(final).toEqual([]);
 	}
 	expect(chained.ended()).toBe(false);
@@ -649,12 +559,9 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 			["group", 1n + 2n * BILLIONS],
 		]);
 	}
-	for (const hop of ["up", "down"] as const) {
-		expect(wire.on(hop)).toEqual([
-			["drop", 1n, 1n + BILLIONS, StreamCode.Cancel, 0n],
-			["skip", 1n + BILLIONS, 1n + 2n * BILLIONS, undefined, undefined],
-		]);
-	}
+	// The skip rides the GROUP above it, whose Previous Start passes over the run.
+	for (const hop of ["up", "down"] as const)
+		expect(wire.on(hop)).toEqual([["drop", 1n, 1n + BILLIONS, StreamCode.Cancel]]);
 	expect(chained.fetches()).toEqual(before);
 
 	for (const reader of [narrow, wide]) reader.close();
@@ -663,7 +570,7 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 
 // Mirrors Rust `a_run_of_billions_settles_in_one_step` in
 // rs/moq-net/tests/integration/drop_record.rs.
-for (const judged of ["reopened by a widening", "forgotten by the relay"] as const) {
+for (const judged of ["unsettled by a widening", "forgotten by the relay"] as const) {
 	test(`a run of billions ${judged} is judged again in one step`, async () => {
 		using clock = manual();
 		const chained = await chain(Version.DRAFT_07, Version.DRAFT_07);
@@ -676,17 +583,17 @@ for (const judged of ["reopened by a widening", "forgotten by the relay"] as con
 		await chained.reached();
 		chained.write(0n, 0);
 		expect(settled(await next(reader))).toEqual(["group", 0n]);
-		if (judged === "reopened by a widening")
+		if (judged === "unsettled by a widening")
 			hooks.dropTrackGroups(chained.track, 1n, 1n + BILLIONS, staleHole(1500));
 		else chained.track.skipGroups(1n, 1n + BILLIONS);
 		chained.write(1n + BILLIONS, 1000);
-		const expected = judged === "reopened by a widening" ? StreamCode.Old : StreamCode.NotFound;
+		const expected = judged === "unsettled by a widening" ? StreamCode.Old : StreamCode.NotFound;
 		expect(settled(await next(reader))[3]).toBe(expected);
 		expect(settled(await next(reader))).toEqual(["group", 1n + BILLIONS]);
 		if (wide) await drain(clock, wide);
 		const before = chained.fetches();
 
-		if (judged === "reopened by a widening") reader.update({ delay: { max: null } });
+		if (judged === "unsettled by a widening") reader.update({ delay: { max: null } });
 		else await clock.advance(cache.DEFAULT_EXPIRY.mul(2));
 		const after = await drain(clock, reader);
 		expect(after.length).toBeLessThanOrEqual(1);

@@ -37,8 +37,9 @@ const samples = (): Sample[] =>
 				.map((line) => JSON.parse(line) as Sample)
 		: [];
 
-// Chromium loops this constant tone as its microphone. Its default fake device has silent
-// intervals of its own, which would make an audible onset ambiguous.
+// Chromium loops this tone as its microphone. Its default fake device has silent
+// intervals of its own, which would make an audible onset ambiguous. The publisher's voice gate
+// scores a steady tone as active, as libopus does, so it is sent.
 const wav = Buffer.alloc(44 + 48_000 * 2);
 wav.write("RIFF", 0);
 wav.writeUInt32LE(wav.length - 8, 4);
@@ -52,8 +53,9 @@ wav.writeUInt16LE(2, 32);
 wav.writeUInt16LE(16, 34);
 wav.write("data", 36);
 wav.writeUInt32LE(wav.length - 44, 40);
-for (let i = 0; i < 48_000; i++)
+for (let i = 0; i < 48_000; i++) {
 	wav.writeInt16LE(Math.round(8192 * Math.sin((2 * Math.PI * 440 * i) / 48_000)), 44 + i * 2);
+}
 const tone = join(out, "tone.wav");
 await Bun.write(tone, wav);
 

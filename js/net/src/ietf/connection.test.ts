@@ -1,6 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
 import { yieldNow } from "@moq/clock";
-import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
 import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -9,6 +8,7 @@ import * as Path from "../path.ts";
 import { Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { Connection } from "./connection.ts";
+import { IetfSessionCode } from "./error.ts";
 import { Fetch, type FetchType } from "./fetch.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
@@ -257,7 +257,6 @@ test("uni streams before SETUP are held until it lands", async () => {
 
 	const { control, early, solicit, hidden, cluster } = await exchangeSetup(pair.server, version, "test", {
 		client: false,
-		extensions: offered(),
 	});
 	expect(early.length).toBe(2);
 
@@ -305,7 +304,7 @@ test("truncated uni stream before SETUP is skipped", async () => {
 	parameters.setBytes(SetupOption.Implementation, new TextEncoder().encode("test"));
 	await new Setup({ parameters }).encode(setup, version);
 
-	const { early } = await exchangeSetup(pair.server, version, "test", { client: false, extensions: offered() });
+	const { early } = await exchangeSetup(pair.server, version, "test", { client: false });
 	expect(early.length).toBe(0);
 });
 
@@ -380,11 +379,11 @@ function updateWithTokens(...tokens: (readonly number[])[]): Uint8Array {
  */
 for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 	for (const [name, token, code] of [
-		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
-		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
-		["an unknown alias type", [0x04, 0x00], SessionCode.KeyValueFormatting],
+		["REGISTER", [0x01, 0x07, 0x00], IetfSessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], IetfSessionCode.KeyValueFormatting],
+		["an unknown alias type", [0x04, 0x00], IetfSessionCode.KeyValueFormatting],
 	] as const) {
 		test(`a request token with ${name} closes ${alpn}`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => void 0);
@@ -418,10 +417,10 @@ for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
  */
 for (const [version, alpn] of [[Version.DRAFT_22, ALPN.DRAFT_22]] as const) {
 	for (const [name, token, code] of [
-		["REGISTER", [0x01, 0x07, 0x00], SessionCode.AuthTokenCacheOverflow],
-		["DELETE", [0x00, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_ALIAS", [0x02, 0x07], SessionCode.UnknownAuthTokenAlias],
-		["USE_VALUE without a type", [0x03], SessionCode.KeyValueFormatting],
+		["REGISTER", [0x01, 0x07, 0x00], IetfSessionCode.AuthTokenCacheOverflow],
+		["DELETE", [0x00, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_ALIAS", [0x02, 0x07], IetfSessionCode.UnknownAuthTokenAlias],
+		["USE_VALUE without a type", [0x03], IetfSessionCode.KeyValueFormatting],
 	] as const) {
 		test(`an update token with ${name} closes ${alpn}`, async () => {
 			const logged = spyOn(console, "error").mockImplementation(() => void 0);

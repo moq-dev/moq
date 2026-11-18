@@ -154,8 +154,57 @@
 		{
 			"name": "registered_claims_are_ignored",
 			"key": "hs256",
-			"payload": { "publish": ["**"], "iss": "issuer", "sub": 7, "jti": ["x"] },
+			"payload": { "publish": ["**"], "iss": "issuer", "sub": 7 },
 			"claims": { "root": "", "publish": ["**"], "subscribe": [] }
+		},
+		{
+			"name": "token_id",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": "550e8400-e29b-41d4-a716-446655440000" },
+			"claims": { "root": "", "publish": ["**"], "subscribe": [], "jti": "550e8400-e29b-41d4-a716-446655440000" }
+		},
+		{
+			"name": "token_id_at_the_length_bound",
+			"key": "hs256",
+			"payload": {
+				"publish": ["**"],
+				"jti": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+			},
+			"claims": {
+				"root": "",
+				"publish": ["**"],
+				"subscribe": [],
+				"jti": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+			}
+		},
+		{
+			"name": "token_id_past_the_length_bound",
+			"key": "hs256",
+			"payload": {
+				"publish": ["**"],
+				"jti": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+			},
+			"claims": null
+		},
+		{
+			"name": "token_id_not_a_string",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": ["x"] },
+			"claims": null
+		},
+		{ "name": "null_token_id", "key": "hs256", "payload": { "publish": ["**"], "jti": null }, "claims": null },
+		{ "name": "empty_token_id", "key": "hs256", "payload": { "publish": ["**"], "jti": "" }, "claims": null },
+		{
+			"name": "token_id_with_a_space",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": "a b" },
+			"claims": null
+		},
+		{
+			"name": "token_id_beyond_ascii",
+			"key": "hs256",
+			"payload": { "publish": ["**"], "jti": "caf\u00e9" },
+			"claims": null
 		},
 		{ "name": "unknown_claim", "key": "hs256", "payload": { "publish": ["**"], "aud": "relay" }, "claims": null },
 		{ "name": "grants_nothing", "key": "hs256", "payload": { "publish": [], "subscribe": [] }, "claims": null },
@@ -164,7 +213,7 @@
 			"name": "capped_role",
 			"key": "hs256",
 			"payload": { "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] },
-			"claims": { "root": "", "publish": ["alice/**"], "publish_rate": 1000, "subscribe": ["**"] }
+			"claims": { "root": "", "publish": { "path": ["alice/**"], "rate": 1000 }, "subscribe": ["**"] }
 		},
 		{
 			"name": "misspelled_cap",
@@ -250,6 +299,47 @@
 				"alg": "HS256",
 				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
 				"scope": { "publish": { "path": ["**"], "rate": 1000 } }
+			},
+			"valid": false
+		},
+		{
+			"name": "a_null_scope",
+			"jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "scope": null },
+			"valid": false
+		},
+		{
+			"name": "a_null_kid",
+			"jwk": { "kty": "oct", "alg": "HS256", "k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68", "kid": null },
+			"valid": false
+		},
+		{
+			"name": "a_null_key_ops",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"key_ops": null
+			},
+			"valid": false
+		},
+		{
+			"name": "a_null_scope_root",
+			"jwk": {
+				"kty": "oct",
+				"alg": "HS256",
+				"k": "Fp8kipWUJeUFqeSqWym_tRC_tyI8z-QpqopIGrbrD68",
+				"scope": { "root": null, "publish": ["**"] }
+			},
+			"valid": false
+		},
+		{
+			"name": "a_null_okp_private_key",
+			"jwk": {
+				"kty": "OKP",
+				"alg": "EdDSA",
+				"crv": "Ed25519",
+				"x": "UiU9fT_SdBBpkFtJPRCY0gX1jK_Dr9syYLFuEz4QUM4",
+				"d": null
 			},
 			"valid": false
 		},
@@ -542,7 +632,39 @@
 		{ "name": "expires_past_the_clock", "grant": { "publish": ["**"], "expires": 18446744074 }, "valid": false },
 		{ "name": "revalidate_without_expires", "grant": { "publish": ["**"], "revalidate": 60 }, "valid": false },
 		{ "name": "grants_nothing", "grant": { "expires": 4102444800 }, "valid": false },
-		{ "name": "upstream_without_peer", "grant": { "publish": ["**"], "upstream": true }, "valid": false },
-		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false }
+		{ "name": "invalid_tier", "grant": { "publish": ["**"], "tier": "a b" }, "valid": false },
+		{ "name": "unknown_field", "grant": { "publish": ["**"], "future": true }, "valid": false },
+		{ "name": "flat_rate", "grant": { "publish": ["**"], "publish_rate": 8000 }, "valid": false },
+		{
+			"name": "legacy_upstream_flag",
+			"grant": { "publish": ["**"], "peer": true, "upstream": true },
+			"valid": false
+		},
+		{
+			"name": "capped_role",
+			"grant": { "publish": { "path": ["alice/**"], "rate": 8000 }, "subscribe": ["**"] },
+			"valid": true
+		},
+		{ "name": "cap_on_nothing", "grant": { "publish": { "path": [], "rate": 8000 } }, "valid": false },
+		{ "name": "misspelled_cap", "grant": { "publish": { "path": ["**"], "rat": 8000 } }, "valid": false },
+		{ "name": "link_peer", "grant": { "publish": ["**"], "link": "peer" }, "valid": true },
+		{ "name": "link_upstream", "grant": { "publish": ["**"], "link": "upstream", "peer": true }, "valid": true },
+		{ "name": "peer_alias", "grant": { "publish": ["**"], "peer": true }, "valid": true },
+		{ "name": "not_a_peer", "grant": { "publish": ["**"], "peer": false }, "valid": true },
+		{
+			"name": "link_disagrees_with_peer",
+			"grant": { "publish": ["**"], "link": "upstream", "peer": false },
+			"valid": false
+		},
+		{ "name": "unknown_link", "grant": { "publish": ["**"], "link": "downstream" }, "valid": false },
+		{ "name": "null_link", "grant": { "publish": ["**"], "link": null }, "valid": false },
+		{ "name": "null_root", "grant": { "publish": ["**"], "root": null }, "valid": false },
+		{ "name": "null_revalidate", "grant": { "publish": ["**"], "revalidate": null }, "valid": false },
+		{ "name": "null_tier", "grant": { "publish": ["**"], "tier": null }, "valid": false },
+		{ "name": "null_label", "grant": { "publish": ["**"], "label": null }, "valid": false },
+		{ "name": "null_mounts", "grant": { "publish": ["**"], "mounts": null }, "valid": false },
+		{ "name": "null_peer", "grant": { "publish": ["**"], "peer": null }, "valid": false },
+		{ "name": "positional", "grant": [["**"]], "valid": false },
+		{ "name": "null_grant", "grant": null, "valid": false }
 	]
 }

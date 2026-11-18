@@ -46,16 +46,17 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 				while (datagrams.priority.peek() !== 17) await datagrams.priority.changed();
 				expect(info.priority).toBe(streams && alpn !== ALPN_07_WIP ? 0 : -7);
 				const stamp = Timestamp.fromMicros(1234567);
-				const sequence = (1n << 53n) + 1n;
-				datagrams.insert({ sequence, timestamp: stamp, payload: new Uint8Array([7, 8]) });
+				const key = (1n << 53n) + 1n;
+				datagrams.insert({ sequence: key, timestamp: stamp, payload: new Uint8Array([7, 8]) });
 				const received = await reader.recv();
-				expect(received?.sequence).toBe(sequence);
+				expect(received?.sequence).toBe(key);
 				expect(received?.timestamp?.asMicros()).toBe(streams && alpn !== ALPN_07_WIP ? 1234000 : 1234567);
 				expect(received?.payload).toEqual(new Uint8Array([7, 8]));
 				if (track) {
 					const grouped = remote.track("audio").subscribe();
 					track.writeFrame({ timestamp: Timestamp.fromMillis(1), payload: new Uint8Array([9]) });
-					expect((await grouped.recvGroup())?.sequence).toBe(0n);
+					// The frame's time starts its group.
+					expect((await grouped.recvGroup())?.start).toBe(1n);
 					grouped.close();
 				}
 				reader.setPriority(-9);
@@ -151,9 +152,9 @@ test("lite-07 bounds and prioritizes independent createWritable datagram queues"
 		expect(pair.server.sendStreams.datagrams.find((other) => other !== queue)?.sendOrder).toBe(
 			sendOrder({ priority: 31, publisher: 7 }),
 		);
-		// Type, Subscribe ID, and Sequence each occupy one byte on this untimed track.
-		datagrams.append(Timestamp.unscaled(1n), new Uint8Array(898));
-		datagrams.append(Timestamp.unscaled(2n), new Uint8Array(897));
+		// Type, Subscribe ID, Sequence, and the bare Timestamp each occupy one byte here.
+		datagrams.append(Timestamp.unscaled(1n), new Uint8Array(897));
+		datagrams.append(Timestamp.unscaled(2n), new Uint8Array(896));
 		expect((await reader.recv())?.sequence).toBe(2n);
 	} finally {
 		second.close();

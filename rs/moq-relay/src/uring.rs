@@ -145,7 +145,6 @@ impl Workers {
 			bind,
 			versions,
 			// With the versions and timeout, mapped onto the moq handshake by `listen.server()`.
-			extensions: _,
 			implementation: _,
 			timeout,
 			tls: listen_tls,
@@ -186,8 +185,7 @@ impl Workers {
 						&& listen_tls.key.is_empty()
 						&& listen_tls.generate.is_empty()
 						&& listen_tls.root.is_empty()
-						&& listen_tls.identity.is_none()
-						&& listen_tls.peers.is_none(),
+						&& listen_tls.identity.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
 				tls
@@ -504,18 +502,7 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.limits.receive_window = NonZeroU64::new(quic.receive_window);
 	transport.limits.stream_receive_window = NonZeroU64::new(quic.stream_receive_window);
 	transport.limits.send_window = NonZeroU64::new(quic.send_window);
-	transport.congestion = match (&quic.controller, quic.congestion_control) {
-		// The application's own controller wins over a family, as on the tokio path.
-		(Some(controller), _) => controller.0.clone(),
-		(None, Some(moq_tokio::quic::CongestionControl::Loss)) => moq_uring::quic::Congestion::Loss.into(),
-		// Unset means the backend's own default, and live media wants a steady
-		// send rate an encoder can track over CUBIC's sawtooth.
-		(None, Some(moq_tokio::quic::CongestionControl::Delay) | None) => moq_uring::quic::Congestion::Delay.into(),
-		(None, Some(moq_tokio::quic::CongestionControl::None)) => moq_uring::quic::Congestion::None.into(),
-		// A family added to the tokio stack later, rather than a silent
-		// substitution the operator would never learn about.
-		(None, Some(other)) => anyhow::bail!("io_uring workers cannot run the {other:?} congestion controller"),
-	};
+	transport.congestion = quic.congestion_control.into();
 	Ok(transport)
 }
 
@@ -726,7 +713,7 @@ async fn accept(
 	let session = moq_uring::transport::Local::new(conn.clone());
 	let handshake = serve
 		.moq
-		.accept_request(moq_net::time::Instant::now(), session)
+		.handshake(moq_net::time::Instant::now(), session)
 		.with_deadline(deadline)
 		.await
 		.context("moq handshake failed")?;
@@ -860,8 +847,8 @@ impl crate::incoming::Sealed for Request {
 		self.handshake.role()
 	}
 
-	fn peer_hop(&self) -> Option<std::num::NonZeroU64> {
-		self.handshake.peer_hop()
+	fn peer_node(&self) -> Option<std::num::NonZeroU64> {
+		self.handshake.peer_node()
 	}
 
 	fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
@@ -1002,7 +989,7 @@ mod tests {
 			&mut crate::handoff::Sockets::disabled(),
 		)
 		.expect_err("a QUIC-LB nonce without an id is refused");
-		assert!(err.to_string().contains("--listen-quic-lb-nonce"), "{err:#}");
+		assert!(err.to_string().contains("--listen-lb-nonce"), "{err:#}");
 	}
 
 	/// A window the operator set has to reach the worker. Refusing it, or

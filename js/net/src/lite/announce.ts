@@ -4,7 +4,7 @@ import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import { encodeVarint, type Reader, type Writer } from "../stream.ts";
 import { SEGMENT_BYTES } from "../util/limits.ts";
-import { decodeForwarded, decodeRoute, encodeRoute, utf8 } from "./instance.ts";
+import { decodeRoute, encodeRoute } from "./instance.ts";
 import * as Message from "./message.ts";
 import { MAX_MESSAGE_SIZE } from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -12,7 +12,6 @@ import {
 	hasAnnounceCompression,
 	hasAnnounceId,
 	hasAnnounceOk,
-	hasAnnounceRestart,
 	hasExcludeHop,
 	hasRouteCost,
 	hasRoutes,
@@ -32,122 +31,102 @@ const STATUS_UPDATE = 2;
 const ANNOUNCE_START = 0;
 const ANNOUNCE_END = 1;
 const ANNOUNCE_UPDATE = 2;
-// lite-07: another publisher instance replaces the advertisement.
-const ANNOUNCE_RESTART = 3;
+// lite-07: what only two nodes that both declared a Node ID exchange. An endpoint declares none,
+// so receiving one is a protocol violation.
+const ANNOUNCE_FLOOR = 3;
 const SYNCED = 4;
-// lite-07: the route layer.
-const ROUTE_START = 6;
-const ROUTE_UPDATE = 7;
-const ROUTE_END = 8;
-const ANNOUNCE_FLOOR = 9;
-const ROUTE_HOLD = 11;
-const DEAD = 15;
 // lite-07: an edit of the prefixes the sender wants, and the marker answering one.
-const ANNOUNCE_REQUEST = 16;
-const ANNOUNCE_OK = 17;
-
-// DEAD kinds.
-const DEAD_CLOSED = 0n;
-const DEAD_DRAIN = 1n;
-
-/** The largest lite-07 varint. No origin advertises it as a Revision: it leaves room for the
- * floor's offset. */
-export const ROUTE_MAX = 2n ** 64n - 1n;
+const ANNOUNCE_REQUEST = 5;
+const ANNOUNCE_OK = 6;
+const ROUTE = 7;
+const ROUTE_END = 8;
+const DEAD = 9;
+const DRAIN = 10;
 
 /** Lite-07: copy the first `keep` path segments of the live announcement `distance` back from
  * the stream's next Announce ID, where 1 is the latest ANNOUNCE_START. Resolved by
  * {@link AnnounceHistory}. */
 export type Base = { distance: bigint; keep: number };
 
-/** One node a lite-07 route crossed: its Node ID, and the session it learned the route on, an
- * opaque per-node counter that is 0 for the publisher's own hop. */
-export interface RouteHop {
-	node: bigint;
-	session: bigint;
-}
+/** The most nodes a lite-07 claim's chain may name: one that would reach 32 is never taken. */
+export const CHAIN_MAX = 31;
 
-/** How a lite-07 publisher reaches a publisher node: the `path` it crossed, the publisher first and
- * the sender last, whether a node on it sent GOAWAY, the lowest link priority on it, the sender's
- * metric to the publisher, and whether it may only travel away from an upstream. Mirrors
- * `route::path::Offer` in rs/moq-net. */
-export interface Offer {
-	path: RouteHop[];
-	draining: boolean;
-	priority: number;
-	metric: bigint;
-	downOnly: boolean;
-}
-
-/** A Route Offer this node refuses: the path it still names, which a later DEAD may match, and why. */
-export interface Unusable {
-	refused: Refusal;
-	path: RouteHop[];
-}
-
-/** News on DEAD about the routes the sender offered. `closed`: the session `hop` names closed, at
- * the node `far` at its other end. The next `moved` messages on the stream are ROUTE_UPDATEs, one
- * per route on the stream through that hop that continues on another path, and the receiver
- * applies the DEAD and all of them as one. The rest end if `gone`, and are held if not, unless the
- * receiver is the node just before the sender on the route's path. `drain`: `node` sent GOAWAY, so
- * every path through it ranks as draining. */
-export type Dead =
-	| { kind: "closed"; hop: RouteHop; far: bigint; gone: boolean; moved: bigint }
-	| { kind: "drain"; node: bigint };
-
-/** The most Hops a route may carry. One that arrives with this many is unusable. */
-export const ROUTE_MAX_HOPS = 32;
-
-// Route Offer flags.
-const DOWN_ONLY = 0x1;
+// Claim flags.
+const UNAVAILABLE = 0x1;
 const DRAINING = 0x2;
+
+/**
+ * What a lite-07 claim says beside its path and instance. Mirrors `route::relay::Claim` in
+ * rs/moq-net.
+ */
+export interface Claim {
+	/** Which incarnation of the instance this is. */
+	epoch: bigint;
+	/** The sender's cost to the claim's publisher. */
+	cost: Cost;
+	/** How many segments broader the claim is than the path it is presented at. */
+	above: bigint;
+	/** No route reaches the claim from the node that told it: requests for it fail until one does. */
+	unavailable: boolean;
+	/** A node on the way to its publisher sent GOAWAY. */
+	draining: boolean;
+	/** The lowest link priority on the way to its publisher. */
+	priority: number;
+	/** The Node IDs that announced the claim again across a scoped grant or an older version. */
+	chain: bigint[];
+}
+
+/** A claim this origin publishes itself: no cost, at the top priority, announced again by no one. */
+export function ownClaim(epoch: bigint, above = 0n): Claim {
+	return { epoch, cost: 0n, above, unavailable: false, draining: false, priority: 127, chain: [] };
+}
+
+/** Whether two claims say the same. */
+export function claimsEqual(a: Claim, b: Claim): boolean {
+	return (
+		a.epoch === b.epoch &&
+		a.cost === b.cost &&
+		a.above === b.above &&
+		a.unavailable === b.unavailable &&
+		a.draining === b.draining &&
+		a.priority === b.priority &&
+		a.chain.length === b.chain.length &&
+		a.chain.every((node, i) => node === b.chain[i])
+	);
+}
 
 /**
  * A message on the Announce Stream.
  *
- * Lite-07 carries everything one side says about routing on its one unidirectional stream: the
- * edits of the prefixes it wants (`request`), and the markers (`ok`), routes, and claims answering
- * the prefixes its peer wants.
+ * Lite-07 carries everything one side says about its claims on its one unidirectional stream:
+ * the edits of the prefixes it wants (`request`), and the markers (`ok`, `synced`) and claims
+ * answering the prefixes its peer wants. Two nodes that both declared a Node ID also exchange
+ * routes there, which an endpoint never sends and refuses to receive.
  *
- * On lite-06+ these are independently-typed messages (`ANNOUNCE_START`, `ANNOUNCE_END`,
- * `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`, `SYNCED`, the ROUTE messages, and
- * `ANNOUNCE_FLOOR`), each framed as `Type | Length | Body` like the subscribe stream's responses.
- * Each `active` (ANNOUNCE_START) implicitly assigns the next announce id (a per-stream ordinal
- * starting at 0), and on lite-07 each `routeStart` the next Route ID; the others reference those
- * ids. Older versions send a single ANNOUNCE_BROADCAST message that retracts by path (`ended`).
- *
- * Lite-07 names the route a claim travels under (`route`) in place of a hop chain, so `hops` is
- * empty there; every earlier version carries the chain and no route.
+ * On lite-06+ these are independently-typed messages, each framed as `Type | Length | Body`
+ * like the subscribe stream's responses. Each ANNOUNCE_START implicitly assigns the next
+ * announce id (a per-stream ordinal starting at 0); the others reference it. Older versions send
+ * a single ANNOUNCE_BROADCAST message that retracts by path (`ended`).
  */
 export type AnnounceBroadcast =
-	/** A broadcast is now available, carrying the path suffix, relative to the requested prefix
-	 * before lite-07 and to the session from it, and (lite-06+) the cost. An absent
-	 * cost encodes as zero; it decodes as `undefined` on a wire with no room for one. Before
-	 * lite-07 it carries the hop chain; on lite-07 the Route ID, the instance and epoch, which
-	 * change only with a `restart`, and a `pathBase` the suffix follows. */
-	| {
-			status: "active";
-			suffix: Path.Valid;
-			route?: bigint;
-			instance?: Instance.Valid;
-			epoch?: bigint;
-			hops?: Hop[];
-			cost?: Cost;
-			/** Lite07+: how many segments broader the claim is than the path it is presented at. */
-			above?: bigint;
-			pathBase?: Base;
-	  }
+	/** Before lite-07: a broadcast is now available, carrying the path suffix relative to the
+	 * requested prefix, the hop chain, and (lite-06) the cost. An absent cost encodes as zero; it
+	 * decodes as `undefined` on a wire with no room for one. */
+	| { status: "active"; suffix: Path.Valid; hops?: Hop[]; cost?: Cost }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
-	/** Lite06+: a broadcast is no longer available, retracted by announce id.
-	 * The id is retired; referencing it again is a protocol violation. */
-	| { status: "endedId"; id: bigint }
-	/** Lite06+: atomically replace the metadata of the announcement with this id: its cost, and
-	 * before lite-07 its hop chain. The id stays live. */
-	| { status: "update"; id: bigint; hops?: Hop[]; cost?: Cost; above?: bigint }
-	/** Lite07+: the announcement with this id now serves the instance and epoch given. Another
-	 * instance is another stream, so what the receiver resolved under its prefix is stale; a
-	 * higher epoch of the same one continues it. The id stays live. */
-	| { status: "restart"; id: bigint; instance?: Instance.Valid; epoch?: bigint; cost?: Cost; above?: bigint }
+	/** Lite06+: the claim with this announce id is gone, and the id retired; referencing it again
+	 * is a protocol violation. On lite-07 its publisher withdrew it unless `lost`, when the
+	 * sender only lost its way to it. */
+	| { status: "endedId"; id: bigint; lost?: boolean }
+	/** Lite06 only: atomically replace the hop chain and cost of the announcement with this id.
+	 * The id stays live. */
+	| { status: "update"; id: bigint; hops?: Hop[]; cost?: Cost }
+	/** Lite07+ ANNOUNCE_START: a claim of the broadcast at `suffix`, relative to the session,
+	 * serving `instance`, which assigns it the next announce id. */
+	| { status: "start"; suffix: Path.Valid; pathBase?: Base; instance: Instance.Valid; claim: Claim }
+	/** Lite07+ ANNOUNCE_UPDATE: the claim with this id now stands as `claim`. */
+	| { status: "change"; id: bigint; claim: Claim }
 	/** An unknown lite-06+ announce type, skipped by length. Does not assign an id. */
 	| { status: "skipped" }
 	/** Lite07+ SYNCED: the initial set of the prefix the receiver assigned this Prefix ID has been
@@ -158,30 +137,8 @@ export type AnnounceBroadcast =
 	 * Prefix ID. With `more`, the edit continues in the next message, and takes effect whole with
 	 * its last (see `requestParts`). */
 	| { status: "request"; more: boolean; remove: bigint[]; add: Add[] }
-	/** Lite07+ ANNOUNCE_OK: the receiver's last edit takes effect here. */
-	| { status: "ok" }
-	/** Lite07+ ROUTE_START: the publisher reaches the publisher node `node` along `offer`, covering
-	 * the prefix the receiver assigned the Prefix ID `prefix` joined with `suffix`, and assigns the
-	 * route the next Route ID. `exact` marks a route the publisher keeps at its own prefix whatever
-	 * prefix the request lies at, so an edit widening the request past it leaves it there. */
-	| { status: "routeStart"; node: bigint; prefix: bigint; suffix: Path.Valid; exact: boolean; offer: Offer }
-	/** Lite07+ ROUTE_UPDATE: the route with this id changed, and is usable. */
-	| { status: "routeUpdate"; id: bigint; offer: Offer }
-	/** Lite07+ ROUTE_HOLD: the publisher has no usable route with this id, but holds it and its
-	 * claims while it recovers. */
-	| { status: "routeHold"; id: bigint }
-	/** Lite07+ ROUTE_END: the publisher let go of the route with this id and every claim under it. */
-	| { status: "routeEnd"; id: bigint }
-	/** Lite07+ DEAD: a session or node on the routes the publisher offered is gone or going. */
-	| { status: "dead"; dead: Dead }
-	/** Lite07+ ANNOUNCE_FLOOR: closes the batch of claims under the route with this id, certifying
-	 * the stream's claims for it across the requested prefix as the origin's at `revision`, or
-	 * nothing when `revision` is undefined. */
-	| { status: "floor"; id: bigint; revision?: bigint }
-	/** Lite07+: a route message whose content, which the sender only forwarded, this node refuses.
-	 * The receiver withdraws what it names and keeps the session. Decoded only as far as keeps the
-	 * stream's ids in step; never sent. */
-	| { status: "refused"; message: Refusable; reason: Refusal };
+	/** Lite07+ ANNOUNCE_OK: the receiver's oldest unanswered edit takes effect here. */
+	| { status: "ok" };
 
 /** A prefix an ANNOUNCE_REQUEST adds, relative to the session, and whether it also wants the
  * hidden claims beneath it. */
@@ -189,23 +146,6 @@ export interface Add {
 	prefix: Path.Valid;
 	hidden: boolean;
 }
-
-/** What a refused route message still tells the receiver, so the ids that follow it resolve. */
-export type Refusable =
-	/** ROUTE_START: assigns the next Route ID to the publisher `node`, covering the prefix with the
-	 * Prefix ID `prefix` joined with `suffix`, or no prefix when the suffix itself was refused,
-	 * along `path`, at its own prefix when `exact`. */
-	| { kind: "routeStart"; node: bigint; prefix: bigint; suffix?: Path.Valid; exact: boolean; path: RouteHop[] }
-	/** ROUTE_UPDATE of the route with this Route ID, now along `path`. */
-	| { kind: "routeUpdate"; id: bigint; path: RouteHop[] }
-	/** ANNOUNCE_START under Route ID `route`: assigns the next Announce ID, to `path`, or to no path
-	 * when the path itself was refused. */
-	| { kind: "start"; route: bigint; path?: { suffix: Path.Valid; pathBase?: Base } }
-	/** ANNOUNCE_RESTART of the claim with this Announce ID. */
-	| { kind: "change"; id: bigint };
-
-/** Why a node refuses content a peer forwarded: well framed, but nothing it can use. */
-export type Refusal = "node" | "flags" | "hops" | "path" | "instance";
 
 // Both wire rules on a hop chain, applied to what we send and to what we receive: a
 // chain that revisits a hop looped, so neither forwarding it nor subscribing through it
@@ -239,11 +179,6 @@ async function encodeHops(w: Writer, version: Version, hops: Hop[] = []) {
 			await w.u53(hops.length);
 			break;
 		default:
-			// Lite-07 names a route instead, and JS never offers to read the Lite-06 Chain.
-			if (hasRoutes(version)) {
-				if (hops.length > 0) throw new Error("lite-07 claims carry no hop chain");
-				break;
-			}
 			// Lite04+: hop count + individual Hop varints.
 			await w.u53(hops.length);
 			for (const origin of hops) {
@@ -279,13 +214,6 @@ async function decodeHops(r: Reader, version: Version): Promise<Hop[]> {
 	}
 }
 
-// The hop chain of an ANNOUNCE_START or ANNOUNCE_UPDATE. Lite-07 names a route instead, and
-// carries a trailing Lite-06 Chain only to a peer that offered to read it, which JS never does,
-// so any bytes left over are malformed.
-async function decodeChain(r: Reader, version: Version): Promise<{ hops?: Hop[] }> {
-	return hasRoutes(version) ? {} : { hops: await decodeHops(r, version) };
-}
-
 async function encodePath(w: Writer, version: Version, suffix: Path.Valid, base: Base | undefined) {
 	if (hasAnnounceCompression(version)) {
 		await w.u62(base?.distance ?? 0n);
@@ -318,18 +246,6 @@ async function encodeRouteCost(w: Writer, version: Version, cost: Cost | undefin
 	if (version === Version.DRAFT_06) await w.u62(MAX_COST);
 }
 
-// Lite07 follows the cost with how many segments broader the claim is than the path it is
-// presented at, so a claim exactly at a path outranks every broader one shown there. Older versions
-// carry no such field, and a claim they forward is never broader than its own path.
-async function encodeAbove(w: Writer, version: Version, above: bigint | undefined) {
-	if (hasRoutes(version)) await w.u62(above ?? 0n);
-	else if (above) throw new Error("a claim above its path needs lite-07");
-}
-
-async function decodeAbove(r: Reader, version: Version): Promise<bigint | undefined> {
-	return hasRoutes(version) ? await r.u62() : undefined;
-}
-
 async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | undefined> {
 	if (!hasRouteCost(version)) return undefined;
 	const cost = saturate(await r.u62());
@@ -337,78 +253,44 @@ async function decodeRouteCost(r: Reader, version: Version): Promise<Cost | unde
 	return cost;
 }
 
-/** Encode a Route Offer: the path, then flags, priority, and metric. No node offers an empty
- * path or one past {@link ROUTE_MAX_HOPS}, nor names Node ID 0 in one. */
-async function encodeOffer(w: Writer, offer: Offer) {
-	if (offer.path.length === 0 || offer.path.length > ROUTE_MAX_HOPS || offer.path.some((hop) => hop.node === 0n))
-		throw new Error("no node offers that path");
-	await w.u62(BigInt(offer.path.length));
-	for (const hop of offer.path) {
-		await w.u62(hop.node);
-		await w.u62(hop.session);
-	}
-	await w.u8((offer.downOnly ? DOWN_ONLY : 0) | (offer.draining ? DRAINING : 0));
-	await w.u8(toWire(offer.priority));
-	await w.u62(offer.metric);
+/** Encode what a lite-07 claim says after its epoch: cost, above, flags, priority, and chain. */
+async function encodeClaim(w: Writer, claim: Claim) {
+	if (claim.chain.length > CHAIN_MAX || claim.chain.some((node) => node === 0n))
+		throw new Error("no node sends that chain");
+	await w.u62(saturate(claim.cost));
+	await w.u62(claim.above);
+	await w.u8((claim.unavailable ? UNAVAILABLE : 0) | (claim.draining ? DRAINING : 0));
+	await w.u8(toWire(claim.priority));
+	await w.u53(claim.chain.length);
+	for (const node of claim.chain) await w.u62(node);
 }
 
-/** Decode a Route Offer. Its path comes first, so a node refusing the rest still learns the path a
- * later DEAD may name. An empty path is the sender's own error, since it names itself last. Hops
- * past the limit, a hop naming Node ID 0, and a flag this node does not know refuse the offer: a
- * newer flag may add a field after the ones this node reads, so a refusal skips the rest of the
- * body. Every hop a path counts is read, but of a path past the limit only those up to one past
- * it are kept: a sender within the limit never sends one, and the whole would hold a body's
- * worth for each route. Mirrors rs/moq-net. */
-async function decodeOffer(r: Reader): Promise<Offer | Unusable> {
-	const count = await r.u62();
-	if (count === 0n) throw new ProtocolViolation("a route offer with no hops");
-	const path: RouteHop[] = [];
-	for (let i = 0n; i < count; i++) {
-		const hop = { node: await r.u62(), session: await r.u62() };
-		if (path.length <= ROUTE_MAX_HOPS) path.push(hop);
-	}
-	const refuse = async (refused: Refusal): Promise<Unusable> => {
-		await r.readAll();
-		return { refused, path };
-	};
-	if (count > BigInt(ROUTE_MAX_HOPS)) return refuse("hops");
-	if (path.some((hop) => hop.node === 0n)) return refuse("node");
+/** Decode a lite-07 claim of `epoch`. A chain past the limit or naming Node ID 0, and a flag this
+ * version does not define, fail the stream: no sender builds one. Mirrors rs/moq-net. */
+async function decodeClaim(r: Reader, epoch: bigint): Promise<Claim> {
+	// Costs saturate at 2^62-1 on every version, so a larger one reads as the ceiling.
+	const cost = saturate(await r.u62());
+	const above = await r.u62();
 	const flags = await r.u8();
-	if (flags & ~(DOWN_ONLY | DRAINING)) return refuse("flags");
+	if (flags & ~(UNAVAILABLE | DRAINING)) throw new ProtocolViolation(`unknown claim flags ${flags}`);
 	const priority = fromWire(await r.u8());
-	const metric = await r.u62();
-	return { path, draining: (flags & DRAINING) !== 0, priority, metric, downOnly: (flags & DOWN_ONLY) !== 0 };
-}
-
-async function encodeDead(w: Writer, dead: Dead) {
-	if (dead.kind === "drain") {
-		if (dead.node === 0n) throw new Error("Node ID 0 names no node");
-		await w.u62(DEAD_DRAIN);
-		await w.u62(dead.node);
-		return;
+	const count = await r.u62();
+	if (count > BigInt(CHAIN_MAX)) throw new ProtocolViolation(`claim chain of ${count} nodes`);
+	const chain: bigint[] = [];
+	for (let i = 0n; i < count; i++) {
+		const node = await r.u62();
+		if (node === 0n) throw new ProtocolViolation("Node ID 0 names no node");
+		chain.push(node);
 	}
-	if (dead.hop.node === 0n || dead.far === 0n) throw new Error("Node ID 0 names no node");
-	await w.u62(DEAD_CLOSED);
-	await w.u62(dead.hop.node);
-	await w.u62(dead.hop.session);
-	await w.u62(dead.far);
-	await w.u8(dead.gone ? 1 : 0);
-	await w.u62(dead.moved);
-}
-
-async function decodeDead(r: Reader): Promise<Dead> {
-	const nonzero = (id: bigint) => {
-		if (id === 0n) throw new ProtocolViolation("Node ID 0 names no node");
-		return id;
+	return {
+		epoch,
+		cost,
+		above,
+		unavailable: (flags & UNAVAILABLE) !== 0,
+		draining: (flags & DRAINING) !== 0,
+		priority,
+		chain,
 	};
-	const kind = await r.u62();
-	if (kind === DEAD_DRAIN) return { kind: "drain", node: nonzero(await r.u62()) };
-	if (kind !== DEAD_CLOSED) throw new ProtocolViolation(`unknown DEAD kind ${kind}`);
-	const hop = { node: nonzero(await r.u62()), session: await r.u62() };
-	const far = nonzero(await r.u62());
-	const gone = await r.u8();
-	if (gone > 1) throw new ProtocolViolation(`DEAD Gone ${gone}`);
-	return { kind: "closed", hop, far, gone: gone === 1, moved: await r.u62() };
 }
 
 /** Encode an ANNOUNCE_REQUEST body: `More`, the Prefix IDs to remove, then the prefixes to add,
@@ -509,101 +391,37 @@ export function requestParts(
 	return parts.map((part, i) => ({ status: "request", more: i + 1 < parts.length, ...part }));
 }
 
-/** Decode a lite-07 suffix: its base, which the sender picked, then the path it forwarded, or
- * undefined for a path this node refuses. */
-async function decodeForwardedPath(r: Reader): Promise<{ suffix: Path.Valid; pathBase?: Base } | undefined> {
-	const distance = await r.u62();
-	const keep = await r.u53();
-	// A distance of 0 names nothing, so a keep without a base is a violation.
-	if (distance === 0n && keep !== 0) throw new ProtocolViolation("announce keep without a base");
-	const text = utf8(await r.read(await r.u53()));
-	const suffix = text === undefined ? undefined : Path.tryDecode(text);
-	if (suffix === undefined) return undefined;
-	return distance === 0n ? { suffix } : { suffix, pathBase: { distance, keep } };
-}
-
-/** A lite-07 ANNOUNCE_START: its suffix, Route ID, instance and epoch, and cost. */
-async function decodeStart(r: Reader, version: Version): Promise<AnnounceBroadcast> {
-	const path = await decodeForwardedPath(r);
-	const route = await r.u62();
-	const refused = async (reason: Refusal): Promise<AnnounceBroadcast> => {
-		await r.readAll();
-		return { status: "refused", message: { kind: "start", route, path }, reason };
-	};
-	if (!path) return refused("path");
-	const { instance, epoch } = await decodeForwarded(r);
-	if (instance === undefined) return refused("instance");
-	const cost = await decodeRouteCost(r, version);
-	return { status: "active", ...path, route, instance, epoch, cost, above: await decodeAbove(r, version) };
-}
-
-/** A lite-07 ANNOUNCE_RESTART: its Announce ID, instance and epoch, and cost. */
-async function decodeRestart(r: Reader, version: Version): Promise<AnnounceBroadcast> {
-	const id = await r.u62();
-	const { instance, epoch } = await decodeForwarded(r);
-	if (instance === undefined) {
-		await r.readAll();
-		return { status: "refused", message: { kind: "change", id }, reason: "instance" };
-	}
-	const cost = await decodeRouteCost(r, version);
-	return { status: "restart", id, instance, epoch, cost, above: await decodeAbove(r, version) };
-}
-
 // lite-06 message body (no discriminator; the type is carried outside the length prefix).
 async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: Version) {
 	switch (msg.status) {
 		case "active":
-			await encodePath(w, version, msg.suffix, msg.pathBase);
-			if (hasRoutes(version)) {
-				if (msg.route === undefined) throw new Error("a lite-07 claim names its route");
-				await w.u62(msg.route);
-			} else if (msg.route !== undefined) {
-				throw new Error("routes not supported for this version");
-			}
-			await encodeRoute(w, version, msg.instance, msg.epoch);
+			if (hasRoutes(version)) throw new Error("a lite-07 claim names its instance");
+			await encodePath(w, version, msg.suffix, undefined);
+			await encodeRoute(w, version, undefined, undefined);
 			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
-			await encodeAbove(w, version, msg.above);
 			break;
 		case "endedId":
 			await w.u62(msg.id);
+			if (hasRoutes(version)) await w.bool(msg.lost ?? false);
 			break;
 		case "update":
+			if (hasRoutes(version)) throw new Error("a lite-07 update carries its claim");
 			await w.u62(msg.id);
 			await encodeHops(w, version, msg.hops);
 			await encodeRouteCost(w, version, msg.cost);
-			await encodeAbove(w, version, msg.above);
 			break;
-		case "restart":
+		case "start":
+			if (!hasRoutes(version)) throw new Error("claims not supported for this version");
+			await encodePath(w, version, msg.suffix, msg.pathBase);
+			await encodeRoute(w, version, msg.instance, msg.claim.epoch);
+			await encodeClaim(w, msg.claim);
+			break;
+		case "change":
+			if (!hasRoutes(version)) throw new Error("claims not supported for this version");
 			await w.u62(msg.id);
-			await encodeRoute(w, version, msg.instance, msg.epoch);
-			await encodeRouteCost(w, version, msg.cost);
-			await encodeAbove(w, version, msg.above);
-			break;
-		case "routeStart":
-			if (msg.node === 0n) throw new Error("Node ID 0 names no origin");
-			await w.u62(msg.node);
-			await w.u62(msg.prefix);
-			await w.string(Path.encode(msg.suffix));
-			await w.bool(msg.exact);
-			await encodeOffer(w, msg.offer);
-			break;
-		case "routeUpdate":
-			await w.u62(msg.id);
-			await encodeOffer(w, msg.offer);
-			break;
-		case "dead":
-			await encodeDead(w, msg.dead);
-			break;
-		case "routeHold":
-		case "routeEnd":
-			await w.u62(msg.id);
-			break;
-		case "floor":
-			await w.u62(msg.id);
-			// No origin advertises the last revision, so it never needs the offset.
-			if (msg.revision !== undefined && msg.revision >= ROUTE_MAX) throw new Error("revision out of range");
-			await w.u62(msg.revision === undefined ? 0n : msg.revision + 1n);
+			await w.u62(msg.claim.epoch);
+			await encodeClaim(w, msg.claim);
 			break;
 		case "synced":
 			await w.u62(msg.prefix);
@@ -617,7 +435,6 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			// The pre-lite-06 path-form retraction has no place on lite-06.
 			throw new Error("ended-by-path not supported for this version");
 		case "skipped":
-		case "refused":
 			throw new Error("decode-only announce type cannot be encoded");
 	}
 }
@@ -626,41 +443,25 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 	switch (msg.status) {
 		case "active":
+		case "start":
 			return ANNOUNCE_START;
 		case "endedId":
 			return ANNOUNCE_END;
 		case "update":
+		case "change":
 			return ANNOUNCE_UPDATE;
-		case "restart":
-			// Older versions send an end and a start instead.
-			if (!hasAnnounceRestart(version)) throw new Error("announce restart not supported for this version");
-			return ANNOUNCE_RESTART;
 		case "synced":
 			if (!hasSynced(version)) throw new Error("synced not supported for this version");
 			return SYNCED;
 		case "request":
+			if (!hasRoutes(version)) throw new Error("announce edits not supported for this version");
+			return ANNOUNCE_REQUEST;
 		case "ok":
-		case "routeStart":
-		case "routeUpdate":
-		case "routeHold":
-		case "routeEnd":
-		case "dead":
-		case "floor":
-			if (!hasRoutes(version)) throw new Error("routes not supported for this version");
-			return {
-				request: ANNOUNCE_REQUEST,
-				ok: ANNOUNCE_OK,
-				routeStart: ROUTE_START,
-				routeUpdate: ROUTE_UPDATE,
-				routeHold: ROUTE_HOLD,
-				routeEnd: ROUTE_END,
-				dead: DEAD,
-				floor: ANNOUNCE_FLOOR,
-			}[msg.status];
+			if (!hasRoutes(version)) throw new Error("announce edits not supported for this version");
+			return ANNOUNCE_OK;
 		case "ended":
 			throw new Error("ended-by-path not supported for this version");
 		case "skipped":
-		case "refused":
 			throw new Error("decode-only announce type cannot be encoded");
 	}
 }
@@ -668,13 +469,26 @@ function announce06Type(msg: AnnounceBroadcast, version: Version): number {
 async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): Promise<AnnounceBroadcast> {
 	switch (typ) {
 		case ANNOUNCE_START: {
-			// Lite-07's claims carry what the sender forwarded, which a receiver may refuse.
-			if (hasRoutes(version)) return decodeStart(r, version);
 			const path = await decodePath(r, version);
-			const route = hasRoutes(version) ? { route: await r.u62() } : {};
 			const served = await decodeRoute(r, version);
-			const hops = await decodeChain(r, version);
-			return { status: "active", ...path, ...route, ...served, ...hops, cost: await decodeRouteCost(r, version) };
+			if (hasRoutes(version)) {
+				// Every lite-07 claim names its instance.
+				if (served.instance === undefined) throw new ProtocolViolation("a claim without an instance");
+				const claim = await decodeClaim(r, served.epoch ?? 0n);
+				return { status: "start", ...path, instance: served.instance, claim };
+			}
+			const hops = await decodeHops(r, version);
+			return { status: "active", suffix: path.suffix, hops, cost: await decodeRouteCost(r, version) };
+		}
+		case ANNOUNCE_END: {
+			const id = await r.u62();
+			return hasRoutes(version) ? { status: "endedId", id, lost: await r.bool() } : { status: "endedId", id };
+		}
+		case ANNOUNCE_UPDATE: {
+			const id = await r.u62();
+			if (hasRoutes(version)) return { status: "change", id, claim: await decodeClaim(r, await r.u62()) };
+			const hops = await decodeHops(r, version);
+			return { status: "update", id, hops, cost: await decodeRouteCost(r, version) };
 		}
 		case SYNCED:
 			if (!hasSynced(version)) break;
@@ -685,67 +499,14 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ANNOUNCE_OK:
 			if (!hasRoutes(version)) break;
 			return { status: "ok" };
-		case ANNOUNCE_END:
-			return { status: "endedId", id: await r.u62() };
-		case ANNOUNCE_UPDATE: {
-			const id = await r.u62();
-			const hops = await decodeChain(r, version);
-			const cost = await decodeRouteCost(r, version);
-			return { status: "update", id, ...hops, cost, above: await decodeAbove(r, version) };
-		}
-		case ANNOUNCE_RESTART: {
-			// Unknown before lite-07: skipped below like any other.
-			if (!hasAnnounceRestart(version)) break;
-			if (hasRoutes(version)) return decodeRestart(r, version);
-			const id = await r.u62();
-			const served = await decodeRoute(r, version);
-			return { status: "restart", id, ...served, cost: await decodeRouteCost(r, version) };
-		}
-		case ROUTE_START: {
-			if (!hasRoutes(version)) break;
-			const node = await r.u62();
-			const prefix = await r.u62();
-			// The suffix is sized, so the offer's path reads even when it is refused.
-			const text = utf8(await r.read(await r.u53()));
-			const suffix = text === undefined ? undefined : Path.tryDecode(text);
-			const exact = await r.bool();
-			const offer = await decodeOffer(r);
-			if (node !== 0n && suffix !== undefined && !("refused" in offer))
-				return { status: "routeStart", node, prefix, suffix, exact, offer };
-			const reason = node === 0n ? "node" : suffix === undefined ? "path" : (offer as Unusable).refused;
-			return {
-				status: "refused",
-				message: { kind: "routeStart", node, prefix, suffix, exact, path: offer.path },
-				reason,
-			};
-		}
-		case ROUTE_UPDATE: {
-			if (!hasRoutes(version)) break;
-			const id = await r.u62();
-			const offer = await decodeOffer(r);
-			if ("refused" in offer)
-				return {
-					status: "refused",
-					message: { kind: "routeUpdate", id, path: offer.path },
-					reason: offer.refused,
-				};
-			return { status: "routeUpdate", id, offer };
-		}
-		case DEAD:
-			if (!hasRoutes(version)) break;
-			return { status: "dead", dead: await decodeDead(r) };
-		case ROUTE_HOLD:
-			if (!hasRoutes(version)) break;
-			return { status: "routeHold", id: await r.u62() };
+		case ANNOUNCE_FLOOR:
+		case ROUTE:
 		case ROUTE_END:
+		case DEAD:
+		case DRAIN:
 			if (!hasRoutes(version)) break;
-			return { status: "routeEnd", id: await r.u62() };
-		case ANNOUNCE_FLOOR: {
-			if (!hasRoutes(version)) break;
-			const id = await r.u62();
-			const revision = await r.u62();
-			return revision === 0n ? { status: "floor", id } : { status: "floor", id, revision: revision - 1n };
-		}
+			// Only two nodes that both declared a Node ID exchange routes, and this one declares none.
+			throw new ProtocolViolation(`route message ${typ} to a node that declared no Node ID`);
 	}
 	// Skip the length-prefixed body so an earlier Lite06 build negotiating
 	// the same ALPN does not kill the announce stream.
@@ -757,8 +518,6 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Version) {
 	switch (msg.status) {
 		case "active":
-			if (msg.pathBase) throw new Error("announce compression not supported for this version");
-			if (msg.route !== undefined) throw new Error("routes not supported for this version");
 			await w.u8(STATUS_ACTIVE);
 			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, msg.hops);
@@ -819,8 +578,8 @@ export async function decodeAnnounceBroadcastMaybe(
 }
 
 /**
- * The live announcements on one lite-06+ announce stream, by Announce ID: what ANNOUNCE_END,
- * ANNOUNCE_UPDATE, and ANNOUNCE_RESTART reference, and what a lite-07 base copies from. Every
+ * The live announcements on one lite-06+ announce stream, by Announce ID: what ANNOUNCE_END
+ * and ANNOUNCE_UPDATE reference, and what a lite-07 base copies from. Every
  * violation throws {@link ProtocolViolation}.
  */
 export class AnnounceHistory {
@@ -851,29 +610,25 @@ export class AnnounceHistory {
 		if (this.#refused.has(id)) return undefined;
 		const base = this.#live.get(id);
 		if (base === undefined) throw new ProtocolViolation(`announce base ${msg.pathBase.distance} is not live`);
-		const head = Path.parts(base);
+		// TEMPORARY MIGRATION, delete at the next version cut and use Path.parts: the previous
+		// release counts a keep by every `/`, escaped or not, and also speaks lite-07, so a keep
+		// counted by segment would resolve to another path on a mixed-version link, as in
+		// rs/moq-net's compress.rs.
+		const head = base === Path.empty() ? [] : base.split("/");
 		const keep = msg.pathBase.keep;
-		if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} segments`);
-		// Joined as text before parsing: a kept segment may end in the `\` of an escaped `/`. A path
-		// that does not resolve is refused as content, as rs/moq-net does.
+		if (keep > head.length) throw new ProtocolViolation(`announce keeps ${keep} of ${head.length} parts`);
+		// Joined as text before parsing: a kept part may end in the `\` of an escaped `/`. A path
+		// that does not resolve, such as one too deep, is refused as content, as rs/moq-net does.
 		const kept = head.slice(0, keep);
 		if (suffix !== Path.empty()) kept.push(suffix);
 		return Path.tryDecode(kept.join("/"));
 	}
 
-	/** The suffix of the live announcement `id`, which an update or restart references. */
+	/** The suffix of the live announcement `id`, which an update references. */
 	get(id: bigint): Path.Valid {
 		const live = this.#live.get(id);
 		if (live === undefined) throw new ProtocolViolation(`unknown announce id: ${id}`);
 		return live;
-	}
-
-	/** Assign the next id to `path` with no ANNOUNCE_START, as an edit does for a claim it presents
-	 * at a prefix below its own. */
-	insert(path: Path.Valid): bigint {
-		const id = this.#next++;
-		this.#live.set(id, path);
-		return id;
 	}
 
 	/** An ANNOUNCE_END: retire the id, returning its suffix, or undefined if it was refused. */

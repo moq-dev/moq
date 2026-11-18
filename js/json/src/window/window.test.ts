@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from "bun:test";
 import { Duration, yieldNow } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
-import { key, next, resetKeys } from "../key.test-util.ts";
+import { key, resetKeys } from "../key.test-util.ts";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -30,7 +30,7 @@ class Live {
 	}
 
 	async push(n: number): Promise<void> {
-		this.producer.push(next({ n }));
+		this.producer.push({ n }, key());
 		await this.read();
 	}
 
@@ -113,10 +113,10 @@ test("concurrent consumer reads are rejected", async () => {
 test("writes after finish are rejected before encoding", () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<number>({ track });
-	producer.push(next(1));
+	producer.push(1, key());
 	producer.finish();
 
-	expect(() => producer.push(next(2))).toThrow("track is closed");
+	expect(() => producer.push(2, key())).toThrow("track is closed");
 	expect(() => producer.pop(1, key())).toThrow("track is closed");
 	expect(producer.window).toEqual([1]);
 });
@@ -239,8 +239,8 @@ test("a joiner over the ratio gets a fresh header", async () => {
 	] as const) {
 		const track = new Track.Producer("test").accept({ refresh: 1, maxAge: null });
 		const producer = new Producer<Rec>({ track });
-		producer.push(next({ n: 1000 }));
-		for (let n = 0; n < pushes; n++) producer.push(next({ n }));
+		producer.push({ n: 1000 }, key());
+		for (let n = 0; n < pushes; n++) producer.push({ n }, key());
 
 		const joiner = track.subscribe();
 		await settle();
@@ -254,8 +254,8 @@ test("a joiner over the ratio gets a fresh header", async () => {
 test("a window refresh reuses the newest timestamp", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
 	const producer = new Producer<Rec>({ track });
-	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(10) });
-	producer.push({ value: { n: 1 }, at: Time.Timestamp.fromMillis(20) });
+	producer.push({ n: 0 }, Time.Timestamp.fromMillis(10));
+	producer.push({ n: 1 }, Time.Timestamp.fromMillis(20));
 	producer.pop(1, Time.Timestamp.fromMillis(30));
 
 	const joiner = track.subscribe();
@@ -274,29 +274,37 @@ test("a window refresh reuses the newest timestamp", async () => {
 	expect(event?.at?.as(Time.Timescale.MILLI)).toBe(30);
 });
 
-test("a window refresh after an older edit starts at the newest timestamp", async () => {
+// An op may carry a timestamp older than its group's first frame, but a new group must start past
+// that frame, so a refresh whose newest timestamp is still the group's own start waits for a later
+// edit, then restates the window there. (Mirrors the Rust
+// `a_refresh_after_older_edits_waits_for_a_later_one`.)
+test("a window refresh after an older edit waits for a later one", async () => {
 	const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI, refresh: 0, maxAge: null });
 	const producer = new Producer<Rec>({ track });
-	producer.push({ value: { n: 0 }, at: Time.Timestamp.fromMillis(30) });
+	producer.push({ n: 0 }, Time.Timestamp.fromMillis(30));
 	// Ops may carry timestamps older than their group's first frame.
-	producer.push({ value: { n: 1 }, at: Time.Timestamp.fromMillis(10) });
+	producer.push({ n: 1 }, Time.Timestamp.fromMillis(10));
 
 	const joiner = track.subscribe();
 	await settle();
+	// No group may share the open group's start.
+	expect(track.largest()?.group).toBe(30n);
+
+	producer.push({ n: 2 }, Time.Timestamp.fromMillis(40));
 	producer.finish();
 	joiner.close();
 
-	// Restating at the last edit's 10 would rewind past group 0's start and be refused.
+	// The later edit rides as an op in the open group, and the refresh restates the window after it.
 	expect(await groups(track)).toEqual([
-		[2, 30],
-		[1, 30],
+		[3, 30],
+		[1, 40],
 	]);
 });
 
 test("a window refresh needs a ratio", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
-	for (let n = 0; n < 4; n++) producer.push(next({ n }));
+	for (let n = 0; n < 4; n++) producer.push({ n }, key());
 
 	const joiner = track.subscribe();
 	await settle();
@@ -325,7 +333,7 @@ test("the window slides", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track });
 	for (let n = 0; n < 5; n++) {
-		producer.push(next({ n }));
+		producer.push({ n }, key());
 		if (n >= 2) producer.pop(1, key());
 	}
 
@@ -370,7 +378,7 @@ test("a lagging consumer is told what it missed", async () => {
 
 	// The consumer stops reading while the window slides past everything it holds.
 	for (let n = 2; n < 8; n++) {
-		producer.push(next({ n }));
+		producer.push({ n }, key());
 		producer.pop(1, key());
 	}
 	subscriber.withRange({ start: { included: (await subscriber.largest())?.group ?? 0n } });
@@ -396,20 +404,20 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 		new NetError.Stream(StreamCode.Old),
 		new NetError.Stream(StreamCode.Evicted),
 	]) {
-		const track = new Track.Producer("test");
+		const track = new Track.Producer("test").accept({ timescale: Time.Timescale.MILLI });
 		const consumer = new Consumer<Rec>({ track: track.subscribe() });
 		const encoder = new Encoder<Rec>({ ops: false });
 
 		let frame = encoder.push({ n: 0 });
-		let group = track.appendGroup();
-		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
+		let group = track.appendGroup(Time.Timestamp.fromMillis(1));
+		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(1) });
 		frame.commit();
 		expect((await consumer.next())?.value).toEqual({ push: { index: 0, value: { n: 0 } } });
 		group.abort(error);
 
 		frame = encoder.push({ n: 1 });
-		group = track.appendGroup();
-		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.now() });
+		group = track.appendGroup(Time.Timestamp.fromMillis(2));
+		group.writeFrame({ payload: frame.payload, timestamp: Time.Timestamp.fromMillis(2) });
 		frame.commit();
 		group.finish();
 		track.finish();
@@ -423,7 +431,7 @@ test("consumer resumes at a checkpoint after losing a group", async () => {
 test("a fresh consumer adopts the current offset", async () => {
 	const track = new Track.Producer("test");
 	const producer = new Producer<Rec>({ track, ops: false });
-	for (let n = 0; n < 5; n++) producer.push(next({ n }));
+	for (let n = 0; n < 5; n++) producer.push({ n }, key());
 	producer.pop(3, key());
 
 	const subscriber = track.subscribe();
@@ -558,7 +566,7 @@ test("edits keep their timestamps, and a scale-less edit its group's key", async
 	for (const at of [Time.Timestamp.unscaled(3n), Time.Timestamp.fromMillis(1_000)]) {
 		const track = new Track.Producer("test").accept(at.scale ? { timescale: Time.Timescale.MILLI } : {});
 		const producer = new Producer<Rec>({ track });
-		producer.push({ value: { n: 0 }, at });
+		producer.push({ n: 0 }, at);
 		producer.pop(1, at.scale ? at : Time.Timestamp.unscaled(4n));
 		producer.finish();
 
@@ -576,8 +584,8 @@ test("events carry their frame's timestamp, and a header's restated records get 
 	const late = track.subscribe();
 	const producer = new Producer<Rec>({ track });
 
-	producer.push({ value: { n: 1 }, at: at(100) });
-	producer.push({ value: { n: 2 }, at: at(200) });
+	producer.push({ n: 1 }, at(100));
+	producer.push({ n: 2 }, at(200));
 	producer.pop(1, at(300));
 	for (const [value, ms] of [
 		[{ push: { index: 0, value: { n: 1 } } }, 100],
@@ -591,7 +599,7 @@ test("events carry their frame's timestamp, and a header's restated records get 
 
 	// A reader joining at a later group learns of the retained record from its header.
 	producer.cut();
-	producer.push({ value: { n: 3 }, at: at(400) });
+	producer.push({ n: 3 }, at(400));
 	producer.finish();
 	late.withRange({ start: { included: 1n } });
 	const events: Timed<Event<Rec>>[] = [];
@@ -607,7 +615,7 @@ test("events on a scale-less track carry their keys", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer<Rec>({ track: track.subscribe() });
 	const producer = new Producer<Rec>({ track });
-	producer.push(next({ n: 0 }));
+	producer.push({ n: 0 }, key());
 	producer.pop(1, key());
 	producer.finish();
 
@@ -621,10 +629,10 @@ test("events on a scale-less track carry their keys", async () => {
 // no edit, at compile time and at run time.
 test("finishing returns a window that reads but takes no edit", () => {
 	const producer = new Producer<Rec>({ track: new Track.Producer("test") });
-	producer.push(next({ n: 1 }));
+	producer.push({ n: 1 }, key());
 	const finished = producer.finish();
 	expect(finished.window).toEqual([{ n: 1 }]);
 	expect(finished.offset).toBe(0);
 	// @ts-expect-error a finished window takes no record
-	expect(() => finished.push(next({ n: 2 }))).toThrow("track is closed");
+	expect(() => finished.push({ n: 2 }, key())).toThrow("track is closed");
 });

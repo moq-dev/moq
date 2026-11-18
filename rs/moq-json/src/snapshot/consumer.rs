@@ -58,8 +58,10 @@ pub struct Consumer<T> {
 impl<T: DeserializeOwned> Consumer<T> {
 	/// Create a consumer reading from the given track.
 	///
-	/// Subscribes right away at [`Config::priority`] and [`Config::delay`], with default
-	/// preferences otherwise; no handle to that subscription leaves the
+	/// Takes the track where the stream and window consumers take a subscriber: a superseded value
+	/// is worthless unless the reader holds it, so the consumer owns its subscription and fixes its
+	/// budget at [`Config::delay`]. Subscribes right away at [`Config::priority`] and [`Config::delay`],
+	/// with default preferences otherwise; no handle to that subscription leaves the
 	/// consumer, so nothing can change its budget. A read waits until the subscription resolves,
 	/// and fails if it cannot. A [compressed](moq_net::track::Info::compression) track reads the
 	/// same: moq-net inflates it.
@@ -203,9 +205,16 @@ impl Track {
 		if let Self::Subscribing(pending) = self {
 			*self = Self::Ordered(Box::new(std::task::ready!(pending.poll_ok(waiter))?.ordered()));
 		}
-		match self {
-			Self::Ordered(track) => track.poll_next_group(waiter),
-			Self::Subscribing(_) => unreachable!("resolved above"),
+		let Self::Ordered(track) = self else {
+			unreachable!("resolved above")
+		};
+		// A snapshot is the newest group's content, so a group given up on changes nothing.
+		loop {
+			match std::task::ready!(track.poll_next_group(waiter))? {
+				Some(moq_net::track::Item::Group(group)) => return Poll::Ready(Ok(Some(group))),
+				Some(moq_net::track::Item::Gap { .. }) => continue,
+				None => return Poll::Ready(Ok(None)),
+			}
 		}
 	}
 }
@@ -272,10 +281,10 @@ mod timestamps {
 			for (n, ticks) in times.into_iter().enumerate() {
 				let at = moq_net::Timestamp::new(ticks, scale).unwrap();
 				producer
-					.update(crate::Timed {
-						value: &serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
+					.update(
+						&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
 						at,
-					})
+					)
 					.unwrap();
 				if n == 1 {
 					producer.cut().unwrap();
@@ -316,10 +325,10 @@ mod timestamps {
 		let waiter = kio::Waiter::noop();
 		for n in 0..3 {
 			producer
-				.update(crate::Timed::new(
+				.update(
 					&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
 					moq_net::Timestamp::unscaled(n),
-				))
+				)
 				.unwrap();
 			if n == 0 {
 				let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
@@ -337,10 +346,10 @@ mod timestamps {
 		assert!(consumer.poll_next(&waiter).is_pending());
 		let n = 3;
 		producer
-			.update(crate::Timed::new(
+			.update(
 				&serde_json::json!({"n": n, "padding": "large-repeated-value-for-deltas"}),
 				moq_net::Timestamp::unscaled(n),
-			))
+			)
 			.unwrap();
 		let Poll::Ready(Ok(Some(value))) = consumer.poll_next(&waiter) else {
 			panic!("missing new state")

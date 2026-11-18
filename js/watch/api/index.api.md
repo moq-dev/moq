@@ -9,7 +9,6 @@ export namespace Audio {
 		readonly out: Signals.Readonlys<Audio.DecoderOutput>;
 		reset(): void;
 		readonly source: Audio.Source;
-		static supported: (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {
@@ -56,7 +55,6 @@ export namespace Audio {
 	}
 	export type SourceInput = {
 		broadcast: Signals.Getter<Broadcast | undefined>;
-		supported: Signals.Getter<Audio.Supported | undefined>;
 		target: Signals.Getter<Audio.Target | undefined>;
 	};
 	export type SourceOutput = {
@@ -81,7 +79,6 @@ export namespace Audio {
 		trimmed: Clock.Duration;
 		underruns: number;
 	}
-	export type Supported = (config: Hang.Catalog.AudioConfig) => Promise<boolean>;
 	export type Target = {
 		name?: string;
 	};
@@ -102,7 +99,6 @@ export type BroadcastInput = {
 	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
 	origin: Signals.Getter<Net.Origin.Reader | undefined>;
-	tail: Signals.Getter<boolean>;
 };
 
 export type BroadcastOutput = {
@@ -200,7 +196,6 @@ export type SyncOutput = {
 	delay: Signals.Signal<Clock.Duration>;
 	instant: Signals.Signal<boolean>;
 	maxDelay: Signals.Signal<Clock.Duration>;
-	reference: Signals.Signal<number | undefined>;
 	timestamp: Signals.Signal<Clock.Duration | undefined>;
 };
 
@@ -247,7 +242,6 @@ export namespace Video {
 		readonly in: Signals.Readonlys<Video.DecoderInput>;
 		readonly out: Signals.Readonlys<Video.DecoderOutput>;
 		readonly source: Video.Source;
-		static supported: (config: Hang.Catalog.VideoConfig) => Promise<boolean>;
 		readonly sync: Sync;
 	}
 	export type DecoderInput = {
@@ -298,7 +292,6 @@ export namespace Video {
 	export type SourceInput = {
 		broadcast: Signals.Getter<Broadcast | undefined>;
 		rate: Signals.Getter<number | undefined>;
-		supported: Signals.Getter<Video.Supported | undefined>;
 		target: Signals.Getter<Video.Target | undefined>;
 	};
 	export type SourceOutput = {
@@ -320,7 +313,6 @@ export namespace Video {
 		stalled: Clock.Duration;
 		stalls: number;
 	}
-	export type Supported = (config: Hang.Catalog.VideoConfig) => Promise<boolean>;
 	export type Target = {
 		bitrate?: number;
 		height?: number;

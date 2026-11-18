@@ -288,7 +288,7 @@ impl Cluster {
 		let relays: Vec<_> = (1..=n as u64)
 			.map(|id| {
 				let mut config = config.clone();
-				config.hop = std::num::NonZeroU64::new(id).unwrap();
+				config.node = std::num::NonZeroU64::new(id).unwrap();
 				let (origin, driver) = origin::Producer::new(config);
 				support::harness::spawn(driver);
 				origin.with_proxy(true)

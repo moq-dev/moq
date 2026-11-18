@@ -61,11 +61,8 @@ What remains:
 ## Required
 
 - [The switch](/quest/m2/multicast/switch.md) - the rule whose fixtures replace the mitigations, once the new route layer is on the wire
-- [Held after close](/quest/m2/cluster-routes/held-after-close.md) - a relay whose own session closed shows its held claims unavailable, not offline
-- [Doubt holds](/quest/m2/cluster-routes/doubt-holds.md) - a relay keeps holding while doubt alone keeps it off its routes
 - [Route fan-out](/quest/m2/cluster-routes/route-fanout.md) - a route change costs only the streams and broadcasts it touches
 
 ## Related
 
 - [Routes and announces](/quest/m2/cluster-routes/README.md) - the contract and its fixtures
-- [Doubt and keep-alive](/quest/m2/cluster-routes/doubt-keepalive.md) - whether the doubt timer follows the keep-alive

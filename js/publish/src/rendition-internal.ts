@@ -46,7 +46,7 @@ export class Rendition<Config> {
 	 * contributes nothing.
 	 *
 	 * When the broadcast first lists a video or audio rendition in a network broadcast, it declares
-	 * the longest of these as the catalog's `media.join.interval`, rounded up to whole milliseconds,
+	 * the longest of these as the catalog's `sync.interval`, rounded up to whole milliseconds,
 	 * so an HLS or DASH export can cut its segments before any media is encoded. That declaration
 	 * is fixed for the network broadcast, so a later change here does not move it.
 	 */

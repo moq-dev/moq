@@ -4,7 +4,7 @@
 //!
 //! A publisher `P` pushes one broadcast, under one instance, to CDN relays `A` and `B`. A
 //! subscriber `S` links to both, ranking `A` first by demoting `B` with
-//! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
+//! [`origin::Producer::with_priority`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. A lite-07 route ranks by the lowest preference on its path,
 //! and `P`'s links to both CDNs are neutral, so promoting `A` instead would gain nothing. Losing `A` moves `S` to `B`, and `A` returning moves it
 //! back. Between lite-07 routes, which carry the instance, each move resumes the
@@ -65,7 +65,7 @@ async fn dial(
 ) -> MockPair {
 	let mut options = MockConnectOptions::new(version);
 	options.server_publish = Some(cdn.consume());
-	options.client_subscribe = Some(subscriber.clone().with_preference(origin::Preference::new(preference)));
+	options.client_subscribe = Some(subscriber.clone().with_priority(origin::Priority::new(preference)));
 	options.cost = Some(cost);
 	connect_mock(options).await
 }
@@ -215,7 +215,7 @@ impl Topology {
 			group.write_frame(timestamp(key, frame), payload(key, frame)).unwrap();
 			written.push((key, payload(key, frame)));
 		}
-		group.close().unwrap();
+		group.finish().unwrap();
 		written
 	}
 

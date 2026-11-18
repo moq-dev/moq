@@ -18,10 +18,26 @@ mod backend;
 pub use backend::Error;
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
 pub mod demux;
-pub mod driver;
 
-/// WebTransport over the moq-quic [`driver`], usable without a MoQ session.
+#[cfg(feature = "test-support")]
+pub mod driver;
+#[cfg(not(feature = "test-support"))]
+#[allow(
+	dead_code,
+	unused_imports,
+	reason = "parts serve only the tests the `test-support` feature publishes it for"
+)]
+pub(crate) mod driver;
+
+#[cfg(feature = "test-support")]
 pub mod web;
+#[cfg(not(feature = "test-support"))]
+#[allow(
+	dead_code,
+	unused_imports,
+	reason = "parts serve only the tests the `test-support` feature publishes it for"
+)]
+pub(crate) mod web;
 
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
 ///
@@ -73,46 +89,46 @@ pub(crate) struct Forward {
 	pub peers: PathBuf,
 }
 
-/// A congestion controller of the application's own, built fresh for each connection.
+/// The congestion control algorithm for a QUIC connection.
 ///
-/// Implement [`moq_congestion::Factory`] and install it with [`Config::controller`].
-#[derive(Clone)]
-pub struct Controller(pub std::sync::Arc<dyn moq_congestion::Factory + Send + Sync>);
-
-impl std::fmt::Debug for Controller {
-	/// Opaque: a factory carries no description of its own.
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.write_str("Controller(..)")
-	}
-}
-
-/// The congestion control family for a QUIC connection.
-///
-/// CUBIC is used for loss-based control and BBR v3 for delay-based control, the default. A new
-/// algorithm joins as a variant named after it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
+/// A new algorithm joins as a variant named after it.
+#[derive(
+	Clone, Copy, Debug, Default, PartialEq, Eq, Hash, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize,
+)]
 #[usage(ignore_case)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
 pub enum CongestionControl {
-	/// Loss-based (CUBIC): grows until it drops packets, so the send rate sawtooths.
-	/// Throughput-oriented, and the default on most stacks.
-	Loss,
-	/// Delay-based (BBR v3): tracks the measured delivery rate and RTT instead of waiting
+	/// BBR v3, the default: tracks the measured delivery rate and RTT instead of waiting
 	/// for loss, which keeps queues short and the send rate steady enough for an encoder
 	/// to track.
-	Delay,
+	#[default]
+	Bbr,
+	/// CUBIC: grows until it drops packets, so the send rate sawtooths.
+	/// Throughput-oriented, and the default on most stacks.
+	Cubic,
 	/// No congestion control and no pacing, for tests and controlled links.
-	None,
+	Unlimited,
 }
 
-/// Parses the same spellings the CLI and TOML accept (`loss`, `delay`, `none`), case-insensitively.
+/// Parses the same spellings the CLI and TOML accept (`bbr`, `cubic`, `unlimited`), case-insensitively.
 impl std::str::FromStr for CongestionControl {
 	type Err = String;
 
 	fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
 		<Self as usage_rs::argv::spec::ValueEnum>::from_choice(s)
-			.ok_or_else(|| format!("unknown congestion control: {s}"))
+			.ok_or_else(|| format!("unknown congestion control: {s} (expected bbr, cubic, or unlimited)"))
+	}
+}
+
+/// The controller factory a QUIC transport config holds, so every runtime builds the same one.
+impl From<CongestionControl> for std::sync::Arc<dyn moq_congestion::Factory + Send + Sync> {
+	fn from(algorithm: CongestionControl) -> Self {
+		match algorithm {
+			CongestionControl::Bbr => std::sync::Arc::new(moq_congestion::bbr3::Config::default()),
+			CongestionControl::Cubic => std::sync::Arc::new(moq_congestion::cubic::Config::default()),
+			CongestionControl::Unlimited => std::sync::Arc::new(moq_congestion::Unlimited),
+		}
 	}
 }
 
@@ -227,7 +243,7 @@ pub struct Config {
 	)]
 	pub mtu_discovery: Option<bool>,
 
-	/// Congestion control family. Defaults to `delay`, which uses BBRv3.
+	/// Congestion control algorithm: `bbr` (BBR v3, the default), `cubic`, or `unlimited`.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-congestion-control",
@@ -237,15 +253,6 @@ pub struct Config {
 		setting = "quic.congestion_control"
 	)]
 	pub congestion_control: Option<CongestionControl>,
-
-	/// A congestion controller of your own for every connection, in place of
-	/// [`congestion_control`](Self::congestion_control)'s families.
-	///
-	/// Code-only, since a controller has no text form: no flag or setting reaches it.
-	/// Both the QUIC backend and the relay's io_uring runtime run it.
-	#[serde(skip)]
-	#[usage(skip)]
-	pub controller: Option<Controller>,
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
 	/// in flight or in incomplete messages across every stream at once. Defaults to
@@ -426,19 +433,17 @@ pub(crate) struct Legacy {
 		name = "client-quic-congestion-control",
 		long = "client-quic-congestion-control",
 		env = "MOQ_CLIENT_QUIC_CONGESTION_CONTROL",
-		value_enum,
 		hide = true
 	)]
-	client_congestion_control: Option<CongestionControl>,
+	client_congestion_control: Option<String>,
 
 	#[usage(
 		name = "server-quic-congestion-control",
 		long = "server-quic-congestion-control",
 		env = "MOQ_SERVER_QUIC_CONGESTION_CONTROL",
-		value_enum,
 		hide = true
 	)]
-	server_congestion_control: Option<CongestionControl>,
+	server_congestion_control: Option<String>,
 
 	#[usage(
 		name = "client-quic-qlog",
@@ -620,8 +625,7 @@ impl Config {
 			idle_timeout,
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
-			congestion_control: self.congestion_control,
-			controller: self.controller.clone(),
+			congestion_control: self.congestion_control.unwrap_or_default(),
 			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
 			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
 			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
@@ -662,10 +666,8 @@ pub struct Resolved {
 	pub keep_alive: Option<Duration>,
 	/// Whether to run path MTU discovery.
 	pub mtu_discovery: bool,
-	/// Congestion control override, or `None` for the default.
-	pub congestion_control: Option<CongestionControl>,
-	/// The application's own congestion controller, in place of the family.
-	pub controller: Option<Controller>,
+	/// Congestion control algorithm, defaulting to [`CongestionControl::Bbr`].
+	pub congestion_control: CongestionControl,
 	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
 	///
 	/// The windows are resolved here rather than by each backend, whose own defaults
@@ -683,15 +685,6 @@ pub struct Resolved {
 }
 
 impl Resolved {
-	/// The congestion control family to install.
-	///
-	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
-	/// send rate steady enough for a live encoder to track, which is what this stack
-	/// carries.
-	pub(crate) fn congestion(&self) -> CongestionControl {
-		self.congestion_control.unwrap_or(CongestionControl::Delay)
-	}
-
 	/// The directory to write qlog traces into, if any.
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
@@ -746,6 +739,16 @@ mod tests {
 		Cli::try_parse_from(&argv).expect("valid test arguments").quic
 	}
 
+	/// The parse error rendered as the process would print it.
+	fn try_parse(args: &[&str]) -> Result<Config, String> {
+		let mut argv = vec![std::ffi::OsString::from("test")];
+		argv.extend(args.iter().map(std::ffi::OsString::from));
+		let argv: Vec<_> = argv.iter().map(std::ffi::OsString::as_os_str).collect();
+		Cli::try_parse_from(&argv)
+			.map(|cli| cli.quic)
+			.map_err(|err| usage_rs::render_failure(Cli::spec(), &argv, &err))
+	}
+
 	#[test]
 	fn defaults_apply_when_unset() {
 		assert!(Config::default().idle_timeout.is_none());
@@ -786,7 +789,7 @@ mod tests {
 			"5000",
 			"--quic-gso=false",
 			"--quic-congestion-control",
-			"delay",
+			"cubic",
 			"--quic-qlog",
 			"/tmp/qlog",
 			"--quic-keylog",
@@ -794,19 +797,49 @@ mod tests {
 		]);
 		assert_eq!(quic.max_streams, Some(5000));
 		assert_eq!(quic.gso, Some(false));
-		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
+		assert_eq!(quic.congestion_control, Some(CongestionControl::Cubic));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
 		assert_eq!(quic.keylog.as_deref(), Some(std::path::Path::new("/tmp/keys.log")));
 	}
 
-	/// `none` is spelled the same on the CLI, in TOML, and through `FromStr`.
+	/// Each algorithm is spelled the same on the CLI, in TOML, and through `FromStr`,
+	/// and unset resolves to BBR.
 	#[test]
-	fn congestion_control_none_parses() {
-		let quic = parse(&["--quic-congestion-control", "none"]);
-		assert_eq!(quic.congestion_control, Some(CongestionControl::None));
-		let quic: Config = toml::from_str(r#"congestion_control = "none""#).expect("parse");
-		assert_eq!(quic.congestion_control, Some(CongestionControl::None));
-		assert_eq!("NONE".parse(), Ok(CongestionControl::None));
+	fn congestion_control_parses_by_algorithm_name() {
+		for (word, algorithm) in [
+			("bbr", CongestionControl::Bbr),
+			("cubic", CongestionControl::Cubic),
+			("unlimited", CongestionControl::Unlimited),
+		] {
+			let quic = parse(&["--quic-congestion-control", word]);
+			assert_eq!(quic.congestion_control, Some(algorithm));
+			let quic: Config = toml::from_str(&format!("congestion_control = \"{word}\"")).expect("parse");
+			assert_eq!(quic.congestion_control, Some(algorithm));
+			assert_eq!(word.to_uppercase().parse(), Ok(algorithm));
+		}
+		assert_eq!(Resolved::default().congestion_control, CongestionControl::Bbr);
+	}
+
+	/// The released family names are refused rather than aliased, with an error that
+	/// names every algorithm, so a deployed config learns the new spelling.
+	#[test]
+	fn congestion_control_family_names_are_refused() {
+		for family in ["loss", "delay", "none"] {
+			let err = try_parse(&["--quic-congestion-control", family]).expect_err(family);
+			for name in ["bbr", "cubic", "unlimited"] {
+				assert!(err.contains(name), "{family}: {err}");
+			}
+			let err = toml::from_str::<Config>(&format!("congestion_control = \"{family}\""))
+				.expect_err(family)
+				.to_string();
+			for name in ["bbr", "cubic", "unlimited"] {
+				assert!(err.contains(name), "{family}: {err}");
+			}
+			let err = family.parse::<CongestionControl>().expect_err(family);
+			for name in ["bbr", "cubic", "unlimited"] {
+				assert!(err.contains(name), "{family}: {err}");
+			}
+		}
 	}
 
 	/// Every old role-prefixed spelling parses into a hidden field and is reported,

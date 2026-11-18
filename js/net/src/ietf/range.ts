@@ -1,17 +1,17 @@
 import { race, Signal } from "@moq/signals";
 import { error, NotFound, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
-import { type Fill, fillChanged, wantedRuns } from "../fill.ts";
+import { type FillGroups, fillChanged, wantedRuns } from "../fill.ts";
 import type * as group from "../group.ts";
 import { receiveFrame, skipPayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
-import { received, type Timescale } from "../time.ts";
+import type { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
-import { decodeFetchObject, EndOfRange } from "./object.ts";
+import { decodeFetchObject, EndOfRange, objectTime } from "./object.ts";
 
 /** The groups one standalone FETCH writes, sharing the joining FETCH's object and payload decoder. @internal */
 export class RangeFetch {
-	readonly fill: Fill;
+	readonly fill: FillGroups;
 	readonly first: bigint;
 	readonly last: bigint;
 	readonly bound?: number;
@@ -22,12 +22,12 @@ export class RangeFetch {
 	readonly #stop = new AbortController();
 	readonly #done = Promise.withResolvers<void>();
 	#next: bigint;
-	#current?: { sequence: bigint; producer?: group.Producer };
+	#current?: { key: bigint; producer?: group.Producer };
 	#taken = false;
 	#finished = false;
 
 	constructor(options: {
-		fill: Fill;
+		fill: FillGroups;
 		first: bigint;
 		track: track.Producer;
 		timescale?: Timescale;
@@ -84,15 +84,15 @@ export class RangeFetch {
 		this.#changed.update((n) => n + 1);
 	}
 
-	#open(sequence: bigint): void {
-		if (sequence < this.#next || sequence > this.last)
+	#open(key: bigint): void {
+		if (key < this.#next || key > this.last)
 			throw new ProtocolViolation("FETCH group is out of order or past FETCH_OK's End Location");
 		this.#closeGroup();
-		this.fill.dropGroups(this.#next, sequence);
-		// A live stream may have answered this sequence while the FETCH was in flight.
-		const producer = this.fill.isWanted(sequence) ? this.fill.accept(sequence) : undefined;
-		this.#current = { sequence, producer };
-		this.#next = sequence + 1n;
+		this.fill.dropGroups(this.#next, key);
+		// A live stream may have answered this key while the FETCH was in flight.
+		const producer = this.fill.isWanted(key) ? this.fill.accept(key) : undefined;
+		this.#current = { key: key, producer };
+		this.#next = key + 1n;
 		this.#changed.update((n) => n + 1);
 	}
 
@@ -108,7 +108,7 @@ export class RangeFetch {
 		let first = true;
 		let trailing = false;
 		try {
-			const decode = (c: Cursor) => decodeFetchObject(c, this.#timescale);
+			const decode = (c: Cursor) => decodeFetchObject(c);
 			for (;;) {
 				const object = await untilAborted(
 					Promise.resolve(stream.tryDecode(decode) ?? stream.decodeMaybe(decode)),
@@ -122,7 +122,7 @@ export class RangeFetch {
 						(this.bound !== undefined && object.group === this.last && object.object >= this.bound)
 					)
 						throw new ProtocolViolation("End of Range is outside FETCH_OK's range");
-					if (this.#current?.sequence === object.group) {
+					if (this.#current?.key === object.group) {
 						if (object.reason !== EndOfRange.NonExistent)
 							throw new NotFound("FETCH group suffix unavailable");
 						trailing = true;
@@ -135,7 +135,7 @@ export class RangeFetch {
 							object.group + 1n,
 							new NotFound("FETCH omitted a group prefix"),
 						);
-						this.#current = { sequence: object.group };
+						this.#current = { key: object.group };
 						this.#next = object.group + 1n;
 					}
 					prior = object.group;
@@ -158,12 +158,12 @@ export class RangeFetch {
 					(object.subgroup === "explicit" && object.subgroupId !== 0n)
 				)
 					throw new Error("FETCH subgroups and datagrams are unsupported");
-				const sequence =
+				const key =
 					object.group === undefined ? prior : prior === undefined ? object.group : prior + object.group + 1n;
-				if (sequence === undefined || sequence > 0xffff_ffff_ffff_ffffn)
+				if (key === undefined || key > 0xffff_ffff_ffff_ffffn)
 					throw new ProtocolViolation("invalid FETCH Group ID");
-				if (this.#current?.sequence !== sequence) {
-					this.#open(sequence);
+				if (this.#current?.key !== key) {
+					this.#open(key);
 					next = 0;
 					trailing = false;
 				}
@@ -176,31 +176,25 @@ export class RangeFetch {
 						: object.object;
 				if (id === undefined || id !== next || !Number.isSafeInteger(id))
 					throw new Error("FETCH object gap is unsupported");
-				if (sequence === this.last && this.bound !== undefined && id >= this.bound)
+				if (key === this.last && this.bound !== undefined && id >= this.bound)
 					throw new ProtocolViolation("FETCH continued past FETCH_OK's End Location");
-				if (this.#timescale !== undefined && object.timestamp === undefined)
-					throw new StreamError(StreamCode.MalformedTrack, {
-						message: `object without a Timestamp on a track with TIMESCALE: group=${sequence}`,
-					});
 				const producer = this.#current?.producer;
 				if (producer) {
-					if (object.payload)
-						producer.writeFrame({
-							payload: object.payload,
-							timestamp: received(object.timestamp, producer.sequence),
-						});
-					else if (!(await untilAborted(receiveFrame(stream, producer, object), this.#stop.signal)))
+					const timestamp = objectTime(this.#timescale, producer.start);
+					if (object.payload) producer.writeFrame({ payload: object.payload, timestamp });
+					else if (
+						!(await untilAborted(
+							receiveFrame(stream, producer, { size: object.size, timestamp }),
+							this.#stop.signal,
+						))
+					)
 						throw new Error("FETCH group was abandoned");
 				} else if (!object.payload) await untilAborted(skipPayload(stream, object.size), this.#stop.signal);
-				prior = sequence;
+				prior = key;
 				next = id + 1;
 				first = false;
 			}
-			if (
-				this.#legacy &&
-				this.bound !== undefined &&
-				(this.#current?.sequence !== this.last || next < this.bound)
-			)
+			if (this.#legacy && this.bound !== undefined && (this.#current?.key !== this.last || next < this.bound))
 				throw new ProtocolViolation("FETCH ended before FETCH_OK's End Location");
 			this.#closeGroup();
 			this.fill.dropGroups(this.#next, this.last + 1n);

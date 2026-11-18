@@ -33,7 +33,7 @@ fn publish(origin: &origin::Producer, path: &str) -> (origin::Route, track::Prod
 		.unwrap();
 	let mut group = track.append_next().unwrap();
 	group.write_frame(group.at_start(), path.as_bytes().to_vec()).unwrap();
-	group.close().unwrap();
+	group.finish().unwrap();
 	(route, track)
 }
 
@@ -109,9 +109,9 @@ fn ended(paths: &[&str]) -> Vec<(bool, String)> {
 	paths.iter().map(|path| (false, path.to_string())).collect()
 }
 
-/// What a reader on `version` sees once `paths` leave without a withdrawal it can
-/// certify: offline where the route layer carries it, ended where only an ANNOUNCE
-/// says it went.
+/// What a reader on `version` sees once `paths` leave with the session that carried
+/// them, which no publisher withdrew: offline where the route layer carries it, ended
+/// where only an ANNOUNCE says it went.
 fn lost(version: Version, paths: &[&str]) -> Vec<(bool, String)> {
 	match version.to_string().as_str() {
 		"moq-lite-07-wip" => paths.iter().map(|path| (false, format!("offline {path}"))).collect(),
@@ -131,10 +131,9 @@ async fn mounted(version: &str) {
 	assert_eq!(drain(&mut routes).await, started(&["own", "shared/cam"]), "{version}");
 	assert_eq!(watch(&viewer, "shared/cam").await, "tenant-a/public/cam", "{version}");
 
-	// What leaves the target leaves the mount. The route layer carries the mount's
-	// withdrawal without a floor certifying it, so it goes offline there.
+	// What leaves the target leaves the mount.
 	drop(published.remove(0));
-	assert_eq!(drain(&mut routes).await, lost(version, &["shared/cam"]), "{version}");
+	assert_eq!(drain(&mut routes).await, ended(&["shared/cam"]), "{version}");
 }
 
 /// A session rooted inside the mount reads only the target.

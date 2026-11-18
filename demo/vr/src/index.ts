@@ -8,8 +8,8 @@ const name = Net.Path.from(params.get("name") ?? "vr.hang");
 
 const connection = new Net.Connection({ url });
 const broadcast = new Broadcast({ origin: connection.origin, name, enabled: true });
-const audioSrc = new Audio.Source({ broadcast, supported: Audio.Decoder.supported });
-const videoSrc = new Video.Source({ broadcast, supported: Video.Decoder.supported });
+const audioSrc = new Audio.Source({ broadcast });
+const videoSrc = new Video.Source({ broadcast });
 const sync = new Sync({});
 const audio = new Audio.Decoder({ source: audioSrc, sync, enabled: true });
 const video = new Video.Decoder({ source: videoSrc, sync, enabled: true });

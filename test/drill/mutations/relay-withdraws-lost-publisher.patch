@@ -9,7 +9,7 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -11454,7 +11454,7 @@
+@@ -11273,7 +11273,7 @@ impl Announced {
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -18,7 +18,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -11540,7 +11540,7 @@
+@@ -11359,7 +11359,7 @@ fn mint_sources<K: Clone + Send + Sync + 'static>(
  		let validity = if subscriber.version.has_instance() {
  			Default::default()
  		} else {
@@ -27,7 +27,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		};
  		let source = subscriber.origin.create_source(path.clone(), validity);
  		// The handler exists before the requester sees the source, so a track it
-@@ -11569,7 +11569,8 @@
+@@ -11387,7 +11387,8 @@ struct AnnouncedRoute<K = Path> {
  	/// without recomputing the chain.
  	route: crate::origin::RouteInfo,
  	/// Dropping it retracts the route and rejects its queued requests.
@@ -37,7 +37,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Queues this route on its prefix's ready set when its request queue wakes.
-@@ -11587,7 +11588,7 @@
+@@ -11405,7 +11406,7 @@ impl<K: Clone + Send + Sync + 'static> AnnouncedRoute<K> {
  	) -> Self {
  		Self {
  			route,
@@ -49,21 +49,21 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs
-@@ -1109,7 +1109,7 @@
- 				if let Some(served) = self.served.remove(&(id, claim, prefix))
+@@ -291,7 +291,7 @@ impl Routed {
+ 		for ((origin, path, instance), mut served) in self.served.drain() {
+ 			let unavailable = served.route.route.clone().with_available(false);
+ 			served.route.update(unavailable);
+-			let left = Left(served.route.dynamic.clone());
++			let left = Left((*served.route.dynamic).clone());
+ 			self.stream.orphan(origin, &(path, instance), Box::new(left));
+ 		}
+ 	}
+@@ -641,7 +641,7 @@ impl Routed {
+ 				if let Some(served) = self.served.remove(&(origin, path, instance))
  					&& ended
  				{
 -					served.route.dynamic.withdrawn();
 +					std::mem::ManuallyDrop::into_inner(served.route.dynamic).withdrawn();
  				}
  			}
- 			// What the peer is sent goes to the half answering it.
-@@ -1154,7 +1154,7 @@
- 		{
- 			tracing::debug!(route = %subscriber.log_path(&path), node = id, "dropping looped claim");
- 			if let Some(entry) = self.served.remove(&key) {
--				entry.route.dynamic.withdrawn();
-+				std::mem::ManuallyDrop::into_inner(entry.route.dynamic).withdrawn();
- 			}
- 			return;
  		}

@@ -1,85 +1,79 @@
-# [S] moq-net publishes no item without a caller
+# [L] moq-net's last pub items with a single container-reader caller go private
 
 ## Goal
 
-The moq-net crate the cut publishes has no public item that nothing outside
-it calls: each one below is removed or made `pub(crate)`, and the one place
-moq-lite's subscriber tells outcomes apart by matching error variants reads
-a typed outcome instead.
+`track::Subscriber::next_in_range`, `is_skipped`, and `poll_start` are
+crate-private, and so is `Subscriber::with_range` if its last production
+caller can leave. Their one consumer is moq-mux's container reader, which
+orders groups itself; `track::Ordered` reports a `Gap`, so the reader can
+move onto it.
 
 ## Plan
 
-Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit): ✅ remove
-or hide every public item the audit found without a caller, one sweep quest
-per area, each item re-checked for a downstream caller first (rejected:
-keeping them until someone complains; one sweep across every crate). An item
-stays private until a consumer needs it, and adding it back later is
-additive while removing it after the cut is a break.
+What is left of the moq-net sweep, which removed or hid every other item
+without a caller.
 
-Before removing an item, grep Kixel and moq.pro for a caller (the
-maintainer's condition). Keep what one uses, and name the caller in the PR.
+Findings (2026-11-17, from reading the code when this quest was claimed as
+`[S]`): moving the reader onto `Gap` is not an `Ordered` swap, so the quest
+is `[L]`.
 
-Items, each with the grep that showed no caller at `80ca9787e3` (over `rs`,
-`js`, `py`, `swift`, `kt`, `dart`, `cpp`, `go`, `demo`, and `test`, outside
-`rs/moq-net/`):
+- `moq-mux`'s `container::Consumer` reads in arrival order
+  (`poll_recv_group`) into its own `pending` queue and judges a hole at
+  `current` while the groups past it are already buffered: the wall-time wait
+  since a later group arrived (`hole_wait`, now
+  `Delay::min`), media-timestamp `aged` against the newest buffered content,
+  the playout clock `passed`, a full max buffer, and container continuity
+  (`poll_continues`, 1 ms contiguity).
+- `track::Ordered` holds at most one group back behind a hole and judges it by
+  its own reach-versus-newest-frame budget. It never delivers the groups past
+  a hole, so the reader could not run the wait, clock, buffer-full, or
+  continuity rules above on it. `next_in_range` is what tells the reader
+  "nothing will fill this hole" (the `excluded` case) and `poll_start`
+  resolves its start; `Gap` covers the first and `Ordered`'s start the
+  second, only if the reader drops everything else above.
+- The three methods have more callers than the one reader.
+  `Subscriber::is_skipped` is also called from `moq-audio` (through
+  `container::Consumer::is_skipped`), `moq-stats`, and the ts import tests;
+  `Ordered::is_skipped`, already public, would serve those.
+  `Subscriber::with_range` has production callers in `moq-mux`
+  `container/source.rs`, `moq-json` `window`, and `moq-audio`
+  `decode/consumer.rs`, and in `moq-net/benches/origin.rs`.
+- The reader's code is being changed by
+  [#8984](https://github.com/moq-dev/moq/pull/8984) (hole waiting),
+  [#9021](https://github.com/moq-dev/moq/pull/9021), and
+  [#8951](https://github.com/moq-dev/moq/pull/8951), so this starts after
+  the hole wait lands.
 
-- `track::Position::after`, `after_group`, and `group_end`
-  (`rs/moq-net/src/model/subscription.rs:610`, `:622`, `:631`): remove.
-  `grep -rnF 'Position::after('`, `'after_group('`, and `'.group_end()'`
-  find 0 lines outside moq-net; inside, only unit tests and `after` calling
-  `after_group`. `after_group` is `start + 1`, which no longer names the
-  next group now that groups are addressed by start.
-- `origin::Consumer::covering` (`rs/moq-net/src/model/origin.rs:7734`): make
-  `pub(crate)`. `grep -rnF '.covering()'` finds 0 lines outside moq-net; the
-  lite and moq-transport sessions call it, and its doc says "a session
-  serving its peer always uses this view".
-- `track::Subscriber::with_range` and `track::Ordered::with_range`
-  (`rs/moq-net/src/model/track.rs:10427`, `:10756`): make `pub(crate)` after
-  moving their two production callers
-  (`rs/moq-mux/src/container/source.rs:621`,
-  `rs/moq-audio/src/decode/consumer.rs:243`) to `Subscription::ranges`, which
-  is already the subscriber's read filter. The audio caller's comment gives
-  a reason, that a range is aggregated across subscribers and can rewind the
-  publisher for everyone, that `Range::live()` no longer has. If either
-  caller cannot move, keep the method and say why in the PR. Sessions and
-  resume keep using it inside the crate.
-- The 17 `pub fn` predicates of `lite::Version`
-  (`rs/moq-net/src/lite/version.rs`, `has_track_stream` to `has_route_cost`):
-  make `pub(crate)`. They are reachable today only through the public
-  `Version::Lite` variant, and no caller exists outside moq-net; the relay
-  uses only the crate-level `Version::has_request_path`. Each would
-  otherwise be a public name to keep or break as lite-08 moves the cut-offs.
-  [The opaque `Version`](/quest/m2/net-renames.md) closes the same door from
-  the other side; either order works.
-- `Recovery` (`rs/moq-net/src/lite/subscriber/fills.rs:691-695`) matches
-  `Error::Decode(DecodeError::Short)` and then
-  `matches!(err, Error::ProtocolViolation)` to tell a reset from malformed
-  bytes, against AGENTS.md's "never match on errors". The reader returns a
-  typed outcome (ended, reset, malformed) that both `Recovery` and the live
-  subscription read. No API change.
+Decided 2026-11-17 (maintainer, `/quest-run m0/m1/m2`):
 
-Not in this sweep, with their owners:
+- ✅ B: keep the quest, rewritten as `[L]` with the hole wait as `Required`
+  (rejected: A, delete it and keep the methods public as the reader's
+  documented surface; C, shrink it to making `with_range` crate-private
+  alone).
 
-- `Subscriber::next_in_range`, `is_skipped`, and `poll_start` have one
-  consumer, moq-mux's container reader, which orders groups itself.
-  [Group drops](/quest/m2/group-drops.md) adds `Gap` to `track::Ordered`;
-  once the container reader moves onto it these three can go private.
-- `socket::is_endpoint` leaves with
-  [socket endpoints](/quest/m2/sockets/remove.md).
-- `origin::Producer::update_hold`, `with_proxy`, `Source`, `source()`,
-  `Consumer::local()`, `origin::RouteKey`, and `Config::route_key` belong to
-  [the route switch](/quest/m2/multicast/switch.md).
-- `setup::Extensions` belongs to
-  [the `ietf` extension](/quest/m2/ietf-records-per-track.md).
+Steps:
 
-Run `just api-diff rust` after the change and list
-every item it shows removed in the PR's Impact section.
+1. Design the container reader's hole policy on `track::Ordered` first: what
+   moves into moq-net (the wait, the clock, the buffer cap, continuity) and
+   what stays in the reader. Decide there whether `Ordered` takes the
+   wall-time wait that `Delay::min` now means, and how the reader's hole
+   tests in `container/consumer.rs` carry over. Added `Ordered` API needs the
+   maintainer's say.
+2. Move the reader onto it, and the `is_skipped` callers onto
+   `Ordered::is_skipped`.
+3. Make `next_in_range`, `is_skipped`, and `poll_start` crate-private. Make
+   `Subscriber::with_range` crate-private too if the callers listed above can
+   leave: `moq-json`, `moq-audio`, and the benches move to
+   `Subscription::ranges`; `container/source.rs`'s resubscription needs
+   "after group N" with a time start, which a `Range` cannot say, so it
+   needs the reader's own cursor to drop that group. Otherwise `with_range`
+   stays and this quest records why.
+- `origin::Consumer::covering` stays `pub`: moq.pro and moq-net's own
+  `benches/origin.rs` call it.
 
-Public API: breaking, removals only (`Position::after`, `after_group`,
-`group_end`, `origin::Consumer::covering`, `Subscriber::with_range`,
-`Ordered::with_range`, and the `lite::Version` predicates). Wire: none.
+Public API: breaking, removals only unless step 1 adds `Ordered` inputs.
+Wire: none.
 
 ## Related
 
-- [moq-net's node, version, handshake, and route priority](/quest/m2/net-renames.md) - makes `Version` opaque
-- [A group a subscriber gives up on is always reported](/quest/m2/group-drops.md) - gives the container reader the `Gap` that frees three more methods
+- [Browser audio holes](/quest/m2/audio-playout/browser-audio-hole-skip.md) - the browser counterpart of the reader moving onto `Gap`

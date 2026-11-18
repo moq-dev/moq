@@ -63,7 +63,7 @@ try {
 	const subscribe = (index: number, sequence: bigint) =>
 		active[index]
 			.track("value")
-			.subscribe({ delay: { max: null }, order: "ascending", ranges: [{ start: { absolute: sequence } }] })
+			.subscribe({ delay: { max: null }, order: "ascending", ranges: [{ start: { time: sequence } }] })
 			.ordered();
 	const check = (frame: Awaited<ReturnType<Moq.Track.Ordered["readFrame"]>>, sequence: bigint) => {
 		assert(frame, "track ended before its replacement");
@@ -103,6 +103,7 @@ try {
 			const filling = (async () => {
 				for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
 					try {
+						if (fill.kind === "lookup") continue; // no time lookups here
 						if (fill.start < sequence) continue; // history the replacement no longer holds
 						assert.equal(fill.start, future);
 						assert.equal(fill.end, future + 1n);
@@ -124,7 +125,7 @@ try {
 			check(resumed, sequence);
 			check(immediate, sequence);
 			try {
-				assert.equal(fetched.sequence, future);
+				assert.equal(fetched.start, future);
 				assert.equal(await fetched.readString(), String(future));
 			} finally {
 				fetched.close();

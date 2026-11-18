@@ -129,11 +129,17 @@ const native = values.publisher === "native";
 const isEngine = (name: string): name is Engine => ENGINES.some((engine) => engine === name);
 const requestedPublisher = values["publisher-engine"] ?? "chromium";
 const requestedPlayer = values["player-engine"] ?? "chromium";
+// moq-transport states no delay, so the incumbent replays its whole retention to a returning
+// viewer, and an in-order transport delivers all of it ahead of the live edge. Chromium's
+// WebTransport delivers newest first and hides it; the other engines play over WebSocket.
+const replacementVersions = ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"].filter(
+	(version) => requestedPlayer === "chromium" || version !== "moq-transport-22",
+);
 const selected = new Set<string>(
 	values.cases === undefined
 		? native
 			? NATIVE_CASES
-			: CASES.filter((name) => name !== "replacement")
+			: CASES
 		: values.cases === "none"
 			? []
 			: values.cases.split(","),
@@ -161,9 +167,9 @@ if (
 const publisherEngine = requestedPublisher as Engine;
 const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
-if (!native && values.cases === undefined) {
+if (!native && selected.has("replacement") && !replacementVersions.includes("moq-transport-22")) {
 	console.error(
-		"QUARANTINE\treplacement\tintermittent audio silence after skipped groups under CPU load; see quest/m0/interop-green/replacement-audio.md",
+		"QUARANTINE\treplacement moq-transport-22\tmoq-transport states no delay, so the incumbent replays its whole retention ahead of the live edge over an in-order transport; see test/interop/README.md",
 	);
 }
 
@@ -1070,11 +1076,11 @@ try {
 	if (!native) {
 		const interval = await player
 			.locator(SELECTORS.watch)
-			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.media?.join?.interval);
+			.evaluate((el: MoqWatch) => el.broadcast.out.catalog.peek()?.sync?.interval);
 		check(
 			interval === KEYFRAME_INTERVAL_MS,
 			"declared join interval",
-			() => `the catalog declares media.join.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
+			() => `the catalog declares sync.interval ${interval}, not ${KEYFRAME_INTERVAL_MS}`,
 		);
 	}
 
@@ -1290,7 +1296,7 @@ try {
 	// can be explained by the incumbent timing out or closing its session.
 	if (wants("replacement")) {
 		const sourceBrowser = await browserFor("publisher");
-		for (const version of ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"]) {
+		for (const version of replacementVersions) {
 			console.error(`=== live replacement and fallback: ${version} ===`);
 			const name = `replacement-${version}-${process.pid}.hang`;
 			const [old, oldErrors] = await open(

@@ -13,8 +13,8 @@ import (
 	"moq.dev/moq/media"
 )
 
-// Codec selects H.264 or H.265.
-type Codec = ffi.MoqVideoCodec
+// Codec selects the video codec; build one with moq.H264VideoCodec or moq.H265VideoCodec.
+type Codec = *ffi.MoqVideoCodec
 
 // PixelFormat is a CPU pixel layout (I420 or RGBA).
 type PixelFormat = ffi.MoqVideoPixelFormat
@@ -123,6 +123,15 @@ func (p *Producer) Reservation() *moq.Reservation {
 		return nil
 	}
 	return bridge.Reservation(*raw).(*moq.Reservation)
+}
+
+// AbortUnwanted closes the track with an application error code, but only while
+// nobody wants it: call it once moq.TrackDemand.WantedChanged returns nil. It returns
+// true once the track is closed, and false, leaving the track open, when a reader
+// joined since; keep serving and wait for the next nil on a fresh Demand():
+// one that already returned nil misses a reader that came and went, and waits on.
+func (p *Producer) AbortUnwanted(errorCode uint16) (bool, error) {
+	return p.inner.AbortUnwanted(errorCode)
 }
 
 // Finish drains the encoder and ends the track.

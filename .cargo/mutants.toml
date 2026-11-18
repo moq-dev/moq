@@ -13,7 +13,7 @@ additional_cargo_test_args = ["--lib", "--test", "integration"]
 # only where the same function has another such mutant that tests do catch.
 exclude_re = [
     # Debug output only feeds logs.
-    '<impl (std::)?fmt::Debug for (Scope|Node|Stream|RouteKey|Proof)>::fmt',
+    '<impl (std::)?fmt::Debug for (Scope|Node|Stream)>::fmt',
     # The rotation's xorshift step only picks which fresh identity comes next,
     # and the guard after it enforces freshness and range.
     'replace (\^= with \|=|<< with >>|>> with <<) in Router<N, A>::rotate',

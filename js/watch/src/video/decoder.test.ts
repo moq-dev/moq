@@ -1,4 +1,4 @@
-import { describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { readFileSync } from "node:fs";
 import { Duration, Instant, now, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
@@ -10,8 +10,10 @@ import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync, Track } from "../sync";
+import { stubSupport } from "../webcodecs.test-util";
 import { Decoder } from "./decoder";
 import { Source } from "./source";
+import { supported } from "./supported";
 
 const flush = () => yieldNow();
 
@@ -50,10 +52,7 @@ async function play(catalog: Signal<Catalog.Root>): Promise<{
 	decoder: Decoder;
 }> {
 	const broadcast = new Signal<Broadcast | undefined>(watchBroadcast(catalog));
-	const source = new Source({
-		broadcast,
-		supported: async () => true,
-	});
+	const source = new Source({ broadcast });
 	const sync = new Sync({ delay: Duration.millis(0) });
 	await settle();
 	const decoder = new Decoder({ source, sync });
@@ -62,6 +61,12 @@ async function play(catalog: Signal<Catalog.Root>): Promise<{
 }
 
 describe("Decoder jitter across a source switch", () => {
+	let decoder: Disposable;
+	beforeEach(() => {
+		decoder = stubSupport({ video: () => true });
+	});
+	afterEach(() => decoder[Symbol.dispose]());
+
 	it("keeps the outgoing floor when the next source reuses the track name", async () => {
 		const outgoing = new Signal<Catalog.Root>({
 			video: { renditions: { video: config({ delay: 200, jitter: 60 }) } },
@@ -375,7 +380,7 @@ async function guardedPlayback(
 		producer.close();
 		mediaProducer.close();
 	};
-	const source = new Source({ broadcast, supported: async () => true });
+	const source = new Source({ broadcast });
 	const delay = new Signal<Delay>(initial ?? (lookahead ? Duration.millis(100) : "instant"));
 	const sync = new Sync({ delay, lookahead: Duration.millis(lookahead) });
 	const enabled = new Signal(true);
@@ -499,6 +504,27 @@ for (const kind of ["legacy", "cmaf"] as const) {
 	}
 }
 
+// Signals compare a write against the value it replaced, so a range changed in place after delivery
+// is a change no subscriber hears about.
+it("never changes the buffered ranges it already reported", async () => {
+	const reads = Array.from({ length: 8 }, (_, i) => sample(0n, i * 20_000, i === 0));
+	const playback = await guardedPlayback("legacy", reads, [], false, 1000);
+	const show = (ranges: Container.BufferedRanges) =>
+		ranges.map((r) => `${r.start.asMicros()}-${r.end.asMicros()}`).join();
+	const seen: [Container.BufferedRanges, string][] = [];
+	const dispose = playback.decoder.out.buffered.subscribe((ranges) => seen.push([ranges, show(ranges)]));
+	try {
+		await microtasks();
+		expect(seen.length).toBeGreaterThan(1);
+		for (const [ranges, shown] of seen) expect(show(ranges)).toBe(shown);
+		expect(show(playback.decoder.out.buffered.peek())).toBe(seen.at(-1)?.[1] ?? "");
+	} finally {
+		dispose();
+		playback.close();
+		await microtasks();
+	}
+});
+
 it("promoting from no active track holds its picture and timestamp until a frame arrives", async () => {
 	const playback = await guardedPlayback("legacy", [sample(10n, 1000)]);
 	try {
@@ -523,7 +549,7 @@ it("configures an avc3 rendition with the avc1 string WebCodecs accepted, leavin
 	});
 	try {
 		const rendition = playback.catalog.peek().video?.renditions?.video;
-		expect(rendition && (await Decoder.supported(rendition))).toBe(true);
+		expect(rendition && (await supported(rendition))).toBe(true);
 		expect(rendition?.codec).toBe("avc3.640028");
 		expect(playback.configures.at(-1)?.codec).toBe("avc1.640028");
 	} finally {
@@ -1259,6 +1285,26 @@ describe("Decoder stalls", () => {
 		}
 	});
 
+	// A publisher repeats a still screen at a 4 Hz floor rather than its frame rate.
+	it("a still picture repeated every 250 ms plays without a stall", async () => {
+		const { clock, feeds, playback, stalls, close } = await cold();
+		try {
+			feeds.push(0, sample(0n, 0));
+			await microtasks();
+			for (let ms = 250; ms <= 5000; ms += 250) {
+				await clock.advance(250);
+				feeds.push(0, sample(0n, ms * 1000, false));
+				await microtasks();
+				// Past the poster's second-long wait, the picture plays.
+				if (ms >= 1500) expect(playback.decoder.out.stalled.peek()).toBe(false);
+			}
+			expect(playback.decoder.out.frame.peek()?.timestamp).toBe(4_000_000);
+			expect(stalls()).toBe(0);
+		} finally {
+			await close();
+		}
+	});
+
 	it("holds the last picture through a declared end without a stall", async () => {
 		const { clock, feeds, playback, stalls, feedback, close } = await cold();
 		try {
@@ -1526,7 +1572,7 @@ it("bounds startup decoding while another track is missing and releases it on cl
 	const playback = await guardedPlayback("legacy", [], [], true, 1000);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: new Signal(null) });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 20; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1552,7 +1598,7 @@ it("resumes decoding the moment shared startup releases", async () => {
 	const audio = new Signal<{ start: Duration; end: Duration } | null>(null);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 8; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1600,7 +1646,7 @@ it("continues filling when the shared floor rises while video waits on audio", a
 	const audio = new Signal<{ start: Duration; end: Duration } | null>(null);
 	const remove = playback.sync.track({ target: new Signal(Duration.millis(100)), startup: audio });
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 7; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();
@@ -1624,7 +1670,7 @@ it("keeps feeding a decoder that has not output its first picture yet", async ()
 	const clock = manualAt(0);
 	const playback = await guardedPlayback("legacy", [], [0, 40_000, 80_000, 120_000], true, 1000);
 	if (!playback.track) throw new Error("missing video track");
-	const group = playback.track.appendGroup();
+	const group = playback.track.appendGroup(Moq.Time.Timestamp.fromMillis(0));
 	try {
 		for (let i = 0; i < 5; i++) group.writeFrame(legacyFrame(Duration.micros(i * 40_000)));
 		await microtasks();

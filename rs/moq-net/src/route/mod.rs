@@ -1,11 +1,9 @@
 //! The per-origin route layer, as one node's state machine.
 //!
-//! Routing follows the path rule the routes epic's Plan item 27 picked
-//! ([`path::Router`]): a route per publisher and prefix, believed by its own path. Each
-//! publisher versions its own claims with a revision, and a node merges every
-//! neighbour's certified view claim by claim, so no stale copy revives a withdrawal it
-//! already knows. [`node::Node`] drives it for every lite-07 session of one origin. See
-//! `quest/m2/cluster-routes/README.md` for the contract.
+//! A forwarding node routes to other forwarding nodes by path vector, and each one
+//! versions its own claims with a revision, so no stale copy revives a withdrawal a node
+//! already knows ([`relay::Router`]). [`node::Node`] drives it for every lite-07 session of
+//! one origin. See `rs/moq-net/verify/route-algebra/README.md` for the proof.
 //!
 //! The router does no I/O: the caller feeds it what each neighbour sent and drains its
 //! messages and reader [`Event`]s. Neighbour keys `N` and claim attributes `A` are opaque
@@ -17,26 +15,21 @@
 )]
 
 pub(crate) mod node;
-pub(crate) mod path;
-mod proof;
+mod prefix;
 mod reader;
-mod view;
+pub(crate) mod relay;
 
 #[cfg(test)]
 mod tests;
 
-use std::{fmt, sync::Arc};
+use std::fmt;
 
 use crate::Path;
 
 pub(crate) use node::Node;
 #[cfg(feature = "async")]
-pub(crate) use proof::EXPORTER_LABEL;
-pub use proof::RouteKey;
-pub(crate) use proof::{Proof, Transcript};
-#[cfg(feature = "async")]
-pub(crate) use view::ancestors;
-pub(crate) use view::{View, within};
+pub(crate) use prefix::{ancestors, heads, within};
+pub(crate) use relay::NodeId;
 
 /// A claim's attributes as the router carries them down a stream.
 pub(crate) trait Item: Clone + Eq + fmt::Debug {
@@ -45,6 +38,17 @@ pub(crate) trait Item: Clone + Eq + fmt::Debug {
 	/// much broader it is, so the claim keeps that distance: a claim exactly at a prefix
 	/// outranks every broader one there. `lowered(0)` is the claim itself.
 	fn lowered(&self, by: u64) -> Self;
+
+	/// How many segments the claim's own prefix lacks of the path it is shown at, as
+	/// [`Self::lowered`] counts them: 0 for a claim exactly there, which outranks every
+	/// broader one whatever their epochs or routes.
+	fn above(&self) -> u64;
+
+	/// Which run of its Instance the publisher is on: among claims of one Instance at one
+	/// path and distance, a higher epoch supersedes a lower one whatever either's route
+	/// costs, or whether a route reaches it, as `model::origin` ranks them. 0 for
+	/// attributes that carry none.
+	fn epoch(&self) -> u64;
 }
 
 /// Opaque attributes that cover nothing broader than their own path.
@@ -55,6 +59,14 @@ macro_rules! opaque {
 			fn lowered(&self, _: u64) -> Self {
 				self.clone()
 			}
+
+			fn above(&self) -> u64 {
+				0
+			}
+
+			fn epoch(&self) -> u64 {
+				0
+			}
 		}
 	)*};
 }
@@ -62,26 +74,14 @@ macro_rules! opaque {
 #[cfg(any(test, feature = "fuzz"))]
 opaque!((), u8, u32, u64);
 
-/// An opaque routing identity, declared by an origin or derived by [`Scope`].
+/// A relay's routing identity.
 pub(crate) type Id = u64;
-
-/// Set on every identity a [`Scope`] qualifies, so any node recognizes a
-/// qualified key and refuses to qualify it again.
-pub(crate) const QUALIFIED: Id = 1 << 63;
-
-/// The largest identity a node generates: the 53 bits a generated hop id keeps, so
-/// a generated identity travels as itself on a lite-06 hop chain (see `node::hop`).
-pub(crate) const GENERATED: Id = (1 << 53) - 1;
 
 /// A route metric: the sum of configured link costs.
 pub(crate) type Metric = u64;
 
-/// An origin's claim revision, advancing on every change to its own claims.
+/// A forwarding node's claim revision, advancing on every change to its own claims.
 pub(crate) type Rev = u64;
-
-/// The largest lite-07 varint. No origin ever advertises it as a revision, rotating its
-/// identity instead, so every revision leaves room for ANNOUNCE_FLOOR's offset.
-pub(crate) const MAX: u64 = u64::MAX;
 
 /// A neighbor key.
 pub(crate) trait Key: Copy + Ord + fmt::Debug {}
@@ -89,85 +89,6 @@ pub(crate) trait Key: Copy + Ord + fmt::Debug {}
 impl Key for usize {}
 
 impl Key for u64 {}
-
-/// One side's configuration of a link to a neighbor.
-#[derive(Clone, Debug)]
-pub(crate) struct Link {
-	/// Strictly positive: a zero-cost link would leave a path as cheap as the one it
-	/// extends, so selection would not converge.
-	pub cost: Metric,
-	/// The application's local priority for this connection: a path ranks by the lowest
-	/// on it, higher first, before cost.
-	pub priority: i8,
-	/// The neighbor is upstream: routes learned here are down-only, and no
-	/// down-only route is sent back.
-	pub upstream: bool,
-	/// Whether this neighbor is sent routes learned from other neighbors.
-	pub proxy: bool,
-	/// Set when the neighbor publishes under a scoped grant.
-	pub scope: Option<Scope>,
-	/// The prefixes this side wants of the neighbor, which it asks for where they meet
-	/// the node's own interest and the scope.
-	pub interest: std::collections::BTreeSet<Path>,
-	/// The prefix the session names its paths beneath: an asked prefix travels as what
-	/// follows it.
-	pub root: Path,
-	/// Which of the neighbor's sessions the stream belongs to: every stream of one session
-	/// shares it, and a later session has a higher one. [`node::Node`] sets it. Among equal
-	/// routes through one neighbor a node takes its latest session's, since an earlier one
-	/// is on its way out, as a GOAWAY migration leaves it.
-	pub session: u64,
-}
-
-impl Default for Link {
-	fn default() -> Self {
-		Self {
-			cost: 1,
-			priority: 0,
-			upstream: false,
-			proxy: true,
-			scope: None,
-			interest: [Path::empty()].into(),
-			root: Path::empty(),
-			session: 0,
-		}
-	}
-}
-
-/// A scoped neighbor's grant: every identity it sends is filed under a
-/// qualified key, and its claims count only within the grant's regions.
-#[derive(Clone)]
-pub(crate) struct Scope {
-	/// The prefixes the grant covers.
-	pub regions: Vec<Path>,
-	/// Derives the qualified key for an identity the neighbor names. It must
-	/// set [`QUALIFIED`].
-	pub qualify: Arc<dyn Fn(Id) -> Id + Send + Sync>,
-}
-
-impl fmt::Debug for Scope {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_struct("Scope")
-			.field("regions", &self.regions)
-			.finish_non_exhaustive()
-	}
-}
-
-/// Qualifies the identities a scoped neighbor names under `key`: a hash of the key and
-/// the identity, collision-resistant at 64 bits, with [`QUALIFIED`] set. Relays proving
-/// the same key for a neighbor file its identities alike.
-pub(crate) fn qualifier(key: [u8; 32]) -> Arc<dyn Fn(Id) -> Id + Send + Sync> {
-	Arc::new(move |id: Id| {
-		let mut ctx = rind::digest::Context::new(&rind::digest::SHA256);
-		ctx.update(b"moq-lite qualified node id");
-		ctx.update(&key);
-		ctx.update(&id.to_le_bytes());
-		let digest = ctx.finish();
-		let mut bytes = [0; 8];
-		bytes.copy_from_slice(&digest.as_ref()[..8]);
-		u64::from_le_bytes(bytes) | QUALIFIED
-	})
-}
 
 /// The most nodes a route crosses, its origin included: the longest hop list a
 /// message carries.
@@ -216,9 +137,10 @@ pub(crate) enum Kind {
 	Unavailable,
 }
 
+/// A change the reader sees: `id` is the Instance the claim serves.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Event<A> {
-	pub id: Id,
+pub(crate) struct Event<A, K = Id> {
+	pub id: K,
 	pub claim: Path,
 	pub kind: Kind,
 	pub item: A,
@@ -235,10 +157,24 @@ pub(crate) enum Error {
 	ZeroCost,
 	#[error("unknown neighbor")]
 	UnknownNeighbor,
-	#[error("no declared identity")]
-	NoIdentity,
 	#[error("one interest prefix inside another")]
 	Nested,
 	#[error("no such interest prefix")]
 	UnknownPrefix,
+	#[error("a neighbor connected twice")]
+	Duplicate,
+	#[error("a routing neighbor asked for part of the tree")]
+	Partial,
+	#[error("a claim outside what was asked, or anything before the answer began")]
+	Unasked,
+	#[error("claims or news about no route the neighbor offered")]
+	Unrouted,
+	#[error("a route or chain the rule never builds")]
+	Malformed,
+	#[error("a message the neighbor's role never sends")]
+	Role,
+	#[error(
+		"a routing neighbor started before a session of its relay known closed: its clock went back, or two relays share an id"
+	)]
+	Regressed,
 }

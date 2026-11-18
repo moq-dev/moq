@@ -67,7 +67,9 @@ pub struct Delay {
 	/// included, and a resumed subscription ignore it, and changing it later moves nothing
 	/// already started.
 	///
-	/// A media consumer reads an unstated minimum as zero. The aggregate across subscribers is
+	/// A media consumer also waits this long for a missing group, since past it the group would
+	/// play late, and starts an unstated minimum as zero but waits a missing group for
+	/// [`Self::max`] instead. The aggregate across subscribers is
 	/// the largest stated one, which a relay forwards upstream, so the copy it fills reaches
 	/// back for the reader that buffers most; each reader's own minimum then bounds what it
 	/// reads of that copy. moq-lite before 07 and moq-transport cannot carry it.
@@ -206,7 +208,7 @@ pub enum Anchor {
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
 	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
-	/// history looks the start up there (see [`Fill::time`](crate::track::Fill::time)),
+	/// history looks the start up there (see [`FillLookup`](crate::track::FillLookup)),
 	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
 	/// reaches back to the oldest group. While no group is held at all it waits for one,
 	/// reading nothing of its range meanwhile. An end includes every group starting at or
@@ -610,40 +612,6 @@ impl Position {
 		Self { group, frame: 0 }
 	}
 
-	/// The position just past `frame` of `group`: the exclusive end that includes it.
-	///
-	/// `None` when there is no such position, i.e. the very last frame of the very last
-	/// group. That is past everything, which an open [`Range::end`] spells `None` too, so
-	/// the two meanings line up.
-	pub fn after(group: u64, frame: u64) -> Option<Self> {
-		match frame.checked_add(1) {
-			Some(frame) => Some(Self { group, frame }),
-			// Past the last frame of a group is the head of the next one.
-			None => Self::after_group(group),
-		}
-	}
-
-	/// The position just past every frame of `group`: the exclusive end that includes
-	/// the group whole.
-	///
-	/// `None` past the last group, for the reason given on [`Self::after`].
-	pub fn after_group(group: u64) -> Option<Self> {
-		Some(Self::group(group.checked_add(1)?))
-	}
-
-	/// The bound this exclusive end puts on a group cursor, for
-	/// [`crate::track::Subscriber::with_range`].
-	///
-	/// A head-of-group end excludes its group. A mid-group end includes it, so a frame
-	/// cap can apply within that group.
-	pub fn group_end(self) -> Bound<u64> {
-		if self.frame == 0 {
-			Bound::Excluded(self.group)
-		} else {
-			Bound::Included(self.group)
-		}
-	}
-
 	/// The first group this exclusive end excludes whole, `None` past the last group: the
 	/// boundary a wire that cannot name a frame carries as the track's end.
 	pub(crate) fn final_key(self) -> Option<u64> {
@@ -749,21 +717,7 @@ mod tests {
 	}
 
 	#[test]
-	fn positions_are_total_at_the_extremes() {
-		// Past the last frame of a group is the head of the next one, not a wider frame
-		// in the same group.
-		assert_eq!(Position::after(5, u64::MAX), Some(Position::group(6)));
-
-		// Past everything has no position. An open range spells that `None` too, so the
-		// meanings coincide and the group is included rather than dropped.
-		assert_eq!(Position::after_group(u64::MAX), None);
-		assert_eq!(Position::after(u64::MAX, u64::MAX), None);
-
-		// A head-of-group end excludes that group; a mid-group end includes it.
-		assert_eq!(Position::group(0).group_end(), Bound::Excluded(0));
-		assert_eq!(Position::after_group(5).unwrap().group_end(), Bound::Excluded(6));
-		assert_eq!(Position::after(5, 2).unwrap().group_end(), Bound::Included(5));
-
+	fn cursor_bounds_are_total_at_the_extremes() {
 		// A cursor cap is the first index it withholds; an inclusive bound at the last
 		// index withholds nothing.
 		assert_eq!(key_bounds(..0), (0, Some(0)));

@@ -1029,23 +1029,10 @@ impl Session {
 }
 
 /// Whether a failure is the source going away (its session closing, or its route going), which
-/// holds the pads for the next start. A refusal is not: no restart answers a path that names
-/// nothing or a token that doesn't grant it, so it fails the session, as a malformed catalog does.
+/// holds the pads for the next start. A verdict is not: no restart answers a path that names
+/// nothing, a token that doesn't grant it, or malformed content, so it fails the session.
 fn source_lost(err: &moq_net::Error) -> bool {
-	if matches!(err, moq_net::Error::NotFound | moq_net::Error::Unauthorized) {
-		return false;
-	}
-	let code = match err {
-		moq_net::Error::Stream(moq_net::StreamError::Session(code)) => code.clone(),
-		_ => moq_net::SessionError::from(err),
-	};
-	!matches!(
-		code,
-		moq_net::SessionError::Unauthorized
-			| moq_net::SessionError::ProtocolViolation
-			| moq_net::SessionError::KeyValueFormatting
-			| moq_net::SessionError::InvalidRequestId
-	)
+	err.retry() != moq_net::Retry::Never
 }
 
 /// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
@@ -1725,9 +1712,12 @@ impl Reader {
 		// ending a broadcast produces for a name nobody served). A publisher that answers neither
 		// leaves this waiting, so racing `cancel` keeps such a reader reapable, and holding the
 		// wait here keeps it off every other rendition.
-		// The catalog warmup reaches that much further back for a decoder to start clean.
-		let playout =
-			moq_mux::container::Playout::new(moq_net::track::Delay::default().with_max(max_delay), shape.warmup);
+		// The catalog warmup reaches that much further back for a decoder to start clean. No min:
+		// the pipeline's own latency is unknown here, so a missing group is waited for the max delay.
+		let playout = moq_mux::container::Playout::new(
+			moq_net::track::Delay::default().with_min(None).with_max(max_delay),
+			shape.warmup,
+		);
 		let subscriber = tokio::select! {
 			_ = cancel.changed() => return Exit::Done,
 			subscriber = async {
@@ -2594,20 +2584,29 @@ mod session_tests {
 		})
 	}
 
+	/// A refusal or malformed input fails the session, wherever it was judged. A session ending,
+	/// whatever its code, is the source going away: the connection decides whether it returns.
 	#[test]
-	fn malformed_input_is_not_a_lost_source() {
+	fn a_verdict_is_not_a_lost_source() {
 		for err in [
 			moq_net::Error::ProtocolViolation,
 			moq_net::Error::WrongSize,
-			moq_net::Error::Session(moq_net::SessionError::ProtocolViolation),
-			moq_net::Error::Session(moq_net::SessionError::KeyValueFormatting),
+			moq_net::Error::NotFound,
+			moq_net::Error::Unauthorized,
+			moq_net::Error::Stream(moq_net::StreamError::NotFound),
+			moq_net::Error::Stream(moq_net::StreamError::Unauthorized),
+			moq_net::Error::Stream(moq_net::StreamError::MalformedTrack),
+			moq_net::Error::Stream(moq_net::StreamError::App(1)),
 		] {
 			assert!(!super::source_lost(&err), "{err:?}");
 		}
 		for err in [
 			moq_net::Error::Closed,
-			moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
 			moq_net::Error::Cancel,
+			moq_net::Error::Unroutable,
+			moq_net::Error::Stream(moq_net::StreamError::Session(moq_net::SessionError::Cancel)),
+			moq_net::Error::Session(moq_net::SessionError::ProtocolViolation),
+			moq_net::Error::Session(moq_net::SessionError::from_code(0x6)),
 		] {
 			assert!(super::source_lost(&err), "{err:?}");
 		}
@@ -3804,11 +3803,7 @@ mod session_tests {
 	#[test]
 	fn the_source_retries_without_a_budget() {
 		let config = super::connect_config(&unreachable());
-		assert_eq!(
-			config.backoff.timeout,
-			Some((Duration::ZERO).into()),
-			"zero is unlimited"
-		);
+		assert_eq!(config.backoff.timeout, Some(moq_tokio::cli::Bound::NONE), "no give-up");
 	}
 
 	/// `quic-keylog` reaches the client's QUIC config, which refuses it without `SSLKEYLOGFILE`.
@@ -6052,25 +6047,19 @@ mod session_tests {
 		assert!(error.is_none(), "a refused redial failed the pipeline: {error:?}");
 	}
 
+	/// A session the relay closes for a protocol violation ends like any other: the connection
+	/// redials, which is its call rather than the source's, and the pads play on.
 	#[test]
-	fn a_protocol_violation_posts_a_bus_error_after_playback() {
+	fn a_protocol_violation_redials_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
 		let mut publisher = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
 		relay.close.send(moq_net::Error::ProtocolViolation).unwrap();
-		let error = pipeline
-			.bus()
-			.unwrap()
-			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
-		pipeline.set_state(gst::State::Null).unwrap();
+		rendered(&sink, &mut publisher, 2);
+		assert_played_cleanly(pipeline);
 		relay.stop();
-		let error = error.expect("protocol violation did not fail the pipeline");
-		let gst::MessageView::Error(error) = error.view() else {
-			unreachable!()
-		};
-		assert!(error.debug().unwrap().contains("protocol violation"), "{error:?}");
 	}
 
 	/// End to end through a relay: a publisher restarted under a new instance, the old one still up.
@@ -6239,7 +6228,9 @@ mod session_tests {
 		rendered(&sink, &mut old, 1);
 
 		let mut announced = announced(&relay.origin);
-		session.abort(moq_net::Error::App(1));
+		// Not an application code: a relay forwards one to its readers as the publisher's
+		// verdict, which fails the source.
+		session.abort(moq_net::SessionError::Internal.into());
 		await_event(&mut announced, |event| {
 			matches!(
 				event,

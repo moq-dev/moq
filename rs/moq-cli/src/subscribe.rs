@@ -362,8 +362,9 @@ impl Subscribe {
 		// Fmp4 builds the merged init segment from the first catalog snapshot, then
 		// yields moof+mdat fragments in timestamp order across tracks.
 		let stream = self.stream().await?;
+		// No min: an export plays nothing out, so a missing group is waited for the whole max delay.
 		let mut fmp4 = moq_mux::container::fmp4::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay))
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay))
 			.with_fragment_duration(self.args.fragment_duration);
 
 		while let Some(chunk) = fmp4.next().await? {
@@ -384,11 +385,24 @@ impl Subscribe {
 			() = finish.cancelled() => return Ok(()),
 		};
 		let mut mp4 = moq_mux::container::mp4::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay))
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay))
 			.with_fragment_duration(self.args.fragment_duration);
-		let mut file = tokio::fs::File::create_new(&path)
+		let file = tokio::fs::File::create_new(&path)
 			.await
-			.with_context(|| format!("failed to create {}", path.display()))?;
+			.with_context(|| format!("failed to create {}", path.display()))?
+			.into_std()
+			.await;
+		// Held until the file closes, which `moq repair mp4` reads as a recorder still writing.
+		// The OS drops it with a killed recorder, so that recording stays repairable. A file that
+		// can't be locked could never be repaired safely, so it isn't recorded.
+		// On Windows the lock is mandatory and also blocks other readers; a shared lock wouldn't
+		// help, since it denies writes to the handle holding it too.
+		if let Err(err) = file.try_lock() {
+			drop(file);
+			tokio::fs::remove_file(&path).await?;
+			return Err(err).with_context(|| format!("failed to lock {}, so it could not be repaired", path.display()));
+		}
+		let mut file = tokio::fs::File::from_std(file);
 
 		// A failed export still finishes what it recorded; a failed write leaves the file as is.
 		let mut stopped = false;
@@ -451,7 +465,7 @@ impl Subscribe {
 
 		let stream = self.stream().await?;
 		let mut h264 = moq_mux::codec::h264::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay));
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay));
 
 		while let Some(chunk) = h264.next().await? {
 			stdout.write_all(&chunk).await?;
@@ -466,7 +480,7 @@ impl Subscribe {
 
 		let stream = self.stream().await?;
 		let mut h265 = moq_mux::codec::h265::Export::new(self.source, stream)
-			.with_delay(Delay::default().with_max(self.args.max_delay));
+			.with_delay(Delay::default().with_min(None).with_max(self.args.max_delay));
 
 		while let Some(chunk) = h265.next().await? {
 			stdout.write_all(&chunk).await?;

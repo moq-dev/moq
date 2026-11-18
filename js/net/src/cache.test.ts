@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import * as cache from "./cache.ts";
 import { StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
+import { groupsOf } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 import { Producer as TrackProducer } from "./track.ts";
 
@@ -26,22 +27,21 @@ function pooled(pool: cache.Pool, name = "test"): TrackProducer {
 }
 
 function finished(producer: TrackProducer, size: number): bigint {
-	const group = producer.appendGroup();
-	group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.unscaled(group.sequence) });
+	const group = hooks.appendNext(producer);
+	group.writeFrame({ payload: new Uint8Array(size), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
-	return group.sequence;
+	return group.start;
 }
 
 // The sequences a fresh subscriber is handed: what the track still caches. Its mirrors are
 // released once its close settles.
 async function cached(producer: TrackProducer): Promise<bigint[]> {
 	const subscriber = producer.subscribe({ delay: { max: null } });
-	const sequences: bigint[] = [];
-	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup())
-		sequences.push(group.sequence);
+	const keys: bigint[] = [];
+	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup()) keys.push(group.start);
 	subscriber.close();
 	await yieldNow();
-	return sequences;
+	return keys;
 }
 
 // Taking a group is a cache access: a reader handed one just inside the window can still read
@@ -56,7 +56,7 @@ test("delivery restarts a group's idle window", async () => {
 
 		await clock.advance(9_000);
 		const reading = subscriber.tryRecvGroup();
-		expect(reading?.sequence).toBe(0n);
+		expect(reading?.start).toBe(0n);
 		// Far beyond the write, inside the delivery. The new group runs the expiry scan.
 		await clock.advance(9_000);
 		finished(producer, 1);
@@ -72,8 +72,8 @@ test("the sweep expires idle groups across tracks without a write", async () => 
 		const pool = new cache.Pool({ expiry: Duration.millis(1_000) });
 		const tracks = [pooled(pool, "a"), pooled(pool, "b")];
 		const stalled = tracks.map((track) => {
-			const group = track.appendGroup(); // left open
-			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.sequence) });
+			const group = hooks.appendNext(track); // left open
+			group.writeFrame({ payload: new Uint8Array(1), timestamp: Timestamp.unscaled(group.start) });
 			finished(track, 1); // the live edge
 			return group;
 		});
@@ -176,16 +176,16 @@ test("a forgotten stale run is asked of a fill", async () => {
 		await clock.advance(2_000);
 
 		const reader = producer.subscribe({
-			ranges: [{ start: { absolute: 1n } }],
+			ranges: [{ start: { time: 1n } }],
 			delay: { max: Duration.millis(60_000) },
 			order: "ascending",
 		});
 		// The live group first, in arrival order; the next read asks for what it misses.
-		expect((await reader.recvGroup())?.sequence).toBe(3n);
+		expect((await reader.recvGroup())?.start).toBe(3n);
 		const next = reader.recvGroup();
 		const asked: bigint[][] = [];
 		for (;;) {
-			const fill = await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]);
+			const fill = groupsOf(await Promise.race([requests.requestedFill(), yieldNow().then(() => undefined)]));
 			if (!fill) break;
 			asked.push([fill.start, fill.end]);
 		}
@@ -205,8 +205,8 @@ test("a forgotten failed fill answer leaves its gap owed", async () => {
 		const producer = pooled(pool);
 		hooks.receiveTrack(producer);
 		const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
-		for (const sequence of [0n, 2n]) hooks.receiveGroup(producer, { sequence, start: 0 }).finish();
-		hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true }).abort(new Error("archive failed"));
+		for (const key of [0n, 2n]) hooks.receiveGroup(producer, { start: key, offset: 0 }).finish();
+		hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true }).abort(new Error("archive failed"));
 		hooks.endTrack(producer, { group: 3n, frame: 0 });
 		await yieldNow();
 		// A failed fill answer says nothing of the feed, so it records no drop, as in Rust.
@@ -227,10 +227,10 @@ test("a held failed fill answer stays readable", async () => {
 	const producer = pooled(pool);
 	hooks.receiveTrack(producer);
 	const reader = producer.subscribe({ delay: { max: Duration.millis(60_000) } });
-	const answer = hooks.receiveGroup(producer, { sequence: 1n, start: 0, fill: true });
-	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.sequence) });
+	const answer = hooks.receiveGroup(producer, { start: 1n, offset: 0, fill: true });
+	answer.writeFrame({ payload: new Uint8Array(10_000), timestamp: Timestamp.unscaled(answer.start) });
 	const group = await reader.recvGroup();
-	expect(group?.sequence).toBe(1n);
+	expect(group?.start).toBe(1n);
 	answer.abort(new Error("archive failed"));
 	await yieldNow();
 	expect((await group?.readFrame())?.payload.byteLength).toBe(10_000);

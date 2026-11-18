@@ -101,8 +101,8 @@ mod tests {
 		let claims: crate::Claims = serde_json::from_value(wire).unwrap();
 		let key = crate::Key::generate(crate::Algorithm::HS256, None).unwrap();
 		let claims = key.verify(&key.sign(&claims).unwrap()).unwrap();
-		assert_eq!(claims.publish_rate, Some(Rate::from_bps(8000).unwrap()));
-		assert_eq!(claims.subscribe_rate, Some(Rate::from_bps(16000).unwrap()));
+		assert_eq!(claims.publish.rate, Some(Rate::from_bps(8000).unwrap()));
+		assert_eq!(claims.subscribe.rate, Some(Rate::from_bps(16000).unwrap()));
 		let scope: crate::Scope =
 			serde_json::from_str(r#"{"root":"room","publish":["**"],"subscribe":["**"]}"#).unwrap();
 		assert!(scope.allows(&claims));

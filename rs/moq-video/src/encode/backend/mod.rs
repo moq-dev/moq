@@ -18,6 +18,7 @@
 //! when this build enables it.
 
 use super::encoder::{Applied, Codec, Config, Kind};
+use crate::device::Drives;
 use crate::encode::Encoded;
 use crate::{Error, Frame};
 
@@ -240,6 +241,8 @@ struct Candidate {
 		allow(dead_code, reason = "only the `capture` feature uses it")
 	)]
 	cuts: bool,
+	/// The kind of [`Device`](crate::Device) it opens, which a named one steers selection by.
+	drives: Drives,
 	#[cfg(target_os = "linux")]
 	vulkan: bool,
 }
@@ -253,6 +256,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: videotoolbox::VideoToolbox::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -262,6 +266,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediafoundation::MediaFoundation::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -271,6 +276,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: mediacodec::MediaCodec::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -280,6 +286,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: nvenc::Nvenc::open,
 		cuts: true,
+		drives: Drives::Nvidia,
 		#[cfg(target_os = "linux")]
 		vulkan: true,
 	},
@@ -289,6 +296,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264, Codec::H265],
 		open: vaapi::Vaapi::open,
 		cuts: true,
+		drives: Drives::Render,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -301,6 +309,7 @@ const HARDWARE: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: v4l2::V4l2::open,
 		cuts: false,
+		drives: Drives::Video,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -316,6 +325,7 @@ const SOFTWARE: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: openh264::Openh264::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -331,6 +341,7 @@ const NAMED_ONLY: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: probe::Probe::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -339,6 +350,7 @@ const NAMED_ONLY: &[Candidate] = &[
 		codecs: &[Codec::H264],
 		open: probe::Probe::open_no_cut,
 		cuts: false,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	},
@@ -439,6 +451,23 @@ fn select(attempts: Vec<Attempt>, config: &Config) -> Result<Box<dyn Backend>, E
 		{
 			tried.push(format!("{name}: cannot import external Vulkan {device}"));
 			continue;
+		}
+		match config.device.takes(attempt.candidate.drives) {
+			Ok(true) => {}
+			Ok(false) => {
+				tried.push(format!("{name}: does not open {}", config.device));
+				continue;
+			}
+			// Telling whether this backend drives the named node failed, which
+			// counts against this candidate alone, as a failed open would.
+			Err(e) => {
+				tracing::debug!(encoder = name, error = %e, "encoder unavailable, trying next");
+				tried.push(format!("{name}: {e}"));
+				if attempt.hardware {
+					refused.push(format!("{name}: {e}"));
+				}
+				continue;
+			}
 		}
 		match (attempt.candidate.open)(config) {
 			Ok(backend) => {
@@ -713,6 +742,7 @@ mod tests {
 		codecs: &[Codec::H264],
 		open: Stub::open,
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	};
@@ -724,6 +754,7 @@ mod tests {
 		codecs: &[Codec::H264],
 		open: |_| Err(Error::codec(anyhow::anyhow!("driver libraries not found"))),
 		cuts: true,
+		drives: Drives::Own,
 		#[cfg(target_os = "linux")]
 		vulkan: false,
 	};
@@ -746,6 +777,69 @@ mod tests {
 		for candidate in NAMED_ONLY {
 			let backend = (candidate.open)(&config()).unwrap();
 			assert_eq!(backend.can_cut(), candidate.cuts, "{}", candidate.name);
+		}
+	}
+
+	/// A named node passes over the hardware that drives another kind of device
+	/// without opening it, and says so when nothing else opens.
+	#[test]
+	fn a_named_device_passes_over_other_hardware() {
+		const RENDER: Candidate = Candidate {
+			name: "render",
+			open: |_| panic!("opened a render backend for a codec node"),
+			drives: Drives::Render,
+			..WORKING
+		};
+		const VIDEO: Candidate = Candidate {
+			name: "video",
+			drives: Drives::Video,
+			..WORKING
+		};
+
+		let mut config = config();
+		config.device = crate::Device::Video("/dev/video11".into());
+		let opened = select(vec![Attempt::hardware(&RENDER), Attempt::hardware(&VIDEO)], &config).unwrap();
+		assert_eq!(opened.name(), "stub");
+
+		match select(vec![Attempt::hardware(&RENDER)], &config) {
+			Err(Error::NoEncoder(reason)) => assert!(
+				reason.contains("render: does not open codec node /dev/video11"),
+				"{reason}"
+			),
+			Err(other) => panic!("expected NoEncoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoEncoder, opened {}", backend.name()),
+		}
+	}
+
+	/// A driver check that cannot read the named node counts against the NVIDIA
+	/// candidate alone: selection goes on, and the reason reaches the error.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn a_failed_driver_check_moves_on() {
+		const NVIDIA: Candidate = Candidate {
+			name: "nvidia",
+			open: |_| panic!("opened NVIDIA for an unreadable node"),
+			drives: Drives::Nvidia,
+			..WORKING
+		};
+		const RENDER: Candidate = Candidate {
+			name: "render",
+			drives: Drives::Render,
+			..WORKING
+		};
+
+		let mut config = config();
+		config.device = crate::Device::Render("/dev/dri/renderD199-absent".into());
+		let opened = select(vec![Attempt::hardware(&NVIDIA), Attempt::hardware(&RENDER)], &config).unwrap();
+		assert_eq!(opened.name(), "stub");
+
+		match select(vec![Attempt::hardware(&NVIDIA)], &config) {
+			Err(Error::NoEncoder(reason)) => assert!(
+				reason.contains("nvidia: ") && reason.contains("renderD199-absent"),
+				"{reason}"
+			),
+			Err(other) => panic!("expected NoEncoder, got {other:?}"),
+			Ok(backend) => panic!("expected NoEncoder, opened {}", backend.name()),
 		}
 	}
 

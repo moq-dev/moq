@@ -1,56 +1,56 @@
 /**
- * The group sequences a reader handed out, so it never hands one out twice. Mirrors
+ * The group keys a reader handed out, so it never hands one out twice. Mirrors
  * `model::delivered` in `rs/moq-net`.
  *
  * @module
  */
 
-import { max, min } from "./util/sequence.ts";
+import { max, min } from "./util/key.ts";
 
 /**
- * The group sequences a reader handed out, as runs of consecutive sequences.
+ * The group keys a reader handed out, as runs of consecutive keys.
  *
  * A reader stops expecting a group once it is past its budget, and counts everything below it
  * as handed out (see {@link forgetBelow}). The run starting at 0 is that floor, so only the
  * gaps above it cost memory.
  */
 export class Delivered {
-	// First and last sequence of each run, inclusive, sorted and never adjacent to each other.
+	// First and last key of each run, inclusive, sorted and never adjacent to each other.
 	#runs: [bigint, bigint][] = [];
 
-	// The index of the run containing or preceding `sequence`, or -1 when none starts at or below it.
-	#below(sequence: bigint): number {
+	// The index of the run containing or preceding `key`, or -1 when none starts at or below it.
+	#below(key: bigint): number {
 		let lo = 0;
 		let hi = this.#runs.length;
 		while (lo < hi) {
 			const mid = (lo + hi) >>> 1;
-			if (this.#runs[mid][0] <= sequence) lo = mid + 1;
+			if (this.#runs[mid][0] <= key) lo = mid + 1;
 			else hi = mid;
 		}
 		return lo - 1;
 	}
 
-	/** Whether `sequence` was handed out, or is below the floor. */
-	has(sequence: bigint): boolean {
-		const index = this.#below(sequence);
-		return index >= 0 && sequence <= this.#runs[index][1];
+	/** Whether `key` was handed out, or is below the floor. */
+	has(key: bigint): boolean {
+		const index = this.#below(key);
+		return index >= 0 && key <= this.#runs[index][1];
 	}
 
-	/** Whether every sequence in `[start, end)` was handed out, or is below the floor. */
+	/** Whether every key in `[start, end)` was handed out, or is below the floor. */
 	covers(start: bigint, end: bigint): boolean {
 		if (start >= end) return true;
 		const index = this.#below(start);
 		return index >= 0 && end - 1n <= this.#runs[index][1];
 	}
 
-	/** Record `sequence` as handed out; `false` when it already was. */
-	add(sequence: bigint): boolean {
-		if (this.has(sequence)) return false;
-		this.addRun(sequence, sequence + 1n);
+	/** Record `key` as handed out; `false` when it already was. */
+	add(key: bigint): boolean {
+		if (this.has(key)) return false;
+		this.addRun(key, key + 1n);
 		return true;
 	}
 
-	/** Record every sequence in `[start, end)` as handed out. */
+	/** Record every key in `[start, end)` as handed out. */
 	addRun(start: bigint, end: bigint): void {
 		if (start >= end) return;
 		// The runs it overlaps or touches, `first` through `last`, merge into one.
@@ -86,7 +86,7 @@ export class Delivered {
 		return gaps;
 	}
 
-	/** Count every sequence below `floor` as handed out. */
+	/** Count every key below `floor` as handed out. */
 	forgetBelow(floor: bigint): void {
 		if (floor <= 0n) return;
 		// Every run starting at or below the floor joins it, including one starting right at it.
@@ -96,7 +96,7 @@ export class Delivered {
 	}
 
 	/**
-	 * The lowest sequence handed out above a gap: once it is past the reader's budget, so is
+	 * The lowest key handed out above a gap: once it is past the reader's budget, so is
 	 * the gap, since group timestamps on a track never rewind.
 	 */
 	aboveGap(): bigint | undefined {
@@ -105,10 +105,10 @@ export class Delivered {
 		return first[0] === 0n ? this.#runs[1]?.[0] : first[0];
 	}
 
-	/** One past the last sequence of the run holding `sequence`, if it was handed out. */
-	runEnd(sequence: bigint): bigint | undefined {
-		const index = this.#below(sequence);
-		return index >= 0 && sequence <= this.#runs[index][1] ? this.#runs[index][1] + 1n : undefined;
+	/** One past the last key of the run holding `key`, if it was handed out. */
+	runEnd(key: bigint): bigint | undefined {
+		const index = this.#below(key);
+		return index >= 0 && key <= this.#runs[index][1] ? this.#runs[index][1] + 1n : undefined;
 	}
 
 	/** How many runs it holds: one per gap, plus the floor. */

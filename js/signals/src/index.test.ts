@@ -138,17 +138,80 @@ describe("Signal", () => {
 		dispose();
 	});
 
-	test("a silent write never hides a later change from a new listener", async () => {
-		const signal = new Signal(0);
-		signal.set(1, false); // nobody listens
-
-		const seen: number[] = [];
+	test("update notifies only on a change, like set", async () => {
+		const signal = new Signal({ n: 1 });
+		const seen: { n: number }[] = [];
 		const dispose = signal.subscribe((v) => seen.push(v));
-		expect(signal.peek()).toBe(1); // the listener starts from 1
 
-		signal.set(0);
+		signal.update((v) => v);
+		signal.update((v) => ({ ...v }));
 		await settle();
-		expect(seen).toEqual([0]);
+		expect(seen).toEqual([]);
+
+		signal.update((v) => ({ n: v.n + 1 }));
+		await settle();
+		expect(seen).toEqual([{ n: 2 }]);
+
+		// An in-place change returned as the same object is no change to compare.
+		signal.update((v) => {
+			v.n++;
+			return v;
+		});
+		await settle();
+		expect(seen).toHaveLength(1);
+		dispose();
+	});
+
+	test("mutate notifies once per call, even when nothing changed", async () => {
+		const signal = new Signal<number[]>([]);
+		let notified = 0;
+		const dispose = signal.subscribe(() => notified++);
+
+		expect(signal.mutate((v) => v.push(1))).toBe(1);
+		await settle();
+		expect(notified).toBe(1);
+
+		signal.mutate(() => {});
+		await settle();
+		expect(notified).toBe(2);
+		expect(signal.peek()).toEqual([1]);
+		dispose();
+	});
+
+	test("proxy forwards a change made in place", async () => {
+		const src = new Signal<number[]>([]);
+		const dst = new Signal<number[]>([1]);
+		const effect = new Effect();
+		effect.proxy(dst, src);
+		const seen: number[][] = [];
+		const dispose = dst.subscribe((v) => seen.push([...v]));
+
+		src.mutate((v) => v.push(2));
+		await settle();
+		expect(seen.at(-1)).toEqual([2]);
+
+		const before = seen.length;
+		src.mutate((v) => v.push(3));
+		await settle();
+		expect(seen.length).toBe(before + 1);
+		expect(seen.at(-1)).toEqual([2, 3]);
+		dispose();
+		effect.close();
+	});
+
+	test("a forced set of an equal value notifies once", async () => {
+		const signal = new Signal("jump");
+		const seen: string[] = [];
+		const dispose = signal.subscribe((v) => seen.push(v));
+
+		signal.set("jump", true);
+		signal.set("jump", true);
+		await settle();
+		expect(seen).toEqual(["jump"]);
+
+		signal.set("jump");
+		await settle();
+		expect(seen).toEqual(["jump"]);
 		dispose();
 	});
 
@@ -1033,7 +1096,7 @@ describe("Effect", () => {
 		}
 	});
 
-	test("timer, timeout, and interval run on the installed clock until cleanup", async () => {
+	test("timer and interval run on the installed clock until cleanup", async () => {
 		const ms = (value: number) => Duration.millis(value);
 		const clock = new Manual();
 		const installed = clock.install();
@@ -1042,22 +1105,19 @@ describe("Effect", () => {
 		try {
 			effect.timer(() => fired.push("timer"), ms(10));
 			effect.interval(() => fired.push("tick"), ms(4));
-			effect.timeout((child) => child.cleanup(() => fired.push("timeout")), ms(6));
 
 			await clock.advance(ms(3));
 			expect(fired).toEqual([]);
 			await clock.advance(ms(1));
 			expect(fired).toEqual(["tick"]);
+			await clock.advance(ms(4));
+			expect(fired).toEqual(["tick", "tick"]);
 			await clock.advance(ms(2));
-			expect(fired).toEqual(["tick", "timeout"]);
-			await clock.advance(ms(2));
-			expect(fired).toEqual(["tick", "timeout", "tick"]);
-			await clock.advance(ms(2));
-			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+			expect(fired).toEqual(["tick", "tick", "timer"]);
 
 			effect.close();
 			await clock.advance(ms(20));
-			expect(fired).toEqual(["tick", "timeout", "tick", "timer"]);
+			expect(fired).toEqual(["tick", "tick", "timer"]);
 		} finally {
 			effect.close();
 			installed.close();

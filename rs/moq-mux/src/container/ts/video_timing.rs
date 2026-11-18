@@ -18,6 +18,7 @@ use h264_reader::rbsp::{BitRead, BitReader, BitReaderError};
 use moq_net::Timestamp;
 
 use super::Unit;
+use crate::container::ts::error::{Result, malformed};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Rate {
@@ -62,20 +63,14 @@ impl Clock {
 		}
 	}
 
-	fn stamp(
-		&mut self,
-		explicit: Option<Timestamp>,
-		poc: i64,
-		rate: Option<Rate>,
-		reset: bool,
-	) -> anyhow::Result<Timestamp> {
+	fn stamp(&mut self, explicit: Option<Timestamp>, poc: i64, rate: Option<Rate>, reset: bool) -> Result<Timestamp> {
 		if reset {
 			self.anchor = None;
 		}
 		let Some(rate) = rate else {
 			self.anchor = None;
 			return explicit.ok_or_else(|| {
-				anyhow::anyhow!("TS video access unit has no timestamp or signalled proportional POC clock")
+				malformed!("TS video access unit has no timestamp or signalled proportional POC clock")
 			});
 		};
 		if let Some(pts) = explicit {
@@ -85,17 +80,17 @@ impl Clock {
 		let anchor = self
 			.anchor
 			.filter(|anchor| anchor.rate == rate)
-			.ok_or_else(|| anyhow::anyhow!("TS video access unit has no timestamp anchor for its POC clock"))?;
+			.ok_or_else(|| malformed!("TS video access unit has no timestamp anchor for its POC clock"))?;
 		// Always measure from the explicit anchor, retaining fractional ticks rather
 		// than accumulating the rounding error of a frame-by-frame increment.
 		let scale = anchor
 			.pts
 			.scale()
-			.ok_or_else(|| anyhow::anyhow!("TS video timestamp anchor has no timescale"))?;
+			.ok_or_else(|| malformed!("TS video timestamp anchor has no timescale"))?;
 		let scale = i128::from(scale.as_u64());
 		let denominator = scale
 			.checked_mul(rate.denominator.into())
-			.ok_or_else(|| anyhow::anyhow!("TS video timestamp overflow"))?;
+			.ok_or_else(|| malformed!("TS video timestamp overflow"))?;
 		let delta = (i128::from(poc) - i128::from(anchor.poc))
 			.checked_mul(i128::from(rate.numerator))
 			.and_then(|n| n.checked_mul(scale));
@@ -104,11 +99,11 @@ impl Clock {
 			.and_then(|n| n.checked_add(delta?))
 			.and_then(|n| n.checked_mul(1_000_000))
 			.and_then(|n| u64::try_from(n / denominator).ok())
-			.ok_or_else(|| anyhow::anyhow!("TS video timestamp outside the media clock"))?;
+			.ok_or_else(|| malformed!("TS video timestamp outside the media clock"))?;
 		Ok(Timestamp::from_micros(micros)?)
 	}
 
-	pub fn avc<'a>(&mut self, unit: &Unit, params: impl Iterator<Item = &'a Bytes>) -> anyhow::Result<Timestamp> {
+	pub fn avc<'a>(&mut self, unit: &Unit, params: impl Iterator<Item = &'a Bytes>) -> Result<Timestamp> {
 		let parsed = (|| {
 			let mut ctx = self.avc_ctx.clone().unwrap_or_default();
 			let bootstrap: Vec<_> = if self.avc_ctx.is_none() {
@@ -184,7 +179,7 @@ impl Clock {
 				self.avc_update = Some(None);
 				return unit
 					.pts
-					.ok_or_else(|| anyhow::anyhow!("TS video timestamp cannot be derived: {err}"));
+					.ok_or_else(|| malformed!("TS video timestamp cannot be derived: {err}"));
 			}
 		};
 		let pts = self.stamp(unit.pts, poc, rate, reset)?;
@@ -196,7 +191,7 @@ impl Clock {
 		Ok(pts)
 	}
 
-	pub fn hevc<'a>(&mut self, unit: &Unit, params: impl Iterator<Item = &'a Bytes>) -> anyhow::Result<Timestamp> {
+	pub fn hevc<'a>(&mut self, unit: &Unit, params: impl Iterator<Item = &'a Bytes>) -> Result<Timestamp> {
 		let parsed = (|| {
 			let mut ctx = self.hevc_ctx.clone().unwrap_or_default();
 			let bootstrap: Vec<_> = if self.hevc_ctx.is_none() {
@@ -259,7 +254,7 @@ impl Clock {
 				self.reset();
 				self.hevc_update = Some(None);
 				unit.pts
-					.ok_or_else(|| anyhow::anyhow!("TS video timestamp cannot be derived: {err}"))
+					.ok_or_else(|| malformed!("TS video timestamp cannot be derived: {err}"))
 			}
 		}
 	}

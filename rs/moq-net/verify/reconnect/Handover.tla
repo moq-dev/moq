@@ -29,7 +29,7 @@ CONSTANTS
     Endpoints,    \* where a dial can land
     Start,        \* the configured target
     Refused,      \* a GOAWAY URI `Redirect::target` refuses
-    Restart,      \* `Config::restart`: "redial", "wait", or "handoff"
+    Restart,      \* `Config::restart`: "redial" or "handoff"
     MaxSessions   \* sessions that connect in one behaviour
 
 Sessions == 1..MaxSessions
@@ -350,13 +350,13 @@ EndClosed ==
 \* `Phase::Live`: a GOAWAY is checked before the close.
 Goaway(s) == watch /\ sess[s].goaway # NoGoaway
 
-\* `Restart::Wait` serves out a restart in place; `Restart::Handoff` does so
-\* only on a session drained before it was healthy, and redials an older one
-\* once, as `Restart::Redial` does.
+\* `Restart::Handoff` serves out a restart in place on a session drained
+\* before it was healthy, and redials an older one once, as `Restart::Redial`
+\* does.
 WaitOut(s) ==
     /\ sess[s].goaway = ""
-    /\ \/ Restart = "wait"
-       \/ Restart = "handoff" /\ sess[s].age = 0
+    /\ Restart = "handoff"
+    /\ sess[s].age = 0
 
 LiveEnds ==
     /\ queue = <<>>

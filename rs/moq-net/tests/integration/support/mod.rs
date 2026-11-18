@@ -18,7 +18,12 @@ pub trait AppendNext {
 
 impl AppendNext for track::Producer {
 	fn append_next(&self) -> moq_net::Result<group::Producer> {
-		self.append_group(self.largest().map_or(0, |largest| largest.group + 1))
+		let key = self.largest().map_or(0, |largest| largest.group + 1);
+		let start = match self.info().timescale {
+			Some(scale) => Timestamp::new(key, scale).map_err(|_| moq_net::Error::TimestampMismatch)?,
+			None => Timestamp::unscaled(key),
+		};
+		self.append_group(start)
 	}
 }
 
@@ -41,6 +46,15 @@ impl AtStart for group::Producer {
 	fn at_start(&self) -> Timestamp {
 		Timestamp::new(self.start, self.timescale().expect("a timed track")).unwrap()
 	}
+}
+
+/// A fill the test expects to name groups rather than look up a time.
+#[allow(dead_code, reason = "shared by several test binaries, each using only part of it")]
+pub fn groups(fill: track::Fill) -> track::FillGroups {
+	let track::Fill::Groups(fill) = fill else {
+		panic!("a run of groups, not a time lookup");
+	};
+	fill
 }
 
 /// The groups from the one containing `keys`' start through the one containing its end, as

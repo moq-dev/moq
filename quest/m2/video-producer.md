@@ -6,7 +6,7 @@
 the uplink grant, as `moq_audio::encode::Producer` does for PCM. The type
 that publishes already encoded access units keeps working under a name that
 says what it takes (recommended: `encode::Publisher`). moq-boy, moq-ffi, and
-moq-c publish video through the new producer, so the probe, catalog
+libmoq publish video through the new producer, so the probe, catalog
 reservation, encode loop, and grant following exist once, in moq-video.
 
 ## Plan
@@ -32,12 +32,12 @@ Facts found by the audit:
   the config, reserve a catalog slot with the effective join, build the
   producer, run the encode, receive, publish loop. `rs/moq-boy/src/video.rs:59-65`
   is the shortest witness; `rs/moq-ffi/src/video.rs` (2,129 lines) and
-  `rs/moq-c/src/video.rs` (1,820 lines) carry the rest.
+  `rs/libmoq/src/video.rs` (1,820 lines) carry the rest.
 - Grant following with rung disable, the part that is easy to get wrong,
   exists three times: private in the capture driver
   (`rs/moq-video/src/encode/producer.rs:718`, `:840`, `:940`), in moq-ffi
-  (`rs/moq-ffi/src/video.rs:370`, `:524`), and in moq-c
-  (`rs/moq-c/src/video.rs:286`, `:319`, `:363`).
+  (`rs/moq-ffi/src/video.rs:370`, `:524`), and in libmoq
+  (`rs/libmoq/src/video.rs:286`, `:319`, `:363`).
 - No quest owns it: [the grant getter](/quest/m3/video-publish-grant.md)
   only adds a getter to the capture handle, and
   [the mux wrap](/quest/m5/net-wrap/mux.md) only makes the producer generic.
@@ -51,9 +51,9 @@ For the PR:
   (`publish_capture`'s `Driver`), which then runs on it, so the capture path
   and a caller's own frames share one encode loop and one grant follower.
   Shape it after audio: an `Options` with `bandwidth`, `write(&Frame)`, and
-  `finish(self) -> Result<Finished, Error>` from the start (the
-  [finish sweep](/quest/m2/finish-sweep.md) converts the renamed type).
-- Move moq-boy, moq-ffi, and moq-c onto it and delete their copies of the
+  `finish(self) -> Result<Finished, Error>`, as the encoded publisher
+  being renamed already has.
+- Move moq-boy, moq-ffi, and libmoq onto it and delete their copies of the
   grant follower. A binding option the lifted type cannot express (moq-ffi's
   `lower` rendition for the simulcast ladder, `rs/moq-ffi/src/video.rs:370`)
   becomes an option of the producer, not a reason to keep a copy.
@@ -65,10 +65,8 @@ For the PR:
   and re-enables its rendition; `just test interop --all` for moq-ffi.
 
 Public API: moq-video breaks (`encode::Producer` changes meaning; the encoded
-publisher is renamed). moq-ffi and moq-c keep their names. Wire: none.
+publisher is renamed). moq-ffi and libmoq keep their names. Wire: none.
 
 ## Related
 
-- [Terminal operations consume](/quest/m2/finish-sweep.md) - gives the renamed type `finish(self)`; whichever lands second rebases
-- [One device selector](/quest/m2/native-media-config.md) - changes `encode::Config` in the same crate
 - [A published capture exposes its grant](/quest/m3/video-publish-grant.md) - adds a getter to the capture handle this runs on

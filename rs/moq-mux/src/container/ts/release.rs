@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
+use super::error::unsupported;
+
 #[cfg(feature = "async")]
 use crate::catalog::CatalogFormat;
 use crate::catalog::Stream;
@@ -49,9 +51,7 @@ impl Release {
 	#[cfg(feature = "async")]
 	pub async fn new(source: crate::Source, catalog_format: CatalogFormat, delay: Duration) -> crate::Result<Self> {
 		if catalog_format == CatalogFormat::Msf {
-			return Err(
-				anyhow::anyhow!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into(),
-			);
+			return Err(unsupported!("the MSF catalog has no `m2ts` passthrough track; read the hang catalog").into());
 		}
 		let mut subscribing = crate::catalog::Subscribing::new(&source.broadcast(), catalog_format);
 		let catalog = kio::wait(|waiter| subscribing.poll_ok(waiter)).await?;
@@ -189,7 +189,7 @@ impl Release {
 	fn update_catalog(&mut self, catalog: &crate::catalog::hang::Catalog<()>) -> crate::Result<()> {
 		let Some(m2ts) = &catalog.m2ts else {
 			if self.track.is_none() && !(catalog.video.renditions.is_empty() && catalog.audio.renditions.is_empty()) {
-				return Err(anyhow::anyhow!(
+				return Err(unsupported!(
 					"the broadcast is demultiplexed, with no `m2ts` passthrough track to release"
 				)
 				.into());
@@ -201,7 +201,9 @@ impl Release {
 				let source = ExportSource::for_stream(
 					&self.source,
 					&m2ts.track,
-					moq_net::track::Delay::default().with_max(self.delay / 2),
+					// Half the delay, as the export's budget, and no min, so a missing group is
+					// waited for it too.
+					moq_net::track::Delay::default().with_min(None).with_max(self.delay / 2),
 				)?;
 				let source = match self.replay {
 					true => source,
@@ -211,7 +213,7 @@ impl Release {
 				self.subscribed = kio::clock::now();
 			}
 			Some((name, _)) if *name != m2ts.track => {
-				return Err(anyhow::anyhow!("the `m2ts` track moved from `{name}` to `{}`", m2ts.track).into());
+				return Err(unsupported!("the `m2ts` track moved from `{name}` to `{}`", m2ts.track).into());
 			}
 			Some(_) => {}
 		}

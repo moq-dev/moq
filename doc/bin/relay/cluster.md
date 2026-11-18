@@ -100,26 +100,34 @@ For a full mesh, list every other relay, or serve the list from `api.url`.
 A session carries both directions, so one dial per pair is enough; listing a
 pair on both sides opens a redundant second session.
 
-`cluster.max_hops` bounds the hop path this relay accepts or forwards, from 1
-to 32, with 32 as the default. Set it near the mesh's diameter after any single
-link or node failure, plus a margin, to cut off long detours during withdrawal
-path hunting. Count the publisher's hop too. A cap below that diameter can
-partition the mesh; a lower cap only drops longer paths and preserves route
-selection among the remaining paths. A peer hears the best route with room
-for this relay's hop, even when a cheaper route at the cap serves locally.
+`cluster.max_hops` is a legacy setting: it bounds the hop path that
+moq-lite-03 through moq-lite-06 carry, and moq-transport drafts 18 through 22
+when the MoQ Cluster extension is negotiated, and it leaves with moq-lite-06.
+A moq-lite-07-wip route crosses at most 32 nodes whatever this is set to: it
+does not hunt for paths, so a lower cap would only hide a short path behind a
+cheaper long one. In a mesh that mixes the two, a moq-lite-07-wip route that
+crossed in from moq-lite-06 still carries the moq-lite-06 chain: a relay drops
+the route when that chain plus the route's publisher is longer than
+`max_hops`.
+
+On those older versions it bounds the hop path this relay accepts or forwards,
+from 1 to 32, with 32 as the default. Set it near the mesh's diameter after any
+single link or node failure, plus a margin, to cut off long detours during
+withdrawal path hunting. Count the publisher's hop too. A cap below that
+diameter can partition the mesh; a lower cap only drops longer paths and
+preserves route selection among the remaining paths. A peer hears the best
+route with room for this relay's hop, even when a cheaper route at the cap
+serves locally.
 
 ```toml
 [cluster]
 max_hops = 6
 ```
 
-The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. It covers
-moq-lite-03 through moq-lite-06 and moq-transport drafts 18 through 22 when
-the MoQ Cluster extension is negotiated. A moq-lite-07-wip route crosses at
-most 32 nodes whatever this is set to: it does not hunt for paths, so a lower
-cap would only hide a short path behind a cheaper long one. A forwarded path counts this relay's
-own hop even when its peer appends it on receipt. Older versions and peers
-without hop paths hide their depth, which this setting cannot bound.
+The same setting is `--cluster-max-hops` or `MOQ_CLUSTER_MAX_HOPS`. A forwarded
+path counts this relay's own hop even when its peer appends it on receipt.
+Versions before moq-lite-03 and peers without hop paths hide their depth, which
+this setting cannot bound.
 
 ## Upstream links
 
@@ -142,8 +150,8 @@ connect = [
 
 The mark belongs to the link, whichever side dialed: a dialed peer is upstream
 when its `connect` entry says so, and a peer that dials in when its
-[grant](/bin/relay/auth#the-contract) sets `"upstream": true` beside
-`"peer": true`. `moq auth serve --mtls-link upstream` grants that to
+[grant](/bin/relay/auth#the-contract) sets `"link": "upstream"` (with
+`"peer": true` for relays before 0.22). `moq auth serve --mtls-link upstream` grants that to
 every certificate, so use it only where cores are the only relays dialing in
 with mTLS: on a hub that leaf relays dial into, it marks every leaf upstream
 and the hub stops forwarding between them. A relay that predates the mark treats every link as
@@ -277,8 +285,8 @@ url = "https://api.example.com/cluster/peers"
 HTTPS peer-list fetches present the same client certificate as cluster dials,
 but authenticate the API with system roots and the hostname in its URL.
 Mesh roots, fingerprints, insecure mode, and the mesh hostname override do not
-apply to the API. For a private API, set `cluster.api.tls.root` to PEM
-paths (or repeat `--cluster-api-tls-root`); these replace system trust
+apply to the API. For a private API, set `cluster.api.root` to PEM
+paths (or repeat `--cluster-api-root`); these replace system trust
 for API fetches only. Malformed roots fail startup, and files reload for new
 connections when rotated.
 
@@ -293,7 +301,9 @@ declares in SETUP on moq-lite-05 and later: a Hop ID added to each route's hop
 list, or on the opt-in `moq-lite-07-wip` a Node ID naming the route's origin,
 which it also adds to the hops of each route it forwards. It is random on every start, so a
 restarted relay is a new node to the rest of the mesh, and there is no setting
-to pin it.
+to pin it. A Node ID also carries when the relay started, which orders the runs
+of an identity kept across restarts; a relay's is new each time, so its clock
+stepping back across a restart changes nothing.
 
 A relay never dials its own `cluster.node`, so every relay can share one
 `cluster.connect` list or API response. Peer URLs that differ only in query,
@@ -325,7 +335,7 @@ listed peer, re-read on every dial so a rotated token applies at the next
 redial). The accepting relay admits a peer like any client, so a mesh
 needs an auth server that grants the cluster CA, such as
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer`. An
-accepted peer counts as a cluster peer only when its grant sets `peer: true`,
+accepted peer counts as a cluster peer only when its grant sets a `link`,
 as `--mtls-link peer` does; otherwise what it announces counts as ingest here, like
 a client's, and it lists [hidden](/concept/moq-lite#hidden-broadcasts) routes
 only by asking, which a relay below moq-lite-07-wip, or on moq-transport
@@ -355,7 +365,7 @@ services.moq-relay = {
   auth.enable = true;
   tls.certs = [ { chain = "/etc/moq/leaf.pem"; key = "/run/secrets/moq-leaf.key"; } ];
   cluster = {
-    rootUrl = [ "https://root.example.com:4443" ];
+    connect = [ "https://root.example.com:4443" ];
     certFile = "/run/secrets/moq-cluster.pem";
     keyFile = "/run/secrets/moq-cluster.key";
   };
@@ -363,7 +373,7 @@ services.moq-relay = {
 ```
 
 Each dialed session binds its own UDP socket on an ephemeral port of
-`connect.bind`'s address. Once `connect.backoff.timeout` (10s when unset or `0`,
+`connect.bind`'s address. Once `connect.backoff.timeout` (10s when unset or `none`,
 which would otherwise retry forever) passes without a session, the redial leaves from a
 fresh port, so a network path that drops one UDP flow can't hold a link down
 while other ports to the same peer would work. A fixed `connect.bind` port opts
