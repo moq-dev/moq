@@ -906,8 +906,8 @@ impl<'a> Epochs<'a> {
 /// neither draining (see [`RouteInfo::draining`]) nor unavailable (see
 /// [`RouteInfo::available`]), so a peer that sent a GOAWAY or a held route ranks below
 /// every other eligible route and serves only as a last resort. Then the route layer's
-/// selected route ahead of its alternates. Then the higher link [`Priority`], so
-/// metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
+/// closest way to a broadcast ahead of its others ([`Lane::primary`]). Then the higher
+/// link [`Priority`], so metrics from different operators are never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
 /// what is here, not a claim that has to ask), then the shortest hop chain, then a hash
 /// of the instance and `path`, so every node converges on the same winner, then, among
@@ -936,9 +936,12 @@ fn route_order(path: &Path, entry: &RouteEntry) -> RouteOrder {
 		// ranks below a broader one: a stream presents a broader claim at the request,
 		// where it ties an exact claim for the path.
 		entry.lane.above,
-		// The route layer's closest claim ahead of another node's of the same broadcast.
-		!entry.lane.primary,
 		entry.draining || !entry.available,
+		// The route layer's closest way ahead of its others to the same broadcast. Below
+		// availability, since the route layer marks every way to a broadcast available or
+		// none: a live instance's other way outranks a dead one held unavailable while a
+		// route change moves its closest way to another session.
+		!entry.lane.primary,
 		// A lite-07 route ranks by the lowest priority of any link on its path.
 		Reverse(match entry.lane.priority {
 			Some(priority) => entry.priority.min(Priority::new(priority)),
@@ -1643,8 +1646,8 @@ struct Horizon {
 /// through that node's routes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) enum NodeFilter {
-	/// Every route. Of the route layer's, the primary ones rank first (see [`Lane`]), so
-	/// a wider covering route serves only while no narrower one does.
+	/// Every route. Of the route layer's, the most specific claim ranks first and then each
+	/// broadcast's closest way (see [`Lane`]).
 	#[default]
 	Any,
 	/// Only the routes this node serves itself.
@@ -10996,6 +10999,47 @@ mod tests {
 			announced.try_next().is_none(),
 			"the broader claim at a higher epoch must not replace the exact one in the announcement"
 		);
+	}
+
+	/// A restarted publisher's dead instance, held unavailable, never wins back the path from
+	/// its live replacement while the replacement's closest way moves to another session:
+	/// the old way is demoted before the session taking over serves the new one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_dead_instance_never_outranks_a_live_one_between_its_ways() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let mut announced = consumer.routes();
+		let route = |instance: &crate::Instance, node, primary, available, cost| {
+			RouteInfo::new()
+				.with_instance(instance.clone(), 0)
+				.with_hops(hops(&[node]))
+				.with_node(Some(node_id(node)))
+				.with_lane(Lane {
+					primary,
+					priority: Some(0),
+					..Lane::default()
+				})
+				.with_available(available)
+				.with_cost(cost)
+		};
+		let (dead, live) = (crate::Instance::random(), crate::Instance::random());
+
+		// The dead instance is cheaper, and still the closest way to its own claim.
+		let _dead = producer
+			.forward("room/alice", route(&dead, 10, true, false, 1))
+			.unwrap();
+		let way = producer.forward("room/alice", route(&live, 11, true, true, 5)).unwrap();
+		assert_eq!(announced.expect_next_active("room/alice").await.instance(), &live);
+
+		way.update(route(&live, 11, false, true, 5)).unwrap();
+		assert!(
+			announced.try_next().is_none(),
+			"the live instance's demoted way keeps the path"
+		);
+		let _pending = consumer.request("room/alice", None);
+		let request = queued(&way).await;
+		assert_eq!(request.path().as_str(), "room/alice");
 	}
 
 	/// A draining route ranks below every other eligible one, even on a preferred link
