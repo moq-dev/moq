@@ -88,6 +88,8 @@
 mod harness;
 #[path = "../../tests/integration/support/mock.rs"]
 pub(crate) mod mock;
+#[path = "../../tests/integration/support/schedule.rs"]
+mod schedule;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
