@@ -1,7 +1,7 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Instant, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import * as MediaClock from "../media-clock";
 import { Order } from "../order";
 
 // The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
@@ -380,7 +380,7 @@ test("captures once a gesture resumes a context built before one", async () => {
 	// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
 	expect(capture.blocked.peek()).toBe(true);
 
-	const before = now().since(Instant.ZERO).asMicros();
+	const before = MediaClock.now().asMicros();
 	webaudio.gesture();
 	await settle();
 
@@ -389,7 +389,7 @@ test("captures once a gesture resumes a context built before one", async () => {
 	expect(webaudio.worklets.length).toBe(1);
 
 	// The worklet is anchored when the graph starts, not when the source appeared, so audio stays on
-	// the same wall clock as video however long the page waited for the click.
+	// the same media clock as video however long the page waited for the click.
 	expect(webaudio.worklets[0].zero).toBeGreaterThanOrEqual(before);
 
 	webaudio.worklets[0].render();

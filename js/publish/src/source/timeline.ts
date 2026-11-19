@@ -1,4 +1,5 @@
-import { Duration, type Instant } from "@moq/clock";
+import { Duration, Instant } from "@moq/clock";
+import * as MediaClock from "../media-clock";
 
 /**
  * Maps a file's presentation timeline onto our clock, repeating it forever.
@@ -11,6 +12,8 @@ import { Duration, type Instant } from "@moq/clock";
 export class Timeline {
 	readonly #zero: Instant;
 	readonly #duration: Duration;
+	// How far the media clock read past the installed clock at `zero`, in microseconds.
+	readonly #shift: number;
 
 	/**
 	 * Anchor a file of `duration` seconds at clock time `zero`.
@@ -19,6 +22,7 @@ export class Timeline {
 	 */
 	constructor(zero: Instant, duration: number) {
 		this.#zero = zero;
+		this.#shift = MediaClock.capture(zero).asMicros() - zero.since(Instant.ZERO).asMicros();
 		this.#duration = Number.isFinite(duration) && duration > 0 ? Duration.secs(duration) : Duration.ZERO;
 	}
 
@@ -36,6 +40,14 @@ export class Timeline {
 		const start = this.#zero.saturatingAdd(this.#duration.mul(loop));
 		if (micros >= 0) return start.saturatingAdd(Duration.micros(micros));
 		return start.saturatingSub(Duration.micros(-micros));
+	}
+
+	/**
+	 * The media clock timestamp of a clock time from {@link at}. A file is placed on the media clock
+	 * once, where it starts, and keeps its own spacing after that, so its audio stays contiguous.
+	 */
+	stamp(at: Instant): Duration {
+		return Duration.micros(Math.max(at.since(Instant.ZERO).asMicros() + this.#shift, 0));
 	}
 
 	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */

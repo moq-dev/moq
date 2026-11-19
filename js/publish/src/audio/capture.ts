@@ -1,4 +1,4 @@
-import { Duration, Instant, now } from "@moq/clock";
+import { Duration } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import {
 	type Computed,
@@ -12,6 +12,7 @@ import {
 } from "@moq/signals";
 import { hosted } from "../assets";
 import { Fanout } from "../fanout";
+import * as MediaClock from "../media-clock";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
 import { isSampleSource, normalizeSource, type SampleSource, type Source, type SourceConfig } from "./types";
@@ -263,9 +264,9 @@ export class Capture {
 					// worklet sees it. The default "max" just follows the input, which is the unreliable
 					// path on macOS. Only force it when we actually have a requested count to honor.
 					channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
-					// Stamp audio against the same wall clock as video (see video/processor.ts), so both
+					// Stamp audio on the same media clock as video (see video/processor.ts), so both
 					// tracks share an epoch and stay in sync.
-					processorOptions: { zero: now().since(Instant.ZERO).asMicros() },
+					processorOptions: { zero: MediaClock.now().asMicros() },
 				});
 				// The edge originates at root, so only root can remove it; the worklet has no outputs.
 				root.connect(worklet);

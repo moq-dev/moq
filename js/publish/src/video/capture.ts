@@ -1,6 +1,7 @@
 import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, race, readonlys, Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
+import * as MediaClock from "../media-clock";
 import { TrackProcessor } from "./processor";
 import { normalizeSource, type Source } from "./types";
 
@@ -194,7 +195,7 @@ class Frames extends Fanout<VideoFrame> {
 								const elapsed = clock.since(held.at).asMicros();
 								const timestamp = Math.max(
 									Math.round(
-										Math.max(last.timestamp + elapsed, clock.since(Instant.ZERO).asMicros()),
+										Math.max(last.timestamp + elapsed, MediaClock.capture(clock).asMicros()),
 									),
 									last.timestamp + 1,
 									held.replayed + 1,
@@ -264,7 +265,7 @@ class Frames extends Fanout<VideoFrame> {
 		const clock = now();
 		const elapsed = clock.since(this.#held.at).asMicros();
 		const at = Math.round(
-			Math.max(held ? held.timestamp + elapsed : 0, clock.since(Instant.ZERO).asMicros(), this.#held.replayed),
+			Math.max(held ? held.timestamp + elapsed : 0, MediaClock.capture(clock).asMicros(), this.#held.replayed),
 		);
 		this.#held.replayed = at;
 		let first = held ? new VideoFrame(held, { timestamp: at }) : undefined;
