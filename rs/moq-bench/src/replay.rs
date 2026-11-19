@@ -131,13 +131,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 	let mut tracks = Vec::new();
 	for path in &args.publish {
 		let route = publish.route(path.as_str(), moq_net::origin::RouteOptions::hidden())?;
-		let track = route.broadcast().create_track(
-			TRACK,
-			track::Info::default()
-				.with_timescale(moq_net::Timescale::MILLI)
-				.with_max_age(None),
-		)
-		.context("the replay track is already published")?;
+		let track = route
+			.broadcast()
+			.create_track(
+				TRACK,
+				track::Info::default()
+					.with_timescale(moq_net::Timescale::MILLI)
+					.with_max_age(None),
+			)
+			.context("the replay track is already published")?;
 		route.announce()?;
 		routes.push(route);
 		tracks.push(track.clone());

@@ -4710,7 +4710,9 @@ test.each(["plain", "routed"])(
 			},
 		});
 		spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
-		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }));
+		const track = defined(
+			fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }),
+		);
 		writeGroup(track, 1);
 		const { client } = await runSubscribe(
 			fx,
