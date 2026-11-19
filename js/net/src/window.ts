@@ -548,7 +548,9 @@ export class Window {
 		let tried: Timed[];
 		if (unplaced !== undefined && this.#waited === unplaced.mark) {
 			tried = [];
-			for (const gap of outside(unplaced.runs)) tried.push(...this.#waiting.takeIn(gap.start, gap.end));
+			for (const gap of outside(unplaced.runs)) {
+				for (const entry of this.#waiting.takeIn(gap.start, gap.end)) tried.push(entry);
+			}
 		} else {
 			tried = this.#waiting.takeAll();
 			this.#waited = unplaced?.mark;
@@ -999,14 +1001,16 @@ function insert(runs: Run[], run: Run): void {
 }
 
 // The times outside sorted, disjoint `runs`, as runs lowest first.
-function* outside(runs: readonly Run[]): Generator<Run> {
+function outside(runs: readonly Run[]): Run[] {
+	const gaps: Run[] = [];
 	let from = 0n;
 	for (const run of runs) {
 		if (run.end <= run.start) continue;
-		if (run.start > from) yield { start: from, end: run.start };
+		if (run.start > from) gaps.push({ start: from, end: run.start });
 		from = max(from, run.end);
 	}
-	if (from < UNBOUNDED) yield { start: from, end: UNBOUNDED };
+	if (from < UNBOUNDED) gaps.push({ start: from, end: UNBOUNDED });
+	return gaps;
 }
 
 // `runs` merged into sorted, disjoint runs, the empty ones dropped.
