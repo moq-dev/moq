@@ -5894,24 +5894,37 @@ impl TrackRun {
 		}
 		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
 		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
-		let resolved = self.track.resolved_keys(0..self.initial);
-		let unresolved = (0..)
+		let mut resolved = self.track.resolved_keys(0..self.initial);
+		let unresolved: Vec<u64> = (0..)
 			.zip(&resolved)
 			.filter(|(_, resolved)| resolved.is_none())
-			.map(|(id, _)| id);
-		let mut waiting = self.track.waiting_keys(unresolved).into_iter();
-		resolved
-			.into_iter()
-			.map(|resolved| {
-				let (from, end) = match resolved {
-					Some(resolved) => (resolved.start.max(start), resolved.end),
+			.map(|(id, _)| id)
+			.collect();
+		let waiting = self.track.waiting_keys(unresolved.iter().copied());
+		// Each read syncs the cursor on its own, so an upstream answer on another thread can
+		// place a range between them. Placing is one-way: a range no longer waiting is resolved
+		// now, unless an update retired it, so read those again rather than name no start.
+		let placed: Vec<u64> = (unresolved.iter().zip(&waiting))
+			.filter(|(_, waiting)| waiting.is_none())
+			.map(|(&id, _)| id)
+			.collect();
+		if !placed.is_empty() {
+			for (id, late) in placed.iter().zip(self.track.resolved_keys(placed.iter().copied())) {
+				resolved[*id as usize] = late;
+			}
+		}
+		let mut waiting = unresolved.iter().copied().zip(waiting).peekable();
+		(0..)
+			.zip(resolved)
+			.map(|(id, resolved)| {
+				let waits = waiting.next_if(|(key, _)| *key == id).and_then(|(_, waits)| waits);
+				let (from, end) = match (resolved, waits) {
+					(Some(resolved), _) => (resolved.start.max(start), resolved.end),
 					// A time start still waiting at or below the floor, as an update before the
 					// start leaves one: whichever group contains it is out of range, so the range
 					// starts where delivery does, the answer placing it would give.
-					None => match waiting.next().flatten()? {
-						(time, end) if time <= self.floor => (start, end),
-						_ => return None,
-					},
+					(None, Some((time, end))) if time <= self.floor => (start, end),
+					(None, _) => return None,
 				};
 				end.is_none_or(|end| end > from).then_some(from)
 			})
