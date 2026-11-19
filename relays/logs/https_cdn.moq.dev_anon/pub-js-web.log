@@ -1,22 +1,21 @@
-publishing smoke-js-web-4296-9628.hang (fake camera, vite) to https://cdn.moq.dev/anon
+publishing smoke-js-web-4065-18841.hang (fake camera, vite) to https://cdn.moq.dev/anon
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
 [page] announce: prefix=
 [page] announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5/~a1d8juh6n6bl active=true
 [page] announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
-[page] announced: broadcast=lcb-7020742-ef62.hang active=true
 [page] announced: broadcast=sp-blume-town-test active=true
-[page] announce: broadcast=smoke-js-web-4296-9628.hang active=true
-[page] track info: broadcast=smoke-js-web-4296-9628.hang track=catalog.json
-[page] track info: broadcast=smoke-js-web-4296-9628.hang track=catalog.json
-[page] publish ok: broadcast=smoke-js-web-4296-9628.hang track=catalog.json
-[page] track info: broadcast=smoke-js-web-4296-9628.hang track=video
-[page] track info: broadcast=smoke-js-web-4296-9628.hang track=video
-[page] publish ok: broadcast=smoke-js-web-4296-9628.hang track=video
-[page] subscribe update: broadcast=smoke-js-web-4296-9628.hang track=video
-[page] subscribe update: broadcast=smoke-js-web-4296-9628.hang track=video
-[page] subscribe update: broadcast=smoke-js-web-4296-9628.hang track=video
-[page] publish error: broadcast=smoke-js-web-4296-9628.hang track=video error=remote error: 1
+[page] announce: broadcast=smoke-js-web-4065-18841.hang active=true
+[page] track info: broadcast=smoke-js-web-4065-18841.hang track=catalog.json
+[page] track info: broadcast=smoke-js-web-4065-18841.hang track=catalog.json
+[page] publish ok: broadcast=smoke-js-web-4065-18841.hang track=catalog.json
+[page] track info: broadcast=smoke-js-web-4065-18841.hang track=video
+[page] track info: broadcast=smoke-js-web-4065-18841.hang track=video
+[page] publish ok: broadcast=smoke-js-web-4065-18841.hang track=video
+[page] subscribe update: broadcast=smoke-js-web-4065-18841.hang track=video
+[page] subscribe update: broadcast=smoke-js-web-4065-18841.hang track=video
+[page] subscribe update: broadcast=smoke-js-web-4065-18841.hang track=video
+[page] publish error: broadcast=smoke-js-web-4065-18841.hang track=video error=remote error: 1
 [page] datagram send stopped: sub=1 error=remote error: 1
-[page] publish error: broadcast=smoke-js-web-4296-9628.hang track=catalog.json error=The stream was aborted by the remote server
+[page] publish error: broadcast=smoke-js-web-4065-18841.hang track=catalog.json error=The stream was aborted by the remote server
 [page] datagram send stopped: sub=0 error=The stream was aborted by the remote server

@@ -1,6 +1,6 @@
 {
-  "generated": "2026-11-19T11:12:29Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/44511371674",
+  "generated": "2026-11-19T12:43:29Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/44525142071",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",

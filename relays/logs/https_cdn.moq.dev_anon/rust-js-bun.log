@@ -4,17 +4,16 @@ announced: prefix=
 connected version=moq-lite-06
 announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5/~a1d8juh6n6bl active=true
 announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
-announced: broadcast=lcb-7020742-ef62.hang active=true
-announced: broadcast=smoke-rust-4296-32351.hang active=true
-subscribe start: id=0 broadcast=smoke-rust-4296-32351.hang track=catalog.json
+announced: broadcast=smoke-rust-4065-21198.hang active=true
+subscribe start: id=0 broadcast=smoke-rust-4065-21198.hang track=catalog.json
 announced: broadcast=sp-blume-town-test active=true
 announce: prefix=
-subscribe ok: id=0 broadcast=smoke-rust-4296-32351.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-rust-4296-32351.hang track=0.avc3
-subscribe ok: id=1 broadcast=smoke-rust-4296-32351.hang track=0.avc3
-received 6709 bytes from smoke-rust-4296-32351.hang
-subscribe close: id=0 broadcast=smoke-rust-4296-32351.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-rust-4296-32351.hang track=0.avc3
+subscribe ok: id=0 broadcast=smoke-rust-4065-21198.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-rust-4065-21198.hang track=0.avc3
+subscribe ok: id=1 broadcast=smoke-rust-4065-21198.hang track=0.avc3
+received 6709 bytes from smoke-rust-4065-21198.hang
+subscribe close: id=0 broadcast=smoke-rust-4065-21198.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-rust-4065-21198.hang track=0.avc3
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
