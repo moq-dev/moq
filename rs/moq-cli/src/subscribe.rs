@@ -5,7 +5,7 @@ use hang::catalog::{AudioCodecKind, VideoCodecKind};
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use moq_mux::select;
 use moq_net::track::Delay;
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 /// Container format written on the export (sink) side.
@@ -425,7 +425,12 @@ impl Subscribe {
 
 		match mp4.finish()? {
 			Some(trailer) => {
-				write_finish(&mut file, &trailer).await?;
+				// Converting drops the error of a write still in flight, which flushing returns.
+				file.flush().await?;
+				let mut file = file.into_std().await;
+				tokio::task::spawn_blocking(move || trailer.write(&mut file))
+					.await?
+					.with_context(|| format!("failed to finish {}", path.display()))?;
 				tracing::info!(path = %path.display(), "recording finished");
 			}
 			// Nothing reached the file, so there is no recording to keep.
@@ -622,17 +627,4 @@ impl Subscribe {
 
 		Ok(())
 	}
-}
-
-/// Make the writes that turn a recording into a regular MP4: the moov where the media ends,
-/// then the mdat header over the reserved box.
-pub async fn write_finish(file: &mut tokio::fs::File, finish: &moq_mux::container::mp4::Finish) -> std::io::Result<()> {
-	file.set_len(finish.moov_offset).await?;
-	file.seek(std::io::SeekFrom::Start(finish.moov_offset)).await?;
-	file.write_all(&finish.moov).await?;
-	// The header points readers past the media at the moov, so the moov must be on disk first.
-	file.sync_data().await?;
-	file.seek(std::io::SeekFrom::Start(finish.mdat_offset)).await?;
-	file.write_all(&finish.mdat).await?;
-	file.sync_all().await
 }
