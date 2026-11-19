@@ -1548,7 +1548,8 @@ The live edge is the newest frame timestamp the publisher holds; on a Track with
 The publisher starts from what it holds and never fetches to reach further back, so a subscriber is handed the buffer it will play, and no more, without waiting for it to fill.
 
 A Range covers whole Groups but for a Position `Start`; a subscriber reads a slice of a Group with FETCH (see [Positions](#positions)).
-A Group that another Range also covers is delivered whole, since each Group is delivered once.
+A Group that another Range may also cover is delivered whole, since each Group is delivered once: one whose `Start` is at or below the Group's start, or is None or Relative, and whose `End` is not a Time below the Group's start.
+A Time `Start` inside the Group, after its start, does not count: whether it falls before the next Group's start is unknown until that Group arrives.
 A subscriber resuming a Track on a new subscription, such as a relay moving to another route, starts at the Position past the frames it holds, so no frame it holds is sent again.
 The Group Stream of a Group that ended at `Frame` carries no FRAME, only how the Group ended.
 

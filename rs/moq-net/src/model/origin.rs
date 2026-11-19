@@ -4467,10 +4467,10 @@ fn follow_demand(
 	}
 	match (weak.subscription(), held.as_mut()) {
 		(Some((subscription, subscribers)), Some(hold)) => {
-			let _ = hold.update(routes.subscription(subscription, subscribers));
+			let _ = routes.subscription(subscription, subscribers).update(hold);
 		}
 		(Some((subscription, subscribers)), None) => {
-			*held = copy.map(|copy| copy.subscribe(routes.subscription(subscription, subscribers)));
+			*held = copy.map(|copy| routes.subscription(subscription, subscribers).subscribe(copy));
 		}
 		(None, _) => *held = None,
 	}
@@ -5171,7 +5171,7 @@ impl kio::Task for FrontServe {
 									// Subscribe before the query exposes upstream demand, and query
 									// that same instance even if the broadcast changes meanwhile.
 									let sub = io.weak.subscription().map(|(demand, subscribers)| {
-										lookup.subscribe(io.routes.subscription(demand, subscribers))
+										io.routes.subscription(demand, subscribers).subscribe(&lookup)
 									});
 									let query = match &sub {
 										Some(sub) => sub.info(),

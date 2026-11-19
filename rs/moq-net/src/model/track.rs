@@ -1219,6 +1219,22 @@ impl TrackState {
 		self.lent.lock().unwrap_or_else(PoisonError::into_inner).remove(&key)
 	}
 
+	/// Hold `head` for group `key` until it arrives, or return the copies of it already
+	/// cached, to adopt it with this state's lock released; see [`Consumer::lend_head`].
+	fn lend(&self, key: u64, head: &Arc<group::Head>) -> Vec<group::Handle> {
+		if let Some(slot) = self.lookup.get(&key) {
+			return slot.copies().cloned().collect();
+		}
+		// Under the caller's read guard, so the group cannot arrive before the loan is held.
+		let mut lent = self.lent.lock().unwrap_or_else(PoisonError::into_inner);
+		let held = |head: &group::Head| head.frames_from_first().unwrap_or_default();
+		let slot = lent.entry(key).or_insert_with(|| head.clone());
+		if held(head) > held(slot) {
+			*slot = head.clone();
+		}
+		Vec::new()
+	}
+
 	/// How many keys just below `key` the publisher declared it never produced: the skip
 	/// run that ends at `key`, as a moq-transport Prior Group ID Gap names it.
 	fn skipped_below(&self, key: u64) -> u64 {
@@ -6580,25 +6596,7 @@ impl Consumer {
 	/// first that arrives, which then holds it whole if it arrives partway through. Of two
 	/// loans for one group the longer stands; see [`group::Handle::adopt_head`].
 	pub(super) fn lend_head(&self, key: u64, head: Arc<group::Head>) {
-		let copies: Vec<group::Handle> = self.with_state(|state| {
-			let Some(state) = state else {
-				return Vec::new();
-			};
-			let state = state.read();
-			match state.lookup.get(&key) {
-				Some(slot) => slot.copies().cloned().collect(),
-				// Under the read guard, so the group cannot arrive before the loan is held.
-				None => {
-					let mut lent = state.lent.lock().unwrap_or_else(PoisonError::into_inner);
-					let held = |head: &group::Head| head.frames_from_first().unwrap_or_default();
-					let slot = lent.entry(key).or_insert_with(|| head.clone());
-					if held(&head) > held(slot) {
-						*slot = head.clone();
-					}
-					Vec::new()
-				}
-			}
-		});
+		let copies = self.with_state(|state| state.map_or_else(Vec::new, |state| state.read().lend(key, &head)));
 		for group in copies {
 			group.adopt_head(&head);
 		}
@@ -7127,6 +7125,14 @@ pub struct Subscribing {
 }
 
 impl Subscribing {
+	/// Lend `head` to group `key` of the subscribed copy; see [`Consumer::lend_head`].
+	pub(super) fn lend_head(&self, key: u64, head: Arc<group::Head>) {
+		let copies = self.state.read().lend(key, &head);
+		for group in copies {
+			group.adopt_head(&head);
+		}
+	}
+
 	/// Resolve the same track's info with this subscription already registered.
 	pub(super) fn info(&self) -> Resolving {
 		Resolving {

@@ -146,6 +146,35 @@ impl Phase {
 /// one that is not reading right now still gets what that copy delivers.
 type Readers = Arc<Mutex<Vec<Weak<Mutex<Reader>>>>>;
 
+/// The readers' demand on a new copy ([`Producer::subscription`]) and the frames they hold
+/// of the group it resumes past, which that copy is lent so it caches the group whole.
+#[must_use]
+pub(super) struct Resumed {
+	demand: Subscription,
+	head: Option<Arc<group::Head>>,
+}
+
+impl Resumed {
+	/// Subscribe `copy` to the demand, lending it the head the demand resumes past.
+	pub(super) fn subscribe(self, copy: &track::Consumer) -> kio::Pending<track::Subscribing> {
+		let resume = self.demand.resume;
+		let sub = copy.subscribe(self.demand);
+		// Once subscribed, so the copy's state exists to hold the loan.
+		if let (Some(head), Some(resume)) = (self.head, resume) {
+			sub.lend_head(resume.group, head);
+		}
+		sub
+	}
+
+	/// Move `sub` to the demand, lending its copy the head the demand resumes past.
+	pub(super) fn update(self, sub: &mut track::Subscribing) -> Result<()> {
+		if let (Some(head), Some(resume)) = (self.head, self.demand.resume) {
+			sub.lend_head(resume.group, head);
+		}
+		sub.update(self.demand)
+	}
+}
+
 /// The front's side of a logical track: which copy serves it, and how it ends.
 ///
 /// Dropping it concludes the track: readers follow the last copy to its end, since no
@@ -166,7 +195,7 @@ impl Producer {
 	}
 
 	/// The readers' demand on a new copy, with each reader resuming where it got to.
-	pub(super) fn subscription(&self, mut demand: Subscription, subscribers: usize) -> Subscription {
+	pub(super) fn subscription(&self, mut demand: Subscription, subscribers: usize) -> Resumed {
 		let readers: Vec<_> = self
 			.readers
 			.lock()
@@ -177,7 +206,7 @@ impl Producer {
 		// A subscription not yet polled has demand but no reader. It still needs the
 		// original ranges, so never narrow the aggregate until every contribution is here.
 		if readers.len() != subscribers || readers.is_empty() {
-			return demand;
+			return Resumed { demand, head: None };
 		}
 		let mut ranges = Vec::new();
 		let mut resumes = Vec::with_capacity(readers.len());
@@ -210,14 +239,18 @@ impl Producer {
 				_ => Vec::new(),
 			};
 			ranges.extend(preferences.clamped(reader.newest, None, &resolved).ranges);
-			resumes.push(reader.held_at(reader.newest).map(|(resume, _)| resume));
+			resumes.push(reader.held_at(reader.newest));
 		}
 		demand.ranges = ranges;
 		// As in a track's own demand, only when every reader resumes.
-		demand.resume = (resumes.into_iter())
-			.reduce(|a, b| a.zip(b).map(|(a, b)| a.min(b)))
+		let resume = (resumes.into_iter())
+			.reduce(|a, b| a.zip(b).map(|(a, b)| if b.0 < a.0 { b } else { a }))
 			.flatten();
-		demand
+		demand.resume = resume.as_ref().map(|(resume, _)| *resume);
+		Resumed {
+			demand,
+			head: resume.map(|(_, head)| head),
+		}
 	}
 
 	/// Stage `copy`, whose info is still in flight, for fetches until the returned
@@ -4117,9 +4150,9 @@ mod test {
 		write(&a, 5);
 		assert_eq!(recv(&mut first).start, 5);
 		let demand = front.subscription().unwrap();
-		assert_eq!(routes.subscription(demand.clone(), 2).resume, None);
+		assert_eq!(routes.subscription(demand.clone(), 2).demand.resume, None);
 		assert_eq!(recv(&mut second).start, 5);
-		assert_eq!(routes.subscription(demand, 2).resume, Some(Position::new(5, 1)));
+		assert_eq!(routes.subscription(demand, 2).demand.resume, Some(Position::new(5, 1)));
 	}
 
 	/// A copy asked past the frames a reader held of a group adopts them once the rest lands,
@@ -4151,6 +4184,45 @@ mod test {
 		assert_eq!(group.start, 0);
 		assert_eq!(read(&mut group), Some(b"x".to_vec()));
 		assert_eq!(read(&mut group), None);
+	}
+
+	/// The subscription an origin opens on a new copy before serving it (its query, then the
+	/// one it holds for the readers) lends the head it resumes past, as a reader's own does.
+	/// Otherwise a reader moving on before the switch lends the next group's head instead,
+	/// and the copy caches the group the query resumed without its head.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_query_resuming_a_new_copy_lends_it_the_head() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut holder = subscribe(&track, HOUR);
+		write(&a, 0);
+		assert_eq!(recv(&mut holder).start, 0);
+
+		let b = copy();
+		let mut held = routes
+			.subscription(track.subscription().unwrap(), 1)
+			.subscribe(&b.consume());
+		assert_eq!(b.subscription().unwrap().resume, Some(Position::new(0, 1)));
+		write(&a, 1);
+		assert_eq!(recv(&mut holder).start, 1);
+		// As the held subscription follows the readers, past the next group too.
+		routes
+			.subscription(track.subscription().unwrap(), 1)
+			.update(&mut held)
+			.unwrap();
+		routes.serve(b.consume());
+
+		for key in [0, 1] {
+			let track::Received::Group(rest) = b.create_group_at(group::Info { start: key }, 1).unwrap() else {
+				panic!("nothing else holds group {key}");
+			};
+			rest.finish().unwrap();
+			let cached = b.consume().peek_group(key).expect("cached");
+			assert_eq!(cached.first_frame(), 0, "group {key} is whole once visible");
+		}
 	}
 
 	/// Routes that close without concluding read like a conclusion: a reader stalled
@@ -8220,7 +8292,7 @@ mod test {
 		for sequence in 11..=20 {
 			write(&a, sequence);
 		}
-		let start = || routes.subscription(Subscription::default(), 1).ranges[0].start;
+		let start = || routes.subscription(Subscription::default(), 1).demand.ranges[0].start;
 		assert_eq!(start(), track::Anchor::Time(5));
 
 		// Changed, but not yet mirrored into the copies.
@@ -8250,11 +8322,11 @@ mod test {
 			assert_eq!(recv(sub).start, 5);
 		}
 		let demand = front.subscription().unwrap();
-		assert_eq!(routes.subscription(demand.clone(), 5).start(), Some(5));
+		assert_eq!(routes.subscription(demand.clone(), 5).demand.start(), Some(5));
 		for _ in 0..64 {
 			drop(subscribe(&front, HOUR));
 		}
-		assert_eq!(routes.subscription(demand, 5).start(), Some(5));
+		assert_eq!(routes.subscription(demand, 5).demand.start(), Some(5));
 		// Swept each time it fills, so it grows by doubling over the most readers alive at
 		// once: here 6.
 		let len = routes.readers.lock().unwrap().len();
@@ -8273,19 +8345,22 @@ mod test {
 		assert_eq!(recv(&mut first).start, 5);
 		let demand = front.subscription().unwrap();
 		// One reader has not read anything yet, so it still needs the oldest range.
-		assert_eq!(routes.subscription(demand.clone(), 2).start(), None);
+		assert_eq!(routes.subscription(demand.clone(), 2).demand.start(), None);
 		assert_eq!(recv(&mut second).start, 5);
-		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
+		assert_eq!(routes.subscription(demand.clone(), 2).demand.start(), Some(5));
 		write(&a, 10);
 		assert_eq!(recv(&mut first).start, 10);
-		assert_eq!(routes.subscription(demand.clone(), 2).start(), Some(5));
+		assert_eq!(routes.subscription(demand.clone(), 2).demand.start(), Some(5));
 		let pending = front
 			.consume()
 			.subscribe(Subscription::default().with_delay(Delay::default().with_max(HOUR)));
-		assert_eq!(routes.subscription(front.subscription().unwrap(), 3).start(), None);
+		assert_eq!(
+			routes.subscription(front.subscription().unwrap(), 3).demand.start(),
+			None
+		);
 		drop(pending);
 		drop(second);
-		assert_eq!(routes.subscription(demand, 1).start(), Some(10));
+		assert_eq!(routes.subscription(demand, 1).demand.start(), Some(10));
 	}
 
 	#[derive(Default)]
