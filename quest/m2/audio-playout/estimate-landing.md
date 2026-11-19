@@ -14,8 +14,9 @@ moved the container reader onto `Ordered`: a missing group is now given up by
 subscription's `Delay::min`, which `moq-audio` set to its playout estimate.
 `decode::Consumer::next` observes each packet at `now()`, when it is read, so
 every packet queued behind a hole the reader waited out reads as late by up to
-the max delay. `@moq/hang` doesn't have this: its estimate observes a second
-subscription as frames land (`#observe`).
+the max delay. The browser doesn't have this: `@moq/watch`'s audio decoder hands
+`@moq/hang`'s consumer a second, ordered subscription, so its estimate observes
+the track's own frames as they land (`#observe`).
 
 Recommended: observe each packet at `container::Consumer::arrival()`, when its
 wire frame landed in this node's cache, which a hole wait doesn't move. That
