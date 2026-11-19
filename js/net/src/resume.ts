@@ -1446,11 +1446,24 @@ class Reader implements ResumeSource {
 		return serving && hooks.holeEnd(serving.sub, key, dropped);
 	}
 
+	// A failed serving copy's own resolution is no placement while the front may still replace it:
+	// the reader's ranges stay as placed, pending until a copy continuing the track places them.
+	// Mirrors the Rust reader answering from its window.
+	#placesNothing(serving: Copy): boolean {
+		return !this.route.concluded && copyFailed(serving);
+	}
+
 	// Each copy asks for the reader's ranges in turn, clamped to its floor and replacement.
 	starts(from: bigint): (bigint | undefined)[] | undefined {
 		this.sync();
 		const serving = this.#serving();
-		return serving && hooks.servingStarts(serving.sub, from);
+		if (!serving) return undefined;
+		if (!this.#placesNothing(serving)) return hooks.servingStarts(serving.sub, from);
+		return this.#placement().map((range) => {
+			if (!range) return undefined;
+			const start = max(range.start, from);
+			return range.end === undefined || range.end > start ? start : undefined;
+		});
 	}
 
 	// Each copy resolves the reader's ranges in turn, clamped to its floor and replacement.
@@ -1458,6 +1471,7 @@ class Reader implements ResumeSource {
 		this.sync();
 		const serving = this.#serving();
 		if (!serving) return undefined;
+		if (this.#placesNothing(serving)) return this.#placement();
 		// As the first copy to resolve them placed them, then as the serving copy does.
 		const ranges = (this.#shell.subscription.peek() ?? track.Subscription.default()).ranges ?? [{}];
 		const placed = this.#placed(ranges);

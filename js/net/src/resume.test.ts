@@ -4353,6 +4353,9 @@ test("a failed copy leaves a time start to the serving copy", async () => {
 		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
 		await settle();
 		expect(read).toEqual([]);
+		// Nor does the reader report a start the failed copy placed.
+		expect(hooks.servingResolved(waiting)[0]).toBeUndefined();
+		expect(hooks.servingStarts(waiting, 0n)[0]).toBeUndefined();
 		front.serve(b.consume());
 		await settle();
 		// Fetched ahead of the live feed's 66.
