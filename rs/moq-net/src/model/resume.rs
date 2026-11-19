@@ -1025,6 +1025,23 @@ impl Subscriber {
 		keys.into_iter().map(|key| window.resolved_key(key)).collect()
 	}
 
+	/// The reader's range keyed `key` while its time start waits; see
+	/// [`track::Subscriber::waiting_key`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(super) fn waiting_key(&self, key: u64) -> Option<(u64, Option<u64>)> {
+		let mut reader = self.reader();
+		if reader.window().resolved_key(key).is_some() {
+			return None;
+		}
+		// Only the serving copy places it: the reader's own window holds no groups. Its
+		// subscription mirrors the reader's ranges in key order.
+		let index = reader.keys.iter().position(|&mirrored| mirrored == key)?;
+		match &mut reader.copies.last_mut()?.sub {
+			Sub::Ready(sub) => sub.waiting_key(index as u64),
+			Sub::Pending(_) => None,
+		}
+	}
+
 	/// The lowest group at or above `from` the reader's ranges cover; see
 	/// [`track::Subscriber::next_in_range`].
 	pub(super) fn next_in_range(&self, from: u64) -> Option<u64> {
@@ -3588,6 +3605,46 @@ mod test {
 		assert_eq!(read, [66, 67]);
 		assert_eq!(joined.resolved_range(0).map(|resolved| resolved.start), Some(66));
 		drop(held);
+	}
+
+	/// A routed reader's time start that its serving copy can't place yet says what it waits
+	/// on and where it ends, as a plain reader's does, so a publisher whose floor already keeps
+	/// out the group containing it can say where the range starts.
+	#[kio::test]
+	async fn a_routed_reader_tells_a_waiting_time_start() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let serving = received_copy();
+		serving.anchored();
+		routes.serve(serving.consume());
+		write(&serving, 1000);
+		let ranges = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([track::Range {
+				start: Anchor::Time(500),
+				end: None,
+			}]);
+		let mut open = logical
+			.consume()
+			.subscribe(ranges.clone())
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert!(open.poll_start(&kio::Waiter::noop()).is_pending());
+		assert_eq!(open.resolved_range(0), None);
+		assert_eq!(open.waiting_key(0), Some((500, None)));
+
+		// A floor at the time keeps out whichever group contains it: the start waits on nothing.
+		let mut floored = logical
+			.consume()
+			.subscribe(ranges)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.with_range(500..);
+		assert!(floored.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(floored.resolved_range(0), None);
+		assert_eq!(floored.waiting_key(0), Some((500, None)));
 	}
 
 	/// As [`an_ended_copy_leaves_a_time_start_to_the_serving_copy`], for a reader that replaces
