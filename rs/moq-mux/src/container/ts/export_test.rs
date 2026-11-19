@@ -2574,7 +2574,7 @@ fn aac_program_configs(ts: &[u8]) -> Vec<(bool, bool)> {
 }
 
 /// A receiver tunes in at a PAT/PMT, so the program config element follows each one rather
-/// than riding the first frame only, including after a marker restarts the program clock. The
+/// than riding the first frame only, including after a break restarts the program clock. The
 /// output cut at a later PAT imports as the same quad track.
 #[tokio::test(start_paused = true)]
 async fn aac_program_config_follows_each_table() {

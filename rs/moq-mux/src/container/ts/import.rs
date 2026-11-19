@@ -182,8 +182,8 @@ pub struct Import<E: catalog::Catalog = ()> {
 	/// while the source holds one. Only fed with `mpegts` catalog support.
 	mux_rate: super::mux_rate::Meter,
 	/// Whether any media or section has been published since the last timebase break, so
-	/// consecutive markers (a repeated flag, a retransmitted clock packet) declare one
-	/// break rather than one each.
+	/// consecutive flags (a repeated flag, a retransmitted clock packet) declare one break
+	/// rather than one each.
 	published: bool,
 	/// True once a PMT with at least one supported stream has been parsed.
 	initialized: bool,
@@ -1639,8 +1639,11 @@ impl<E: catalog::Catalog> Import<E> {
 	/// A system time-base discontinuity: the PCR PID declared that the clock every
 	/// timestamp downstream is measured against restarts here.
 	///
-	/// Publish it as a break on every track, which is what carries it across MoQ (an empty
-	/// group per track) and back out of the exporter as a set `discontinuity_indicator`.
+	/// Publish it as a break on every track, which is what carries it across MoQ (each open
+	/// group ends whole where its media stops, short of where the next starts) and back out of
+	/// the exporter as a set `discontinuity_indicator`. A track whose groups already closed at
+	/// their media's end, such as audio of known duration, carries the break only where its
+	/// timestamps leave a gap.
 	/// Whatever the source does next -- restart at zero, leap half a minute ahead -- is a new
 	/// timeline rather than the old one continuing, and a consumer that splices the two gets
 	/// the whole jump as a frame duration.
@@ -1652,12 +1655,12 @@ impl<E: catalog::Catalog> Import<E> {
 	fn timebase_break(&mut self) -> Result<()> {
 		// The bytes still accumulating belong to the old clock, and their continuation is
 		// stamped on the new one, so cut every PES here rather than splicing across. This
-		// runs before the marker so a salvaged tail lands in the closing group, which the
-		// marker closes without guessing an end.
+		// runs before the break so a salvaged tail lands in the closing group, which the break
+		// ends where its media does rather than at a guess.
 		for pid in self.streams.keys().copied().collect::<Vec<_>>() {
 			self.salvage(pid)?;
 		}
-		// Whole PES the old clock began go out on its timeline, ahead of the marker, so none waits
+		// Whole PES the old clock began go out on its timeline, ahead of the break, so none waits
 		// for a PES on the new one to complete a start code.
 		for stream in self.streams.values_mut() {
 			stream.end();
@@ -9462,7 +9465,7 @@ pub(super) mod test {
 		}
 	}
 
-	/// Read every retained frame of `name` as `kind`, skipping the empty break markers.
+	/// Read every retained frame of `name` as `kind`.
 	async fn read_track(
 		consumer: &moq_net::broadcast::Consumer,
 		name: &str,
@@ -10252,9 +10255,12 @@ pub(super) mod test {
 				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
 				frames.push(frame.timestamp.as_micros().unwrap());
 			}
-			let end = group
-				.end()
-				.map(|end| Timestamp::new(end, group.timescale().unwrap()).unwrap().as_micros().unwrap());
+			let end = group.end().map(|end| {
+				Timestamp::new(end, group.timescale().unwrap())
+					.unwrap()
+					.as_micros()
+					.unwrap()
+			});
 			groups.push((frames, end));
 		}
 		let us = |ms: u64| u128::from(at(ms)) * 1_000_000 / 90_000;
@@ -10346,7 +10352,7 @@ pub(super) mod test {
 			..Default::default()
 		};
 		mux.gops(VIDEO, 90_000, 2);
-		// A codec boundary, not the following clock marker, vouches for the
+		// A codec boundary, not the following clock break, vouches for the
 		// final picture on the old timeline.
 		let mut last = annexb_au(false);
 		last.extend([0, 0, 1, 9, 0xf0]);
@@ -10770,7 +10776,7 @@ pub(super) mod test {
 	}
 
 	/// A mux may flag every packet it emits until the new clock is established, and a clock
-	/// packet is retransmitted freely. Consecutive markers with no media between them are one
+	/// packet is retransmitted freely. Consecutive flags with no media between them are one
 	/// break, or a downstream re-acquires once per packet.
 	#[tokio::test(start_paused = true)]
 	async fn repeated_flags_declare_one_break() {
@@ -10931,7 +10937,7 @@ pub(super) mod test {
 	}
 
 	/// A shared forward boundary is one program break. Every rendition joins the new
-	/// generation, so the clock flags it once however many tracks declared the marker.
+	/// generation, so the clock flags it once however many tracks declared the break.
 	#[tokio::test(start_paused = true)]
 	async fn a_shared_forward_boundary_resets_once_per_rendition() {
 		let mut stimulus = synth_pmt(

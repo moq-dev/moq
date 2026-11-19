@@ -1787,9 +1787,11 @@ async fn a_declared_discontinuity_survives_loss_either_side() {
 #[tokio::test(start_paused = true)]
 async fn a_lost_declared_end_still_breaks_the_clock() {
 	let run = recover(
-		arm(Profile::Spliced, |slot| match slot.video && slot.group == 5 && slot.frame >= 4 {
-			true => Delivery::Omitted,
-			false => clean(slot),
+		arm(Profile::Spliced, |slot| {
+			match slot.video && slot.group == 5 && slot.frame >= 4 {
+				true => Delivery::Omitted,
+				false => clean(slot),
+			}
 		})
 		.breaks(1),
 	)

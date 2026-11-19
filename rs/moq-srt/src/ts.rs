@@ -265,8 +265,8 @@ impl Subscriber {
 	}
 
 	/// The muxer's generation counter for the frame [`next`](Self::next) just
-	/// returned, which increments each time the program clock restarts: a marker that
-	/// breaks the publisher's timeline, or a switch to another instance.
+	/// returned, which increments each time the program clock restarts: a group the
+	/// publisher ended short of where its media resumes, or a switch to another instance.
 	///
 	/// A caller pacing on the media timestamps has to drop its own anchor with it: sample
 	/// this after every frame and re-anchor when it changes, or the new clock maps
