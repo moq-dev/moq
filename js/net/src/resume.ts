@@ -784,7 +784,6 @@ class Reader implements ResumeSource {
 		this.#changed.update((n) => n + 1);
 	}
 
-	/** The reader's copy of the route at `generation`, if it subscribed one, rather than a backfill of it. */
 	/** The newest open copy this reader holds of `source`'s broadcast. */
 	copyOn(source: Source): Copy | undefined {
 		return this.#copies.findLast(
@@ -792,6 +791,7 @@ class Reader implements ResumeSource {
 		);
 	}
 
+	/** The reader's copy of the route at `generation`, if it subscribed one, rather than a backfill of it. */
 	copy(generation: number): Copy | undefined {
 		return this.#copies.findLast((copy) => copy.generation === generation);
 	}
