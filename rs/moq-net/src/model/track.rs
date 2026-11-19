@@ -1227,16 +1227,24 @@ impl TrackState {
 	/// or where the publisher reports starting the range it asked from `time`. A group past
 	/// it says the feed went by: one between still in flight, a stream overtaken, would
 	/// only add that group to the reader's range.
+	///
+	/// A range asked from an earlier time, or from the oldest group (reported as time 0),
+	/// that the publisher started past `time` says the same: no group starts at or before
+	/// it. A reader joining a copy that another reader already asks from further back adds
+	/// no range of its own, so that is the only report its time start gets.
 	fn containing_received(&self, time: u64) -> Containing {
 		if self.lookup.contains_key(&time) {
 			return Containing::Group(time);
 		}
-		match self.time_starts.get(&time) {
-			Some(&start) if start <= time => return Containing::Group(start),
-			// The publisher serves nothing at or before it, as it does for a time older than
-			// every group it holds.
-			Some(_) => return Containing::Before,
-			None => {}
+		if let Some(&start) = self.time_starts.get(&time)
+			&& start <= time
+		{
+			return Containing::Group(start);
+		}
+		// The publisher serves nothing at or before it, as it does for a time older than
+		// every group it holds. Bounded by the copy's live wire ranges.
+		if self.time_starts.range(..=time).any(|(_, &start)| start > time) {
+			return Containing::Before;
 		}
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _))
@@ -15445,6 +15453,46 @@ mod test {
 		write_group(&producer, 3000);
 		assert_eq!(placed(&mut past), Some((1000, true)));
 		assert_eq!(drain(&mut past), vec![1000, 3000]);
+	}
+
+	/// A reader joining a lite-07 copy that another reader already asks from further back adds
+	/// no range of its own, so its publisher reports no start for the reader's time. The start
+	/// of a range asked from earlier, or from the oldest group, places it: past the time, no
+	/// group starts at or before it, and a publisher serving the reader learns where delivery
+	/// starts. At or before the time, a group between may still arrive.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_time_start_by_an_earlier_range() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed =
+			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+
+		let mut before = producer.subscribe(from(500));
+		let mut after = producer.subscribe(from(1500));
+		assert_eq!(placed(&mut before), None);
+		assert!(before.poll_start(&kio::Waiter::noop()).is_pending());
+
+		// Only a range asked from a later time: says nothing of 500.
+		producer.time_starts([(700, 1000)]);
+		assert_eq!(placed(&mut before), None);
+
+		// The range asked from the oldest group started at 1000.
+		producer.time_starts([(0, 1000)]);
+		assert_eq!(placed(&mut before), Some((0, false)));
+		assert!(before.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(drain(&mut before), vec![1000]);
+		assert_eq!(placed(&mut after), None, "a group past 1000 may still arrive");
 	}
 
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its

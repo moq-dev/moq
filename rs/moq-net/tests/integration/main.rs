@@ -83,6 +83,7 @@ mod session_close;
 mod session_panic;
 mod settled_end_survives_abort;
 mod setup_negotiation;
+mod shared_copy_start;
 mod slow_joiner;
 mod source_errors;
 mod stream_credit;
