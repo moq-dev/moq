@@ -73,9 +73,9 @@ pub enum Read {
 		duration: moq_net::Timestamp,
 	},
 	/// The publisher declared that its media stops at `end`: it paused, switched source, or
-	/// finished. A group ending whole reads as one once the next group starts later, or once no
-	/// group continues it within the wait a missing group gets (see [`Consumer`]); a next group
-	/// starting at the end continues the media instead. An audio terminal marker reads as one
+	/// finished. A group ending whole reads as one once the next group starts later, or once a
+	/// continuing group would be too late to play (see [`Consumer`]); a next group starting at the
+	/// end continues the media instead, and a track finishing after it reads as finished. An audio terminal marker reads as one
 	/// ahead of its group's frames, which are then the stopped encoder's final packets (a codec's
 	/// drain), whose output at or past `end` is padding. The next group starts fresh.
 	End {
@@ -106,8 +106,9 @@ pub struct Frame {
 	/// Sample duration in the frame's own scale, when the container reports it.
 	///
 	/// CMAF carries a per-sample duration (trun sample-duration). Legacy and LOC
-	/// can fill it from a duration marker that has already landed when a
-	/// [`GroupConsumer`] reads the frame, as in a fetched group. Streaming
+	/// can fill a group's last frame from its group end, or an older publisher's
+	/// duration marker, that has already landed when a [`GroupConsumer`] reads the
+	/// frame, as in a fetched group. Streaming
 	/// muxers receive the later endpoint separately, so media stays immediately available.
 	/// The [`Consumer`] adds it to `timestamp` to learn how far a group has
 	/// presented, so it can advance to a newer group as soon as the gap is
@@ -235,9 +236,9 @@ pub trait Container {
 	/// CMAF fragment), or none (a CMAF fragment with zero samples), which is not the
 	/// end of the group.
 	///
-	/// On a data track an empty batch is the discontinuity marker, so a data
-	/// container returns one only for an object with no bytes, and refuses any
-	/// other object that decodes to no frames.
+	/// On a data track an empty batch is an older publisher's discontinuity
+	/// marker, so a data container returns one only for an object with no bytes,
+	/// and refuses any other object that decodes to no frames.
 	fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error>;
 
 	/// Return the endpoint timestamp when `frame` is an empty-payload marker.
