@@ -264,6 +264,9 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 	expect(got.ranges).toEqual([position]);
 	const span = spanOf(Version.DRAFT_07, got.ranges ?? []);
 	expect([span.startGroup, span.startFrame]).toEqual([7n, 4]);
+	// Group 0 stays named when a frame qualifies it.
+	const zero = spanOf(Version.DRAFT_07, [{ start: { absolute: 0n, frame: 2 } }]);
+	expect([zero.startGroup, zero.startFrame]).toEqual([0n, 2]);
 	// The model reads the group whole: the publisher cuts the frames.
 	expect(requestedRanges(span)).toEqual([{ start: { time: 7n } }]);
 

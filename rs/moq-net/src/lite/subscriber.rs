@@ -10905,6 +10905,10 @@ impl TrackServe {
 		if opening && idle {
 			subscription = subscription.with_start(newest);
 		}
+		// A wire without frame bounds asks the group whole.
+		if !self.subscriber.version.has_frame_bounds() {
+			subscription.resume = None;
+		}
 		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
 	}
 

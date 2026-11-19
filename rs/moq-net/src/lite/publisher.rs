@@ -4489,10 +4489,10 @@ fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Cons
 ///
 /// A frame bound qualifies the group its range starts or ends at, so everything in between
 /// is served whole.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Frames {
-	/// The group the range starts partway through, and the first frame it serves of it.
-	first: Option<(u64, u64)>,
+	/// Each group a range starts partway through, and the first frame it serves of it.
+	first: Vec<(u64, u64)>,
 	/// The group the range ends partway through, and the last frame it serves of it, inclusive.
 	last: Option<(u64, u64)>,
 	/// The lowest group a legacy wire's start serves: its start names the first group at or
@@ -4503,10 +4503,9 @@ struct Frames {
 impl Frames {
 	/// The first frame to serve of `group`: 0 unless the range starts partway through it.
 	fn start(&self, group: u64) -> u64 {
-		match self.first {
-			Some((at, first)) if at == group => first,
-			_ => 0,
-		}
+		(self.first.iter())
+			.find(|(at, _)| *at == group)
+			.map_or(0, |(_, first)| *first)
 	}
 
 	/// The last frame to serve of `group`, inclusive, or `None` for all of it.
@@ -4564,7 +4563,7 @@ impl Bounds {
 			if let Some(lite::Anchor::Absolute(start)) = range.start
 				&& start.frame != 0
 			{
-				bounds.frames.first = Some((start.group, start.frame));
+				bounds.frames.first.push((start.group, start.frame));
 			}
 			let end = match range.end {
 				None => None,
@@ -4589,17 +4588,15 @@ impl Bounds {
 		}
 		// A group delivers once across the ranges, so a frame start applies only to a group no
 		// other range may cover: another range's would ask for it from frame 0.
-		if let Some((group, _)) = bounds.frames.first {
-			let covers = |range: &Range| match (range.start, range.end) {
-				(Anchor::Time(start), _) if start > group => false,
-				(_, Some(Anchor::Time(end))) if end < group => false,
+		let ranges = &bounds.ranges;
+		bounds.frames.first.retain(|(group, _)| {
+			let covers = |range: &&Range| match (range.start, range.end) {
+				(Anchor::Time(start), _) if start > *group => false,
+				(_, Some(Anchor::Time(end))) if end < *group => false,
 				_ => true,
 			};
-			let mut covering = bounds.ranges.iter().filter(|range| covers(range));
-			if covering.next().is_some() && covering.next().is_some() {
-				bounds.frames.first = None;
-			}
-		}
+			ranges.iter().filter(covers).nth(1).is_none()
+		});
 		bounds
 	}
 
@@ -6640,6 +6637,44 @@ mod serve_group_test {
 		assert_eq!((inside.frames.start(4), inside.frames.end(6)), (0, None));
 	}
 
+	/// Each lite-07 range starting partway through a group serves that group from its frame,
+	/// unless another range may cover it too, which asks for it whole.
+	#[test]
+	fn frame_starts_apply_per_group() {
+		let at = |group, frame| Some(lite::Anchor::Absolute(track::Position { group, frame }));
+		let time = |time| Some(lite::Anchor::Time(time));
+		let disjoint = Bounds::new(
+			&[
+				lite::Range {
+					start: at(7, 4),
+					end: time(8),
+				},
+				lite::Range {
+					start: at(9, 2),
+					end: None,
+				},
+			],
+			false,
+		);
+		assert_eq!((disjoint.frames.start(7), disjoint.frames.start(9)), (4, 2));
+		assert_eq!(disjoint.frames.start(8), 0);
+
+		let overlapping = Bounds::new(
+			&[
+				lite::Range {
+					start: at(7, 4),
+					end: None,
+				},
+				lite::Range {
+					start: at(9, 2),
+					end: None,
+				},
+			],
+			false,
+		);
+		assert_eq!((overlapping.frames.start(7), overlapping.frames.start(9)), (4, 0));
+	}
+
 	/// A group whose head the publisher no longer holds is skipped, not served short:
 	/// only a subscriber that asked for a partial group may receive one.
 	#[test]
@@ -6653,7 +6688,7 @@ mod serve_group_test {
 		group.start_at(5).unwrap();
 		group.write_frame(group.key_time(), b"tail".to_vec()).unwrap();
 		let starting = |frame| Frames {
-			first: Some((3, frame)),
+			first: vec![(3, frame)],
 			..Frames::default()
 		};
 

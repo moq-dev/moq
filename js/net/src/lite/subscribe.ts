@@ -312,10 +312,11 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	if (live) end = undefined;
 	// An exclusive end at the very first group names nothing.
 	if (end === 0n) throw new ProtocolViolation(EMPTY_RANGE);
+	const startFrame = start === undefined ? 0 : positionFrame(ranges, start);
 	return {
 		ranges: [...ranges],
-		startGroup: canonicalStartGroup(version, start, 0),
-		startFrame: start === undefined ? 0 : positionFrame(ranges, start),
+		startGroup: canonicalStartGroup(version, start, startFrame),
+		startFrame,
 		endGroup: end === undefined ? undefined : end - 1n,
 	};
 }

@@ -702,6 +702,12 @@ pub(crate) struct TrackState {
 	// the read guard a first frame holds, so it needs its own lock, never contended.
 	bounds: Mutex<BTreeMap<u64, Timestamp>>,
 
+	// The frames of a group a reader already held when it asked this copy to resume that
+	// group past them, by key, which the group adopts when it arrives (see
+	// [`Consumer::lend_head`]). Filled through a read guard, so it needs its own lock. One
+	// entry: a later loan replaces it, so nothing grows with switches.
+	lent: Mutex<Option<(u64, Arc<group::Head>)>>,
+
 	// The key and start of the highest-key group that left the cache holding a
 	// checked start (see [`group::Origin::Bound`]). Eviction is not a key prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
@@ -1206,6 +1212,12 @@ impl Holdings for TrackState {
 }
 
 impl TrackState {
+	/// The head lent for group `key`, taken; see [`Consumer::lend_head`].
+	fn take_lent(&self, key: u64) -> Option<Arc<group::Head>> {
+		let mut lent = self.lent.lock().unwrap_or_else(PoisonError::into_inner);
+		lent.take_if(|(lent, _)| *lent == key).map(|(_, head)| head)
+	}
+
 	/// How many keys just below `key` the publisher declared it never produced: the skip
 	/// run that ends at `key`, as a moq-transport Prior Group ID Gap names it.
 	fn skipped_below(&self, key: u64) -> u64 {
@@ -4516,9 +4528,17 @@ impl Producer {
 		}
 		state.cap(&group.handle())?;
 		state.commit_group(&group.handle());
+		let lent = match start {
+			0 => None,
+			_ => state.take_lent(info.start),
+		};
 		let deferred = state.deferred();
 		drop(state);
 		deferred.wake();
+		// With the track lock released (lock order is track then group).
+		if let Some(head) = lent {
+			group.handle().adopt_head(&head);
+		}
 		Ok(Received::Group(group))
 	}
 
@@ -6590,6 +6610,29 @@ impl Consumer {
 			}
 			res
 		})
+	}
+
+	/// Lend `head` to group `key` of this copy: to the copies it caches now, or else to the
+	/// first that arrives partway through the group, which then holds it whole. A later loan
+	/// replaces one still waiting; see [`group::Handle::adopt_head`].
+	pub(super) fn lend_head(&self, key: u64, head: Arc<group::Head>) {
+		let copies: Vec<group::Handle> = self.with_state(|state| {
+			let Some(state) = state else {
+				return Vec::new();
+			};
+			let state = state.read();
+			match state.lookup.get(&key) {
+				Some(slot) => slot.copies().cloned().collect(),
+				// Under the read guard, so the group cannot arrive before the loan is held.
+				None => {
+					*state.lent.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, head.clone()));
+					Vec::new()
+				}
+			}
+		});
+		for group in copies {
+			group.adopt_head(&head);
+		}
 	}
 
 	/// Lend `head` to the cached copies of group `key`; see

@@ -210,7 +210,7 @@ impl Producer {
 				_ => Vec::new(),
 			};
 			ranges.extend(preferences.clamped(reader.newest, None, &resolved).ranges);
-			resumes.push(reader.resume_at(reader.newest).map(|(resume, _)| resume));
+			resumes.push(reader.held_at(reader.newest).map(|(resume, _)| resume));
 		}
 		demand.ranges = ranges;
 		// As in a track's own demand, only when every reader resumes.
@@ -610,9 +610,6 @@ struct Copy {
 	/// The frames of the group at `floor` the reader already held when this copy was asked,
 	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
 	resume: Option<Position>,
-	/// Those frames, lent to this copy once the rest of their group lands here, so it holds
-	/// the group whole for a reader that joins later; see [`Reader::lend_heads`].
-	head: Option<Arc<group::Head>>,
 	/// The reader's ranges [`Self::resolved`] are for.
 	from: Vec<track::Range>,
 	/// Each of those ranges resolved, by index, so clamping never widens one: as the
@@ -1476,7 +1473,7 @@ impl Reader {
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// newest another route handed out, is not handed out.
 			copy.floor = copy.floor.max(self.newest);
-			(copy.resume, copy.head) = self.resume_at(copy.floor).unzip();
+			copy.resume = self.resume_at(copy.floor, &copy.track);
 			let start = copy.start(self.groups.0);
 			if let (Sub::Ready(sub), Some(_)) = (&mut copy.sub, copy.floor) {
 				sub.set_range((
@@ -1492,7 +1489,7 @@ impl Reader {
 			return;
 		}
 		let floor = self.newest;
-		let (resume, head) = self.resume_at(floor).unzip();
+		let resume = self.resume_at(floor, &track);
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
 		let mut wire = self.mirrored.clamped(floor, None, &resolved);
@@ -1503,7 +1500,6 @@ impl Reader {
 			track,
 			floor,
 			resume,
-			head,
 			from: self.mirrored.ranges.clone(),
 			resolved,
 			replaced: false,
@@ -1516,36 +1512,27 @@ impl Reader {
 		self.learn_end(None);
 	}
 
+	/// Ask `track` to resume group `key` past the frames held of it (see [`Self::held_at`]),
+	/// lending it those frames, so once the rest arrives it holds the group whole for a
+	/// reader that joins later, after the copies holding them are gone.
+	fn resume_at(&self, key: Option<u64>, track: &track::Consumer) -> Option<Position> {
+		let (resume, head) = self.held_at(key)?;
+		track.lend_head(resume.group, head);
+		Some(resume)
+	}
+
 	/// Where a new copy asked from group `key` resumes it: past the most frames of it a copy
 	/// holds from its first, which the reader already has or reads locally, and those frames.
 	/// A route switch behind the same next hop then sends none of them again, only the rest of
 	/// a group still arriving, and nothing of a finished one. `None` while no copy holds its
 	/// first frame.
-	fn resume_at(&self, key: Option<u64>) -> Option<(Position, Arc<group::Head>)> {
+	fn held_at(&self, key: Option<u64>) -> Option<(Position, Arc<group::Head>)> {
 		let key = key?;
 		(self.copies.iter())
 			.filter_map(|copy| copy.track.peek_group(key)?.handoff().head())
 			.filter_map(|head| Some((head.frames_from_first()?, head)))
 			.max_by_key(|(frames, _)| *frames)
 			.map(|(frames, head)| (Position::new(key, frames), head))
-	}
-
-	/// Lend each copy asked to resume a group the frames it was asked past, once the rest of
-	/// that group lands there, so it holds the group whole for a reader that joins later
-	/// after the copies holding them are gone.
-	fn lend_heads(&mut self) {
-		for copy in &mut self.copies {
-			let (Some(resume), Some(head)) = (copy.resume, &copy.head) else {
-				continue;
-			};
-			let Some(group) = copy.track.peek_group(resume.group) else {
-				continue;
-			};
-			if group.first_frame() > 0 {
-				copy.track.adopt_head(resume.group, head);
-			}
-			copy.head = None;
-		}
 	}
 
 	/// One logical track has one end, whichever route first reports it.
@@ -1760,7 +1747,6 @@ impl Reader {
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<Candidate>>>> {
 		self.sync(waiter);
-		self.lend_heads();
 		if let Some(err) = self.refusal() {
 			return Some(Poll::Ready(Err(err)));
 		}
@@ -2266,7 +2252,6 @@ impl Reader {
 			floor,
 			// Below every group handed out, so the reader holds none of the first.
 			resume: None,
-			head: None,
 			from: self.mirrored.ranges.clone(),
 			resolved,
 			// Bounded from the start: everything it may deliver is older than what the reader
@@ -4133,10 +4118,12 @@ mod test {
 		let b = copy();
 		routes.serve(b.consume());
 		assert_eq!(b.subscription().unwrap().resume, Some(Position::new(0, 1)));
-		let mut rest = b.create_group(group::Info { start: 0 }).unwrap();
-		rest.start_at(1).unwrap();
+		// As a session receives it, partway through. The holder never polls again, so the
+		// copy takes the head on arrival, not from the holder's reads.
+		let track::Received::Group(rest) = b.create_group_at(group::Info { start: 0 }, 1).unwrap() else {
+			panic!("nothing else holds the group");
+		};
 		rest.finish().unwrap();
-		assert!(holder.recv_group().now_or_never().is_none(), "handed out twice");
 		drop(a);
 
 		let mut late = subscribe(&track, HOUR);
