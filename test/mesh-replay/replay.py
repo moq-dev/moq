@@ -820,9 +820,12 @@ class Run:
         gap = 0.5
         rows = []
         for relay in self.relays.values():
+            # A path's newest arrival is known only as of the reader's latest status line, up to a
+            # report interval old, so a pause still going is measured to that line, not to now.
+            known = max(start, min(end, relay.readout.status_at))
             for path, state in relay.readout.paths.items():
                 source = path.split("/")[1]
-                longest, missed = interruption(state, start, end, gap)
+                longest, missed = interruption(state, start, known, gap)
                 rows.append(
                     {
                         "reader": relay.name,

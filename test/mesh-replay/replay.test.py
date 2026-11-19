@@ -176,6 +176,19 @@ class ReaderTest(unittest.TestCase):
         self.assertIsNone(reader.paths["p"].ended)
 
 
+class ReaderReportTest(unittest.TestCase):
+    def test_a_status_line_a_second_old_is_no_pause(self):
+        readout = replay.ReaderLog(Path("/nonexistent"))
+        readout.apply(
+            {"ms": 6000, "event": "status", "paths": {"replay/b/0": {"online": True, "groups": 50, "last": 5950}}}
+        )
+        relay = SimpleNamespace(name="a", readout=readout)
+        run = SimpleNamespace(relays={"a": relay})
+        # The window ends almost a second after the reader last reported, as every window may.
+        report = replay.Run.reader_report(run, 1.0, 6.9, {"c"})
+        self.assertEqual(report["all"]["interrupted"], 0)
+
+
 class KnownTest(unittest.TestCase):
     def test_a_known_flaw_never_excuses_the_start(self):
         run = SimpleNamespace(
