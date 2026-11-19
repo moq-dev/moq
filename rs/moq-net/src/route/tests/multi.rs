@@ -999,16 +999,6 @@ impl<N: Key> Router<N> {
 		out
 	}
 
-	/// Whether it offers a route to itself under `tune.claimed`: it has announced a claim.
-	pub fn announced(&self) -> bool {
-		self.announced
-	}
-
-	/// The route this node uses to `origin`.
-	pub fn best(&self, origin: Id) -> Option<&Best<N>> {
-		self.best.get(&origin)
-	}
-
 	/// Every forwarding node this node has heard a route to or uses one to.
 	pub fn origins(&self) -> BTreeSet<Id> {
 		self.heard.keys().chain(self.best.keys()).copied().collect()
@@ -1551,15 +1541,6 @@ impl MultiSim {
 
 	pub fn hold(&mut self, from: Node, to: Node) {
 		self.held.insert((from, to));
-	}
-
-	pub fn release(&mut self, from: Node, to: Node) {
-		self.held.remove(&(from, to));
-	}
-
-	/// Whether `a` and `b` have a session open.
-	pub fn is_up(&self, a: Node, b: Node) -> bool {
-		self.up.contains(&Self::pair(a, b))
 	}
 
 	pub fn ready(&self) -> Vec<((Node, Node), usize)> {

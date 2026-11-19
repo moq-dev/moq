@@ -2,6 +2,7 @@
 
 pub mod harness;
 pub mod mock;
+pub mod schedule;
 
 use std::ops::{Bound, RangeBounds};
 

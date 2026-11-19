@@ -88,7 +88,11 @@
 //!   its final nonnegative delta. Unsupported transports contribute zero.
 //! * `routes_refused` ([`Presence`]): cumulative routes and claims that lite-07
 //!   sessions under the label forwarded and this node refused, each withdrawn while
-//!   the session stays open.
+//!   the session stays open; [`Routes::refused`] splits it by reason.
+//! * `routes` ([`Presence`], [`Routes`]): what the label's lite-07 sessions did on
+//!   the route layer: route changes their peers caused and the broadcasts each
+//!   rewrote into the origin, DEAD and DRAIN withdrawals sent and received, refusals
+//!   by reason, and sessions closed for their route layer by kind.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the label held
 //!   at once, to compare against what bounds them. A peak never
@@ -156,8 +160,11 @@ use serde::{Deserialize, Serialize};
 use crate::{Path, Pattern, Patterns, time::Instant, util::SendCell};
 
 mod outcomes;
+mod routes;
 pub use outcomes::{Failure, Failures, RefusalKind, Refusals};
 use outcomes::{FailureCounters, RefusalCounters};
+use routes::RouteCounters;
+pub use routes::{RouteClose, RouteCloses, RouteRefusal, RouteRefusals, Routes, Withdrawal, Withdrawals};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -305,7 +312,7 @@ struct SessionCounters {
 	sessions_ended: AtomicU64,
 	announces_peak: AtomicU64,
 	subscriptions_peak: AtomicU64,
-	routes_refused: AtomicU64,
+	routes: RouteCounters,
 	/// Payload bytes of the sessions recording here. One lock covers the folded totals
 	/// and the live sessions, so a readout never goes down when a session leaves.
 	bytes: Mutex<SessionBytes>,
@@ -335,6 +342,7 @@ impl SessionCounters {
 			let (sent, received, activity) = bytes.read(now);
 			(sent, received, activity, bytes.live.is_empty())
 		};
+		let routes = self.routes.snapshot();
 		let presence = Presence {
 			sessions_refused: self.sessions_refused.snapshot(),
 			sessions_failed,
@@ -347,7 +355,8 @@ impl SessionCounters {
 			received_bytes,
 			announces_peak: self.announces_peak.load(Ordering::Relaxed),
 			subscriptions_peak: self.subscriptions_peak.load(Ordering::Relaxed),
-			routes_refused: self.routes_refused.load(Ordering::Relaxed),
+			routes_refused: routes.refused.total(),
+			routes,
 		};
 		(presence, activity, empty)
 	}
@@ -598,8 +607,11 @@ pub struct Presence {
 	/// Cumulative transport bytes received, including transport framing.
 	pub wire_rx: u64,
 	/// Cumulative routes and claims a lite-07 session forwarded that this
-	/// node refused, withdrawing each and keeping the session.
+	/// node refused, withdrawing each and keeping the session: the total of
+	/// [`Routes::refused`].
 	pub routes_refused: u64,
+	/// What the label's lite-07 sessions did on the route layer.
+	pub routes: Routes,
 }
 
 impl Presence {
@@ -617,6 +629,7 @@ impl Presence {
 		self.announces_peak = self.announces_peak.max(other.announces_peak);
 		self.subscriptions_peak = self.subscriptions_peak.max(other.subscriptions_peak);
 		self.routes_refused += other.routes_refused;
+		self.routes.add(other.routes);
 	}
 
 	/// Sessions currently connected.
@@ -1662,11 +1675,42 @@ impl Session {
 
 	/// Count a route or claim the peer forwarded that this node refused.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn refuse_route(&self) {
+	pub(crate) fn refuse_route(&self, kind: RouteRefusal) {
+		self.refuse_routes(kind, 1);
+	}
+
+	/// Count `count` routes or claims the peer forwarded that this node refused.
+	pub(crate) fn refuse_routes(&self, kind: RouteRefusal, count: u64) {
+		if count > 0 {
+			self.routes(|routes| routes.refused.add(kind, count));
+		}
+	}
+
+	/// Count a change to a relay's route that the peer caused, and the broadcasts it rewrote.
+	pub(crate) fn route_changed(&self, rewritten: u64) {
+		self.routes(|routes| routes.changed(rewritten));
+	}
+
+	/// Count a withdrawal sent to the peer, or `received` from it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn withdrawal(&self, kind: Withdrawal, received: bool) {
+		self.routes(|routes| match received {
+			true => routes.received.add(kind, 1),
+			false => routes.sent.add(kind, 1),
+		});
+	}
+
+	/// Count the session closing for its route layer.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn route_closed(&self, kind: RouteClose) {
+		self.routes(|routes| routes.closed.add(kind, 1));
+	}
+
+	fn routes(&self, bump: impl FnOnce(&RouteCounters)) {
 		let Some(inner) = &self.inner else { return };
 		let current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(presence) = &current.presence else { return };
-		presence.routes_refused.fetch_add(1, Ordering::Relaxed);
+		bump(&presence.routes);
 	}
 
 	/// Egress (publisher / reads) scope for a broadcast path. The path is the
