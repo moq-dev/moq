@@ -215,24 +215,25 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
  * starting at or after it, which the publisher's floor keeps (see `cursorFloor`).
  */
 export function requestedRanges(msg: Span & { ranges?: WireRange[] }): Range[] {
-	if (msg.ranges) {
-		return msg.ranges.map((range) => {
-			// Empty, as group bounds say it: keep its place, covering no group.
-			const start = range.start?.absolute;
-			const end = range.end?.absolute;
-			if (start !== undefined && end !== undefined && end <= start) return { ...EMPTY };
-			if (end === 0n) return { ...EMPTY };
-			const out: Range = {};
-			if (range.start) out.start = start === undefined ? (range.start as Anchor) : { time: start };
-			// An absolute end is exclusive; every model end includes its group.
-			if (range.end) out.end = end === undefined ? (range.end as Anchor) : { time: end - 1n };
-			return out;
-		});
-	}
+	if (msg.ranges) return msg.ranges.map(requestedRange);
 	const range: Range = {};
 	if (msg.startGroup !== undefined) range.start = { time: msg.startGroup };
 	if (msg.endGroup !== undefined) range.end = { time: msg.endGroup };
 	return [range];
+}
+
+/** The model range one lite-07 range asks for; see {@link requestedRanges}. */
+export function requestedRange(range: WireRange): Range {
+	// Empty, as group bounds say it: keep its place, covering no group.
+	const start = range.start?.absolute;
+	const end = range.end?.absolute;
+	if (start !== undefined && end !== undefined && end <= start) return { ...EMPTY };
+	if (end === 0n) return { ...EMPTY };
+	const out: Range = {};
+	if (range.start) out.start = start === undefined ? (range.start as Anchor) : { time: start };
+	// An absolute end is exclusive; every model end includes its group.
+	if (range.end) out.end = end === undefined ? (range.end as Anchor) : { time: end - 1n };
+	return out;
 }
 
 /** Decode one lite-07 range end, `undefined` for none: a time, inclusive as an end, or a count back. */
@@ -278,20 +279,31 @@ export function spanOf(version: Version, ranges: readonly WireRange[]): Span & {
 	let floor = true;
 	let live = false;
 	for (const range of ranges) {
-		// A time is the start of the group it names, inclusive as an end.
-		const from = range.start?.absolute ?? range.start?.time;
-		const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+		const [from, to] = rangeBounds(range);
 		if (from === undefined) floor = false;
 		else if (start === undefined || from < start) start = from;
 		if (to === undefined) live = true;
 		else if (end === undefined || end < to) end = to;
 	}
-	if (!floor) start = undefined;
-	if (live) end = undefined;
+	return { ranges: [...ranges], ...spanBetween(version, floor ? start : undefined, live ? undefined : end) };
+}
+
+/**
+ * The group a lite-07 range starts at and the exclusive group it ends before, either undefined
+ * when it counts back from the latest group or has no such end: a time is the start of the group
+ * it names, inclusive as an end.
+ */
+export function rangeBounds(range: WireRange): [bigint | undefined, bigint | undefined] {
+	const from = range.start?.absolute ?? range.start?.time;
+	const to = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+	return [from, to];
+}
+
+/** The span from group `start` up to the exclusive group `end`, either undefined for none. */
+export function spanBetween(version: Version, start: bigint | undefined, end: bigint | undefined): Span {
 	// An exclusive end at the very first group names nothing.
 	if (end === 0n) throw new ProtocolViolation(EMPTY_RANGE);
 	return {
-		ranges: [...ranges],
 		startGroup: canonicalStartGroup(version, start, 0),
 		startFrame: 0,
 		endGroup: end === undefined ? undefined : end - 1n,
@@ -357,6 +369,12 @@ function rangeKey(range: WireRange): string {
 	return `${anchor(range.start)}:${anchor(range.end)}`;
 }
 
+/** A received update's ranges resolved by Range ID: the ones retired, then each one added. Mirrors the Rust `Applied`. */
+export interface Applied {
+	retired: bigint[];
+	added: [bigint, WireRange][];
+}
+
 /**
  * A subscription's live ranges by Range ID, which both ends of a Subscribe Stream keep: the
  * subscriber to write each update as an edit, the publisher to resolve one. Mirrors the Rust
@@ -372,9 +390,6 @@ export class LiveRanges {
 	readonly #live = new Map<bigint, WireRange>();
 	// The bytes the live ranges take on the wire, held to what one SUBSCRIBE carries.
 	#size = 0;
-	// The live ranges `apply` last returned, until one changes, so an edit that changes nothing
-	// costs nothing.
-	#snapshot?: readonly { id: bigint; range: WireRange }[];
 	/** How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports. */
 	readonly initial: bigint;
 
@@ -386,7 +401,6 @@ export class LiveRanges {
 	}
 
 	#add(ranges: readonly WireRange[]) {
-		if (ranges.length > 0) this.#snapshot = undefined;
 		for (const range of ranges) {
 			// Only lite-07 numbers ranges on the wire, and only it is held to one SUBSCRIBE.
 			if (hasRanges(this.#version)) this.#size += rangeSize(range);
@@ -397,7 +411,6 @@ export class LiveRanges {
 	#remove(id: bigint): boolean {
 		const range = this.#live.get(id);
 		if (!range) return false;
-		this.#snapshot = undefined;
 		if (hasRanges(this.#version)) this.#size -= rangeSize(range);
 		this.#live.delete(id);
 		return true;
@@ -433,29 +446,27 @@ export class LiveRanges {
 		return [...this.#live];
 	}
 
-	/** Whether the publisher reports where each range starts, which lite-07 does by Range ID. */
-	get reportsStarts(): boolean {
-		return hasRanges(this.#version);
-	}
-
 	/**
-	 * Apply a received lite-07 `update`'s edit, returning every live range by Range ID: the same
-	 * array as last time while nothing changed. Throws {@link ProtocolViolation} for an edit it
-	 * cannot apply. Before lite-07 an update restates its ranges, so nothing is numbered.
+	 * Apply a received lite-07 `update`'s edit, returning it by Range ID: the ranges retired, then
+	 * each added with the Range ID it took, costing the ranges it names. Throws
+	 * {@link ProtocolViolation} for an edit it cannot apply. Before lite-07 an update restates its
+	 * ranges, so nothing is numbered and the edit is empty. Mirrors the Rust `LiveRanges::apply`.
 	 */
-	apply(update: SubscribeUpdate): readonly { id: bigint; range: WireRange }[] {
-		if (!hasRanges(this.#version)) return [];
-		for (const id of update.remove ?? []) {
+	apply(update: SubscribeUpdate): Applied {
+		if (!hasRanges(this.#version)) return { retired: [], added: [] };
+		const retired = update.remove ?? [];
+		for (const id of retired) {
 			// An id never assigned, or already retired (including earlier in this list).
 			if (!this.#remove(id)) throw new ProtocolViolation(`unknown range id: ${id}`);
 		}
-		this.#add(update.ranges ?? []);
+		const first = this.#next;
+		const add = update.ranges ?? [];
+		this.#add(add);
 		// Asking for nothing is refused like a SUBSCRIBE that does, and a set no SUBSCRIBE
 		// could carry like one too large to send.
 		if (this.#live.size === 0) throw new ProtocolViolation("a subscription asks for no range");
 		if (this.#size > Message.MAX_MESSAGE_SIZE) throw new ProtocolViolation("too many ranges");
-		this.#snapshot ??= [...this.#live].map(([id, range]) => ({ id, range }));
-		return this.#snapshot;
+		return { retired: [...retired], added: add.map((range, index) => [first + BigInt(index), range]) };
 	}
 
 	/**

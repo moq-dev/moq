@@ -36,7 +36,7 @@ fn bench_protect(c: &mut Criterion) {
 		let info = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_max_age(Duration::ZERO);
-		let mut producer = broadcast(&credential).create_track("video", info).unwrap();
+		let mut producer = broadcast(&credential).create_track("video", info).unwrap().unwrap();
 		let mut ms = 0u64;
 		b.iter(|| {
 			ms += 1;
@@ -50,7 +50,7 @@ fn bench_protect(c: &mut Criterion) {
 	group.throughput(Throughput::Bytes(opus.len() as u64));
 	group.bench_function("datagram_opus160", |b| {
 		let info = moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI);
-		let mut producer = broadcast(&credential).create_datagrams("audio", info).unwrap();
+		let mut producer = broadcast(&credential).create_datagrams("audio", info).unwrap().unwrap();
 		let mut ms = 0u64;
 		b.iter(|| {
 			ms += 1;

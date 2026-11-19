@@ -70,7 +70,7 @@ impl Fixture {
 					continue;
 				};
 				if (fill.start().group..fill.end()).contains(&FILLED)
-					&& let Ok(group) = fill.accept(FILLED, None)
+					&& let Ok(Some(group)) = fill.accept(FILLED, None)
 				{
 					write(group);
 				}

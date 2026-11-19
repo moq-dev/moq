@@ -50,7 +50,7 @@ mod sink;
 
 pub use backend::NAMES;
 #[cfg(feature = "capture")]
-pub use capture::{Capture, Driver, Publication, State, Status, publish_capture};
+pub use capture::{Capture, Driver, Publication, Rendition, State, Status, publish_capture};
 pub use encoded::Encoded;
 pub use encoder::{Applied, Codec, Config, Encoder, Kind, Preset};
 pub use producer::{Options, Producer, Rung};

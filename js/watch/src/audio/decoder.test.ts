@@ -7,6 +7,7 @@ import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { defined } from "../defined.test-util.ts";
 import { DELAY_MAX, type Delay, STRETCH, Sync } from "../sync";
 import { Decoder as VideoDecoder } from "../video/decoder";
 import { Source as VideoSource } from "../video/source";
@@ -342,7 +343,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 	// Published, so finishing it declares the subscription's end as a publisher's FIN does. The
 	// reads themselves come from `feed`.
 	const publish = () =>
-		producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+		defined(producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }));
 	let track = publish();
 	let audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
@@ -1587,7 +1588,9 @@ async function livePlayback(burst: number) {
 	const sync = new Sync({ delay: new Signal<Delay>("auto") });
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
-	let track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+	let track = defined(
+		producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
+	);
 	const enabled = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled });
 
@@ -1626,7 +1629,9 @@ async function livePlayback(burst: number) {
 		rename(name: string, patch: Record<string, unknown> = {}) {
 			track.finish();
 			track.close();
-			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+			track = defined(
+				producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
+			);
 			sequence = 0n;
 			catalog.set({ audio: { renditions: { [name]: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } });
 		},
@@ -1634,7 +1639,9 @@ async function livePlayback(burst: number) {
 		move(path: string) {
 			media.peek().close();
 			producer = new Moq.Origin.Producer().route(Moq.Path.from(path), { hidden: true }).broadcast;
-			track = producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE });
+			track = defined(
+				producer.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
+			);
 			sequence = 0n;
 			media.set(producer.consume());
 		},

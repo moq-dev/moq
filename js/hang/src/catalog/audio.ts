@@ -119,8 +119,6 @@ export const AudioSchema = z.object({
 	renditions: renditions(AudioConfigSchema),
 });
 
-/** The catalog audio section: renditions keyed by track name. */
-export type Audio = z.infer<typeof AudioSchema>;
 /** Decoder config for a single audio rendition. */
 export type AudioConfig = z.infer<typeof AudioConfigSchema>;
 

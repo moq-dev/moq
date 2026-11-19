@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode } from "./error.ts";
 import { randomHop } from "./hop.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
@@ -37,7 +38,7 @@ for (const protocol of protocols) {
 			// No publisher limit, so the cache eviction rather than a stale verdict ends a long budget.
 			// moq-transport carries no subscriber budget, so there the publisher's own limit expires it.
 			const maxAge = protocol.kind === "ietf" && mode === "expires" ? Duration.millis(budget) : null;
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge });
+			const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge }));
 			const write = (key: bigint) => {
 				const group = track.createGroup(key);
 				group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(key)) });
@@ -157,7 +158,7 @@ for (const protocol of protocols) {
 		const broadcast = broadcastRoute.broadcast;
 		// No publisher limit, so the eviction rather than a stale verdict gives the group up: lite-07
 		// closes the stream of a group gone stale instead of resetting it.
-		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const write = (key: bigint, frames: number) => {
 			const group = track.createGroup(key);
 			for (let frame = 0; frame < frames; frame++) {

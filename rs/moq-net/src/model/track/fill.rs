@@ -947,9 +947,9 @@ impl FillLookup {
 	/// handing it to the readers waiting on the lookup, and return a [`group::Producer`] to fill.
 	///
 	/// `info` sets the track's [`Info`] if it hasn't been accepted yet, and is ignored otherwise.
-	/// Errors with [`Error::Duplicate`] if the group was already answered or cached,
+	/// Returns `None` if the group was already answered or cached. Errors with
 	/// [`Error::Skipped`] if the track skipped it, or the track's abort error.
-	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
+	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
 		self.inner.accept(key, info.into())
 	}
 
@@ -1016,10 +1016,10 @@ impl FillGroups {
 	/// The group starts at [`start`](Self::start)'s frame when it is the first group, so the
 	/// frames written keep the indices they have in the group. `info` sets the track's
 	/// [`Info`] if it hasn't been accepted yet (a fetch with no live subscription), and is
-	/// ignored otherwise. Errors with [`Error::InvalidRange`] outside the fill,
-	/// [`Error::Duplicate`] if the group was already answered or cached, [`Error::Skipped`] if
-	/// the track skipped it, or the track's abort error.
-	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<group::Producer> {
+	/// ignored otherwise. Returns `None` if the group was already answered or cached. Errors
+	/// with [`Error::InvalidRange`] outside the fill, [`Error::Skipped`] if the track skipped
+	/// it, or the track's abort error.
+	pub fn accept(&self, key: u64, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
 		self.inner.accept(key, info.into())
 	}
 
@@ -1363,11 +1363,11 @@ impl Inner {
 		}
 	}
 
-	fn accept(&self, key: u64, info: Option<Info>) -> Result<group::Producer> {
+	fn accept(&self, key: u64, info: Option<Info>) -> Result<Option<group::Producer>> {
 		self.accept_from(key, info, self.bounds(key))
 	}
 
-	fn accept_from(&self, key: u64, info: Option<Info>, frames: group::Bounds) -> Result<group::Producer> {
+	fn accept_from(&self, key: u64, info: Option<Info>, frames: group::Bounds) -> Result<Option<group::Producer>> {
 		if !self.contains(key) {
 			return Err(Error::InvalidRange);
 		}
@@ -1375,7 +1375,7 @@ impl Inner {
 			return Err(Error::InvalidRange);
 		};
 		if self.result.read().resolved.contains(&key) {
-			return Err(Error::Duplicate);
+			return Ok(None);
 		}
 		// Written for a reader that has yet to pick it up, which the next group waits on.
 		// Recorded before the group is cached, since a reader may take it from the cache and
@@ -1393,7 +1393,7 @@ impl Inner {
 		// Cache the group before answering: readers resolve an accept through the cache.
 		let res = TrackState::modify(&self.state).and_then(|mut state| {
 			let res = match self.flight {
-				true => state.insert_flight(key, frames, info),
+				true => state.insert_flight(key, frames, info).map(Some),
 				false => state.insert_group_request(key, frames, info),
 			};
 			let deferred = state.deferred();
@@ -1402,14 +1402,14 @@ impl Inner {
 			res
 		});
 		if unseen
-			&& res.is_err()
+			&& !matches!(res, Ok(Some(_)))
 			&& let Some(pending) = self.fills.lock().pending.get_mut(&self.id)
 		{
 			pending.unseen.remove(key..end);
 		}
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.accept(key..end);
-			if let Ok(group) = &res
+			if let Ok(Some(group)) = &res
 				&& (self.flight || frames.start > 0 || frames.end.is_some())
 			{
 				outcome.partial.insert(key, group.handle());
@@ -1656,7 +1656,7 @@ impl GroupFill {
 	}
 
 	/// Accept the actual wire range, which an older or compressed upstream may have widened.
-	pub(crate) fn accept_from(&self, info: Info, frames: group::Bounds) -> Result<group::Producer> {
+	pub(crate) fn accept_from(&self, info: Info, frames: group::Bounds) -> Result<Option<group::Producer>> {
 		self.inner.accept_from(self.key, Some(info), frames)
 	}
 
@@ -1684,7 +1684,7 @@ impl GroupFill {
 
 	/// Insert the group into the cache, as [`FillGroups::accept`].
 	#[cfg(test)]
-	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<group::Producer> {
+	pub(crate) fn accept(self, info: impl Into<Option<Info>>) -> Result<Option<group::Producer>> {
 		self.inner.accept(self.key, info.into())
 	}
 

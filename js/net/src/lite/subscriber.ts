@@ -85,7 +85,7 @@ import {
 	EMPTY_RANGE,
 	inclusiveGroupEnd,
 	LiveRanges,
-	requestedRanges,
+	requestedRange,
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
@@ -1720,28 +1720,31 @@ export class Subscriber {
 			const datagrams = request
 				? request.accept(info)
 				: wireOf(state.consumer).createDatagrams(producer.name, info, false);
-			entry.datagrams = { producer: datagrams, timescale: framing.scale };
-			entry.legacyKey = state.legacyKey;
-			this.#datagrams.set(id, entry.datagrams);
-			this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
-			let held: track.Subscriber | undefined;
-			const sync = () => {
-				const priority = datagrams.priority.peek();
-				if (priority === undefined) {
+			// Undefined while a live datagram track already holds the name: serve the stream track alone.
+			if (datagrams) {
+				entry.datagrams = { producer: datagrams, timescale: framing.scale };
+				entry.legacyKey = state.legacyKey;
+				this.#datagrams.set(id, entry.datagrams);
+				this.#legacyDatagrams.set(state.legacyKey, entry.datagrams);
+				let held: track.Subscriber | undefined;
+				const sync = () => {
+					const priority = datagrams.priority.peek();
+					if (priority === undefined) {
+						held?.close();
+						held = undefined;
+					} else if (held) {
+						held.update({ priority });
+					} else {
+						held = producer.subscribe({ priority });
+					}
+				};
+				const dispose = datagrams.priority.subscribe(sync);
+				sync();
+				entry.datagramDemand = () => {
+					dispose();
 					held?.close();
-					held = undefined;
-				} else if (held) {
-					held.update({ priority });
-				} else {
-					held = producer.subscribe({ priority });
-				}
-			};
-			const dispose = datagrams.priority.subscribe(sync);
-			sync();
-			entry.datagramDemand = () => {
-				dispose();
-				held?.close();
-			};
+				};
+			}
 		}
 
 		this.#subscribes.set(id, entry);
@@ -2380,11 +2383,11 @@ export class Subscriber {
 			cancel.abort();
 			return;
 		}
-		let group: netGroup.Producer;
+		let group: netGroup.Producer | undefined;
 		try {
 			// The live feed may have brought it meanwhile, or every reader left.
-			if (!fill.isWanted(key)) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
-			group = fill.accept(key);
+			if (fill.isWanted(key)) group = fill.accept(key);
+			if (!group) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
 		} catch (err) {
 			stream.abort(error(err));
 			return;
@@ -2687,7 +2690,7 @@ export class Subscriber {
 				if (!entry.starts.has(id)) return false;
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
-				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
+				const model = requestedRange(range);
 				owed.push({ ...model, start: { time: at } });
 			}
 			// Each starts at the group its publisher reported starting it at.

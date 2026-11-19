@@ -780,7 +780,11 @@ fn resolve(subscribing: &kio::Pending<track::Subscribing>) -> Result<track::Cons
 #[test]
 fn broadcast_speaks_semantic_names() {
 	let protected = protected();
-	let mut video = protected.producer.create_track("video", timed()).unwrap();
+	let mut video = protected
+		.producer
+		.create_track("video", timed())
+		.unwrap()
+		.expect("a free name");
 	let physical = protected.producer.generation().name("video").unwrap();
 	assert_eq!(video.name(), physical.as_str());
 
@@ -803,7 +807,7 @@ fn broadcast_speaks_semantic_names() {
 #[test]
 fn reserved_track_serves_on_demand() {
 	let protected = protected();
-	let request = protected.producer.reserve_track("audio").unwrap();
+	let request = protected.producer.reserve_track("audio").unwrap().expect("a free name");
 	assert_eq!(request.name(), "audio");
 	let demand = request.demand();
 	assert!(!demand.wanted());
@@ -823,16 +827,23 @@ fn reserved_track_serves_on_demand() {
 fn broadcast_claims_span_outputs() {
 	let generation = test_generation();
 	let first = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation.clone());
-	let mut video = first.create_track("video", timed()).unwrap();
+	let mut video = first.create_track("video", timed()).unwrap().expect("a free name");
 	video.create_group(2).unwrap();
-	let mut audio = first.reserve_track("audio").unwrap().accept(timed());
+	let mut audio = first
+		.reserve_track("audio")
+		.unwrap()
+		.expect("a free name")
+		.accept(timed());
 	audio.append_group(Timestamp::from_millis(0).unwrap()).unwrap();
-	let mut voice = first.create_datagrams("voice", timed_datagrams()).unwrap();
+	let mut voice = first
+		.create_datagrams("voice", timed_datagrams())
+		.unwrap()
+		.expect("a free name");
 	voice.append(ms(1), b"opus").unwrap();
 
 	// A clone of the generation on another output resumes each name above its marks.
 	let second = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation);
-	let mut video = second.create_track("video", timed()).unwrap();
+	let mut video = second.create_track("video", timed()).unwrap().expect("a free name");
 	assert_eq!(
 		video
 			.append_group(Timestamp::from_millis(2).unwrap())
@@ -845,7 +856,7 @@ fn broadcast_claims_span_outputs() {
 		video.append_group(Timestamp::from_millis(3).unwrap()).unwrap().start(),
 		3
 	);
-	let request = second.reserve_track("audio").unwrap();
+	let request = second.reserve_track("audio").unwrap().expect("a free name");
 	assert_eq!(request.name(), "audio");
 	let mut audio = request.accept(timed());
 	assert_eq!(
@@ -860,7 +871,10 @@ fn broadcast_claims_span_outputs() {
 		audio.append_group(Timestamp::from_millis(1).unwrap()).unwrap().start(),
 		1
 	);
-	let mut voice = second.create_datagrams("voice", timed_datagrams()).unwrap();
+	let mut voice = second
+		.create_datagrams("voice", timed_datagrams())
+		.unwrap()
+		.expect("a free name");
 	assert_eq!(voice.append(ms(1), b"opus").unwrap(), 1);
 }
 
@@ -989,7 +1003,12 @@ fn requests_claim_only_accepted_names() {
 	let request = requested(&mut requests);
 	assert_eq!(generation.claims(), 0);
 	let other = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation.clone());
-	other.create_track("video", timed()).unwrap().create_group(5).unwrap();
+	other
+		.create_track("video", timed())
+		.unwrap()
+		.expect("a free name")
+		.create_group(5)
+		.unwrap();
 	let mut video = request.accept(timed());
 	assert_eq!(generation.claims(), 1);
 	assert_eq!(

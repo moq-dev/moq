@@ -45,8 +45,9 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 			broadcast
 				.broadcast()
 				.create_track(i.to_string(), moq_net::track::Info::default().with_max_age(age))
+				.expect("a free name")
 		})
-		.collect::<Result<_, _>>()?;
+		.collect();
 	broadcast.announce()?;
 	let subscriber = moq_tokio::origin::spawn();
 	let consumer = subscriber.consume();

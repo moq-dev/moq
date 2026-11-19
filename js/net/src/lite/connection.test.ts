@@ -5,6 +5,7 @@ import { Session as Qmux } from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { inspect } from "../connection/stats.ts";
+import { defined } from "../defined.test-util.ts";
 import { SessionCode, SessionError } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual, settlesWithin, textFrame } from "../mock.ts";
@@ -354,7 +355,7 @@ for (const [alpn, version] of [
 		const origin = new Producer();
 		const broadcastRoute = origin.route(Path.from("room"));
 		const broadcast = broadcastRoute.broadcast;
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const url = new URL("https://localhost/test");
 		const client = new Connection({ url, quic: pair.client, version });
 		const server = new Connection({ url, quic: pair.server, version, publish: origin.consume(), client: false });
@@ -413,7 +414,7 @@ for (const [alpn, version] of [
 			const origin = new Producer();
 			const broadcastRoute = origin.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
-			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
 			const server = new Connection({
@@ -480,7 +481,7 @@ for (const [alpn, version] of [
 			const origin = new Producer();
 			const broadcastRoute = origin.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
-			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
 			const server = new Connection({
@@ -531,7 +532,7 @@ for (const [alpn, version] of [
 			const origin = new Producer();
 			const broadcastRoute = origin.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
-			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
 			const server = new Connection({
@@ -575,7 +576,7 @@ for (const [alpn, version] of [
 			const origin = new Producer();
 			const broadcastRoute = origin.route(Path.from("room"));
 			const broadcast = broadcastRoute.broadcast;
-			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 			const url = new URL("https://localhost/test");
 			const client = new Connection({ url, quic: pair.client, version });
 			const server = new Connection({
@@ -615,7 +616,7 @@ async function servedRawSubscription(alpn: string = ALPN_07_WIP, version: Versio
 	const origin = new Producer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const server = new Connection({
 		url: new URL("https://relay.example/"),
 		quic: pair.server,
@@ -733,7 +734,7 @@ test("close waits for a served FETCH to be acknowledged", async () => {
 	const origin = new Producer();
 	const broadcastRoute = origin.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(producer);
 	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();
@@ -786,7 +787,7 @@ test("close waits for a request served while withdrawals are in flight", async (
 	const destination = new Producer();
 	const broadcastRoute = source.route(Path.from("room"));
 	const broadcast = broadcastRoute.broadcast;
-	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(producer);
 	group.writeFrame(textFrame("last", Timestamp.fromMillis(Number(group.start))));
 	group.finish();

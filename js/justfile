@@ -35,6 +35,12 @@ check:
 check-changed list:
     python3 ../sh/js/workspace.py check '{{ list }}'
 
+# Find unused files, exports, types, class members, and dependencies in the whole
+# workspace; .fallowrc.jsonc lists the entry points no plugin finds.
+dead-code:
+    uv run --no-project python ../sh/js/install.py frozen
+    bun fallow dead-code --root ..
+
 # Validate the Worker deploy bundles outside the Bun workspace.
 workers:
     ../sh/js/workers.sh
@@ -71,7 +77,7 @@ test-changed list:
 coverage package="":
     python3 ../sh/js/coverage.py '{{ package }}'
 
-# Run one net benchmark: broadcasts, forward, requests, fills, fill-probe, reader, frames, track, resume, observed, drift, ledger, bandwidth, replay, varint, lite-varint, priority, subscribe-drop, window-drop, refresh, compression, or datagrams.
+# Run one net benchmark: broadcasts, forward, requests, fills, fill-probe, reader, frames, track, resume, observed, drift, ledger, bandwidth, replay, varint, lite-varint, priority, subscribe-drop, window-drop, publisher-update, refresh, compression, or datagrams.
 bench name:
     uv run --no-project python ../sh/js/install.py frozen
     bun net/bench/{{ name }}.ts

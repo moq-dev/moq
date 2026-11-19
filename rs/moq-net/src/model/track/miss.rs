@@ -2211,7 +2211,7 @@ mod tests {
 				_ => Servable::covering(
 					Cover::new(runs(6).into_iter().chain(runs(2))),
 					(next(3) == 0).then(|| next(KEYS + 2)),
-					&Servable::NONE,
+					&Default::default(),
 				),
 			};
 			let mut misses = Misses::default();

@@ -458,7 +458,7 @@ mod tests {
 		origin::{Cost, RouteInfo, RouteOptions},
 	};
 
-	/// The follower's next event, which must arrive within the origin's update hold.
+	/// The follower's next event, which must arrive within a second.
 	async fn followed(follow: &mut Follow) -> (&'static str, String) {
 		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
 			.await
@@ -488,7 +488,7 @@ mod tests {
 		}
 	}
 
-	/// The follower stays quiet past the origin's update hold.
+	/// The follower stays quiet for a second.
 	async fn quiet(follow: &mut Follow) {
 		if let Ok(event) = kio::clock::timeout(Duration::from_secs(1), follow.next()).await {
 			panic!("expected nothing, got {event:?}");
@@ -648,7 +648,7 @@ mod tests {
 		);
 	}
 
-	/// The next change handed out, which must arrive within the origin's update hold.
+	/// The next change handed out, which must arrive within a second.
 	async fn changed(announced: &mut Following) -> Option<broadcast::Consumer> {
 		kio::clock::timeout(Duration::from_secs(1), announced.available())
 			.await
@@ -656,7 +656,7 @@ mod tests {
 			.expect("the wait failed")
 	}
 
-	/// The next instance handed out, which must arrive within the origin's update hold.
+	/// The next instance handed out, which must arrive within a second.
 	async fn available(announced: &mut Following) -> broadcast::Consumer {
 		changed(announced).await.expect("an end, not an instance")
 	}
@@ -668,10 +668,9 @@ mod tests {
 		}
 	}
 
-	/// Nothing more is handed out past the origin's update hold.
+	/// Nothing more is handed out for a second.
 	async fn none(announced: &mut Following) {
-		let hold = super::super::origin_impl::lite06_churn::DEFAULT_UPDATE_HOLD * 2;
-		if let Ok(result) = kio::clock::timeout(hold, announced.available()).await {
+		if let Ok(result) = kio::clock::timeout(Duration::from_secs(1), announced.available()).await {
 			panic!(
 				"expected nothing, got {:?}",
 				result.map(|broadcast| broadcast.map(|broadcast| broadcast.info().instance.clone()))
@@ -746,7 +745,8 @@ mod tests {
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
 			drop(dynamic);
-			kio::clock::sleep(super::super::origin_impl::lite06_churn::DEFAULT_UPDATE_HOLD * 2).await;
+			// A gap, well inside the second `available` waits.
+			kio::clock::sleep(Duration::from_millis(600)).await;
 			origin.route("live", RouteOptions::default()).unwrap()
 		});
 		none(&mut announced).await;

@@ -33,17 +33,19 @@ Its proof is
 `rs/moq-net/verify/route-algebra/`, and the quests written against the old
 wire were retargeted or deleted.
 [moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111) ran the cases no
-test covered on real sessions. The lite-07 cut still waits on this epic's
-children, the two flaws it found,
-[a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md)
-and [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
+test covered on real sessions, and
+[moq-dev/moq#9154](https://github.com/moq-dev/moq/pull/9154) fixed the first
+flaw it found: a front now rides through a lost claim's debounce, so a reader
+resumes on a detour learned after its session closed. The lite-07 cut still
+waits on this epic's children, the other flaw,
+[a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
 whose fix changes the wire,
 and two flaws the mesh replay found,
 [feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
-and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
+and [a lite-07 front that stops delivering after it switches copies](/quest/m2/multicast/splice-stall.md);
 and on
-[route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
-the lite-06 mitigations. It does not wait on
+[route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
+scoped subscriber whose grant is too wide to ask for. It does not wait on
 [warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
 only if the port has landed and passed the mesh replay when the cut is made,
 and otherwise moves to the first wip version after it (maintainer,

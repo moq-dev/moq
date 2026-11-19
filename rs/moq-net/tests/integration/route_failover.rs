@@ -363,8 +363,8 @@ fn cut(pair: &MockPair) {
 	pair.client.abort(Error::Cancel);
 }
 
-/// How long the moves in [`next_hop_moves_keep_a_live_reader`] take to land: past the
-/// origin's update hold, and the new next hop's upstream latency both ways.
+/// How long the moves in [`next_hop_moves_keep_a_live_reader`] take to land: past the new
+/// next hop's upstream latency both ways.
 const MOVE: u64 = 75;
 
 /// `P` publishes `live` to `A` and `B`, and the relay `R` pulls both, preferring `A`. A

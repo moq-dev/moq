@@ -6272,6 +6272,7 @@ pub struct UpdateBench {
 	oldest: u64,
 	priority: u8,
 	_track: track::Producer,
+	_routed: Option<track::Routed>,
 	_peer: crate::transport::memory::Session,
 }
 
@@ -6280,6 +6281,16 @@ impl UpdateBench {
 	/// Subscribe to `ranges` one-group time ranges on a track whose groups start at their keys,
 	/// so every range resolves without a group held and nothing is served.
 	pub fn new(ranges: u64) -> Self {
+		Self::with(ranges, false)
+	}
+
+	/// [`Self::new`] on a relay's front: the subscription reads a logical track straight from
+	/// one route's copy, so each update reaches the copy too.
+	pub fn routed(ranges: u64) -> Self {
+		Self::with(ranges, true)
+	}
+
+	fn with(ranges: u64, routed: bool) -> Self {
 		let version = Version::Lite07;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
 		let session = Transport::new(local);
@@ -6298,7 +6309,21 @@ impl UpdateBench {
 				.with_max_age(None),
 		);
 		track.starts_at_keys();
-		let subscriber = track.subscribe(bounds.groups());
+		let routed = routed.then(|| {
+			let routed = track::Routed::new("bench", track.info().clone());
+			routed.copy.starts_at_keys();
+			routed
+		});
+		let subscriber = match &routed {
+			Some(routed) => {
+				let pending = routed.logical.consume().subscribe(bounds.groups());
+				let Poll::Ready(Ok(subscriber)) = pending.poll_ok(&kio::Waiter::noop()) else {
+					panic!("an accepted logical track answers at once");
+				};
+				subscriber
+			}
+			None => track.subscribe(bounds.groups()),
+		};
 		let steer = kio::Producer::new(Steer::default());
 		let ctx = Subscription {
 			session,
@@ -6321,6 +6346,7 @@ impl UpdateBench {
 			oldest: 0,
 			priority: 0,
 			_track: track,
+			_routed: routed,
 			_peer: peer,
 		};
 		this.settle();

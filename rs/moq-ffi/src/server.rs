@@ -136,12 +136,12 @@ async fn serve(
 		}
 	};
 	match listener.local_addr() {
-		Ok(addr) => {
+		Some(addr) => {
 			let _ = bound.send(Ok(addr.to_string()));
 		}
-		Err(err) => {
+		None => {
 			let _ = bound.send(Err(MoqError::Bind {
-				reason: format!("{err}"),
+				reason: "no QUIC listener configured".to_string(),
 			}));
 			listener.close().await;
 			return;

@@ -169,7 +169,7 @@ impl Asker<'_> {
 		}
 	}
 
-	fn accept(self, sequence: u64) -> moq_net::Result<group::Producer> {
+	fn accept(self, sequence: u64) -> moq_net::Result<Option<group::Producer>> {
 		match self {
 			Self::Fill(fill) => fill.accept(sequence, None),
 			Self::Lookup(lookup) => lookup.accept(sequence, None),
@@ -388,7 +388,7 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, a
 	{
 		return;
 	}
-	let Ok(mut producer) = asker.accept(sequence) else {
+	let Ok(Some(mut producer)) = asker.accept(sequence) else {
 		return;
 	};
 	for (index, stored) in stored {
