@@ -276,9 +276,9 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 				await new Promise<void>((resolve) => {
 					handle = video.requestVideoFrameCallback((now, metadata) => {
 						// captureTime is the frame's capture instant; both it and now are DOM timestamps,
-						// which the host clock shares, so audio and video stay on one epoch.
-						const millis = metadata.captureTime ?? now;
-						controller.enqueue(new VideoFrame(video, { timestamp: millis * 1000 }));
+						// which the host clock shares, so they map onto the media clock audio uses too.
+						const at = Instant.ZERO.saturatingAdd(Duration.millis(metadata.captureTime ?? now));
+						controller.enqueue(new VideoFrame(video, { timestamp: MediaClock.capture(at).asMicros() }));
 						resolve();
 					});
 				});

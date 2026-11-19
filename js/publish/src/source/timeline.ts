@@ -1,5 +1,6 @@
 import { Duration, Instant } from "@moq/clock";
 import * as MediaClock from "../media-clock";
+import { GAP } from "../slew";
 
 /**
  * Maps a file's presentation timeline onto our clock, repeating it forever.
@@ -12,8 +13,8 @@ import * as MediaClock from "../media-clock";
 export class Timeline {
 	readonly #zero: Instant;
 	readonly #duration: Duration;
-	// How far the media clock read past the installed clock at `zero`, in microseconds.
-	readonly #shift: number;
+	// How far the file is placed past the installed clock on the media clock, in microseconds.
+	#shift: number;
 
 	/**
 	 * Anchor a file of `duration` seconds at clock time `zero`.
@@ -44,10 +45,14 @@ export class Timeline {
 
 	/**
 	 * The media clock timestamp of a clock time from {@link at}. A file is placed on the media clock
-	 * once, where it starts, and keeps its own spacing after that, so its audio stays contiguous.
+	 * where it starts and keeps its own spacing after that, so its audio stays contiguous, until the
+	 * media clock jumps a suspend ahead of it: the file then jumps with it, rather than publish late.
 	 */
 	stamp(at: Instant): Duration {
-		return Duration.micros(Math.max(at.since(Instant.ZERO).asMicros() + this.#shift, 0));
+		const instant = at.since(Instant.ZERO).asMicros();
+		const shift = MediaClock.capture(at).asMicros() - instant;
+		if (shift - this.#shift > GAP) this.#shift = shift;
+		return Duration.micros(Math.max(instant + this.#shift, 0));
 	}
 
 	/** The file timestamp and pass due at the given clock time, the inverse of {@link at}. */

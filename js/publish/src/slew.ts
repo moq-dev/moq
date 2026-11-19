@@ -4,8 +4,8 @@
 const SLEW = 2_000;
 // `Date.now()` reads whole milliseconds, so an error within two of them is noise, left alone.
 const SETTLED = 2_000;
-// A forward wall jump past this between two reads is a suspend, not drift.
-const GAP = 2_000_000;
+/** A forward wall jump past this between two reads, in microseconds, is a suspend, not drift. */
+export const GAP = 2_000_000;
 
 /**
  * A timeline that advances with the monotonic clock, nudged toward the wall clock by at most 500 ppm,

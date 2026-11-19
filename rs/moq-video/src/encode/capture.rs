@@ -544,11 +544,8 @@ async fn capture_loop<S: CaptureSource>(
 		let Some(mut camera) = wait_capture(&demand, on_demand, source.open(capture)).await? else {
 			continue;
 		};
-		// Capture timestamps use a private monotonic timeline. Sample both clocks
-		// once at open so every queued frame maps to the shared broadcast epoch
-		// without mistaking dequeue time for acquisition time.
-		let mut capture_epoch =
-			u64::try_from(clock.now().as_micros()?.saturating_sub(camera.now().as_micros()?)).unwrap_or(u64::MAX);
+		// How far a reopened stream is shifted past the previous one's last timestamp.
+		let mut lead = 0u64;
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
 		let framerate = capture
@@ -607,7 +604,12 @@ async fn capture_loop<S: CaptureSource>(
 				producer.report_skipped(skipped - reported);
 			}
 			reported = Some(skipped);
-			let mut mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+			// Capture timestamps use a private monotonic timeline. Both clocks are sampled per frame,
+			// so each queued frame maps to the broadcast clock by acquisition, not dequeue, time, and
+			// the stream follows that clock's slew toward the wall clock and its jump across a suspend.
+			let offset =
+				u64::try_from(clock.now().as_micros()?.saturating_sub(camera.now().as_micros()?)).unwrap_or(u64::MAX);
+			let mut mapped = map_capture_timestamp(offset.saturating_add(lead), frame.timestamp)?;
 			// A camera never rewinds its own stream, but a reopened one maps from the shared clock,
 			// which the previous stream can lead: a device re-anchor floors just past its last
 			// timestamp, ahead of arrival. Shift the new stream past it, keeping its spacing.
@@ -615,8 +617,8 @@ async fn capture_loop<S: CaptureSource>(
 				&& mapped <= last
 			{
 				let behind = u64::try_from(last.as_micros()? - mapped.as_micros()?).unwrap_or(u64::MAX);
-				capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
-				mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+				lead = lead.saturating_add(behind).saturating_add(1);
+				mapped = map_capture_timestamp(offset.saturating_add(lead), frame.timestamp)?;
 			}
 			last = Some(mapped);
 			frame.timestamp = mapped;
@@ -713,8 +715,8 @@ mod tests {
 	/// time passes only where a test advances it, so a slow runner moves nothing.
 	///
 	/// Each expectation is the acquisition instant measured on the broadcast clock. The loop
-	/// samples the broadcast clock and then the camera's timeline when it opens a camera, so a
-	/// published timestamp may land up to `SAMPLING` early, never late.
+	/// samples the broadcast clock and then the camera's timeline for each frame, so a published
+	/// timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(feature = "openh264")]
 	mod clock {
 		use kio::clock::Wall;
@@ -912,6 +914,34 @@ mod tests {
 					return timestamp;
 				}
 			}
+		}
+
+		/// Each frame maps onto the broadcast clock as it reads then, so a stream follows the clock's
+		/// slew toward a stepped wall clock rather than the offset it had when the camera opened.
+		#[tokio::test]
+		async fn frames_follow_the_broadcast_clocks_slew() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall()).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					camera.push_at(surface(), Instant::now());
+					let first = read(&mut track).await;
+
+					// Ten seconds of wall step, slewed at 500 ppm: 50 ms over the next 100 s.
+					fixture.time.step_wall(fixture.time.wall() + Duration::from_secs(10));
+					fixture.time.advance(Duration::from_secs(100)).unwrap();
+					camera.push_at(surface(), Instant::now());
+					let published = read(&mut track).await;
+
+					assert!(
+						(published - first).abs_diff(100_050_000) <= ROUNDING,
+						"{}us apart",
+						published - first
+					);
+					fixture.finish().await;
+				})
+				.await
 		}
 
 		/// A camera whose first frame arrives long after the broadcast began stamps it at its
