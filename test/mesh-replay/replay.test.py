@@ -55,7 +55,7 @@ class MeshTest(unittest.TestCase):
         self.assertEqual(replay.load_mesh(HERE / "ring4.toml").diameter(), 2)
 
     def test_half_roll_stops_mid_roll(self):
-        mesh = replay.load_mesh(HERE / "chain3.toml")
+        mesh = replay.load_mesh(HERE / "ring6.toml")
         script = replay.load_script(HERE / "half-roll.toml", mesh)
         self.assertEqual([event["relays"] for event in script.events], [["a", "b"]])
         self.assertEqual(script.known, [])

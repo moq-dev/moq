@@ -4,23 +4,26 @@
 
 Mid-roll, a new relay feeds every SUBSCRIBE an old (lite-06) neighbour sends
 it, including one that arrives as that neighbour withdraws its own echo of the
-broadcast. Today the new relay accepts the subscription and forwards no group
-until the broadcast ends, so the old relay's viewers stay subscribed, see the
-broadcast live, and read nothing.
+broadcast, and a front left from the roll resumes after the next route change.
+Today the new relay accepts the subscription and forwards no group until the
+broadcast ends, so the old relay's viewers stay subscribed, see the broadcast
+live, and read nothing.
 
 No reader starves in
-`just test mesh-replay --mesh test/mesh-replay/chain3.toml --script test/mesh-replay/half-roll.toml`
-or in the nightly ring meshes' rolls.
+`just test mesh-replay --mesh test/mesh-replay/ring6.toml --script test/mesh-replay/half-roll.toml --broadcasts 32`
+or in the nightly ring meshes, once `[[known]]` no longer names this quest in
+`test/mesh-replay/script.toml`.
 
 ## Plan
 
-Found by [the mesh replay](/test/mesh-replay/README.md): in the nightly ring of
-six, rolling `d` starved reader `e` on two of `c`'s broadcasts, and rolling `e`
-starved reader `f` on all four of `d`'s. The chain reproduction starved a
-reader in 3 of 5 runs; one other ended in [the detour stall](/quest/m2/multicast/detour-resume.md).
+Found by [the mesh replay](/test/mesh-replay/README.md). In the ring of six,
+rolling `b` onto the new build starved old relay `c`'s readers of `a`'s
+broadcasts in 3 of 4 nightly cells: 9 of 24 paths at 4 broadcasts per relay,
+40 and 41 of 192 at 32. Rolls further on starved others the same way. The half
+roll alone (`a` and `b`) starved them in 1 of 3 runs at 4 broadcasts.
 
-What the logs of the chain (`a` dials `b` dials `c`, roll `a` then `b`) show,
-with `b` the new relay and `c` the old one:
+What the logs of a chain of three show (`a` dials `b` dials `c`, roll `a` then
+`b`), with `b` the new relay and `c` the old one:
 
 1. `b` restarts on the new build and dials `c`. Its predecessor's session to `c`
    is still draining, so the old relay `c` announces `a`'s broadcasts to the new
@@ -42,9 +45,18 @@ it to the live route. Likely in how the publisher resolves a request against
 the origin while a route is withdrawn: the wait for a claim's route
 ([moq-dev/moq#9052](https://github.com/moq-dev/moq/pull/9052)), or the lite-06
 path's announce handling (hop counts are not checked against loops), in
-`rs/moq-net/src/lite/publisher.rs` and `rs/moq-net/src/model/`. The kept run
-directories of the reproduction (`HARNESS_KEEP=1`, `MESH_REPLAY_LOG=debug`)
-have both relays' logs.
+`rs/moq-net/src/lite/publisher.rs` and `rs/moq-net/src/model/`. Rerun after
+[moq-dev/moq#9112](https://github.com/moq-dev/moq/pull/9112), which changes how
+a let-go claim's copies end but keeps lite-06 routes as they are. Run with
+`HARNESS_KEEP=1 MESH_REPLAY_LOG=debug` to keep every relay's debug log.
+
+A residue on lite-07: after the whole ring rolled onto the new build, a cut of
+the `a`-`b` link left a reader on `a` of one of `b`'s broadcasts online with no
+group for 75s, resumed neither on the detour through `f` nor on the redialed
+session to `b`, until the next fault moved its route (1 path at 4 broadcasts;
+5 at 32, and 33 after reopening every link of `b`). Ten cuts of the same link on
+a ring that started on the new build starved nothing, so it takes the roll
+first. Check it once the mid-roll case is fixed.
 
 It needs an old relay, so it lasts only as long as a roll does, but every roll
 passes through it, once per relay, and a starved viewer sees a live broadcast

@@ -44,10 +44,9 @@ kind = "stuck"
 quest = "/quest/m2/multicast/detour-resume.md"
 
 # Mid-roll, a new relay accepts an old neighbour's subscribe that arrives as the neighbour
-# withdraws its echo of the broadcast, then forwards nothing. `half-roll.toml` on
-# `chain3.toml` reproduces it and still fails.
+# withdraws its echo of the broadcast, then forwards nothing; a front left from the roll can
+# starve after a later cut too. `half-roll.toml` reproduces it and lists nothing known.
 [[known]]
 check = "unfed"
 kind = "starved"
-event = "roll"
 quest = "/quest/m2/multicast/roll-echo-stall.md"

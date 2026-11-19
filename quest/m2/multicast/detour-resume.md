@@ -64,11 +64,10 @@ and accepting it, which leaves a reader stuck on a one-round-trip gap,
 against requirement 2 of [the epic](/quest/m2/multicast/README.md).
 
 [The mesh replay](/test/mesh-replay/README.md) hits it on real relays too,
-with a broader trigger: on a chain of three, killing the middle relay left its
-own reader ended (`no error`) on the far end's broadcasts, with no `offline`
-or `online` after, for good; and rolling the first relay of the chain onto
-the new build ended the middle relay's reader on it (`internal error`,
-`unroutable`) the same way. The replay's script names this quest for a
-`stuck` reader, so it is reported without failing the run.
+mid-roll: in the ring of six at 32 broadcasts per relay, rolling `c`, `d`, and
+`e` onto the new build each left about 32 readers ended (`unroutable` or
+`internal error`) with no `offline` or `online` after, for good. The replay's
+script names this quest for a `stuck` reader, so it is reported without
+failing the run.
 
 Not a wire change.

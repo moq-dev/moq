@@ -82,8 +82,8 @@ resumes it; reopening a relay pauses all of its shapers at once. A kill is SIGKI
 then the same build after `down`. Ending a source stops one relay's publisher,
 settles, then starts it again. After the script every publisher stops.
 
-[`chain3.toml`](chain3.toml) with [`half-roll.toml`](half-roll.toml) is the smallest
-mid-roll mesh: two relays rolled, a new relay between a new one and an old one.
+[`half-roll.toml`](half-roll.toml) rolls only `a` and `b` and stops: the middle of a roll,
+where a new relay sits between a new one and an old one.
 
 ## What fails a run
 
