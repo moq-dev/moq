@@ -3669,9 +3669,21 @@ mod tests {
 	}
 
 	/// An endpoint names itself in no chain, so it takes and tells a claim one hop longer
-	/// than a relay does.
+	/// than a relay does: from a scoped neighbour, and on to one.
 	#[test]
 	fn an_endpoint_names_itself_in_no_chain() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		router.endpoint();
+		open(&mut router, 4, Role::Scoped(vec![p(ROOT)]));
+		let longest: Vec<Id> = (100..100 + MAX_HOPS as Id - 1).collect();
+		let changes = vec![((p("taken"), 7), chained(longest.clone()))];
+		router.recv(4, Msg::Announce { changes }).unwrap();
+		let own = router.own().1;
+		assert!(
+			matches!(own.get(&(p("taken"), 7)), Some(claim) if claim.chain == longest),
+			"{own:?}"
+		);
+
 		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
 		router.endpoint();
 		open(&mut router, 2, Role::Routing(node(2)));
