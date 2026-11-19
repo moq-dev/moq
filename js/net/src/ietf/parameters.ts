@@ -278,31 +278,6 @@ export class Parameters {
 		this.vars.set(MSG_PARAM_FORWARD, v ? 1n : 0n);
 	}
 
-	get publisherPriority(): number | undefined {
-		const v = this.vars.get(MSG_PARAM_PUBLISHER_PRIORITY);
-		return v !== undefined ? Number(v) : undefined;
-	}
-
-	set publisherPriority(v: number) {
-		this.vars.set(MSG_PARAM_PUBLISHER_PRIORITY, BigInt(v));
-	}
-
-	get expires(): bigint | undefined {
-		return this.vars.get(MSG_PARAM_EXPIRES);
-	}
-
-	set expires(v: bigint) {
-		this.vars.set(MSG_PARAM_EXPIRES, v);
-	}
-
-	get maxCacheDuration(): bigint | undefined {
-		return this.vars.get(MSG_PARAM_MAX_CACHE_DURATION);
-	}
-
-	set maxCacheDuration(v: bigint) {
-		this.vars.set(MSG_PARAM_MAX_CACHE_DURATION, v);
-	}
-
 	/** HIDDEN (MoQ Hidden): also advertise hidden namespaces. Absent and 0 both mean no. */
 	get hidden(): boolean {
 		const v = this.vars.get(MSG_PARAM_HIDDEN);

@@ -115,12 +115,6 @@ export class Ledger {
 		return this.#runs.first()?.start;
 	}
 
-	/** The exclusive end of the run accounting for `key`, undefined when none does. */
-	runEnd(key: bigint): bigint | undefined {
-		const run = this.#runs.floor(key);
-		return run !== undefined && key < run.end ? run.end : undefined;
-	}
-
 	/** The exclusive end of the highest run starting at or below `key`. */
 	endBelow(key: bigint): bigint | undefined {
 		return this.#runs.floor(key)?.end;

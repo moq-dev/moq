@@ -134,11 +134,6 @@ export class RecvStream {
 		return this.#window;
 	}
 
-	/** The end of the bytes received, and the final size once known. */
-	get end(): bigint {
-		return this.#end;
-	}
-
 	/** Receive a STREAM frame, charging both windows. Throws on a frame that doesn't
 	 *  continue the stream or that exceeds a window. A frame after the final size
 	 *  is known is dropped. */

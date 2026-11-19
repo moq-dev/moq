@@ -1510,7 +1510,7 @@ export function spreadHash(path: string, instance: string): bigint {
  * spreads a pool's lite-07 claims across paths the same on every node. Mirrors `rendezvous` in
  * `rs/moq-net`.
  */
-export function rendezvousHash(path: string, instance: string): bigint {
+function rendezvousHash(path: string, instance: string): bigint {
 	return fnv(path, new TextEncoder().encode(instance), 0xcbf29ce484222325n);
 }
 
