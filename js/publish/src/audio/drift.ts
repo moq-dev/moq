@@ -10,9 +10,9 @@ import { Resampler } from "./resampler";
 // `Drift` compares each quantum's capture time with the timestamp its first sample will get, and
 // steers a resampler's ratio until the two agree. Mirrors `rs/moq-audio/src/encode/drift.rs`.
 
-// How much input each measurement spans, in microseconds. A quantum's capture time is read when its
-// message reaches the main thread, so it is only ever late, delayed by the render callback or a busy
-// page; the earliest error in a window is the one that measures the clocks rather than the delivery.
+// How much input each measurement spans, in microseconds. A quantum's capture time is read when the
+// audio thread renders it, so it is only ever late, delayed by the render callback; the earliest
+// error in a window is the one that measures the clocks rather than the delivery.
 const WINDOW = 1_000_000;
 
 // The loop's time constant, in windows: a critically damped loop whose double pole sits at
@@ -25,11 +25,11 @@ const TAU = 10;
 const MAX_ADJUST = 2e-3;
 
 // An error, in microseconds, too large to slew at `MAX_ADJUST`: ffmpeg's `min_hard_comp` default.
-// Behind by more for two whole windows, time passed that no sample covers, such as a host whose
+// Behind by more for a whole window, time passed that no sample covers, such as a host whose
 // monotonic clock counted a sleep the context did not, and the timeline re-anchors so the gap lands
-// in the timestamps. One window is not enough, since a page stalled for longer than a window
-// delivers every quantum in it late. Ahead by more, the audio already stamped claims time not yet
-// captured, so input is dropped until the stamps catch up.
+// in the timestamps. Ahead by more, the audio already stamped claims time not yet captured, so input
+// is dropped until the stamps catch up. Ahead by more in only part of a window is a misreading,
+// such as the wall clock stepping while a quantum was in flight, and the window is ignored.
 const RESYNC = 100_000;
 
 /** What {@link Drift.observe} asks of the capture. */
@@ -45,12 +45,12 @@ export type Steer =
 
 type State =
 	// Measuring the current window. Errors are in microseconds, positive when samples were captured
-	// later than their timestamp. `lagged` is whether the previous window ended past the resync bound.
-	| { kind: "tracking"; low: number; high: number; covered: number; lagged: boolean }
+	// later than their timestamp.
+	| { kind: "tracking"; low: number; high: number; covered: number }
 	// The stamped audio runs ahead of capture: input is dropped until it catches up.
 	| { kind: "ahead" };
 
-const tracking = (lagged = false): State => ({ kind: "tracking", low: Infinity, high: -Infinity, covered: 0, lagged });
+const tracking = (): State => ({ kind: "tracking", low: Infinity, high: -Infinity, covered: 0 });
 
 /** The resample ratio that cancels a capture clock's drift against the media clock. */
 export class Drift {
@@ -77,17 +77,14 @@ export class Drift {
 		state.covered += duration;
 		if (state.covered < WINDOW) return { kind: "hold" };
 
-		const { low, high, lagged } = state;
-		this.#state = tracking(low > RESYNC);
-		if (low > RESYNC) {
-			if (!lagged) return { kind: "hold" };
-			this.#state = tracking();
-			return { kind: "resync" };
-		}
+		const { low, high } = state;
+		this.#state = tracking();
+		if (low > RESYNC) return { kind: "resync" };
 		if (high < -RESYNC) {
 			this.#state = { kind: "ahead" };
 			return { kind: "drop" };
 		}
+		if (low < -RESYNC) return { kind: "hold" };
 
 		// Critically damped PI on the error per window: 2 / TAU proportional and 1 / TAU² integral
 		// gain. The integral clamps with the ratio, so a clock past the bound cannot wind it up.

@@ -1,4 +1,4 @@
-import { Duration, now } from "@moq/clock";
+import { Duration, now, wall } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import {
 	type Computed,
@@ -28,9 +28,11 @@ export interface AudioFrame {
 	channels: Float32Array[];
 }
 
-/** @internal A render quantum as the capture worklet posts it, stamped on arrival. */
+/** @internal A render quantum as the capture worklet posts it. */
 export interface WorkletFrame {
 	channels: Float32Array[];
+	/** The wall time the audio thread rendered it at, in milliseconds. */
+	rendered: number;
 }
 
 /** The PCM format frames actually arrive in, which is not always the one we asked for. */
@@ -283,7 +285,9 @@ export class Capture {
 	// downstream as a timestamp gap, which the framer re-anchors on rather than silently sliding.
 	//
 	// Audio is stamped on the same media clock as video (see video/processor.ts), so both tracks share
-	// an epoch and stay in sync: by sample count, steered onto when each quantum reached this thread.
+	// an epoch and stay in sync: by sample count, steered onto when the audio thread rendered each
+	// quantum. Its own wall time, rather than when it reached this thread, so a stalled page delays
+	// the audio without making it look captured late.
 	#drain(worklet: AudioWorkletNode, sampleRate: number, effect: Effect): ReadableStream<AudioFrame> {
 		return new ReadableStream<AudioFrame>(
 			{
@@ -291,9 +295,16 @@ export class Capture {
 					// The sample count stops while the host sleeps, so the timeline also takes the media
 					// clock's suspend jumps, or audio would land behind video by the sleep.
 					const jumps = follow();
+					// The latest jump, the total before it, and a wall time in the middle of its gap: a
+					// quantum rendered before then was in flight across the suspend, captured before it.
+					let jump = { total: jumps(), before: 0, at: 0 };
 					const stamper = new Stamper(sampleRate);
 					effect.event(worklet.port, "message", (event: Event) => {
 						const arrived = MediaClock.capture(now()).asMicros();
+						const at = wall().asUnixMillis();
+						const total = jumps();
+						if (total !== jump.total)
+							jump = { total, before: jump.total, at: at - (total - jump.total) / 2_000 };
 						const posted = (event as MessageEvent<WorkletFrame>).data;
 						const channelCount = posted.channels.length;
 						if (!channelCount) return;
@@ -304,9 +315,11 @@ export class Capture {
 							this.#out.format.set({ sampleRate, channelCount });
 						}
 
-						// The quantum's first sample was captured at least its own length before it arrived.
-						const captured = arrived - (posted.channels[0].length / sampleRate) * 1_000_000;
-						const frame = stamper.push(posted.channels, captured, jumps());
+						// The quantum's first sample was captured at least its own length before it was rendered.
+						const delay = Math.max(at - posted.rendered, 0) * 1_000;
+						const captured = arrived - delay - (posted.channels[0].length / sampleRate) * 1_000_000;
+						const jumped = posted.rendered < jump.at ? jump.before : jump.total;
+						const frame = stamper.push(posted.channels, captured, jumped);
 						if (frame && (controller.desiredSize ?? 0) > 0) controller.enqueue(frame);
 					});
 					worklet.port.start();

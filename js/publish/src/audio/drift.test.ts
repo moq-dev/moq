@@ -4,15 +4,15 @@ import { Drift, Stamper } from "./drift";
 // One 20 ms audio frame, in milliseconds: how far audio may drift from its video over a session.
 const FRAME = 20;
 
-// A simulated capture: a context `ppm` fast of the media clock, 10 ms quanta each reaching the main
-// thread late by up to `jitter` seconds (a fixed LCG, so every run is the same), `stalls` of media
-// time no sample covers, and `janks` of a main thread that delivers nothing until they end, each as
-// `[at, length]` in media seconds.
+// A simulated capture: a context `ppm` fast of the media clock, 10 ms quanta each rendered late by
+// up to `jitter` seconds (a fixed LCG, so every run is the same), `stalls` of media time no sample
+// covers, as `[at, length]`, and `misreads` of one quantum's capture time, as `[at, error]`, all in
+// media seconds.
 interface Device {
 	ppm: number;
 	jitter: number;
 	stalls?: [number, number][];
-	janks?: [number, number][];
+	misreads?: [number, number][];
 }
 
 // What the loop did over a run: the error, timestamp less capture time, of every stamped quantum as
@@ -31,6 +31,7 @@ function worst(run: Run, after: number): number {
 // Every quantum's capture time in media seconds, and how late it reaches the main thread.
 function* quanta(device: Device, seconds: number, block: number): Generator<{ host: number; late: number }> {
 	let seed = 0x2545f491n;
+	device = { ...device, misreads: [...(device.misreads ?? [])] };
 	const stalls = [...(device.stalls ?? [])];
 	let host = 0;
 	while (host < seconds) {
@@ -41,9 +42,8 @@ function* quanta(device: Device, seconds: number, block: number): Generator<{ ho
 		}
 		seed = (seed * 6364136223846793005n + 1442695040888963407n) & 0xffffffffffffffffn;
 		let late = (device.jitter * Number(seed >> 11n)) / 2 ** 53;
-		for (const [at, length] of device.janks ?? []) {
-			if (host >= at && host < at + length) late = Math.max(late, at + length - host);
-		}
+		const misread = device.misreads?.findIndex(([at]) => host >= at) ?? -1;
+		if (misread >= 0) late += device.misreads?.splice(misread, 1)[0][1] ?? 0;
 		yield { host, late };
 		// The context's 10 ms covers less media time when it runs fast.
 		host += block / (1 + device.ppm * 1e-6);
@@ -116,20 +116,18 @@ describe("Drift", () => {
 	test("a stall re-anchors once", () => {
 		const result = run({ ppm: 300, jitter: 0.002, stalls: [[600, 5]] }, 1200);
 		expect([result.resyncs.length, result.drops]).toEqual([1, 0]);
-		// Within three windows of the stall: the first still held errors from before it, and the
-		// lag holds for two.
-		expect(result.resyncs[0]).toBeLessThan(608);
+		// Within two windows of the stall, the first of which still held errors from before it.
+		expect(result.resyncs[0]).toBeLessThan(607);
 		expect(worst(result, result.resyncs[0])).toBeLessThan(FRAME);
 	});
 
-	// A page stalled for longer than a window delivers a whole window late, which a re-anchor would
-	// misread as time no sample covers, and then drop the audio it ran ahead of. It only nudges the
-	// ratio, so the audio stays within a frame once it has settled again.
-	test("a stalled page re-anchors nothing", () => {
-		const result = run({ ppm: 50, jitter: 0.002, janks: [[600, 1.8]] }, 1200);
+	// One quantum read two seconds early, as when the wall clock steps while it is in flight, is
+	// ignored rather than learned as a rate the loop then spends minutes unwinding.
+	test("a misread quantum is ignored", () => {
+		const result = run({ ppm: 50, jitter: 0.002, misreads: [[600, -2]] }, 1200);
 		expect([result.resyncs.length, result.drops]).toEqual([0, 0]);
-		expect(worst(result, 0)).toBeLessThan(2 * FRAME);
-		expect(worst(result, 700)).toBeLessThan(FRAME);
+		// Settled long before it, and still on time to within the 2 ms jitter after it.
+		expect(worst(result, 300)).toBeLessThan(2);
 	});
 
 	// Past the bound the loop runs at it and corrects the rest in steps: a slow clock re-anchors on
@@ -139,8 +137,7 @@ describe("Drift", () => {
 		for (const ppm of [-3000, 3000]) {
 			const result = run({ ppm, jitter: 0 }, 600);
 			expect(result.resyncs.length + result.drops).toBeGreaterThan(0);
-			// A slow clock lags for two windows before it re-anchors.
-			expect(worst(result, 0)).toBeLessThan(100 + 2 * 3 + 15);
+			expect(worst(result, 0)).toBeLessThan(100 + 15);
 		}
 	});
 });
