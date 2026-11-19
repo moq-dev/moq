@@ -4484,8 +4484,8 @@ fn position_group(group: group::Consumer, frames: &Frames) -> Option<group::Cons
 	(group.index() == expected).then_some(group)
 }
 
-/// The frame bounds of a lite-06 subscription's one range, which the model leaves to the
-/// publisher: it reads whole groups. A lite-07 range covers whole groups, so it has none.
+/// The frame bounds of a subscription, which the model leaves to the publisher: it reads
+/// whole groups. Lite-06 bounds its one range's start and end; lite-07 only a range's start.
 ///
 /// A frame bound qualifies the group its range starts or ends at, so everything in between
 /// is served whole.
@@ -4525,7 +4525,8 @@ struct Bounds {
 
 impl Bounds {
 	/// Read `ranges` as they arrived. Group IDs are group starts, so an absolute anchor and a
-	/// time anchor both name a start. Lite-07 carries only time anchors, both ends inclusive.
+	/// time anchor both name a start. Lite-07 carries time anchors, both ends inclusive, and a
+	/// start partway through a group as an absolute one.
 	///
 	/// A `legacy` wire (one without ranges) means its start as the first group starting at
 	/// or after it, never one before it that contains it, so the frames narrow to that
@@ -4543,7 +4544,7 @@ impl Bounds {
 			ranges: Vec::with_capacity(ranges.len()),
 			frames: Frames::default(),
 		};
-		// Only lite-06 bounds frames, and it carries one range.
+		// Lite-06 bounds frames on its one range, and lite-07 only a range's start.
 		for range in ranges {
 			// Empty partway through a group, which whole groups can't say: keep its place,
 			// covering no group and narrowing no frame of one.
@@ -4585,6 +4586,19 @@ impl Bounds {
 				Some(end) => Some(anchor(end)),
 			};
 			bounds.ranges.push(Range { start, end });
+		}
+		// A group delivers once across the ranges, so a frame start applies only to a group no
+		// other range may cover: another range's would ask for it from frame 0.
+		if let Some((group, _)) = bounds.frames.first {
+			let covers = |range: &Range| match (range.start, range.end) {
+				(Anchor::Time(start), _) if start > group => false,
+				(_, Some(Anchor::Time(end))) if end < group => false,
+				_ => true,
+			};
+			let mut covering = bounds.ranges.iter().filter(|range| covers(range));
+			if covering.next().is_some() && covering.next().is_some() {
+				bounds.frames.first = None;
+			}
 		}
 		bounds
 	}
@@ -6931,7 +6945,7 @@ mod serve_group_test {
 		let (bytes, fin) = first_stream(&log);
 		assert!(fin, "no FIN");
 		// Only the GROUP: the write blocked before the first frame, and none goes out after.
-		assert_eq!(bytes, [0, 3, 0, 0, 0]);
+		assert_eq!(bytes, [0, 4, 0, 0, 0, 0]);
 		assert!(outcomes.dropped.lock().unwrap().is_empty(), "dropped");
 	}
 

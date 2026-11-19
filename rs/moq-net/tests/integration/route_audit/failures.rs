@@ -180,15 +180,7 @@ async fn failures(seed: u64, relays: usize) -> Duration {
 			None => assert_eq!(shown, None, "{case}: let go"),
 		}
 	}
-	// Pinned, not endorsed, until [the resend fix](/quest/m2/multicast/resend.md): a route
-	// moving behind an unchanged next hop sends that hop the newest group again, once.
-	let doubled = mesh.doubled();
-	eprintln!("measured failures at one instant, seed {seed:#x}: groups sent twice {doubled:?}");
-	let links: BTreeSet<_> = doubled.iter().map(|&(from, to, _, _)| (from, to)).collect();
-	assert!(
-		links.len() == doubled.len() && doubled.iter().all(|doubled| doubled.3 == 2),
-		"seed {seed:#x}: {doubled:?}"
-	);
+	assert_eq!(mesh.doubled(), [], "seed {seed:#x}: no group crosses a link twice");
 	worst
 }
 
@@ -221,11 +213,10 @@ mod failures_at_one_instant {
 /// 1 and `Y` at 2, with `B` (`R3`) reading through `A`. The link from `X` to `A` closes:
 /// `A` moves onto `Y`, and `B` keeps `A` as its next hop while its route moves from `X`
 /// to `Y`. A lite-07 request names the relay it routes to, so `B` asks `A` anew, from the
-/// newest group it handed out: a range cannot start past a group whose end it does not
-/// know. That group crosses `A`-`B` twice. Pinned, not endorsed, until
-/// [the resend fix](/quest/m2/multicast/resend.md).
+/// position past the frames it holds of the newest group it handed out, and no group
+/// crosses `A`-`B` twice.
 #[kio::test]
-async fn a_route_moving_behind_one_next_hop_resends_a_group() {
+async fn a_route_moving_behind_one_next_hop_resends_no_group() {
 	let mut mesh = Mesh::new(4);
 	mesh.join(0, 2, Join::peer(1)).await;
 	mesh.join(1, 2, Join::peer(2)).await;
@@ -243,11 +234,7 @@ async fn a_route_moving_behind_one_next_hop_resends_a_group() {
 	for (i, report) in reports(&mut readers, since, "X-A cut").iter().enumerate().skip(2) {
 		assert!(report.seamless(), "R{i}: {report:?}");
 	}
-	let doubled = mesh.doubled();
-	assert!(
-		matches!(doubled.as_slice(), [(2, 3, _, 2)]),
-		"one group crosses A-B twice: {doubled:?}"
-	);
+	assert_eq!(mesh.doubled(), [], "no group crosses A-B twice");
 }
 
 /// A ring of six with a publisher on `R0` and a reader on every relay. A link from `R0` to

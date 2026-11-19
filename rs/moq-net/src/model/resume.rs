@@ -179,6 +179,7 @@ impl Producer {
 			return demand;
 		}
 		let mut ranges = Vec::new();
+		let mut resumes = Vec::with_capacity(readers.len());
 		for reader in readers {
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			let preferences = reader.subscription.read().clone();
@@ -208,8 +209,13 @@ impl Producer {
 				_ => Vec::new(),
 			};
 			ranges.extend(preferences.clamped(reader.newest, None, &resolved).ranges);
+			resumes.push(reader.resume_at(reader.newest));
 		}
 		demand.ranges = ranges;
+		// As in a track's own demand, only when every reader resumes.
+		demand.resume = (resumes.into_iter())
+			.reduce(|a, b| a.zip(b).map(|(a, b)| a.min(b)))
+			.flatten();
 		demand
 	}
 
@@ -600,6 +606,9 @@ struct Copy {
 	sub: Sub,
 	/// Where the subscription was asked to start, so demand updates never ask for less.
 	floor: Option<u64>,
+	/// The frames of the group at `floor` the reader already held when this copy was asked,
+	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
+	resume: Option<Position>,
 	/// The reader's ranges [`Self::resolved`] are for.
 	from: Vec<track::Range>,
 	/// Each of those ranges resolved, by index, so clamping never widens one: as the
@@ -651,7 +660,9 @@ impl Copy {
 				self.from = reader.ranges.clone();
 			}
 		}
-		reader.clamped(self.floor, self.end(), &self.resolved)
+		let mut wire = reader.clamped(self.floor, self.end(), &self.resolved);
+		wire.resume = self.resume;
+		wire
 	}
 
 	/// The first group past where this copy was replaced, if any: one replaced before
@@ -1461,6 +1472,7 @@ impl Reader {
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// newest another route handed out, is not handed out.
 			copy.floor = copy.floor.max(self.newest);
+			copy.resume = self.resume_at(copy.floor);
 			let start = copy.start(self.groups.0);
 			if let (Sub::Ready(sub), Some(_)) = (&mut copy.sub, copy.floor) {
 				sub.set_range((
@@ -1469,20 +1481,24 @@ impl Reader {
 				));
 			}
 			copy.resolved = resolved;
-			let wire = self.mirrored.clamped(copy.floor, None, &copy.resolved);
+			let mut wire = self.mirrored.clamped(copy.floor, None, &copy.resolved);
+			wire.resume = copy.resume;
 			copy.send(wire);
 			self.copies.push(copy);
 			return;
 		}
 		let floor = self.newest;
+		let resume = self.resume_at(floor);
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
-		let wire = self.mirrored.clamped(floor, None, &resolved);
+		let mut wire = self.mirrored.clamped(floor, None, &resolved);
+		wire.resume = resume;
 		self.copies.push(Copy {
 			generation,
 			sub: Sub::Pending(Box::new(track.subscribe(wire))),
 			track,
 			floor,
+			resume,
 			from: self.mirrored.ranges.clone(),
 			resolved,
 			replaced: false,
@@ -1493,6 +1509,23 @@ impl Reader {
 			feeds: true,
 		});
 		self.learn_end(None);
+	}
+
+	/// Where a new copy asked from group `key` resumes it: past the frames of it the copies
+	/// hold from its first, joined across copies, which the reader already has or reads
+	/// locally. A route switch behind the same next hop then sends none of them again, only
+	/// the rest of a group still arriving, and nothing of a finished one. `None` while no
+	/// copy holds its first frame.
+	fn resume_at(&self, key: Option<u64>) -> Option<Position> {
+		let key = key?;
+		let mut spans: Vec<_> = (self.copies.iter())
+			.filter_map(|copy| copy.track.peek_group(key)?.committed_span())
+			.collect();
+		spans.sort_unstable_by_key(|span| span.start);
+		let held = spans
+			.into_iter()
+			.fold(0, |held, span| if span.start <= held { held.max(span.end) } else { held });
+		(held > 0).then_some(Position::new(key, held))
 	}
 
 	/// One logical track has one end, whichever route first reports it.
@@ -2199,7 +2232,8 @@ impl Reader {
 			copy.since = Some(copy.track.now());
 			copy.from = self.mirrored.ranges.clone();
 			copy.resolved = resolved;
-			let wire = self.mirrored.clamped(copy.floor, copy.end(), &copy.resolved);
+			let mut wire = self.mirrored.clamped(copy.floor, copy.end(), &copy.resolved);
+			wire.resume = copy.resume;
 			copy.send(wire);
 			return;
 		}
@@ -2209,6 +2243,8 @@ impl Reader {
 			generation,
 			sub: Sub::Pending(Box::new(track.subscribe(wire))),
 			floor,
+			// Below every group handed out, so the reader holds none of the first.
+			resume: None,
 			from: self.mirrored.ranges.clone(),
 			resolved,
 			// Bounded from the start: everything it may deliver is older than what the reader
@@ -4000,6 +4036,63 @@ mod test {
 			sub.recv_group().now_or_never().is_none(),
 			"the group was handed out twice"
 		);
+	}
+
+	/// A switch asks the new copy for the newest group handed out from past the frames the
+	/// copies hold of it, never again from its first: the rest of one still arriving, and
+	/// nothing of a finished one. The reader reads the group on from the part the new copy
+	/// gets, every frame once.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_switch_resumes_the_newest_group_past_the_frames_held() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&track, Duration::from_secs(10));
+
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+		open.write_frame(ts(1), b"b".as_ref()).unwrap();
+		let mut reading = recv(&mut sub);
+		assert_eq!(read(&mut reading), Some(b"a".to_vec()));
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(read(&mut reading), Some(b"b".to_vec()));
+		let asked = b.subscription().expect("subscribed");
+		assert_eq!(asked.start(), Some(0));
+		assert_eq!(asked.resume, Some(Position::new(0, 2)), "past the two frames held");
+
+		// The new copy gets only the rest, and the reader reads on from it.
+		let mut rest = b.create_group(group::Info { start: 0 }).unwrap();
+		rest.start_at(2).unwrap();
+		rest.write_frame(ts(2), b"c".as_ref()).unwrap();
+		rest.finish().unwrap();
+		assert_eq!(read(&mut reading), Some(b"c".to_vec()));
+		assert_eq!(read(&mut reading), None);
+		assert!(sub.recv_group().now_or_never().is_none(), "handed out twice");
+
+		// A finished group is resumed past its every frame, so none of it is sent again.
+		write(&b, 1);
+		assert_eq!(recv(&mut sub).start, 1);
+		let c = copy();
+		routes.serve(c.consume());
+		assert_eq!(c.subscription().expect("subscribed").resume, Some(Position::new(1, 1)));
+
+		// A reader holding none of the group asks for it whole, and outweighs one resuming.
+		let routes = Producer::new();
+		let front = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut first = subscribe(&front, HOUR);
+		let mut second = subscribe(&front, HOUR);
+		write(&a, 5);
+		assert_eq!(recv(&mut first).start, 5);
+		let demand = front.subscription().unwrap();
+		assert_eq!(routes.subscription(demand.clone(), 2).resume, None);
+		assert_eq!(recv(&mut second).start, 5);
+		assert_eq!(routes.subscription(demand, 2).resume, Some(Position::new(5, 1)));
 	}
 
 	/// Routes that close without concluding read like a conclusion: a reader stalled

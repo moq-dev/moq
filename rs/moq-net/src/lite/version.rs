@@ -166,12 +166,6 @@ impl Version {
 		)
 	}
 
-	/// Whether GROUP carries `Frame Start`, the index of the stream's first frame. Lite-06 only:
-	/// earlier versions have no frame bounds, and a lite-07 subscription reads whole groups.
-	pub(crate) fn has_group_frame_start(self) -> bool {
-		matches!(self, Self::Lite06)
-	}
-
 	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's `Group Order`.
 	/// Added in lite-07; an earlier subscription is served newest first.
 	pub(crate) fn has_order(self) -> bool {

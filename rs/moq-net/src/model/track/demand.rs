@@ -9,7 +9,7 @@ use std::{
 	time::Duration,
 };
 
-use super::{Delay, Order, Range, Subscription, TrackState, clamp_combined};
+use super::{Delay, Order, Position, Range, Subscription, TrackState, clamp_combined};
 
 mod ranges;
 use ranges::Ranges;
@@ -26,6 +26,8 @@ pub(super) struct Subscriptions {
 	descending: usize,
 	/// Subscribers that need the live feed; see [`Subscription::feed`].
 	feed: usize,
+	/// Where resuming subscribers resume; see [`Subscription::resume`].
+	resumes: BTreeMap<Position, usize>,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -63,17 +65,18 @@ pub(super) enum Requested {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Delay, Order, bool);
+type Scalars = (i8, Delay, Order, bool, Option<Position>);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, delay, order, feed) = self.scalars()?;
+		let (priority, delay, order, feed, resume) = self.scalars()?;
 		Some(Subscription {
 			priority,
 			delay,
 			ranges: self.ranges.union(),
 			order,
 			feed,
+			resume,
 		})
 	}
 
@@ -99,6 +102,11 @@ impl Subscriptions {
 					Order::Descending
 				},
 				self.feed != 0,
+				// A subscriber asking for the whole group outweighs any resuming one.
+				match self.resumes.values().sum::<usize>() == self.count {
+					true => self.resumes.first_key_value().map(|(resume, _)| *resume),
+					false => None,
+				},
 			)
 		})
 	}
@@ -267,6 +275,9 @@ impl Subscriptions {
 			}
 			self.descending += usize::from(new.order == Order::Descending);
 			self.feed += usize::from(new.feed);
+			if let Some(resume) = new.resume {
+				add(&mut self.resumes, resume);
+			}
 			self.count += 1;
 		}
 		if let Some(old) = old {
@@ -280,6 +291,9 @@ impl Subscriptions {
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
 			self.feed -= usize::from(old.feed);
+			if let Some(resume) = old.resume {
+				remove(&mut self.resumes, resume);
+			}
 			self.count -= 1;
 		}
 		if reshaped || self.scalars() != prev {
@@ -494,6 +508,9 @@ mod tests {
 					Order::Descending
 				},
 				feed: rng.random_bool(0.25),
+				resume: rng
+					.random_bool(0.5)
+					.then(|| Position::new(rng.random_range(0..8), rng.random_range(1..4))),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),

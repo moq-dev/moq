@@ -59,10 +59,10 @@ impl Subscribe<'_> {
 /// One end of a [`Range`], as the wire carries it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Anchor {
-	/// A position: a start delivers from it, and an end stops just before it. Only lite-06
-	/// bounds a range partway through a group. Lite-07 has no such type: a group's start is its
-	/// time, so it goes out as a [`Anchor::Time`], an end as the time just before it, and
-	/// decodes as one.
+	/// A position: a start delivers from it, and an end stops just before it. Lite-06 bounds
+	/// either end partway through a group. A group's start is its time, so lite-07 sends one
+	/// at a group's first frame as an [`Anchor::Time`], an end as the time just before it, and
+	/// a start partway through a group as its Position type, which only a start may be.
 	Absolute(crate::track::Position),
 	/// The group this many before the latest, included as an end. Lite07+ only, except a
 	/// start of 0 (see [`Range`]).
@@ -310,8 +310,8 @@ fn decode_range_list(r: &mut Decoder<'_>) -> Result<Vec<Range>, DecodeError> {
 	// count the bytes can't back runs out before it costs anything.
 	let mut ranges = Vec::new();
 	for _ in 0..count {
-		let start = decode_anchor(r)?;
-		let end = decode_anchor(r)?;
+		let start = decode_anchor(r, false)?;
+		let end = decode_anchor(r, true)?;
 		ranges.push(Range { start, end });
 	}
 	Ok(ranges)
@@ -322,10 +322,10 @@ fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), Encode
 	w.varint(ranges.len() as u64)?;
 	for range in ranges {
 		for (anchor, end) in [(range.start, false), (range.end, true)] {
-			let (kind, value) = wire_anchor(anchor, end)?;
+			let (kind, values) = wire_anchor(anchor, end)?;
 			w.varint(kind)?;
-			if let Some(value) = value {
-				w.varint(value)?;
+			for value in values.iter().flatten() {
+				w.varint(*value)?;
 			}
 		}
 	}
@@ -336,39 +336,54 @@ fn encode_range_list(w: &mut Encoder<'_>, ranges: &[Range]) -> Result<(), Encode
 pub(super) fn range_size(range: &Range, form: Form) -> Option<usize> {
 	let size = |value| varint::size(value, form).ok();
 	let anchor = |anchor, end| -> Option<usize> {
-		let (kind, value) = wire_anchor(anchor, end).ok()?;
-		Some(size(kind)? + value.map_or(Some(0), size)?)
+		let (kind, values) = wire_anchor(anchor, end).ok()?;
+		values
+			.iter()
+			.flatten()
+			.try_fold(size(kind)?, |total, value| Some(total + size(*value)?))
 	};
 	Some(anchor(range.start, false)? + anchor(range.end, true)?)
 }
 
 /// Decode one lite-07 range end: its type, then the fields that type carries. Type 0 is no
-/// anchor, the oldest group as a start and the live edge as an end.
-fn decode_anchor(r: &mut Decoder<'_>) -> Result<Option<Anchor>, DecodeError> {
+/// anchor, the oldest group as a start and the live edge as an end. Type 3, a position
+/// partway through a group, is a start only, so `end` refuses it, and so is one at frame 0,
+/// which type 1 says.
+fn decode_anchor(r: &mut Decoder<'_>, end: bool) -> Result<Option<Anchor>, DecodeError> {
 	Ok(match r.varint()? {
 		0 => None,
 		1 => Some(Anchor::Time(r.varint()?)),
 		2 => Some(Anchor::Relative(r.varint()?)),
+		3 if !end => {
+			let group = r.varint()?;
+			let frame = r.varint()?;
+			if frame == 0 {
+				return Err(DecodeError::InvalidValue);
+			}
+			Some(Anchor::Absolute(crate::track::Position { group, frame }))
+		}
 		_ => return Err(DecodeError::InvalidValue),
 	})
 }
 
-/// The lite-07 type and value of a range's start or `end`, the inverse of [`decode_anchor`].
+/// The lite-07 type and values of a range's start or `end`, the inverse of [`decode_anchor`].
 ///
-/// An absolute position goes out as its group's time: a start as is, and an exclusive end as
-/// the inclusive time just before it, an end at group 0 holding nothing a time can say. A
-/// range covers whole groups, so a position partway through one is refused: FETCH reads a
-/// slice of a group.
-fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, Option<u64>), EncodeError> {
+/// An absolute position at a group's first frame goes out as its group's time: a start as
+/// is, and an exclusive end as the inclusive time just before it, an end at group 0 holding
+/// nothing a time can say. A start partway through a group goes out as a position, its
+/// group's start then the frame; an end there is refused, since FETCH reads a slice of a group.
+fn wire_anchor(anchor: Option<Anchor>, end: bool) -> Result<(u64, [Option<u64>; 2]), EncodeError> {
 	Ok(match anchor {
-		None => (0, None),
-		Some(Anchor::Time(time)) => (1, Some(time)),
-		Some(Anchor::Relative(back)) => (2, Some(back)),
-		Some(Anchor::Absolute(position)) if position.frame != 0 => return Err(EncodeError::Version),
-		Some(Anchor::Absolute(position)) if end => {
-			(1, Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?))
-		}
-		Some(Anchor::Absolute(position)) => (1, Some(position.group)),
+		None => (0, [None, None]),
+		Some(Anchor::Time(time)) => (1, [Some(time), None]),
+		Some(Anchor::Relative(back)) => (2, [Some(back), None]),
+		Some(Anchor::Absolute(position)) if position.frame != 0 && end => return Err(EncodeError::Version),
+		Some(Anchor::Absolute(position)) if position.frame != 0 => (3, [Some(position.group), Some(position.frame)]),
+		Some(Anchor::Absolute(position)) if end => (
+			1,
+			[Some(position.group.checked_sub(1).ok_or(EncodeError::InvalidState)?), None],
+		),
+		Some(Anchor::Absolute(position)) => (1, [Some(position.group), None]),
 	})
 }
 
@@ -1799,30 +1814,36 @@ mod test {
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::InvalidState)));
 	}
 
-	/// A lite-07 range covers whole groups: an absolute anchor is its type and group alone,
-	/// and one partway through a group is refused, since FETCH reads a slice of a group.
+	/// A lite-07 start may fall partway through a group, as its Position type: the group's
+	/// start, then the frame. An end there is refused, since FETCH reads a slice of a group,
+	/// and so is a Position at frame 0, which a Time says.
 	#[test]
-	fn lite07_ranges_cover_whole_groups() {
+	fn lite07_starts_partway_through_a_group() {
 		let mut msg = framed_sample();
 		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
 		msg.ranges = vec![Range {
 			start: absolute(7, 4),
 			end: None,
 		}];
-		assert!(matches!(encode(&msg, Version::Lite07), Err(EncodeError::Version)));
+		assert_eq!(roundtrip(&msg, Version::Lite07).ranges, msg.ranges);
+		let position = encode(&msg, Version::Lite07).unwrap();
+		// Type 3, start 7, frame 4, then no end.
+		assert!(position.ends_with(&[1, 3, 7, 4, 0]), "{position:?}");
+		assert_eq!(
+			range_size(&msg.ranges[0], Version::Lite07.into()),
+			Some(4),
+			"the size a range takes counts both fields"
+		);
 
-		msg.ranges = vec![Range {
-			start: absolute(7, 0),
-			end: absolute(9, 0),
-		}];
-		let whole = encode(&msg, Version::Lite07).unwrap();
-		msg.ranges = vec![Range {
-			start: Some(Anchor::Relative(7)),
-			end: Some(Anchor::Relative(9)),
-		}];
-		// The same bytes but the two types: no frame follows either group.
-		let relative = encode(&msg, Version::Lite07).unwrap();
-		assert_eq!(whole.len(), relative.len());
+		let decode = |tail: &[u8]| {
+			let mut wire = position.clone();
+			wire.truncate(position.len() - 5);
+			wire.extend_from_slice(tail);
+			crate::coding::decode_from(&mut wire.as_slice(), Version::Lite07, Subscribe::decode_msg).map(|_| ())
+		};
+		assert!(decode(&[1, 3, 7, 4, 0]).is_ok());
+		assert!(matches!(decode(&[1, 3, 7, 0, 0]), Err(DecodeError::InvalidValue)));
+		assert!(matches!(decode(&[1, 1, 7, 3, 9, 4]), Err(DecodeError::InvalidValue)));
 	}
 
 	/// An update sends only the ranges that changed, and the publisher resolves the same list,

@@ -4619,6 +4619,17 @@ impl Consumer {
 		self.cursor.state.read().committed()
 	}
 
+	/// The frames committed to the copy this reads, from the index it started at: what a route
+	/// switch need not ask for again. `None` once aborted, or on a sparse wire, whose object
+	/// IDs are not frame indices.
+	pub(super) fn committed_span(&self) -> Option<std::ops::Range<u64>> {
+		let state = self.cursor.state.read();
+		if state.outcome.error().is_some() || state.sparse() {
+			return None;
+		}
+		Some(state.offset as u64..state.committed() as u64)
+	}
+
 	fn poll_read_frame_copy<T>(
 		&mut self,
 		waiter: &kio::Waiter,
