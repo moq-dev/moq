@@ -1273,10 +1273,12 @@ impl Lent {
 		if standing.is_some_and(|slot| held(&slot) >= held(head)) {
 			return;
 		}
-		match group::Handoff::lent(head.clone(), cache) {
-			Some(loan) => self.0.insert(key, loan),
-			None => self.0.remove(&key),
-		};
+		// Forget the loans the pool reclaimed, so the map grows no further than the loans it
+		// bills, however many groups readers resume a copy at that never arrive.
+		self.0.retain(|_, loan| loan.head().is_some());
+		if let Some(loan) = group::Handoff::lent(head.clone(), cache) {
+			self.0.insert(key, loan);
+		}
 	}
 
 	/// The head lent for group `key`, unless its pool reclaimed it.
@@ -16086,6 +16088,43 @@ mod test {
 		assert!(matches!(next.as_mut().poll(&mut cx), Poll::Ready(Err(Error::Old))));
 		head.finish().unwrap();
 		edge.finish().unwrap();
+	}
+
+	/// A copy whose readers keep resuming it at groups that never arrive keeps no more loans
+	/// than its pool bills: one the pool reclaimed is forgotten at the next loan.
+	#[test]
+	#[cfg(feature = "async")]
+	fn reclaimed_loans_leave_the_copy() {
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let producer = track_producer_pooled("test", pool.clone());
+		let consumer = producer.consume();
+		let head = |start: u64| {
+			let mut prefix = group::Info { start }.produce();
+			prefix
+				.write_frame(Timestamp::from_millis(start).unwrap(), bytes::Bytes::new())
+				.unwrap();
+			prefix.consume().handoff().head().unwrap()
+		};
+		let lent = |producer: &Producer| {
+			producer
+				.state
+				.read()
+				.lent
+				.lock()
+				.unwrap()
+				.0
+				.keys()
+				.copied()
+				.collect::<Vec<_>>()
+		};
+		consumer.lend_head(1, head(1));
+		consumer.lend_head(2, head(2));
+		assert_eq!(lent(&producer), [1, 2]);
+		pool.step(Duration::from_secs(2));
+		pool.sweep();
+		assert_eq!(pool.used(), 0, "the sweep reclaimed both");
+		consumer.lend_head(3, head(3));
+		assert_eq!(lent(&producer), [3]);
 	}
 
 	/// A copy lent the heads of two groups its readers resumed it at holds each whole as it
