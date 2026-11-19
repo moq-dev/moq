@@ -126,7 +126,7 @@ class SelectTest(unittest.TestCase):
         # moq-net and its dependencies can deepen the session driver's Send proof.
         for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
             with self.subTest(path=path):
-                calls = self.selected(path)
+                calls = [call for call in self.selected(path) if call != "rs c-tests --syntax"]
                 self.assertEqual(len(calls), 4, calls)
                 self.assertTrue(calls[0].startswith("rs lint "), calls)
                 self.assertEqual(calls[1], "rs media-defaults", calls)
@@ -137,6 +137,24 @@ class SelectTest(unittest.TestCase):
         # Only the lint phase runs it, so the gate compiles it once.
         self.assertNotIn("rs send-depth", self.selected("rs/moq-net/src/lib.rs", action="test"))
         self.assertNotIn("rs send-depth", self.selected("rs/moq-auth/src/lib.rs"))
+
+    def test_gate_compiles_c_callers_against_libmoq(self):
+        # libmoq, a crate its header reaches, and the C callers' own inputs.
+        for path in (
+            "rs/libmoq/src/lib.rs",
+            "rs/libmoq/c-tests/abort-unwanted.c",
+            "rs/moq-net/src/lib.rs",
+            "sh/rs/c-tests.sh",
+            "doc/lib/c/index.md",
+            "doc/lib/samples.sh",
+            "Cargo.lock",
+        ):
+            with self.subTest(path=path):
+                self.assertRegex(path, dispatch_scope())
+                self.assertEqual(self.selected(path).count("rs c-tests --syntax"), 1)
+        # Only the lint phase runs it, and only for libmoq.
+        self.assertNotIn("rs c-tests --syntax", self.selected("rs/libmoq/src/lib.rs", action="test"))
+        self.assertNotIn("rs c-tests --syntax", self.selected("rs/moq-auth/src/lib.rs"))
 
     def test_media_defaults_are_isolated_from_device_features(self):
         for path in ("rs/moq-audio/src/lib.rs", "rs/moq-video/src/lib.rs", "Cargo.lock"):

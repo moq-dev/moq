@@ -44,8 +44,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
 - **Auth and crypto.** End-to-end encryption is its own unpublished crate again
   ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
-- **Catalog, drafts, and formats.** [hang-04](/quest/m2/hang04/README.md)
-  (the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
+- **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
   [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
 - **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
