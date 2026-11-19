@@ -1,5 +1,6 @@
 //! Two node layers under MoQ, on the bake-off's network beside the path vector that
-//! ships (`quest/m3/node-layer.md`). Nothing here ships.
+//! ships, measured to decide whether moq-net keeps routing inside a trusted domain
+//! (moq-dev/moq#9149: it does). Nothing here ships.
 //!
 //! Both keep what only MoQ does: an endpoint's claims belong to the relay it connects
 //! to, which announces them under its own identity with a version, so a newer copy
@@ -97,9 +98,10 @@ enum Msg {
 		broadcast: Broadcast,
 		live: bool,
 	},
-	/// The membership feed: `node` is up under `ident`, or gone.
+	/// The membership feed: `node` is up under `ident`, or that identity is gone.
 	Member {
 		node: Node,
+		ident: Id,
 		alive: bool,
 	},
 	/// A flat relay's GOAWAY on one of its sessions.
@@ -169,8 +171,9 @@ pub(super) struct LayerSim {
 	leaving: BTreeSet<Node>,
 	built: bool,
 	/// Each message with the round it may arrive in: a flat session crosses the
-	/// network's path between its relays, a round per link.
-	queues: BTreeMap<Chan, VecDeque<(u64, Msg)>>,
+	/// network's path between its relays, a round per link, and waits with `None`
+	/// while the network has no path, setting out again once it has one.
+	queues: BTreeMap<Chan, VecDeque<(Option<u64>, Msg)>>,
 	/// Flat: the links of the network's path between two relays, while one exists.
 	paths: std::cell::RefCell<BTreeMap<(Node, Node), Option<usize>>>,
 	/// A queue is delivering this round, so what it sends moves next round at the earliest.
@@ -188,28 +191,34 @@ fn pair(a: Node, b: Node) -> (Node, Node) {
 }
 
 /// Cheapest paths from `source` to every node `edges` reaches. No path carries what a
-/// relay learned over a link it marks onward over another link it marks, and only a
-/// node `transit` admits passes a path on. Returns each node's rank and the path.
+/// relay learned over a link it marks onward over another link it marks, a path
+/// already `marked` leaves `source` by no link it marks, and only a node `transit`
+/// admits passes a path on. Returns each node's rank and the path.
 fn cheapest(
 	source: Id,
+	marked: bool,
 	edges: &dyn Fn(Id) -> Vec<(Id, Metric)>,
 	marks: &dyn Fn(Id, Id) -> bool,
 	draining: &dyn Fn(Id) -> bool,
 	transit: &dyn Fn(Id) -> bool,
 	spent: &mut usize,
 ) -> BTreeMap<Id, (Rank, Vec<Id>)> {
-	// A label is a node and whether some relay on the way marked the link it arrived
-	// over: from such a relay on, the path never leaves over a link its sender marks.
-	type Label = (Id, bool);
+	// A label is a node, whether some relay on the way marked the link it arrived over
+	// (from such a relay on, the path never leaves over a link its sender marks), and
+	// whether it passed a draining relay. Draining ranks first, so a cheaper drained
+	// path to a node is kept beside a dearer clean one: past another draining relay
+	// both are drained and the cheaper wins.
+	type Label = (Id, bool, bool);
 	let mut best: BTreeMap<Label, (Rank, Option<Label>)> = BTreeMap::new();
 	let mut heap = BinaryHeap::new();
-	best.insert((source, false), ((false, 0, usize::MAX), None));
-	heap.push(Reverse(((false, 0, usize::MAX), (source, false))));
+	let start = (source, marked, false);
+	best.insert(start, ((false, 0, usize::MAX), None));
+	heap.push(Reverse(((false, 0, usize::MAX), start)));
 	while let Some(Reverse((rank, label))) = heap.pop() {
 		if best.get(&label).is_some_and(|(have, _)| *have < rank) {
 			continue;
 		}
-		let (at, marked) = label;
+		let (at, marked, _) = label;
 		if at != source && !transit(at) {
 			continue;
 		}
@@ -221,10 +230,10 @@ fn cheapest(
 			let drain = rank.0 || (at != source && draining(at));
 			let first = if at == source { node_of(next) } else { rank.2 };
 			let reach = (drain, rank.1 + cost, first);
-			let label = (next, marked || marks(next, at));
-			if best.get(&label).is_none_or(|(have, _)| reach < *have) {
-				best.insert(label, (reach, Some((at, marked))));
-				heap.push(Reverse((reach, label)));
+			let next = (next, marked || marks(next, at), drain);
+			if best.get(&next).is_none_or(|(have, _)| reach < *have) {
+				best.insert(next, (reach, Some(label)));
+				heap.push(Reverse((reach, next)));
 			}
 		}
 	}
@@ -321,8 +330,8 @@ impl LayerSim {
 		}
 		// A message sent while this round delivers can move no earlier than the next,
 		// so it waits one round more than one sent between rounds.
-		let links = self.links_between(from, to).unwrap_or(1).max(1) as u64;
-		let due = self.now + links - 1 + u64::from(self.stepping);
+		let due = (self.links_between(from, to))
+			.map(|links| self.now + links.max(1) as u64 - 1 + u64::from(self.stepping));
 		self.queues.entry((from, to)).or_default().push_back((due, msg));
 	}
 
@@ -360,6 +369,11 @@ impl LayerSim {
 		if from == to {
 			return Some(Vec::new());
 		}
+		self.underlay_from(from).remove(&to)
+	}
+
+	/// Flat: [`Self::underlay`] from `from` to every relay it reaches.
+	fn underlay_from(&self, from: Node) -> BTreeMap<Node, Vec<Node>> {
 		let mut spent = 0;
 		let as_id = |node: Node| node as Id;
 		let edges = |at: Id| {
@@ -369,9 +383,10 @@ impl LayerSim {
 		};
 		let marks = |x: Id, y: Id| self.marks(x as Node, y as Node);
 		let transit = |at: Id| !self.dead.contains(&(at as Node));
-		let found = cheapest(as_id(from), &edges, &marks, &|_| false, &transit, &mut spent);
-		let (_, path) = found.get(&as_id(to))?;
-		Some(path.iter().map(|&id| id as Node).collect())
+		let found = cheapest(as_id(from), false, &edges, &marks, &|_| false, &transit, &mut spent);
+		(found.into_iter())
+			.map(|(id, (_, path))| (id as Node, path.into_iter().map(|id| id as Node).collect()))
+			.collect()
 	}
 
 	/// Flat: how many links a message between two relays crosses, or `None` while the
@@ -385,14 +400,38 @@ impl LayerSim {
 		if let Some(&known) = self.paths.borrow().get(&key) {
 			return known;
 		}
-		let found = self.underlay(from, to).map(|path| path.len());
-		self.paths.borrow_mut().insert(key, found);
-		found
+		// One search from `from` answers every pair it starts.
+		let reached = self.underlay_from(from);
+		let mut paths = self.paths.borrow_mut();
+		for relay in self.relays().into_iter().filter(|&relay| relay != from) {
+			paths.insert((from, relay), reached.get(&relay).map(Vec::len));
+		}
+		paths.insert((from, from), Some(1));
+		paths[&key]
 	}
 
-	/// The network changed: forget every path worked out on it.
+	/// The network changed: forget every path worked out on it. A flat message whose
+	/// path is gone waits, and one waiting sets out on the path that came back, as
+	/// if sent now: no hop moves while the network has no path.
 	fn reroute(&mut self) {
 		self.paths.get_mut().clear();
+		if self.layer != Layer::Flat {
+			return;
+		}
+		let now = self.now;
+		let chans: Vec<Chan> = (self.queues.iter())
+			.filter(|(_, queue)| !queue.is_empty())
+			.map(|(&chan, _)| chan)
+			.collect();
+		for (from, to) in chans {
+			let links = self.links_between(from, to);
+			for (due, _) in self.queues.get_mut(&(from, to)).expect("a queue") {
+				*due = match links {
+					None => None,
+					Some(links) => due.or(Some(now + links.max(1) as u64 - 1)),
+				};
+			}
+		}
 	}
 
 	/// The identity a relay's link-state database says `ident` links to, both ways.
@@ -406,11 +445,9 @@ impl LayerSim {
 			.collect()
 	}
 
-	fn compute(&mut self, node: Node) {
-		let mut spent = 0;
-		let Some(relay) = self.relay(node) else {
-			return;
-		};
+	/// Link state: `relay`'s rank and next hop toward each identity in its database,
+	/// for a request that arrived `marked` or not.
+	fn next_hops(relay: &Relay, marked: bool, spent: &mut usize) -> BTreeMap<Id, (Rank, Node)> {
 		let edges = |at: Id| Self::ls_edges(relay, at);
 		let marks = |x: Id, y: Id| {
 			relay
@@ -421,10 +458,17 @@ impl LayerSim {
 		};
 		let draining = |at: Id| relay.lsdb.get(&at).is_some_and(|lsa| lsa.draining);
 		let transit = |at: Id| relay.lsdb.contains_key(&at);
-		let found = cheapest(relay.ident, &edges, &marks, &draining, &transit, &mut spent);
-		let table = (found.into_iter())
+		(cheapest(relay.ident, marked, &edges, &marks, &draining, &transit, spent).into_iter())
 			.map(|(ident, (rank, path))| (ident, (rank, node_of(path[0]))))
-			.collect();
+			.collect()
+	}
+
+	fn compute(&mut self, node: Node) {
+		let mut spent = 0;
+		let Some(relay) = self.relay(node) else {
+			return;
+		};
+		let table = Self::next_hops(relay, false, &mut spent);
 		self.spent += spent;
 		self.relay_mut(node).expect("a relay").table = table;
 	}
@@ -593,7 +637,7 @@ impl LayerSim {
 				let knows = |x: Node, y: Node| {
 					!self.leaving.contains(&x) && self.relay(x).is_some_and(|relay| relay.known.contains(&y))
 				};
-				if knows(a, b) && knows(b, a) && self.underlay(a, b).is_some() {
+				if knows(a, b) && knows(b, a) && self.links_between(a, b).is_some() {
 					out.insert((a, b));
 				}
 			}
@@ -611,20 +655,31 @@ impl LayerSim {
 			let linked = !self.mesh_edges(node).is_empty() && !self.dead.contains(&node);
 			if linked && !self.members.contains(&node) {
 				self.members.insert(node);
+				let ident = self.relay(node).expect("a relay").ident;
 				for peer in self.relays().into_iter().filter(|&peer| peer != node) {
-					self.send(FEED, peer, Msg::Member { node, alive: true });
+					self.send(FEED, peer, Msg::Member { node, ident, alive: true });
 				}
 				let all: BTreeSet<Node> = self.members.iter().copied().filter(|&m| m != node).collect();
 				self.relay_mut(node).expect("a relay").known = all;
 			}
 		}
 		let want = self.wanted();
-		let have: BTreeSet<(Node, Node)> = (self.relays().into_iter())
-			.flat_map(|a| {
-				let peers: Vec<Node> = self.relay(a).expect("a relay").sessions.keys().copied().collect();
-				peers.into_iter().map(move |b| pair(a, b))
-			})
-			.collect();
+		// A session is open once both ends hold it under the other's current identity;
+		// one end alone, or a stale identity, is reopened while wanted.
+		let holds = |x: Node, y: Node| {
+			let ident = self.relay(y).expect("a relay").ident;
+			self.relay(x).expect("a relay").sessions.get(&y) == Some(&ident)
+		};
+		let mut have = BTreeSet::new();
+		let mut open = BTreeSet::new();
+		for a in self.relays() {
+			for &b in self.relay(a).expect("a relay").sessions.keys() {
+				have.insert(pair(a, b));
+				if holds(a, b) && holds(b, a) {
+					open.insert(pair(a, b));
+				}
+			}
+		}
 		// The network lost the path between them, which only the session's keep-alives
 		// show; one that comes back first carries on.
 		let now = self.now;
@@ -632,9 +687,12 @@ impl LayerSim {
 			self.doomed.entry((a, b)).or_insert(now + super::bakeoff::IDLE as u64);
 		}
 		self.doomed.retain(|pair, _| !want.contains(pair));
-		for &(a, b) in want.difference(&have) {
+		for &(a, b) in want.difference(&open) {
 			for (x, y) in [(a, b), (b, a)] {
 				let ident = self.relay(y).expect("a relay").ident;
+				if self.relay(x).expect("a relay").sessions.get(&y).is_some_and(|&held| held != ident) {
+					self.forget(x, y);
+				}
 				self.relay_mut(x).expect("a relay").sessions.insert(y, ident);
 			}
 			for (x, y) in [(a, b), (b, a)] {
@@ -759,6 +817,10 @@ impl LayerSim {
 	fn drop_link(&mut self, a: Node, b: Node) {
 		self.up.remove(&pair(a, b));
 		self.reroute();
+		// A flat session between relays outlives the link: it ends only by `part`.
+		if self.layer == Layer::Flat && self.is_relay(a) && self.is_relay(b) {
+			return;
+		}
 		for key in [(a, b), (b, a)] {
 			self.queues.remove(&key);
 			self.held.remove(&key);
@@ -866,12 +928,14 @@ impl LayerSim {
 					self.announce(to, broadcast, state);
 				}
 			}
-			Msg::Member { node, alive } => {
+			Msg::Member { node, ident, alive } => {
 				let relay = self.relay_mut(to).expect("a relay");
 				match alive {
 					true => {
 						relay.known.insert(node);
 					}
+					// The news of an identity it already holds a newer session past is old.
+					false if relay.sessions.get(&node).is_some_and(|&held| held != ident) => {}
 					false => {
 						relay.known.remove(&node);
 						self.forget(to, node);
@@ -975,8 +1039,9 @@ impl Net for LayerSim {
 		self.disconnect(node, peer);
 		// The feed names a dead relay gone once a neighbour notices.
 		if self.layer == Layer::Flat && self.dead.contains(&node) && self.members.remove(&node) {
+			let ident = self.relay(node).expect("a relay").ident;
 			for to in self.relays().into_iter().filter(|&to| to != node) {
-				self.send(FEED, to, Msg::Member { node, alive: false });
+				self.send(FEED, to, Msg::Member { node, ident, alive: false });
 			}
 		}
 		self.resync();
@@ -1076,7 +1141,10 @@ impl Net for LayerSim {
 			.filter(|(key, _)| !self.held.contains(key))
 			// A flat session waits while the network has no path to carry it.
 			.filter(|((from, to), _)| self.links_between(*from, *to).is_some())
-			.map(|(key, queue)| (*key, queue.iter().take_while(|(due, _)| *due <= self.now).count()))
+			.map(|(key, queue)| {
+				let due = queue.iter().take_while(|(due, _)| due.is_some_and(|due| due <= self.now));
+				(*key, due.count())
+			})
 			.filter(|&(_, count)| count > 0)
 			.collect()
 	}
@@ -1127,7 +1195,10 @@ impl Net for LayerSim {
 		let home = node_of(announcer);
 		match self.layer {
 			Layer::LinkState => {
-				let (mut at, mut hops) = (from, Vec::new());
+				// Whether the request arrived over a link some relay on the way marks: a
+				// relay forwards that one by no link it marks, as the sticky rule needs.
+				// Rare, so worked out per request rather than kept as a second table.
+				let (mut at, mut hops, mut marked) = (from, Vec::new(), false);
 				while hops.len() <= self.spots.len() {
 					if at == home && self.relay(at).is_some_and(|relay| relay.ident == announcer) {
 						let done = self
@@ -1135,9 +1206,14 @@ impl Net for LayerSim {
 							.inspect(|&endpoint| hops.push(endpoint));
 						return Some((hops, done.is_some()));
 					}
-					let Some(&(_, next)) = self.relay(at).and_then(|relay| relay.table.get(&announcer)) else {
+					let next = self.relay(at).and_then(|relay| match marked {
+						false => relay.table.get(&announcer).map(|&(_, next)| next),
+						true => Self::next_hops(relay, true, &mut 0).get(&announcer).map(|&(_, next)| next),
+					});
+					let Some(next) = next else {
 						return Some((hops, false));
 					};
+					marked |= self.marks(next, at);
 					hops.push(next);
 					at = next;
 				}
@@ -1256,7 +1332,7 @@ fn path(lab: &Lab, from: Node, to: Node) -> (Metric, Vec<(Node, Node)>) {
 	};
 	let marks = |x: Id, y: Id| lab.mesh.ties.get(&(x as Node, y as Node)) == Some(&Tie::Up);
 	let mut spent = 0;
-	let found = cheapest(from as Id, &edges, &marks, &|_| false, &|_| true, &mut spent);
+	let found = cheapest(from as Id, false, &edges, &marks, &|_| false, &|_| true, &mut spent);
 	let Some(((_, cost, _), nodes)) = found.get(&(to as Id)) else {
 		return (0, Vec::new());
 	};
@@ -1342,19 +1418,22 @@ fn the_layers_carry_every_failure_on_every_shape() {
 	}
 }
 
-/// What one failure cost, summed over every single-domain shape at `relays`.
-fn total(arm: Arm, relays: usize, failure: Failure) -> (usize, usize, usize) {
-	let mut sum = (0, 0, 0);
-	for shape in domains(relays, 2) {
-		for (seen, row) in fail(arm, &shape.mesh, relays > 16) {
-			if seen == failure {
-				sum.0 += row.cost.sent.msgs;
-				sum.1 += row.cost.right;
-				sum.2 += row.cost.stale + row.cost.dark;
-			}
-		}
-	}
-	sum
+/// A drained path stays beside a clean one to the same relay: past a draining relay
+/// both are drained, and the cheaper drained one wins.
+#[test]
+fn cheapest_keeps_a_cheaper_drained_path() {
+	let (source, a, d, target) = (0, 1, 2, 3);
+	let links: BTreeMap<Id, Vec<(Id, Metric)>> = BTreeMap::from([
+		(source, vec![(a, 10), (d, 1)]),
+		(d, vec![(source, 1), (a, 1)]),
+		(a, vec![(source, 10), (d, 1), (target, 1)]),
+		(target, vec![(a, 1)]),
+	]);
+	let edges = |at: Id| links[&at].clone();
+	let draining = |at: Id| at == a || at == d;
+	let found = cheapest(source, false, &edges, &|_, _| false, &draining, &|_| true, &mut 0);
+	assert_eq!(found[&a], ((false, 10, a as Node), vec![a]));
+	assert_eq!(found[&target], ((true, 3, d as Node), vec![d, a, target]));
 }
 
 /// A link that closes while the network still joins both ends costs a flat domain
@@ -1362,11 +1441,56 @@ fn total(arm: Arm, relays: usize, failure: Failure) -> (usize, usize, usize) {
 /// moves routes.
 #[test]
 fn a_flat_domain_rides_out_a_link_closing() {
-	let (flat, _, flat_unfed) = total(Arm::Layer(Layer::Flat), 9, Failure::Close);
-	assert_eq!((flat, flat_unfed), (0, 0));
-	let (ls, ..) = total(Arm::Layer(Layer::LinkState), 9, Failure::Close);
-	let (relay, ..) = total(Arm::RELAY, 9, Failure::Close);
+	// Route messages and unfed relay-rounds for the busiest tree link closing, summed
+	// over every single-domain shape.
+	let close = |arm: Arm| {
+		let mut sum = (0, 0);
+		for shape in domains(9, 2) {
+			let mut lab = Lab::new(arm, &shape.mesh);
+			let Some((a, b)) = lab.tree_link(0, true, &shape.mesh.tree()) else {
+				continue;
+			};
+			let cost = lab.measure(&|lab| lab.cut(a, b));
+			sum.0 += cost.sent.msgs;
+			sum.1 += cost.stale + cost.dark;
+		}
+		sum
+	};
+	assert_eq!(close(Arm::Layer(Layer::Flat)), (0, 0));
+	let (ls, _) = close(Arm::Layer(Layer::LinkState));
+	let (relay, _) = close(Arm::RELAY);
 	assert!(ls > 0 && relay > 0, "link state {ls}, relay {relay}");
+}
+
+/// A link-state request keeps the sticky rule at every hop, not only where it starts:
+/// X marks R and H, so R's path to H goes round by Y, and X forwards it that way
+/// rather than by its own cheapest link to H.
+#[test]
+fn link_state_forwards_by_the_marks_a_request_arrived_with() {
+	let (r, x, y, h) = (0, 1, 2, 3);
+	let mesh = Mesh {
+		relays: 4,
+		links: vec![(r, x, 1), (x, h, 1), (x, y, 5), (y, h, 5)],
+		ties: BTreeMap::from([((x, r), Tie::Up), ((x, h), Tie::Up)]),
+		homes: vec![h],
+		claims: 1,
+	};
+	let lab = Lab::new(Arm::Layer(Layer::LinkState), &mesh);
+	let (publisher, id) = mesh.publisher(0);
+	assert_eq!(lab.net.chase(r, id), Some((vec![x, y, h, publisher], true)));
+	assert_eq!(lab.net.chase(x, id), Some((vec![h, publisher], true)));
+}
+
+/// A flat home that restarts before the feed's news of its death arrives still ends
+/// with a session to every relay: the old identity's removal touches no newer
+/// session, and a session one end alone holds reopens.
+#[test]
+fn a_flat_home_restarting_reopens_every_session() {
+	let mesh = super::bakeoff::tiers(3, 3, true, 1);
+	let mut lab = Lab::new(Arm::Layer(Layer::Flat), &mesh);
+	lab.restart(mesh.homes[0]);
+	assert!(lab.settle());
+	assert_eq!(lab.check(), Ok(()));
 }
 
 /// A flat domain without warm routes pulls every relay's copy from the announcer, so
@@ -1444,7 +1568,7 @@ fn benchmark_node_layer() {
 #[ignore = "a sweep; prints the node layer's growth table"]
 fn benchmark_node_layer_growth() {
 	println!(
-		"grows,relays,links,publishers,broadcasts,rule,build_route_messages,build_claim_items,held_routes,held_claims,close_route_messages,death_route_messages,death_claim_items,death_unfed"
+		"grows,relays,links,publishers,announcers,broadcasts,rule,build_route_messages,build_claim_items,held_routes,held_claims,close_route_messages,death_route_messages,death_claim_items,death_unfed"
 	);
 	let tiers_of = |relays: usize, publishers: usize, claims: usize| {
 		let (regions, edges) = match relays {
@@ -1480,10 +1604,11 @@ fn benchmark_node_layer_growth() {
 			});
 			let death = super::bakeoff::transit(&mesh, &tree).map(|relay| lab.measure(&|lab| lab.crash(relay)));
 			println!(
-				"{grows},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+				"{grows},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
 				mesh.relays,
 				mesh.links.len(),
 				mesh.homes.len(),
+				mesh.homes.iter().collect::<BTreeSet<_>>().len(),
 				mesh.homes.len() * mesh.claims,
 				arm.name(),
 				built.msgs,
