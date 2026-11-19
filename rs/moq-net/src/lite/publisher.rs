@@ -5921,6 +5921,121 @@ impl CoverageBench {
 	}
 }
 
+/// A lite-07 subscription's run loop taking a stream of SUBSCRIBE_UPDATEs, for the
+/// `publisher` bench: each edit retires the oldest ranges and adds as many new ones, so the
+/// live set keeps its size and an update's cost shows up as a slope over it.
+#[cfg(any(test, feature = "fuzz"))]
+pub struct UpdateBench {
+	run: TrackRun,
+	live: lite::LiveRanges,
+	writer: Writer<crate::transport::boxed::SendStream, Version>,
+	/// The oldest live Range ID.
+	oldest: u64,
+	priority: u8,
+	_track: track::Producer,
+	_peer: crate::transport::memory::Session,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl UpdateBench {
+	/// Subscribe to `ranges` one-group time ranges on a track whose groups start at their keys,
+	/// so every range resolves without a group held and nothing is served.
+	pub fn new(ranges: u64) -> Self {
+		let version = Version::Lite07;
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let session = Transport::new(local);
+		let Poll::Ready(Ok(stream)) =
+			session.poll_open_uni(&mut Default::default(), &kio::Waiter::noop(), SendOptions::default())
+		else {
+			panic!("a memory stream opens at once");
+		};
+		let wire: Vec<_> = (0..ranges).map(Self::range).collect();
+		let bounds = Bounds::new(&wire, false);
+		let track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"bench",
+			track::Info::default()
+				.with_timescale(crate::Timescale::MILLI)
+				.with_max_age(None),
+		);
+		track.starts_at_keys();
+		let subscriber = track.subscribe(bounds.groups());
+		let steer = kio::Producer::new(Steer::default());
+		let ctx = Subscription {
+			session,
+			id: 0,
+			track_name: "bench".into(),
+			priority: PriorityQueue::default(),
+			publisher: 0,
+			group: None,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
+			version,
+			stamp: None,
+			outcomes: Default::default(),
+			object_records: false,
+		};
+		let mut this = Self {
+			run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
+			live: lite::LiveRanges::new(version, &wire),
+			writer: Writer::new(stream, version),
+			oldest: 0,
+			priority: 0,
+			_track: track,
+			_peer: peer,
+		};
+		this.settle();
+		this
+	}
+
+	/// The one-group range Range ID `id` asks for, each a group of its own while the live
+	/// set stays under 8K ranges, small enough that 8K of them fit one SUBSCRIBE.
+	fn range(id: u64) -> lite::Range {
+		let time = Some(lite::Anchor::Time(2 * id % (1 << 14)));
+		lite::Range { start: time, end: time }
+	}
+
+	/// Retire the `edited` oldest ranges and add as many new ones, then serve until parked.
+	pub fn edit(&mut self, edited: u64) {
+		let remove = (self.oldest..self.oldest + edited).collect();
+		self.oldest += edited;
+		let next = self.live.next();
+		let add = (next..next + edited).map(Self::range).collect();
+		self.apply(lite::RangeEdit::Edit { remove, add }, 0);
+	}
+
+	/// Move only the priority, leaving every range live.
+	pub fn steer(&mut self) {
+		self.priority ^= 1;
+		self.apply(self.live.unchanged(), self.priority);
+	}
+
+	fn apply(&mut self, ranges: lite::RangeEdit, priority: u8) {
+		let update = lite::SubscribeUpdate {
+			wanted_group: None,
+			priority: priority as i8,
+			max_delay: Some(Duration::from_secs(3600)),
+			min_delay: None,
+			ranges,
+			order: Order::Ascending,
+		};
+		let update = <lite::SubscribeUpdate as Resolve<lite::Subscribe<'static>>>::resolve(update, &mut self.live)
+			.expect("a valid edit");
+		self.run.update(update);
+		self.settle();
+	}
+
+	fn settle(&mut self) {
+		loop {
+			match self.run.poll_step(&mut self.writer, &kio::Waiter::noop()) {
+				Poll::Ready(Ok(ControlFlow::Continue(()))) => continue,
+				Poll::Ready(res) => panic!("the subscription ended: {res:?}"),
+				Poll::Pending => return,
+			}
+		}
+	}
+}
+
 /// Where a group stream is ranked.
 enum Rank {
 	/// In the subscription's send group, by its key in the subscription's order.

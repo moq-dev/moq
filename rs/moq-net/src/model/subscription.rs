@@ -3,9 +3,9 @@ use std::{
 	time::Duration,
 };
 
-mod runs;
+mod cover;
 mod window;
-pub(super) use runs::{Layered, Runs};
+pub(super) use cover::{Cover, minus};
 pub(crate) use window::Accounted;
 pub(crate) use window::Resolved;
 pub(super) use window::{Containing, Holdings, Unheld, Window};

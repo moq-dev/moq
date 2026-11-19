@@ -23,7 +23,7 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Holdings, Layered, Runs, Window};
+use super::subscription::{Accounted, Containing, Cover, Holdings, Window};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -2048,9 +2048,8 @@ impl TrackState {
 	}
 
 	/// The first live-feed group at or above `from` that `servable` covers for which `f`
-	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run.
-	/// Several runs leapfrog the live groups, so a run holding none (a reader's misses, or
-	/// fetched backfill) costs one lookup rather than a walk over every run past it.
+	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run, and
+	/// the reader's index of the live groups among several.
 	fn find_servable<'a, R>(
 		&'a self,
 		servable: &Servable,
@@ -2080,58 +2079,13 @@ impl TrackState {
 				if from > hi {
 					return None;
 				}
-				let groups = &several.groups;
-				// The fixed runs through the reader's index of the live groups among them, then
-				// the walks' few runs layered over them, short of what the index found.
-				let fixed = several.live.find(self, groups.fixed(), from, hi, rev, &mut f);
-				// Nothing lies past a find at the far end, so only the find answers.
-				let short = match (&fixed, rev) {
-					(None, _) => Some((from, hi)),
-					(Some((found, _)), true) => found.checked_add(1).map(|lo| (lo, hi)),
-					(Some((found, _)), false) => found.checked_sub(1).map(|hi| (from, hi)),
-				};
-				let layered = short
-					.filter(|(lo, hi)| lo <= hi)
-					.and_then(|(lo, hi)| self.leapfrog(groups.layer(), lo, hi, rev, &mut f));
-				layered.or(fixed.map(|(_, found)| found))
+				// Through the reader's index of the live groups among its runs.
+				several
+					.live
+					.find(self, &several.groups, from, hi, rev, &mut f)
+					.map(|(_, found)| found)
 			}
 		}
-	}
-
-	/// [`Self::find_servable`] over `runs` within `lo..=hi`: several runs leapfrog the live
-	/// groups, so a run holding none costs one lookup rather than a walk over every run past
-	/// it.
-	fn leapfrog<'a, R>(
-		&'a self,
-		runs: &Runs,
-		mut lo: u64,
-		mut hi: u64,
-		rev: bool,
-		f: &mut impl FnMut(&'a Slot) -> Option<R>,
-	) -> Option<R> {
-		// What is left to search, shrinking from the end the search starts at.
-		while lo <= hi {
-			let run = match rev {
-				true => runs.last(lo, hi),
-				false => runs.first(lo, hi),
-			}?;
-			let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
-			// The cache from the run on, toward the far end: one lookup either finds the run's
-			// groups or the next cached group past a run holding none.
-			let leap = match rev {
-				true => leap(self.live(lo..=end).rev(), start..=end, f),
-				false => leap(self.live(start..=hi), start..=end, f),
-			};
-			match leap {
-				Leap::Found(found) => return Some(found),
-				Leap::Empty => return None,
-				Leap::Past(key) if rev => hi = key,
-				Leap::Past(key) => lo = key,
-				Leap::Exhausted if rev => hi = start.checked_sub(1)?,
-				Leap::Exhausted => lo = end.checked_add(1)?,
-			}
-		}
-		None
 	}
 
 	/// Whether `key` still holds the servable incarnation `stamp`.
@@ -7580,7 +7534,7 @@ struct Drift {
 
 /// The groups a reader reads, and the exclusive end it stops at, or `None` before its ranges
 /// resolve.
-type Coverage = Option<(Layered, Option<u64>)>;
+type Coverage = Option<(Cover, Option<u64>)>;
 
 /// Whether a reader judging under `budget` with `coverage` is settled by `hole` over a run
 /// from `start`. Any hole but a received stale one settles every reader. A stale verdict
@@ -7818,7 +7772,7 @@ struct Edge {
 #[derive(Clone, Default)]
 struct Admitted {
 	/// The window's groups, `None` while a relative anchor waits and every group is in it.
-	groups: Option<Layered>,
+	groups: Option<Cover>,
 	floor: u64,
 	cap: Option<u64>,
 }
@@ -7864,17 +7818,52 @@ impl Admitted {
 		self.overlapping(0..=u64::MAX)
 	}
 
-	/// What this admits and `old` doesn't within `lo..=hi`, when the two differ only in the
-	/// window's walks: `None` otherwise.
+	/// What this admits and `old` doesn't within `lo..=hi`, when neither waits on a relative
+	/// anchor: `None` otherwise. Costs where the window, the floor, or the cap moved between
+	/// them, never the runs that stayed.
 	fn gained(&self, old: &Self, lo: u64, hi: u64) -> Option<Vec<ops::RangeInclusive<u64>>> {
 		let (groups, old_groups) = (self.groups.as_ref()?, old.groups.as_ref()?);
-		if (self.floor, self.cap) != (old.floor, old.cap) || !groups.shares_fixed(old_groups) {
-			return None;
-		}
 		let Some(last) = self.last() else {
 			return Some(Vec::new());
 		};
-		groups.gained(old_groups, lo.max(self.floor), hi.min(last))
+		let (lo, hi) = (lo.max(self.floor), hi.min(last));
+		if lo > hi {
+			return Some(Vec::new());
+		}
+		let mut moved: RangeInclusiveSet<u64> = groups.moved(old_groups).into_iter().collect();
+		if self.floor != old.floor {
+			moved.insert(self.floor.min(old.floor)..=self.floor.max(old.floor) - 1);
+		}
+		let old_last = old.last();
+		match old_last {
+			Some(old_last) if old_last != last => {
+				moved.insert(old_last.min(last) + 1..=old_last.max(last));
+			}
+			Some(_) => {}
+			// The old admitted nothing, so all of this is new.
+			None => moved.insert(lo..=hi),
+		}
+		let mut gained = Vec::new();
+		for span in moved.overlapping(lo..=hi) {
+			for run in groups.within((*span.start()).max(lo), (*span.end()).min(hi)) {
+				let (start, end) = (*run.start(), *run.end());
+				// What lies outside the old bounds is new whatever its runs held.
+				let inside = old_last.map(|old_last| (start.max(old.floor), end.min(old_last)));
+				match inside.filter(|(from, to)| from <= to) {
+					None => gained.push(run),
+					Some((from, to)) => {
+						if start < from {
+							gained.push(start..=from - 1);
+						}
+						gained.extend(super::subscription::minus(from..=to, old_groups));
+						if to < end {
+							gained.push(to + 1..=end);
+						}
+					}
+				}
+			}
+		}
+		Some(gained)
 	}
 }
 
@@ -7964,39 +7953,6 @@ impl<T, C: DoubleEndedIterator<Item = T>, I: DoubleEndedIterator<Item = T>> Doub
 	}
 }
 
-/// What one run's lookup found, for [`TrackState::find_servable`] leapfrogging the cache.
-enum Leap<R> {
-	/// A group in the run that the search answered.
-	Found(R),
-	/// The run's groups, none answering.
-	Exhausted,
-	/// Nothing in the run: the nearest cached group past it.
-	Past(u64),
-	/// Nothing cached from the run on.
-	Empty,
-}
-
-/// Search `cached`, ordered from the run toward the far end, for a group in `run` that `f`
-/// answers.
-fn leap<'a, R>(
-	mut cached: impl Iterator<Item = (&'a u64, &'a Slot)>,
-	run: ops::RangeInclusive<u64>,
-	f: &mut impl FnMut(&'a Slot) -> Option<R>,
-) -> Leap<R> {
-	let Some((&first, slot)) = cached.next() else {
-		return Leap::Empty;
-	};
-	if !run.contains(&first) {
-		return Leap::Past(first);
-	}
-	let mut within =
-		std::iter::once(slot).chain(cached.take_while(|(key, _)| run.contains(*key)).map(|(_, slot)| slot));
-	match within.find_map(f) {
-		Some(found) => Leap::Found(found),
-		None => Leap::Exhausted,
-	}
-}
-
 /// The groups a reader can be served, the only ones its drift is measured against: one it
 /// never reads, past its cap or in a gap between its ranges, never stands in for one it does.
 #[derive(Clone, PartialEq)]
@@ -8015,7 +7971,7 @@ enum Servable {
 /// Built again whenever the window or cap moves, which a time end does on each group, so it
 /// shares the fixed runs and their index, and copies only the walks' runs.
 struct Several {
-	groups: Layered,
+	groups: Cover,
 	cap: Option<u64>,
 	live: Arc<Live>,
 }
@@ -8062,7 +8018,7 @@ impl Indexed {
 	}
 
 	/// Take in what arrived since the last call.
-	fn catch_up(&mut self, state: &TrackState, fixed: &Runs) {
+	fn catch_up(&mut self, state: &TrackState, fixed: &Cover) {
 		for entry in state.arrivals_from(self.taken) {
 			if fixed.contains(entry.key) {
 				self.groups.insert(entry.key, entry.stamp);
@@ -8109,7 +8065,7 @@ impl Live {
 	fn find<'a, R>(
 		&self,
 		state: &'a TrackState,
-		fixed: &Runs,
+		fixed: &Cover,
 		mut lo: u64,
 		mut hi: u64,
 		rev: bool,
@@ -8199,7 +8155,7 @@ impl Servable {
 
 	/// The groups in `groups` below the exclusive `cap`. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
-	fn layered(groups: Layered, cap: Option<u64>, previous: &Self) -> Self {
+	fn layered(groups: Cover, cap: Option<u64>, previous: &Self) -> Self {
 		let last = match cap {
 			Some(cap) => match cap.checked_sub(1) {
 				Some(last) => last,
@@ -8221,7 +8177,7 @@ impl Servable {
 			};
 		}
 		let live = match previous {
-			Self::Runs(several) if several.groups.shares_fixed(&groups) => several.live.clone(),
+			Self::Runs(several) if several.groups == groups => several.live.clone(),
 			_ => Arc::default(),
 		};
 		Self::Runs(Arc::new(Several { groups, cap, live }))
@@ -17042,10 +16998,10 @@ mod test {
 		}
 	}
 
-	/// A search over a layered servable window, through the reader's index of the live
-	/// groups and the layer's runs, finds what a scan of every live group would, in either
-	/// direction, as groups arrive, start, abort, leave the cache, or arrive again between
-	/// searches that keep the same index. Each window is searched on two tracks, as a
+	/// A search over a servable window of several runs, through the reader's index of the
+	/// live groups, finds what a scan of every live group would, in either direction, as
+	/// groups arrive, start, abort, leave the cache, or arrive again between searches that
+	/// keep the same index, and as the window is edited. Each window is searched on two tracks, as a
 	/// group's expiry that moved to a replacement copy searches its reader's.
 	#[test]
 	fn layered_searches_match_a_scan_of_every_live_group() {
@@ -17066,13 +17022,16 @@ mod test {
 				track_producer("test", Info::timed()),
 				track_producer("copy", Info::timed()),
 			];
-			let runs = |count: u64| -> Runs {
-				Runs::new((0..next(count + 1)).map(|_| {
-					let start = next(KEYS);
-					start..=start + next(5)
-				}))
+			let runs = |count: u64| -> Vec<_> {
+				(0..next(count + 1))
+					.map(|_| {
+						let start = next(KEYS);
+						start..=start + next(5)
+					})
+					.collect()
 			};
-			let fixed = Arc::new(runs(8));
+			let mut cover = Cover::new(runs(8));
+			let mut layer = Vec::new();
 			let mut groups = [Vec::new(), Vec::new()];
 			let mut servable = Servable::NONE;
 			for step in 0..30 {
@@ -17100,11 +17059,19 @@ mod test {
 					}
 					_ => {}
 				}
-				// Now and then the window's walks move, keeping the fixed runs and their index.
+				// Now and then the cap moves, keeping the runs and their index, or the runs are
+				// edited.
 				if step == 0 || next(4) == 0 {
 					let cap = (next(4) == 0).then(|| next(KEYS + 2));
-					let layered = Layered::new(fixed.clone(), runs(2));
-					servable = Servable::layered(layered, cap, &servable);
+					if next(2) == 0 {
+						for run in std::mem::replace(&mut layer, runs(2)) {
+							cover.add(run, -1);
+						}
+						for run in &layer {
+							cover.add(run.clone(), 1);
+						}
+					}
+					servable = Servable::layered(cover.clone(), cap, &servable);
 				}
 				for (track, producer) in producers.iter().enumerate() {
 					let state = producer.state.read();
@@ -17119,12 +17086,7 @@ mod test {
 							let found = state.find_servable(&servable, from, rev, shown);
 							let shape = match &servable {
 								Servable::Run { start, end } => format!("run {start}..{end:?}"),
-								Servable::Runs(several) => format!(
-									"{:?} under {:?} below {:?}",
-									several.groups.fixed(),
-									several.groups.layer(),
-									several.cap
-								),
+								Servable::Runs(several) => format!("{:?} below {:?}", several.groups, several.cap),
 							};
 							let cached: Vec<_> = state.live(..).map(|(key, slot)| (*key, slot.is_shown())).collect();
 							assert_eq!(
@@ -17147,8 +17109,8 @@ mod test {
 		let groups: Vec<_> = (0..100)
 			.map(|key| producer.create_group(group::Info { start: key }).unwrap())
 			.collect();
-		let fixed = Arc::new(Runs::new([0..=999, 1001..=u64::MAX]));
-		let servable = Servable::layered(Layered::new(fixed, Runs::default()), None, &Servable::NONE);
+		let runs = Cover::new([0..=999, 1001..=u64::MAX]);
+		let servable = Servable::layered(runs, None, &Servable::NONE);
 		let Servable::Runs(several) = &servable else {
 			panic!("several runs");
 		};
@@ -17212,12 +17174,9 @@ mod test {
 		let points = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, u64::MAX - 1, u64::MAX];
 		for bounds in windows {
 			let runs = || bounds.iter().map(|&(first, last)| first..=last);
-			// The runs fixed, and again split between fixed runs and a layer over them.
-			let layered = [
-				Layered::new(Arc::new(Runs::new(runs())), Runs::default()),
-				Layered::new(Arc::new(Runs::new(runs().skip(1))), Runs::new(runs().take(1))),
-			];
-			for groups in layered {
+			// The runs counted once, and again with the first counted twice.
+			let covers = [Cover::new(runs()), Cover::new(runs().chain(runs().take(1)))];
+			for groups in covers {
 				let servable = Servable::layered(groups, None, &Servable::NONE);
 				if let [(first, last)] = bounds {
 					assert!(
