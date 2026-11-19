@@ -565,12 +565,23 @@ impl Track {
 		let is_video = matches!(self.kind, Kind::Video(_));
 		// A placed frame is judged at release, against the keyframe's departure ([`Export::leads_video`]).
 		let aligned = !is_video && !self.kind.placed();
+		let mut lost = None;
 		loop {
 			if !input.waiting_for_header && input.jitter.full(&self.key, waiter) {
 				let _ = self.source.poll_received(waiter);
 				break;
 			}
-			match self.source.poll_event(waiter)? {
+			let event = match self.source.poll_event(waiter) {
+				// The track failed: it ends like a finished one, and the export decides whether that
+				// ends it too ([`Export::survive`]).
+				Poll::Ready(Err(err)) if self.source.lost() => {
+					self.read = Read::Ended;
+					lost = Some(err);
+					break;
+				}
+				event => event?,
+			};
+			match event {
 				Poll::Ready(Some(Event::Frame { frame, arrived })) => {
 					if is_video && frame.keyframe && input.waiting_for_header {
 						tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "keyframe", now = ?kio::clock::now(), program = self.key.program, ?arrived);
@@ -641,7 +652,7 @@ impl Track {
 		if self.read == Read::Ended && !input.waiting_for_header {
 			self.release(name, input.jitter, true)?;
 		}
-		Ok(())
+		lost.map_or(Ok(()), Err)
 	}
 
 	/// The samples an audio frame of `payload` lasts and their rate, if it may share a PES with
@@ -1922,7 +1933,11 @@ where
 					},
 				);
 				let ended = live && track.read != Read::Live;
-				if let Err(err) = filled {
+				let lost = track.source.lost();
+				if let Err(err) = filled.or_else(|err| match lost {
+					true => self.survive(&name, err),
+					false => Err(err),
+				}) {
 					self.leave(err)?;
 				}
 				if ended || matches!(self.program.feed, Feed::Retired(_)) {
@@ -2365,9 +2380,28 @@ where
 			jitter: &mut self.jitter,
 			trimmed: &mut self.program.trimmed,
 		};
+		let mut lost = Vec::new();
 		for (name, track) in &mut self.program.tracks {
-			track.fill(name, waiter, &mut input)?;
+			if let Err(err) = track.fill(name, waiter, &mut input) {
+				if !track.source.lost() {
+					return Err(err);
+				}
+				lost.push((name.clone(), err));
+			}
 		}
+		lost.into_iter().try_for_each(|(name, err)| self.survive(&name, err))
+	}
+
+	/// Whether the export outlives the failure of track `name`, which [`Track::fill`] ended.
+	///
+	/// While another track still reads, only that rendition ends: a publisher that loses a
+	/// source, such as a microphone, may list a replacement, which joins like any new rendition.
+	/// With nothing left reading, the failure is the program's, as before.
+	fn survive(&self, name: &str, err: crate::Error) -> crate::Result<()> {
+		if !self.program.tracks.values().any(|track| track.read == Read::Live) {
+			return Err(err);
+		}
+		tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
 		Ok(())
 	}
 

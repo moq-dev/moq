@@ -9117,6 +9117,48 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	assert_eq!(pes_count(&frames), 20 + 15, "every frame of both tracks went out");
 }
 
+/// A rendition whose track fails ends alone while another still reads, and a replacement the
+/// publisher lists joins the program, as `moq import capture` publishes a reopened microphone.
+#[tokio::test(start_paused = true)]
+async fn a_failed_rendition_is_replaced_while_the_rest_plays_on() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut kept = aac_rendition(&mut broadcast, &mut catalog, "kept.aac");
+	let mut failing = aac_rendition(&mut broadcast, &mut catalog, "0.aac");
+
+	let mut export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
+		.await
+		.unwrap()
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut failing, ms);
+	}
+	let mut frames = poll_frames(&mut export);
+
+	// The failed track stays listed while its retained groups drain, as a capture's does.
+	failing.abort(moq_net::Error::Transport("audio device lost".into()));
+	for ms in (200..300).step_by(20) {
+		write_aac(&mut kept, ms);
+	}
+	frames.extend(poll_frames(&mut export));
+	let mut replacement = aac_rendition(&mut broadcast, &mut catalog, "1.aac");
+	for ms in (300..400).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut replacement, ms);
+	}
+	catalog.modify().unwrap().audio.renditions.remove("0.aac");
+	let _finished = kept.finish().unwrap();
+	let _finished = replacement.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let (rest, end) = drain_to_end(&mut export).await;
+	end.expect("a failed rendition with others still playing does not end the export");
+	frames.extend(rest);
+	assert_eq!(pes_count(&frames), 20 + 10 + 5, "every frame of all three tracks went out");
+}
+
 /// Publish an empty catalog at `live` under `route`.
 fn publish_live<E: crate::catalog::hang::CatalogExt>(
 	origin: &moq_net::origin::Producer,
