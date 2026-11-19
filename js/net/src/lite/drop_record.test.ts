@@ -31,6 +31,9 @@ type Hop = "up" | "down";
 // A SUBSCRIBE_DROP or SUBSCRIBE_SKIP a subscriber decoded, and on which hop.
 interface Heard {
 	hop: Hop;
+	// Heard on a subscription opened after the chain's two, such as a recovery: its drops refuse
+	// only the fills owing the groups then, and settle no copy's record.
+	recovery: boolean;
 	kind: "drop" | "skip";
 	start: bigint;
 	end: bigint;
@@ -44,7 +47,7 @@ interface Heard {
  * still in flight.
  */
 function tap() {
-	const hops = new Map<Reader, Hop>();
+	const hops = new Map<Reader, { hop: Hop; recovery: boolean }>();
 	const heard: Heard[] = [];
 	const updates: SubscribeUpdate[] = [];
 	const held: (() => void)[] = [];
@@ -52,14 +55,14 @@ function tap() {
 
 	const start = SubscribeStart.decode.bind(SubscribeStart);
 	spyOn(SubscribeStart, "decode").mockImplementation(async (r, version) => {
-		if (!hops.has(r)) hops.set(r, hops.size === 0 ? "up" : "down");
+		if (!hops.has(r)) hops.set(r, { hop: hops.size === 0 ? "up" : "down", recovery: hops.size >= 2 });
 		return start(r, version);
 	});
 	const drop = SubscribeDrop.decode.bind(SubscribeDrop);
 	spyOn(SubscribeDrop, "decode").mockImplementation(async (r, version) => {
 		const msg = await drop(r, version);
 		const entry: Heard = {
-			hop: hops.get(r) ?? "down",
+			...(hops.get(r) ?? { hop: "down", recovery: true }),
 			kind: "drop",
 			start: msg.start,
 			end: msg.end,
@@ -72,7 +75,12 @@ function tap() {
 	const skip = SubscribeSkip.decode.bind(SubscribeSkip);
 	spyOn(SubscribeSkip, "decode").mockImplementation(async (r, version) => {
 		const msg = await skip(r, version);
-		heard.push({ hop: hops.get(r) ?? "down", kind: "skip", start: msg.start, end: msg.end });
+		heard.push({
+			...(hops.get(r) ?? { hop: "down", recovery: true }),
+			kind: "skip",
+			start: msg.start,
+			end: msg.end,
+		});
 		return msg;
 	});
 	const update = SubscribeUpdate.decodeMaybe.bind(SubscribeUpdate);
@@ -321,17 +329,17 @@ async function relayEvicted(readers: ("owed" | "fresh" | "widened")[]): Promise<
 	await chained.close();
 }
 
-// Mirrors Rust `a_group_the_relay_evicted_is_filled_never_dropped` in
+// Mirrors Rust `a_relay_eviction_is_filled_by_range_for_every_reader` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("a group the relay evicted while the publisher holds it is filled for a new and an owed reader", () =>
 	relayEvicted(["fresh", "owed"]));
 
-// Mirrors Rust `a_group_the_relay_evicted_is_filled_never_dropped` in
+// Mirrors Rust `a_relay_eviction_is_filled_by_range_for_every_reader` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("a group the relay evicted while the publisher holds it is filled for a widened reader", () =>
 	relayEvicted(["widened"]));
 
-// Mirrors Rust `an_evicted_drop_is_forwarded_unchanged_and_never_reoffered` in
+// Mirrors Rust `an_origin_eviction_drop_is_forwarded_final` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("an origin's evicted drops cross the relay unchanged, and no update re-offers them", async () => {
 	using clock = manual();
@@ -514,9 +522,17 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 		}
 	}
 	// Nothing a narrow budget gave up is named dropped with anything but OLD on the wire, which
-	// would settle every reader, wide ones too.
+	// would settle every reader, wide ones too. A recovery stops a group no fill owes any more with
+	// CANCEL, which its publisher names back in a drop when the stop beats the stream's end: that
+	// drop settles nothing.
 	if (readers.includes("wide")) {
-		const final = wire.heard.slice(heard).filter((row) => row.kind !== "drop" || row.error !== StreamCode.Old);
+		const final = wire.heard
+			.slice(heard)
+			.filter(
+				(row) =>
+					row.kind !== "drop" ||
+					(row.error !== StreamCode.Old && !(row.recovery && row.error === StreamCode.Cancel)),
+			);
 		expect(final).toEqual([]);
 	}
 	expect(chained.ended()).toBe(false);
@@ -525,17 +541,13 @@ async function lostRun(readers: ("wide" | "narrow")[]): Promise<void> {
 	await chained.close();
 }
 
-// Mirrors Rust `a_shed_run_is_judged_or_filled_through_the_relay` in
-// rs/moq-net/tests/integration/drop_record.rs.
 test("a sequence whose run the relay forgot is judged by a narrow reader", () => lostRun(["narrow"]));
 
-// Mirrors Rust `a_shed_run_is_judged_or_filled_through_the_relay` in
-// rs/moq-net/tests/integration/drop_record.rs.
 test("a sequence whose run the relay forgot is filled for a wide reader", () => lostRun(["narrow", "wide"]));
 
 const BILLIONS = 1n << 40n;
 
-// Mirrors Rust `a_run_of_billions_settles_in_one_step` in
+// Mirrors Rust `a_huge_run_settles_in_one_step` in
 // rs/moq-net/tests/integration/drop_record.rs.
 test("a run of billions of sequences is settled by each reader in one step, dropped or skipped", async () => {
 	using clock = manual();
@@ -569,7 +581,7 @@ test("a run of billions of sequences is settled by each reader in one step, drop
 	await chained.close();
 });
 
-// Mirrors Rust `a_run_of_billions_settles_in_one_step` in
+// Mirrors Rust `a_huge_run_settles_in_one_step` in
 // rs/moq-net/tests/integration/drop_record.rs.
 for (const judged of ["unsettled by a widening", "forgotten by the relay"] as const) {
 	test(`a run of billions ${judged} is judged again in one step`, async () => {
