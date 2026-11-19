@@ -3536,6 +3536,49 @@ mod test {
 		drop(held);
 	}
 
+	/// A route capped while replaced and then returned to reads on to the end of the reader's
+	/// bounded range: the cap never becomes the range's own end. Mirrors the `@moq/net` "a
+	/// returning route keeps the reader's bounded end across its cap".
+	#[kio::test]
+	async fn a_returning_route_keeps_the_readers_bounded_end_across_its_cap() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"x".as_ref()).unwrap();
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Time(0),
+				end: Some(Anchor::Time(100)),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription.clone())
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let held = recv(&mut sub);
+		assert_eq!(held.start, 0);
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 10);
+		write(&b, 20);
+		assert_eq!(drain(&mut sub, false), [10, 20]);
+
+		routes.serve(a.consume());
+		write(&a, 30);
+		assert_eq!(drain(&mut sub, false), [30], "past the cap A had while replaced");
+		// An update keeping the ranges asks A again with its own resolution of them.
+		sub.update(subscription.with_priority(1)).unwrap();
+		write(&a, 40);
+		assert_eq!(drain(&mut sub, false), [40], "an update keeps the reader's end");
+		open.finish().unwrap();
+		drop(held);
+	}
+
 	/// A returning route resumes where a fresh copy would, and what it buffered while
 	/// replaced below what another route already handed out comes through the backfill:
 	/// the late group once, and nothing handed out again.

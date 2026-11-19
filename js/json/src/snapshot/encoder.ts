@@ -2,6 +2,7 @@ import { Error as NetError } from "@moq/net";
 import type * as z from "zod/mini";
 import { deepEqual, diff } from "../diff.ts";
 import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
+import { stringify } from "../parse.ts";
 
 // Bound the number of patches a joiner must apply before reaching the current value.
 const MAX_DELTA_FRAMES = 256;
@@ -176,13 +177,8 @@ export class Encoder<T> {
 
 		// Serialize once; parse it back to a normalized JSON value for diffing and comparison
 		// (dropping `undefined` fields, matching what lands on the wire).
-		const text = JSON.stringify(valid);
-		if (text === undefined) {
-			// `JSON.stringify` yields undefined for a top-level undefined, function, or symbol. Reject it
-			// here rather than letting it reach the wire as an unparseable frame.
-			throw new Error("value is not representable as JSON");
-		}
-
+		// A delta only nests the value's own fields, so checking the value covers its patches too.
+		const text = stringify(valid);
 		const json = JSON.parse(text);
 
 		// A resync has to emit even for an unchanged value: the frame that carried it may never have

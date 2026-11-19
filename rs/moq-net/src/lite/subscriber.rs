@@ -3220,6 +3220,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
+			edges: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -3381,6 +3382,7 @@ mod tests {
 				finishing: None,
 				parked: false,
 				starts: Default::default(),
+				edges: Default::default(),
 				declared: None,
 				end: None,
 				wanted: None,
@@ -3859,6 +3861,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
+			edges: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
@@ -3975,6 +3978,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
+			edges: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -4043,6 +4047,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: [(0, Some(4))].into(),
+			edges: Default::default(),
 			declared: None,
 			end: Some(lite::SubscribeFinish { group: 10, error: None }),
 			wanted: None,
@@ -5564,6 +5569,7 @@ mod tests {
 			finishing: None,
 			parked: false,
 			starts: Default::default(),
+			edges: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -10089,6 +10095,10 @@ struct SubStream {
 	/// Where SUBSCRIBE_START or SUBSCRIBE_STARTED says each live range's delivery starts, by
 	/// Range ID, `None` for one with nothing to deliver.
 	starts: std::collections::BTreeMap<u64, Option<u64>>,
+	/// The latest group each live range's start was counted back from, by Range ID: the
+	/// publisher's Largest when SUBSCRIBE_START answered, or the copy's latest when
+	/// SUBSCRIBE_STARTED did. Set only with its start, so an update keeping a range keeps it.
+	edges: std::collections::BTreeMap<u64, Option<u64>>,
 	/// What [`Self::declare`] last declared on the copy, so an unchanged one is not declared
 	/// again: each declaration restarts the grace of the gaps above it.
 	declared: Option<(Option<u64>, bool)>,
@@ -10131,23 +10141,32 @@ impl SubStream {
 		Some((start, self.started.is_none()))
 	}
 
-	/// Tell the copy where the publisher started each live range asked from a group's start,
-	/// which a reader's time start there resolves to when the copy holds no group at it.
+	/// Tell the copy where the publisher started each live range: one asked from a group's
+	/// start, which a reader's time start there resolves to when the copy holds no group at
+	/// it, and one counting back, which the copy, holding only part of the track, can't count.
 	/// Lite-07 only, where each range's start is reported.
-	fn report_time_starts(&self, serving: &track::Producer) {
+	fn report_starts(&self, serving: &track::Producer) {
 		if !self.live.reports_starts() {
 			return;
 		}
-		let starts = self
-			.live
-			.iter()
-			.filter_map(|(id, range)| match (range.start, self.starts.get(&id)) {
-				(Some(lite::Anchor::Absolute(time)), Some(Some(start))) if time.frame == 0 => {
-					Some((time.group, *start))
+		let mut times = Vec::new();
+		let mut relative = Vec::new();
+		for (id, range) in self.live.iter() {
+			let Some(Some(start)) = self.starts.get(&id) else {
+				continue;
+			};
+			match range.start {
+				Some(lite::Anchor::Absolute(time)) if time.frame == 0 => times.push((time.group, *start)),
+				Some(lite::Anchor::Relative(back)) => {
+					if let Some(Some(latest)) = self.edges.get(&id) {
+						relative.push((back, *start, *latest));
+					}
 				}
-				_ => None,
-			});
-		serving.time_starts(starts);
+				_ => {}
+			}
+		}
+		serving.time_starts(times);
+		serving.relative_starts(relative);
 	}
 
 	/// Declare on the copy where the live feed starts, by [`Self::feed_start`], so a reader
@@ -10278,6 +10297,7 @@ impl SubStream {
 		let changed = !self.live.iter().map(|(id, _)| id).eq(before);
 		let live = &self.live;
 		self.starts.retain(|id, _| live.get(*id).is_some());
+		self.edges.retain(|id, _| live.get(*id).is_some());
 		if self.started.is_some() {
 			self.fill_ids.retain(|id| live.get(*id).is_some());
 		}
@@ -11229,6 +11249,7 @@ impl Establish {
 			finishing: None,
 			parked: self.parked,
 			starts: Default::default(),
+			edges: Default::default(),
 			declared: None,
 			end: None,
 			wanted: None,
@@ -12474,11 +12495,14 @@ impl ServeLoop {
 				// fill's range starting past where it asked skips groups it will not deliver.
 				let now = serve.subscriber.runtime.now();
 				let mut served: Option<u64> = None;
+				// What each range's relative start counted back from.
+				let edge = start.largest.map(|largest| largest.position.group);
 				for (id, start) in (0..).zip(&start.starts) {
 					// One an update retired since owes nothing, though before lite-07 its start
 					// still says where the SUBSCRIBE's demand was served from.
 					if active.live.get(id).is_some() {
 						active.starts.insert(id, *start);
+						active.edges.insert(id, edge);
 					}
 					match active.fill_range(id) {
 						Some(groups) => {
@@ -12501,6 +12525,15 @@ impl ServeLoop {
 					}
 				}
 				active.started = Some(served);
+				// Before the copy goes live, since a reader's relative start resolves only then:
+				// it counts back from the publisher's Largest, as the publisher did, rather than
+				// from whichever group landed first.
+				active.report_starts(&self.serving);
+				if active.live.reports_starts()
+					&& let Some(largest) = start.largest
+				{
+					self.serving.report_edge(largest.position.group);
+				}
 				// Only a live fill's Range ID matters from here.
 				let live = &active.live;
 				active.fill_ids.retain(|id| live.get(*id).is_some());
@@ -12534,7 +12567,6 @@ impl ServeLoop {
 				// Lite-07 says where every live range starts, so the declaration follows them
 				// whatever an update changed since.
 				if active.live.reports_starts() {
-					active.report_time_starts(&self.serving);
 					active.declare(&mut self.serving);
 				} else if active.start == active.requested && active.demand.is_some() {
 					let _ = match (serve.subscriber.version.resolves_start(), served) {
@@ -12566,6 +12598,7 @@ impl ServeLoop {
 				// One retired since is owed nothing.
 				if active.live.get(id).is_some() {
 					active.starts.insert(id, started.start);
+					active.edges.insert(id, self.serving.latest_live());
 					let now = serve.subscriber.runtime.now();
 					// A fill's range starting past where it asked skips groups it will not deliver.
 					if let Some(groups) = active.fill_range(id) {
@@ -12579,7 +12612,7 @@ impl ServeLoop {
 					if let Ok(mut tail) = active.tail.write() {
 						tail.expire(now);
 					}
-					active.report_time_starts(&self.serving);
+					active.report_starts(&self.serving);
 					active.declare(&mut self.serving);
 				}
 			}
