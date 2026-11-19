@@ -2475,10 +2475,9 @@ export class Publisher {
 			ended = true;
 			group.close();
 			// A stream that fails after its FIN may have lost its header, so report it for a DROP.
-			// Its bytes still hold the connection until acknowledged, so before lite-07 a group gone
-			// stale meanwhile is reset like one still serving, as the Rust `GroupServe` does.
-			if (closes) await stream.closed;
-			else await write(() => stream.closed);
+			// Going stale meanwhile resets nothing, as in the Rust `GroupServe`: the FIN said the
+			// group ended whole, and a reset would discard the tail the peer has yet to read.
+			await stream.closed;
 			return undefined;
 		} catch (err: unknown) {
 			let e = error(err);

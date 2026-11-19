@@ -4,7 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
+import { ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks, NO_MAX_DELAY, staleHole } from "../internal.ts";
@@ -1404,11 +1404,10 @@ test("lite draft-06: a reported cut stays dropped when re-created", async () => 
 	}
 });
 
-// A group stream that never completes after its FIN still holds the connection. Like the
-// Rust `GroupServe`, the publisher waits on it only while the age budget keeps the group:
-// the newest group is never stale, and once its successor arrived a full budget ago the
-// stream is reset with `Old` and the group dropped.
-test("lite draft-06: a group stream that never completes is reset once the group goes stale", async () => {
+// A group stream whose FIN went out is whole on the wire, so, like the Rust `GroupServe`, the
+// publisher never resets it as its group goes stale while the acknowledgement is pending: a reset
+// would discard the tail the subscriber has yet to read. No drop names it either.
+test("lite draft-06: a group stream awaiting its FIN acknowledgement is not reset as the group goes stale", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const budget = 1_000;
@@ -1424,25 +1423,19 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
 
 		let reason: unknown;
-		const reset = sub.stall().then((value) => {
+		void sub.stall().then((value) => {
 			reason = value;
 		});
 		sub.serve(1n);
 		expect(await sub.servedHeader()).toBe(1n);
 		await flush();
-		await clock.advance(Duration.millis(budget * 10));
-		expect(reason).toBeUndefined();
 
 		sub.serve(2n);
 		expect(await sub.servedSequence()).toBe(2n);
-		await clock.advance(Duration.millis(budget - 1));
+		const response = decodeSubscribeResponseMaybe(sub.client.reader, Version.DRAFT_06);
+		expect(await settlesWithin(response, clock, Duration.millis(budget * 10))).toBe(false);
+		await flush();
 		expect(reason).toBeUndefined();
-		await clock.advance(Duration.millis(1));
-		await reset;
-		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
-		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
-		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 2n]);
 	} finally {
 		await sub.close();
 		installed.close();
