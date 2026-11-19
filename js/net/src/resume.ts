@@ -815,6 +815,16 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
+	// A group a replaced copy delivered landed all the same, so every copy counts.
+	landed(start: bigint, end: bigint): Instant | undefined {
+		let landed: Instant | undefined;
+		for (const copy of this.#copies) {
+			const arrived = hooks.landed(copy.sub, start, end);
+			if (arrived && (!landed || arrived.gt(landed))) landed = arrived;
+		}
+		return landed;
+	}
+
 	judgedGroup(key: bigint): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];

@@ -2875,7 +2875,7 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		expect(update.ranges).toHaveLength(1);
 		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
 		await drainReactions();
-		expect(await track.start()).toBe(1n);
+		expect(hooks.sourceStart(track)).toBe(1n);
 	} finally {
 		track.close();
 		broadcast.close();

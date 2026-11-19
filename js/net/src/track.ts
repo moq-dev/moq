@@ -92,8 +92,11 @@ export type Item =
 	/**
 	 * Groups `[start, end)` this reader gave up on, which it will not return, with what a read of
 	 * them would have ended with. `group` is absent, so `item?.group` reads a group or nothing.
+	 * `landed` is when the latest of those groups landed here, undefined when none did or the cache
+	 * has since evicted it: a reader timing arrivals learns when what it never read came in, such
+	 * as a join's backlog skipped as stale.
 	 */
-	| { kind: "gap"; start: bigint; end: bigint; error: Error; group?: never };
+	| { kind: "gap"; start: bigint; end: bigint; error: Error; landed?: Instant; group?: never };
 
 // What an ordered read found: an item, or the same idle, end, and error as a group read.
 type ItemRecv = Item | { kind: "idle" } | { kind: "done" } | { kind: "error"; error: Error };
@@ -1017,6 +1020,9 @@ let receivedCopy: (producer: Producer) => boolean;
 // The keys in `[start, end)` the producer caches, unsorted, costing the smaller of the span
 // and the cache; assigned in its static block.
 let cachedIn: (producer: Producer, start: bigint, end: bigint) => bigint[];
+// When the latest group the producer caches in `[start, end)` landed, undefined when it caches
+// none; assigned in its static block.
+let cachedLanded: (producer: Producer, start: bigint, end: bigint) => Instant | undefined;
 // Mirror the cached groups in `[start, end)` that `offer` accepts into a sink again, cut ones
 // included as a fresh sink gets them, for a reader whose floor moved below them; assigned in
 // the producer's static block.
@@ -1142,6 +1148,7 @@ let ordered_: {
 	readFrame(subscriber: Subscriber): Promise<({ group: bigint; frame: number } & Frame) | undefined>;
 	readString(subscriber: Subscriber): Promise<string | undefined>;
 	readJson(subscriber: Subscriber): Promise<unknown | undefined>;
+	isSkipped(subscriber: Subscriber, start: bigint, end: bigint): boolean;
 };
 
 // A pending request for a group past every key written. Mirrors the Rust `demand::Pending`.
@@ -1619,6 +1626,14 @@ export class Producer {
 				return found;
 			}
 			return [...producer.#cached.keys()].filter((key) => key >= start && key < end);
+		};
+		cachedLanded = (producer, start, end) => {
+			let landed: Instant | undefined;
+			for (const key of cachedIn(producer, start, end)) {
+				const arrived = producer.#cached.get(key)?.arrived;
+				if (arrived && (!landed || arrived.gt(landed))) landed = arrived;
+			}
+			return landed;
 		};
 		cachedMirror = (producer, key, from) => {
 			const entry = producer.#cached.get(key);
@@ -4369,6 +4384,11 @@ export class Subscriber {
 			if (group) hooks.expireGroup(group, hooks.staleAt(subscriber, key));
 			return group;
 		};
+		hooks.landed = (subscriber, start, end) => {
+			if (subscriber.#resume) return subscriber.#resume.landed(start, end);
+			const producer = subscriber.#state.producer;
+			return producer && cachedLanded(producer, start, end);
+		};
 		hooks.holdsGroup = (subscriber, key) => {
 			const producer = subscriber.#state.producer;
 			return producer !== undefined && cachedHolds(producer, key);
@@ -4499,6 +4519,7 @@ export class Subscriber {
 			readFrame: (subscriber) => subscriber.#readFrame(),
 			readString: (subscriber) => subscriber.#readString(),
 			readJson: (subscriber) => subscriber.#readJson(),
+			isSkipped: (subscriber, start, end) => subscriber.#isSkipped(start, end),
 		};
 	}
 
@@ -4573,25 +4594,6 @@ export class Subscriber {
 	}
 
 	/**
-	 * Where the source's feed starts once its publisher resolved it, raised to this reader's own
-	 * floor: the first group a publisher tells its peer it serves, or lower where a fill this
-	 * reader waits on starts. Undefined when the source declares none and no fill is out.
-	 *
-	 * Where a reader that waits on each group in key starts when {@link floor} names none:
-	 * groups arrive newest first, so the first to arrive is not the oldest served. A copy says
-	 * only once subscribed upstream, so ask once {@link info} resolves or a group arrives. Mirrors
-	 * the Rust `Subscriber::poll_start`.
-	 */
-	async start(): Promise<bigint | undefined> {
-		for (;;) {
-			const start = hooks.sourceStart(this);
-			if (start !== "pending") return start;
-			if (this.#state.closed.peek() !== undefined) return undefined;
-			await this.#wait();
-		}
-	}
-
-	/**
 	 * The lowest group at or above `from` this subscriber's ranges and {@link withRange} floor
 	 * cover, past the starts the publisher declared skipped (see {@link Producer.appendGroup}) and
 	 * those given up for good, undefined when none does: the groups between are never read, so a
@@ -4599,7 +4601,7 @@ export class Subscriber {
 	 * a skip as such a drop. `from` itself while a relative anchor waits on the first group, which
 	 * can't say yet. Mirrors the Rust `Subscriber::next_in_range`.
 	 */
-	nextInRange(from: bigint): bigint | undefined {
+	#nextInRange(from: bigint): bigint | undefined {
 		from = max(from, this.#local.start);
 		if (this.#resume) {
 			// Without a serving copy nothing says yet.
@@ -4612,18 +4614,8 @@ export class Subscriber {
 		return firstOpen(this.#window.runs(from), (key) => holeEnd(drops, key, true));
 	}
 
-	/**
-	 * Whether the publisher declared every start in `[start, end)` skipped, never to be produced
-	 * (which {@link Producer.appendGroup} does between groups), so no group can arrive there: true
-	 * for an empty range. Unlike {@link nextInRange}, this ignores the subscriber's ranges. A copy
-	 * knows only the skips its wire forwarded.
-	 *
-	 * What tells a reader that nothing lies between two groups, or before a track's first. It
-	 * knows only the skips recorded so far, so `false` means "not known skipped": a skip still in
-	 * flight reads `false`, as does one a local producer's cache expired below its edge. Mirrors
-	 * the Rust `Subscriber::is_skipped`.
-	 */
-	isSkipped(start: bigint, end: bigint): boolean {
+	// Whether the publisher declared every start in `[start, end)` skipped; see Ordered.isSkipped.
+	#isSkipped(start: bigint, end: bigint): boolean {
 		if (end <= start) return true;
 		const run = [{ start, end }];
 		if (this.#resume) {
@@ -5240,7 +5232,7 @@ export class Subscriber {
 				// What the read still owes lies above the gap, so the gap goes first.
 				const lowest = this.#lowestGap(items);
 				if (!lowest) return { kind: "idle" };
-				const owed = this.nextInRange(items.at);
+				const owed = this.#nextInRange(items.at);
 				const ready = lowest.span.start <= items.at || owed === undefined || owed >= lowest.span.start;
 				return ready ? this.#takeGap(items, lowest.index, lowest.span, lowest.span.end) : { kind: "idle" };
 			}
@@ -5327,7 +5319,8 @@ export class Subscriber {
 		if (forgot > floor) this.#stoppedReading(floor, forgot);
 		if (!this.#resume) this.#nextKey = max(this.#nextKey, given.end);
 		this.#fold(forgot);
-		return { kind: "gap", start: given.start, end: given.end, error };
+		const landed = hooks.landed(this, given.start, given.end);
+		return { kind: "gap", start: given.start, end: given.end, error, landed };
 	}
 
 	// Remove `[from, resume)` from the gap at `index`, returning its error.
@@ -5741,10 +5734,19 @@ export class Ordered {
 		return this.#subscriber.finished();
 	}
 
-	/** Whether the publisher declared every start in `[start, end)` skipped; see {@link Subscriber.isSkipped}. */
-	// fallow-ignore-next-line unused-class-member
+	/**
+	 * Whether the publisher declared every start in `[start, end)` skipped, never to be produced
+	 * (which {@link Producer.appendGroup} does between groups), so no group can arrive there: true
+	 * for an empty range. Unlike the gaps, this ignores the ranges. A copy knows only the skips its
+	 * wire forwarded.
+	 *
+	 * What tells a reader that nothing lies between two groups, or before a track's first. It
+	 * knows only the skips recorded so far, so `false` means "not known skipped": a skip still in
+	 * flight reads `false`, as does one a local producer's cache expired below its edge. Mirrors
+	 * the Rust `Ordered::is_skipped`.
+	 */
 	isSkipped(start: bigint, end: bigint): boolean {
-		return this.#subscriber.isSkipped(start, end);
+		return ordered_.isSkipped(this.#subscriber, start, end);
 	}
 
 	/**

@@ -1,7 +1,7 @@
 // What an ordered read returns from nextItem: groups in key order, and a gap for every group it gives up on.
 // Ports the Rust `track::Ordered` item tests, so both read the same.
 import { expect, test } from "bun:test";
-import { Duration, sleep } from "@moq/clock";
+import { Duration, now, sleep } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { StreamCode, StreamError } from "./error.ts";
 import { hooks, staleHole } from "./internal.ts";
@@ -201,6 +201,36 @@ test("a cached group the seek passes as stale is a gap", () =>
 		put(producer, 2n, false);
 		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
 		expect(items(ordered)).toEqual(["gap 0..1 (old)", "group 1", "group 2"]);
+	}));
+
+// A gap says when the latest group it gives up landed: one the read passed as stale, and none for
+// keys that never came. Mirrors the Rust `a_gap_reports_when_what_it_gives_up_landed`.
+test("a gap reports when what it gives up landed", () =>
+	withClock((clock) => {
+		const landed = (ordered: Ordered): string[] => {
+			const out: string[] = [];
+			for (let item = ordered.tryNextItem(); item; item = ordered.tryNextItem()) {
+				if (item.kind === "group") {
+					out.push(`group ${item.group.start}`);
+					item.group.close();
+				} else {
+					out.push(`gap ${item.start}..${item.end} ${item.landed?.since(first).asMillis() ?? "never"}`);
+				}
+			}
+			return out;
+		};
+		const producer = receivedTrack();
+		const first = now();
+		clock.jump(Duration.millis(5));
+		put(producer, 0n, false);
+		put(producer, 1n, false);
+		clock.jump(Duration.millis(100));
+		put(producer, 2n, false);
+		const ordered = producer.subscribe({ delay: { max: Duration.millis(50) } }).ordered();
+		drop(producer, 3n, 4n);
+		put(producer, 4n, false);
+		// Group 0 landed 5 ms in, before it went stale, and group 3 never did.
+		expect(landed(ordered)).toEqual(["gap 0..1 5", "group 1", "group 2", "gap 3..4 never", "group 4"]);
 	}));
 
 // Rust reports it Old; JS keeps no record below the read, so its memory stays bounded.

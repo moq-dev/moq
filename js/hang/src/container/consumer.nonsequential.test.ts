@@ -57,8 +57,14 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 	// A hang group can only promote early once its end is known, e.g. via an end-of-group signal such
 	// as a trailing frame carrying the group's end timestamp. Until the container carries that, expect
 	// the wait. The CMAF path (per-sample duration in the moof) is covered in consumer.test.ts.
+	// An unserved fill owes the missing groups, as a session's feed would, so the ordered read waits
+	// for them up to the max delay.
 	const track = new Track.Producer("test");
-	const consumer = new Consumer(track.subscribe(), {
+	track.requests();
+	const subscriber = track.subscribe({ delay: { max: Duration.millis(5000) } });
+	// Read from group A on, so nothing below it is owed.
+	subscriber.withRange({ start: { included: 1_000_000n } });
+	const consumer = new Consumer(subscriber, {
 		format: new LegacyFormat("data"),
 		delay: { min: null, max: Duration.millis(5000) },
 	});
@@ -140,21 +146,25 @@ test("Consumer reads on without a gap past a group it skipped", async () => {
 // groups sequenced by their starts, as a Rust publisher numbers them, then run back to back without
 // waiting on the sequences between them, while a missing one is still a gap.
 test("Consumer reads one-packet Opus groups at sparse sequences back to back", async () => {
+	// An unserved fill owes the missing groups, as a session's feed would.
 	const track = new Track.Producer("test");
+	track.requests();
 	const config = AudioConfigSchema.parse({
 		codec: "opus",
 		container: { kind: "legacy" },
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
-	const consumer = new Consumer(track.subscribe(), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Duration.millis(5000) } }), {
 		format: new LegacyFormat(config),
 		delay: { min: null, max: Duration.millis(5000) },
 	});
 	// One 20 ms CELT packet per group, each read before the next lands. The group starting at 40 ms
 	// never arrives.
 	const packet = new Uint8Array([31 << 3, 0]);
-	const publish = (start: number) => {
+	// Appending declares the starts between groups skipped; `after` is the start of the group before.
+	const publish = (start: number, after?: number) => {
+		if (after !== undefined) track.skipGroups(BigInt(after + 1), BigInt(start));
 		const group = track.createGroup(BigInt(start));
 		group.writeFrame({ payload: encodeLegacyFrame(start, packet), timestamp: Time.Timestamp.fromMicros(start) });
 		group.finish();
@@ -163,11 +173,12 @@ test("Consumer reads one-packet Opus groups at sparse sequences back to back", a
 	publish(0);
 	expect(await poll(consumer.next())).toMatchObject({ kind: "frame", group: 0n });
 	const next = consumer.next();
-	publish(20_000);
+	publish(20_000, 0);
 	expect(await poll(next)).toMatchObject({ kind: "frame", group: 20_000n });
 	// Nothing proves the timeline unbroken past 40 ms, so the reader waits on the missing group.
 	const after = consumer.next();
-	publish(60_000);
+	// The publisher appended a group at 40 ms, which never arrives.
+	publish(60_000, 40_000);
 	expect(await poll(after)).toBe("pending");
 
 	consumer.close();
