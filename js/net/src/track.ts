@@ -4288,6 +4288,7 @@ export class Subscriber {
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
 		hooks.staleAt = (subscriber, key) => {
+			if (subscriber.#resume) return subscriber.#resume.staleAt(key);
 			const held: Superseded = {};
 			return {
 				expired: () => subscriber.#staleAt(key, subscriber.#drift(), true, held),

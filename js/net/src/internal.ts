@@ -548,6 +548,8 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(key: bigint, from?: number): GroupConsumer | undefined;
+	/** Whether group `key` is stale, judged by the copy {@link cachedGroup} would hand it out from. */
+	staleAt(key: bigint): Expiry;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
