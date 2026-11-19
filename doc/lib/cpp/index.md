@@ -241,13 +241,13 @@ Start every subscription from `moq::subscription_defaults()` and change its fiel
 
 ## Track demand
 
-`demand()->wanted()` is the group subscribers want, or `std::nullopt` while nobody subscribes, and `wanted_changed()` waits for it to move: start a new group once it passes your largest. Set `TrackInfo::refresh` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
+`demand()->wanted()` is whether anyone subscribes, and `wanted_changed()` waits for it to change. `demand()->refresh()` resolves once a subscriber asks for a new group: the first group of a track with none, or a join judged by `TrackInfo::refresh`. Write a group starting with a keyframe or snapshot, which answers it, then wait again. Set `refresh.ratio` to have a joining subscriber ask once the newest group has grown past that many times its first frame, and `refresh.interval` to have a request wait until the newest group is that old, which caps how often you make groups however many subscribers ask. A subscriber asks with `consumer->refresh()`, which resolves once the request is sent (forwarded upstream, or read by a local publisher); cancelling the future first withdraws it.
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
 A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
-To end a track nobody wants, call `abort_unwanted(code)` on its producer (raw, media, audio, video, or JSON) once `wanted_changed()` returns `std::nullopt` rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next `std::nullopt` on a fresh `demand()`, since one that already returned `std::nullopt` misses a subscriber that came and went.
+To end a track nobody wants, call `abort_unwanted(code)` on its producer (raw, media, audio, video, or JSON) once `wanted_changed()` returns false rather than releasing it: it returns false and keeps the track for a subscriber that joined since. Then wait for the next false on a fresh `demand()`, since one that already returned false misses a subscriber that came and went.
 
 ## Authorization
 

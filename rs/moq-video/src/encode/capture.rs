@@ -5,7 +5,7 @@
 //! the mode it negotiates, then keeps it open and encodes whether or not anyone is watching, so a
 //! late subscriber can reach the recent past within its `max_delay`. With
 //! `Capture::on_demand` it instead closes the camera between viewers, encoding only while
-//! [`Demand::wanted`](moq_net::track::Demand::wanted) is `Some`: a subscriber is watching.
+//! [`Demand::wanted`](moq_net::track::Demand::wanted): a subscriber is watching.
 //!
 //! Capture advertises [`track::Info::refresh`](moq_net::track::Info::refresh) when its encoder
 //! is sure to honor a cut, and forces a keyframe whenever a joining subscriber asks for a group
@@ -413,7 +413,8 @@ fn capture_track<E: CatalogExt>(
 ) -> Result<moq_net::track::Producer, Error> {
 	// Advertised only when every backend the encoder may open honors a cut, since the info
 	// is fixed before the capture learns which one it got.
-	let refresh = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
+	let ratio = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
+	let refresh = moq_net::track::Refresh::default().with_ratio(ratio);
 	let info = catalog.track_info(hang::catalog::PRIORITY.video).with_refresh(refresh);
 	Ok(broadcast.unique_track(suffix(options.codec), info)?)
 }
@@ -475,7 +476,7 @@ fn log_track_ended(err: moq_net::Error) {
 async fn until_capturing(demand: &moq_net::track::Demand, on_demand: bool, run: bool) -> Result<(), moq_net::Error> {
 	let mut demand = demand.clone();
 	loop {
-		let wanted = demand.wanted_changed().await?.is_some();
+		let wanted = demand.wanted_changed().await?;
 		if (wanted || !on_demand) == run {
 			return Ok(());
 		}
@@ -587,7 +588,7 @@ async fn capture_loop<S: CaptureSource>(
 			let frame = tokio::select! {
 				biased;
 				wanted = watch.wanted_changed() => match wanted {
-					Ok(wanted) if on_demand && wanted.is_none() => break, // no viewers: release the camera
+					Ok(wanted) if on_demand && !wanted => break, // no viewers: release the camera
 					Ok(_) => continue,
 					Err(err) => {
 						log_track_ended(err);
@@ -1395,7 +1396,7 @@ mod tests {
 			steps.extend((1..=10).map(|seed| Step::Frame(noise(seed))));
 			steps.extend([Step::Join, Step::Frame(surface()), Step::Frame(surface())]);
 			let (info, groups) = capture_groups(steps).await;
-			assert_eq!(info.refresh, Some(REFRESH));
+			assert_eq!(info.refresh.ratio, Some(REFRESH));
 
 			let lengths: Vec<_> = groups.iter().map(Vec::len).collect();
 			assert_eq!(lengths, [14, 2], "only the second join cut, at the frame after it");
@@ -1427,7 +1428,7 @@ mod tests {
 					..Capture::default()
 				};
 				let track = capture_track(broadcast.clone(), &catalog, &options).unwrap();
-				assert_eq!(track.info().refresh, refresh);
+				assert_eq!(track.info().refresh.ratio, refresh);
 			}
 		}
 

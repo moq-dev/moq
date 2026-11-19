@@ -3,8 +3,8 @@
 //!
 //! Exporters declare what wire shape they want their frames in (currently:
 //! length-prefixed NAL units for H.264/H.265) and call [`ExportSource::poll_read`]
-//! to pull normalized frames. For Annex-B sources (catalog codec marked
-//! `inline: true` / `in_band: true`, empty `description`) the source attaches
+//! to pull normalized frames. For Annex-B sources (no catalog `description`,
+//! whatever the codec string says) the source attaches
 //! an [`Avc1`] / [`Hvc1`] transform that strips parameter sets into an avcC or
 //! hvcC and length-prefixes the rest; frames wait until that record exists. fMP4
 //! instead attaches an [`InBand`] transform, keeping the sets in the samples, when
@@ -241,7 +241,7 @@ impl ExportSource {
 
 	/// Subscribe to a video rendition without attaching any codec-shape
 	/// transform. Payloads pass through untouched (Annex-B stays Annex-B,
-	/// avc1 length-prefixed stays length-prefixed). The Annex-B exporter
+	/// length-prefixed stays length-prefixed). The Annex-B exporter
 	/// uses this to keep parameter sets in-band.
 	///
 	/// Rejects an escaping `broadcast` reference like [`Self::for_video`].

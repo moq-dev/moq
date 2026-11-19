@@ -106,7 +106,7 @@ for (const wire of WIRES) {
 		// Publish once the viewer's subscription reached the publisher through the relay, so
 		// every group rides it live rather than racing it.
 		const demand = track.demand();
-		while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+		while (!demand.wanted.peek()) await demand.wanted.changed();
 
 		for (const key of [PAST_SAFE, MAX_QUIC]) {
 			const group = track.createGroup(key);

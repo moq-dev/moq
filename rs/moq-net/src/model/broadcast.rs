@@ -1835,7 +1835,7 @@ mod test {
 		let mut group = subscriber.assert_group();
 		drop(subscriber);
 		assert_eq!(wanted_changed(&mut demand, &waiter), None, "the group is read");
-		assert!(video.demand().wanted().is_some());
+		assert!(video.demand().wanted());
 
 		let Poll::Ready(Ok(Some(frame))) = group.poll_next_frame(&waiter) else {
 			panic!("the frame was written");
@@ -1846,7 +1846,7 @@ mod test {
 
 		drop(frame);
 		assert!(!writing.demand().wanted());
-		assert_eq!(video.demand().wanted(), None);
+		assert_eq!(video.demand().wanted_start(), None);
 		assert_eq!(wanted_changed(&mut demand, &waiter), Some(false));
 	}
 
@@ -2087,18 +2087,18 @@ mod test {
 		let consumer1 = c1_fut.await.unwrap();
 
 		// The producer should NOT be unused yet because there's a consumer.
-		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
+		assert!(producer1.demand().wanted(), "track producer should be used");
 
 		// A second subscriber reuses the live producer (fast path / dedup).
 		let consumer2 = bc.track("unknown_track").unwrap().subscribe(None).await.unwrap();
 		consumer2.assert_is_clone(&consumer1);
 
 		drop(consumer1);
-		assert!(producer1.demand().wanted().is_some(), "track producer should be used");
+		assert!(producer1.demand().wanted(), "track producer should be used");
 
 		drop(consumer2);
 		assert!(
-			producer1.demand().wanted().is_none(),
+			!producer1.demand().wanted(),
 			"track producer should be unused after all consumers are dropped"
 		);
 
@@ -2119,7 +2119,7 @@ mod test {
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
-			producer2.demand().wanted().is_none(),
+			!producer2.demand().wanted(),
 			"new track producer should be unused after its consumer is dropped"
 		);
 	}
@@ -2486,7 +2486,7 @@ mod test {
 		let track = producer.create_track("video", crate::track::Info::timed()).unwrap();
 
 		// The unused wake a teardown acts on.
-		assert!(track.demand().wanted().is_none());
+		assert!(!track.demand().wanted());
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap().subscribe(None);

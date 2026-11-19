@@ -14,6 +14,7 @@ import { Listing, listTracks, makeLister, type Tracks } from "./listing.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
+import { checkName } from "./util/utf8.ts";
 import { registerWire, trackOf, wireOf } from "./wire.ts";
 
 export { type Listed, Tracks, type TracksEvent } from "./listing.ts";
@@ -270,7 +271,7 @@ async function resolveTrackInfo(state: BroadcastState, name: string, hold?: Abor
 	let answered = false;
 	let ended = false;
 	const release = () => {
-		if (lookups.opened && lookups.pending.peek() === 0 && producer.demand().wanted.peek() === undefined)
+		if (lookups.opened && lookups.pending.peek() === 0 && !producer.demand().wanted.peek())
 			hooks.releaseTrack(producer);
 	};
 	info.then(
@@ -476,8 +477,9 @@ export class Producer {
 	 * from the returned producer. A request a handler has already taken stays a duplicate.
 	 * An append on the track throws if it would reuse a key an earlier track of the name
 	 * wrote in this broadcast, so a replacement writes its first group explicitly. Throws if an
-	 * open track or a live request already holds the name. `info` resolves as
-	 * {@link track.Producer.accept} does, so an omitted `maxAge` is zero, the live edge only.
+	 * open track or a live request already holds the name, or if the name holds a lone surrogate,
+	 * which UTF-8 cannot carry. `info` resolves as {@link track.Producer.accept} does, so an
+	 * omitted `maxAge` is zero, the live edge only.
 	 */
 	createTrack(name: string, info: track.InfoInit = {}): track.Producer {
 		if (this.#state.closed.peek() !== undefined) {
@@ -672,6 +674,7 @@ export class Consumer {
 
 	/** Read a datagram track live from now, independently of any same-name stream track. */
 	datagrams(name: string): datagram.Consumer {
+		checkName(name);
 		return wireOf(this).datagrams(name);
 	}
 

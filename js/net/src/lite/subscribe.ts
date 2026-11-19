@@ -615,7 +615,7 @@ async function decodeMinDelay(r: Reader, version: Version): Promise<number | und
 }
 
 export class SubscribeUpdate {
-	/** A join requesting this group or later, judged against the local refresh ratio. */
+	/** A refresh request for this group or later, judged against the local track's refresh. */
 	wantedGroup?: bigint;
 	priority: number;
 	/** See {@link Subscribe.order}. */

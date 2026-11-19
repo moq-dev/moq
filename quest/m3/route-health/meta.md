@@ -91,7 +91,3 @@ to `just test interop --all`.
 Public API: a metadata subscription in Rust, JS, and the bindings. Wire: in
 the current lite wip, the mode on SUBSCRIBE (or a message of its own) and
 payload-less FRAMEs.
-
-## Required
-
-- [The switch](/quest/m2/multicast/switch.md) - the route layer this rides on, and nothing uses it sooner

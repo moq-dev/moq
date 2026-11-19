@@ -61,6 +61,8 @@ url = { workspace = true }
 jni = { workspace = true }
 
 [dev-dependencies]
+# The runtime's manual clock, for a test that owns the runtime: nextest runs each in its own process.
+kio = { workspace = true, features = ["manual"] }
 moq-shaper = { path = "../moq-shaper" }
 # A peer without MoQ Solicit.
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["test-support"] }

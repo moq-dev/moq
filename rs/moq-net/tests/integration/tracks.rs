@@ -108,7 +108,7 @@ async fn a_listing_carries_track_info() {
 		.with_timescale(moq_net::Timescale::MILLI)
 		.with_max_age(Duration::from_secs(3))
 		.with_priority(9)
-		.with_refresh(4)
+		.with_refresh(moq_net::track::Refresh::default().with_ratio(4))
 		.with_compression(moq_net::track::Compression::Deflate);
 	let _a = broadcast.broadcast().create_track("a", info).unwrap();
 	broadcast.announce().unwrap();
@@ -130,7 +130,7 @@ async fn a_listing_carries_track_info() {
 	assert_eq!(info.timescale, Some(moq_net::Timescale::MILLI));
 	assert_eq!(info.max_age, Some(Duration::from_secs(3)));
 	assert_eq!(info.priority, 9);
-	assert_eq!(info.refresh, Some(4));
+	assert_eq!(info.refresh, moq_net::track::Refresh::default().with_ratio(4));
 	assert_eq!(info.compression, moq_net::track::Compression::Deflate);
 }
 

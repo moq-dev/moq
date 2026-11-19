@@ -1099,11 +1099,12 @@ struct OriginConsumerState {
 	/// The entries held back, by when a poll looks at them again.
 	parked: BTreeMap<(Instant, u64), Path>,
 	next_seq: u64,
-	/// Prefixes whose most recently delivered update was an announce. A pending
-	/// `Announce` is ambiguous on its own: it is an unseen initial announce (a
-	/// retraction cancels it entirely) or a metadata update on a route the
-	/// consumer already observed (a retraction must still be delivered).
-	delivered: BTreeSet<Path>,
+	/// Prefixes whose most recently delivered update was an announce, with the
+	/// instance it named. A pending `Announce` is ambiguous on its own: it is an
+	/// unseen initial announce (a retraction cancels it entirely) or a metadata
+	/// update on a route the consumer already observed (a retraction must still be
+	/// delivered). The instance tells a restart back to it from one onto another.
+	delivered: BTreeMap<Path, Instance>,
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
@@ -1135,7 +1136,7 @@ impl OriginConsumerState {
 	fn owe(&mut self) {
 		self.owed = 0;
 		for (prefix, pending) in &mut self.pending {
-			pending.owed = !self.delivered.contains(prefix)
+			pending.owed = !self.delivered.contains_key(prefix)
 				|| matches!(
 					pending.update,
 					Some(PendingUpdate::Unannounce(..) | PendingUpdate::UnannounceAnnounce { .. })
@@ -1217,8 +1218,11 @@ impl OriginConsumerState {
 			Some(PendingUpdate::Unannounce(old, gone) | PendingUpdate::UnannounceAnnounce { old, gone, .. }) => {
 				PendingUpdate::UnannounceAnnounce { old, gone, new: meta }
 			}
+			// Back to the instance the consumer holds, before it saw the restart away:
+			// one continuous stream, so a metadata update.
+			_ if self.delivered.get(&prefix) == Some(&meta.0.3) => PendingUpdate::Announce(meta),
 			Some(PendingUpdate::Restart(_)) => PendingUpdate::Restart(meta),
-			_ if self.delivered.contains(&prefix) => PendingUpdate::Restart(meta),
+			_ if self.delivered.contains_key(&prefix) => PendingUpdate::Restart(meta),
 			// The consumer never saw the old instance, so this is its first announce.
 			_ => PendingUpdate::Announce(meta),
 		};
@@ -1230,7 +1234,7 @@ impl OriginConsumerState {
 		match self.pending.get_mut(&prefix).and_then(|pending| pending.update.take()) {
 			// The pending announce was never delivered and neither was any earlier
 			// one, so the pair cancels entirely, and nothing is owed for it.
-			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {
+			Some(PendingUpdate::Announce(_)) if !self.delivered.contains_key(&prefix) => {
 				let pending = self.remove(&prefix).unwrap();
 				self.owed -= usize::from(pending.owed);
 			}
@@ -1298,7 +1302,7 @@ impl OriginConsumerState {
 			}
 			let pending = self.pending.get_mut(prefix).unwrap();
 			let wake = match pending.update.as_ref().unwrap() {
-				PendingUpdate::Announce(_) if self.delivered.contains(prefix) => {
+				PendingUpdate::Announce(_) if self.delivered.contains_key(prefix) => {
 					// The clock reads the driver's last advance, which may be stale: anchor
 					// the hold on the first advance after the update arrived, by waking the
 					// driver.
@@ -1356,14 +1360,14 @@ impl OriginConsumerState {
 		let ((meta, captures), kind) = match pending.update.unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
-				let kind = match self.delivered.insert(prefix.clone()) {
-					true => RouteKind::Start,
-					false => RouteKind::Update,
+				let kind = match self.delivered.insert(prefix.clone(), meta.0.3.clone()) {
+					None => RouteKind::Start,
+					Some(_) => RouteKind::Update,
 				};
 				(meta, kind)
 			}
 			PendingUpdate::Restart(meta) => {
-				self.delivered.insert(prefix.clone());
+				self.delivered.insert(prefix.clone(), meta.0.3.clone());
 				(meta, RouteKind::Restart)
 			}
 			PendingUpdate::Unannounce(meta, gone) => {
@@ -7692,7 +7696,9 @@ impl Consumer {
 			timers: self.timers.clone(),
 		};
 		// Built before taking the lock, since opening a cursor takes it.
-		let node = crate::route::Node::origin(self.node(), self.timers.clone());
+		// A relay forwards on every handle (`with_proxy`), and an application on none, so
+		// the creating handle speaks for the origin here, as for `OwnClaims::proxy`.
+		let node = crate::route::Node::origin(self.node(), self.proxy, self.timers.clone());
 		let claims = OwnClaims {
 			routes: own(false).routes(),
 			downstream: own(true).routes(),
@@ -11245,6 +11251,44 @@ mod tests {
 		announced.expect_next_offline("room/alice").await;
 	}
 
+	/// A restart onto another instance and back before the next poll leaves the instance
+	/// the consumer holds: an update, never a restart to the same instance.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn restart_away_and_back_is_an_update() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().routes();
+		let held: crate::Instance = "01900000-0000-7000-8000-000000000002".parse().unwrap();
+		let _held = producer
+			.forward(
+				"room/alice",
+				RouteInfo::new()
+					.with_instance(held.clone(), 0)
+					.with_hops(hops(&[10]))
+					.with_cost(3),
+			)
+			.unwrap();
+		announced.expect_next_active("room/alice").await;
+
+		let other = producer
+			.forward(
+				"room/alice",
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[11]))
+					.with_cost(1),
+			)
+			.unwrap();
+		drop(other);
+		match announced.expect_next().await {
+			RouteEvent {
+				kind: RouteKind::Update,
+				announce,
+			} => assert_eq!(announce.route.instance(), &held),
+			other => panic!("should be an update: got {other:?}"),
+		}
+	}
+
 	#[test]
 	fn interest_prefixes_fall_back_above_an_escaped_slash() {
 		let heads = |pattern: &str| interest_prefixes(&Patterns::from(pattern.parse::<Pattern>().unwrap()));
@@ -12369,7 +12413,7 @@ mod tests {
 
 		// Parked: the source copy goes, the delivered group stays warm. The source
 		// then tears its idle track down, so a returning reader asks it afresh.
-		kio::clock::timeout(Duration::from_secs(1), source.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), source.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -15550,7 +15594,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("source unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15572,7 +15616,7 @@ mod tests {
 			.expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted))
 			.await
 			.expect("returning reader re-splices the source")
 			.expect("source closed");
@@ -15623,7 +15667,7 @@ mod tests {
 		assert_eq!(&tail.payload[..], b"tail");
 		let end = kio::clock::timeout(Duration::from_secs(1), reading.read_frame()).await;
 		assert!(matches!(end, Ok(Ok(None))), "the group should finish: {end:?}");
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("the front lets the source go once the held group ends")
 			.expect("source closed");
@@ -15709,7 +15753,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15723,7 +15767,7 @@ mod tests {
 			)
 			.await
 			.expect("resubscribe");
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted))
 			.await
 			.expect("resubscribe should reach the leaf")
 			.expect("source open");
@@ -15738,7 +15782,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("second chained unused should resolve far below track::IDLE_LINGER")
 			.expect("source closed");
@@ -15751,7 +15795,7 @@ mod tests {
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted))
 			.await
 			.expect("fetch should reach the leaf")
 			.expect("source open");
@@ -15860,7 +15904,7 @@ mod tests {
 			.expect("request");
 
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("the draining source stays subscribed with nobody reading")
 			.expect("open");
@@ -16335,7 +16379,7 @@ mod tests {
 		drop(group);
 
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16380,7 +16424,7 @@ mod tests {
 		let mut open = old.append_next().unwrap();
 		open.write_frame(open.key_time(), b"open".as_ref()).unwrap();
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16411,7 +16455,7 @@ mod tests {
 		let (producer, _server, _upstream, old, subscription) = remote_front().await;
 		let resolved = producer.consume().request("room/alice", None).await.unwrap();
 		drop(subscription);
-		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(1), old.demand().until(|wanted| !wanted))
 			.await
 			.expect("parked")
 			.expect("open");
@@ -16822,7 +16866,7 @@ mod tests {
 			.unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
 		let sub = resolved.track("video").unwrap().subscribe(None).await.unwrap();
-		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted.is_some()))
+		kio::clock::timeout(Duration::from_secs(1), track.demand().until(|wanted| wanted))
 			.await
 			.expect("the front subscribed the source")
 			.unwrap();
@@ -16833,7 +16877,7 @@ mod tests {
 		drop(broadcast);
 		settle(|| resolved.is_closed()).await;
 
-		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| wanted.is_none()))
+		kio::clock::timeout(Duration::from_secs(5), track.demand().until(|wanted| !wanted))
 			.await
 			.expect("the ended copy must not keep the source subscribed")
 			.unwrap();

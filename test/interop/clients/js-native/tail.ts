@@ -188,7 +188,7 @@ try {
 				track.close();
 			} else if (!status && !cached && !history) {
 				const demand = track.demand();
-				while (demand.wanted.peek() === undefined) await demand.wanted.changed();
+				while (!demand.wanted.peek()) await demand.wanted.changed();
 				write(track);
 				track.close();
 			}

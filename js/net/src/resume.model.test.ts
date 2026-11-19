@@ -1079,6 +1079,35 @@ test("regressions", async () => {
 			],
 			finish: false,
 		},
+		// The serving route ends while a replaced copy holds the read open for a group under its
+		// bound: groups in range still in flight on the ended route land, and are read. Mirrors
+		// the Rust case.
+		{
+			ops: [
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [6, 8], false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "end", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// The same for a reader without a range, once the serving copy's first group bounds the
+		// replaced one below the groups still in flight.
+		{
+			ops: [
+				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
+				{ kind: "up", instance: 0, slot: 1 },
+				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
+				{ kind: "write", instance: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 2, frames: 1 },
+				{ kind: "write", instance: 0, slot: 1, group: 11, frames: 1 },
+				{ kind: "end", instance: 0, slot: 1 },
+			],
+			finish: false,
+		},
 	];
 	const failures: string[] = [];
 	for (const [i, c] of regressions.entries()) {

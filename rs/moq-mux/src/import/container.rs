@@ -175,7 +175,8 @@ pub struct Finished<E: crate::container::ts::Catalog = ()> {
 }
 
 impl<E: crate::container::ts::Catalog> Finished<E> {
-	/// Release every track's cache, reporting `err` to readers that have not drained it.
+	/// Abort every track with `err`. Readers still draining a track get its clean end instead once
+	/// every group below its end finished.
 	pub fn abort(self, err: moq_net::Error) {
 		match self.inner {
 			FinishedImpl::Fmp4(finished) => finished.abort(err),

@@ -285,6 +285,26 @@ mod test {
 		let _ = Encoder::<Value>::new(config);
 	}
 
+	/// An abort after finish changes nothing a reader sees: every group finished, so one still
+	/// draining gets the rest of the window and the clean end, not the error.
+	#[test]
+	fn aborting_a_finished_window_still_drains() {
+		let (mut producer, track) = producer(Config::default());
+		let mut consumer = consumer(track);
+		producer.push(&rec(0), key()).unwrap();
+		producer.push(&rec(1), key()).unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut next = || match consumer.poll_next(&waiter) {
+			Poll::Ready(next) => next.unwrap().map(|event| event.value),
+			Poll::Pending => panic!("expected a window event or its end"),
+		};
+		assert!(matches!(next(), Some(Event::Push { index: 0, .. })));
+
+		producer.finish().unwrap().abort(moq_net::Error::Cancel).unwrap();
+		assert!(matches!(next(), Some(Event::Push { index: 1, .. })));
+		assert!(next().is_none());
+	}
+
 	fn consumer(track: moq_net::track::Subscriber) -> Consumer<Value> {
 		Consumer::new(track, consumer::Config::default())
 	}
@@ -700,7 +720,10 @@ mod test {
 	#[test]
 	fn a_joiner_over_the_ratio_gets_a_fresh_header() {
 		let waiter = kio::Waiter::noop();
-		let (mut producer, _track) = producer_on(Config::default(), moq_net::track::Info::default().with_refresh(1));
+		let (mut producer, _track) = producer_on(
+			Config::default(),
+			moq_net::track::Info::default().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 
 		// A 32 byte header and a 16 byte push: under the ratio.
 		producer.push(&rec(0), moq_net::Timestamp::unscaled(0)).unwrap();
@@ -747,7 +770,10 @@ mod test {
 	fn a_refresh_reuses_the_newest_timestamp() {
 		let waiter = kio::Waiter::noop();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(
+			Config::default(),
+			timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		for n in 0..4 {
 			producer.push(&rec(n), ms(100 + n)).unwrap();
 		}
@@ -774,7 +800,10 @@ mod test {
 	fn a_refresh_after_older_edits_waits_for_a_later_one() {
 		let (waiter, woken) = crate::refresh::flagged();
 		let ms = |n| moq_net::Timestamp::from_millis(n).unwrap();
-		let (mut producer, _track) = producer_on(Config::default(), timed().with_refresh(1));
+		let (mut producer, _track) = producer_on(
+			Config::default(),
+			timed().with_refresh(moq_net::track::Refresh::default().with_ratio(1)),
+		);
 		for (n, at) in [130, 110, 120, 115].into_iter().enumerate() {
 			producer.push(&rec(n as u64), ms(at)).unwrap();
 		}
@@ -814,6 +843,17 @@ mod test {
 		// A clone finishes, so the shared state refuses this handle's refresh.
 		let _finished = producer.clone().finish().unwrap();
 		assert!(matches!(producer.refresh().now_or_never(), Some(Err(_))));
+	}
+
+	/// A refresh waiting for the first push ends once a clone finishes the track.
+	#[test]
+	fn a_refresh_before_the_first_push_ends_with_the_track() {
+		let (producer, _track) = producer(Config::default());
+		let (waiter, flag) = crate::refresh::flagged();
+		assert!(producer.poll_refresh(&waiter).is_pending());
+		let _finished = producer.clone().finish().unwrap();
+		assert!(flag.take(), "the finish wakes it");
+		assert!(matches!(producer.poll_refresh(&waiter), std::task::Poll::Ready(Err(_))));
 	}
 
 	#[test]

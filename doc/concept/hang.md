@@ -219,11 +219,14 @@ independent, so an audio group can end at any frame; the first-party encoders
 put one packet in each unless told otherwise.
 
 The `description` field carries out-of-band codec setup (an `avcC` box for
-H.264). When it is absent, the parameter sets ride inline before each keyframe,
-which is what `avc3`/`hev1` tracks do. Decoders should handle both. CMAF is the
-exception: its samples are always length-prefixed, so an `avc3`/`hev1` CMAF
-track keeps the configuration record as its `description` for the NAL length
-size, even when the parameter sets ride in the samples.
+H.264) and decides the framing. With one, H.264 and H.265 frames are
+length-prefixed by its NAL length size; without one, they are Annex-B and carry
+their parameter sets before each keyframe. The codec string only says where the
+parameter sets live: `avc1`/`hvc1` keep them in the `description`, while
+`avc3`/`hev1` may repeat them in band, with or without one. Decoders should
+handle every combination. CMAF samples are always length-prefixed, so a CMAF
+track always carries the configuration record, even when the parameter sets
+ride in the samples.
 
 ## Your own format
 

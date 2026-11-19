@@ -231,6 +231,14 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
   cut gate's "hand-written `moq-c`" below reads `libmoq`, and the two
   quests for a code-free `libmoq` stub were deleted.
 
+On the reconciled candidate, regenerate the Nix build plan with `just rs cargo-nix` after the
+shared version bump. A dry run of the bump to 0.22.0 updated 52 packages and left Cargo.nix stale.
+Repeat the two-relay smoke with the candidate and the last published relay. Put each binary upstream
+in turn, then publish from each side, discover it from the other, fetch and compare a frame, and
+observe withdrawal. All four paths passed on lite-06 with 0.17.17 and audited main at d0ce553674.
+Re-run the existing cut checks on the resolved merge and version bump. After publication,
+use the manual `just test wire-compat --remeasure` procedure while the automated update is broken.
+
 ## Required
 
 - [Breaking release readiness](/quest/m2/README.md) - code, protocol and package proofs
@@ -242,5 +250,4 @@ Decided 2026-11-16 (maintainer, /quest-plan of the pre-cut audit):
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the cut PR's release gate runs `interop.yml`, which failed on `main` every day through 2026-11-12
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the release gate runs `features.yml`, red in the 2026-11-12 Nightly
 - [Claim new npm names](/quest/m3/release/npm-first-publish.md) - trusted publishing can publish every new `@moq/*` package
-- [The Playwright bump](/quest/m1/playwright-pin.md) - the cut PR's interop lane runs with `CI_STRICT`, which fails the route key lane on a Chromium below 158
-- [Pre-cut correctness fixes](/quest/m1/precut-fixes/README.md) - the cut publishes none of the defects the 2026-11-17 correctness audit found
+- [Pre-cut correctness fixes](/quest/m1/precut-fixes/README.md) - both pre-cut audits' required fixes have landed

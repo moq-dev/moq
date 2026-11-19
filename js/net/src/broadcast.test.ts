@@ -210,7 +210,7 @@ test("an info lookup joining a subscription's request is answered after the subs
 	// Flush every pending notification, so only the lookup is left holding demand.
 	subscriber.close();
 	await yieldNow();
-	expect(request.demand().wanted.peek()).toBeUndefined();
+	expect(request.demand().wanted.peek()).toBe(false);
 
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
@@ -709,7 +709,7 @@ test("a pending track info query is answered by its request, and closing rejects
 	const request = await pending;
 	if (!request) throw new Error("expected request");
 	// Nobody subscribes to the queried track itself.
-	expect(request.demand().wanted.peek()).toBeUndefined();
+	expect(request.demand().wanted.peek()).toBe(false);
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
 	expect((await info).priority).toBe(2);
 
@@ -743,4 +743,22 @@ test("a fetch of a failed group leaves its unread frames to the pool's expiry", 
 	} finally {
 		installed.close();
 	}
+});
+
+test("a track name with a lone surrogate is refused where it is named, since UTF-8 would write U+FFFD", () => {
+	const broadcast = new BroadcastProducer();
+	const consumer = broadcast.consume();
+	for (const name of ["\uD800", "a\uDC00", "\uDC00\uD800"]) {
+		expect(() => broadcast.createTrack(name)).toThrow("lone surrogate");
+		expect(() => broadcast.createDatagrams(name)).toThrow("lone surrogate");
+		expect(() => broadcast.track(name)).toThrow("lone surrogate");
+		expect(() => consumer.track(name)).toThrow("lone surrogate");
+		expect(() => consumer.datagrams(name)).toThrow("lone surrogate");
+	}
+	// A pair is one scalar, U+10000, and U+FFFD itself is text like any other.
+	for (const name of ["𐀀", "a�"]) {
+		expect(broadcast.createTrack(name).name).toBe(name);
+		expect(consumer.track(name).name).toBe(name);
+	}
+	broadcast.close();
 });

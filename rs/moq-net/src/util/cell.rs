@@ -48,3 +48,10 @@ impl<T> std::ops::Deref for SendCell<T> {
 		&self.0
 	}
 }
+
+// A `&mut` can swap in only another `T`, whose bounds construction already proved.
+impl<T> std::ops::DerefMut for SendCell<T> {
+	fn deref_mut(&mut self) -> &mut T {
+		&mut self.0
+	}
+}

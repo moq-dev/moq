@@ -25,6 +25,20 @@ test("from refuses a backslash that escapes neither a backslash nor a slash", ()
 	expect(() => Path.from("a\\", "b")).toThrow("escapes neither");
 });
 
+test("from refuses a lone surrogate, which UTF-8 would write as U+FFFD", () => {
+	for (const raw of ["\uD800", "a\uDC00", "a/\uD800b", "\uDC00\uD800"]) {
+		expect(() => Path.from(raw)).toThrow("lone surrogate");
+		expect(() => Path.from("ok", raw)).toThrow("lone surrogate");
+		expect(() => Path.decode(raw)).toThrow("lone surrogate");
+		expect(Path.tryDecode(raw)).toBeUndefined();
+		expect(() => Path.normalizeRelative(raw)).toThrow("lone surrogate");
+	}
+	// A pair is one scalar, U+10000, and U+FFFD itself is text like any other.
+	for (const raw of ["\uD800\uDC00", "a/\uFFFD", "\uFEFFconcert"]) {
+		expect(Path.from(raw)).toBe(raw as Path.Valid);
+	}
+});
+
 test("an escaped slash is content, never a separator", () => {
 	// It neither ends nor empties a segment, wherever it sits.
 	for (const raw of ["\\/a", "\\/\\/a", "a/\\/b"]) {

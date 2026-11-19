@@ -72,7 +72,7 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 		// Waiting for its first segment, the cursor subscribes before any media exists.
 		let mut demand = publisher.media.as_ref().expect("open").demand();
 		let wanted = async {
-			while demand.wanted_changed().await?.is_none() {}
+			while !demand.wanted_changed().await? {}
 			moq_net::Result::Ok(())
 		};
 		kio::clock::timeout(TIMEOUT, async {
