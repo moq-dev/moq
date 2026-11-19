@@ -246,7 +246,10 @@ async fn follow(
 				match result {
 					Ok(change) => change,
 					Err(err) => {
-						out.write(&Line::Ended { path: &path, error: err.to_string() })?;
+						out.write(&Line::Ended {
+							path: &path,
+							error: err.to_string(),
+						})?;
 						following.available().await?
 					}
 				}
@@ -274,7 +277,10 @@ async fn read(
 	newest: &mut Option<u64>,
 ) -> anyhow::Error {
 	let result = async {
-		let mut track = broadcast.track(TRACK)?.subscribe(track::Subscription::default()).await?;
+		let mut track = broadcast
+			.track(TRACK)?
+			.subscribe(track::Subscription::default())
+			.await?;
 		while let Some(mut group) = track.recv_group().await? {
 			let Some(frame) = group.read_frame().await? else {
 				continue;
@@ -285,7 +291,9 @@ async fn read(
 			let now = millis_wall();
 			// Each instance numbers its groups from its own start, so `missed` compares within one,
 			// and only a group past the newest shows what the publisher wrote in between.
-			let missed = newest.filter(|&newest| sequence > newest).map(|newest| sequence - newest - 1);
+			let missed = newest
+				.filter(|&newest| sequence > newest)
+				.map(|newest| sequence - newest - 1);
 			let last = {
 				let mut reader = reader.lock().unwrap();
 				reader.groups += 1;
@@ -294,11 +302,7 @@ async fn read(
 			if let Some(from) = last
 				&& (now.saturating_sub(from) > gap || missed.is_some_and(|missed| missed > 0))
 			{
-				out.write(&Line::Gap {
-					path,
-					from,
-					missed,
-				})?;
+				out.write(&Line::Gap { path, from, missed })?;
 			}
 			*newest = (*newest).max(Some(sequence));
 		}
@@ -321,11 +325,24 @@ struct Reader {
 #[derive(Serialize)]
 #[serde(tag = "event", rename_all = "lowercase")]
 enum Line<'a> {
-	Online { path: &'a str },
-	Offline { path: &'a str },
-	Ended { path: &'a str, error: String },
-	Gap { path: &'a str, from: u64, missed: Option<u64> },
-	Status { paths: BTreeMap<&'a str, Reader> },
+	Online {
+		path: &'a str,
+	},
+	Offline {
+		path: &'a str,
+	},
+	Ended {
+		path: &'a str,
+		error: String,
+	},
+	Gap {
+		path: &'a str,
+		from: u64,
+		missed: Option<u64>,
+	},
+	Status {
+		paths: BTreeMap<&'a str, Reader>,
+	},
 }
 
 /// The JSON lines output, shared by every task, each line stamped and flushed whole.

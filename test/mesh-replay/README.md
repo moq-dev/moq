@@ -106,7 +106,7 @@ each event:
 - **Quiet**: seconds after the fault ended until no route or announce message moved for
   `quiet`; **Fed**: until every reader with a route read again.
 - **Announce msgs / bytes**: control messages of the `announce` class, which carries
-  ROUTE, ROUTE_END, DEAD, and DRAIN on lite-07, sent by every relay.
+  ROUTE, ROUTE\_END, DEAD, and DRAIN on lite-07, sent by every relay.
 - **Changed**, **Rewritten**, **DEAD**, **DRAIN**: the route counters
   (`moq_relay_route_*`, see `doc/concept/stats.md`), sent and received. They count only
   moq-lite-07 sessions, so relays without one in the event are left out, and the
