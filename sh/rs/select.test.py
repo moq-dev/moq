@@ -137,6 +137,8 @@ class SelectTest(unittest.TestCase):
         # Only the lint phase runs it, so the gate compiles it once.
         self.assertNotIn("rs send-depth", self.selected("rs/moq-net/src/lib.rs", action="test"))
         self.assertNotIn("rs send-depth", self.selected("rs/moq-auth/src/lib.rs"))
+        # moq-tokio spawns the driver, so its own changes are proved too.
+        self.assertIn("rs send-depth", self.selected("rs/moq-tokio/src/client.rs"))
 
     def test_media_defaults_are_isolated_from_device_features(self):
         for path in ("rs/moq-audio/src/lib.rs", "rs/moq-video/src/lib.rs", "Cargo.lock"):

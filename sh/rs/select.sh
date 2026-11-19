@@ -172,8 +172,9 @@ case "$action" in
         fi
         # moq-net without `async`, which every other build unifies back in.
         if wants moq-net; then just rs no-async; fi
-        # The session driver's Send proof, which a deeper session state breaks.
-        if [[ "$action" == lint ]] && wants moq-net; then just rs send-depth; fi
+        # The session driver's Send proof, which a deeper session state breaks, and
+        # moq-tokio's spawn of it.
+        if [[ "$action" == lint ]] && wants '(moq-net|moq-tokio)'; then just rs send-depth; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         ;;
