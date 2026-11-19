@@ -1361,6 +1361,9 @@ export class Producer {
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the time
 	// it asked from. Mirrors the Rust `TrackState::time_starts`.
 	#timeStarts = new Map<bigint, TimeStart>();
+	// The lowest time and highest start in `#timeStarts`, so the times its ranges may place are
+	// bounded without a walk of them all.
+	#timeStartReach: { lowest: bigint; highest: bigint } | undefined;
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
@@ -1623,6 +1626,13 @@ export class Producer {
 				);
 			}
 			producer.#timeStarts = merged;
+			let reach: { lowest: bigint; highest: bigint } | undefined;
+			for (const [asked, reported] of merged) {
+				reach = reach
+					? { lowest: min(reach.lowest, asked), highest: max(reach.highest, reported.start) }
+					: { lowest: asked, highest: reported.start };
+			}
+			producer.#timeStartReach = reach;
 			producer.#placing++;
 			// The answer may place a time start an ordered read waits at.
 			for (const state of [producer.#state, ...producer.#sinks]) state.timelineChanged.update((rev) => rev + 1);
@@ -1630,19 +1640,15 @@ export class Producer {
 		landedThrough = (producer, time, from) => producer.#landingThrough(time, from) === undefined;
 		landingSpan = (producer) => {
 			const first = producer.#arrivals.first();
-			const froms = first === undefined ? [] : [first];
-			let start = first;
-			for (const [asked, reported] of producer.#timeStarts) {
-				froms.push(reported.start);
-				start = start === undefined ? asked + 1n : min(start, asked + 1n);
-			}
+			const reach = producer.#timeStartReach;
+			const asked = reach && reach.lowest + 1n;
+			const start = first === undefined ? asked : asked === undefined ? first : min(first, asked);
 			if (start === undefined) return undefined;
-			let end = start;
-			const grace = producer.#grace();
-			for (const from of froms) {
-				const landable = producer.#landing({ start: from, end: UNBOUNDED, floor: true, grace }).next();
-				end = max(end, landable.done ? UNBOUNDED : landable.value.start);
-			}
+			// The first key landable from a place only rises with it, so the highest bounds them all.
+			const from = first === undefined ? (reach?.highest ?? start) : max(first, reach?.highest ?? first);
+			const landable = producer.#landing({ start: from, end: UNBOUNDED, floor: true, grace: producer.#grace() });
+			const next = landable.next();
+			const end = next.done ? UNBOUNDED : next.value.start;
 			return end > start ? { start, end } : undefined;
 		};
 		timeStartFolds = (producer, time) => {

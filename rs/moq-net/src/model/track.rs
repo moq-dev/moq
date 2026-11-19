@@ -763,6 +763,9 @@ pub(crate) struct TrackState {
 	// resolved one. Replaced whole as the ranges change, so it holds at most one entry per
 	// time asked from.
 	time_starts: BTreeMap<u64, TimeStart>,
+	// The highest start in `time_starts`, so the times its ranges may place are bounded
+	// without a walk of them all.
+	highest_time_start: Option<u64>,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges counting
 	// back, by how many groups each counted, with the latest group it counted from: the copy
 	// holds only part of the track, so it can't count back over its own groups. Replaced whole
@@ -1330,35 +1333,25 @@ impl TrackState {
 
 	/// The times [`Self::landed_through`] may place, wherever the groups and drops leave them:
 	/// from the lowest time a first arrival or a reported range reaches, through the key below
-	/// the farthest one either may still land. Empty when it places none.
+	/// the first one the highest place it counts from may still land. The first key landable
+	/// from a place only rises with it, so that one bounds them all. Empty when it places none.
 	fn landing_span(&self) -> ops::RangeInclusive<u64> {
 		if !self.readable() {
 			return Unplaced::NONE;
 		}
 		let first = self.arrivals.first();
-		let reported = || {
-			self.time_starts
-				.iter()
-				.map(|(&asked, reported)| (asked, reported.start))
-		};
-		let lowest = first
-			.into_iter()
-			.chain(reported().map(|(asked, _)| asked.saturating_add(1)))
-			.min();
-		let Some(lowest) = lowest else {
+		let asked = self.time_starts.keys().next().map(|asked| asked.saturating_add(1));
+		let Some(lowest) = first.into_iter().chain(asked).min() else {
 			return Unplaced::NONE;
 		};
+		let from = first.into_iter().chain(self.highest_time_start).max().unwrap_or(lowest);
 		let grace = self.arrival_grace();
-		let mut landable = lowest;
-		for from in first.into_iter().chain(reported().map(|(_, start)| start)) {
-			match self.find_landable(from..u64::MAX, true, grace, |open, _| Some(open.start)) {
-				Some(key) => landable = landable.max(key),
-				None => return lowest..=u64::MAX,
-			}
-		}
-		match landable.checked_sub(1) {
-			Some(last) => lowest..=last,
-			None => Unplaced::NONE,
+		match self.find_landable(from..u64::MAX, true, grace, |open, _| Some(open.start)) {
+			Some(key) => match key.checked_sub(1) {
+				Some(last) => lowest..=last,
+				None => Unplaced::NONE,
+			},
+			None => lowest..=u64::MAX,
 		}
 	}
 
@@ -4914,6 +4907,7 @@ impl Producer {
 		if let Ok(mut state) = self.modify()
 			&& state.time_starts != starts
 		{
+			state.highest_time_start = starts.values().map(|reported| reported.start).max();
 			state.time_starts = starts;
 			state.placing += 1;
 		}
