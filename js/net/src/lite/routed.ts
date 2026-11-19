@@ -115,6 +115,8 @@ export class Routed {
 	/** The grant changed since the last edit: the next goes even when it changes nothing, since its
 	 * ANNOUNCE_OK follows what the change shows under a wider prefix, and new readers wait for it. */
 	#regranted = false;
+	/** What our grant lets us subscribe to, as last seen. */
+	#granted?: Path.Patterns;
 
 	// Each live claim holds one of the session's announce slots.
 	#claims: SlotMap<bigint, Live>;
@@ -135,15 +137,21 @@ export class Routed {
 			if (this.#closing) return;
 			for (const [id, live] of this.#claims) this.#serve(id, live, false, false);
 		});
-		let granted = session.grant?.peek()?.subscribe;
-		this.#stopGrant = session.grant?.subscribe((grant) => {
-			const next = grant?.subscribe;
-			if (next === granted || (next && granted?.equals(next))) return;
-			granted = next;
-			if (this.#asked.size === 0) return;
-			this.#regranted = true;
+		this.#granted = session.grant?.peek()?.subscribe;
+		this.#stopGrant = session.grant?.subscribe(() => {
 			this.#ask();
+			this.#release();
 		});
+	}
+
+	// Note a grant change, read as it is set rather than when its listeners run, so a reader
+	// attached between the two waits too.
+	#regrant(): void {
+		const next = this.#session.grant?.peek()?.subscribe;
+		const granted = this.#granted;
+		if (next === granted || (next && granted?.equals(next))) return;
+		this.#granted = next;
+		if (this.#asked.size > 0) this.#regranted = true;
 	}
 
 	/** Feed `announced` what the stream carries for `request`, until its last consumer leaves. */
@@ -209,6 +217,7 @@ export class Routed {
 
 	// Ask the peer for what the readers now want, one edit at a time.
 	#ask(): void {
+		this.#regrant();
 		if (this.#editing || this.#finished || this.#silent || this.#closing) return;
 		const { remove, add } = this.#edit();
 		if (remove.length === 0 && add.length === 0 && !this.#regranted) return;
@@ -232,6 +241,7 @@ export class Routed {
 	#release(): void {
 		const done = this.#finished || this.#silent;
 		if (!done) {
+			this.#ask();
 			if (this.#editing) return;
 			const { remove, add } = this.#edit();
 			if (remove.length > 0 || add.length > 0) return;
