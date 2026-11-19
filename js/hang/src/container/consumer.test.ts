@@ -755,12 +755,17 @@ test("Consumer raises a decode error at the head of an open group past a hole", 
 	g10.writeFrame({ payload: new Uint8Array([0xff]), timestamp: Time.Timestamp.fromMicros(2) });
 	g10.writeFrame({ payload: new Uint8Array([0x03]), timestamp: Time.Timestamp.fromMicros(3) });
 
-	const timeout = new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 1000));
-	const read = consumer.next().then(
-		() => "read",
-		(err: Error) => err.message,
+	let settled = "hung";
+	consumer.next().then(
+		() => {
+			settled = "read";
+		},
+		(err: Error) => {
+			settled = err.message;
+		},
 	);
-	expect(await Promise.race([read, timeout])).toBe("malformed");
+	await clock.advance(Duration.millis(100));
+	expect(settled).toBe("malformed");
 	consumer.close();
 	track.close();
 });
