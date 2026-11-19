@@ -45,7 +45,7 @@ impl AudioEncoder {
 		self.producer.reanchor();
 	}
 
-	/// Publish a marker group marking the pause, so the gap the reanchor is about
+	/// End the open group whole where its audio stops, so the gap the reanchor is about
 	/// to open reads as a break rather than one very long packet.
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.producer.discontinuity()?;

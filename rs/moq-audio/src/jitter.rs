@@ -495,7 +495,7 @@ impl Estimator {
 	/// A declared end lies between the previous observation and the next, so the
 	/// silence it declares does not relax the estimate the way an unexplained gap
 	/// does. Called before observing the first frame after the end, not at the
-	/// marker, since the stopped encoder's final packets may still follow it.
+	/// end, since the stopped encoder's final packets may still follow it.
 	fn end(&mut self) {
 		// Before any observation there is no interval for the silence to stretch.
 		if self.origin.is_some() {

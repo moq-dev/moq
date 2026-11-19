@@ -1187,8 +1187,8 @@ impl MoqMediaTrackProducer {
 
 	/// Mark a timeline break without lowering the advertised jitter or delay.
 	///
-	/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
-	/// and video must resume on a keyframe.
+	/// Ends the open group whole where its media does, so a later frame resumes after a pause.
+	/// Resumed frames must continue the broadcast media clock, and video must resume on a keyframe.
 	pub fn discontinuity(&self) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut guard = self.inner.lock().unwrap();

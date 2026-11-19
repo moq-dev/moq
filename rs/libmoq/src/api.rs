@@ -3381,8 +3381,8 @@ pub extern "C" fn moq_publish_media_set_enabled(media: u32, enabled: bool) -> i3
 
 /// Mark a timeline break without lowering the advertised jitter or delay.
 ///
-/// Publishes a discontinuity marker; resumed frames must continue the broadcast media clock,
-/// and video must resume on a keyframe.
+/// Ends the open group whole where its media does, so a later frame resumes after a pause.
+/// Resumed frames must continue the broadcast media clock, and video must resume on a keyframe.
 /// Returns zero on success, or a negative code on failure.
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_publish_media_discontinuity(media: u32) -> i32 {

@@ -203,8 +203,8 @@ impl Import {
 		Ok(())
 	}
 
-	/// Mark a break in the timeline by publishing a marker group. To bound the closing
-	/// group's final frame first, [`cut(end)`](Self::cut) before this. See
+	/// Mark a break in the timeline by ending the open group whole where its frames do. To end
+	/// it at a known bound instead, [`cut(end)`](Self::cut) before this. See
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> Result<()> {
 		self.track.discontinuity()?;

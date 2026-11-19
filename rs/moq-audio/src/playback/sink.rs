@@ -227,8 +227,8 @@ impl Sink {
 	/// as a codec's final frames, continue the audio before the silence.
 	///
 	/// A player calls it at the decoder's [`Read::End`](crate::decode::Read::End),
-	/// the marker a publisher's [`discontinuity`](crate::encode::Producer::discontinuity)
-	/// sends. The sink plays on; [`finish`](Self::finish) is what ends it.
+	/// the pause a publisher's [`discontinuity`](crate::encode::Producer::discontinuity)
+	/// declares. The sink plays on; [`finish`](Self::finish) is what ends it.
 	pub fn silence(&mut self) {
 		self.channel.lock().unwrap().prod.silence();
 	}

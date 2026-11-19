@@ -715,8 +715,9 @@ reference history, the histogram, and the prior are untouched, and an end
 before the first observation, or under a fixed target, does nothing.
 
 The receiver calls `end()` before observing the first frame from a group later
-than the declared end's own: the stopped encoder's final packets may follow the
-marker in its group, and they belong to the speech before the silence, not after it.
+than the declared end's own: the stopped encoder's final packets may follow an
+audio terminal marker in its group, and they belong to the speech before the
+silence, not after it.
 
 ## Fixed targets
 
@@ -1093,8 +1094,8 @@ the order written; the noise itself is not part of conformance.
 Decoded audio stops a codec's pre-skip short of the declared end when the
 publisher leaves its encoder's lookahead unflushed, so the browser's ring takes
 the end that early. Natively, `moq play` declares the end on the playback sink
-when it reads the marker, and the stopped encoder's final frames that follow
-the marker still play before the silence.
+when it reads the end, and the stopped encoder's final frames in the end's
+group still play before the silence.
 
 ### Comfort corpus
 

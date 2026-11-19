@@ -91,8 +91,8 @@ impl VideoEncoder {
 		}
 	}
 
-	/// Publish a marker group marking a pause, so the PTS jump on resume reads as a break
-	/// rather than one very long frame, and a viewer arriving mid-pause isn't served the
+	/// End the open group whole where its pictures stop, so the PTS jump on resume reads as a
+	/// break rather than one very long frame, and a viewer arriving mid-pause isn't served the
 	/// pre-pause group as if it were live. The encoder closes until the next frame, so a
 	/// paused emulator holds none.
 	///

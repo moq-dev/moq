@@ -368,10 +368,10 @@ fn run_emulator(
 		if session.pause.get().paused() {
 			// Mark the break BEFORE parking, not after resuming. Our PTS is the emulator
 			// clock, which keeps running while we sleep, so the next frame lands however
-			// long the pause was into the future. Published as a marker group that gap
-			// reads as a discontinuity rather than one enormous frame duration, and the
-			// marker becomes the live edge -- so a viewer arriving mid-pause waits for real
-			// media instead of being served the pre-pause group as if it were live.
+			// long the pause was into the future. Ending the open group whole where its media
+			// stops makes that gap read as a discontinuity rather than one enormous frame
+			// duration, and bounds how long the pre-pause group is served: a viewer arriving
+			// mid-pause waits for real media instead of being served it as if it were live.
 			session.video_encoder.discontinuity();
 			audio_encoder.discontinuity()?;
 

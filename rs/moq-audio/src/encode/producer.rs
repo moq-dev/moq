@@ -111,10 +111,10 @@ pub struct Producer {
 	/// Where the latest stamped packet ends, in microseconds: the next anchor's floor, since
 	/// group starts strictly increase.
 	stamped: u64,
-	/// An encoder reset that still needs a marker group before its next packet.
+	/// An encoder reset that still needs the open group ended before its next packet.
 	pending_discontinuity: bool,
-	/// Whether no packet has been published since the last marker group, or the track began, so a
-	/// break needs no marker of its own.
+	/// Whether no packet has been published since the last break, or the track began, so a
+	/// break needs no end of its own.
 	decoder_boundary: bool,
 	/// How the encoder classified the packet it coded most recently: [`Activity::Dtx`] exactly while
 	/// a voice encode is silent.
@@ -395,8 +395,8 @@ impl Producer {
 	/// partial input frame. Call this when resuming after an idle gap (e.g. a
 	/// released-then-reopened microphone) so the gap appears in the PTS and
 	/// audio stays aligned with a wall-clock video track, rather than the gap
-	/// being compressed out by the running sample count. If the codec had
-	/// started, a marker group is published before the next packet so
+	/// being compressed out by the running sample count. Each group already
+	/// ends whole where its last packet does, so the jump reads as a pause and
 	/// subscribers jump the playhead.
 	///
 	/// This is for a gap the caller learns of only once audio returns, such as
@@ -694,7 +694,7 @@ impl Producer {
 			return Ok(());
 		}
 		if !std::mem::replace(&mut self.silent, true) && !self.decoder_boundary {
-			// Bound a group the join left open where speech ended, so the marker follows it.
+			// Bound a group the join left open where speech ended, so it ends whole there.
 			if !self.track.needs_keyframe() {
 				self.track.cut(Some(stamp.start))?;
 			}
@@ -766,12 +766,12 @@ impl Producer {
 	/// are dropped, and the next frame sets a fresh anchor. See
 	/// [`Producer::discontinuity`](moq_mux::container::Producer::discontinuity).
 	///
-	/// Unlike [`reanchor`](Self::reanchor), the marker goes out now and closes the
-	/// open group, so subscribers hear the silence as declared from its start: the
+	/// Unlike [`reanchor`](Self::reanchor), the open group ends whole now, so
+	/// subscribers hear the silence as declared from its start: the
 	/// decoder reports it as [`Read::End`](crate::decode::Read::End), and a player
 	/// fills it with comfort noise rather than counting a gap.
 	pub fn discontinuity(&mut self) -> Result<(), Error> {
-		// A marker already ends what was published, such as a voice encode's pause.
+		// A break already ended what was published, such as a voice encode's pause.
 		if !self.decoder_boundary {
 			self.track.discontinuity()?;
 		}
@@ -1131,7 +1131,7 @@ mod tests {
 				break;
 			}
 		}
-		// History expiring before anything was published leaves no epoch to end with a marker.
+		// History expiring before anything was published leaves no epoch to end.
 		let first = reader.read().await.unwrap().unwrap();
 		assert!(
 			matches!(&first, moq_mux::container::Read::Frame { frame, .. } if frame.timestamp == at(100)),

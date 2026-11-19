@@ -48,7 +48,7 @@ Exporters take a catalog stream alongside the source. Choose its encoding and
 rendition selection before exporting; the same stream shape drives every container.
 MPEG-TS metadata is retained when the stream uses `ts::Ext`.
 
-A container read yields frames plus two markers in delivery order: a gap where
+A container read yields frames plus two other items in delivery order: a gap where
 media after what was read will never arrive (a skip, a hole), carrying where it
 starts and how long it lasts as an upper bound, and an end where the publisher
 declared its media stops (a pause, a source switch, the finish). Joining

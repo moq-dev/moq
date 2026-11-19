@@ -114,10 +114,22 @@ pub(crate) enum Item {
 /// [`poll_read`](Self::poll_read) yields [`Read::Gap`] wherever media after an item already read
 /// will never arrive: a latency skip, an evicted current group, or a hole the publisher did not
 /// declare skipped whose boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
-/// gap, since nothing was read before it. A marker group (no decodable frames: one empty
-/// payload, or on a data track one object with no bytes) is the publisher declaring a stop,
-/// read as [`Read::End`]; nothing is missing. A data track's marker carries no timestamp, so
-/// it ends at the furthest point read, and reads as nothing before the first item.
+/// gap, since nothing was read before it.
+///
+/// A media group its publisher finished whole (moq-lite-07's group end) times its last frame and
+/// may declare a stop, read as [`Read::End`]; nothing is missing. It is a stop once the next
+/// group's first frame starts more than 1 ms past the end, read ahead of that group. A next group
+/// starting at the end continues the media. A reader feeding a player also reads the stop once
+/// a continuing group would be a whole max delay late, counted from when it was due, or once the
+/// [playhead](Self::set_playhead) reaches the end; an export waits for the next group. A track that
+/// finishes after the group reads as finished instead. A loss after the end reads the stop ahead
+/// of the gap only when every start a lost group could have taken lies past the end, the
+/// publisher having declared the rest skipped; otherwise a lost group may have continued it, so
+/// only the gap reads. An audio terminal marker (an empty payload opening its group) declares the
+/// stop ahead of the codec's final packets. Publishers before moq-lite-07 declared a stop with a
+/// marker group (no decodable frames: one empty payload, or on a data track one object with no
+/// bytes), still read as [`Read::End`]. A data track's marker carries no timestamp, so it ends at
+/// the furthest point read, and reads as nothing before the first item.
 /// Empty groups (zero objects) mean nothing. Errors come in delivery order: a payload that fails
 /// to decode, or a group below an earlier group's start, ends the reader where it sits, and a
 /// failed track once the groups already here drain. A skip returns the error of a malformed group
