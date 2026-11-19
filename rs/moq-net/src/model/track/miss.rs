@@ -83,7 +83,7 @@ pub(super) struct Misses {
 	/// missable groups then, `None` while every group was.
 	clipped: Option<(u64, Option<u64>, Option<Cover>)>,
 	/// The window's missable groups the last probe judged against, `None` while every group
-	/// was, so a move of only its time ends' runs judges only what they moved over.
+	/// was, so a moved window diffs this snapshot against its own and judges only what moved.
 	view: Option<Cover>,
 	/// Where the track leaves what it evicts that this reader judged cached, once it judged.
 	inbox: Option<Inbox>,
@@ -764,12 +764,12 @@ impl Misses {
 		}
 		// A window that moved keeps most of its runs, so only what it moved over is judged again
 		// below.
-		let layered = match (&self.view, view) {
+		let diffed = match (&self.view, view) {
 			(Some(old), Some(view)) => Some((old.clone(), view)),
 			_ => None,
 		};
 		let terms = self.at.is_none_or(|previous| {
-			(previous.1 != at.1 && layered.is_none())
+			(previous.1 != at.1 && diffed.is_none())
 				|| previous.2 != at.2
 				|| previous.4 != at.4
 				|| previous.5 != at.5
@@ -834,11 +834,11 @@ impl Misses {
 				}
 				self.deferred.remove(0..low);
 			}
-			// What the time ends' runs no longer cover is forgotten, and what they newly cover
+			// What the window no longer covers is forgotten, and what it newly covers
 			// judged, within what the probe judges: from the floor up to the newest group,
 			// below the cap.
 			let last = id.2.map_or(Some(top), |cap| cap.checked_sub(1).map(|cap| cap.min(top)));
-			if let Some((old, view)) = &layered
+			if let Some((old, view)) = &diffed
 				&& let Some(last) = last
 				&& self.at.is_some_and(|previous| previous.1 != at.1)
 			{
@@ -2208,7 +2208,7 @@ mod tests {
 					start: next(8),
 					end: Some(KEYS - next(8)),
 				},
-				_ => Servable::layered(
+				_ => Servable::covering(
 					Cover::new(runs(6).into_iter().chain(runs(2))),
 					(next(3) == 0).then(|| next(KEYS + 2)),
 					&Servable::NONE,
@@ -2331,7 +2331,7 @@ mod tests {
 			fills.lock().add_handler();
 			let fixed = runs(6);
 			let mut shared = Cover::new(fixed.clone());
-			let mut layered: Vec<RangeInclusive<u64>> = Vec::new();
+			let mut moving: Vec<RangeInclusive<u64>> = Vec::new();
 			let cap = (next(3) == 0).then(|| next(KEYS + 4));
 			let asking = Asking {
 				priority: 0,
@@ -2342,7 +2342,7 @@ mod tests {
 			let (mut given_moved, mut given_whole) = (Vec::new(), Vec::new());
 			for revision in 0..8 {
 				let layer = runs(3);
-				for run in std::mem::replace(&mut layered, layer.clone()) {
+				for run in std::mem::replace(&mut moving, layer.clone()) {
 					shared.add(run, -1);
 				}
 				for run in &layer {
@@ -2392,7 +2392,7 @@ mod tests {
 				assert_eq!(
 					snapshot(&moved),
 					snapshot(&whole),
-					"round {round} revision {revision}: {fixed:?} under {layered:?}",
+					"round {round} revision {revision}: {fixed:?} under {moving:?}",
 				);
 				assert_eq!(given_moved, given_whole, "round {round} revision {revision}");
 			}

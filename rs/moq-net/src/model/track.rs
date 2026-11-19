@@ -7814,9 +7814,9 @@ struct Edge {
 	servable: Servable,
 }
 
-/// What a cursor's arrival walk reads: its window from the floor, below the cap. Holds the
-/// window's groups as they are layered, so taking it again after a time end moves costs
-/// the walks' runs, not every run of the window.
+/// What a cursor's arrival walk reads: its window from the floor, below the cap. Holds a
+/// snapshot of the window's cover, so taking it again after the window moves diffs the two
+/// snapshots and costs what moved, not every run of the window.
 #[derive(Clone, Default)]
 struct Admitted {
 	/// The window's groups, `None` while a relative anchor waits and every group is in it.
@@ -8013,11 +8013,12 @@ enum Servable {
 	Runs(Arc<Several>),
 }
 
-/// A servable window of several runs: the window's groups as it layers them, below the
-/// exclusive `cap`, with the reader's index of the live groups inside its fixed runs.
+/// A servable window of several runs: a snapshot of the window's cover, below the exclusive
+/// `cap`, with the reader's index of the live groups inside that cover.
 ///
-/// Built again whenever the window or cap moves, which a time end does on each group, so it
-/// shares the fixed runs and their index, and copies only the walks' runs.
+/// Built again whenever the window or cap moves, which a time end does on each group. The
+/// snapshot is a pointer clone, and the index is kept while the cover is unchanged
+/// (pointer-equal), so a move of only the cap rebuilds nothing.
 struct Several {
 	groups: Cover,
 	cap: Option<u64>,
@@ -8030,12 +8031,12 @@ impl PartialEq for Several {
 	}
 }
 
-/// A reader's index of the live feed's cached groups inside its window's fixed runs, so a
+/// A reader's index of the live feed's cached groups inside its window's cover, so a
 /// search costs the live groups it passes, never the runs between them: thousands of runs
 /// in the gaps of a sparsely numbered feed would otherwise each cost a lookup.
 ///
 /// Taken in from the arrival order, which every live group enters once, on the reader's own
-/// search: each arrival costs it one lookup in the fixed runs. A slot that leaves or is
+/// search: each arrival costs it one lookup in the cover. A slot that leaves or is
 /// replaced leaves its entry stale, dropped when a search meets it or once stale entries
 /// could outnumber the live groups.
 ///
@@ -8051,7 +8052,7 @@ struct Indexed {
 	track: Weak<cache::Track>,
 	/// How far into the arrival order this has taken in, as an absolute index.
 	taken: usize,
-	/// The stamp of each live group inside the fixed runs, by key, as it arrived.
+	/// The stamp of each live group inside the cover, by key, as it arrived.
 	groups: BTreeMap<u64, u32>,
 }
 
@@ -8066,9 +8067,9 @@ impl Indexed {
 	}
 
 	/// Take in what arrived since the last call.
-	fn catch_up(&mut self, state: &TrackState, fixed: &Cover) {
+	fn catch_up(&mut self, state: &TrackState, groups: &Cover) {
 		for entry in state.arrivals_from(self.taken) {
-			if fixed.contains(entry.key) {
+			if groups.contains(entry.key) {
 				self.groups.insert(entry.key, entry.stamp);
 			}
 		}
@@ -8108,12 +8109,12 @@ impl Live {
 		&mut indexes[position]
 	}
 
-	/// The first live group inside `fixed`, within `lo..=hi`, for which `f` answers, lowest
+	/// The first live group inside `groups`, within `lo..=hi`, for which `f` answers, lowest
 	/// first or, with `rev`, highest first, with its key.
 	fn find<'a, R>(
 		&self,
 		state: &'a TrackState,
-		fixed: &Cover,
+		groups: &Cover,
 		mut lo: u64,
 		mut hi: u64,
 		rev: bool,
@@ -8129,7 +8130,7 @@ impl Live {
 				let mut indexes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
 				let indexed = Self::index(&mut indexes, state);
 				if !caught_up {
-					indexed.catch_up(state, fixed);
+					indexed.catch_up(state, groups);
 					caught_up = true;
 				}
 				let entries = indexed.groups.range(lo..=hi).map(|(&key, &stamp)| (key, stamp));
@@ -8193,17 +8194,17 @@ impl Servable {
 	}
 
 	/// The groups `window` reads. `previous`, what the same reader was served before, lends
-	/// its index of the live groups when the fixed runs are the same.
+	/// its index of the live groups while the cover is unchanged.
 	fn of(window: &Window, previous: &Self) -> Self {
 		match window.groups() {
 			None => Self::ALL,
-			Some(groups) => Self::layered(groups.clone(), None, previous),
+			Some(groups) => Self::covering(groups.clone(), None, previous),
 		}
 	}
 
 	/// The groups in `groups` below the exclusive `cap`. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
-	fn layered(groups: Cover, cap: Option<u64>, previous: &Self) -> Self {
+	fn covering(groups: Cover, cap: Option<u64>, previous: &Self) -> Self {
 		let last = match cap {
 			Some(cap) => match cap.checked_sub(1) {
 				Some(last) => last,
@@ -8249,7 +8250,7 @@ impl Servable {
 			}
 			Self::Runs(several) => {
 				let cap = several.cap.map_or(cap, |own| own.min(cap));
-				Self::layered(several.groups.clone(), Some(cap), self)
+				Self::covering(several.groups.clone(), Some(cap), self)
 			}
 		}
 	}
@@ -17182,7 +17183,7 @@ mod test {
 	/// keep the same index, and as the window is edited. Each window is searched on two tracks, as a
 	/// group's expiry that moved to a replacement copy searches its reader's.
 	#[test]
-	fn layered_searches_match_a_scan_of_every_live_group() {
+	fn live_index_searches_match_a_scan_of_every_live_group() {
 		// A small deterministic generator, so a failure replays.
 		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
 		let next = |bound: u64| {
@@ -17249,7 +17250,7 @@ mod test {
 							cover.add(run.clone(), 1);
 						}
 					}
-					servable = Servable::layered(cover.clone(), cap, &servable);
+					servable = Servable::covering(cover.clone(), cap, &servable);
 				}
 				for (track, producer) in producers.iter().enumerate() {
 					let state = producer.state.read();
@@ -17288,7 +17289,7 @@ mod test {
 			.map(|key| producer.create_group(group::Info { start: key }).unwrap())
 			.collect();
 		let runs = Cover::new([0..=999, 1001..=u64::MAX]);
-		let servable = Servable::layered(runs, None, &Servable::NONE);
+		let servable = Servable::covering(runs, None, &Servable::NONE);
 		let Servable::Runs(several) = &servable else {
 			panic!("several runs");
 		};
@@ -17355,7 +17356,7 @@ mod test {
 			// The runs counted once, and again with the first counted twice.
 			let covers = [Cover::new(runs()), Cover::new(runs().chain(runs().take(1)))];
 			for groups in covers {
-				let servable = Servable::layered(groups, None, &Servable::NONE);
+				let servable = Servable::covering(groups, None, &Servable::NONE);
 				if let [(first, last)] = bounds {
 					assert!(
 						servable
