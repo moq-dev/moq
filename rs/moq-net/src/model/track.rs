@@ -9273,15 +9273,22 @@ impl Cursor {
 
 	/// Look up each time start the window can't resolve from the cache, once, and take in
 	/// the answers, parking `waiter` on the lookups still out.
+	///
+	/// Indexed by time, so a pass costs O(L log L) in the lookups out rather than O(L²).
 	fn look_up(&mut self, waiter: &kio::Waiter) {
-		let lookups: Vec<(u64, u64)> = self.filter.window.lookups().collect();
+		// The first span looking a time up sets how far its lookup reaches.
+		let mut lookups = BTreeMap::new();
+		for (time, reach) in self.filter.window.lookups() {
+			lookups.entry(time).or_insert(reach);
+		}
 		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
 			return;
 		}
 		let asking = &asking(&self.subscription);
 		let fills = self.state.read().fills.clone();
-		for (time, reach) in lookups {
-			if self.filter.lookups.iter().any(|lookup| lookup.time == time) {
+		let asked: BTreeSet<u64> = self.filter.lookups.iter().map(|lookup| lookup.time).collect();
+		for (&time, &reach) in &lookups {
+			if asked.contains(&time) {
 				continue;
 			}
 			let ask = fill::Ask {
@@ -9300,8 +9307,9 @@ impl Cursor {
 		}
 		let mut moved = false;
 		for lookup in &mut self.filter.lookups {
-			// The window stops looking once replaced; with no join, nothing can answer.
-			if !self.filter.window.lookups().any(|(time, _)| time == lookup.time) {
+			// The window stops looking once replaced; with no join, nothing can answer. An
+			// answer taken in below stops only the spans looking up that time.
+			if !lookups.contains_key(&lookup.time) {
 				lookup.join = None;
 				continue;
 			}

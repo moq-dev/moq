@@ -209,13 +209,11 @@ impl Cover {
 	}
 
 	/// The runs from `from` on, lowest first, each whole but clipped to `from`.
+	///
+	/// One walk in key order that skips every subtree holding no run's edge, so each run
+	/// costs about one descent, however many runs overlap inside it.
 	pub fn runs(&self, from: u64) -> impl Iterator<Item = RangeInclusive<u64>> + '_ {
-		let mut next = Some(from);
-		std::iter::from_fn(move || {
-			let run = self.first(next?, u64::MAX)?;
-			next = run.end().checked_add(1);
-			Some(run)
-		})
+		Runs::new(self, from)
 	}
 
 	/// The runs reaching into `lo..=hi`, lowest first, clipped to it.
@@ -225,14 +223,18 @@ impl Cover {
 			.map(move |run| *run.start()..=(*run.end()).min(hi))
 	}
 
-	/// The lowest key covered.
+	/// The lowest key covered: the first edge, where the first run starts.
 	pub fn lowest(&self) -> Option<u64> {
-		self.first(0, u64::MAX).map(|run| *run.start())
+		first(&self.root)
 	}
 
-	/// The highest key covered.
+	/// The highest key covered: just below the last edge, where the last run ends, or every
+	/// key on while a run is open.
 	pub fn highest(&self) -> Option<u64> {
-		self.last(0, u64::MAX).map(|run| *run.end())
+		match sum(&self.root) > 0 {
+			true => Some(u64::MAX),
+			false => last(&self.root).map(|key| key - 1),
+		}
 	}
 
 	/// The spans where `self` and `old` may cover differently, lowest first: where their counts
@@ -382,6 +384,86 @@ fn first(link: &Link) -> Option<u64> {
 		node = left;
 	}
 	Some(node.key)
+}
+
+fn last(link: &Link) -> Option<u64> {
+	let mut node = link.as_ref()?;
+	while let Some(right) = &node.right {
+		node = right;
+	}
+	Some(node.key)
+}
+
+/// [`Cover::runs`]: the edges above where it started, in key order, each node waiting with
+/// how many runs were open entering it.
+struct Runs<'a> {
+	stack: Vec<(&'a Node, i64)>,
+	/// Where the run being walked started, `None` between runs.
+	open: Option<u64>,
+	done: bool,
+}
+
+impl<'a> Runs<'a> {
+	fn new(cover: &'a Cover, from: u64) -> Self {
+		let mut runs = Self {
+			stack: Vec::new(),
+			open: (cover.count(from) > 0).then_some(from),
+			done: false,
+		};
+		// Every edge above `from`, the ones at or below it counted into where it starts.
+		let mut link = &cover.root;
+		let mut offset = 0;
+		while let Some(node) = link {
+			if node.key <= from {
+				offset += sum(&node.left) + node.delta;
+				link = &node.right;
+			} else {
+				runs.stack.push((node, offset));
+				link = &node.left;
+			}
+		}
+		runs
+	}
+
+	/// Queue the subtree under `link`, entered with `offset` runs open, down its left edge,
+	/// leaving out each subtree whose running sum stays on the side it entered on.
+	fn descend(&mut self, mut link: &'a Link, offset: i64) {
+		while let Some(node) = link {
+			let crosses = match offset > 0 {
+				true => offset.saturating_add(node.low) <= 0,
+				false => offset.saturating_add(node.high) > 0,
+			};
+			if !crosses {
+				return;
+			}
+			self.stack.push((node, offset));
+			link = &node.left;
+		}
+	}
+}
+
+impl Iterator for Runs<'_> {
+	type Item = RangeInclusive<u64>;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		if self.done {
+			return None;
+		}
+		while let Some((node, offset)) = self.stack.pop() {
+			let at = offset + sum(&node.left) + node.delta;
+			self.descend(&node.right, at);
+			match self.open {
+				Some(start) if at <= 0 => {
+					self.open = None;
+					return Some(start..=node.key - 1);
+				}
+				None if at > 0 => self.open = Some(node.key),
+				_ => {}
+			}
+		}
+		self.done = true;
+		self.open.take().map(|start| start..=u64::MAX)
+	}
 }
 
 /// The first key of the subtree, entered with `offset` runs open, whose running sum is `want`.
@@ -553,8 +635,14 @@ mod tests {
 				assert!(cover.runs(0).eq(union.iter().cloned()), "{}", context());
 				assert_eq!(cover.is_empty(), held.is_empty(), "{}", context());
 				let all = points(&union.iter().cloned().collect::<Vec<_>>());
+				assert_eq!(cover.lowest(), union.iter().next().map(|run| *run.start()), "{}", context());
+				assert_eq!(cover.highest(), union.iter().next_back().map(|run| *run.end()), "{}", context());
 				for &lo in &all {
 					assert_eq!(cover.contains(lo), union.contains(&lo), "{} at {lo}", context());
+					let from = union
+						.overlapping(lo..=u64::MAX)
+						.map(|run| (*run.start()).max(lo)..=*run.end());
+					assert!(cover.runs(lo).eq(from), "{} runs from {lo}", context());
 					for &hi in all.iter().filter(|hi| **hi >= lo) {
 						let first = union
 							.overlapping(lo..=hi)
