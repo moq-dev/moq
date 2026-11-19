@@ -797,7 +797,7 @@ impl Routed {
 		let same = permit.same_limit(&self.permit);
 		// A grant change shows more or less of the peer's answer to a prefix wider than the
 		// grant: the readers wait again, for the answer to an edit, which follows it.
-		if permit.granted_regions() != self.permit.granted_regions() && !self.stream.asking().is_empty() {
+		if !permit.same_grant(&self.permit) && !self.stream.asking().is_empty() {
 			self.regranted = true;
 			for (want, snapshot) in &mut self.wants {
 				snapshot.get_or_insert_with(|| self.origin.snapshot(want.clone()));

@@ -4143,6 +4143,14 @@ test("a lite-07 prefix wider than the grant is answered region by region", async
 		request([], []);
 		const widened = await until("ok");
 		expect(started(widened)).toEqual(["c/y above 0"]);
+
+		// Widened to `a`, the claim at `a` is no longer presented at `a/b` but at its own path:
+		// lost where it was, since its publisher never withdrew it, and `a/b/x` stays.
+		grant.set(regions("a", "c"));
+		request([], []);
+		const moved = await until("ok");
+		expect(started(moved)).toEqual(["a above 0"]);
+		expect(moved.filter((msg) => msg.status === "endedId")).toEqual([{ status: "endedId", id: 0n, lost: true }]);
 	} finally {
 		for (const broadcast of broadcasts) broadcast.close();
 		close();

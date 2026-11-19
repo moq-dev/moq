@@ -643,6 +643,12 @@ impl Permit {
 		Some(both)
 	}
 
+	/// Whether the peer granted both the same, whatever limit either set.
+	#[cfg(feature = "async")]
+	pub(crate) fn same_grant(&self, other: &Self) -> bool {
+		self.granted == other.granted
+	}
+
 	/// Whether both set the same limit on the peer, whatever either was granted.
 	#[cfg(feature = "async")]
 	pub(crate) fn same_limit(&self, other: &Self) -> bool {
@@ -3130,6 +3136,33 @@ mod tests {
 			permit(Some(&["a", "b"]), Some(&["c"])).granted_regions(),
 			Some(vec![path("a"), path("b")])
 		);
+	}
+
+	/// What a publisher shows its peer lies within the regions of the grant and the limit
+	/// together, the deeper of any two nested; and two grants with the same regions can
+	/// still differ, as `a/*` and `a/**` do.
+	#[cfg(feature = "async")]
+	#[test]
+	fn the_regions_follow_the_grant_and_the_limit() {
+		let permit = |granted: Option<&[&str]>, limit: Option<&[&str]>| Permit {
+			granted: granted.map(patterns),
+			limit: limit.map(patterns),
+		};
+		let path = crate::Path::from_static;
+		assert_eq!(permit(None, None).regions(), None);
+		assert_eq!(permit(None, Some(&["a/b"])).regions(), Some(vec![path("a/b")]));
+		assert_eq!(permit(Some(&[""]), Some(&["a"])).regions(), Some(vec![path("a")]));
+		assert_eq!(
+			permit(Some(&["a", "c/d"]), Some(&["a/b", "c", "e"])).regions(),
+			Some(vec![path("a/b"), path("c/d")])
+		);
+
+		let one = |pattern: &str| Permit {
+			granted: Some(Patterns::from(pattern.parse::<crate::Pattern>().unwrap())),
+			limit: None,
+		};
+		assert_eq!(one("a/*").granted_regions(), one("a/**").granted_regions());
+		assert!(!one("a/*").same_grant(&one("a/**")));
 	}
 
 	/// A limit replaces the last one, narrower or wider, and applies to a version

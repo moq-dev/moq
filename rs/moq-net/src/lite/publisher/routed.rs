@@ -77,8 +77,8 @@ enum Holds {
 enum Marker {
 	/// The peer's edit.
 	Request,
-	/// A grant change, which stopped reading these.
-	Grant { removed: Vec<Path> },
+	/// A grant change, which stopped reading `removed` and started reading `added` more.
+	Grant { removed: Vec<Path>, added: usize },
 }
 
 /// A prefix the peer asked for.
@@ -146,6 +146,9 @@ pub(in crate::lite) struct Answer {
 	markers: VecDeque<Marker>,
 	/// The latest marker answered the peer's edit, so the SYNCED after it count.
 	answering: bool,
+	/// How many reads a grant change added have yet to send their initial set, before
+	/// what it no longer shows goes: a claim a wider read tells again is kept.
+	regranting: Option<usize>,
 	/// The ANNOUNCE_REQUESTs of an edit that continues.
 	parts: Option<Parts>,
 	encoder: lite::AnnounceEncoder,
@@ -189,6 +192,7 @@ impl Answer {
 			regions,
 			markers: VecDeque::new(),
 			answering: false,
+			regranting: None,
 			main,
 			routing,
 			mounts: BTreeMap::new(),
@@ -379,7 +383,8 @@ impl Answer {
 			add: wanted.difference(&self.reads).cloned().collect(),
 		};
 		let removed = edit.remove.clone();
-		self.ask(edit, Marker::Grant { removed })?;
+		let added = edit.add.len();
+		self.ask(edit, Marker::Grant { removed, added })?;
 		// Queued for this session now, so the pass that saw the change sends it.
 		self.main.flush();
 		Ok(())
@@ -474,9 +479,9 @@ impl Answer {
 				Ok(())
 			}
 			Msg::Edited if source == MAIN => match self.markers.pop_front() {
-				Some(Marker::Grant { removed }) => {
+				Some(Marker::Grant { removed, added }) => {
 					self.answering = false;
-					self.regranted(writer, removed)
+					self.regranted(writer, removed, added)
 				}
 				_ => {
 					self.answering = true;
@@ -491,8 +496,18 @@ impl Answer {
 						let holds = std::mem::replace(&mut mount.holds, Holds::Nothing);
 						(holds == Holds::Synced).then_some(mount.prefix)
 					}
-					// What a grant change reads starts after its prefix's SYNCED.
-					None if !self.answering => None,
+					// What a grant change reads starts after its prefix's SYNCED, and once all
+					// of it is in, what the change no longer shows goes.
+					None if !self.answering => {
+						if let Some(left) = self.regranting.as_mut() {
+							*left = left.saturating_sub(1);
+							if *left == 0 {
+								self.regranting = None;
+								self.resync(writer)?;
+							}
+						}
+						None
+					}
 					None => (self.prefixes.iter())
 						.find(|(_, prefix)| {
 							!prefix.synced && prefix.path.as_ref().is_some_and(|prefix| route::within(&path, prefix))
@@ -610,9 +625,10 @@ impl Answer {
 	}
 
 	/// The marker of a grant change: the session's key no longer reads `removed`, and the
-	/// node dropped what they showed. End what the grant no longer shows, start what it
-	/// now does, and read the mounts beneath each region it newly shows.
-	fn regranted(&mut self, writer: &mut Writer, removed: Vec<Path>) -> Result<(), Error> {
+	/// node dropped what they showed, while `added` reads more send their initial sets
+	/// next. Read the mounts beneath each region the grant newly shows, and once those
+	/// initial sets are in, end what it no longer shows and start what it now does.
+	fn regranted(&mut self, writer: &mut Writer, removed: Vec<Path>, added: usize) -> Result<(), Error> {
 		let mut gone: Vec<Named> = (self.told.iter())
 			.filter(|(key, (source, _))| *source == MAIN && removed.iter().any(|read| route::within(&key.0, read)))
 			.map(|(key, _)| key.clone())
@@ -645,10 +661,22 @@ impl Answer {
 				self.mount(id, read, Holds::Main)?;
 			}
 		}
+		// Forgotten without ending yet: a wider read may tell the claim again.
 		for key in &gone {
 			self.told.remove(key);
 		}
 		self.main.flush();
+		match added {
+			0 => self.resync(writer),
+			added => {
+				self.regranting = Some(added);
+				Ok(())
+			}
+		}
+	}
+
+	/// Bring every claim the peer holds or the node told in line with the grant.
+	fn resync(&mut self, writer: &mut Writer) -> Result<(), Error> {
 		let mut keys: Vec<Named> = self.told.keys().cloned().collect();
 		keys.extend(self.live.keys().filter(|key| !self.told.contains_key(key)).cloned());
 		for key in keys {

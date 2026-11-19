@@ -3877,6 +3877,23 @@ mod announce_test {
 			.iter()
 			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { lost: true, .. }));
 		assert_eq!(lost.count(), 2, "{narrowed:?}");
+
+		// Widened to everything, the root replaces the region as what is read: `a/b/x` is
+		// told again by the wider read rather than ended, and only the claim above the
+		// region moves, lost where it was presented and told at its own path.
+		auth.handle().authorize(&limit(&[""]));
+		answer.poll_permit(&waiter).unwrap();
+		let whole = sent(&mut answer);
+		let ends: Vec<_> = (whole.iter())
+			.filter_map(|msg| match msg {
+				lite::AnnounceBroadcast::End { lost, .. } => Some(*lost),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(ends, [true], "{whole:?}");
+		let told = started(&whole);
+		assert!(told.contains(&("a".to_string(), 0)), "{whole:?}");
+		assert!(!told.iter().any(|(path, _)| path == "a/b/x"), "{whole:?}");
 	}
 
 	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
