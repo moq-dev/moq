@@ -142,30 +142,54 @@ impl Session {
 
 /// A boxed transport and the receive credit its paused streams hold.
 pub(super) struct Shared<S: ?Sized> {
-	/// The stream credit reserved by streams this session stopped reading to pace a group's
+	/// The connection credit held by streams this session stopped reading to pace a group's
 	/// writer, at most half the connection window; see [`ReceiveWindow`].
 	paused: AtomicU64,
 	session: S,
 }
 
 impl Shared<dyn ErasedSession> {
-	/// Reserve the credit of one more paused stream, its stream window and the `taken` bytes it
-	/// read without returning their credit, unless it would push the paused total over half the
-	/// connection window, returning how much it reserved. Without a connection window a paused
-	/// stream holds only its own credit, so it reserves nothing.
-	fn reserve(&self, taken: u64) -> Option<u64> {
-		let window = self.session.receive_window()?;
-		let Some(connection) = window.connection else {
-			return Some(0);
-		};
-		let charge = window.stream.saturating_add(taken).min(connection.get());
-		let cap = connection.get() / 2;
+	/// Reserve `charge` for one more paused stream, unless it would push the paused total over
+	/// half the `connection` window.
+	fn reserve(&self, charge: u64, connection: u64) -> bool {
+		let cap = connection / 2;
 		self.paused
 			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |paused| {
 				paused.checked_add(charge).filter(|total| *total <= cap)
 			})
-			.ok()?;
-		Some(charge)
+			.is_ok()
+	}
+}
+
+/// How many streams half the connection window holds paused, each at its [`Pacing::allowance`].
+const PAUSED: u64 = 64;
+
+/// How ingest paces a stream under its session's receive windows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pacing {
+	/// How far the group's writer reads ahead of its fastest reader before pausing.
+	window: u64,
+	/// The stream's full receive credit.
+	stream: u64,
+	/// The credit a paced stream lets the peer send past the room its group has left, so a
+	/// paused one holds about this much; zero without a connection window to share.
+	allowance: u64,
+}
+
+impl Pacing {
+	fn new(receive: Option<ReceiveWindow>) -> Self {
+		let window = crate::model::pace::window(receive);
+		let Some(receive) = receive else {
+			return Self { window, stream: 0, allowance: 0 };
+		};
+		let allowance = receive
+			.connection
+			.map_or(0, |connection| (connection.get() / 2 / PAUSED).min(receive.stream));
+		Self {
+			window,
+			stream: receive.stream,
+			allowance,
+		}
 	}
 }
 
@@ -457,8 +481,10 @@ impl RecvStream {
 		Self(Box::new(Budgeted {
 			stream,
 			session,
-			held: 0,
-			window: OnceLock::new(),
+			held: None,
+			pacing: OnceLock::new(),
+			shaped: None,
+			unshaped: false,
 		}))
 	}
 
@@ -469,12 +495,19 @@ impl RecvStream {
 		self.0.window()
 	}
 
-	/// Reserve the receive credit this stream may hold while ingest stops reading it, its stream
-	/// window and the `taken` bytes read without returning their credit, returning whether it
-	/// may stop: not once the session's paused streams hold half its connection window, nor on
-	/// a transport that reports no window.
-	pub(crate) fn pause(&mut self, taken: u64) -> bool {
-		self.0.pause(taken)
+	/// Let the peer send only what the group's writer has `room` for, at least the `unsealed`
+	/// rest of the segment being written, plus an allowance, or the full stream credit while
+	/// no reader holds the writer back (`None`), so the stream holds about the allowance once
+	/// it pauses. See [`poll::RecvStream::set_window`].
+	pub(crate) fn shape(&mut self, room: Option<u64>, unsealed: u64) {
+		self.0.shape(room, unsealed)
+	}
+
+	/// Reserve the connection credit this stream holds while ingest stops reading it, returning
+	/// whether it may stop: not once the session's paused streams hold half its connection
+	/// window, nor on a transport that reports no window.
+	pub(crate) fn pause(&mut self) -> bool {
+		self.0.pause()
 	}
 
 	/// Return the credit [`Self::pause`] reserved, as ingest reads the stream again.
@@ -487,22 +520,50 @@ impl RecvStream {
 struct Budgeted<T> {
 	stream: T,
 	session: Budget,
-	/// The credit reserved while paused, zero while read.
-	held: u64,
-	/// The pacing window, read from the session's receive windows when ingest first paces
-	/// the stream, so one that arrived before admission widened them paces at the wider ones.
-	window: OnceLock<u64>,
+	/// The credit reserved while paused, `None` while read.
+	held: Option<u64>,
+	/// Read from the session's receive windows when ingest first paces the stream, so one
+	/// that arrived before admission widened them paces at the wider ones.
+	pacing: OnceLock<Pacing>,
+	/// The window last set with [`poll::RecvStream::set_window`], `None` for the full credit.
+	shaped: Option<u64>,
+	/// The transport cannot set a stream's window, so a paused stream holds its full credit.
+	unshaped: bool,
 }
 
 impl<T> Budgeted<T> {
 	/// Return the credit reserved while paused, if any.
 	fn release(&mut self) {
-		let held = std::mem::take(&mut self.held);
-		if held > 0
+		if let Some(held) = self.held.take()
+			&& held > 0
 			&& let Some(shared) = self.session.upgrade()
 		{
 			shared.paused.fetch_sub(held, Ordering::AcqRel);
 		}
+	}
+
+	fn pacing(&self) -> Pacing {
+		*self.pacing.get_or_init(|| {
+			let receive = self
+				.session
+				.upgrade()
+				.and_then(|shared| shared.session.receive_window());
+			Pacing::new(receive)
+		})
+	}
+}
+
+impl<T: poll::RecvStream> Budgeted<T> {
+	/// Set the stream's window to `window`, returning the connection credit it may hold, or
+	/// `None` once the transport turned out not to support it.
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		if self.unshaped {
+			return None;
+		}
+		let credit = self.stream.set_window(window);
+		self.unshaped = credit.is_none();
+		self.shaped = credit.map(|_| window);
+		credit
 	}
 }
 
@@ -614,8 +675,10 @@ trait ErasedRecv: Send + Sync {
 	fn set_priority(&mut self, priority: i64);
 	fn stop(&mut self, code: u32);
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error>;
+	fn set_window(&mut self, window: u64) -> Option<u64>;
 	fn window(&self) -> u64;
-	fn pause(&mut self, taken: u64) -> bool;
+	fn shape(&mut self, room: Option<u64>, unsealed: u64);
+	fn pause(&mut self) -> bool;
 	fn resume(&mut self);
 }
 
@@ -815,24 +878,66 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 		poll::RecvStream::poll_reset(&mut self.stream, waiter).map(Error::new)
 	}
 
-	fn window(&self) -> u64 {
-		*self.window.get_or_init(|| {
-			let receive = self
-				.session
-				.upgrade()
-				.and_then(|shared| shared.session.receive_window());
-			crate::model::pace::window(receive)
-		})
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		poll::RecvStream::set_window(&mut self.stream, window)
 	}
 
-	fn pause(&mut self, taken: u64) -> bool {
-		if self.held > 0 {
+	fn window(&self) -> u64 {
+		self.pacing().window
+	}
+
+	fn shape(&mut self, room: Option<u64>, unsealed: u64) {
+		let pacing = self.pacing();
+		// Nothing is shared without a connection window, so nothing needs to stay small.
+		if pacing.allowance == 0 || self.unshaped {
+			return;
+		}
+		let target = match room {
+			Some(room) => room.max(unsealed).saturating_add(pacing.allowance).min(pacing.stream),
+			None => pacing.stream,
+		};
+		// Only a move of half an allowance is worth the transport's lock: the charge at a pause
+		// is what the stream holds, not this target.
+		if self.shaped.unwrap_or(pacing.stream).abs_diff(target) >= pacing.allowance / 2 {
+			Budgeted::set_window(self, target);
+		}
+	}
+
+	fn pause(&mut self) -> bool {
+		if self.held.is_some() {
 			return true;
 		}
-		let Some(held) = self.session.upgrade().and_then(|shared| shared.reserve(taken)) else {
+		let Some(shared) = self.session.upgrade() else {
 			return false;
 		};
-		self.held = held;
+		let Some(receive) = shared.session.receive_window() else {
+			return false;
+		};
+		// Without a connection window a paused stream holds only its own credit.
+		let Some(connection) = receive.connection.map(std::num::NonZeroU64::get) else {
+			self.held = Some(0);
+			return true;
+		};
+		let pacing = self.pacing();
+		// The least it could hold, checked first, so a stream past the cap reads on without
+		// taking the transport's lock.
+		let least = match self.unshaped {
+			true => receive.stream,
+			false => pacing.allowance,
+		};
+		if shared.paused.load(Ordering::Acquire).saturating_add(least) > connection / 2 {
+			return false;
+		}
+		// A transport that shapes says what the stream holds; any other holds its full credit.
+		let charge = Budgeted::set_window(self, pacing.allowance)
+			.unwrap_or(receive.stream)
+			.min(connection);
+		// Refused, it reads on and sheds, still holding only its shaped credit, so it may pause
+		// once others resume.
+		if !shared.reserve(charge, connection) {
+			return false;
+		}
+		self.held = Some(charge);
 		true
 	}
 
@@ -1030,6 +1135,10 @@ impl poll::RecvStream for RecvStream {
 
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.0.poll_reset(waiter)
+	}
+
+	fn set_window(&mut self, window: u64) -> Option<u64> {
+		self.0.set_window(window)
 	}
 }
 

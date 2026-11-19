@@ -80,10 +80,14 @@ pub(crate) trait Pause {
 		crate::model::pace::AHEAD
 	}
 
-	/// Reserve the credit this stream may hold while paused, its stream window and the `taken`
-	/// bytes it read whose credit it has yet to return, returning whether it may pause. A
+	/// Let the peer send only what the group's writer has `room` for, at least the `unsealed`
+	/// rest of the segment being written, so the stream holds little once it pauses; `None`
+	/// while no reader holds the writer back.
+	fn shape(&mut self, _room: Option<u64>, _unsealed: u64) {}
+
+	/// Reserve the credit this stream holds while paused, returning whether it may pause. A
 	/// stream outside any session always may.
-	fn pause(&mut self, _taken: u64) -> bool {
+	fn pause(&mut self) -> bool {
 		true
 	}
 
@@ -96,8 +100,12 @@ impl Pause for crate::transport::boxed::RecvStream {
 		crate::transport::boxed::RecvStream::window(self)
 	}
 
-	fn pause(&mut self, taken: u64) -> bool {
-		crate::transport::boxed::RecvStream::pause(self, taken)
+	fn shape(&mut self, room: Option<u64>, unsealed: u64) {
+		crate::transport::boxed::RecvStream::shape(self, room, unsealed)
+	}
+
+	fn pause(&mut self) -> bool {
+		crate::transport::boxed::RecvStream::pause(self)
 	}
 
 	fn resume(&mut self) {
@@ -454,8 +462,17 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 		let result = loop {
 			// A writer too far ahead of the group's fastest reader leaves the rest in the
-			// stream, so flow control pushes back upstream.
-			let lease = match self.poll_pace(waiter, frame.poll_ready(waiter, self.stream.window())) {
+			// stream, so flow control pushes back upstream. One partway into a segment reads
+			// on to its seal first, so a paused stream never holds a segment's credit.
+			let paced = match self.unreleased {
+				0 => {
+					let window = self.stream.window();
+					let paced = frame.poll_ready(waiter, window);
+					self.poll_pace(waiter, paced, || frame.room(window), frame.unsealed() as u64)
+				}
+				_ => Poll::Ready(Ok(())),
+			};
+			let mut lease = match match paced {
 				// The stream alone, so `unreleased` can count while the lease is out.
 				Poll::Ready(Ok(())) => {
 					let version = &self.version;
@@ -465,8 +482,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				}
 				Poll::Ready(Err(err)) => break Err(err),
 				Poll::Pending => Poll::Pending,
-			};
-			let mut lease = match lease {
+			} {
 				Poll::Pending => {
 					if owed > 0 {
 						frame.notify();
@@ -515,6 +531,10 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 					frame.notify();
 					owed = 0;
 				}
+				// The transport grants credit from what was taken when it next sends, so the
+				// room is measured from here, the chunk taken.
+				let window = self.stream.window();
+				self.stream.shape(frame.room(window), frame.unsealed() as u64);
 			}
 			if complete {
 				break Ok(());
@@ -543,24 +563,35 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	where
 		S: Pause,
 	{
-		self.poll_pace(waiter, group.poll_admit(waiter, header, self.stream.window()))
+		let window = self.stream.window();
+		let paced = group.poll_admit(waiter, header, window);
+		self.poll_pace(waiter, paced, || group.room(window), 0)
 	}
 
 	/// Wait out `paced`, the group's pace gate, if the session has room for the credit this
 	/// stream holds while paused (see [`Pause`]); otherwise read on, and the group sheds.
+	/// Once open, the stream's credit is sized to the `room` the writer has left, at least
+	/// the `unsealed` rest of its segment.
 	///
 	/// A paused stream is not read, so it is watched for a reset instead, which fails the
 	/// wait rather than leaving it to the group's reader to notice.
-	fn poll_pace(&mut self, waiter: &kio::Waiter, paced: Poll<()>) -> Poll<Result<(), Error>>
+	fn poll_pace(
+		&mut self,
+		waiter: &kio::Waiter,
+		paced: Poll<()>,
+		room: impl FnOnce() -> Option<u64>,
+		unsealed: u64,
+	) -> Poll<Result<(), Error>>
 	where
 		S: Pause,
 	{
 		match paced {
 			Poll::Ready(()) => {
 				self.stream.resume();
+				self.stream.shape(room(), unsealed);
 				Poll::Ready(Ok(()))
 			}
-			Poll::Pending if self.stream.pause(self.unreleased) => {
+			Poll::Pending if self.stream.pause() => {
 				let err = ready!(self.stream.poll_reset(waiter));
 				Poll::Ready(Err(self.version.transport_error(err)))
 			}

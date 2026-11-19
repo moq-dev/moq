@@ -129,6 +129,25 @@ impl Pace {
 		self.paced(self.read.load(Ordering::SeqCst), partial, window)
 	}
 
+	/// How many more bytes a writer `partial` bytes into an uncommitted frame may take
+	/// before it is more than `window` past the fastest reader, or `None` once nothing holds
+	/// it back: that reader fell off, or the writer is past the window with no reader
+	/// (`wanted` false), so it reads on and sheds.
+	///
+	/// Measured from where readers got even before one holds the group, since the first to
+	/// arrive starts there.
+	pub fn room(&self, partial: u64, window: u64, wanted: bool) -> Option<u64> {
+		let read = self.read.load(Ordering::SeqCst);
+		if read < self.front.load(Ordering::SeqCst) {
+			return None;
+		}
+		let lead = self.written().saturating_add(partial).saturating_sub(read);
+		match window.checked_sub(lead) {
+			None if !wanted => None,
+			room => Some(room.unwrap_or(0)),
+		}
+	}
+
 	/// Register `waiter` for the next read or shed, returning how far readers got, read
 	/// after registering so a read in between is never missed; [`Self::paced`] reads the
 	/// front after it too.

@@ -925,6 +925,19 @@ pub mod poll {
 			Poll::Pending
 		}
 
+		/// Let the peer send at most `window` bytes past what the reader took, rather than the
+		/// stream's full receive credit, returning the connection credit the stream may hold from
+		/// now on: the bytes that arrived and were not released, and those the peer may still send.
+		///
+		/// A session pacing a stream (see [`Session::receive_window`]) shrinks its window as the
+		/// group runs out of room, so the stream holds little once paused, and many fit in the
+		/// connection window. Credit already granted stays granted. `None` when the transport
+		/// cannot, the default, whose paused streams hold their full stream credit.
+		fn set_window(&mut self, window: u64) -> Option<u64> {
+			let _ = window;
+			None
+		}
+
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream. Its credit returns as it is read.
 		///
