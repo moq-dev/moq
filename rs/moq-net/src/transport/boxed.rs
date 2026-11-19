@@ -1276,7 +1276,11 @@ mod test {
 		};
 
 		let (mut stream, windows) = shaping(0);
-		assert_eq!(stream.window(), 2 * STREAM, "its group holds what the transport does not");
+		assert_eq!(
+			stream.window(),
+			2 * STREAM,
+			"its group holds what the transport does not"
+		);
 		stream.shape(None, 0);
 		assert!(windows.lock().unwrap().is_empty(), "already at its full credit");
 		stream.shape(Some(10_000), 0);
