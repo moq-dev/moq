@@ -27,8 +27,8 @@ cheaper than an unplanned one.
 - Test it on real relays, in a triangle where the drained relay dials both
   others: each neighbour, hearing the GOAWAY itself, counts
   `routes.sent.drain` toward the other, which counts `routes.received.drain`,
-  all before either counts a DEAD. The neighbour that hears the GOAWAY counts
-  no DRAIN received: the draining relay sends GOAWAY, not DRAIN.
+  all before either counts a DEAD. No DRAIN comes from the draining relay
+  itself, which sends GOAWAY: a pair of relays alone shows none.
 
 Public API: none. Wire: none.
 
