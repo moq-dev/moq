@@ -7,6 +7,7 @@ import { Duration, Elapsed, timeout } from "@moq/clock";
 import type { Manual } from "@moq/clock/test";
 import * as cache from "../cache.ts";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { hooks, type Recv, staleHole } from "../internal.ts";
 import { createMockTransportPair, manual } from "../mock.ts";
@@ -133,7 +134,7 @@ async function chain(up: Version, down: Version) {
 		for await (const request of claim.requested()) request.serve(wireOf(ingest).consume(request.path));
 	})();
 	const broadcast = source.route(path).broadcast;
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	hooks.poolTrack(track, new cache.Pool({}));
 	const remote = wireOf(viewer).consume(path);
 

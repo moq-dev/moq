@@ -99,6 +99,11 @@ int main()
 	assert((RateOptions("obs_nvenc_h264_tex", &nvenc_opts) ==
 		std::vector<std::string>{"maxBitRate=20000", "vbvBufferSize=0"}));
 	assert(RateOptions("obs_qsv11_v2", &nvenc_opts).empty());
+	// VA-API's ffmpeg_opts can pick FFmpeg's rate mode or force constant QP.
+	obs_data_t vaapi_opts;
+	obs_data_set_string(&vaapi_opts, "ffmpeg_opts", "rc_mode=QVBR low_power=1 qp=18");
+	for (const char *id : {"ffmpeg_vaapi_tex", "hevc_ffmpeg_vaapi", "av1_ffmpeg_vaapi_tex"})
+		assert((RateOptions(id, &vaapi_opts) == std::vector<std::string>{"rc_mode=QVBR", "qp=18"}));
 
 	// x264 runs the user's CBR or VBR at the cap, and anything else as VBR. A buffer of
 	// its own is replaced. x264opts is never rewritten: the options in it that set a rate

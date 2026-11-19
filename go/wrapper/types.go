@@ -49,19 +49,17 @@ type (
 	// AnnounceEventAbsent reports that no route covers a path any more, whether its origin withdrew it
 	// or this side let go of it, carrying its last route.
 	AnnounceEventAbsent = ffi.MoqAnnounceEventAbsent
-	// Range is a span of a track to deliver: from Start up to End, or onward when End is nil.
-	// A relative start is the first frame of its group, a relative end includes its whole
-	// group, and an absolute end is exclusive.
+	// Range is a span of a track to deliver: from Start through End, or onward when End is nil.
+	// Every start is the first frame of its group, and every end includes its whole group.
 	Range = ffi.MoqRange
-	// Anchor is where one end of a Range falls: AnchorOldest, AnchorAbsolute, AnchorRelative, or AnchorTime.
+	// Anchor is where one end of a Range falls: AnchorOldest, AnchorRelative, or AnchorTime.
 	Anchor = ffi.MoqAnchor
 	// AnchorOldest is the oldest group still around, as far back as the max delay allows. A start only.
 	AnchorOldest = ffi.MoqAnchorOldest
-	// AnchorAbsolute is a group, delivered from its first frame.
-	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
 	AnchorRelative = ffi.MoqAnchorRelative
 	// AnchorTime is the group containing a time, an Unscaled Timestamp in the track's timescale; a scaled one is refused.
+	// As an end it includes every group starting at or before the time.
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder

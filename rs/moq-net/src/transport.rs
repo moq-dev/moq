@@ -683,20 +683,6 @@ pub mod poll {
 		}
 	}
 
-	/// What [`SendStream::poll_acked`] learned about the bytes below an offset.
-	#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-	#[non_exhaustive]
-	pub enum Acked {
-		/// The peer acknowledged every byte below the offset.
-		Delivered,
-		/// The transport cannot see acknowledgments, so delivery is unknown, never assumed.
-		Unsupported,
-		/// The transport handed every byte below the offset to a reliable link, such as qmux's
-		/// TCP, which delivers it unless the link fails. Not an acknowledgment: it says nothing of
-		/// when the peer got it, but a reset can no longer discard it.
-		Sent,
-	}
-
 	/// An outgoing stream with partial writes, priorities, and reset codes.
 	pub trait SendStream: 'static {
 		/// The error type for every operation on this stream.
@@ -712,17 +698,17 @@ pub mod poll {
 		/// The position just past every byte written so far.
 		fn offset(&self) -> Self::Offset;
 
-		/// Poll until the peer acknowledged every byte below `offset`.
+		/// Poll until every byte below `offset` reaches the peer unless the session fails.
 		///
-		/// Errors once those bytes can never be acknowledged: the stream was reset by either
-		/// side or the session closed. Bytes already acknowledged stay so after a reset or stop.
-		/// A transport over a reliable link answers [`Acked::Sent`] once the link took them.
-		/// A transport that cannot see acknowledgments is ready with [`Acked::Unsupported`]
-		/// immediately, the default, on every stream, so a caller can decide once per session. An
-		/// offset minted by another stream may panic.
-		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<Acked, Self::Error>> {
+		/// That is once the peer acknowledged them, or, over a reliable link such as qmux's TCP,
+		/// once the link took them, so a reset can no longer discard them. Errors once those
+		/// bytes can never get there: the stream was reset by either side or the session closed.
+		/// Bytes already acknowledged stay so after a reset or stop. The default, for a transport
+		/// that cannot see acknowledgments, is ready at once: the bytes it took are all it knows.
+		/// An offset minted by another stream may panic.
+		fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 			let _ = (waiter, offset);
-			Poll::Ready(Ok(Acked::Unsupported))
+			Poll::Ready(Ok(()))
 		}
 
 		/// Poll to write some of the buffer to the stream, returning how many bytes were

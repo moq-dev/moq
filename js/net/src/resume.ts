@@ -54,6 +54,7 @@ import type { Consumer as GroupConsumer } from "./group.ts";
 import {
 	type Ask,
 	type DropRun,
+	type Expiry,
 	finalKey,
 	type GroupRecover,
 	hooks,
@@ -222,6 +223,8 @@ class Route {
 	readonly readers = new Set<Reader>();
 	/** Called once the last reader leaves. */
 	idle: () => void = () => {};
+	/** Called once a reader subscribes a copy, or moves one onto a new source. */
+	copied: () => void = () => {};
 
 	constructor(name: string) {
 		this.name = name;
@@ -544,6 +547,7 @@ class Reader implements ResumeSource {
 			this.#bound(copy);
 			this.#copies.push(copy);
 			this.wake();
+			route.copied();
 			return;
 		}
 		const asked: Pick<Copy, "floor" | "from" | "resolved"> = { floor: this.#newest };
@@ -594,6 +598,7 @@ class Reader implements ResumeSource {
 		source.retain();
 		this.#bound(copy);
 		this.#copies.splice(index, 0, copy);
+		this.route.copied();
 		const shell = this.#shell;
 		const record = this.#record;
 		copy.sub.info().then(
@@ -903,6 +908,13 @@ class Reader implements ResumeSource {
 	/** Wake parked reads, so they look again and let go of what nothing needs. */
 	wake(): void {
 		this.#changed.update((n) => n + 1);
+	}
+
+	/** The newest open copy this reader holds of `source`'s broadcast. */
+	copyOn(source: Source): Copy | undefined {
+		return this.#copies.findLast(
+			(copy) => copy.source.from.closed === source.from.closed && copy.sub.closed.peek() === undefined,
+		);
 	}
 
 	/** The reader's copy of the route at `generation`, if it subscribed one, rather than a backfill of it. */
@@ -2133,6 +2145,64 @@ class Recover implements GroupRecover {
 }
 
 /**
+ * A fetched group's own budget, in milliseconds, judged against a reader's copy of its track on
+ * the route it came from, as the Rust relay judges a fetch landed in that copy's cache. It opens
+ * no subscription, so a fetch-only relay never pulls the track: with no copy, nothing newer is
+ * known here, and the group is never stale.
+ */
+class FetchExpiry implements Expiry {
+	readonly changed: readonly Getter<unknown>[];
+	#find: () => Copy | undefined;
+	#key: bigint;
+	#budget: number;
+	// The copy judging the group. One that closed still judges by what it held, until another opens.
+	#judging?: { sub: track.Subscriber; expiry: Expiry; unwatch: Dispose[] };
+	// Bumped whenever the judging copy's verdict may change.
+	#relay = new Signal(0);
+	#closed = false;
+
+	constructor(find: () => Copy | undefined, copied: Getter<unknown>, key: bigint, budget: number) {
+		this.#find = find;
+		this.#key = key;
+		this.#budget = budget;
+		this.changed = [copied, this.#relay];
+	}
+
+	expired(): boolean {
+		this.#pick();
+		return this.#judging?.expiry.expired() ?? false;
+	}
+
+	/** Judge afresh once the group moves to another route: the old route's copy says nothing about it. */
+	moved(): void {
+		this.#unwatch();
+		this.#judging = undefined;
+		this.#relay.update((n) => n + 1);
+	}
+
+	/** Stop watching the copy, once nobody reads the group. */
+	close(): void {
+		this.#closed = true;
+		this.#unwatch();
+	}
+
+	#pick(): void {
+		const found = this.#find();
+		if (!found || found.sub === this.#judging?.sub) return;
+		this.#unwatch();
+		const expiry = hooks.staleAt(found.sub, this.#key, this.#budget);
+		const bump = () => this.#relay.update((n) => n + 1);
+		const unwatch = this.#closed ? [] : expiry.changed.map((changed) => changed.subscribe(bump));
+		this.#judging = { sub: found.sub, expiry, unwatch };
+	}
+
+	#unwatch(): void {
+		for (const dispose of this.#judging?.unwatch ?? []) dispose();
+		if (this.#judging) this.#judging.unwatch = [];
+	}
+}
+
+/**
  * One broadcast served through one route at a time; see the module docs.
  *
  * Its {@link consumer} is the broadcast handed out: every track read through it follows the
@@ -2151,6 +2221,8 @@ export class Front {
 	#info = new Map<string, { info: track.Info; source: number }>();
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
+	/** Bumped whenever a reader subscribes a copy, which may judge a fetched group; see {@link FetchExpiry}. */
+	#copied = new Signal(0);
 	/** Aborted once the current source is replaced, retiring what was asked of it. */
 	#retire = new AbortController();
 	#concluded = false;
@@ -2421,6 +2493,7 @@ export class Front {
 		created.idle = () => {
 			if (this.#routes.get(name) === created) this.#routes.delete(name);
 		};
+		created.copied = () => this.#copied.update((n) => n + 1);
 		this.#routes.set(name, created);
 		// A track whose properties another source already gave is checked like any replacement.
 		if (this.#concluded) created.conclude();
@@ -2532,6 +2605,16 @@ export class Front {
 	async fetchGroup(name: string, key: bigint, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
 		const fetched = await this.#fetch(name, key, options);
 		let current = fetched.source;
+		// A group fetched over a wire carries no budget of its own, unlike one a local track
+		// answers: the fetch's own budget judges it against a copy of the route it came from.
+		const judge = new FetchExpiry(
+			() => this.#copyOn(name, current),
+			this.#copied,
+			key,
+			options?.maxDelay?.asMillis() ?? Number.POSITIVE_INFINITY,
+		);
+		const expiry = (group: GroupConsumer) => hooks.groupExpiry(group) ?? judge;
+		if (!hooks.groupExpiry(fetched.group)) hooks.expireGroup(fetched.group, judge);
 		// Too old and evicted judge a subscription's delivery, not whether the group exists, so
 		// neither is a verdict on a fetch: one answered from a group still arriving over a
 		// subscription asks the route again for the rest when that delivery gives up on it.
@@ -2556,11 +2639,11 @@ export class Front {
 				// The fetch's hold on its route passes to the group on adoption, or goes with the discard.
 				return {
 					group: next.group,
-					// The route applies the fetch's own budget.
-					expiry: { expired: () => false, changed: [] },
+					expiry: expiry(next.group),
 					adopt: () => {
 						current.release();
 						current = next.source;
+						judge.moved();
 						// Its fetch may hold its subscription until its reader lets go, and the
 						// reader is now `fetched.group`.
 						void hooks.groupReleased(fetched.group).then(() => next.group.close());
@@ -2572,10 +2655,27 @@ export class Front {
 				};
 			},
 		});
-		// Only once the group carries its recovery: reading `closed` before then would settle it
-		// on a failure recovery could still continue, releasing the route while it is read.
+		// Only once the group carries its recovery: reading `closed` or `done` before then would
+		// settle it on a failure recovery could still continue, releasing the route, or ending
+		// the budget's watch, while it is read.
 		void fetched.group.closed.then(() => current.release());
+		// The budget is watched for as long as the group is read, or until released while a held
+		// reply awaits its acknowledgement, as the fetch's own subscription is.
+		void (
+			(options as broadcast.FetchFrom | undefined)?.held
+				? hooks.groupReleased(fetched.group)
+				: hooks.groupDone(fetched.group)
+		).then(() => judge.close());
 		return fetched.group;
+	}
+
+	// The newest open copy of track `name` a reader holds of `source`'s broadcast, if any.
+	#copyOn(name: string, source: Source): Copy | undefined {
+		for (const reader of this.#routes.get(name)?.readers ?? []) {
+			const copy = reader.copyOn(source);
+			if (copy) return copy;
+		}
+		return undefined;
 	}
 
 	// Fetch a group from whichever route serves the track, asking the next one when a route

@@ -4793,11 +4793,13 @@ impl FrontServe {
 			route: entry.id,
 			local: entry.local,
 			carried: !entry.instance.is_minted(),
+			claim: entry.node.is_some(),
 		});
-		// No candidate irreversibly ends this front. Leave the cache under the same lock
-		// a lookup takes, before a route can return and a newcomer join the broadcast the
-		// end actions are about to close. Existing requesters keep their original verdict.
-		if best.is_none() {
+		// No candidate irreversibly ends this front, unless it waits on a claim. Leave the
+		// cache under the same lock a lookup takes, before a route can return and a newcomer
+		// join the broadcast the end actions are about to close. Existing requesters keep
+		// their original verdict.
+		if best.is_none() && !self.front.waiting() {
 			table
 				.fronts
 				.remove_if(&(self.path.clone(), self.horizon, self.pin.clone()), |front| {
@@ -10137,7 +10139,10 @@ mod tests {
 
 		let fetch = track.consume().fetch_group(0, None);
 		let fill = requests.requested_fill_group().await.unwrap();
-		let mut fetched = fill.accept(crate::track::Info::timed()).unwrap();
+		let mut fetched = fill
+			.accept(crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		fetched
 			.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref())
 			.unwrap();
@@ -12341,7 +12346,10 @@ mod tests {
 		let serving = fetched.clone();
 		let _fetching = kio::clock::sim::spawn(async move {
 			while let Ok(request) = fetches.requested_fill_group().await {
-				let mut group = request.accept(crate::track::Info::timed()).unwrap();
+				let mut group = request
+					.accept(crate::track::Info::timed())
+					.unwrap()
+					.expect("a fresh group");
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(group.key_time(), frame.as_ref()).unwrap();
 				}

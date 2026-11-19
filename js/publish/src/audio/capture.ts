@@ -1,4 +1,4 @@
-import { Duration } from "@moq/clock";
+import { Duration, now, wall } from "@moq/clock";
 import * as Util from "@moq/hang/util";
 import {
 	type Computed,
@@ -16,6 +16,7 @@ import * as MediaClock from "../media-clock";
 import { follow } from "../media-timeline";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import CaptureWorklet from "./capture-worklet.ts?worklet";
+import { Stamper } from "./drift";
 import { isSampleSource, normalizeSource, type SampleSource, type Source, type SourceConfig } from "./types";
 
 /** A chunk of planar PCM, timestamped against the shared wall clock. */
@@ -27,11 +28,11 @@ export interface AudioFrame {
 	channels: Float32Array[];
 }
 
-/** @internal An {@link AudioFrame} as the capture worklet posts it: clock values cannot cross a port. */
+/** @internal A render quantum as the capture worklet posts it. */
 export interface WorkletFrame {
-	/** Microseconds on the shared clock. */
-	timestamp: number;
 	channels: Float32Array[];
+	/** The wall time the audio thread rendered it at, in milliseconds. */
+	rendered: number;
 }
 
 /** The PCM format frames actually arrive in, which is not always the one we asked for. */
@@ -46,6 +47,10 @@ export interface Format {
 // How many capture quanta a rendition may fall behind before it starts losing the oldest. A worklet
 // pushes on the audio thread and can't be told to wait. Roughly 85ms at 48kHz.
 const QUEUE = 32;
+
+// How far apart two quanta's render times may be, in milliseconds, before the audio thread was
+// asleep between them. Half the media clock's suspend threshold, and far past any render callback.
+const SKIP = 1_000;
 
 // The rate to run the capture graph at when nothing asks for another.
 //
@@ -248,10 +253,9 @@ export class Capture {
 			}
 		});
 
-		// Only capture while the graph runs. The worklet stamps frames from when it is built, so one built
-		// while suspended would lag the wall clock by however long the page waited for a gesture. And a
-		// suspended graph carries nothing, so it has no format: the encoder announces no audio until
-		// samples actually flow, and drops it again if Safari interrupts the context.
+		// Only capture while the graph runs. A suspended graph carries nothing, so it has no format: the
+		// encoder announces no audio until samples actually flow, and drops it again if Safari
+		// interrupts the context.
 		effect.run(
 			this.#guard((inner) => {
 				if (!inner.get(loaded) || !inner.get(running)) return;
@@ -265,9 +269,6 @@ export class Capture {
 					// worklet sees it. The default "max" just follows the input, which is the unreliable
 					// path on macOS. Only force it when we actually have a requested count to honor.
 					channelCountMode: requestedChannels !== undefined ? "explicit" : "max",
-					// Stamp audio on the same media clock as video (see video/processor.ts), so both
-					// tracks share an epoch and stay in sync.
-					processorOptions: { zero: MediaClock.now().asMicros() },
 				});
 				// The edge originates at root, so only root can remove it; the worklet has no outputs.
 				root.connect(worklet);
@@ -286,14 +287,25 @@ export class Capture {
 	// Turn the quanta the worklet pushes into a stream. The audio thread can't be asked to wait, so
 	// this never applies backpressure; the fanout above bounds each reader instead. A drop shows up
 	// downstream as a timestamp gap, which the framer re-anchors on rather than silently sliding.
+	//
+	// Audio is stamped on the same media clock as video (see video/processor.ts), so both tracks share
+	// an epoch and stay in sync: by sample count, steered onto when the audio thread rendered each
+	// quantum. Its own wall time, rather than when it reached this thread, so a stalled page delays
+	// the audio without making it look captured late.
 	#drain(worklet: AudioWorkletNode, sampleRate: number, effect: Effect): ReadableStream<AudioFrame> {
 		return new ReadableStream<AudioFrame>(
 			{
 				start: (controller) => {
-					// The worklet counts samples, which stop while the host sleeps, so each frame also
-					// takes the media clock's suspend jumps, or audio would land behind video by the sleep.
+					// The sample count stops while the host sleeps, so the timeline also takes the media
+					// clock's suspend jumps, or audio would land behind video by the sleep.
 					const jumps = follow();
+					// The jumps the timeline has taken, and when the last quantum was rendered.
+					let jumped = 0;
+					let rendered: number | undefined;
+					const stamper = new Stamper(sampleRate);
 					effect.event(worklet.port, "message", (event: Event) => {
+						const arrived = MediaClock.capture(now()).asMicros();
+						const at = wall().asUnixMillis();
 						const posted = (event as MessageEvent<WorkletFrame>).data;
 						const channelCount = posted.channels.length;
 						if (!channelCount) return;
@@ -304,11 +316,16 @@ export class Capture {
 							this.#out.format.set({ sampleRate, channelCount });
 						}
 
-						if ((controller.desiredSize ?? 0) > 0)
-							controller.enqueue({
-								timestamp: Duration.micros(posted.timestamp + jumps()),
-								channels: posted.channels,
-							});
+						// The quantum's first sample was captured at least its own length before it was rendered.
+						const delay = Math.max(at - posted.rendered, 0) * 1_000;
+						const captured = arrived - delay - (posted.channels[0].length / sampleRate) * 1_000_000;
+						// The audio thread's wall time skips the suspend too, so the jump lands on the first
+						// quantum rendered after it, however late that reaches this thread: one in flight across
+						// it was captured before.
+						if (rendered !== undefined && posted.rendered - rendered > SKIP) jumped = jumps();
+						rendered = posted.rendered;
+						const frame = stamper.push(posted.channels, captured, jumped);
+						if (frame && (controller.desiredSize ?? 0) > 0) controller.enqueue(frame);
 					});
 					worklet.port.start();
 				},

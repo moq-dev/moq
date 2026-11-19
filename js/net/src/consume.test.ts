@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Producer } from "./broadcast.ts";
 import { BroadcastCache } from "./consume.ts";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
@@ -16,7 +17,7 @@ test("cache identity follows the serving announcement, preserving held tracks", 
 	const instance = Instance.random();
 	cache.announce(pool, broad, { ...WireRoute.default, instance });
 	const source = new Producer();
-	const track = source.createTrack("video");
+	const track = defined(source.createTrack("video"));
 	const held = cache.insert(job, cache.instance(job), source.consume());
 	const ordered = held.track("video").subscribe().ordered();
 	cache.announce(job, specific, { ...WireRoute.default, instance });

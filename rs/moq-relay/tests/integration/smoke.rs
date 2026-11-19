@@ -689,7 +689,7 @@ async fn spawn_accept_relay(
 
 	let cluster = crate::spawn_cluster(cluster::Options::default());
 	let mut server = server.listen().await.expect("listen");
-	let quic = server.local_addr().ok();
+	let quic = server.local_addr();
 	let tcp = server.tcp_local_addr();
 
 	let handle = tokio::spawn(async move {

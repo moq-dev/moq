@@ -40,7 +40,7 @@ export interface Decision {
 export const HOLD: Decision = { pace: 0, low: 0, high: 0, urgent: false };
 
 /** The frames of one hop at `rate`: 10 ms, the crossfade a splice plays and the spacing of decisions. */
-export function hop(rate: number): number {
+function hop(rate: number): number {
 	return Math.max(1, Math.floor((rate * 10) / 1000));
 }
 
