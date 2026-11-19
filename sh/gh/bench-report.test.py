@@ -260,78 +260,6 @@ class ReportTest(unittest.TestCase):
             ],
         )
 
-    def gate_cost(self, modules="300 250000 check rs\n120 410500 test rs\n420 660500 whole run\n"):
-        raw = self.root / "raw"
-        (raw / "cold" / "js" / "js" / "net").mkdir(parents=True)
-        (raw / "toolchains.txt").write_text("rustc 1.98.1\ncargo 1.98.1\n")
-        (raw / "cold" / "loadavg").write_text("0.52 0.30 0.12 1/200 4242\n")
-        (raw / "cold" / "modules.txt").write_text(modules)
-        ours = ROOT / "rs" / "moq-net"
-        (raw / "cold" / "rustc.tsv").write_text(
-            f"moq-net\t{ours}\tlib\t9000\t300\n"
-            f"moq-net\t{ours}\ttest\t4000\t200\n"
-            f"moq-net\t{ours}\tlib\t1000\t100\n"
-            "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tbuild\t500\t50\n"
-            "aws-lc-sys\t/cargo/registry/src/aws-lc-sys-0.30.0\tlib\t1500\t70\n"
-            f"moq-ffi\t{ROOT / '.tmp' / 'fixture'}\tbin\t7000\t900\n"
-            "moq-ffi\t/tmp/fixture\tlib\t7000\t900\n"
-        )
-        (raw / "cold" / "nextest.xml").write_text(
-            '<testsuites><testsuite name="moq-net">'
-            '<testcase classname="moq-net" name="a" time="1.5"/><testcase classname="moq-net" name="b" time="0.25"/>'
-            '</testsuite><testsuite name="moq-net::integration">'
-            '<testcase classname="moq-net::integration" name="c" time="2"/></testsuite></testsuites>'
-        )
-        (raw / "cold" / "js" / "js" / "net" / "junit.xml").write_text(
-            '<testsuites><testsuite name="src/a.test.ts" file="src/a.test.ts" time="0.5">'
-            '<testcase name="x" time="0.25"/><testsuite name="nested" file="src/a.test.ts" time="0.5">'
-            '<testcase name="y" time="0.5"/></testsuite></testsuite></testsuites>'
-        )
-        common = (
-            '<testsuite name="js/common/api.test.ts" file="js/common/api.test.ts" time="0.125">'
-            '<testcase name="z" time="0.125"/></testsuite>'
-        )
-        (raw / "cold" / "js" / "junit.xml").write_text(f"<testsuites>{common}</testsuites>")
-        return report.cost(self.root)
-
-    def test_gate_cost_records_modules_crates_and_tests(self):
-        entries = {entry["name"]: entry for entry in self.gate_cost()}
-        values = {name: (entry["unit"], entry["value"]) for name, entry in entries.items()}
-        self.assertEqual(
-            values,
-            {
-                "cold/module/rs/check/wall": ("s", 300),
-                "cold/module/rs/check/cpu": ("s", 250),
-                "cold/module/rs/test/wall": ("s", 120),
-                "cold/module/rs/test/cpu": ("s", 410.5),
-                "cold/total/wall": ("s", 420),
-                "cold/total/cpu": ("s", 660.5),
-                "cold/rustc/cpu": ("s", 16),
-                "cold/rustc/instructions": ("instructions", 720),
-                # Our crate splits by target kind; the dependency's build script and library sum;
-                # the tooling tests' fixture crates, whatever their names, are left out.
-                "cold/crate/moq-net/lib/instructions": ("instructions", 400),
-                "cold/crate/moq-net/test/instructions": ("instructions", 200),
-                "cold/crate/aws-lc-sys/instructions": ("instructions", 120),
-                "cold/rust-test/moq-net": ("s", 1.75),
-                "cold/rust-test/moq-net::integration": ("s", 2),
-                # A file sums its tests, nested describe blocks included, rather than its elapsed time.
-                "cold/js-test/js/net/src/a.test.ts": ("s", 0.75),
-                "cold/js-test/js/common/api.test.ts": ("s", 0.125),
-            },
-        )
-        self.assertEqual(
-            entries["cold/total/wall"]["extra"],
-            "Load average 0.52 0.30 0.12 before the scenario; rustc 1.98.1; cargo 1.98.1",
-        )
-
-    def test_gate_cost_refuses_a_phase_that_did_not_pass(self):
-        for status in ("failed", "cancelled", "skipped"):
-            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
-                self.root = Path(directory)
-                with self.assertRaisesRegex(ValueError, "did not pass"):
-                    self.gate_cost(f"300 250000 check rs ({status})\n300 250000 whole run\n")
-
     def test_criterion_requires_fresh_measured_estimates(self):
         run = self.root / "runs" / "one"
         run.mkdir(parents=True)
@@ -581,27 +509,6 @@ class ReportTest(unittest.TestCase):
         page, rows = self.rows("c10")
         self.assertEqual(rows, {"bench-a/x": "muted", "bench-b/y": "muted"})
 
-    def test_each_publisher_stales_only_its_own_sources(self):
-        self.history("costs", [(f"c{day}", day, {"bench-a/x": 100, "bench-gate-cost/y": 100}) for day in range(1, 3)])
-        self.history("gate-cost", [("g3", 3, {"bench-gate-cost/y": 100})])
-        # Gate cost's own run moved the source; Nightly's latest run is still c2.
-        page, rows = self.rows()
-        self.assertEqual(rows, {"bench-a/x": "muted", "bench-gate-cost/y": "muted"})
-        self.assertNotIn("stale", page)
-        # A Nightly run whose bench-a failed stales bench-a alone.
-        page = report.regressions(self.root, "c4", now=START + 31 * DAY)
-        self.assertIn("bench-a (1) <span", page)
-        self.assertNotIn("bench-gate-cost (1) <span", page)
-        # A gate cost run that failed stales only its source.
-        page = report.regressions(self.root, "g5", now=START + 31 * DAY, publisher="gate-cost")
-        self.assertNotIn("bench-a (1) <span", page)
-        self.assertIn("bench-gate-cost (1) <span", page)
-        # Nightly's next render keeps that failure stale, from the run gate cost recorded.
-        report.index(self.root, "g5", publisher="gate-cost")
-        page = report.regressions(self.root, "c2", now=START + 31 * DAY)
-        self.assertNotIn("bench-a (1) <span", page)
-        self.assertIn("bench-gate-cost (1) <span", page)
-
     def test_table_replaces_charts_and_keeps_history(self):
         with self.assertRaises(ValueError):
             report.index(self.root)
@@ -670,8 +577,7 @@ class ReportTest(unittest.TestCase):
             git("worktree", "remove", str(history), cwd=checkout)
             site = self.root / f"site-{iteration}"
             subprocess.run(
-                # Nightly publishes first, then gate cost, which has no paired comparison.
-                ["bash", str(publisher), "finish", str(site), *(["nightly", str(paired)] if iteration == 1 else ["gate-cost"])],
+                ["bash", str(publisher), "finish", str(site), str(paired)],
                 cwd=checkout,
                 env=env,
                 check=True,
@@ -679,14 +585,8 @@ class ReportTest(unittest.TestCase):
             )
             self.assertFalse((site / "source").exists())
             self.assertEqual((site / "bench/costs/data.js").read_text(), stored)
-            # The source checkout's commit has no point, so Nightly's only source is stale, and
-            # stays stale on gate cost's run, which reads the commit Nightly's run recorded.
+            # The source checkout's commit has no point, so the only source is stale.
             self.assertIn("stale: last measured", (site / "bench/index.html").read_text())
-            self.assertEqual(
-                set(json.loads((site / "bench/publishers.json").read_text())),
-                {"nightly"} if iteration == 1 else {"nightly", "gate-cost"},
-            )
-            self.assertEqual(json.loads((site / "bench/paired.json").read_text()), {"sources": {}})
             git("worktree", "remove", str(site), cwd=checkout)
             git("branch", "-D", "gh-pages", cwd=checkout)
         self.assertEqual(git("--git-dir", str(remote), "show", "gh-pages:bench/costs/data.js").stdout, stored)

@@ -318,8 +318,7 @@ jobs:
 
   # gh-pages is the one Pages site, and each directory has one writer: this job owns
   # bench/ (the regression table and its history) and the root index listing every
-  # report, except bench/gate-cost/ (gate-cost.yml, which also rerenders the table),
-  # smoke.yml owns relays/, and interop.yml owns interop/. Each commits only
+  # report, smoke.yml owns relays/, and interop.yml owns interop/. Each commits only
   # its own directory, deploys the whole branch, and holds the benchmark-pages group
   # so they never race. `queue: max` keeps every waiting writer; the default queue
   # holds one and cancels the older, which would silently drop a night's report.
@@ -389,7 +388,7 @@ jobs:
           comment-on-alert: false
           fail-on-alert: false
       - name: Publish shared history
-        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site nightly benchmark-reports/paired.json
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site benchmark-reports/paired.json
       - name: Drop a stale Pages artifact
         run: nix shell --inputs-from . nixpkgs#just --command just gh pages-clean
         env:
@@ -848,8 +847,7 @@ jobs:
   # and have the disk for a full build, which a hosted runner ran out of.
   # Those runners keep state the queue builds with, such as the Cargo registry,
   # so only main's reviewed code runs here, without the Rust cache, which only
-  # the queue writes (see .github/actions/rust-cache), and with a fresh home,
-  # as for Gate cost (gate-cost.yml).
+  # the queue writes (see .github/actions/rust-cache), and with a fresh home.
   gate:
     name: Gate
     if: github.ref == 'refs/heads/main'

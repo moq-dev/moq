@@ -250,67 +250,6 @@ def sizes(directory):
     )
 
 
-def cost(directory):
-    """Read the gate cost scenarios: each module's wall and CPU time, each crate's compile
-    instructions, and each test binary's and test file's summed test time."""
-    raw = directory / "raw"
-    toolchains = "; ".join((raw / "toolchains.txt").read_text().splitlines())
-    scenarios = sorted(path for path in raw.iterdir() if path.is_dir())
-    if not scenarios:
-        raise ValueError(f"no gate cost scenarios in {raw}")
-    entries = []
-    for scenario in scenarios:
-        name = scenario.name
-        load = " ".join((scenario / "loadavg").read_text().split()[:3])
-        extra = f"Load average {load} before the scenario; {toolchains}"
-        for line in (scenario / "modules.txt").read_text().splitlines():
-            wall, cpu, label = line.split(" ", 2)
-            if label == "whole run":
-                key, note = "total", {"extra": extra}
-            elif match := re.fullmatch(r"(\w+) (\w+)", label):
-                key, note = f"module/{match[2]}/{match[1]}", {}
-            else:
-                raise ValueError(f"{name}: a gate phase did not pass: {label}")
-            entries.append({"name": f"{name}/{key}/wall", "unit": "s", "value": value(int(wall)), **note})
-            entries.append({"name": f"{name}/{key}/cpu", "unit": "s", "value": value(int(cpu) / 1000), **note})
-
-        # The repository's own crates split by target kind; a dependency's builds sum into one
-        # series. A tooling test's fixture crate, in a scratch directory, counts only in its module.
-        crates, cpu = {}, 0
-        for line in (scenario / "rustc.tsv").read_text().splitlines():
-            package, manifest, kind, milliseconds, instructions = line.split("\t")
-            if Path(manifest).is_relative_to(ROOT) and not Path(manifest).is_relative_to(ROOT / ".tmp"):
-                key = f"{package}/{kind}"
-            elif "/registry/src/" in manifest or "/git/checkouts/" in manifest:
-                key = package
-            else:
-                continue
-            crates[key] = crates.get(key, 0) + int(instructions)
-            cpu += int(milliseconds)
-        entries.append({"name": f"{name}/rustc/cpu", "unit": "s", "value": value(cpu / 1000)})
-        entries.append({"name": f"{name}/rustc/instructions", "unit": "instructions", "value": sum(crates.values())})
-        entries += [
-            {"name": f"{name}/crate/{key}/instructions", "unit": "instructions", "value": value(total)}
-            for key, total in sorted(crates.items())
-        ]
-
-        # Slot time, the sum of each test's elapsed time, does not shrink with more workers.
-        tests = {}
-        for case in ElementTree.parse(scenario / "nextest.xml").getroot().iter("testcase"):
-            key = f"rust-test/{case.get('classname')}"
-            tests[key] = tests.get(key, 0) + float(case.get("time"))
-        for report in sorted((scenario / "js").glob("**/junit.xml")):
-            package = report.parent.relative_to(scenario / "js")
-            for suite in ElementTree.parse(report).getroot().findall("testsuite"):
-                # Bun's suite time is elapsed, which shrinks when tests overlap.
-                seconds = sum(float(case.get("time")) for case in suite.iter("testcase"))
-                tests[f"js-test/{(package / suite.get('file')).as_posix()}"] = seconds
-        entries += [
-            {"name": f"{name}/{key}", "unit": "s", "value": value(seconds)} for key, seconds in sorted(tests.items())
-        ]
-    return checked(entries)
-
-
 def prepare(directory, output):
     costs, rates, comparisons = [], [], {}
     for source in sorted(directory.glob("bench-*")):
@@ -350,8 +289,6 @@ def prepare(directory, output):
 
 
 HISTORY_PREFIX = "window.BENCHMARK_DATA = "
-# Each history directory under bench/ and the workflow that publishes it, on its own schedule.
-HISTORY = {"costs": "nightly", "rates": "nightly", "gate-cost": "gate-cost"}
 BASELINE = 7
 TREND = 30
 
@@ -359,7 +296,7 @@ TREND = 30
 def history(directory):
     """Read github-action-benchmark's stored runs into one point per series and commit."""
     series = {}
-    for kind, publisher in HISTORY.items():
+    for kind in ("costs", "rates"):
         path = directory / "bench" / kind / "data.js"
         if not path.exists():
             continue
@@ -375,7 +312,6 @@ def history(directory):
                         "commit": commit["id"],
                         "order": (when, run["date"]),
                         "date": run["date"],
-                        "publisher": publisher,
                         "unit": bench["unit"],
                         "value": value(bench["value"]),
                     }
@@ -518,21 +454,14 @@ exceeds {threshold}%. {"; ".join(notes)}</p>"""
     return "\n".join(parts) + "\n<h2>Nightly trend</h2>\n"
 
 
-def regressions(directory, commit=None, now=None, publisher="nightly"):
+def regressions(directory, commit=None, now=None):
     """Render every series' newest point against its own baseline as one static table."""
     series = history(directory)
     if not series:
         raise ValueError("no benchmark history to publish")
     now = time.time() if now is None else now
-    # Each publisher's latest commit: the publishing run's own, else the one its last run recorded,
-    # else its newest point, so one publisher's render keeps another's failures stale.
-    latest = {}
-    for point in sorted((point for points in series.values() for point in points), key=lambda point: point["order"]):
-        latest[point["publisher"]] = point["commit"]
-    if (runs := directory / "bench" / "publishers.json").exists():
-        latest.update(json.loads(runs.read_text()))
-    if commit is not None:
-        latest[publisher] = commit
+    if commit is None:
+        commit = max((points[-1] for points in series.values()), key=lambda point: point["order"])["commit"]
     # A source records every series or none, so a series missing from its source's newest run was retired.
     sources = {}
     for name, points in series.items():
@@ -544,8 +473,7 @@ def regressions(directory, commit=None, now=None, publisher="nightly"):
         source = name.split("/", 1)[0]
         if points[-1]["commit"] != sources[source]["commit"]:
             continue
-        newest = sources[source]
-        row = {**assess(points), "name": name, "stale": newest["commit"] != latest[newest["publisher"]]}
+        row = {**assess(points), "name": name, "stale": sources[source]["commit"] != commit}
         if row["stale"]:
             row.pop("flag", None)
         (flagged if "flag" in row else sections[source]).append(row)
@@ -557,7 +485,7 @@ def regressions(directory, commit=None, now=None, publisher="nightly"):
     for source, rows in sections.items():
         newest = sources[source]
         label = f"{html.escape(source)} ({len(rows)})"
-        if newest["commit"] != latest[newest["publisher"]]:
+        if newest["commit"] != commit:
             measured = datetime.fromtimestamp(newest["date"] / 1000, timezone.utc)
             days = math.floor((now - newest["date"] / 1000) / 86400)
             label += (
@@ -579,11 +507,10 @@ td{{font-variant-numeric:tabular-nums}}polyline{{fill:none;stroke:#555}}.worse{{
 .better{{background:#cec}}.muted{{color:#888;font-weight:400}}input{{font:inherit;width:100%;padding:.3rem}}
 </style>
 <h1>MoQ nightly benchmarks</h1>
-<p>Published by the {publisher} run at
-<a href="https://github.com/moq-dev/moq/commit/{latest[publisher]}">{latest[publisher][:9]}</a>, {len(flagged)} flagged
+<p>Nightly <a href="https://github.com/moq-dev/moq/commit/{commit}">{commit[:9]}</a>, {len(flagged)} flagged
 of {sum(map(len, sections.values())) + len(flagged)} series. Each series compares its newest point with the median
 of its previous {BASELINE}. Red is worse and green is better by more than 10% and 3 times that window's median
-absolute deviation. Grey rows lack history or come from a source that did not finish on its publisher's latest run.
+absolute deviation. Grey rows lack history or come from a source that did not finish tonight.
 <a href="https://github.com/moq-dev/moq/blob/main/bench/README.md#nightly-trends">Metrics and local
 reproduction</a></p>
 <input id="filter" type="search" placeholder="Filter series">
@@ -604,18 +531,14 @@ filter.oninput = () => {{
 """
 
 
-def index(directory, commit=None, paired_path=None, publisher="nightly"):
+def index(directory, commit=None, paired_path=None):
     destination = directory / "bench"
     destination.mkdir(parents=True, exist_ok=True)
     if paired_path is not None:
         (destination / "paired.json").write_text(paired_path.read_text())
-    (destination / "index.html").write_text(regressions(directory, commit, publisher=publisher))
-    if commit is not None:
-        runs = destination / "publishers.json"
-        recorded = json.loads(runs.read_text()) if runs.exists() else {}
-        runs.write_text(json.dumps({**recorded, publisher: commit}, indent=2, sort_keys=True) + "\n")
+    (destination / "index.html").write_text(regressions(directory, commit))
     # The table replaces the action's chart pages, which it only writes when missing.
-    for kind in HISTORY:
+    for kind in ("costs", "rates"):
         if (destination / kind).is_dir():
             (destination / kind / "index.html").write_text(
                 '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=../">'
@@ -646,7 +569,7 @@ def index(directory, commit=None, paired_path=None, publisher="nightly"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for command in ("rust", "rust-test", "js", "size", "cost", "prepare"):
+    for command in ("rust", "rust-test", "js", "size", "prepare"):
         sub = commands.add_parser(command)
         sub.add_argument("directory", type=Path)
         sub.add_argument("output", type=Path)
@@ -657,8 +580,7 @@ def main():
     sub.add_argument("directory", type=Path)
     sub = commands.add_parser("index")
     sub.add_argument("directory", type=Path)
-    sub.add_argument("--publisher", choices=sorted(set(HISTORY.values())), default="nightly", help="the workflow publishing this run")
-    sub.add_argument("--commit", help="the publishing run's commit; its sources without a point for it are stale")
+    sub.add_argument("--commit", help="the nightly commit; sources without a point for it are stale")
     sub.add_argument("--paired", type=Path, help="tonight's prepared paired comparisons, replacing the published ones")
     args = parser.parse_args()
     if args.command == "rust":
@@ -673,15 +595,13 @@ def main():
         write(args.output, javascript(args.directory))
     elif args.command == "size":
         write(args.output, sizes(args.directory))
-    elif args.command == "cost":
-        write(args.output, cost(args.directory))
     elif args.command == "prepare":
         prepare(args.directory, args.output)
     elif args.command == "status":
         args.directory.mkdir(parents=True, exist_ok=True)
         (args.directory / "outcome.json").write_text(json.dumps({"status": args.status}) + "\n")
     else:
-        index(args.directory, args.commit, args.paired, args.publisher)
+        index(args.directory, args.commit, args.paired)
 
 
 if __name__ == "__main__":

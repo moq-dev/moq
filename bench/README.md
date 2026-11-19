@@ -822,21 +822,17 @@ filter. A series with fewer than 8 points is grey.
 
 A failed or cancelled source records no point, so its section is grey and
 marked stale with the date and commit of its last measurement; it is never
-flagged as tonight's result. Staleness is judged against the source's own
-publisher, whose latest run `bench/publishers.json` records: gate cost runs on
-its own schedule, so a Nightly without it, or a gate cost run without the
-Nightly sources, stales neither, and each keeps the other's failures stale. A series missing from its source's newest run was
+flagged as tonight's result. A series missing from its source's newest run was
 retired and leaves the table. Re-runs of the same commit collapse to the latest
 point.
 
 The Nightly workflow keeps history on one `gh-pages` branch, where
 `github-action-benchmark` appends each night's points to `bench/{costs,rates}/data.js`
-with its alerts, comments, and charts unused; the Gate cost workflow appends its own to
-`bench/gate-cost/data.js` and rerenders the same table. Each publisher runs only on `main`,
+with its alerts, comments, and charts unused. The publisher runs only on `main`,
 serializes history writes, renders the table from that history even when every
 source failed, and deploys the branch explicitly. Re-running its job in place
 fails, because the earlier attempt's `github-pages` artifact remains; delete
-that artifact first or wait for the next scheduled run.
+that artifact first or wait for the next Nightly.
 
 The table includes these measurements:
 
@@ -860,33 +856,6 @@ The table includes these measurements:
 - Shipping sizes, in bytes: the release artifacts and JS
   bundles the [size report](../sh/size/README.md) measures, recorded even on a
   night its growth check fails. Release build times stay out.
-- The merge gate's own cost (`bench-gate-cost`), described below.
-
-The gate cost source runs `just gh gate-cost` on a merge queue runner, in
-`gate-cost.yml` at the queue's quietest hour rather than in Nightly, in two
-scenarios: `cold`, a `just ci --all` from an empty target directory with no
-Rust cache, then `moq-net`, the diff-scoped `just ci` an agent runs after an
-edit to moq-net, on what `cold` built. Modules run one at a time
-(`CHECK_JOBS=1`), so each module's cost is its own rather than whichever lane
-reached a shared build first. Each scenario records `total` and
-`module/MODULE/PHASE` wall and CPU seconds, which the dispatcher writes to
-`CHECK_TIMES`; CPU counts the processes a phase waited for, so a daemon's work,
-such as a Nix build or Gradle's, is wall time only. `rustc` and
-`crate/PACKAGE/KIND` (`lib`, `bin`, `test`, or `build` for a build script's
-compile) for the repository's own crates, or `crate/PACKAGE` for a dependency,
-are the user-space instructions of every rustc run, which
-`sh/gh/rustc-cost.sh` counts under `perf stat` as the `RUSTC_WRAPPER`.
-Instructions are the low-noise series for compiles; build script runs, such as
-aws-lc-sys's C build, and tooling tests' fixture crates count only in their
-module. `rust-test/BINARY` and
-`js-test/FILE` are summed test seconds (slot time, which more workers do not
-shrink) from the workspace nextest run's JUnit report and a Bun JUnit report
-per package. The total's history keeps the load average before the scenario
-and the toolchain versions. Reproduce it from a clean checkout with an empty
-target directory, the Rust cache off (no mbx shim on PATH), and
-`kernel.perf_event_paranoid` at 2 or below, and `perf_event_open` allowed by
-any seccomp filter (a systemd-nspawn container needs
-`--system-call-filter=perf_event_open`); it takes an hour or more.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.

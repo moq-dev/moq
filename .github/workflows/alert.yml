@@ -18,7 +18,6 @@ on:
       - Cache
       - CodSpeed
       - Docker
-      - Gate cost
       - GStreamer CI image
       - Interop
       - libmoq
@@ -73,7 +72,7 @@ jobs:
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.event != 'pull_request_target' &&
       (github.event.workflow_run.event == 'schedule' ||
-      !contains(fromJSON('["CodSpeed", "Gate cost", "GStreamer CI image", "Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
+      !contains(fromJSON('["CodSpeed", "GStreamer CI image", "Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
     runs-on: ubuntu-latest
     # The webhook lives in the `alert` Environment, which admits only `main`,
     # where workflow_run runs. It is not a release credential, so it stays out
