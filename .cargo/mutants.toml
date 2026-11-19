@@ -56,6 +56,9 @@ exclude_re = [
     # original retries on the new copy and the arm prevents a lost wake.
     'replace \|\| with && in Fetching::(poll_moved|moved)$',
     'replace Fetching::moved -> bool with false$',
+    # The same for `Recover::poll`'s route watch, whose generation it just read; once no
+    # front moves the copy, the read never continues on the watch.
+    ':\d+:43: replace \|\| with && in Recover::poll$',
     ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
     # The reader list's sweep only bounds memory: a dead entry fails every
     # `Weak::upgrade`, and `subscribe` sweeps the list again.

@@ -4338,31 +4338,42 @@ mod test {
 
 	/// A failed group no front is left to move ends once the serving route refuses the rest
 	/// and its subscription will not deliver the group either, even when that refusal is a
-	/// delivery failure: no next route will come. It waits while the fetch is unanswered.
+	/// delivery failure: no next route will come. It waits while the fetch is unanswered, or
+	/// while the subscription may still deliver the group.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_concluded_tracks_group_ends_once_the_serving_route_refuses_the_rest() {
-		let routes = Producer::new();
-		let logical = logical(&routes);
-		let a = copy();
-		routes.serve(a.consume());
-		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
-		open.write_frame(ts(0), b"a".as_ref()).unwrap();
-		let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
-		assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
+		for dropped in [true, false] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+			open.write_frame(ts(0), b"a".as_ref()).unwrap();
+			let mut fetched = logical.consume().fetch_group(0, None).now_or_never().unwrap().unwrap();
+			assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
 
-		let b = copy();
-		let dynamic = b.requests();
-		routes.serve(b.consume());
-		b.drop_groups(0..1, StreamError::Old);
-		routes.conclude();
-		open.abort(Error::Cancel).unwrap();
-		assert!(fetched.read_frame().now_or_never().is_none(), "the fetch of the rest is unanswered");
+			let b = copy();
+			let dynamic = b.requests();
+			routes.serve(b.consume());
+			if dropped {
+				b.drop_groups(0..1, StreamError::Old);
+			}
+			routes.conclude();
+			open.abort(Error::Cancel).unwrap();
+			assert!(
+				fetched.read_frame().now_or_never().is_none(),
+				"dropped={dropped}: the fetch of the rest is unanswered"
+			);
 
-		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		request.reject(Error::Cancel);
-		let res = fetched.read_frame().now_or_never();
-		assert!(matches!(res, Some(Err(Error::Cancel))), "{res:?}");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			request.reject(Error::Cancel);
+			let res = fetched.read_frame().now_or_never();
+			match dropped {
+				true => assert!(matches!(res, Some(Err(Error::Cancel))), "{res:?}"),
+				false => assert!(res.is_none(), "b's subscription may still deliver it: {res:?}"),
+			}
+		}
 	}
 
 	/// A fetched group whose route dies after the front finished the track continues on the

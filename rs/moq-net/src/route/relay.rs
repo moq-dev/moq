@@ -3668,6 +3668,37 @@ mod tests {
 		assert_eq!(told[&(p("short"), 7)].len(), MAX_HOPS - 1);
 	}
 
+	/// An endpoint names itself in no chain, so it takes and tells a claim one hop longer
+	/// than a relay does.
+	#[test]
+	fn an_endpoint_names_itself_in_no_chain() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		router.endpoint();
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Scoped(vec![p(ROOT)]));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		let long: Vec<Id> = (100..100 + MAX_HOPS as Id - 2).chain([2]).collect();
+		let changes = vec![((p("long"), 7), chained(long.clone()))];
+		router
+			.recv(
+				2,
+				Msg::Claims {
+					origin: node(2),
+					changes,
+					floor: 1,
+				},
+			)
+			.unwrap();
+		router.drain();
+		let edit = Edit {
+			remove: Vec::new(),
+			add: vec![p(ROOT)],
+		};
+		router.edit(3, edit).unwrap();
+		let told = chains(router.drain(), 3);
+		assert_eq!(told.get(&(p("long"), 7)), Some(&long));
+	}
+
 	/// A message that changes one claim twice is one the rule never sends, so it is
 	/// refused whole, from a routing neighbour or an endpoint.
 	#[test]
