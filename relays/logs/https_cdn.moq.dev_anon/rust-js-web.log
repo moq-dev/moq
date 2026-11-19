@@ -1,13 +1,15 @@
 [page] negotiated protocol: moq-lite-06
 [page] announced: prefix=
-[page] announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5/~a1d8juh6n6bl active=true
-[page] announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
-[page] announced: broadcast=smoke-rust-4065-21198.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-4065-21198.hang track=catalog.json
-[page] announced: broadcast=sp-blume-town-test active=true
 [page] announce: prefix=
-[page] subscribe ok: id=0 broadcast=smoke-rust-4065-21198.hang track=catalog.json
-[page] received catalog hang smoke-rust-4065-21198.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-4065-21198.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-4065-21198.hang track=0.avc3
-decoded 18 frames from smoke-rust-4065-21198.hang (vite)
+[page] announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5/~dp1b5vywm3e4 active=true
+[page] announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
+[page] announced: broadcast=alluno/input/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5 active=true
+[page] announced: broadcast=moq-hls-demo-dev active=true
+[page] announced: broadcast=smoke-rust-4117-13483.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4117-13483.hang track=catalog.json
+[page] announced: broadcast=sp-blume-town-test active=true
+[page] subscribe ok: id=0 broadcast=smoke-rust-4117-13483.hang track=catalog.json
+[page] received catalog hang smoke-rust-4117-13483.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4117-13483.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4117-13483.hang track=0.avc3
+decoded 20 frames from smoke-rust-4117-13483.hang (vite)

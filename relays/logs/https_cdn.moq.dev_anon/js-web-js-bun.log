@@ -2,18 +2,20 @@ https://cdn.moq.dev/anon connected via WebTransport
 https://cdn.moq.dev/anon negotiated ALPN: moq-lite-06
 announced: prefix=
 connected version=moq-lite-06
-announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5/~a1d8juh6n6bl active=true
+announced: broadcast=alluno/comms/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5/~dp1b5vywm3e4 active=true
 announced: broadcast=alluno/host/4defd109-b88c-4900-8c00-e409f1cb7e6e active=true
+announced: broadcast=alluno/input/4defd109-b88c-4900-8c00-e409f1cb7e6e/f83d734e-a180-4294-ad90-be4d09c3f5d5 active=true
+announced: broadcast=moq-hls-demo-dev active=true
 announced: broadcast=sp-blume-town-test active=true
 announce: prefix=
-announced: broadcast=smoke-js-web-4065-18841.hang active=true
-subscribe start: id=0 broadcast=smoke-js-web-4065-18841.hang track=catalog.json
-subscribe ok: id=0 broadcast=smoke-js-web-4065-18841.hang track=catalog.json
-subscribe start: id=1 broadcast=smoke-js-web-4065-18841.hang track=video
-subscribe ok: id=1 broadcast=smoke-js-web-4065-18841.hang track=video
-received 6916 bytes from smoke-js-web-4065-18841.hang
-subscribe close: id=0 broadcast=smoke-js-web-4065-18841.hang track=catalog.json
-subscribe close: id=1 broadcast=smoke-js-web-4065-18841.hang track=video
+announced: broadcast=smoke-js-web-4117-31397.hang active=true
+subscribe start: id=0 broadcast=smoke-js-web-4117-31397.hang track=catalog.json
+subscribe ok: id=0 broadcast=smoke-js-web-4117-31397.hang track=catalog.json
+subscribe start: id=1 broadcast=smoke-js-web-4117-31397.hang track=video
+subscribe ok: id=1 broadcast=smoke-js-web-4117-31397.hang track=video
+received 7043 bytes from smoke-js-web-4117-31397.hang
+subscribe close: id=0 broadcast=smoke-js-web-4117-31397.hang track=catalog.json
+subscribe close: id=1 broadcast=smoke-js-web-4117-31397.hang track=video
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,

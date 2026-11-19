@@ -1,15 +1,15 @@
-[2m2026-11-19T12:38:44.207555Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6057667156600033 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-19T12:38:44.211205Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-19T12:38:44.211219Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-19T12:38:44.214749Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
-[2m2026-11-19T12:38:44.214795Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-19T12:38:44.362972Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
-[2m2026-11-19T12:38:44.362995Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
-[2m2026-11-19T12:38:44.464983Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4065-6252.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-19T12:38:44.558776Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4065-6252.hang [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-19T12:38:44.666985Z[0m [33m WARN[0m [2mmoq_mux::container::consumer[0m[2m:[0m track failed; ending the reader [3mtrack[0m[2m=[0m"0.avc3" [3merror[0m[2m=[0mRemote(18)
-[2m2026-11-19T12:38:44.667073Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-rust-4065-6252.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-19T12:38:44.667195Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
+[2m2026-11-19T17:12:26.020834Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m7677373861677351 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-19T17:12:26.023852Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-19T17:12:26.023865Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-19T17:12:26.026951Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
+[2m2026-11-19T17:12:26.027154Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-19T17:12:26.130518Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-22
+[2m2026-11-19T17:12:26.130550Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mmoqt://moq-ng.cloudflare.mediaoverquic.com:443
+[2m2026-11-19T17:12:26.237964Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4117-4178.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-19T17:12:26.388582Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe started [3mbroadcast[0m[2m=[0msmoke-rust-4117-4178.hang [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-19T17:12:26.540325Z[0m [33m WARN[0m [2mmoq_mux::container::consumer[0m[2m:[0m track failed; ending the reader [3mtrack[0m[2m=[0m"0.avc3" [3merror[0m[2m=[0mRemote(18)
+[2m2026-11-19T17:12:26.540437Z[0m [32m INFO[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe cancelled [3mbroadcast[0m[2m=[0msmoke-rust-4117-4178.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-19T17:12:26.540582Z[0m [32m INFO[0m [2mmoq_net::ietf::session[0m[2m:[0m session terminated [3merr[0m[2m=[0mtransport: connection error: closed
 Error: moq: remote error: code=18
 
 Caused by:

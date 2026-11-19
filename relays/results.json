@@ -1,6 +1,6 @@
 {
-  "generated": "2026-11-19T12:43:29Z",
-  "run_url": "https://github.com/moq-dev/moq/actions/runs/44525142071",
+  "generated": "2026-11-19T17:17:12Z",
+  "run_url": "https://github.com/moq-dev/moq/actions/runs/44573983262",
   "registry": "https://raw.githubusercontent.com/englishm/moq-interop-runner/main/implementations.json",
   "pairs": [
     "rust → rust",
@@ -645,7 +645,7 @@
           "status": "FAIL",
           "pub_version": "moq-transport-22",
           "sub_version": "moq-transport-22",
-          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects: session terminated err=transport: connection error: closed",
+          "reason": "SUBSCRIBE for catalog.json, no SUBSCRIBE_OK logged, no objects",
           "sub_log": "https_relay.moqtail.dev/js-web-rust.log",
           "pub_log": "https_relay.moqtail.dev/pub-js-web.log"
         },
