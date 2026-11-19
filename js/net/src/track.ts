@@ -3629,11 +3629,13 @@ export class Subscriber {
 				return keys.length === 0 ? "unknown" : "before";
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
-			back: (latest, back) => {
-				// A lite-07 copy holds only part of the track, so it counts back as its publisher did,
-				// from the latest group the publisher counted from: a newer one moved the live edge.
+			// A lite-07 copy holds only part of the track, so it starts where its publisher did,
+			// counting from the same latest group: a newer one moved the live edge.
+			reportedStart: (latest, back) => {
 				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
-				if (reported !== undefined && reported.latest === latest) return reported.start;
+				return reported !== undefined && reported.latest === latest ? reported.start : undefined;
+			},
+			back: (latest, back) => {
 				if (back === 0n) return latest;
 				// Bounded by the cache: a huge count reaches back to the oldest.
 				const index = BigInt(keyIndex(keys, latest)) - back;
