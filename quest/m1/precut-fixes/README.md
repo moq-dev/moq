@@ -20,9 +20,13 @@ lite-07 sequence addressing, socket endpoints, moq-e2ee).
 Decided 2026-11-17 (maintainer, [moq-dev/moq#9010](https://github.com/moq-dev/moq/pull/9010#issuecomment-6959731587)): ✅ every finding gates the cut, including those `release` already ships,
 so they all live in this epic, which the cut requires (rejected: gating only
 what `release` lacks, the agent's /quest-afk recommendation; gating none).
-The one exception: ✅ [ts-step-damage](/quest/m1/ts-step-damage.md) is a
+The one exception: ✅ ts-step-damage (a lone TS stream's timestamp step) was a
 standalone low-priority m1 quest outside the gate, since it was read from
 source with no field report (rejected: keeping it in the gate; deleting it).
+Deleted 2026-11-19 (maintainer, /quest-complete): with no field report, an
+import that ends with the cause, as it has since
+[moq-dev/moq#9170](https://github.com/moq-dev/moq/pull/9170), is the right
+behavior for an unexplained step.
 ✅ Every quest the audit added stays in m1 (rejected: only this epic in m1).
 
 Each child reproduces its finding before fixing it: most were read from
