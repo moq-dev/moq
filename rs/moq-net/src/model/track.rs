@@ -10639,14 +10639,16 @@ impl Subscriber {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				keys.into_iter().map(|key| cursor.filter.window.resolved_key(key)).collect()
+				keys.into_iter()
+					.map(|key| cursor.filter.window.resolved_key(key))
+					.collect()
 			}
 			Inner::Resume(resume, _) => resume.resolved_keys(keys),
 		}
 	}
 
 	/// This subscriber's range keyed `key` as resolved here; see [`Self::resolved_keys`].
-	#[cfg(test)]
+	#[cfg(all(test, feature = "async"))]
 	pub(crate) fn resolved_range(&mut self, key: u64) -> Option<Resolved> {
 		self.resolved_keys([key]).pop().flatten()
 	}

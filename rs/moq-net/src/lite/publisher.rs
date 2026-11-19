@@ -8490,7 +8490,12 @@ mod serve_group_test {
 		};
 		run.update(lite07_add(&run, &[(0, served)], 1, &[time]));
 		let live = [(0, served), (1, time)];
-		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(9000), 0, None, None)]));
+		run.update(lite07_add(
+			&run,
+			&live,
+			2,
+			&[lite::Range::span(Some(9000), 0, None, None)],
+		));
 		assert_eq!(run.floor, 4000);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let served: Vec<u64> = group_headers(&session, Version::Lite07)
@@ -8629,7 +8634,12 @@ mod serve_group_test {
 		};
 		run.update(lite07_add(&run, &[], 1, &[time]));
 		assert_eq!(run.track.resolved_range(1).map(|r| r.start), Some(4000));
-		run.update(lite07_add(&run, &[(1, time)], 2, &[lite::Range::span(Some(9000), 0, None, None)]));
+		run.update(lite07_add(
+			&run,
+			&[(1, time)],
+			2,
+			&[lite::Range::span(Some(9000), 0, None, None)],
+		));
 		assert_eq!(run.floor, 4000);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let served: Vec<u64> = group_headers(&session, Version::Lite07)

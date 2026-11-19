@@ -148,39 +148,11 @@ impl Cover {
 		first_from(&self.root, 0, from, want)
 	}
 
-	/// The last key at or before `to` whose running sum is `want`.
-	fn last_key(&self, to: u64, want: Want) -> Option<u64> {
-		last_to(&self.root, 0, to, want)
-	}
-
-	/// The first boundary key above `after`.
-	fn successor(&self, after: u64) -> Option<u64> {
-		let mut link = &self.root;
-		let mut found = None;
-		while let Some(node) = link {
-			if node.key > after {
-				found = Some(node.key);
-				link = &node.left;
-			} else {
-				link = &node.right;
-			}
-		}
-		found
-	}
-
 	/// Where the run covering `key` ends.
 	fn run_end(&self, key: u64) -> u64 {
 		match self.first_key(key, Want::Gap) {
 			Some(gap) => gap - 1,
 			None => u64::MAX,
-		}
-	}
-
-	/// Where the run covering `key` starts.
-	fn run_start(&self, key: u64) -> u64 {
-		match self.last_key(key, Want::Gap) {
-			Some(gap) => self.successor(gap).expect("a covered key past the gap"),
-			None => first(&self.root).expect("a covered key"),
 		}
 	}
 
@@ -194,18 +166,6 @@ impl Cover {
 			false => self.first_key(lo, Want::Covered).filter(|start| *start <= hi)?,
 		};
 		Some(start..=self.run_end(start))
-	}
-
-	/// The highest run reaching into `lo..=hi`, its end clipped to `hi`.
-	pub fn last(&self, lo: u64, hi: u64) -> Option<RangeInclusive<u64>> {
-		if lo > hi {
-			return None;
-		}
-		let end = match self.contains(hi) {
-			true => hi,
-			false => self.run_end(self.last_key(hi, Want::Covered)?),
-		};
-		(end >= lo).then(|| self.run_start(end)..=end)
 	}
 
 	/// The runs from `from` on, lowest first, each whole but clipped to `from`.
@@ -498,38 +458,6 @@ fn first_from(link: &Link, offset: i64, from: u64, want: Want) -> Option<u64> {
 	first_in(&node.right, at, want)
 }
 
-/// The last key of the subtree, entered with `offset` runs open, whose running sum is `want`.
-fn last_in(link: &Link, offset: i64, want: Want) -> Option<u64> {
-	let node = link.as_ref()?;
-	if !want.within(offset, node) {
-		return None;
-	}
-	let at = offset + sum(&node.left) + node.delta;
-	if let Some(key) = last_in(&node.right, at, want) {
-		return Some(key);
-	}
-	if want.at(at) {
-		return Some(node.key);
-	}
-	last_in(&node.left, offset, want)
-}
-
-/// [`last_in`] over the keys at or before `to`.
-fn last_to(link: &Link, offset: i64, to: u64, want: Want) -> Option<u64> {
-	let node = link.as_ref()?;
-	if node.key > to {
-		return last_to(&node.left, offset, to, want);
-	}
-	let at = offset + sum(&node.left) + node.delta;
-	if let Some(key) = last_to(&node.right, at, to, want) {
-		return Some(key);
-	}
-	if want.at(at) {
-		return Some(node.key);
-	}
-	last_in(&node.left, offset, want)
-}
-
 /// Collect each key whose delta differs between `new` and `old`, with how much more `new`
 /// counts there. A key's priority is fixed, so the higher-ranked root of the two holds a key
 /// the other lacks, unless both roots are the same key.
@@ -635,8 +563,18 @@ mod tests {
 				assert!(cover.runs(0).eq(union.iter().cloned()), "{}", context());
 				assert_eq!(cover.is_empty(), held.is_empty(), "{}", context());
 				let all = points(&union.iter().cloned().collect::<Vec<_>>());
-				assert_eq!(cover.lowest(), union.iter().next().map(|run| *run.start()), "{}", context());
-				assert_eq!(cover.highest(), union.iter().next_back().map(|run| *run.end()), "{}", context());
+				assert_eq!(
+					cover.lowest(),
+					union.iter().next().map(|run| *run.start()),
+					"{}",
+					context()
+				);
+				assert_eq!(
+					cover.highest(),
+					union.iter().next_back().map(|run| *run.end()),
+					"{}",
+					context()
+				);
 				for &lo in &all {
 					assert_eq!(cover.contains(lo), union.contains(&lo), "{} at {lo}", context());
 					let from = union
@@ -649,11 +587,6 @@ mod tests {
 							.next()
 							.map(|run| (*run.start()).max(lo)..=*run.end());
 						assert_eq!(cover.first(lo, hi), first, "{} first in {lo}..={hi}", context());
-						let last = union
-							.overlapping(lo..=hi)
-							.next_back()
-							.map(|run| *run.start()..=(*run.end()).min(hi));
-						assert_eq!(cover.last(lo, hi), last, "{} last in {lo}..={hi}", context());
 					}
 				}
 				// The copy before the edit still answers as it did.
