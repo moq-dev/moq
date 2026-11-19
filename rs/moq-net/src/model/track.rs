@@ -7172,6 +7172,11 @@ impl Subscribing {
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		self.subscription.update(subscription)
 	}
+
+	/// The subscription's preferences, which [`Preferences::edit`] changes by key.
+	pub(super) fn preferences(&self) -> &Preferences {
+		&self.subscription
+	}
 }
 
 impl kio::Task for Subscribing {
@@ -10976,15 +10981,18 @@ impl Subscriber {
 		}
 	}
 
-	/// This subscriber's own ranges, by index, as resolved here: `None` for one empty or
-	/// still waiting, and for every range of a front's reader.
-	pub(super) fn resolved_ranges(&mut self) -> Vec<Option<Resolved>> {
+	/// This subscriber's own ranges keyed in `keys`, in that order, as resolved here: `None`
+	/// for one empty, still waiting, or not held, and for every range of a front's reader,
+	/// whose copies resolve them.
+	pub(super) fn resolved_ranges(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.resolved()
+				keys.into_iter()
+					.map(|key| cursor.filter.window.resolved_key(key))
+					.collect()
 			}
-			Inner::Resume(..) => Vec::new(),
+			Inner::Resume(..) => keys.into_iter().map(|_| None).collect(),
 		}
 	}
 
@@ -11166,6 +11174,14 @@ impl Subscriber {
 	/// This subscriber's current preferences.
 	pub fn subscription(&self) -> Subscription {
 		self.control().subscription()
+	}
+
+	/// This subscriber's preferences, read by key without materializing them.
+	pub(super) fn preferences(&self) -> &Preferences {
+		match &self.inner {
+			Inner::Plain(cursor) => &cursor.subscription,
+			Inner::Resume(resume, _) => resume.subscription(),
+		}
 	}
 
 	/// Replace this subscriber's delivery preferences.
@@ -28888,7 +28904,7 @@ mod test {
 		}]));
 		assert_eq!(drain(&mut subscriber), vec![0, 400]);
 		assert_eq!(
-			subscriber.resolved_ranges(),
+			subscriber.resolved_ranges([0]),
 			vec![Some(Resolved {
 				start: 0,
 				end: Some(501),

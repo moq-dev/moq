@@ -42,6 +42,8 @@
 
 use rangemap::{RangeMap, RangeSet};
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use std::ops::Bound;
 use std::sync::{Arc, PoisonError, Weak};
 use std::sync::{Mutex, MutexGuard};
@@ -181,7 +183,12 @@ impl Producer {
 		let mut ranges = Vec::new();
 		for reader in readers {
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-			let preferences = reader.subscription.read().subscription();
+			let (preferences, revision, delay) = {
+				let preferences = reader.subscription.read();
+				(preferences.ranges().collect::<Vec<_>>(), preferences.revision, preferences.delay)
+			};
+			// Whether the reader mirrored these ranges, and so its copies resolved them.
+			let current = revision == reader.revision;
 			// A failed copy's resolution is no placement, as in `Reader::window`: the reader's
 			// own stands, or the anchors do for ranges it has yet to take up.
 			let failed = reader.route.end().is_none()
@@ -189,25 +196,32 @@ impl Producer {
 					.copies
 					.last()
 					.is_some_and(|copy| matches!(copy.sub, Sub::Ready(_)) && copy_failed(&copy.track));
-			let placed = match failed {
-				true if reader.mirrored.ranges == preferences.ranges => Some(reader.window().resolved()),
-				true => Some(Vec::new()),
-				false => None,
-			};
 			let resolved = match reader.copies.last_mut() {
-				_ if placed.is_some() => placed.unwrap_or_default(),
-				Some(Copy {
-					sub: Sub::Ready(sub),
-					from,
-					..
-				}) if *from == preferences.ranges => sub.resolved_ranges(),
+				_ if failed && current => reader.window().resolved_by_key(),
+				_ if failed => BTreeMap::new(),
 				Some(Copy {
 					sub: Sub::Ready(sub), ..
-				}) => sub.resolve_ranges(&preferences),
-				Some(copy) if copy.from == preferences.ranges => copy.resolved.clone(),
-				_ => Vec::new(),
+				}) if current => keyed_resolution(preferences.iter().map(|(key, _)| *key), sub.resolved_ranges(preferences.iter().map(|(key, _)| *key))),
+				Some(Copy {
+					sub: Sub::Ready(sub), ..
+				}) => {
+					let ranges = preferences.iter().map(|(_, range)| *range).collect();
+					let subscription = Subscription {
+						ranges,
+						delay,
+						..Default::default()
+					};
+					keyed_resolution(preferences.iter().map(|(key, _)| *key), sub.resolve_ranges(&subscription))
+				}
+				Some(copy) if current => copy.resolved.clone(),
+				_ => BTreeMap::new(),
 			};
-			ranges.extend(preferences.clamped(reader.newest, None, &resolved).ranges);
+			let floor = reader.newest;
+			ranges.extend(
+				preferences
+					.iter()
+					.map(|(key, range)| range.clamped(floor, None, resolved.get(key).copied())),
+			);
 		}
 		demand.ranges = ranges;
 		demand
@@ -462,22 +476,27 @@ impl Consumer {
 
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
-		let (mirrored, keys, revision) = {
+		let (mirrored, revision) = {
 			let prefs = subscription.read();
-			(
-				prefs.subscription(),
-				prefs.ranges().map(|(key, _)| key).collect::<Vec<_>>(),
-				prefs.revision,
-			)
+			let mut mirrored = Mirrored {
+				priority: prefs.priority,
+				delay: prefs.delay,
+				order: prefs.order,
+				feed: prefs.feed,
+				..Default::default()
+			};
+			for (key, range) in prefs.ranges() {
+				mirrored.insert(key, range);
+			}
+			(mirrored, prefs.revision)
 		};
-		let window = keyed(&keys, &mirrored.ranges, &Unheld);
+		let window = keyed(mirrored.ranges.iter().map(|(key, range)| (*key, *range)), &Unheld);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
 				route: self.clone(),
 				subscription: subscription.clone(),
 				mirrored,
-				keys,
 				revision,
 				generation: None,
 				copies: Vec::new(),
@@ -609,11 +628,11 @@ struct Copy {
 	sub: Sub,
 	/// Where the subscription was asked to start, so demand updates never ask for less.
 	floor: Option<u64>,
-	/// The reader's ranges [`Self::resolved`] are for.
-	from: Vec<track::Range>,
-	/// Each of those ranges resolved, by index, so clamping never widens one: as the
-	/// serving copy had them when this one was subscribed, until this one answers.
-	resolved: Vec<Option<Resolved>>,
+	/// The reader's ranges resolved, by the reader's key, so clamping never widens one: as
+	/// the serving copy had them when this one was subscribed, until this one answers. A
+	/// range left out is not resolved. The copy's own subscription keys each range as the
+	/// reader does, so a change to the reader's ranges reaches it as an edit of those alone.
+	resolved: BTreeMap<u64, Resolved>,
 	/// Replaced by a newer route.
 	replaced: bool,
 	/// Bounded once the newer copy delivered its first group: nothing past this group is
@@ -642,25 +661,31 @@ enum Sub {
 }
 
 impl Copy {
-	/// What this copy is asked for: the reader's own preferences, from no earlier than
-	/// where it was asked to start, and through no later than where it was replaced.
-	fn wire(&mut self, reader: &Subscription) -> Subscription {
-		match &mut self.sub {
-			// Its own resolution, which capping its end must not move.
-			Sub::Ready(sub) if reader.ranges == self.from => self.resolved = sub.resolved_ranges(),
-			// Replaced ranges resolve against this copy's cache now, as any subscriber's do.
-			Sub::Ready(sub) => {
-				self.resolved = sub.resolve_ranges(reader);
-				self.from = reader.ranges.clone();
-			}
-			Sub::Pending(_) if reader.ranges == self.from => {}
-			// Its own resolution, once it answers, is for these.
-			Sub::Pending(_) => {
-				self.resolved.clear();
-				self.from = reader.ranges.clone();
-			}
+	/// Subscribe to `track` for `reader`, from `floor` up to the exclusive `end`, each range
+	/// clamped by where `resolved` places it, keyed as the reader keys it.
+	fn subscribe(
+		track: &track::Consumer,
+		reader: &Mirrored,
+		floor: Option<u64>,
+		end: Option<u64>,
+		resolved: &BTreeMap<u64, Resolved>,
+	) -> Sub {
+		// The wire request carries the floor from the first message: some sessions read the
+		// demand only once.
+		let pending = track.subscribe(reader.wire(floor, end, resolved));
+		// Keyed by position as subscribed: the reader's own keys from then on.
+		if !reader.ranges.keys().copied().eq(0..reader.ranges.len() as u64) {
+			let _ = pending.preferences().rekey(reader.ranges.keys().copied());
 		}
-		reader.clamped(self.floor, self.end(), &self.resolved)
+		Sub::Pending(Box::new(pending))
+	}
+
+	/// The copy's own subscription preferences.
+	fn preferences(&self) -> &track::Preferences {
+		match &self.sub {
+			Sub::Pending(pending) => pending.preferences(),
+			Sub::Ready(sub) => sub.preferences(),
+		}
 	}
 
 	/// The first group past where this copy was replaced, if any: one replaced before
@@ -670,20 +695,64 @@ impl Copy {
 			.and_then(|last| last.map_or(Some(0), |last| last.checked_add(1)))
 	}
 
-	fn update(&mut self, reader: &Subscription) {
+	/// Mirror `change` to the reader's preferences, which now read as `reader`.
+	fn update(&mut self, reader: &Mirrored, change: &Change) {
 		self.reopen();
-		let wire = self.wire(reader);
-		self.send(wire);
+		match change {
+			Change::Scalars => self.send(reader, []),
+			Change::Edit(keys) => {
+				let added: Vec<(u64, track::Range)> = keys
+					.iter()
+					.filter_map(|key| Some((*key, *reader.ranges.get(key)?)))
+					.collect();
+				for key in keys {
+					self.resolved.remove(key);
+				}
+				// Added ranges resolve against this copy's cache now, as any subscriber's do;
+				// a copy still unanswered resolves them once it answers.
+				if let Sub::Ready(sub) = &mut self.sub {
+					let subscription = reader.with_ranges(added.iter().map(|(_, range)| *range).collect());
+					for ((key, _), resolved) in added.iter().zip(sub.resolve_ranges(&subscription)) {
+						if let Some(resolved) = resolved {
+							self.resolved.insert(*key, resolved);
+						}
+					}
+				}
+				self.send(reader, keys.iter().copied());
+			}
+			Change::All => {
+				// Replaced ranges resolve against this copy's cache now, as any subscriber's
+				// do, and the copy resolves them all again too.
+				self.resolved = match &mut self.sub {
+					Sub::Ready(sub) => keyed_resolution(reader.ranges.keys().copied(), sub.resolve_ranges(&reader.subscription())),
+					Sub::Pending(_) => BTreeMap::new(),
+				};
+				let wire = reader.wire(self.floor, self.end(), &self.resolved);
+				let _ = match &mut self.sub {
+					Sub::Pending(pending) => pending.update(wire),
+					Sub::Ready(sub) => sub.update(wire),
+				};
+				// Keyed by position as replaced: the reader's own keys from then on.
+				let keyed = self.preferences().read().ranges().map(|(key, _)| key).eq(reader.ranges.keys().copied());
+				if !keyed {
+					let _ = self.preferences().rekey(reader.ranges.keys().copied());
+				}
+			}
+		}
 	}
 
 	/// Take nothing past `until` from this replaced copy, superseded from now. A bound only
 	/// narrows what it may deliver, so a copy that ran out stays out: reopened, it would be
 	/// waited on with nothing left to wake the reader.
-	fn bound(&mut self, until: Option<u64>, reader: &Subscription) {
+	fn bound(&mut self, until: Option<u64>, reader: &Mirrored) {
 		self.until = Some(until);
 		self.since = Some(self.track.now());
-		let wire = self.wire(reader);
-		self.send(wire);
+		// Its own resolution, which capping its end must not move.
+		if let Sub::Ready(sub) = &mut self.sub {
+			let keys = reader.ranges.keys().copied();
+			self.resolved = keyed_resolution(reader.ranges.keys().copied(), sub.resolved_ranges(keys));
+		}
+		self.send(reader, reader.ranges.keys().copied());
 	}
 
 	/// Read this copy again: one that ran out under the reader's old ranges, budget, or
@@ -695,11 +764,45 @@ impl Copy {
 		}
 	}
 
-	/// Ask for `wire` instead, answered or not.
-	fn send(&mut self, wire: Subscription) {
+	/// The range keyed `key` as this copy is asked for it: the reader's own, from no earlier
+	/// than where it was asked to start, and through no later than where it was replaced.
+	fn wire(&self, reader: &Mirrored, key: u64) -> Option<track::Range> {
+		let range = reader.ranges.get(&key)?;
+		Some(range.clamped(self.floor, self.end(), self.resolved.get(&key).copied()))
+	}
+
+	/// Ask for the reader's current priority, delay, and order, and for the ranges keyed in
+	/// `keys` as [`Self::wire`] has them, answered or not: an edit of the ranges that moved.
+	fn send(&mut self, reader: &Mirrored, keys: impl IntoIterator<Item = u64>) {
+		let (mut retire, mut add) = (Vec::new(), Vec::new());
+		{
+			let held = self.preferences().read();
+			// A feed an edit can't carry is asked whole, which keys the ranges by position.
+			if held.feed != reader.feed {
+				drop(held);
+				return self.update(reader, &Change::All);
+			}
+			for key in keys {
+				let wire = self.wire(reader, key);
+				if wire == held.range(key) {
+					continue;
+				}
+				match wire {
+					Some(range) => add.push((key, range)),
+					None => retire.push(key),
+				}
+			}
+		}
+		let edit = track::Edit {
+			retire,
+			add,
+			priority: reader.priority,
+			delay: reader.delay,
+			order: reader.order,
+		};
 		let _ = match &mut self.sub {
-			Sub::Pending(pending) => pending.update(wire),
-			Sub::Ready(sub) => sub.update(wire),
+			Sub::Pending(pending) => pending.preferences().edit(edit),
+			Sub::Ready(sub) => sub.edit(edit),
 		};
 	}
 
@@ -828,7 +931,7 @@ struct Retain<'a> {
 	groups_read: bool,
 	/// The newest group the serving copy has.
 	edge: Option<u64>,
-	mirrored: &'a Subscription,
+	mirrored: &'a Mirrored,
 	delivered: &'a Delivered,
 	out: &'a [(u64, Weak<()>)],
 	waiter: &'a kio::Waiter,
@@ -1216,6 +1319,123 @@ impl Candidate {
 	}
 }
 
+/// A reader's preferences as its copies are asked for them, each range by the key the
+/// reader's own preferences give it.
+#[derive(Clone, Default)]
+struct Mirrored {
+	priority: i8,
+	delay: track::Delay,
+	order: track::Order,
+	feed: bool,
+	ranges: BTreeMap<u64, track::Range>,
+	/// How many ranges end at the oldest group, which names no group; see [`Reader::refusal`].
+	oldest_ends: usize,
+}
+
+impl Mirrored {
+	fn insert(&mut self, key: u64, range: track::Range) {
+		self.oldest_ends += usize::from(range.end == Some(Anchor::Oldest));
+		if let Some(old) = self.ranges.insert(key, range) {
+			self.oldest_ends -= usize::from(old.end == Some(Anchor::Oldest));
+		}
+	}
+
+	fn remove(&mut self, key: u64) {
+		if let Some(old) = self.ranges.remove(&key) {
+			self.oldest_ends -= usize::from(old.end == Some(Anchor::Oldest));
+		}
+	}
+
+	fn budget(&self) -> Duration {
+		self.delay.budget()
+	}
+
+	/// These preferences with `ranges` instead.
+	fn with_ranges(&self, ranges: Vec<track::Range>) -> Subscription {
+		Subscription {
+			priority: self.priority,
+			delay: self.delay,
+			ranges,
+			order: self.order,
+			feed: self.feed,
+		}
+	}
+
+	/// These preferences, the ranges in key order. Costs every range.
+	fn subscription(&self) -> Subscription {
+		self.with_ranges(self.ranges.values().copied().collect())
+	}
+
+	/// [`Self::subscription`] from no earlier than `floor` and through no later than the
+	/// exclusive `end`, each range clamped where `resolved` places it.
+	fn wire(&self, floor: Option<u64>, end: Option<u64>, resolved: &BTreeMap<u64, Resolved>) -> Subscription {
+		self.with_ranges(
+			self.ranges
+				.iter()
+				.map(|(key, range)| range.clamped(floor, end, resolved.get(key).copied()))
+				.collect(),
+		)
+	}
+}
+
+#[cfg(test)]
+impl Mirrored {
+	/// `subscription`, its ranges keyed by position.
+	fn of(subscription: &Subscription) -> Self {
+		let mut mirrored = Self {
+			priority: subscription.priority,
+			delay: subscription.delay,
+			order: subscription.order,
+			feed: subscription.feed,
+			..Default::default()
+		};
+		for (key, range) in (0..).zip(&subscription.ranges) {
+			mirrored.insert(key, *range);
+		}
+		mirrored
+	}
+}
+
+#[cfg(test)]
+impl Copy {
+	/// What this copy is asked for, every range as [`Self::wire`] has it, a ready copy's
+	/// resolution its own.
+	fn wire_all(&mut self, reader: &Mirrored) -> Subscription {
+		if let Sub::Ready(sub) = &mut self.sub {
+			let keys = reader.ranges.keys().copied();
+			self.resolved = keyed_resolution(keys.clone(), sub.resolved_ranges(keys));
+		}
+		reader.wire(self.floor, self.end(), &self.resolved)
+	}
+}
+
+/// What changed in a reader's preferences, for its copies to mirror.
+enum Change {
+	/// Only the priority, delay, order, or feed.
+	Scalars,
+	/// Those, and the ranges keyed here: each one retired, added, or both.
+	Edit(BTreeSet<u64>),
+	/// Every range, keyed afresh.
+	All,
+}
+
+/// Why the serving copy's resume point may pass over groups the reader lacks.
+enum Resumed {
+	/// The route changed: the floor the copy serving before was asked from, and where it
+	/// placed each range, by key.
+	Route(Option<u64>, BTreeMap<u64, Resolved>),
+	/// The ranges keyed here were added, and may cover groups below the resume point.
+	Ranges(BTreeSet<u64>),
+}
+
+/// Each of `keys` with what `resolved` holds in its place, leaving out the unresolved.
+fn keyed_resolution(keys: impl IntoIterator<Item = u64>, resolved: Vec<Option<Resolved>>) -> BTreeMap<u64, Resolved> {
+	keys.into_iter()
+		.zip(resolved)
+		.filter_map(|(key, resolved)| Some((key, resolved?)))
+		.collect()
+}
+
 /// A [`Subscriber`]'s state.
 struct Reader {
 	/// The first exclusive end any copy declared, refined by a matching mid-group end. A copy
@@ -1229,10 +1449,7 @@ struct Reader {
 	route: Consumer,
 	/// The reader's own preferences, mirrored into every copy's subscription.
 	subscription: track::Preferences,
-	mirrored: Subscription,
-	/// The key of each of [`Self::mirrored`]'s ranges, in order, so the reader's window answers
-	/// a range by the key an edit names it with.
-	keys: Vec<u64>,
+	mirrored: Mirrored,
 	/// The preferences' revision [`Self::mirrored`] holds.
 	revision: u64,
 	/// The route generation last read.
@@ -1243,10 +1460,9 @@ struct Reader {
 	/// The newest group handed out: where a new copy is asked to start.
 	newest: Option<u64>,
 	/// Set once the serving copy's resume point may pass over groups the reader lacks: the
-	/// route changed, or the ranges did. Where the copy serving before placed the ranges, if
-	/// the route changed: the floor it was asked from, and its resolution. Kept until the gaps
-	/// are backfilled: see [`Reader::backfill_gaps`].
-	resumed: Option<(Option<u64>, Vec<Option<Resolved>>)>,
+	/// route changed, or the ranges did. Kept until the gaps are backfilled: see
+	/// [`Reader::backfill_gaps`].
+	resumed: Option<Resumed>,
 	/// The reader's ranges resolved; see [`Reader::window`].
 	window: Window,
 	/// The local floor and exclusive cap; see [`track::Subscriber::with_range`].
@@ -1271,7 +1487,7 @@ impl Reader {
 	/// The reader's ranges resolved, a relative anchor as the first ready copy to answer for
 	/// them resolved it, whatever its failover cap: that bounds what the copy delivers, not
 	/// where the ranges resolve. Kept once resolved, past that copy being let go. Pending
-	/// while a relative anchor waits on a copy to resolve it.
+	/// while a relative anchor waits on a copy to resolve it. Costs the ranges still unsettled.
 	fn window(&mut self) -> &Window {
 		let concluded = self.route.end().is_some();
 		for index in 0..self.copies.len() {
@@ -1286,22 +1502,27 @@ impl Reader {
 				continue;
 			}
 			let cap = copy.end();
-			let resolved = match &mut copy.sub {
-				Sub::Ready(sub) => sub.resolved_ranges(),
-				Sub::Pending(_) => continue,
+			let Sub::Ready(sub) = &mut copy.sub else {
+				continue;
 			};
+			let keys = self.window.unsettled();
 			// A failover cap at or below where a range starts empties the copy's range, which
 			// then says nothing of where the reader's own range starts. One at or below where
 			// it ends cut that end short, so it says nothing of where the reader's range ends.
-			let resolved: Vec<_> = resolved
-				.into_iter()
-				.map(|resolved| {
+			let resolved: BTreeMap<u64, Resolved> = keys
+				.iter()
+				.copied()
+				.zip(sub.resolved_ranges(keys.iter().copied()))
+				.filter_map(|(key, resolved)| {
 					let resolved = resolved
 						.filter(|resolved| cap.is_none() || resolved.end.is_none_or(|end| end > resolved.start))?;
-					Some(Resolved {
-						end: resolved.end.filter(|end| cap.is_none_or(|cap| *end < cap)),
-						..resolved
-					})
+					Some((
+						key,
+						Resolved {
+							end: resolved.end.filter(|end| cap.is_none_or(|cap| *end < cap)),
+							..resolved
+						},
+					))
 				})
 				.collect();
 			self.resolve(&resolved);
@@ -1309,51 +1530,59 @@ impl Reader {
 		&self.window
 	}
 
-	/// Resolve unsettled [`Self::window`] anchors with a copy's resolution of the reader's ranges,
-	/// unless a relative anchor still waits there too.
-	fn resolve(&mut self, resolved: &[Option<Resolved>]) {
-		// A range the copy left unresolved keeps its anchors, which only a copy can place.
-		let mut unplaced = false;
-		let ranges: Vec<_> = self
-			.mirrored
-			.ranges
-			.iter()
-			.enumerate()
-			.map(|(index, range)| {
-				let Some(resolved) = resolved.get(index).copied().flatten() else {
-					unplaced |= !range.is_empty()
-						&& (matches!(range.start, Anchor::Relative(_) | Anchor::Time(1..))
-							|| matches!(range.end, Some(Anchor::Relative(_))));
-					return *range;
-				};
-				track::Range {
-					start: match range.start {
-						Anchor::Relative(_) | Anchor::Time(_) if resolved.floored => Anchor::Time(resolved.start),
-						// One that reached back to the oldest group still does, as on a plain reader.
-						Anchor::Relative(_) | Anchor::Time(_) => Anchor::Oldest,
-						start => start,
-					},
-					end: match (range.end, resolved.end) {
-						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => match end.checked_sub(1) {
-							Some(last) => Some(Anchor::Time(last)),
-							None => return track::Range::EMPTY,
-						},
-						(end, _) => end,
-					},
+	/// Place the unsettled [`Self::window`] ranges where a copy resolved them, unless one it
+	/// leaves unresolved, or a relative anchor, still waits there too.
+	fn resolve(&mut self, resolved: &BTreeMap<u64, Resolved>) {
+		let mut placed = Vec::new();
+		for key in self.window.unsettled() {
+			let Some(range) = self.mirrored.ranges.get(&key).copied() else {
+				continue;
+			};
+			let Some(resolved) = resolved.get(&key).copied() else {
+				// A range the copy left unresolved keeps its anchors, which only a copy can place.
+				if !range.is_empty()
+					&& (matches!(range.start, Anchor::Relative(_) | Anchor::Time(1..))
+						|| matches!(range.end, Some(Anchor::Relative(_))))
+				{
+					return;
 				}
-			})
-			.collect();
-		if unplaced {
+				// Placed as it is: nothing of it waits on a copy.
+				placed.push((key, range));
+				continue;
+			};
+			let end = match (range.end, resolved.end) {
+				(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => match end.checked_sub(1) {
+					Some(last) => Some(Anchor::Time(last)),
+					None => {
+						placed.push((key, track::Range::EMPTY));
+						continue;
+					}
+				},
+				(end, _) => end,
+			};
+			let start = match range.start {
+				Anchor::Relative(_) | Anchor::Time(_) if resolved.floored => Anchor::Time(resolved.start),
+				// One that reached back to the oldest group still does, as on a plain reader.
+				Anchor::Relative(_) | Anchor::Time(_) => Anchor::Oldest,
+				start => start,
+			};
+			placed.push((key, track::Range { start, end }));
+		}
+		// A relative end still open leaves the window waiting on a first group it never gets.
+		if placed.iter().any(|(_, range)| {
+			!range.is_empty()
+				&& (matches!(range.start, Anchor::Relative(_)) || matches!(range.end, Some(Anchor::Relative(_))))
+		}) {
 			return;
 		}
-		let window = keyed(&self.keys, &ranges, &Placed);
-		if !window.is_pending() {
-			self.window = window;
-		}
+		self.window
+			.edit([], &placed, None, &Placed)
+			.expect("a hop that holds it placed refuses nothing");
 	}
 
 	/// Follow the route: subscribe to a new copy, mark the ones it replaced, and mirror
-	/// the reader's preferences into each.
+	/// the reader's preferences into each. A change to the ranges costs the ranges it
+	/// touched, in the reader and in each copy alike.
 	fn sync(&mut self, waiter: &kio::Waiter) {
 		// Learn before a swap or retention drops the only copy that knows the end.
 		self.learn_end(None);
@@ -1363,34 +1592,81 @@ impl Reader {
 		let mirrored = &self.mirrored;
 		let revision = self.revision;
 		let _ = self.subscription.poll_ref(waiter, |sub| {
-			let moved = (sub.priority, sub.delay, sub.order, sub.feed)
-				!= (mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed);
-			if moved || sub.revision != revision {
-				let keys = (sub.revision != revision).then(|| sub.ranges().map(|(key, _)| key).collect());
-				changed = Some((sub.subscription(), keys, sub.revision));
+			let scalars = (sub.priority, sub.delay, sub.order, sub.feed);
+			let moved = scalars != (mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed);
+			if sub.revision != revision {
+				// The keys the changes since touched, each with its range now, or every range
+				// once the log no longer reaches back that far.
+				let ranges = match sub.changes(revision) {
+					Some(keys) => Ok(keys.into_iter().map(|key| (key, sub.range(key))).collect::<Vec<_>>()),
+					None => Err(sub.ranges().collect::<BTreeMap<_, _>>()),
+				};
+				changed = Some((scalars, Some(ranges), sub.revision));
+			} else if moved {
+				changed = Some((scalars, None, revision));
 			}
 			Poll::<()>::Pending
 		});
-		if let Some((sub, keys, revision)) = changed {
+		if let Some((scalars, ranges, revision)) = changed {
 			self.revision = revision;
-			let replaced = keys.is_some_and(|keys: Vec<u64>| {
-				let replaced = sub.ranges != self.mirrored.ranges || keys != self.keys;
-				self.keys = keys;
-				replaced
-			});
-			if replaced {
-				self.window = keyed(&self.keys, &sub.ranges, &Unheld);
-				// The serving copy's resume point may cut off groups the new ranges cover, judged
-				// by the reader's window.
-				self.resumed = Some((None, Vec::new()));
-			}
-			self.mirrored = sub;
+			let mirrored = &mut self.mirrored;
+			(mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed) = scalars;
+			let change = match ranges {
+				None => Change::Scalars,
+				Some(Ok(edited)) => {
+					for (key, range) in &edited {
+						match range {
+							Some(range) => self.mirrored.insert(*key, *range),
+							None => self.mirrored.remove(*key),
+						}
+					}
+					let added: Vec<(u64, track::Range)> = edited
+						.iter()
+						.filter_map(|(key, range)| Some((*key, (*range)?)))
+						.collect();
+					self.window
+						.edit(edited.iter().map(|(key, _)| *key), &added, None, &Unheld)
+						.expect("a hop that holds nothing refuses nothing");
+					// The serving copy's resume point may cut off groups the added ranges cover,
+					// judged by the reader's window. A route change still to judge is judged
+					// against every range instead, since the ones it placed moved.
+					if !added.is_empty() {
+						let added = added.iter().map(|(key, _)| *key);
+						self.resumed = Some(Resumed::Ranges(match self.resumed.take() {
+							Some(Resumed::Ranges(mut keys)) => {
+								keys.extend(added);
+								keys
+							}
+							Some(Resumed::Route(..)) => self.mirrored.ranges.keys().copied().collect(),
+							None => added.collect(),
+						}));
+					}
+					Change::Edit(edited.into_iter().map(|(key, _)| key).collect())
+				}
+				Some(Err(ranges)) if ranges == self.mirrored.ranges => Change::Scalars,
+				Some(Err(ranges)) => {
+					let mut mirrored = Mirrored {
+						ranges: BTreeMap::new(),
+						oldest_ends: 0,
+						..std::mem::take(&mut self.mirrored)
+					};
+					for (key, range) in ranges {
+						mirrored.insert(key, range);
+					}
+					self.mirrored = mirrored;
+					self.window = keyed(self.mirrored.ranges.iter().map(|(key, range)| (*key, *range)), &Unheld);
+					// The serving copy's resume point may cut off groups the new ranges cover,
+					// judged by the reader's window.
+					self.resumed = Some(Resumed::Ranges(self.mirrored.ranges.keys().copied().collect()));
+					Change::All
+				}
+			};
 			for copy in &mut self.copies {
-				copy.update(&self.mirrored);
+				copy.update(&self.mirrored, &change);
 			}
-			// A ready copy just resolved the replaced ranges against its cache, before its
+			// A ready copy just resolved the changed ranges against its cache, before its
 			// failover cap raised them, so the reader takes that resolution now.
-			if replaced {
+			if !matches!(change, Change::Scalars) {
 				let concluded = self.route.end().is_some();
 				for index in (0..self.copies.len()).rev() {
 					if self.window.is_settled() {
@@ -1439,22 +1715,26 @@ impl Reader {
 				.copies
 				.last()
 				.is_some_and(|copy| matches!(copy.sub, Sub::Ready(_)) && copy_failed(&copy.track));
+		let keys = self.mirrored.ranges.keys().copied();
 		let resolved = match self.copies.last_mut() {
-			Some(_) if failed => self.window().resolved(),
+			Some(_) if failed => self.window().resolved_by_key(),
 			Some(Copy {
 				sub: Sub::Ready(sub), ..
-			}) => sub.resolved_ranges(),
+			}) => keyed_resolution(keys.clone(), sub.resolved_ranges(keys)),
 			// One still unanswered passes on what it was handed.
 			Some(Copy {
 				sub: Sub::Pending(_),
 				resolved,
 				..
 			}) => resolved.clone(),
-			None => Vec::new(),
+			None => BTreeMap::new(),
 		};
 		// The new copy starts at the newest group handed out, so a lower one still missing is
 		// asked of its route once the reader says which; see `backfill_gaps`.
-		self.resumed = Some((self.copies.last().and_then(|copy| copy.floor), resolved.clone()));
+		self.resumed = Some(Resumed::Route(
+			self.copies.last().and_then(|copy| copy.floor),
+			resolved.clone(),
+		));
 		// The replaced copies keep delivering until the new one delivers its first group: a
 		// group they get meanwhile may be one the new route never has. See `observe`.
 		for copy in &mut self.copies {
@@ -1465,7 +1745,7 @@ impl Reader {
 		// newest is the route's own copy, not a backfill of it.
 		if let Some(index) = self.copies.iter().rposition(|copy| copy.track.same_channel(&track)) {
 			// The copy's own resolution ends at its old cap; the reader's does not.
-			let resolved = self.window().resolved();
+			let resolved = self.window().resolved_by_key();
 			let mut copy = self.copies.remove(index);
 			copy.generation = generation;
 			copy.replaced = false;
@@ -1483,21 +1763,16 @@ impl Reader {
 				));
 			}
 			copy.resolved = resolved;
-			let wire = self.mirrored.clamped(copy.floor, None, &copy.resolved);
-			copy.send(wire);
+			copy.send(&self.mirrored, self.mirrored.ranges.keys().copied());
 			self.copies.push(copy);
 			return;
 		}
 		let floor = self.newest;
-		// The wire request carries the floor from the first message: some sessions read
-		// the demand only once.
-		let wire = self.mirrored.clamped(floor, None, &resolved);
 		self.copies.push(Copy {
 			generation,
-			sub: Sub::Pending(Box::new(track.subscribe(wire))),
+			sub: Copy::subscribe(&track, &self.mirrored, floor, None, &resolved),
 			track,
 			floor,
-			from: self.mirrored.ranges.clone(),
 			resolved,
 			replaced: false,
 			until: None,
@@ -1549,11 +1824,7 @@ impl Reader {
 	/// end is refused here, before waiting on a copy to refuse it, since the demand asked
 	/// upstream leaves it out.
 	fn refusal(&self) -> Option<Error> {
-		self.mirrored
-			.ranges
-			.iter()
-			.any(|range| range.end == Some(Anchor::Oldest))
-			.then_some(Error::InvalidRange)
+		(self.mirrored.oldest_ends > 0).then_some(Error::InvalidRange)
 	}
 
 	/// Drop the replaced copies nothing needs any more; see [`Copy::retains`]. Whether one
@@ -1847,7 +2118,7 @@ impl Reader {
 			// a backfill that already ran out was let go: ask its route again.
 			let copy = &self.copies[index];
 			if late && !copy.replaced && copy.floor.is_some() && Some(copy.generation) == self.generation {
-				self.resumed.get_or_insert_with(|| (None, Vec::new()));
+				self.resumed.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
 			}
 		}
 		// A later copy placed the window this pass: a group held back above may now be the lowest.
@@ -2201,7 +2472,7 @@ impl Reader {
 		}
 		// Resolved as the reader first had them: the newest copy's resolution starts at its
 		// resume point, and a bounded copy's own ends at its earlier cap.
-		let resolved = self.window().resolved();
+		let resolved = self.window().resolved_by_key();
 		// A later resume point widens the route's backfill rather than asking again, so flaps
 		// over a gap keep one per route. Waited for as long as a new one would be.
 		let last = self.copies.len() - 1;
@@ -2211,19 +2482,15 @@ impl Reader {
 		{
 			copy.until = Some(lowered.end.checked_sub(1));
 			copy.since = Some(copy.track.now());
-			copy.from = self.mirrored.ranges.clone();
 			copy.resolved = resolved;
-			let wire = self.mirrored.clamped(copy.floor, copy.end(), &copy.resolved);
-			copy.send(wire);
+			copy.send(&self.mirrored, self.mirrored.ranges.keys().copied());
 			return;
 		}
 		let floor = Some(lowered.start);
-		let wire = self.mirrored.clamped(floor, Some(lowered.end), &resolved);
 		let copy = Copy {
 			generation,
-			sub: Sub::Pending(Box::new(track.subscribe(wire))),
+			sub: Copy::subscribe(&track, &self.mirrored, floor, Some(lowered.end), &resolved),
 			floor,
-			from: self.mirrored.ranges.clone(),
 			resolved,
 			// Bounded from the start: everything it may deliver is older than what the reader
 			// already read, so it is waited for no longer than the reader's budget.
@@ -2252,26 +2519,43 @@ impl Reader {
 		let Some(floor) = self.window().floor() else {
 			return;
 		};
-		let Some((replaced, resolved)) = self.resumed.take() else {
+		let Some(resumed_by) = self.resumed.take() else {
 			return;
 		};
 		let Some(resumed) = self.copies.last().and_then(|copy| copy.floor) else {
 			return;
 		};
 		// Each range from where the copy it replaced placed it, else where the reader did: a
-		// start at that copy's own resume point was only raised there.
-		let from = self
-			.mirrored
-			.clamped(Some(0), None, &resolved)
-			.ranges
-			.iter()
-			.map(|range| match range.start {
-				Anchor::Time(start) if replaced.is_none_or(|replaced| start > replaced) => start,
-				_ => floor,
-			})
-			.min()
-			.unwrap_or(floor)
-			.max(self.groups.0);
+		// start at that copy's own resume point was only raised there. After an edit, only the
+		// ranges it added: the rest were judged when they came.
+		let start = |range: &track::Range, replaced: Option<u64>, resolved: Option<Resolved>| match range
+			.clamped(Some(0), None, resolved)
+			.start
+		{
+			Anchor::Time(start) if replaced.is_none_or(|replaced| start > replaced) => start,
+			_ => floor,
+		};
+		let from = match &resumed_by {
+			Resumed::Route(replaced, resolved) => self
+				.mirrored
+				.ranges
+				.iter()
+				.map(|(key, range)| start(range, *replaced, resolved.get(key).copied()))
+				.min(),
+			Resumed::Ranges(keys) => {
+				let starts: Vec<u64> = keys
+					.iter()
+					.filter_map(|key| self.mirrored.ranges.get(key))
+					.map(|range| start(range, None, None))
+					.collect();
+				// Retired since, so nothing new is covered.
+				if starts.is_empty() {
+					return;
+				}
+				starts.into_iter().min()
+			}
+		};
+		let from = from.unwrap_or(floor).max(self.groups.0);
 		if let Some(gap) = delivered.gaps(from..resumed).first() {
 			self.backfill(gap.start..resumed, delivered);
 		}
@@ -2948,10 +3232,9 @@ impl kio::Task for Fetching {
 	}
 }
 
-/// A window over `ranges`, each keyed as `keys` names it, on a hop that refuses nothing.
-fn keyed(keys: &[u64], ranges: &[track::Range], holdings: &impl Holdings) -> Window {
-	Window::keyed(keys.iter().copied().zip(ranges.iter().copied()), None, None, holdings)
-		.expect("a hop that holds nothing or holds it placed refuses nothing")
+/// A window over `ranges`, each under its key, on a hop that refuses nothing.
+fn keyed(ranges: impl IntoIterator<Item = (u64, track::Range)>, holdings: &impl Holdings) -> Window {
+	Window::keyed(ranges, None, None, holdings).expect("a hop that holds nothing or holds it placed refuses nothing")
 }
 
 #[cfg(test)]
@@ -7447,10 +7730,11 @@ mod test {
 		}];
 		let updated = Subscription::default().with_ranges(ranges.clone());
 		assert!(matches!(copy.sub, Sub::Pending(_)));
-		copy.update(&updated);
-		assert_eq!(copy.wire(&updated).ranges, ranges);
+		let updated = Mirrored::of(&updated);
+		copy.update(&updated, &Change::All);
+		assert_eq!(copy.wire_all(&updated).ranges, ranges);
 		assert!(copy.poll_ready((0, None), &kio::Waiter::noop()).is_ready());
-		assert_eq!(copy.wire(&updated).ranges, ranges);
+		assert_eq!(copy.wire_all(&updated).ranges, ranges);
 	}
 
 	/// A copy that already answered resolves ranges the reader replaced against its cache,
@@ -7472,8 +7756,9 @@ mod test {
 			start: Anchor::Relative(2),
 			end: None,
 		}]);
-		copy.update(&updated);
-		assert_eq!(copy.wire(&updated).ranges[0].start, Anchor::Time(2));
+		let updated = Mirrored::of(&updated);
+		copy.update(&updated, &Change::All);
+		assert_eq!(copy.wire_all(&updated).ranges[0].start, Anchor::Time(2));
 	}
 
 	/// A replacement asked for a range reaching back past where the reader got to, while
@@ -7820,9 +8105,9 @@ mod test {
 		let old = &mut reader.copies[0];
 		old.replaced = true;
 		old.until = Some(Some(3800));
-		old.update(&mirrored);
+		old.update(&mirrored, &Change::Scalars);
 		assert_eq!(
-			old.wire(&mirrored).ranges,
+			old.wire_all(&mirrored).ranges,
 			vec![range],
 			"the time end is inside the cap"
 		);
@@ -7910,7 +8195,7 @@ mod test {
 		old.replaced = true;
 		old.until = Some(Some(12));
 		assert_eq!(
-			old.wire(&mirrored).ranges,
+			old.wire_all(&mirrored).ranges,
 			[track::Range {
 				start: track::Anchor::Time(8),
 				end: Some(track::Anchor::Time(12)),
@@ -7928,10 +8213,10 @@ mod test {
 			let mut reader = sub.reader.lock().unwrap();
 			let old = &mut reader.copies[0];
 			old.until = Some(last);
-			assert_eq!(old.wire(&Subscription::default()).end(), end);
+			assert_eq!(old.wire_all(&Mirrored::of(&Subscription::default())).end(), end);
 			// A reader's narrower bound survives an unbounded replacement cap.
-			let requested = Subscription::default().with_end(7);
-			assert_eq!(old.wire(&requested).end(), Some(end.unwrap_or(7)));
+			let requested = Mirrored::of(&Subscription::default().with_end(7));
+			assert_eq!(old.wire_all(&requested).end(), Some(end.unwrap_or(7)));
 		}
 	}
 
