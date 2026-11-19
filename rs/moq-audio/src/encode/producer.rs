@@ -1902,7 +1902,8 @@ mod tests {
 					_ => None,
 				})
 				.collect();
-			assert_eq!(ends.len(), 2, "one end per pause: {read:?}");
+			// The second pause runs into the finish, which ends the read instead.
+			assert_eq!(ends.len(), 1, "one end per pause the track outlives: {read:?}");
 
 			// The end is where libopus stopped transmitting, after its hangover.
 			let (first, end) = ends[0];
@@ -1925,14 +1926,17 @@ mod tests {
 					.iter()
 					.any(|item| matches!(item, Read::Frame { group, .. } if *group == resumed))
 			);
+			// Nothing follows the speech and its hangover: the finish is silence too.
 			assert_eq!(
-				ends[1].0 - first - 1,
+				read.len() - first - 1,
 				second_dtx - 150,
 				"the speech and the hangover after it"
 			);
-
-			// Nothing follows the second end: the finish is silence too.
-			assert_eq!(ends[1].0, read.len() - 1, "{:?}", &read[ends[1].0..]);
+			assert!(
+				read[first + 1..].iter().all(|item| matches!(item, Read::Frame { .. })),
+				"{:?}",
+				&read[first + 1..]
+			);
 
 			// The local indicator follows what the track carries.
 			assert_eq!(activity[first_dtx - 1], Activity::Active);

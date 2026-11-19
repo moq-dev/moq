@@ -220,6 +220,9 @@ pub struct Consumer<F: Container> {
 	// needs, rather than only once the next group starts later, as an export does.
 	prompt: bool,
 
+	// The end about to be read is a group's own, which precedes any gap a loss after it left.
+	declaring: bool,
+
 	// The item a gap was returned ahead of.
 	next: Option<Item>,
 
@@ -480,6 +483,7 @@ impl<F: Container> Consumer<F> {
 			end_timer: None,
 			marked: None,
 			prompt: false,
+			declaring: false,
 			next: None,
 			group: 0,
 			arrived: None,
@@ -592,6 +596,9 @@ impl<F: Container> Consumer<F> {
 				let resume = frame.timestamp;
 				let group = self.group;
 				(Item::Frame { group, frame, arrived }, resume)
+			}
+			Some(Event::FrameEnd { end, opens: true }) if std::mem::take(&mut self.declaring) => {
+				return Poll::Ready(Ok(Some(Item::End { group: self.group, end })));
 			}
 			Some(Event::FrameEnd { end, opens: true }) => (Item::End { group: self.group, end }, end),
 			Some(Event::FrameEnd { end, opens: false }) => return Poll::Ready(Ok(Some(Item::FrameEnd(end)))),
@@ -741,22 +748,38 @@ impl<F: Container> Consumer<F> {
 			if let Some(group) = self.pending.front_mut()
 				&& group.start <= self.current
 			{
-				// The group after a declared end shows where it starts with its first frame: one
-				// starting at the end continues the media, and a later one resumes it after a pause
-				// the end declared. A marker opening it says so itself, and a loss reads as the gap.
-				if self.declared.is_some() {
-					let _ = group.poll_min_timestamp(waiter, &self.format, true);
-					let marked = group.markers.front().is_some_and(|(index, _)| *index == 0);
-					let first = group.buffered.front().and_then(|(frame, ..)| time(frame.timestamp));
-					if marked || self.gap || first.is_some() {
-						let declared = self.declared.take().unwrap();
-						let ended = time(declared.end);
-						if !marked && !self.gap && first.is_some_and(|first| !pts_contiguous(ended, first)) {
-							return Poll::Ready(self.declare(declared));
+				// The group after a declared end shows where it starts with its first media frame:
+				// one starting at the end continues the media, and a later one resumes it after a
+				// pause the end declared, read ahead of any gap a loss after it left. Nothing of the
+				// group is read before that. A marker group with no media says so itself, and an
+				// empty group says nothing.
+				let undecided = match &self.declared {
+					Some(_) => {
+						let polled = group.poll_min_timestamp(waiter, &self.format, true);
+						match group.buffered.front().and_then(|(frame, ..)| time(frame.timestamp)) {
+							Some(first) => {
+								let declared = self.declared.take().unwrap();
+								if !pts_contiguous(time(declared.end), first) {
+									return Poll::Ready(self.declare(declared));
+								}
+								false
+							}
+							None if polled.is_pending() => true,
+							None => {
+								if !group.is_empty() || group.fault.is_some() {
+									self.declared = None;
+								}
+								false
+							}
 						}
 					}
-				}
-				match group.poll_read(waiter, &self.format) {
+					None => false,
+				};
+				let read = match undecided {
+					true => Poll::Pending,
+					false => group.poll_read(waiter, &self.format),
+				};
+				match read {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => {
 						let seq = group.group.start;
 						let ts = frame.timestamp;
@@ -983,6 +1006,15 @@ impl<F: Container> Consumer<F> {
 					// A data marker has no timestamp to prove continuity across the hole.
 					if !empty && !continues && next_start.is_none_or(|start| !pts_contiguous(self.presented_end, start))
 					{
+						// A lost group could have continued a declared end, unless every start it could
+						// have taken lies past the end: then the media paused there first.
+						if let Some(declared) = self.declared.take() {
+							match self.first_unskipped(self.current..sequence) {
+								Some(start) if !self.paused_before(&declared, start) => {}
+								Some(_) => return Poll::Ready(self.declare(declared)),
+								None => self.declared = Some(declared),
+							}
+						}
 						self.lose();
 					}
 					tracing::debug!(
@@ -1299,9 +1331,42 @@ impl<F: Container> Consumer<F> {
 		self.gap = true;
 	}
 
-	// Read a declared end as the end of its group's media.
+	// The earliest start in `run` its publisher did not declare skipped, where a group lost in it
+	// could begin, or `None` when it declared the whole run skipped.
+	fn first_unskipped(&self, run: std::ops::Range<u64>) -> Option<u64> {
+		let track = match &self.reader {
+			Reader::Reading(track) | Reader::Failed(track, _) => track,
+			Reader::Ended | Reader::Lost => return Some(run.start),
+		};
+		if track.is_skipped(run.clone()) {
+			return None;
+		}
+		// Skipped prefixes only grow with the run, so the first unskipped start is a bisection.
+		let (mut low, mut high) = (run.start, run.end - 1);
+		while low < high {
+			let mid = low + (high - low) / 2;
+			match track.is_skipped(run.start..mid + 1) {
+				true => low = mid + 1,
+				false => high = mid,
+			}
+		}
+		Some(low)
+	}
+
+	// Whether a group starting at `start`, in the declared end's scale, begins past where it stopped.
+	fn paused_before(&self, declared: &Declared, start: u64) -> bool {
+		let start = declared
+			.end
+			.scale()
+			.and_then(|scale| Timestamp::new(start, scale).ok())
+			.and_then(time);
+		start.is_some_and(|start| !pts_contiguous(time(declared.end), start))
+	}
+
+	// Read a declared end as the end of its group's media, ahead of any gap a loss after it left.
 	fn declare(&mut self, declared: Declared) -> Result<Option<Event>, F::Error> {
 		self.end_timer = None;
+		self.declaring = true;
 		self.group = declared.group;
 		self.advance(time(declared.end).ok_or(moq_net::Error::TimestampMismatch)?);
 		Ok(Some(Event::FrameEnd {
