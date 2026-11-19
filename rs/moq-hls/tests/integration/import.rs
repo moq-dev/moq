@@ -60,7 +60,9 @@ fn groups(track: &mut moq_net::track::Ordered) -> Vec<u64> {
 
 #[tokio::test(start_paused = true)]
 async fn a_paused_export_imports_past_its_gaps() {
-	let pair = Pair::connect().await;
+	// moq-lite-07 carries the group end that times the last segment; an earlier wire leaves it to
+	// the spacing estimate.
+	let pair = Pair::new("moq-lite-07-wip".parse().unwrap(), Default::default()).await;
 	let mut publisher = Publisher::new(&pair.publisher, "live", Default::default());
 	let server = pair.server();
 	let app = server.router();

@@ -2153,10 +2153,19 @@ impl Follow {
 			}
 			First::Media(pts, reach, declared) => {
 				let sequence = group.start;
-				if let Some((_, previous, _)) = &self.latest {
-					self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
+				// The group before ended whole short of this one: its content stops at its end, as a
+				// discontinuity marker said, and the pause between spans no frame.
+				let mut slots = Vec::new();
+				match &self.latest {
+					Some((previous, _, _)) if let Some(end) = whole_end(previous).filter(|end| paused(*end, pts)) => {
+						slots = self.grid.stop(end);
+					}
+					Some((_, previous, _)) => {
+						self.spacing = pts.checked_sub(*previous).ok().map(super::span).or(self.spacing);
+					}
+					None => {}
 				}
-				let mut slots = self.grid.group(sequence, pts);
+				slots.extend(self.grid.group(sequence, pts));
 				// A fragment carrying the whole group may already pass the next line.
 				if let Some(newest) = reach.newest() {
 					slots.extend(self.grid.reach(newest));
@@ -2455,6 +2464,8 @@ impl WatchMedia {
 						.take()
 						.expect("read to its end once")
 						.finish(follow.spacing, follow.interval);
+					// A group finished whole says where its content ends.
+					let end = whole_end(group).or(end);
 					let slots = follow.grid.finish(reach, end);
 					let done = follow.list(&self.rendition, slots, None, None, true);
 					return Poll::Ready(done.expect("an ended track ends the watch"));
@@ -2591,6 +2602,20 @@ impl Reach {
 			.filter(|end| *end > newest)
 			.or_else(|| step.map(|step| newest + step));
 		(timestamp(newest), end.and_then(timestamp))
+	}
+}
+
+/// Where `group` ends, once its producer finished it whole.
+fn whole_end(group: &moq_net::group::Consumer) -> Option<moq_net::Timestamp> {
+	moq_net::Timestamp::new(group.end()?, group.timescale()?).ok()
+}
+
+/// Whether media starting at `start` begins past `end` by more than the 1 ms a stamp's rounding
+/// leaves, so the content stopped at `end` and paused.
+fn paused(end: moq_net::Timestamp, start: moq_net::Timestamp) -> bool {
+	match (Duration::try_from(end), Duration::try_from(start)) {
+		(Ok(end), Ok(start)) => start > end.saturating_add(Duration::from_millis(1)),
+		_ => false,
 	}
 }
 

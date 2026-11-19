@@ -4153,10 +4153,10 @@ mod tests {
 		assert_eq!(dash.segments, [(5_500, 2_500), (8_000, 2_000)]);
 	}
 
-	// A discontinuity marker carries no media, so it starts no segment: the content before it
-	// ends, the slots the pause skipped are gaps, and every listed segment serves media.
+	// A discontinuity ends the group before it whole, and starts no segment: the content before it
+	// ends there, the slots the pause skipped are gaps, and every listed segment serves media.
 	#[tokio::test(start_paused = true)]
-	async fn a_discontinuity_marker_lists_no_segment() {
+	async fn a_discontinuity_lists_no_segment() {
 		let origin = produce_origin();
 		let broadcast = origin
 			.route("live", moq_net::origin::RouteOptions::hidden())

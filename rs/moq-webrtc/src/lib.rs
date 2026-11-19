@@ -127,6 +127,25 @@ mod tests {
 		frame.payload.to_vec()
 	}
 
+	/// Push `payload` every 20 ms from `$at`, advancing it, until `$read` resolves, and return what it
+	/// read. A live source keeps sending, and a viewer needs it to: a group that ended whole before
+	/// the viewer subscribed is not served to it. Copies pushed before the read resolved may still
+	/// be on their way to it.
+	macro_rules! flowing {
+		($bridge:expr, $at:ident, $payload:expr, $read:expr) => {{
+			let read = $read;
+			tokio::pin!(read);
+			loop {
+				push($bridge, $at, $payload);
+				$at += 20_000;
+				tokio::select! {
+					read = &mut read => break read,
+					_ = kio::clock::sleep(Duration::from_millis(20)) => {}
+				}
+			}
+		}};
+	}
+
 	fn push(bridge: &mut dyn Bridge, timestamp_us: u64, payload: &'static [u8]) {
 		bridge
 			.push(Frame {
@@ -307,7 +326,8 @@ mod tests {
 	async fn a_whep_viewer_stays_on_its_instance_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
 		let (old_route, mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
-		push(&mut *old, 20_000, OPUS_PACKET);
+		let mut at = 20_000;
+		push(&mut *old, at, OPUS_PACKET);
 
 		let (url, http, mut sessions) = serve_whep(&origin).await;
 		let (viewer, mut played) = view(url).await;
@@ -315,15 +335,18 @@ mod tests {
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
-		assert_eq!(next_payload(&mut played).await, OPUS_PACKET);
+		at += 20_000;
+		assert_eq!(flowing!(&mut *old, at, OPUS_PACKET, next_payload(&mut played)), OPUS_PACKET);
 
 		let _new = take_over(&origin).await;
-		push(&mut *old, 40_000, OLD_PACKET);
-		assert_eq!(
-			next_payload(&mut played).await,
-			OLD_PACKET,
-			"the viewer left its instance"
-		);
+		push(&mut *old, at, OLD_PACKET);
+		let next = loop {
+			match next_payload(&mut played).await {
+				packet if packet == OPUS_PACKET => continue,
+				packet => break packet,
+			}
+		};
+		assert_eq!(next, OLD_PACKET, "the viewer left its instance");
 
 		kill((old_route, old, old_catalog));
 		let ended = kio::clock::timeout(TIMEOUT, session)
@@ -341,7 +364,8 @@ mod tests {
 	async fn a_whep_viewer_ends_with_its_broadcast() {
 		let origin = moq_tokio::origin::spawn();
 		let (_route, mut bridge, mut catalog) = publish_opus(&origin, moq_net::Instance::random());
-		push(&mut *bridge, 20_000, OPUS_PACKET);
+		let mut at = 20_000;
+		push(&mut *bridge, at, OPUS_PACKET);
 
 		let (url, http, mut sessions) = serve_whep(&origin).await;
 		let (task, mut viewer) = raw_view(url).await;
@@ -349,17 +373,23 @@ mod tests {
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
-		assert_eq!(received(&mut viewer).await.unwrap(), OPUS_PACKET);
+		at += 20_000;
+		assert_eq!(
+			flowing!(&mut *bridge, at, OPUS_PACKET, received(&mut viewer)).unwrap(),
+			OPUS_PACKET
+		);
 
 		// The publisher's final packet, then its clean end, as an RTMP `deleteStream` does.
-		push(&mut *bridge, 40_000, NEW_PACKET);
+		push(&mut *bridge, at, NEW_PACKET);
 		let _finished = bridge.finish().unwrap();
 		catalog.finish().unwrap();
-		assert_eq!(
-			received(&mut viewer).await.as_deref(),
-			Some(NEW_PACKET),
-			"the final packet was lost"
-		);
+		let last = loop {
+			match received(&mut viewer).await {
+				Some(packet) if packet == OPUS_PACKET => continue,
+				packet => break packet,
+			}
+		};
+		assert_eq!(last.as_deref(), Some(NEW_PACKET), "the final packet was lost");
 		assert_eq!(received(&mut viewer).await, None, "the viewer was not closed");
 		// The channel also closes if the viewer panicked, so only its task tells a clean close.
 		kio::clock::timeout(TIMEOUT, task)
@@ -427,8 +457,8 @@ mod tests {
 		let _ = old.await;
 		let (_new, mut viewer) = raw_view_on(url, udp).await;
 		let _new_session = sessions.recv().await.unwrap();
-		push(&mut *bridge, 40_000, NEW_PACKET);
-		let played = received(&mut viewer).await.expect("the new session never played");
+		let mut at = 40_000;
+		let played = flowing!(&mut *bridge, at, NEW_PACKET, received(&mut viewer)).expect("the new session never played");
 		assert!([OPUS_PACKET, NEW_PACKET].contains(&played.as_slice()), "{played:?}");
 		http.abort();
 	}

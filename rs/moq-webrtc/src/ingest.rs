@@ -170,10 +170,10 @@ mod tests {
 		assert!(consumer.is_closed());
 	}
 
-	/// A step in the session timeline breaks the track's timeline with a group of its own, which
-	/// is what lets a reader's clock re-anchor instead of read the step as drift.
+	/// A step in the session timeline ends the group before it whole, short of where the next
+	/// group starts, which is what lets a reader's clock re-anchor instead of read the step as drift.
 	#[tokio::test(start_paused = true)]
-	async fn a_step_publishes_a_marker_group() {
+	async fn a_step_ends_the_group_before_it() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -186,10 +186,10 @@ mod tests {
 			payload: bytes::Bytes::from_static(&[0xfc, 0xff, 0xfe]),
 		};
 		let mut track = consumer.track("0.opus").unwrap().subscribe(None).await.unwrap();
-		let mut groups = 0;
+		let mut groups = Vec::new();
 		let mut read = async |track: &mut moq_net::track::Subscriber| {
-			while let Ok(Ok(Some(_))) = kio::clock::timeout(Duration::from_millis(100), track.recv_group()).await {
-				groups += 1;
+			while let Ok(Ok(Some(group))) = kio::clock::timeout(Duration::from_millis(100), track.recv_group()).await {
+				groups.push(group);
 			}
 		};
 		sink.on_frame("0".into(), frame(20_000)).unwrap();
@@ -200,7 +200,9 @@ mod tests {
 		read(&mut track).await;
 		sink.on_frame("0".into(), frame(400_000)).unwrap();
 		read(&mut track).await;
-		assert_eq!(groups, 4, "two frames, the marker, and the frame after it");
+		assert_eq!(groups.len(), 3, "one group per frame, and none for the step");
+		let end = groups[1].end().expect("the step ends the group before it whole");
+		assert!(groups[1].start < end && end < groups[2].start, "{end}");
 	}
 
 	/// Dropping a sink before its session ends, as when shutdown cancels a pull, aborts its

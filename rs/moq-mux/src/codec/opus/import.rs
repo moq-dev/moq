@@ -85,8 +85,7 @@ impl Import {
 		Ok(())
 	}
 
-	/// Mark a break in the timeline by publishing a marker group. To bound the closing
-	/// group's final frame first, [`cut(end)`](Self::cut) before this. See
+	/// Mark a break in the timeline by ending the open group whole where its packets do. See
 	/// [`Producer::discontinuity`](crate::container::Producer::discontinuity).
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
 		self.track.discontinuity()?;
@@ -109,11 +108,15 @@ impl Import {
 		// Only the first frame of each group is a keyframe, so the group spans until the caller cuts
 		// instead of opening one group (one QUIC stream) per packet.
 		let keyframe = self.track.needs_keyframe();
+		let payload = frame.into_bytes();
+		// The packet states its own duration, so a cut without an end still ends the group whole
+		// where the packet does, which shows a reader whether the next group continues it.
+		let duration = super::packet_samples(&payload).and_then(|samples| moq_net::Timestamp::from_scale(samples.into(), 48_000).ok());
 		self.track.write(Frame {
 			timestamp,
-			payload: frame.into_bytes(),
+			payload,
 			keyframe,
-			duration: None,
+			duration,
 		})?;
 		Ok(())
 	}
