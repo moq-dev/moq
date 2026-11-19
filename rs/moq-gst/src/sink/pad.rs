@@ -521,7 +521,7 @@ impl Pad {
 			let broadcast = broadcast.clone();
 			let request = broadcast
 				.reserve_track(name.clone())
-				.with_context(|| format!("cannot reserve track {name}"))?;
+				.with_context(|| format!("the track {name} already exists"))?;
 			// Raw data declares a short explicit max age for subscribers that buffer its samples.
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
@@ -617,7 +617,7 @@ impl Pad {
 				let name = Self::track_name(&broadcast, requested, ".mp3");
 				let request = broadcast
 					.reserve_track(name.clone())
-					.with_context(|| format!("cannot reserve track {name}"))?;
+					.with_context(|| format!("the track {name} already exists"))?;
 				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
 					moq_mux::codec::mp3::Import::new(producer, reserved, Self::audio_config(config.into(), container))?
@@ -650,7 +650,7 @@ impl Pad {
 				let name = Self::track_name(&broadcast, requested, ".opus");
 				let request = broadcast
 					.reserve_track(name.clone())
-					.with_context(|| format!("cannot reserve track {name}"))?;
+					.with_context(|| format!("the track {name} already exists"))?;
 				let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.audio));
 				(
 					moq_mux::codec::opus::Import::new(producer, reserved, Self::audio_config(config, container))?
@@ -727,7 +727,7 @@ impl Pad {
 		let name = Self::track_name(broadcast, requested, &format!(".{format}"));
 		let request = broadcast
 			.reserve_track(name.clone())
-			.with_context(|| format!("cannot reserve track {name}"))?;
+			.with_context(|| format!("the track {name} already exists"))?;
 		let mut video = import::VideoInit::new(format, init.to_vec());
 		video.hint.container = container;
 		let track = import::Track::video(request, reserved, video)?;
@@ -746,7 +746,7 @@ impl Pad {
 		let name = Self::track_name(broadcast, requested, &format!(".{format}"));
 		let request = broadcast
 			.reserve_track(name.clone())
-			.with_context(|| format!("cannot reserve track {name}"))?;
+			.with_context(|| format!("the track {name} already exists"))?;
 		let mut audio = import::AudioInit::new(format, init.to_vec());
 		audio.container = container;
 		let track = import::Track::audio(request, reserved, audio)?;
@@ -1482,7 +1482,7 @@ mod tests {
 		);
 		assert_eq!(
 			second.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("camera")),),
-			CapsOutcome::Failed("cannot reserve track camera: duplicate".to_string()),
+			CapsOutcome::Failed("the track camera already exists".to_string()),
 			"the duplicate reservation is rejected"
 		);
 		assert!(second.is_failed(), "the collision fails the second pad");
