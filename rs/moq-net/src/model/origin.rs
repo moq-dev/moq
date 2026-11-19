@@ -2617,7 +2617,7 @@ impl Producer {
 				announcement: entry,
 				control: kio::Lock::new(control),
 				forwarded: false,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			broadcast: source.clone(),
 		};
@@ -2842,7 +2842,7 @@ impl Producer {
 				announcement,
 				control: kio::Lock::new(control),
 				forwarded,
-				_keepalive: self.tasks.keepalive(),
+				keepalive: std::sync::Mutex::new(Some(self.tasks.keepalive())),
 			}),
 			server: serve,
 			publisher,
@@ -3180,8 +3180,8 @@ struct RouteState {
 	/// the route ([`RouteKind::Offline`]), not that its origin ended it.
 	forwarded: bool,
 	/// A route is lifecycle work: the origin's driver keeps running for as long as one
-	/// lives, even once every producer handle is gone.
-	_keepalive: Keepalive,
+	/// lives, even once every producer handle is gone. `None` once [`Claim::disown`]ed.
+	keepalive: std::sync::Mutex<Option<Keepalive>>,
 }
 
 /// What a route advertises when it announces, changed under one lock so concurrent
@@ -3918,7 +3918,8 @@ impl kio::Task for FeedOwnClaims {
 }
 
 /// The driver's task firing the route node's timers on the origin's clock: a claim no
-/// route reaches going offline. It ends once nothing owns the origin.
+/// route reaches going offline. It ends once nothing owns the origin, letting go of what
+/// closed sessions left behind, since no timer would take it offline after.
 struct RouteTimer {
 	node: crate::route::Node,
 	deadline: crate::time::Deadline,
@@ -3930,6 +3931,7 @@ impl kio::Task for RouteTimer {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		if self.origin.poll_orphaned(waiter).is_ready() {
+			self.node.release_orphans();
 			return Poll::Ready(());
 		}
 		loop {
@@ -4201,7 +4203,7 @@ impl DriverState {
 		// `route` holds across its attach: a concurrent create either
 		// finishes before this (the walk below cleans its entry up) or observes
 		// `closed` and fails with `Closed`.
-		let (servers, cursors, fronts) = {
+		let (servers, cursors, fronts, route_node) = {
 			let mut shared = self.shared.lock();
 			shared.closed = true;
 			// Fronts and parked requesters observe `closed` on their next pass.
@@ -4217,8 +4219,12 @@ impl DriverState {
 			for listener in &shared.listeners {
 				listener.queue.close();
 			}
-			(servers, cursors, fronts)
+			// The node holds what closed sessions left behind, and each of those holds this
+			// state: let go of it, or the two keep each other alive. Dropped outside the
+			// lock, since an orphan's release takes it.
+			(servers, cursors, fronts, shared.route_node.take())
 		};
+		drop(route_node);
 
 		// Reject requesters still parked on a remote front's channel: its watcher
 		// was cancelled above and will never resolve them.
@@ -6936,6 +6942,19 @@ struct PendingFront {
 }
 
 impl Claim {
+	/// Stop keeping the origin's driver running: what a closed session left behind is no
+	/// owner, and goes with the origin.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn disown(&self) {
+		let keepalive = self
+			.state
+			.keepalive
+			.lock()
+			.unwrap_or_else(|err| err.into_inner())
+			.take();
+		drop(keepalive);
+	}
+
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.state.announcement.shared;
@@ -7702,7 +7721,10 @@ impl Consumer {
 		}
 		let claims = Arc::new(std::sync::Mutex::new(claims));
 		let created = (node, Arc::downgrade(&claims));
-		shared.route_node = Some(created.clone());
+		// A torn-down origin keeps no node: nothing would let go of it again.
+		if !shared.closed {
+			shared.route_node = Some(created.clone());
+		}
 		drop(shared);
 		self.tasks.push(FeedOwnClaims {
 			claims,
