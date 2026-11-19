@@ -3,6 +3,7 @@ import { yieldNow } from "@moq/clock";
 import { getter, Once, race, Signal } from "@moq/signals";
 import { announcedView } from "./announced.test-util";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { type Cost, toHop, WireRoute } from "./hop.ts";
 import * as Instance from "./instance.ts";
@@ -66,7 +67,7 @@ for (const via of ["direct", "request", "follow"] as const) {
 			const origin = new Producer();
 			const path = Path.from("live");
 			const broadcast = publish(origin, path);
-			const track = broadcast.createTrack("video", { maxAge: null });
+			const track = defined(broadcast.createTrack("video", { maxAge: null }));
 			const request = via === "direct" ? undefined : origin.consume()[via](path);
 			await settle();
 			const consumed = request ? request.active.peek() : broadcast.consume();
@@ -250,7 +251,7 @@ test("a published broadcast resolves by path", async () => {
 	expect(wireOf(consumer).routes(path)).toBe(false);
 
 	const broadcast = publish(origin, path);
-	broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const handle = await routed(consumer, path);
 	expect(handle).toBeDefined();
@@ -324,7 +325,7 @@ test("a superseded broadcast closes, and its subscribers keep reading", async ()
 
 	const publication = origin.route(path, { hidden: true });
 	const first = publication.broadcast;
-	const track = first.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(first.createTrack("video", { timescale: Timescale.MILLI }));
 	publication.announce();
 	const mine = await routed(consumer, path);
 	const subscriber = mine?.track("video").subscribe();
@@ -522,11 +523,11 @@ test("a local publish shadows a remote entry", async () => {
 	const path = Path.from("room");
 
 	const upstream = new BroadcastProducer();
-	upstream.createTrack("remote-track", { timescale: Timescale.MILLI });
+	defined(upstream.createTrack("remote-track", { timescale: Timescale.MILLI }));
 	const dispose = serve(origin, path, provider(upstream), { hops: [], cost: 9n });
 
 	const local = publish(origin, path);
-	local.createTrack("local-track", { timescale: Timescale.MILLI });
+	defined(local.createTrack("local-track", { timescale: Timescale.MILLI }));
 
 	// Local wins: the handle reaches the local track, not the remote one.
 	const handle = await routed(consumer, path);
@@ -652,7 +653,7 @@ test("disposing the newest remote route promotes the fallback", async () => {
 	// Two sessions announced the same path; the older one is still alive when the newer
 	// one goes away, so the route must fail over rather than black-hole.
 	const older = new BroadcastProducer();
-	older.createTrack("chat", { timescale: Timescale.MILLI });
+	defined(older.createTrack("chat", { timescale: Timescale.MILLI }));
 	const keepOlder = older.consume();
 	const disposeOlder = serve(origin, path, provider(older));
 
@@ -1401,7 +1402,7 @@ test("a handle serves a request under live", async () => {
 	expect(req?.path).toBe(Path.from("live/cam"));
 
 	const produced = new BroadcastProducer();
-	produced.createTrack("video", { timescale: Timescale.MILLI });
+	defined(produced.createTrack("video", { timescale: Timescale.MILLI }));
 	req.serve(produced);
 	await settle();
 
@@ -1439,7 +1440,7 @@ test("a received route still serves a broadcast a session delivered", async () =
 	const origin = new Producer();
 	const path = Path.from("room");
 	const upstream = new BroadcastProducer();
-	upstream.createTrack("video");
+	defined(upstream.createTrack("video"));
 	const foreign = upstream.consume();
 	overrideBroadcastWire(foreign, {});
 	const stop = serve(origin, path, () => foreign);
@@ -1476,7 +1477,7 @@ test("an accepted dynamic broadcast is retired when it closes, and its handle re
 
 	const first = await it.next();
 	const produced = new BroadcastProducer();
-	produced.createTrack("video", { timescale: Timescale.MILLI });
+	defined(produced.createTrack("video", { timescale: Timescale.MILLI }));
 	first.value.serve(produced);
 	await settle();
 	const held = request.active.peek();
@@ -1489,7 +1490,7 @@ test("an accepted dynamic broadcast is retired when it closes, and its handle re
 	const second = await it.next();
 	expect(second.value?.path).toBe(path);
 	const replacement = new BroadcastProducer();
-	replacement.createTrack("video", { timescale: Timescale.MILLI });
+	defined(replacement.createTrack("video", { timescale: Timescale.MILLI }));
 	second.value.serve(replacement);
 	await settle();
 	expect(request.active.peek()).toBe(held);
@@ -2853,7 +2854,7 @@ test("demand held across an instance change asks again, unless it named the old 
 	await expect(pinned).rejects.toThrow("unroutable");
 
 	const next = new BroadcastProducer();
-	const track = next.createTrack("video");
+	const track = defined(next.createTrack("video"));
 	(await it.next()).value.serve(next);
 	const subscription = (await unpinned)?.track("video").subscribe();
 	track.createGroup(7n);
@@ -2901,7 +2902,7 @@ test("demand held across an instance round trip still asks again", async () => {
 	req.serve(new BroadcastProducer().consume());
 
 	const next = new BroadcastProducer();
-	const track = next.createTrack("video");
+	const track = defined(next.createTrack("video"));
 	(await it.next()).value.serve(next);
 	const subscription = (await demanded)?.track("video").subscribe();
 	track.createGroup(7n);
@@ -3031,7 +3032,7 @@ test.each([
 
 	const held = origin.consume().request(path);
 	const old = new BroadcastProducer();
-	const oldTrack = old.createTrack("video");
+	const oldTrack = defined(old.createTrack("video"));
 	(await requests.next()).value.serve(old);
 	await settle();
 	const resolved = held.active.peek();
@@ -3068,7 +3069,7 @@ test.each([
 	const fresh = origin.consume().request(path);
 	const demanded = wireOf(origin.consume()).demand(path);
 	const next = new BroadcastProducer();
-	const nextTrack = next.createTrack("video");
+	const nextTrack = defined(next.createTrack("video"));
 	(await requests.next()).value.serve(next);
 	await settle();
 	expect(fresh.active.peek()?.instance).toBe(to);
@@ -3166,7 +3167,7 @@ test("a session's re-request after an instance update asks the handler again", a
 	wireOf(dynamic).update({ ...wireOf(dynamic).info, instance: NEWER });
 	const after = wire.demand(path);
 	const next = new BroadcastProducer();
-	const track = next.createTrack("video");
+	const track = defined(next.createTrack("video"));
 	(await requests.next()).value.serve(next);
 	const subscription = (await after)?.track("video").subscribe();
 	track.createGroup(7n);
@@ -3201,7 +3202,7 @@ test("an update does not override route selection: another claim at the instance
 	wireOf(first).update({ ...wireOf(first).info, instance: NEWER, cost: 9n });
 	const fresh = origin.consume().request(path);
 	const replacement = new BroadcastProducer();
-	const track = replacement.createTrack("video");
+	const track = defined(replacement.createTrack("video"));
 	(await secondRequests.next()).value.serve(replacement);
 	await settle();
 	expect(held.active.peek()?.instance).toBe(INSTANCE);

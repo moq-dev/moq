@@ -2,6 +2,7 @@
 // Bun's WebCrypto stands in for the browser's, so compare runs on the same runtime.
 import { Duration } from "@moq/clock";
 import { Broadcast, Time } from "@moq/net";
+import { defined } from "../src/defined.test-util.ts";
 import { Credential } from "../src/index.ts";
 
 const GROUP_FRAMES = 64;
@@ -25,10 +26,12 @@ for (const bytes of [160, 1_160, 16_384, 262_144]) {
 		for (let round = 0; round < 6; round++) {
 			const generation = credential.produce();
 			// No publisher limit: every group is sealed before the first is read.
-			const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
-				timescale: Time.Timescale.MILLI,
-				maxAge: null,
-			});
+			const net = defined(
+				new Broadcast.Producer().createTrack(await generation.name("video"), {
+					timescale: Time.Timescale.MILLI,
+					maxAge: null,
+				}),
+			);
 			const consumer = credential
 				.consume(generation.epoch)
 				.consume(net.subscribe({ delay: { max: Duration.millis(60_000) } }), "video");

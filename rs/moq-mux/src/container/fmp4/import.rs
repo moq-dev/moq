@@ -607,10 +607,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// Declare the track at the fMP4's native timescale, which the moq-hang draft requires
 		// of a CMAF track: frame timestamps are emitted at this same scale (see `extract`), so
 		// each one carries its fragment's earliest presentation time exactly.
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(".m4s"),
+		let track = self.broadcast.unique_track(
+			".m4s",
 			self.catalog.track_info(kind.priority()).with_timescale(timescale),
-		)?;
+		);
 
 		// Join the broadcast's join interval, measured: an fMP4 declares no GOP.
 		let member = Some(self.catalog.join(None));
@@ -657,10 +657,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			Kind::Video => (".mp4-v", crate::container::Kind::Video),
 			Kind::Audio => (".mp4-a", crate::container::Kind::Audio),
 		};
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			self.catalog.track_info(kind.priority()),
-		)?;
+		let track = self
+			.broadcast
+			.unique_track(suffix, self.catalog.track_info(kind.priority()));
 		let wire = crate::catalog::hang::Container::new(&Container::Legacy, wire_kind)?;
 		Ok(match kind {
 			Kind::Video => Output::Video(reserved.video(track, wire, self.init_video(trak, moov)?)?),
@@ -690,10 +689,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		// The picker label is the HandlerBox name; `vlab` is an opaque source identifier.
 		config.label = (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone());
 		let wire = crate::catalog::hang::Container::new(&config.container, crate::container::Kind::Data)?;
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(".mp4-t"),
-			self.catalog.track_info(hang::catalog::PRIORITY.text),
-		)?;
+		let track = self
+			.broadcast
+			.unique_track(".mp4-t", self.catalog.track_info(hang::catalog::PRIORITY.text));
 		let producer = reserved.text(track, wire, config)?;
 		self.text.insert(
 			trak.tkhd.track_id,

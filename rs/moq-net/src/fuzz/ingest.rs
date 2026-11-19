@@ -214,7 +214,7 @@ fn run(session: Session, info: &track::Info, body: &[u8], chunk: usize) -> Optio
 	// Unbounded, so eviction never aborts a group mid-frame.
 	broadcast.pool = cache::Pool::unbounded();
 	let broadcast = broadcast.produce();
-	let track = broadcast.create_track("ingest", info.clone()).ok()?;
+	let track = broadcast.create_track("ingest", info.clone())?;
 
 	let (end, fin, group) = match session {
 		Session::Lite {

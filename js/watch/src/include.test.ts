@@ -8,6 +8,7 @@ import { key } from "../../json/src/key.test-util.ts";
 import * as Mint from "../../net/src/mint.ts";
 import { wireOf } from "../../net/src/wire.ts";
 import { Broadcast } from "./broadcast";
+import { defined } from "./defined.test-util.ts";
 import { Source } from "./video/source";
 import { stubSupport } from "./webcodecs.test-util";
 
@@ -43,12 +44,13 @@ it("reads a listed include's catalog but no media, keeping its rendition IDs its
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
 	const include = publish(origin, "room/extra.hang");
-	const includeCatalog = include.createTrack(Catalog.TRACK);
+	const includeCatalog = defined(include.createTrack(Catalog.TRACK));
 	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track: includeCatalog, deltas: false });
-	parent
-		.createTrack("video")
-		.writeFrame({ payload: new TextEncoder().encode("source frames"), timestamp: Time.Timestamp.unscaled(0n) });
-	const includeVideo = include.createTrack("video");
+	defined(parent.createTrack("video")).writeFrame({
+		payload: new TextEncoder().encode("source frames"),
+		timestamp: Time.Timestamp.unscaled(0n),
+	});
+	const includeVideo = defined(include.createTrack("video"));
 	includeVideo.writeFrame({
 		payload: new TextEncoder().encode("include frames"),
 		timestamp: Time.Timestamp.unscaled(0n),
@@ -184,7 +186,7 @@ it("reports an include outside the origin's scope as an error, leaving the paren
 it("tracks the include entry without reopening it on unrelated catalog updates", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const firstCatalog = publish(origin, "room/first.hang").createTrack(Catalog.TRACK);
+	const firstCatalog = defined(publish(origin, "room/first.hang").createTrack(Catalog.TRACK));
 	publish(origin, "room/second.hang");
 	const catalog = new Signal(Catalog.RootSchema.parse({ include: { extra: { broadcast: "./first.hang" } } }));
 	const parent = new Broadcast({
@@ -315,7 +317,7 @@ it("never reads an include of another instance, but reads a minted one", async (
 	publish(origin, "room/main.hang");
 	const served = Instance.random();
 	const proven = publish(origin, "room/proven.hang", served);
-	const track = proven.createTrack(Catalog.TRACK);
+	const track = defined(proven.createTrack(Catalog.TRACK));
 	// A route over a wire that carries no instance has one its session minted.
 	publish(origin, "room/plain.hang", Mint.fresh());
 	const named = Instance.random();
@@ -361,7 +363,7 @@ it("shares the parent's resolution, so a new instance checks the held handle", a
 	const origin = new Origin.Producer();
 	const [served, other] = [Instance.random(), Instance.random()];
 	publish(origin, "room/main.hang", served);
-	const extraCatalog = publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK);
+	const extraCatalog = defined(publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK));
 	const entries = (instance?: Instance.Valid) =>
 		Catalog.RootSchema.parse({
 			include: {
@@ -424,19 +426,19 @@ it("offers every include's renditions to selection, subscribing only the selecte
 	using _decoder = stubSupport({ video: () => true });
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
-	const parentHd = parent.createTrack("hd");
+	const parentHd = defined(parent.createTrack("hd"));
 	const served = Instance.random();
 	const ladder = publish(origin, "room/ladder.hang", served);
-	const ladderTrack = ladder.createTrack(Catalog.TRACK);
+	const ladderTrack = defined(ladder.createTrack(Catalog.TRACK));
 	const ladderCatalog = new Json.Snapshot.Producer<Catalog.Root>({ track: ladderTrack, deltas: false });
 	const rung = (name: string) => {
-		const track = ladder.createTrack(name);
+		const track = defined(ladder.createTrack(name));
 		track.writeFrame({ payload: new TextEncoder().encode(name), timestamp: key() });
 		return track;
 	};
 	const [high, low, ladderHd] = [rung("720p"), rung("360p"), rung("hd")];
-	const remote = publish(origin, "room/remote.hang").createTrack("remote");
-	const nested = publish(origin, "room/nested.hang").createTrack(Catalog.TRACK);
+	const remote = defined(publish(origin, "room/remote.hang").createTrack("remote"));
+	const nested = defined(publish(origin, "room/nested.hang").createTrack(Catalog.TRACK));
 
 	const sized = (width: number, height: number, bitrate: number): Catalog.VideoConfig =>
 		Catalog.VideoConfigSchema.parse({ ...video("avc1.42001f"), codedWidth: width, codedHeight: height, bitrate });
@@ -547,7 +549,7 @@ it("dedupes an include's rendition only against a usable one", async () => {
 	const serve = (instance: Instance.Valid) => {
 		const broadcast = publish(origin, "room/extra.hang", instance);
 		const catalog = new Json.Snapshot.Producer<Catalog.Root>({
-			track: broadcast.createTrack(Catalog.TRACK),
+			track: defined(broadcast.createTrack(Catalog.TRACK)),
 			deltas: false,
 		});
 		catalog.update(Catalog.RootSchema.parse({ video: { renditions: { v: video("vp8") } } }), key());
@@ -587,10 +589,10 @@ it("takes a missing section's display settings from the include whose renditions
 	publish(origin, "room/main.hang");
 	const serve = (path: string, value: Catalog.Root) => {
 		const broadcast = publish(origin, path);
-		new Json.Snapshot.Producer<Catalog.Root>({ track: broadcast.createTrack(Catalog.TRACK), deltas: false }).update(
-			value,
-			key(),
-		);
+		new Json.Snapshot.Producer<Catalog.Root>({
+			track: defined(broadcast.createTrack(Catalog.TRACK)),
+			deltas: false,
+		}).update(value, key());
 		return broadcast;
 	};
 	// The first include's only rendition reads a broadcast nobody announced, so none of it is listed.

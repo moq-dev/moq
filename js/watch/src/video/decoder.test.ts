@@ -9,6 +9,7 @@ import { Effect, Signal } from "@moq/signals";
 import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
+import { defined } from "../defined.test-util.ts";
 import { type Delay, Sync, Track } from "../sync";
 import { stubSupport } from "../webcodecs.test-util";
 import { Decoder } from "./decoder";
@@ -387,7 +388,9 @@ async function guardedPlayback(
 	// Published before the decoder subscribes, since a broadcast with no request handler refuses
 	// an unknown track.
 	const track = live
-		? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
+		? defined(
+				mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE }),
+			)
 		: undefined;
 	const decoder = new Decoder({ source, sync, enabled });
 	// Another track on the same clock, whose arrivals the tests drive by hand.
@@ -447,7 +450,12 @@ async function guardedPlayback(
 				? new Moq.Origin.Producer().route(Moq.Path.from(path), { hidden: true }).broadcast
 				: new Moq.Broadcast.Producer();
 			const track = live
-				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI, maxAge: Container.MAX_AGE })
+				? defined(
+						mediaProducer.createTrack("video", {
+							timescale: Moq.Time.Timescale.MILLI,
+							maxAge: Container.MAX_AGE,
+						}),
+					)
 				: undefined;
 			media.set(mediaProducer.consume());
 			return track;
@@ -1189,10 +1197,12 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		(playback.track as Moq.Track.Producer).close();
 		playback.switchRendition("video/1");
 		video.replace(
-			playback.producer.createTrack("video/1", {
-				timescale: Moq.Time.Timescale.MILLI,
-				maxAge: Container.MAX_AGE,
-			}),
+			defined(
+				playback.producer.createTrack("video/1", {
+					timescale: Moq.Time.Timescale.MILLI,
+					maxAge: Container.MAX_AGE,
+				}),
+			),
 		);
 		await run(20_000, 26_000);
 

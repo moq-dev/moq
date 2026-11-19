@@ -981,7 +981,7 @@ impl poll::SendStream for Recorded<memory::SendStream> {
 		self.inner.offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 		self.inner.poll_acked(waiter, offset)
 	}
 

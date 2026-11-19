@@ -304,7 +304,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			}
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(3, timed()).unwrap();
+		let mut group = request.accept(3, timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(
 				moq_net::Timestamp::unscaled(group.start),

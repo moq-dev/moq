@@ -12,6 +12,7 @@ import {
 import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
 import type * as Datagram from "./datagram.ts";
+import { defined } from "./defined.test-util.ts";
 import { DATAGRAM, GROUP } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import type * as Generation from "./generation.ts";
@@ -46,7 +47,7 @@ const text = (value: string) => encoder.encode(value);
 // No publisher limit, since the tests read groups a later one has superseded.
 function netTrack(name: string, timed = true): NetTrack.Producer {
 	const timescale = timed ? Time.Timescale.MILLI : undefined;
-	return new Broadcast.Producer().createTrack(name, { timescale, maxAge: null });
+	return defined(new Broadcast.Producer().createTrack(name, { timescale, maxAge: null }));
 }
 
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
@@ -247,7 +248,7 @@ test("a broadcast speaks semantic names and puts physical names on the wire", as
 	const generation = credential().produce();
 	const net = new Broadcast.Producer();
 	const producer = new Protected.Producer(net, generation);
-	const video = await producer.createTrack("video", { timescale: Time.Timescale.MILLI });
+	const video = defined(await producer.createTrack("video", { timescale: Time.Timescale.MILLI }));
 	expect(video.name).toBe(await generation.name("video"));
 
 	const consumer = await new Protected.Consumer(
@@ -877,9 +878,11 @@ test("produce waits for an unaccepted track's timescale", async () => {
 
 test("a timestamp out of range at the track's timescale spends nothing", async () => {
 	const generation = credential().produce();
-	const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
-		timescale: Time.Timescale.NANO,
-	});
+	const net = defined(
+		new Broadcast.Producer().createTrack(await generation.name("video"), {
+			timescale: Time.Timescale.NANO,
+		}),
+	);
 	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net), "video");
 	const producer = await generation.produce(net, "video");
 	const huge = new Time.Timestamp(Number.MAX_SAFE_INTEGER, Time.Timescale.MILLI);

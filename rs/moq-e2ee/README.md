@@ -30,7 +30,7 @@ let generation = credential.produce();
 let options = RouteOptions::hidden().with_instance(generation.epoch().instance(), 0);
 let route = origin.route(&credential.path("meeting.hang")?, options)?;
 let protected = broadcast::Producer::new(route.broadcast().clone(), generation.clone());
-let video = protected.create_track("video", None)?;
+let video = protected.create_track("video", None)?.context("video already exists")?;
 route.announce()?;
 ```
 

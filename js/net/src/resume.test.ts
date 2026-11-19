@@ -3,6 +3,7 @@ import { Duration, yieldNow } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer, type FetchFrom } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { WireRoute } from "./hop.ts";
@@ -63,7 +64,7 @@ function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
  * Resumed readers backfill superseded groups, so it sets no publisher limit.
  */
 function copy(source: BroadcastProducer) {
-	const producer = source.createTrack("seq", { maxAge: null });
+	const producer = defined(source.createTrack("seq", { maxAge: null }));
 	return {
 		producer,
 		write(key: bigint, frames = 1, close = true) {
@@ -173,7 +174,7 @@ test("a pending refresh moves to the next copy when the one it asked closes", as
 	const sources = [new BroadcastProducer(), new BroadcastProducer()];
 	const handles = sources.map((source) => source.consume());
 	const tracks = sources.map((source) => {
-		const producer = source.createTrack("seq", { maxAge: null, refresh: { interval: Duration.secs(5) } });
+		const producer = defined(source.createTrack("seq", { maxAge: null, refresh: { interval: Duration.secs(5) } }));
 		const group = producer.createGroup(0n);
 		group.writeFrame({ payload: enc.encode("0"), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
@@ -538,7 +539,7 @@ test("a backfill waits on a fill the finished route still owes", async () => {
 					fill.dropGroups(key, key + 1n);
 					continue;
 				}
-				const group = fill.accept(key);
+				const group = defined(fill.accept(key));
 				group.writeFrame({ payload: enc.encode("2.0"), timestamp: Timestamp.unscaled(group.start) });
 				group.finish();
 			}
@@ -778,13 +779,13 @@ test("a lagging same-instance replica resumes from one publisher's bytes exactly
 	const publisher = new Producer();
 	const originalRoute = publisher.route(path, { instance: { id: INSTANCE, epoch: 0n } });
 	const original = originalRoute.broadcast;
-	const source = original.createTrack("seq", { maxAge: null });
+	const source = defined(original.createTrack("seq", { maxAge: null }));
 	const origin = new Producer();
 
 	// Both replicas forward this one source. Only the incumbent pauses mid-group.
 	function replica(lagging: boolean) {
 		const broadcast = new BroadcastProducer();
-		const output = broadcast.createTrack("seq", { maxAge: null });
+		const output = defined(broadcast.createTrack("seq", { maxAge: null }));
 		const input = source.subscribe({ delay: { max: Duration.millis(60_000) } });
 		const release = Promise.withResolvers<void>();
 		let stopped = false;
@@ -1017,8 +1018,8 @@ for (const [name, before, after] of [
 ] as const) {
 	test(`a replacement claiming different ${name} is refused once the old copy runs out`, async () => {
 		const { a, b, swap, active, close } = await setup();
-		const old = a.createTrack("seq", before);
-		b.createTrack("seq", after);
+		const old = defined(a.createTrack("seq", before));
+		defined(b.createTrack("seq", after));
 		const sub = active.track("seq").subscribe();
 		expect(await sub.info()).toMatchObject(before);
 		await swap();
@@ -1037,7 +1038,7 @@ for (const [name, before, after] of [
 // `unchecked` records how a copy arrived (lite-05/06), so it splices beside a lite-07 copy.
 test("a replacement differing only in unchecked takes over", async () => {
 	const { a, b, swap, active, close } = await setup();
-	const old = a.createTrack("seq", { unchecked: true, maxAge: null });
+	const old = defined(a.createTrack("seq", { unchecked: true, maxAge: null }));
 	const tb = copy(b);
 	const sub = active.track("seq").subscribe();
 	await sub.info();
@@ -1342,8 +1343,8 @@ test("a replacement that aborts before its first group after the front concludes
 
 test("waiting for the end of a track whose replacement was refused ends with the refusal", async () => {
 	const { a, b, swap, active, close } = await setup();
-	const old = a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
+	const old = defined(a.createTrack("seq", { priority: 1 }));
+	defined(b.createTrack("seq", { priority: 2 }));
 	const sub = active.track("seq").subscribe();
 	expect((await sub.info()).priority).toBe(1);
 	await swap();
@@ -1375,10 +1376,10 @@ test("a fetched group continued from an empty, already-closed copy releases that
 		const sub = front.consumer.track("seq").subscribe();
 
 		// Group 5 is empty: the first route fails it, the next holds it closed.
-		const failing = a.createTrack("fetch").createGroup(5n);
+		const failing = defined(a.createTrack("fetch")).createGroup(5n);
 		const group = await front.consumer.track("fetch").fetchGroup(5n);
 		const read = group.readFrame();
-		const whole = b.createTrack("fetch").createGroup(5n);
+		const whole = defined(b.createTrack("fetch")).createGroup(5n);
 		whole.finish();
 		front.serve(b.consume());
 		await settle();
@@ -1416,7 +1417,7 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 		ta.write(0n);
 		expect(drain(sub)).toEqual([0n]);
 
-		const fa = a.createTrack("fetch");
+		const fa = defined(a.createTrack("fetch"));
 		const failing = fa.createGroup(5n);
 		failing.writeFrame({ payload: enc.encode("5.0"), timestamp: Timestamp.unscaled(failing.start) });
 		const fetching = front.consumer.track("fetch").fetchGroup(5n);
@@ -1426,12 +1427,12 @@ test("a fetched group failing as it is handed out releases its route once", asyn
 
 		// The next route holds the fetched group whole; the old one still feeds the reader a
 		// group the new route never has.
-		const fb = b.createTrack("fetch");
+		const fb = defined(b.createTrack("fetch"));
 		const whole = fb.createGroup(5n);
 		whole.writeFrame({ payload: enc.encode("5.0"), timestamp: Timestamp.unscaled(whole.start) });
 		whole.writeFrame({ payload: enc.encode("5.1"), timestamp: Timestamp.unscaled(whole.start) });
 		whole.finish();
-		b.createTrack("seq");
+		defined(b.createTrack("seq"));
 		front.serve(b.consume());
 		const group = await fetching;
 		const frames: string[] = [];
@@ -2041,8 +2042,8 @@ test("a replacement spliced before the first copy answers is still checked again
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
-	const old = a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
+	const old = defined(a.createTrack("seq", { priority: 1 }));
+	defined(b.createTrack("seq", { priority: 2 }));
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
 	// Swapped in the same turn, before the first copy's info committed anywhere.
@@ -2193,8 +2194,8 @@ test("a late subscriber's first route is checked against properties an earlier s
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
-	a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
+	defined(a.createTrack("seq", { priority: 1 }));
+	defined(b.createTrack("seq", { priority: 2 }));
 	front.serve(a.consume());
 	expect((await front.consumer.track("seq").info()).priority).toBe(1);
 
@@ -2587,8 +2588,8 @@ for (const [field, first, second] of [
 		const front = new Front();
 		const a = new BroadcastProducer();
 		const b = new BroadcastProducer();
-		a.createTrack("seq", first);
-		b.createTrack("seq", second);
+		defined(a.createTrack("seq", first));
+		defined(b.createTrack("seq", second));
 		front.serve(a.consume());
 		expect(await front.consumer.track("seq").info()).toMatchObject(first);
 		front.serve(b.consume());
@@ -2603,8 +2604,8 @@ test("a failed group on a route whose replacement was refused ends with the refu
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
-	const ta = a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
+	const ta = defined(a.createTrack("seq", { priority: 1 }));
+	defined(b.createTrack("seq", { priority: 2 }));
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
 	const stalled = ta.createGroup(0n);
@@ -2681,8 +2682,8 @@ test("a fetch never reads a replacement refused for its track properties", async
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
-	a.createTrack("seq", { priority: 1 });
-	const tb = b.createTrack("seq", { priority: 2 });
+	defined(a.createTrack("seq", { priority: 1 }));
+	const tb = defined(b.createTrack("seq", { priority: 2 }));
 	const group = tb.createGroup(0n);
 	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
@@ -2704,7 +2705,7 @@ test("the first fetch of a track says what the track is for later routes", async
 		[a, 1],
 		[b, 2],
 	] as const) {
-		const producer = source.createTrack("seq", { priority });
+		const producer = defined(source.createTrack("seq", { priority }));
 		const group = producer.createGroup(0n);
 		group.writeFrame({ payload: enc.encode(`${priority}`), timestamp: Timestamp.unscaled(group.start) });
 		group.finish();
@@ -2723,7 +2724,7 @@ test("aborting a fetch stops it while its route's properties are still being che
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
-	a.createTrack("seq");
+	defined(a.createTrack("seq"));
 	// b serves tracks on demand but never answers, so its properties never arrive.
 	void wireOf(b).requested();
 	front.serve(a.consume());
@@ -2760,8 +2761,8 @@ test("a fetch never hands out a group from a route refused for its properties", 
 	const front = new Front();
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
-	a.createTrack("seq", { priority: 1 });
-	const tb = b.createTrack("seq", { priority: 2 });
+	defined(a.createTrack("seq", { priority: 1 }));
+	const tb = defined(b.createTrack("seq", { priority: 2 }));
 	const group = tb.createGroup(0n);
 	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
@@ -2783,7 +2784,7 @@ test("a refused route is not served again by a later compatible source", async (
 	const b = new BroadcastProducer();
 	const c = new BroadcastProducer();
 	const ta = copy(a);
-	b.createTrack("seq", { priority: 2 });
+	defined(b.createTrack("seq", { priority: 2 }));
 	const tc = copy(c);
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
@@ -3050,7 +3051,7 @@ test("track info asks the next route when the current one never answers", async 
 	const b = new BroadcastProducer();
 	// a serves tracks on demand but never answers.
 	void wireOf(a).requested();
-	b.createTrack("seq", { priority: 2 });
+	defined(b.createTrack("seq", { priority: 2 }));
 	front.serve(a.consume());
 	const info = front.consumer.track("seq").info();
 	await settle();
@@ -3099,7 +3100,7 @@ test("track info waits for the copy being read to say what the track is", async 
 	const b = new BroadcastProducer();
 	// a answers what the track is only when told to.
 	const requests = wireOf(a).requested();
-	b.createTrack("seq", { priority: 2 });
+	defined(b.createTrack("seq", { priority: 2 }));
 	front.serve(a.consume());
 	const sub = front.consumer.track("seq").subscribe();
 	front.serve(b.consume());
@@ -3171,7 +3172,7 @@ test("a fetch waits for the copy being read to say what the track is", async () 
 	const b = new BroadcastProducer();
 	// a answers what the track is only when told to.
 	const requests = wireOf(a).requested();
-	const tb = b.createTrack("seq", { priority: 2 });
+	const tb = defined(b.createTrack("seq", { priority: 2 }));
 	const group = tb.createGroup(0n);
 	group.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.unscaled(group.start) });
 	group.finish();
@@ -3220,7 +3221,7 @@ test("a fetch still out on the old route moves to the new one", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();
 	// a has the track but not group 5 yet, so its fetch waits on a's request handler.
-	const pending = a.createTrack("seq", { maxAge: null }).requests();
+	const pending = defined(a.createTrack("seq", { maxAge: null })).requests();
 	const tb = copy(b);
 	tb.write(5n);
 	front.serve(a.consume());
@@ -4025,7 +4026,7 @@ test.each([
 	// The old source's listing is answered, as a session answers its peer's.
 	const answer = wireOf(from).lister();
 	answer.synced();
-	b.createTrack("seq");
+	defined(b.createTrack("seq"));
 	front.serve(from);
 	const tracks = front.consumer.tracks();
 	try {
@@ -4040,7 +4041,7 @@ test.each([
 		end(answer);
 		await settled;
 		expect(await tracks.next()).toMatchObject({ kind: "added", name: "seq" });
-		b.createTrack("late");
+		defined(b.createTrack("late"));
 		expect(await tracks.next()).toMatchObject({ kind: "added", name: "late" });
 	} finally {
 		tracks.close();
