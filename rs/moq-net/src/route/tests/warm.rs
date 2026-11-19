@@ -486,7 +486,7 @@ fn close(streams: &mut BTreeMap<Node, BTreeSet<u64>>, peer: Node, stream: u64) {
 	}
 }
 
-fn pair(a: Node, b: Node) -> (Node, Node) {
+pub(super) fn pair(a: Node, b: Node) -> (Node, Node) {
 	(a.min(b), a.max(b))
 }
 
@@ -621,8 +621,9 @@ impl WarmSim {
 		self.net.link(node, home, 1, Tie::Peer);
 		self.net.publish(node, id);
 		(0..claims)
-			.map(|claim| {
-				let path = format!("live/{claim}");
+			.map(|_| {
+				// Numbered across publishers, so no two announce one path.
+				let path = format!("live/{}", self.casts.len());
 				self.net.claim(node, &path, true);
 				self.casts.push((id, p(&path)));
 				self.casts.len() - 1
