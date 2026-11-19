@@ -330,8 +330,8 @@ impl LayerSim {
 		}
 		// A message sent while this round delivers can move no earlier than the next,
 		// so it waits one round more than one sent between rounds.
-		let due = (self.links_between(from, to))
-			.map(|links| self.now + links.max(1) as u64 - 1 + u64::from(self.stepping));
+		let due =
+			(self.links_between(from, to)).map(|links| self.now + links.max(1) as u64 - 1 + u64::from(self.stepping));
 		self.queues.entry((from, to)).or_default().push_back((due, msg));
 	}
 
@@ -657,7 +657,15 @@ impl LayerSim {
 				self.members.insert(node);
 				let ident = self.relay(node).expect("a relay").ident;
 				for peer in self.relays().into_iter().filter(|&peer| peer != node) {
-					self.send(FEED, peer, Msg::Member { node, ident, alive: true });
+					self.send(
+						FEED,
+						peer,
+						Msg::Member {
+							node,
+							ident,
+							alive: true,
+						},
+					);
 				}
 				let all: BTreeSet<Node> = self.members.iter().copied().filter(|&m| m != node).collect();
 				self.relay_mut(node).expect("a relay").known = all;
@@ -690,7 +698,13 @@ impl LayerSim {
 		for &(a, b) in want.difference(&open) {
 			for (x, y) in [(a, b), (b, a)] {
 				let ident = self.relay(y).expect("a relay").ident;
-				if self.relay(x).expect("a relay").sessions.get(&y).is_some_and(|&held| held != ident) {
+				if self
+					.relay(x)
+					.expect("a relay")
+					.sessions
+					.get(&y)
+					.is_some_and(|&held| held != ident)
+				{
 					self.forget(x, y);
 				}
 				self.relay_mut(x).expect("a relay").sessions.insert(y, ident);
@@ -1041,7 +1055,15 @@ impl Net for LayerSim {
 		if self.layer == Layer::Flat && self.dead.contains(&node) && self.members.remove(&node) {
 			let ident = self.relay(node).expect("a relay").ident;
 			for to in self.relays().into_iter().filter(|&to| to != node) {
-				self.send(FEED, to, Msg::Member { node, ident, alive: false });
+				self.send(
+					FEED,
+					to,
+					Msg::Member {
+						node,
+						ident,
+						alive: false,
+					},
+				);
 			}
 		}
 		self.resync();
@@ -1142,7 +1164,9 @@ impl Net for LayerSim {
 			// A flat session waits while the network has no path to carry it.
 			.filter(|((from, to), _)| self.links_between(*from, *to).is_some())
 			.map(|(key, queue)| {
-				let due = queue.iter().take_while(|(due, _)| due.is_some_and(|due| due <= self.now));
+				let due = queue
+					.iter()
+					.take_while(|(due, _)| due.is_some_and(|due| due <= self.now));
 				(*key, due.count())
 			})
 			.filter(|&(_, count)| count > 0)
@@ -1208,7 +1232,9 @@ impl Net for LayerSim {
 					}
 					let next = self.relay(at).and_then(|relay| match marked {
 						false => relay.table.get(&announcer).map(|&(_, next)| next),
-						true => Self::next_hops(relay, true, &mut 0).get(&announcer).map(|&(_, next)| next),
+						true => Self::next_hops(relay, true, &mut 0)
+							.get(&announcer)
+							.map(|&(_, next)| next),
 					});
 					let Some(next) = next else {
 						return Some((hops, false));
