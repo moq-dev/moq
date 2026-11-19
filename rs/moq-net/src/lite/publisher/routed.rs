@@ -370,7 +370,10 @@ impl Answer {
 			add: wanted.difference(&self.reads).cloned().collect(),
 		};
 		let removed = edit.remove.clone();
-		self.ask(edit, Marker::Grant { removed })
+		self.ask(edit, Marker::Grant { removed })?;
+		// Queued for this session now, so the pass that saw the change sends it.
+		self.main.flush();
+		Ok(())
 	}
 
 	/// The grant changed: read what it now shows, and at the marker of that, end what it

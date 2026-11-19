@@ -223,10 +223,9 @@ export class Answer {
 		const grant = this.#publish.grant?.peek();
 		const granted = grant && regions(grant.publish);
 		// The claims the peer is shown, by their path from the session's root: the table under each
-		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us
-		// publish, which is kept apart to tell a claim it no longer covers from one that ended.
+		// prefix, less the hidden ones it did not ask for and whatever our grant does not let us publish.
 		const latest = new Map<Path.Valid, Advertised>();
-		const ungranted = new Set<Path.Valid>();
+		const shows = (path: Path.Valid) => !grant || grant.publish.matches(path);
 		const ids = [...this.#prefixes.keys()].sort((a, b) => (a < b ? -1 : 1));
 		for (const id of table ? ids : []) {
 			const prefix = this.#prefixes.get(id);
@@ -236,8 +235,7 @@ export class Answer {
 				// A claim covering what is read from above keeps how many segments broader than it it is.
 				for (const [suffix, snap] of presented(read, table, carries, true)) {
 					const path = Path.join(read, suffix);
-					if (!grant || grant.publish.matches(path)) latest.set(path, snap);
-					else ungranted.add(path);
+					if (shows(path)) latest.set(path, snap);
 				}
 			}
 		}
@@ -250,7 +248,7 @@ export class Answer {
 		};
 		for (const [path, sent] of [...this.#live]) {
 			// No longer granted, it is lost to the peer: its publisher never ended it.
-			if (!latest.has(path)) end(path, sent, ungranted.has(path));
+			if (!latest.has(path)) end(path, sent, !shows(path));
 		}
 		for (const [path, snap] of latest) {
 			const { instance, epoch, cost } = snap.route;
