@@ -64,6 +64,8 @@ select_packages() {
         sed -n 's|^nix/modules/moq-relay\.nix$|moq-relay|p' "$list"
         # The gate's Send-depth proof of moq-net's session driver is this script.
         sed -n 's|^sh/rs/send-depth\.sh$|moq-net|p' "$list"
+        # The gate compiles the C fixtures and doc samples against libmoq's header.
+        sed -nE 's#^(sh/rs/c-tests\.sh|doc/lib/c/.*|doc/lib/samples\.sh)$#libmoq#p' "$list"
         jq -r --rawfile list "$list" '
             def resolve: gsub("\\\\"; "/") | reduce split("/")[] as $s ([];
                 if $s == ".." then .[:-1] elif $s == "." then . else . + [$s] end) | join("/");
@@ -174,6 +176,8 @@ case "$action" in
         if wants moq-net; then just rs no-async; fi
         # The session driver's Send proof, which a deeper session state breaks.
         if [[ "$action" == lint ]] && wants moq-net; then just rs send-depth; fi
+        # Every C caller still matches libmoq's generated header.
+        if [[ "$action" == lint ]] && wants libmoq; then just rs c-tests --syntax; fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
         ;;
