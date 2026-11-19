@@ -538,11 +538,10 @@ impl Preferences {
 		}
 		// Found before taking the lock every subscriber shares.
 		let (gone, came) = moved(&old, &next.ranges);
-		let mut wakes = self
-			.0
-			.subscriptions
-			.as_ref()
-			.map(|subs| subs.lock().replace(Some(contribution), Some(next_contribution), (&gone, &came)));
+		let mut wakes = self.0.subscriptions.as_ref().map(|subs| {
+			subs.lock()
+				.replace(Some(contribution), Some(next_contribution), (&gone, &came))
+		});
 		value.replace(next);
 		drop(value);
 		if let Some(wakes) = &mut wakes {

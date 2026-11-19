@@ -4700,7 +4700,10 @@ impl Requested {
 	/// [`crate::track::Subscription::end`].
 	fn end(&self) -> Option<u64> {
 		match self.unbounded {
-			0 => self.ends.last_key_value().map_or(Some(0), |(last, _)| last.checked_add(1)),
+			0 => self
+				.ends
+				.last_key_value()
+				.map_or(Some(0), |(last, _)| last.checked_add(1)),
 			_ => None,
 		}
 	}
@@ -8244,7 +8247,13 @@ mod serve_group_test {
 			max_delay: Some(Duration::from_secs(3600)),
 			min_delay: None,
 			ranges: lite::Applied::Edit {
-				retired: run.requested.ranges.keys().filter(|id| !kept.contains(id)).copied().collect(),
+				retired: run
+					.requested
+					.ranges
+					.keys()
+					.filter(|id| !kept.contains(id))
+					.copied()
+					.collect(),
 				added: (next..).zip(added.iter().copied()).collect(),
 			},
 			order: Order::Descending,
@@ -8386,7 +8395,12 @@ mod serve_group_test {
 
 		write_group(&mut track, newer, newer);
 		let live = [(0, served), (1, time)];
-		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(99), 0, None, None)]));
+		run.update(lite07_add(
+			&run,
+			&live,
+			2,
+			&[lite::Range::span(Some(99), 0, None, None)],
+		));
 		let after = run.track.resolved_range(1).expect("resolved");
 		[(before.start, before.floored), (after.start, after.floored)]
 	}

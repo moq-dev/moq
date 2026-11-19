@@ -8568,14 +8568,18 @@ impl Cursor {
 			let preferences = subscription.read();
 			let ranges_revision = preferences.revision;
 			let state = state.read();
-			let (window, refused) =
-				match Window::keyed(preferences.ranges(), preferences.delay.min, state.latest_live(), &*state) {
-					Ok(window) => (window, None),
-					Err(err) => (
-						Window::new(&[], None, None, &*state).expect("nothing to refuse"),
-						Some(err),
-					),
-				};
+			let (window, refused) = match Window::keyed(
+				preferences.ranges(),
+				preferences.delay.min,
+				state.latest_live(),
+				&*state,
+			) {
+				Ok(window) => (window, None),
+				Err(err) => (
+					Window::new(&[], None, None, &*state).expect("nothing to refuse"),
+					Some(err),
+				),
+			};
 			let filter = Filter {
 				window,
 				resolved: ranges_revision,
@@ -8746,13 +8750,17 @@ impl Cursor {
 				self.filter.resolved = revision;
 				let applied = match change {
 					Change::Edit(changes) => {
-						let added: Vec<(u64, Range)> =
-							changes.iter().filter_map(|(key, range)| Some((*key, (*range)?))).collect();
+						let added: Vec<(u64, Range)> = changes
+							.iter()
+							.filter_map(|(key, range)| Some((*key, (*range)?)))
+							.collect();
 						self.filter.window.set_min(min);
-						let applied =
-							self.filter
-								.window
-								.edit(changes.iter().map(|(key, _)| *key), &added, state.latest_live(), holdings);
+						let applied = self.filter.window.edit(
+							changes.iter().map(|(key, _)| *key),
+							&added,
+							state.latest_live(),
+							holdings,
+						);
 						// A time looked up and answered is asked again for a range that names it anew.
 						self.filter.lookups.retain(|lookup| lookup.join.is_some());
 						applied
@@ -9964,7 +9972,11 @@ impl Republish {
 		};
 		let (ranges, min, revision) = {
 			let current = preferences.read();
-			(current.ranges().collect::<Vec<_>>(), current.delay.min, current.revision)
+			(
+				current.ranges().collect::<Vec<_>>(),
+				current.delay.min,
+				current.revision,
+			)
 		};
 		if published.read().revision >= revision {
 			return;
@@ -13239,8 +13251,11 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_received_copy_reaches_back_only_to_groups_it_holds() {
-		let placed =
-			|subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| (resolved.start, resolved.floored));
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber
+				.resolved_range(0)
+				.map(|resolved| (resolved.start, resolved.floored))
+		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -15323,8 +15338,11 @@ mod test {
 				}])
 				.with_delay(Delay::default().with_max(None))
 		};
-		let placed =
-			|subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| (resolved.start, resolved.floored));
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber
+				.resolved_range(0)
+				.map(|resolved| (resolved.start, resolved.floored))
+		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -26308,9 +26326,7 @@ mod test {
 				0 => Anchor::Relative(rng.random_range(0..5)),
 				_ => Anchor::Time(rng.random_range(0..24_000)),
 			};
-			let end = rng
-				.random_bool(0.6)
-				.then(|| Anchor::Time(rng.random_range(0..24_000)));
+			let end = rng.random_bool(0.6).then(|| Anchor::Time(rng.random_range(0..24_000)));
 			Range { start, end }
 		};
 		// Key 0 is the default subscription's one range.
@@ -26318,11 +26334,7 @@ mod test {
 		let mut next = 0;
 		let mut edited = producer.subscribe(Subscription::default());
 		for step in 0..400 {
-			let retire: Vec<u64> = live
-				.keys()
-				.copied()
-				.filter(|_| rng.random_bool(0.2))
-				.collect();
+			let retire: Vec<u64> = live.keys().copied().filter(|_| rng.random_bool(0.2)).collect();
 			let add: Vec<(u64, Range)> = (0..rng.random_range(0..3))
 				.map(|_| {
 					next += 1;

@@ -610,9 +610,9 @@ mod tests {
 			let found: Vec<u64> = minus(run.clone(), &cover).into_iter().flatten().collect();
 			assert_eq!(found, expected, "{run:?} minus {runs:?}");
 		}
-		let whole = Cover::new([0..=u64::MAX]);
+		let whole = Cover::new(std::iter::once(0..=u64::MAX));
 		assert!(minus(0..=u64::MAX, &whole).is_empty());
-		let low = Cover::new([0..=9]);
+		let low = Cover::new(std::iter::once(0..=9));
 		assert_eq!(minus(5..=u64::MAX, &low), vec![10..=u64::MAX]);
 	}
 }

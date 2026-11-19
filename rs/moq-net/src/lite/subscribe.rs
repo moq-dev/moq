@@ -846,7 +846,10 @@ pub(crate) struct LiveRanges {
 pub(crate) enum Applied {
 	/// Lite-07: the Range IDs retired, then each range added with its Range ID, so applying
 	/// it costs the ranges it names.
-	Edit { retired: Vec<u64>, added: Vec<(u64, Range)> },
+	Edit {
+		retired: Vec<u64>,
+		added: Vec<(u64, Range)>,
+	},
 	/// Before lite-07: every live range, numbered afresh.
 	Replace(Vec<(u64, Range)>),
 }
@@ -856,7 +859,13 @@ impl Applied {
 	/// Holds no more than the ranges live before this and after `later`.
 	pub fn then(self, later: Self) -> Self {
 		match (self, later) {
-			(Self::Edit { mut retired, mut added }, Self::Edit { retired: gone, added: came }) => {
+			(
+				Self::Edit { mut retired, mut added },
+				Self::Edit {
+					retired: gone,
+					added: came,
+				},
+			) => {
 				let gone: std::collections::BTreeSet<u64> = gone.into_iter().collect();
 				// Each Range ID is added once, so one this added and `later` retired was never live.
 				let fresh: std::collections::BTreeSet<u64> =
@@ -960,10 +969,7 @@ impl LiveRanges {
 				}
 				let added = (self.next..).zip(add.iter().copied()).collect();
 				self.add(add);
-				Applied::Edit {
-					retired: remove,
-					added,
-				}
+				Applied::Edit { retired: remove, added }
 			}
 			_ => return Err(DecodeError::Version),
 		};

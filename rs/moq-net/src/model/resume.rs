@@ -451,7 +451,11 @@ impl Consumer {
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let (mirrored, keys, revision) = {
 			let prefs = subscription.read();
-			(prefs.subscription(), prefs.ranges().map(|(key, _)| key).collect::<Vec<_>>(), prefs.revision)
+			(
+				prefs.subscription(),
+				prefs.ranges().map(|(key, _)| key).collect::<Vec<_>>(),
+				prefs.revision,
+			)
 		};
 		let window = keyed(&keys, &mirrored.ranges, &Unheld);
 		let reader = Arc::new_cyclic(|this| {
@@ -7073,9 +7077,7 @@ mod test {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let sub = routes
-			.consume()
-			.subscribe(Subscription::default().into());
+		let sub = routes.consume().subscribe(Subscription::default().into());
 		let mut reader = sub.reader.lock().unwrap();
 		let copy = &mut reader.copies[0];
 		copy.floor = Some(0);
@@ -7101,9 +7103,7 @@ mod test {
 			write(&a, sequence);
 		}
 		routes.serve(a.consume());
-		let sub = routes
-			.consume()
-			.subscribe(Subscription::default().into());
+		let sub = routes.consume().subscribe(Subscription::default().into());
 		let mut reader = sub.reader.lock().unwrap();
 		let copy = &mut reader.copies[0];
 		copy.floor = Some(0);
@@ -8786,7 +8786,11 @@ mod test {
 				write(&a, key);
 			}
 			assert_eq!(start(&mut sub, 10), None);
-			assert_eq!(start(&mut sub, 0), Some(0), "the start stays pinned while the end settles");
+			assert_eq!(
+				start(&mut sub, 0),
+				Some(0),
+				"the start stays pinned while the end settles"
+			);
 		}
 	}
 

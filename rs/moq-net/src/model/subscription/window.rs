@@ -419,7 +419,10 @@ impl Window {
 				floored: true,
 			});
 		}
-		let span = self.spans.get(&key).filter(|span| span.looking.is_none() && !span.waiting)?;
+		let span = self
+			.spans
+			.get(&key)
+			.filter(|span| span.looking.is_none() && !span.waiting)?;
 		Some(Resolved {
 			start: span.start,
 			end: span.end,
