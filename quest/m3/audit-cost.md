@@ -35,8 +35,6 @@ tests [moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600), build time
   [alert.yml](/.github/workflows/alert.yml), a Pages report, or a job summary;
   a result only in an artifact or log is invisible), and cost (runner-minutes
   by runner type; macOS is the scarce one).
-- The [benchmark history](https://git.moq.dev/bench/)'s `bench-gate-cost`
-  `module/*` rows give each `just ci` module's wall and CPU seconds.
 - Sum elapsed runner-minutes from the REST jobs API. Org billing is monthly
   attribution only; never derive a workflow's cost from it.
 - Read failures by cause, not job count: N fuzz targets failing one build is

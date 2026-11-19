@@ -77,8 +77,8 @@ export interface ConsumerProps {
 	/**
 	 * Read the media in key order from this reader of the same track instead of `track`'s arrival
 	 * order, so it decides every hole. It must be a second subscription, never `track`'s own, which
-	 * keeps reading in arrival order to feed the estimate: a missing group is a hole once the reader reports it as a gap,
-	 * and never waited for here. Its `delay.max` is then how long a hole is waited for, so size it to
+	 * keeps reading in arrival order to feed the estimate: a missing group is a hole once the reader reports it as a gap
+	 * and the media after it does not continue the timeline, and never waited for here. Its `delay.max` is then how long a hole is waited for, so size it to
 	 * what the player can still play late. `track` only feeds the arrival estimate, read frame by frame
 	 * as it lands, so give it a `delay.max` reaching as far as lateness can move the estimate.
 	 */
@@ -246,6 +246,9 @@ export class Consumer {
 	#mediaGroup?: bigint;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
+	// The ordered reader gave up on keys since the last item read: a loss only if the next item does
+	// not continue the timeline, since a publisher keying groups by timestamp never produced most keys.
+	#gapped?: { from: bigint; to: bigint };
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
 	// Undefined until the first item, so a loss before it is no gap.
 	#edge?: number;
@@ -863,8 +866,9 @@ export class Consumer {
 		const nextStart = next?.frames.at(0)?.timestamp.asMicros();
 		if (!next || nextStart === undefined || active.end < nextStart) return false;
 
+		// Routine for a group of one frame whose stream finishes after the next one starts, and nothing
+		// is lost, so it says nothing.
 		this.#groups.shift();
-		console.warn(`skipping covered group: ${active.consumer.start} -> ${next.consumer.start}`);
 		this.#pass(active, next.consumer.start);
 
 		this.#discard(active);
@@ -1086,7 +1090,10 @@ export class Consumer {
 					) {
 						// What an ordered reader gives up it reports as a gap; a key it skips without one was never a
 						// group. A gap an empty group carries still marks the next frame, which follows the loss.
-						if (!contiguous && (decided ? head.gap : !empty)) {
+						if (decided && head.gap && !contiguous) {
+							// The head's first frame may not have landed yet, so the next item read decides.
+							this.#gapped = { from: this.#gapped?.from ?? this.#active, to: head.consumer.start };
+						} else if (!decided && !contiguous && !empty) {
 							this.#lost = true;
 							if (!startup) {
 								console.warn(
@@ -1318,8 +1325,14 @@ export class Consumer {
 	#emit(read: Exclude<Read, { kind: "gap" }>): Read {
 		const resume = (read.kind === "frame" ? read.frame.timestamp : read.end).asMicros();
 		const edge = this.#edge;
-		const lost = this.#lost;
+		const gapped = this.#gapped;
+		this.#gapped = undefined;
+		let lost = this.#lost;
 		this.#lost = false;
+		if (gapped && edge !== undefined && !ptsContiguous(edge, resume)) {
+			lost = true;
+			console.warn(`skipping missing groups: track=${this.#track.name} ${gapped.from} -> ${gapped.to}`);
+		}
 		this.#advance(read.kind === "frame" ? resume + (read.frame.duration?.asMicros() ?? 0) : resume);
 		if (!lost || edge === undefined) return read;
 

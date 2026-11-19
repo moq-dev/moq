@@ -176,40 +176,20 @@ def run(action, plan):
 
     command("uv", "run", "--no-project", "python", str(ROOT / "sh/js/install.py"), "frozen")
     if action == "test":
-        # JS_TEST_REPORTS=DIR keeps each test file's time in a JUnit report under DIR at
-        # its package's path, for the nightly gate cost scenarios. Every test script is
-        # `bun test`, which takes the reporter flags; the packages then run in turn.
         # The root run skips `.env`, which Bun would load from here, so a developer's file
         # can't change a result; the packages run from their own directories, which have none.
-        # Bun resolves the outfile from each package's directory, so anchor it here.
-        report_dir = os.environ.get("JS_TEST_REPORTS")
-        report_dir = report_dir and Path(report_dir).absolute()
-
-        def junit(directory):
-            if not report_dir:
-                return []
-            (report_dir / directory).mkdir(parents=True, exist_ok=True)
-            return ["--reporter=junit", f"--reporter-outfile={report_dir / directory / 'junit.xml'}"]
-
         command("python3", "sh/js/playwright.test.py")
         command(
             "bun",
             "--no-env-file",
             "test",
-            *junit("."),
             "js/common/api.test.ts",
             "js/common/constructors.test.ts",
             "js/common/deps.test.ts",
             "js/common/worklet.test.ts",
             "js/common/release.test.ts",
         )
-        if not report_dir:
-            scripts("test")
-            return
-        for package in packages.values():
-            if "test" in package["manifest"].get("scripts", {}):
-                directory = package["directory"]
-                command("bun", "run", "test", *junit(directory), cwd=ROOT / directory)
+        scripts("test")
         return
     if action == "build":
         scripts("build")

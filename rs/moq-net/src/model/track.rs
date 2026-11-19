@@ -23,7 +23,7 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Cover, Holdings, Unplaced, Window};
+use super::subscription::{Accounted, Containing, Cover, Holdings, Unplaced, Window, minus};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -754,6 +754,9 @@ pub(crate) struct TrackState {
 	// a time it holds no group at, but its publisher reports where it resolved one. Replaced
 	// whole as the ranges change, so it holds at most one entry per live range.
 	time_starts: BTreeMap<u64, u64>,
+	// The newest start in `time_starts` past the time its range asked from, kept as it is
+	// replaced: [`Holdings::unplaced`] reads it on every settle of every reader.
+	starts_past: Option<u64>,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges counting
 	// back, by how many groups each counted, with the latest group it counted from: the copy
 	// holds only part of the track, so it can't count back over its own groups. Replaced whole
@@ -1130,9 +1133,20 @@ impl Holdings for TrackState {
 		}
 	}
 
-	/// Exactly the times [`Self::containing`] can't place, but those `time_starts` places.
+	/// Only times [`Self::containing`] can't place, but those `time_starts` places directly.
+	/// It leaves out the times below the newest start the publisher reported past an earlier
+	/// range's time: `containing_received` places those once no held group precedes them,
+	/// which an eviction brings about without changing the mark. A consistent publisher
+	/// reports its oldest group for each such range, so the run then still starts where its
+	/// unknown times do.
 	fn unplaced(&self) -> Option<Unplaced> {
 		let none = Unplaced::NONE;
+		let past = self.starts_past.filter(|_| self.anchors == Anchors::Wire);
+		// The times below every held group that no inference from an earlier range places.
+		let unheld = |run: ops::RangeInclusive<u64>| match past {
+			Some(past) => (*run.start()).max(past)..=*run.end(),
+			None => run,
+		};
 		// The times at or after `from` whose keys from `from` through them drops do not all
 		// cover. As in `dropped_cover`, the last time checks the keys below it only, so a run
 		// from the last key covers nothing and leaves nothing unplaced.
@@ -1147,7 +1161,7 @@ impl Holdings for TrackState {
 		} else {
 			match (self.lookup.first_key_value(), self.lookup.last_key_value()) {
 				// Before any group, only a time whose keys down to 0 were all dropped is placed.
-				(None, _) | (_, None) => [uncovered(0), none],
+				(None, _) | (_, None) => [unheld(uncovered(0)), none],
 				(Some(_), Some(_)) if self.anchors != Anchors::Wire => [none.clone(), none],
 				// A copy places a time below its groups only once the keys down to 0 were
 				// dropped, and one above them only once the keys down to the newest were.
@@ -1156,7 +1170,7 @@ impl Holdings for TrackState {
 					let below = *below.start()..=(*below.end()).min(first.saturating_sub(1));
 					let below = match first {
 						0 => none.clone(),
-						_ => below,
+						_ => unheld(below),
 					};
 					let above = match last.checked_add(1) {
 						Some(next) => uncovered(next),
@@ -1272,6 +1286,14 @@ impl TrackState {
 	/// or where the publisher reports starting the range it asked from `time`. A group past
 	/// it says the feed went by: one between still in flight, a stream overtaken, would
 	/// only add that group to the reader's range.
+	///
+	/// With no group held at or before `time`, a range asked from an earlier time, or from
+	/// the oldest group (reported as time 0), that the publisher started past `time` says
+	/// the same: no group starts at or before it. A reader joining a copy that another
+	/// reader already asks from further back adds no range of its own, so that is the only
+	/// report its time start gets. A group the copy still holds there is a group the
+	/// publisher has since expired, so it wins: the time still waits to learn whether it
+	/// contains it.
 	fn containing_received(&self, time: u64) -> Containing {
 		if self.lookup.contains_key(&time) {
 			return Containing::Group(time);
@@ -1290,7 +1312,12 @@ impl TrackState {
 			{
 				Containing::Group(key)
 			}
-			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
+			None if self.dropped_cover(0..time.saturating_add(1))
+				|| (self.starts_past.is_some_and(|past| past > time)
+					&& self.time_starts.range(..time).any(|(_, &start)| start > time)) =>
+			{
+				Containing::Before
+			}
 			_ => Containing::Unknown,
 		}
 	}
@@ -4788,6 +4815,11 @@ impl Producer {
 		if let Ok(mut state) = self.modify()
 			&& state.time_starts != starts
 		{
+			state.starts_past = starts
+				.iter()
+				.filter(|&(asked, start)| asked < start)
+				.map(|(_, &start)| start)
+				.max();
 			state.time_starts = starts;
 			state.placing += 1;
 		}
@@ -5408,6 +5440,14 @@ impl Producer {
 		snapshot_subscription(&subs, bound)
 	}
 
+	/// Arm `waiter` for the next change to the subscribers' demand, without reading it: a
+	/// caller that follows each subscriber's own edits needs the wake, not the aggregate,
+	/// whose ranges cost every subscriber's to build.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn watch_subscription(&self, waiter: &kio::Waiter) {
+		watch_combined(&self.state, waiter);
+	}
+
 	/// The aggregate subscription once it changes: the most demanding request across all
 	/// live subscribers, or `None` once the last one drops. Errors once the track is aborted.
 	///
@@ -5784,6 +5824,12 @@ fn poll_combined_changed(
 	subs.lock().poll_changed(bound, prev, waiter)
 }
 
+/// Arm `waiter` for the next change to the counted aggregate, reading none of it.
+fn watch_combined(state: &kio::Producer<TrackState>, waiter: &kio::Waiter) {
+	let subs = state.read().subscriptions.clone();
+	subs.lock().watch(waiter);
+}
+
 /// Read the counted aggregate without walking the audience.
 fn snapshot_subscription(subs: &kio::Lock<Subscriptions>, bound: Option<Duration>) -> Option<Subscription> {
 	clamp_combined(subs.lock().combined(), bound)
@@ -5819,6 +5865,36 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 		combined.delay.max = Some(bound);
 	}
 	Some(combined)
+}
+
+/// A front's logical track served from one route's copy, for benches.
+#[cfg(any(feature = "fuzz", all(test, feature = "async")))]
+pub(crate) struct Routed {
+	/// The logical track readers subscribe to.
+	pub logical: Producer,
+	/// The route's copy, which its source writes.
+	pub copy: Producer,
+	/// Concludes the logical track once dropped.
+	_routes: super::resume::Producer,
+}
+
+#[cfg(any(feature = "fuzz", all(test, feature = "async")))]
+impl Routed {
+	/// A logical track named `name`, and a copy of it serving it, both with `info`.
+	pub(crate) fn new(name: &str, info: Info) -> Self {
+		let broadcast = Arc::new(broadcast::Info::default());
+		let routes = super::resume::Producer::new();
+		let logical = Request::new(broadcast.clone(), name)
+			.routes(routes.consume())
+			.accept(info.clone());
+		let copy = Producer::new(broadcast, name, info);
+		routes.serve(copy.consume());
+		Self {
+			logical,
+			copy,
+			_routes: routes,
+		}
+	}
 }
 
 /// Aborts a track without keeping it open, from [`Producer::abort_handle`].
@@ -5932,6 +6008,15 @@ impl TrackWeak {
 	/// A [`Demand`] on the cached track, for a broadcast to watch.
 	pub(super) fn demand(&self) -> Demand {
 		Demand::new(self.name.clone(), self.state.clone())
+	}
+
+	/// [`Self::subscription`] without its ranges, costing none of them.
+	pub(super) fn terms(&self) -> Option<(Subscription, usize)> {
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
+		drop(state);
+		let subs = subs.lock();
+		Some((clamp_combined(subs.terms(), bound)?, subs.len()))
 	}
 
 	/// The readers' aggregate demand and contribution count, or `None` without one.
@@ -7172,6 +7257,11 @@ impl Subscribing {
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
 		self.subscription.update(subscription)
 	}
+
+	/// The subscription's preferences, which [`Preferences::edit`] changes by key.
+	pub(super) fn preferences(&self) -> &Preferences {
+		&self.subscription
+	}
 }
 
 impl kio::Task for Subscribing {
@@ -8089,8 +8179,8 @@ enum Servable {
 /// `cap`, with the reader's index of the live groups inside that cover.
 ///
 /// Built again whenever the window or cap moves, which a time end does on each group. The
-/// snapshot is a pointer clone, and the index is kept while the cover is unchanged
-/// (pointer-equal), so a move of only the cap rebuilds nothing.
+/// snapshot is a pointer clone, and the index carries over: a move of only the cap changes
+/// nothing in it, and a move of the cover costs the runs that moved.
 struct Several {
 	groups: Cover,
 	cap: Option<u64>,
@@ -8115,6 +8205,9 @@ impl PartialEq for Several {
 /// One index per track searched: a group's expiry that moved to a replacement copy (see
 /// [`GroupExpiry::for_track`]) searches its reader's servable on that copy's track, whose
 /// arrival order and stamps are its own.
+///
+/// Each index is for the cover it last searched: a search under an edited cover moves only
+/// the runs the edit moved, so a SUBSCRIBE_UPDATE costs its own ranges, never the cache.
 #[derive(Default)]
 struct Live(Mutex<Vec<Indexed>>);
 
@@ -8122,6 +8215,8 @@ struct Indexed {
 	/// The track indexed, by its cache account. Held weakly, so a track that went away
 	/// leaves an entry another track's can't be mistaken for.
 	track: Weak<cache::Track>,
+	/// The cover the entries were taken in for.
+	cover: Cover,
 	/// How far into the arrival order this has taken in, as an absolute index.
 	taken: usize,
 	/// The stamp of each live group inside the cover, by key, as it arrived.
@@ -8138,8 +8233,15 @@ impl Indexed {
 		std::ptr::eq(self.track.as_ptr(), Arc::as_ptr(&state.cache))
 	}
 
-	/// Take in what arrived since the last call.
+	/// Take in what arrived since the last call, under `groups`.
 	fn catch_up(&mut self, state: &TrackState, groups: &Cover) {
+		if self.taken == 0 {
+			// Nothing taken in yet: every live group has an arrival entry, so the walk below
+			// takes in all of them under `groups`.
+			self.cover = groups.clone();
+		} else if self.cover != *groups {
+			self.recover(state, groups);
+		}
 		for entry in state.arrivals_from(self.taken) {
 			if groups.contains(entry.key) {
 				self.groups.insert(entry.key, entry.stamp);
@@ -8150,6 +8252,31 @@ impl Indexed {
 		// and a prune costs each entry it drops one lookup.
 		if self.groups.len() > 2 * state.visible.len().max(LIVE_BATCH) {
 			self.groups.retain(|key, stamp| current(state, *key, *stamp).is_some());
+		}
+	}
+
+	/// Move the entries to `groups` from the cover they were taken in for: only where the
+	/// two differ, which for an edited copy costs the runs the edit moved and the live groups
+	/// in them. A group not yet taken in from the arrival order still is, as an entry again.
+	fn recover(&mut self, state: &TrackState, groups: &Cover) {
+		let old = std::mem::replace(&mut self.cover, groups.clone());
+		for span in groups.moved(&old) {
+			let (lo, hi) = (*span.start(), *span.end());
+			for run in old.within(lo, hi) {
+				for lost in minus(run, groups) {
+					let keys: Vec<u64> = self.groups.range(lost).map(|(key, _)| *key).collect();
+					for key in keys {
+						self.groups.remove(&key);
+					}
+				}
+			}
+			for run in groups.within(lo, hi) {
+				for gained in minus(run, &old) {
+					for (key, slot) in state.live(gained) {
+						self.groups.insert(*key, slot.stamp);
+					}
+				}
+			}
 		}
 	}
 }
@@ -8172,6 +8299,7 @@ impl Live {
 				indexes.retain(|indexed| indexed.track.strong_count() > 0);
 				indexes.push(Indexed {
 					track: Arc::downgrade(&state.cache),
+					cover: Cover::default(),
 					taken: 0,
 					groups: BTreeMap::new(),
 				});
@@ -8265,18 +8393,18 @@ impl Servable {
 		}
 	}
 
-	/// The groups `window` reads. `previous`, what the same reader was served before, lends
-	/// its index of the live groups while the cover is unchanged.
-	fn of(window: &Window, previous: &Self) -> Self {
+	/// The groups `window` reads, searched through `live`, the reader's index of the live
+	/// groups, which follows the cover it is searched under.
+	fn of(window: &Window, live: &Arc<Live>) -> Self {
 		match window.groups() {
 			None => Self::ALL,
-			Some(groups) => Self::covering(groups.clone(), None, previous),
+			Some(groups) => Self::covering(groups.clone(), None, live),
 		}
 	}
 
 	/// The groups in `groups` below the exclusive `cap`. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
-	fn covering(groups: Cover, cap: Option<u64>, previous: &Self) -> Self {
+	fn covering(groups: Cover, cap: Option<u64>, live: &Arc<Live>) -> Self {
 		let last = match cap {
 			Some(cap) => match cap.checked_sub(1) {
 				Some(last) => last,
@@ -8297,11 +8425,11 @@ impl Servable {
 				end: (*first.end()).min(last).checked_add(1),
 			};
 		}
-		let live = match previous {
-			Self::Runs(several) if several.groups == groups => several.live.clone(),
-			_ => Arc::default(),
-		};
-		Self::Runs(Arc::new(Several { groups, cap, live }))
+		Self::Runs(Arc::new(Several {
+			groups,
+			cap,
+			live: live.clone(),
+		}))
 	}
 
 	/// These groups below the exclusive `cap`.
@@ -8322,7 +8450,7 @@ impl Servable {
 			}
 			Self::Runs(several) => {
 				let cap = several.cap.map_or(cap, |own| own.min(cap));
-				Self::covering(several.groups.clone(), Some(cap), self)
+				Self::covering(several.groups.clone(), Some(cap), &several.live)
 			}
 		}
 	}
@@ -8394,6 +8522,9 @@ struct Cursor {
 	/// measures drift against the same groups after the cap or ranges move, and with its
 	/// [`Control`]s, which republish it when they replace the ranges.
 	published: kio::Producer<Published>,
+	/// This cursor's index of the live groups its servable window covers, kept across every
+	/// move of the window, so an edit to the ranges costs the runs it moved.
+	live: Arc<Live>,
 	/// Groups the drift budget skipped since the count was last drained. Accumulated
 	/// here rather than metered in place because the stats scope lives on the owning
 	/// [`Subscriber`], which drains this after every read.
@@ -8774,7 +8905,8 @@ impl Cursor {
 			};
 			(filter, state.cache.clone())
 		};
-		let published = Published::new(Servable::of(&filter.window, &Servable::NONE), filter.resolved, None);
+		let live = Arc::<Live>::default();
+		let published = Published::new(Servable::of(&filter.window, &live), filter.resolved, None);
 		Self {
 			state,
 			cache,
@@ -8788,6 +8920,7 @@ impl Cursor {
 			// Uncapped, the servable groups are the window's.
 			servable: published.servable.clone(),
 			published: kio::Producer::new(published),
+			live,
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
 			record: Record::default(),
@@ -8876,7 +9009,7 @@ impl Cursor {
 	fn update_servable(&mut self) {
 		// A moved window or cap notifies nothing this cursor parked on.
 		idle::Idle::disarm(&mut self.idle);
-		let runs = Servable::of(&self.filter.window, &self.published.read().runs);
+		let runs = Servable::of(&self.filter.window, &self.live);
 		let (revision, cap) = (self.filter.resolved, self.end_key);
 		self.servable = runs.below(cap);
 		let next = |current: &Published| {
@@ -10176,7 +10309,7 @@ impl Republish {
 			return;
 		};
 		drop(state);
-		let runs = Servable::of(&window, &Servable::NONE);
+		let runs = Servable::of(&window, &Arc::default());
 		if let Ok(mut current) = published.write()
 			&& current.revision < revision
 		{
@@ -10766,7 +10899,8 @@ impl Subscriber {
 	/// none: groups arrive newest first, so the first to arrive is not the oldest served.
 	///
 	/// Pending too while a time start waits on the groups held to place it, since where its
-	/// range starts is unknown until then.
+	/// range starts is unknown until then, unless the floor sits at or past that time, as a
+	/// pre-lite-07 wire's start does: the group containing it is out of range then.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
@@ -10775,12 +10909,12 @@ impl Subscriber {
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
-		if cursor.filter.window.is_waiting() {
+		if cursor.filter.window.is_waiting_above(cursor.min_key) {
 			// Registered before syncing again, so a change placing it after this wakes it. A
 			// closed track places it at once, since nothing more can arrive.
 			let closed = cursor.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
 			cursor.sync();
-			if !closed && cursor.filter.window.is_waiting() {
+			if !closed && cursor.filter.window.is_waiting_above(cursor.min_key) {
 				return Poll::Pending;
 			}
 		}
@@ -10825,6 +10959,22 @@ impl Subscriber {
 					.collect()
 			}
 			Inner::Resume(resume, _) => resume.resolved_keys(keys),
+		}
+	}
+
+	/// This subscriber's ranges keyed in `keys` while their time starts wait on the groups
+	/// held to place them, or on its route copies for a reader following them: each one's
+	/// time, and the exclusive end it resolved to. `None` for one that resolved.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn waiting_keys(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<(u64, Option<u64>)>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+				keys.into_iter()
+					.map(|key| cursor.filter.window.waiting_key(key))
+					.collect()
+			}
+			Inner::Resume(resume, _) => resume.waiting_keys(keys),
 		}
 	}
 
@@ -10937,15 +11087,18 @@ impl Subscriber {
 		}
 	}
 
-	/// This subscriber's own ranges, by index, as resolved here: `None` for one empty or
-	/// still waiting, and for every range of a front's reader.
-	pub(super) fn resolved_ranges(&mut self) -> Vec<Option<Resolved>> {
+	/// This subscriber's own ranges keyed in `keys`, in that order, as resolved here: `None`
+	/// for one empty, still waiting, or not held, and for every range of a front's reader,
+	/// whose copies resolve them.
+	pub(super) fn resolved_ranges(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.resolved()
+				keys.into_iter()
+					.map(|key| cursor.filter.window.resolved_key(key))
+					.collect()
 			}
-			Inner::Resume(..) => Vec::new(),
+			Inner::Resume(..) => keys.into_iter().map(|_| None).collect(),
 		}
 	}
 
@@ -11127,6 +11280,14 @@ impl Subscriber {
 	/// This subscriber's current preferences.
 	pub fn subscription(&self) -> Subscription {
 		self.control().subscription()
+	}
+
+	/// This subscriber's preferences, read by key without materializing them.
+	pub(super) fn preferences(&self) -> &Preferences {
+		match &self.inner {
+			Inner::Plain(cursor) => &cursor.subscription,
+			Inner::Resume(resume, _) => resume.subscription(),
+		}
 	}
 
 	/// Replace this subscriber's delivery preferences.
@@ -12183,6 +12344,13 @@ impl Request {
 		snapshot_subscription(&subs, bound)
 	}
 
+	/// Arm `waiter` for the next change to the demand of everyone waiting, without reading
+	/// it; see [`Producer::watch_subscription`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn watch_subscription(&self, waiter: &kio::Waiter) {
+		watch_combined(&self.state, waiter);
+	}
+
 	/// The aggregate [`subscription`](Self::subscription) once it changes, or `None` once
 	/// nobody is waiting.
 	#[cfg_attr(feature = "async", kio::wrapper)]
@@ -12290,12 +12458,14 @@ mod test {
 	}
 
 	proptest::proptest! {
-		/// The times a track reports unplaced are exactly those its `containing` can't place,
-		/// but for the ones a copy's reported time starts place, on its own groups or on a
-		/// lite-07 copy's, through groups arriving and every way keys are given up.
+		/// The times a track reports unplaced are only those its `containing` can't place, but
+		/// for the ones a copy's reported time starts place, after each step: through groups
+		/// arriving and leaving, and every way keys are given up. A time it leaves out lies below
+		/// the newest start reported past an earlier range's time, which may place it once no held
+		/// group precedes it.
 		#[test]
-		fn unplaced_matches_containing(
-			ops in proptest::collection::vec((0u8..5, 0u64..40, 1u64..8), 0..24),
+		fn unplaced_holds_only_what_containing_cant_place(
+			ops in proptest::collection::vec((0u8..6, 0u64..40, 1u64..8), 0..24),
 			wire: bool,
 			starts in proptest::collection::vec((0u64..48, 0u64..48), 0..3),
 		) {
@@ -12304,6 +12474,25 @@ mod test {
 				producer.anchored();
 				producer.time_starts(starts.clone());
 			}
+			let reported: BTreeSet<u64> = starts.iter().map(|(time, _)| *time).collect();
+			let past = starts.iter().filter(|(asked, start)| asked < start).map(|(_, start)| *start).max();
+			let check = |producer: &Producer| -> std::result::Result<(), proptest::test_runner::TestCaseError> {
+				let state = producer.state.read();
+				let unplaced = state.unplaced().expect("a track always tells");
+				for time in (0..64).chain([u64::MAX - 1, u64::MAX]) {
+					let inside = unplaced.runs.iter().any(|run| run.contains(&time));
+					let unknown = state.containing(time) == Containing::Unknown;
+					if wire && reported.contains(&time) {
+						proptest::prop_assert!(!unknown, "a reported start places {}", time);
+					} else if inside {
+						proptest::prop_assert!(unknown, "{} is unplaced but placed", time);
+					} else if unknown {
+						proptest::prop_assert!(wire && past.is_some_and(|past| time < past), "{} is left out", time);
+					}
+				}
+				Ok(())
+			};
+			check(&producer)?;
 			for (op, start, len) in ops {
 				let groups = start..start + len;
 				match op {
@@ -12311,20 +12500,17 @@ mod test {
 					1 => producer.skip_groups(groups),
 					2 => drop(producer.create_group(group::Info { start })),
 					3 => producer.modify().unwrap().forget_drops(groups),
+					// Evict the first group held from `start`, as expiry does.
+					4 => {
+						let held = producer.state.read().lookup.range(start..).next().map(|(&key, _)| key);
+						if let Some(key) = held {
+							producer.modify().unwrap().evict_group(key, Error::Evicted);
+						}
+					}
 					// A group at the last key that can start one, past every time but the last.
 					_ => drop(producer.create_group(group::Info { start: u64::MAX - 1 })),
 				}
-			}
-			let state = producer.state.read();
-			let unplaced = state.unplaced().expect("a track always tells");
-			let reported: BTreeSet<u64> = starts.iter().map(|(time, _)| *time).collect();
-			for time in (0..64).chain([u64::MAX - 1, u64::MAX]) {
-				let inside = unplaced.runs.iter().any(|run| run.contains(&time));
-				let unknown = state.containing(time) == Containing::Unknown;
-				match wire && reported.contains(&time) {
-					true => proptest::prop_assert!(!unknown, "a reported start places {}", time),
-					false => proptest::prop_assert_eq!(inside, unknown, "at {}", time),
-				}
+				check(&producer)?;
 			}
 		}
 
@@ -15646,6 +15832,137 @@ mod test {
 		assert_eq!(drain(&mut past), vec![1000, 3000]);
 	}
 
+	/// A reader joining a lite-07 copy that another reader already asks from further back adds
+	/// no range of its own, so its publisher reports no start for the reader's time. The start
+	/// of a range asked from earlier, or from the oldest group, places it: past the time, no
+	/// group starts at or before it, and a publisher serving the reader learns where delivery
+	/// starts. At or before the time, a group between may still arrive.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_time_start_by_an_earlier_range() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+
+		let mut before = producer.subscribe(from(500));
+		let mut after = producer.subscribe(from(1500));
+		assert_eq!(placed(&mut before), None);
+		assert!(before.poll_start(&kio::Waiter::noop()).is_pending());
+
+		// Only a range asked from a later time: says nothing of 500.
+		producer.time_starts([(700, 1000)]);
+		assert_eq!(placed(&mut before), None);
+
+		// The range asked from the oldest group started at 1000.
+		producer.time_starts([(0, 1000)]);
+		assert_eq!(placed(&mut before), Some((0, false)));
+		assert!(before.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(drain(&mut before), vec![1000]);
+		assert_eq!(placed(&mut after), None, "a group past 1000 may still arrive");
+	}
+
+	/// A group the copy still holds at or before a time start outranks a start reported for an
+	/// earlier range: the publisher expiring it says nothing of whether it contains the time.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_keeps_a_held_group_over_an_earlier_range() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+
+		let mut reader = producer.subscribe(from(2500));
+		producer.time_starts([(0, 3000)]);
+		assert_eq!(placed(&mut reader), None, "the held 2000 may contain 2500");
+
+		write_group(&producer, 3000);
+		assert_eq!(placed(&mut reader), Some((2000, true)));
+		assert_eq!(drain(&mut reader), vec![2000, 3000]);
+	}
+
+	/// Once the copy evicts the group it held before a time start, the start of a range asked
+	/// from earlier places the time: no reported start changed, but the waiting reader still
+	/// starts.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_places_a_time_start_once_the_group_before_it_is_evicted() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges([0])[0].map(|resolved| (resolved.start, resolved.floored))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+
+		let mut reader = producer.subscribe(from(2500));
+		producer.time_starts([(0, 3000)]);
+		assert_eq!(placed(&mut reader), None, "the held 2000 may contain 2500");
+
+		producer.evict(2000);
+		write_group(&producer, 3000);
+		assert_eq!(placed(&mut reader), Some((0, false)));
+		assert_eq!(drain(&mut reader), vec![3000]);
+	}
+
+	/// A floor at or past a time start, as a pre-lite-07 wire's start sets, keeps out the group
+	/// containing that time unless it starts there, so where the range starts waits on nothing
+	/// a lite-07 copy has yet to place. Without the floor, it waits.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_floor_at_a_time_start_waits_on_no_placing() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+
+		let mut open = producer.subscribe(from(500));
+		assert!(open.poll_start(&kio::Waiter::noop()).is_pending());
+		let mut floored = producer.subscribe(from(500)).with_range(500..);
+		assert!(floored.poll_start(&kio::Waiter::noop()).is_ready());
+		let mut below = producer.subscribe(from(500)).with_range(499..);
+		assert!(below.poll_start(&kio::Waiter::noop()).is_pending());
+		assert_eq!(drain(&mut floored), vec![1000]);
+	}
+
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its
 	/// publisher reported, not over the groups the copy holds, until a group past the latest
 	/// the publisher counted from moves the live edge.
@@ -17383,7 +17700,7 @@ mod test {
 	/// A search over a servable window of several runs, through the reader's index of the
 	/// live groups, finds what a scan of every live group would, in either direction, as
 	/// groups arrive, start, abort, leave the cache, or arrive again between searches that
-	/// keep the same index, and as the window is edited. Each window is searched on two tracks, as a
+	/// keep the same index, and as the window is edited or replaced. Each window is searched on two tracks, as a
 	/// group's expiry that moved to a replacement copy searches its reader's.
 	#[test]
 	fn live_index_searches_match_a_scan_of_every_live_group() {
@@ -17416,6 +17733,7 @@ mod test {
 			let mut layer = Vec::new();
 			let mut groups = [Vec::new(), Vec::new()];
 			let mut servable = Servable::NONE;
+			let live = Arc::<Live>::default();
 			for step in 0..30 {
 				let key = next(KEYS);
 				let track = next(2) as usize;
@@ -17452,8 +17770,12 @@ mod test {
 						for run in &layer {
 							cover.add(run.clone(), 1);
 						}
+					} else if next(8) == 0 {
+						// Ranges replaced whole: a cover of another lineage.
+						layer.clear();
+						cover = Cover::new(runs(8));
 					}
-					servable = Servable::covering(cover.clone(), cap, &servable);
+					servable = Servable::covering(cover.clone(), cap, &live);
 				}
 				for (track, producer) in producers.iter().enumerate() {
 					let state = producer.state.read();
@@ -17492,7 +17814,7 @@ mod test {
 			.map(|key| producer.create_group(group::Info { start: key }).unwrap())
 			.collect();
 		let runs = Cover::new([0..=999, 1001..=u64::MAX]);
-		let servable = Servable::covering(runs, None, &Servable::NONE);
+		let servable = Servable::covering(runs, None, &Arc::default());
 		let Servable::Runs(several) = &servable else {
 			panic!("several runs");
 		};
@@ -17559,7 +17881,7 @@ mod test {
 			// The runs counted once, and again with the first counted twice.
 			let covers = [Cover::new(runs()), Cover::new(runs().chain(runs().take(1)))];
 			for groups in covers {
-				let servable = Servable::covering(groups, None, &Servable::NONE);
+				let servable = Servable::covering(groups, None, &Arc::default());
 				if let [(first, last)] = bounds {
 					assert!(
 						servable
@@ -28884,7 +29206,7 @@ mod test {
 		}]));
 		assert_eq!(drain(&mut subscriber), vec![0, 400]);
 		assert_eq!(
-			subscriber.resolved_ranges(),
+			subscriber.resolved_ranges([0]),
 			vec![Some(Resolved {
 				start: 0,
 				end: Some(501),

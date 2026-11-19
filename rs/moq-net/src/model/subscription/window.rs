@@ -332,9 +332,12 @@ impl Window {
 		!self.reaching.is_empty()
 	}
 
-	/// Whether a time start still waits on the groups held to place it.
-	pub fn is_waiting(&self) -> bool {
-		!self.waiting.is_empty()
+	/// Whether a time start still waits on the groups held to place it, where the group
+	/// containing it may start above `floor`. One at or below the floor needs no placing: the
+	/// floor already keeps out every group but one starting there, and serves the first group
+	/// from it either way.
+	pub fn is_waiting_above(&self, floor: u64) -> bool {
+		self.waiting.last().is_some_and(|&(time, _)| time > floor)
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
@@ -471,9 +474,35 @@ impl Window {
 		})
 	}
 
+	/// The range keyed `key` while its time start waits on the groups held to place it: that
+	/// time, and the exclusive end it resolved to, `None` while it stays open.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub fn waiting_key(&self, key: u64) -> Option<(u64, Option<u64>)> {
+		let span = self.spans.get(&key)?;
+		span.waits_on().map(|time| (time, span.end))
+	}
+
 	/// Each range resolved, in key order, as [`Self::resolved_key`] reads it.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
 		self.ranges.keys().map(|key| self.resolved_key(*key)).collect()
+	}
+
+	/// Each range resolved, by key, leaving out those [`Self::resolved_key`] can't place.
+	pub fn resolved_by_key(&self) -> BTreeMap<u64, Resolved> {
+		self.ranges
+			.keys()
+			.filter_map(|key| Some((*key, self.resolved_key(*key)?)))
+			.collect()
+	}
+
+	/// The keys of the ranges not yet settled, which keep [`Self::is_settled`] false: waiting
+	/// on a first group, on the groups held to place a start, or on a lookup. Costs those.
+	pub fn unsettled(&self) -> BTreeSet<u64> {
+		let mut keys = self.pending.clone();
+		keys.extend(self.reaching.iter().copied());
+		keys.extend(self.waiting.iter().map(|(_, key)| *key));
+		keys.extend(self.looking.iter().map(|(_, key)| *key));
+		keys
 	}
 
 	/// The exclusive end past every group in range, `None` when one stays open or an anchor
@@ -1019,7 +1048,12 @@ mod tests {
 			window.runs(0).collect::<Vec<_>>(),
 			window.missable(0).collect::<Vec<_>>(),
 			(window.floor(), window.start(), window.named(), window.end()),
-			(window.resolved(), lookups, window.is_settled(), window.is_waiting()),
+			(
+				window.resolved(),
+				lookups,
+				window.is_settled(),
+				!window.waiting.is_empty(),
+			),
 		)
 	}
 

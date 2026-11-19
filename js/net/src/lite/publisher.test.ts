@@ -1680,6 +1680,29 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	}
 }
 
+// A relay's copy already asks from the oldest group, so a downstream asking from time 2 adds no
+// range upstream and gets no start of its own. The oldest range starting at 6 still places it:
+// the source holds nothing at or before 2.
+test("lite draft-07: a time start a copy's oldest range covers starts where that range did", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_07, startGroup: 2n });
+	// The relay's own reader, asking from the oldest group, which the copy's demand then starts at.
+	const local = sub.track.subscribe({ delay: { max: Duration.millis(60_000) } });
+	try {
+		hooks.receiveTrack(sub.track);
+		await flush();
+		hooks.timeStarts(sub.track, [[0n, 6n]]);
+		hooks.startTrack(sub.track, { start: 6n });
+		sub.serve(6n);
+		expect(await sub.servedSequence()).toBe(6n);
+		const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_07);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
+		expect(response.start.starts[0]).toBe(6n);
+	} finally {
+		local.close();
+		await sub.close();
+	}
+});
+
 // A relay's group stream can beat the upstream START on its own stream. Resolving from that
 // group would give up the backlog the START still promises, so the first group waits for it.
 for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {

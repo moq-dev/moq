@@ -6,13 +6,21 @@ import { DEFAULT_EXPIRY } from "./cache.ts";
 import { ProtocolViolation, Skipped, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
-import { hooks, skipHole, staleHole } from "./internal.ts";
+import { hooks, maxDelayOf, skipHole, staleHole } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { rescale, rescaleIn } from "./rescale.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import { authoredInfo, Subscription, Producer as TrackProducer } from "./track.ts";
+import {
+	type Anchor,
+	authoredInfo,
+	type Delay,
+	type Order,
+	type Range,
+	Subscription,
+	Producer as TrackProducer,
+} from "./track.ts";
 import { unwanted } from "./util/demand.ts";
-import { LIVE, rangesStart } from "./window.ts";
+import { LIVE, rangesStart, union } from "./window.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -3497,7 +3505,8 @@ test("a late subscriber to a closed unlimited track is released once the cache a
 		producer.close();
 
 		// Counts the map entries subscribing leaves behind, rather than the heap: any entry
-		// keyed by the subscriber that outlives the cache window would pin it.
+		// keyed by the subscriber that outlives the cache window would pin it. Only an object key
+		// can be, so the subscriber's own ranges, keyed by number, don't count.
 		const added: [Map<unknown, unknown>, unknown][] = [];
 		const set = Map.prototype.set;
 		const spy = spyOn(Map.prototype, "set").mockImplementation(function (this: Map<unknown, unknown>, key, value) {
@@ -3519,7 +3528,7 @@ test("a late subscriber to a closed unlimited track is released once the cache a
 		// A closed track protects nothing, so the next scan past the window reclaims it all.
 		clock.set(10_000 + CACHE_WINDOW_MS + 200);
 		producer.subscribe().close();
-		expect(added.filter(([map, key]) => map.has(key)).length).toBe(0);
+		expect(added.filter(([map, key]) => typeof key === "object" && map.has(key)).length).toBe(0);
 	} finally {
 		clock.installed.close();
 	}
@@ -5625,7 +5634,10 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	finished.close();
 });
 
-test("track: a reader's unplaced times are the times its holdings can't place", () => {
+// Mirrors moq-net's `unplaced_holds_only_what_containing_cant_place`: a run holds only times
+// `containing` can't place, but those a reported start places directly, and leaves out only
+// times below the newest start reported past an earlier range's time.
+test("track: a reader's unplaced times are only times its holdings can't place", () => {
 	let seed = 5;
 	const random = (below: number) => {
 		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -5636,6 +5648,14 @@ test("track: a reader's unplaced times are the times its holdings can't place", 
 	for (let round = 0; round < 400; round++) {
 		const received = random(2) === 0;
 		const producer = received ? receivedTrack() : new TrackProducer("test").accept({ maxAge: null });
+		const starts: [bigint, bigint][] = [];
+		if (received) {
+			for (let n = random(3); n > 0; n--) starts.push([BigInt(random(48)), BigInt(random(48))]);
+			hooks.timeStarts(producer, starts);
+		}
+		const reported = new Set(starts.map(([time]) => time));
+		let past = 0n;
+		for (const [asked, start] of new Map(starts)) if (asked < start && start > past) past = start;
 		const reader = producer.subscribe();
 		for (let step = random(16); step >= 0; step--) {
 			const holdings = hooks.subscriberHoldings(reader);
@@ -5643,7 +5663,10 @@ test("track: a reader's unplaced times are the times its holdings can't place", 
 			expect(unplaced).toBeDefined();
 			for (let at = 0n; at < 64n; at++) {
 				const open = unplaced?.runs.some((run) => run.start <= at && at < run.end) ?? false;
-				expect([received, at, holdings.containing(at) === "unknown"]).toEqual([received, at, open]);
+				const unknown = holdings.containing(at) === "unknown";
+				if (reported.has(at)) expect([at, unknown]).toEqual([at, false]);
+				else if (open) expect([at, unknown]).toEqual([at, true]);
+				else if (unknown) expect([at, received && at < past]).toEqual([at, true]);
 			}
 			const key = BigInt(random(48));
 			if (random(2) === 0) {
@@ -5653,6 +5676,128 @@ test("track: a reader's unplaced times are the times its holdings can't place", 
 					// A key this copy refuses, such as one a skip covers.
 				}
 			} else hooks.dropTrackGroups(producer, key, key + BigInt(1 + random(4)), { error: errors[random(2)] });
+		}
+		producer.close();
+	}
+});
+
+// The aggregate as it was folded from every subscriber before it was counted, kept to check the
+// counted one against: Rust's Subscription::poll_combined.
+function foldSubscriptions(subscriptions: Iterable<Subscription | undefined>): Subscription | undefined {
+	const largest = (a: Duration | null | undefined, b: Duration | null | undefined): Duration | null => {
+		if (a === null || a === undefined) return b ?? null;
+		if (b === null || b === undefined) return a;
+		return a.max(b);
+	};
+	let combined: Subscription | undefined;
+	for (const subscription of subscriptions) {
+		if (!subscription) continue;
+		if (!combined) {
+			combined = { ...subscription };
+			continue;
+		}
+		combined.priority = Math.max(combined.priority ?? 0, subscription.priority ?? 0);
+		combined.delay = {
+			max: Duration.millis(Math.max(maxDelayOf(combined), maxDelayOf(subscription))),
+			min: largest(combined.delay?.min, subscription.delay?.min),
+		};
+		combined.order =
+			combined.order === "ascending" && subscription.order === "ascending" ? "ascending" : "descending";
+		combined.ranges = [...(combined.ranges ?? []), ...(subscription.ranges ?? [])];
+	}
+	if (combined) combined.ranges = union(combined.ranges ?? []);
+	return combined;
+}
+
+// Joins, whole replacements, edits by key, closes, and fetches each move the counted aggregates
+// to exactly what folding every subscriber gives.
+test("the counted aggregates match a full fold of every subscriber", async () => {
+	let seed = 7;
+	const random = (below: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		// The high bits: an LCG's low bits cycle.
+		return (seed >>> 16) % below;
+	};
+	const anchor = (): Anchor | undefined => {
+		const kind = random(6);
+		if (kind === 0) return { relative: BigInt(random(4)) };
+		if (kind === 1) return undefined;
+		return { time: BigInt(random(24)) };
+	};
+	const range = (): Range => {
+		const out: Range = {};
+		const start = anchor();
+		if (start) out.start = start;
+		const end = random(3) === 0 ? undefined : anchor();
+		if (end) out.end = end;
+		return out;
+	};
+	const delay = (): Delay => ({
+		max: random(5) === 0 ? null : Duration.millis(random(4) * 100),
+		min: random(3) === 0 ? null : Duration.millis(random(4) * 50),
+	});
+	const order = (): Order => (random(2) === 0 ? "ascending" : "descending");
+	type Held = {
+		subscriber: ReturnType<TrackProducer["subscribe"]>;
+		keys: Map<bigint, Range>;
+		next: bigint;
+		fetch: boolean;
+	};
+	for (let round = 0; round < 200; round++) {
+		const producer = new TrackProducer("test");
+		const held: Held[] = [];
+		for (let step = 0; step < 60; step++) {
+			const op = held.length === 0 ? 0 : random(8);
+			const pick = held[random(held.length)];
+			if (op === 0 && held.length < 6) {
+				const ranges = Array.from({ length: random(6) }, range);
+				const subscriber = producer.subscribe({ priority: random(4), order: order(), delay: delay(), ranges });
+				held.push({
+					subscriber,
+					keys: new Map(ranges.map((r, i) => [BigInt(i), r])),
+					next: BigInt(ranges.length),
+					fetch: false,
+				});
+			} else if (op === 1 && !pick.fetch) {
+				const ranges = Array.from({ length: random(6) }, range);
+				const before = [...pick.keys.values()];
+				pick.subscriber.update({ priority: random(4), order: order(), delay: delay(), ranges });
+				// A whole replacement rekeys by position only when the ranges change.
+				if (!Bun.deepEquals(before, ranges)) {
+					pick.keys = new Map(ranges.map((r, i) => [BigInt(i), r]));
+					if (pick.next < BigInt(ranges.length)) pick.next = BigInt(ranges.length);
+				}
+			} else if (op <= 4 && !pick.fetch) {
+				const retire: bigint[] = [];
+				const add: [bigint, Range][] = [];
+				for (const key of pick.keys.keys()) if (random(3) === 0) retire.push(key);
+				for (const key of pick.keys.keys()) if (random(5) === 0) add.push([key, range()]);
+				for (let count = random(3); count > 0; count--) add.push([pick.next++, range()]);
+				const readded = new Set(add.map(([key]) => key));
+				for (const key of retire) if (!readded.has(key)) pick.keys.delete(key);
+				for (const [key, r] of add) pick.keys.set(key, r);
+				hooks.editSubscriber(pick.subscriber, {
+					retire,
+					add,
+					priority: random(4),
+					order: order(),
+					delay: delay(),
+				});
+			} else if (op === 5 && !pick.fetch) {
+				hooks.fetchBudget(pick.subscriber, Duration.millis(random(4) * 100));
+				pick.fetch = true;
+			} else if (op >= 6) {
+				pick.subscriber.close();
+				held.splice(held.indexOf(pick), 1);
+			}
+			// A close leaves the aggregates once its signal fires.
+			await yieldNow();
+			for (const { subscriber, keys } of held)
+				expect(subscriber.subscription.peek()?.ranges).toEqual([...keys.values()]);
+			const all = held.map(({ subscriber }) => subscriber.subscription.peek());
+			const live = held.filter(({ fetch }) => !fetch).map(({ subscriber }) => subscriber.subscription.peek());
+			expect(hooks.requested(producer).peek()).toEqual(foldSubscriptions(all));
+			expect(producer.subscription.peek()).toEqual(foldSubscriptions(live));
 		}
 		producer.close();
 	}
