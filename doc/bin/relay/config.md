@@ -381,7 +381,11 @@ drain_timeout = "10s"                # Top-level key, as --drain-timeout / MOQ_D
 
 The first SIGTERM or SIGINT starts a drain: every session is sent a GOAWAY
 asking it to reconnect elsewhere, including any that connect during the drain,
-and is force-closed if it is still connected when the window ends. Accepted
+and is force-closed if it is still connected when the window ends. The cluster
+links the relay dialed are drained the same way and stop redialing, so a
+neighbour hears the relay is draining and moves its routes before the link
+closes. A neighbour keeps serving such a link rather than leave it, so a relay
+that dialed a peer holds its drain to the end of the window. Accepted
 connections still handshaking or awaiting authorization hold the drain until
 they finish, fail, or reach that same deadline, where any still pending is
 refused or closed. Public HTTP/1.1 connections hold the drain from TCP accept
@@ -391,7 +395,7 @@ ALPN because extended CONNECT is disabled. A later WebSocket upgrade on the same
 keep-alive connection joins the drain when its headers arrive. The internal
 listener is unaffected.
 
-The relay exits as soon as every admitted connection has left, or immediately on
+The relay exits as soon as every admitted connection and dialed link has left, or immediately on
 a second signal. When the window ends, it stops waiting for connections still
 pending and exits once every session it closed has reported its `end` to the
 auth server, each report bounded by that server's request timeout. Once it commits to exit, WebSocket

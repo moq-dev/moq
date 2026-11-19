@@ -78,4 +78,3 @@ Public API: none. Wire: none.
 - `rs/moq-net/tests/integration/route_audit/` ([moq-dev/moq#9111](https://github.com/moq-dev/moq/pull/9111)) - the same failures on mock sessions with mocked time
 - [Random fault schedules](/quest/m4/cluster-fault-schedules.md) - searches fault timings on the simulated clock
 - [A nightly soak](/quest/m4/relay-soak.md) - one real relay under churn
-- [A draining relay drains the cluster links it dialed](/quest/m2/multicast/drain-dialed-links.md) - without it, a drained relay's dialed links end with DEAD and no DRAIN
