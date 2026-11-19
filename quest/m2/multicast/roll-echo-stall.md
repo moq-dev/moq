@@ -4,15 +4,14 @@
 
 Mid-roll, a new relay feeds every SUBSCRIBE an old (lite-06) neighbour sends
 it, including one that arrives as that neighbour withdraws its own echo of the
-broadcast, and a front left from the roll resumes after the next route change.
-Today the new relay accepts the subscription and forwards no group until the
-broadcast ends, so the old relay's viewers stay subscribed, see the broadcast
-live, and read nothing.
+broadcast. Today the new relay accepts the subscription and forwards no group
+until the broadcast ends, so the old relay's viewers stay subscribed, see the
+broadcast live, and read nothing.
 
 No reader starves in
 `just test mesh-replay --mesh test/mesh-replay/ring6.toml --script test/mesh-replay/half-roll.toml --broadcasts 32`
-or in the nightly ring meshes, once `[[known]]` no longer names this quest in
-`test/mesh-replay/script.toml`.
+or in the nightly ring meshes' rolls, once `[[known]]` no longer names this
+quest in `test/mesh-replay/script.toml`.
 
 ## Plan
 
@@ -49,14 +48,6 @@ path's announce handling (hop counts are not checked against loops), in
 [moq-dev/moq#9112](https://github.com/moq-dev/moq/pull/9112), which changes how
 a let-go claim's copies end but keeps lite-06 routes as they are. Run with
 `HARNESS_KEEP=1 MESH_REPLAY_LOG=debug` to keep every relay's debug log.
-
-A residue on lite-07: after the whole ring rolled onto the new build, a cut of
-the `a`-`b` link left a reader on `a` of one of `b`'s broadcasts online with no
-group for 75s, resumed neither on the detour through `f` nor on the redialed
-session to `b`, until the next fault moved its route (1 path at 4 broadcasts;
-5 at 32, and 33 after reopening every link of `b`). Ten cuts of the same link on
-a ring that started on the new build starved nothing, so it takes the roll
-first. Check it once the mid-roll case is fixed.
 
 Decided 2026-11-19 (coordinator, to which the maintainer delegated the call
 while away): ✅ the lite-07 cut waits on it (rejected: cutting without it).
