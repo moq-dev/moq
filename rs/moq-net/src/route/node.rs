@@ -614,19 +614,23 @@ impl Stream {
 	}
 
 	/// Whether this session now serves `origin`'s claim of `broadcast` as it was last
-	/// handed it, or may not carry it.
-	pub fn serving(&self, origin: NodeId, broadcast: &Broadcast, ok: bool) {
+	/// handed it, or may not carry it. Returns whether that newly refuses the claim, for
+	/// its stats to count once however often it is handed again.
+	pub fn serving(&self, origin: NodeId, broadcast: &Broadcast, ok: bool) -> bool {
 		let mut state = self.node.lock();
 		let key = (origin, self.key);
 		let Some(slot) = (state.lanes.get_mut(broadcast)).and_then(|slots| slots.get_mut(&key)) else {
-			return;
+			return false;
 		};
-		slot.confirm = match ok {
+		let confirm = match ok {
 			true => Confirm::Serving,
 			false => Confirm::Refused,
 		};
+		let refused = confirm == Confirm::Refused && slot.confirm != Confirm::Refused;
+		slot.confirm = confirm;
 		state.settle(broadcast, false);
 		*self.node.moved.lock() += 1;
+		refused
 	}
 
 	/// Leave what this session serves of `origin`'s claim of `broadcast` behind as it

@@ -810,14 +810,18 @@ impl Routed {
 				served,
 			} => {
 				let key = (origin, path, instance);
-				let ok = self.serve(subscriber, &key, served);
+				let served = self.serve(subscriber, &key, served);
 				// Dropped, a claim this session may no longer carry goes offline rather
 				// than ending: its publisher never withdrew it.
-				if !ok {
+				if served.is_err() {
 					self.served.remove(&key);
 				}
 				let (origin, path, instance) = key;
-				self.stream.serving(origin, &(path, instance), ok);
+				let refused = self.stream.serving(origin, &(path, instance), served.is_ok());
+				// Counted as the claim's slot turns refused, not on each update behind it.
+				if refused && let Err(Some(kind)) = served {
+					self.origin.stats().refuse_route(kind);
+				}
 			}
 			node::Output::Unserve {
 				origin,
@@ -835,24 +839,26 @@ impl Routed {
 		}
 	}
 
-	/// Serve a claim through this session, or update how it is served. Returns whether
-	/// the session may carry it, counting a refusal.
-	fn serve(&mut self, subscriber: &Subscriber, key: &ServedKey, served: node::Served) -> bool {
-		// The root and limit checks below are not counted: a claim the peer sent outside
-		// them was refused as it arrived, and the node may hand this session another's.
-		let refuse = |kind| {
-			self.origin.stats().refuse_route(kind);
-			false
-		};
+	/// Serve a claim through this session, or update how it is served. Fails when the
+	/// session may not carry it, with the reason its stats count the refusal under.
+	///
+	/// The root and limit checks count nothing: a claim the peer sent outside them was
+	/// refused as it arrived, and the node may hand this session another session's claim.
+	fn serve(
+		&mut self,
+		subscriber: &Subscriber,
+		key: &ServedKey,
+		served: node::Served,
+	) -> Result<(), Option<RouteRefusal>> {
 		let (origin, claim, instance) = key;
 		let Some(path) = claim.strip_prefix(&self.root) else {
 			// Outside the session's root, so nothing a request could name here.
-			return false;
+			return Err(None);
 		};
 		// The node may hand over a claim another session of the same peer carries, which
 		// is served here only if this session may carry it too.
 		if !self.permit.within_limit(path.as_str()) {
-			return false;
+			return Err(None);
 		}
 		// The chain a claim travels to a lite-06 peer: the relays it entered or left a
 		// routing domain by, then the node claiming it, so a relay it reaches back through
@@ -867,12 +873,12 @@ impl Routed {
 		for relay in relays {
 			let pushed = route::node::hop(relay).is_some_and(|hop| hops.push(hop).is_ok());
 			if !pushed {
-				return refuse(RouteRefusal::Looped);
+				return Err(Some(RouteRefusal::Looped));
 			}
 		}
 		if subscriber.names_self(&hops) || hops.len() > self.origin.max_hops().get() {
 			tracing::debug!(route = %subscriber.log_path(&path), node = ?origin, "dropping looped claim");
-			return refuse(RouteRefusal::Looped);
+			return Err(Some(RouteRefusal::Looped));
 		}
 		let lane = crate::origin::Lane {
 			primary: served.primary,
@@ -896,7 +902,7 @@ impl Routed {
 		{
 			entry.named = served.named;
 			entry.route.update(route);
-			return true;
+			return Ok(());
 		}
 		// A new epoch replaces the old route, attached before it goes.
 		tracing::debug!(route = %subscriber.log_path(&path), node = ?origin, "announce");
@@ -910,10 +916,10 @@ impl Routed {
 					route: entry,
 				};
 				self.served.insert(key.clone(), served);
-				true
+				Ok(())
 			}
 			// Outside our origin's scope.
-			Err(_) => refuse(RouteRefusal::Scope),
+			Err(_) => Err(Some(RouteRefusal::Scope)),
 		}
 	}
 

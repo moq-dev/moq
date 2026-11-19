@@ -688,3 +688,26 @@ async fn a_claim_back_through_this_relay_counts_as_looped() {
 	let refused = routes(&registry).refused;
 	assert_eq!((refused.looped, refused.total()), (1, 1), "{refused:?}");
 }
+
+/// A claim the origin refuses to serve counts once as its slot turns refused, not again
+/// each time the node hands it over with its route changed.
+#[kio::test]
+async fn a_claim_refused_in_serve_counts_once_across_route_changes() {
+	let (mut subscriber, _consumer) = forwarding();
+	let registry = counted(&mut subscriber);
+	subscriber.origin = subscriber.origin.exclude("live").unwrap();
+	let mut routed = routing(&subscriber);
+	let far = NodeId { relay: 8, ..PEER };
+	routed.receive(route(far)).unwrap();
+	routed.receive(start("live/a")).unwrap();
+	routed.receive(Wire::Floor { id: 0, revision: 1 }).unwrap();
+	pump(&mut routed, &subscriber);
+	assert!(served(&routed).is_empty());
+	assert_eq!(routes(&registry).refused.scope, 1);
+
+	// The route drains, so the node hands the claim over again with its new rank.
+	routed.receive(Wire::Drain { node: far }).unwrap();
+	pump(&mut routed, &subscriber);
+	let refused = routes(&registry).refused;
+	assert_eq!((refused.scope, refused.total()), (1, 1), "{refused:?}");
+}
