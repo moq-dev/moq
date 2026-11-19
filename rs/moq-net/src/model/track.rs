@@ -1713,8 +1713,9 @@ impl TrackState {
 	/// Keep the change index aligned with the range map, including the neighbours an
 	/// insertion coalesces and the two pieces a removal can leave.
 	fn change_drops(&mut self, groups: ops::Range<u64>, hole: Option<Hole>) {
-		// A group given up never arrives to take the head lent for it.
-		if hole.is_some() {
+		// A group skipped never arrives to take the head lent for it. A drop, stale or not, can
+		// still be followed by the group, so its loan stands until the pool reclaims it.
+		if hole == Some(Hole::Skip) {
 			let lent = self.lent.get_mut().unwrap_or_else(PoisonError::into_inner);
 			lent.retain(|key| !groups.contains(&key));
 		}
@@ -16505,6 +16506,31 @@ mod test {
 			"whole once visible"
 		);
 		drop((late, wider));
+	}
+
+	/// A drop is not final: a group arriving after one still takes the head lent for it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_drop_keeps_the_loan() {
+		let producer = track_producer("test", Info::timed());
+		let consumer = producer.consume();
+		let mut prefix = group::Info { start: 7 }.produce();
+		for _ in 0..2 {
+			prefix
+				.write_frame(Timestamp::from_millis(7).unwrap(), bytes::Bytes::new())
+				.unwrap();
+		}
+		consumer.lend_head(7, prefix.consume().handoff().head().unwrap());
+		producer.give_up(7..8, Hole::stale(Duration::from_millis(1)));
+		let Received::Group(late) = producer.create_group_at(group::Info { start: 7 }, 2).unwrap() else {
+			panic!("a stale drop does not refuse the group");
+		};
+		assert_eq!(
+			consumer.peek_group(7).expect("cached").first_frame(),
+			0,
+			"whole once visible"
+		);
+		drop(late);
 	}
 
 	/// A copy lent the heads of two groups its readers resumed it at holds each whole as it
