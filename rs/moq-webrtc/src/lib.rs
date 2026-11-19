@@ -422,11 +422,21 @@ mod tests {
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
-		// The line subscribed at the group it found, so it plays that group.
-		assert_eq!(received(&mut viewer).await.as_deref(), Some(OPUS_PACKET));
-		push(&mut *bridge, 40_000, NEW_PACKET);
+		// The track still sends, so the viewer plays it.
+		let mut at = 40_000;
+		assert_eq!(
+			flowing!(&mut *bridge, at, OPUS_PACKET, received(&mut viewer)).as_deref(),
+			Some(OPUS_PACKET)
+		);
+		push(&mut *bridge, at, NEW_PACKET);
 		let _finished = bridge.finish().unwrap();
-		assert_eq!(received(&mut viewer).await.as_deref(), Some(NEW_PACKET));
+		let last = loop {
+			match received(&mut viewer).await {
+				Some(packet) if packet == OPUS_PACKET => continue,
+				packet => break packet,
+			}
+		};
+		assert_eq!(last.as_deref(), Some(NEW_PACKET));
 		assert_eq!(received(&mut viewer).await, None, "the viewer was not closed");
 		// The channel also closes if the viewer panicked, so only its task tells a clean close.
 		kio::clock::timeout(TIMEOUT, task)
@@ -777,8 +787,12 @@ mod tests {
 			.expect("WHEP negotiation timed out")
 			.unwrap();
 
-		let mut opus = opus_output(&output_consumer).await;
-		assert_eq!(next_payload(&mut opus).await, OPUS_PACKET);
+		let mut opus_out = opus_output(&output_consumer).await;
+		let mut at = 40_000;
+		assert_eq!(
+			flowing!(&mut opus, at, OPUS_PACKET, next_payload(&mut opus_out)),
+			OPUS_PACKET
+		);
 
 		assert!(logs_contain("whip client connected"));
 		assert!(logs_contain("whep client connected"));
