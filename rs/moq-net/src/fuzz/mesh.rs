@@ -74,11 +74,19 @@ struct Upstream {
 struct Left(crate::origin::Claim, Arc<AtomicUsize>);
 
 impl node::Orphan for Left {
-	fn release(self: Box<Self>, ended: bool) {
+	fn release(self: Box<Self>, gone: node::Gone) {
 		self.1.fetch_add(1, Ordering::Relaxed);
-		if ended {
-			self.0.withdrawn();
-		}
+		release(self.0, gone);
+	}
+}
+
+/// Let go of a served claim as a session does, for the reason `gone` gives.
+fn release(claim: crate::origin::Claim, gone: node::Gone) {
+	match gone {
+		node::Gone::Moved => drop(claim),
+		node::Gone::Lost => claim.retire(false),
+		node::Gone::Ended => claim.retire(true),
+		node::Gone::Withdrawn => claim.withdrawn(),
 	}
 }
 
@@ -376,6 +384,7 @@ impl RouteMesh {
 					primary: served.primary,
 					priority: Some(served.priority),
 					above: u8::try_from(served.attr.above).unwrap_or(u8::MAX),
+					lifecycle: served.lifecycle,
 				};
 				let route = crate::origin::RouteInfo::new()
 					.with_instance(instance.clone(), served.attr.epoch)
@@ -403,12 +412,10 @@ impl RouteMesh {
 				origin: node,
 				path,
 				instance,
-				ended,
+				gone,
 			} => {
-				if let Some(held) = up.served.remove(&(node, path, instance))
-					&& ended
-				{
-					held.claim.withdrawn();
+				if let Some(held) = up.served.remove(&(node, path, instance)) {
+					release(held.claim, gone);
 				}
 			}
 		}
