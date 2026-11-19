@@ -254,6 +254,7 @@ moq ... import capture --window 39193 --audio off        # one window (macOS, Wi
 moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 moq ... import capture --video demand                    # also gate video on demand
+moq ... import capture --rendition sd=0.25              # add a quarter-size simulcast rendition
 moq ... import capture --audio on                        # encode audio continuously
 ```
 
@@ -278,6 +279,12 @@ has a subscriber, leaving nothing to fetch from before the first viewer; video
 still opens its source once at startup to probe the mode it negotiates.
 `--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
+`--rendition NAME=SCALE`, repeatable, also publishes `video/NAME` from the same
+capture, each frame scaled to SCALE of its pixels (0.25 is half the width and
+height) at a bitrate derived from that size, like the web publisher's simulcast.
+Each one encodes only while watched, and with `--video demand` the source stays
+open while any rendition is. The renditions share the connection smallest
+first: under congestion the smallest keeps playing while larger ones pause.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.

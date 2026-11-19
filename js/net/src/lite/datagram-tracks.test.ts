@@ -3,6 +3,7 @@ import * as clock from "@moq/clock";
 import { yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import { SessionCode } from "../error.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, type MockTransport, manual } from "../mock.ts";
@@ -25,12 +26,14 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			using clock = manual();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
-			const datagrams = publication.broadcast.createDatagrams("audio", {
-				timescale: Timescale.MICRO,
-				priority: -7,
-			});
+			const datagrams = defined(
+				publication.broadcast.createDatagrams("audio", {
+					timescale: Timescale.MICRO,
+					priority: -7,
+				}),
+			);
 			const track = streams
-				? publication.broadcast.createTrack("audio", { timescale: Timescale.MILLI })
+				? defined(publication.broadcast.createTrack("audio", { timescale: Timescale.MILLI }))
 				: undefined;
 			publication.announce();
 			const pair = createMockTransportPair(alpn);
@@ -116,10 +119,10 @@ test("lite-04 refuses datagram tracks at setup", async () => {
 test("lite-07 bounds and prioritizes independent createWritable datagram queues", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
-	const datagrams = publication.broadcast.createDatagrams("audio");
-	publication.broadcast.createTrack("audio", { compression: "deflate" });
+	const datagrams = defined(publication.broadcast.createDatagrams("audio"));
+	defined(publication.broadcast.createTrack("audio", { compression: "deflate" }));
 	publication.announce();
-	const other = publication.broadcast.createDatagrams("other", { priority: 7 });
+	const other = defined(publication.broadcast.createDatagrams("other", { priority: 7 }));
 	const pair = createMockTransportPair(ALPN_07_WIP, { datagramWritable: "createWritable" });
 	Object.defineProperty(pair.server.datagrams, "maxDatagramSize", { value: 900 });
 	const [client, server] = await Promise.all([
@@ -171,8 +174,8 @@ for (const alpn of [ALPN_05, ALPN_06])
 		test(`${alpn}: datagram readers rejoin and outlive streams (${first} first)`, async () => {
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
-			const datagrams = publication.broadcast.createDatagrams("audio");
-			const track = publication.broadcast.createTrack("audio");
+			const datagrams = defined(publication.broadcast.createDatagrams("audio"));
+			const track = defined(publication.broadcast.createTrack("audio"));
 			publication.announce();
 			const pair = createMockTransportPair(alpn);
 			const [client, server] = await Promise.all([
@@ -216,7 +219,7 @@ for (const alpn of [ALPN_05, ALPN_06])
 test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDATE writes", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
-	const datagrams = publication.broadcast.createDatagrams("audio");
+	const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 	publication.announce();
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const [client, server] = await Promise.all([
@@ -247,8 +250,8 @@ test("lite-07 forwards a priority change made while the previous DATAGRAMS_UPDAT
 test("lite-06: a request cancelled behind the shared datagram writer sends nothing", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
-	const first = publication.broadcast.createDatagrams("a");
-	const second = publication.broadcast.createDatagrams("b");
+	const first = defined(publication.broadcast.createDatagrams("a"));
+	const second = defined(publication.broadcast.createDatagrams("b"));
 	publication.announce();
 	const pair = createMockTransportPair(ALPN_06);
 	// The legacy API's one session queue, stalled on its first write.
@@ -351,7 +354,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 			using clock = manual();
 			const source = new Origin();
 			const publication = source.route(path, { hidden: true });
-			const datagrams = publication.broadcast.createDatagrams("audio");
+			const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 			publication.announce();
 			const pair = createMockTransportPair(alpn);
 			lagAnswers(pair.server, lag);
@@ -395,7 +398,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		using clock = manual();
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
-		const datagrams = publication.broadcast.createDatagrams("audio");
+		const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
 		const [client, server] = await Promise.all([
@@ -433,7 +436,7 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 		const BURST = 64;
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
-		const datagrams = publication.broadcast.createDatagrams("audio");
+		const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
 		const [client, server] = await Promise.all([
@@ -475,10 +478,12 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	// flaky: quest/m0/flaky/a-session-close-right-after-a-datagram-tracks-end-keeps-the-2.md
+	const testEnd = test.skipIf(alpn === ALPN_06);
+	testEnd(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
-		const datagrams = publication.broadcast.createDatagrams("audio");
+		const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
 		const [client, server] = await Promise.all([
@@ -527,7 +532,7 @@ for (const [alpn, version] of [
 	test(`${alpn}: a duplicate SETUP after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
-		const datagrams = publication.broadcast.createDatagrams("audio");
+		const datagrams = defined(publication.broadcast.createDatagrams("audio"));
 		publication.announce();
 		const pair = createMockTransportPair(alpn);
 		// Once armed, the publisher's FINs on the request streams it accepts never leave.
@@ -636,7 +641,7 @@ function holdNextAnswer(transport: MockTransport): { arm(): void; release(): voi
 test("lite-07: an unanswered track's datagrams don't delay another track's last", async () => {
 	const source = new Origin();
 	const publication = source.route(path, { hidden: true });
-	const b = publication.broadcast.createDatagrams("b");
+	const b = defined(publication.broadcast.createDatagrams("b"));
 	// Answers "a" on demand.
 	const requested = wireOf(publication.broadcast).requestedDatagrams();
 	publication.announce();

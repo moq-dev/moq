@@ -30,7 +30,7 @@ export interface InsecureTestKeyPair {
 }
 
 /** Every RSA algorithm with a committed key pair. */
-export const INSECURE_TEST_RSA_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"] as const;
+const INSECURE_TEST_RSA_ALGORITHMS = ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"] as const;
 
 /** Throwaway key pairs keyed by algorithm. Test-only: see the module comment. */
 export const INSECURE_TEST_RSA_KEYS: Readonly<

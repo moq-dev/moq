@@ -4,6 +4,7 @@
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
@@ -88,7 +89,7 @@ async function roundTrip(wire: Wire, timescale: Timescale | undefined, timestamp
 async function republish(input: BroadcastConsumer): Promise<BroadcastProducer> {
 	const subscription = input.track("video").subscribe();
 	const copy = new BroadcastProducer();
-	const video = copy.createTrack("video", await subscription.info());
+	const video = defined(copy.createTrack("video", await subscription.info()));
 	void (async () => {
 		try {
 			const groups = subscription.ordered();

@@ -1457,8 +1457,8 @@ fn reserve_track(
 	suffix: &str,
 ) -> Result<moq_net::track::Request, MoqError> {
 	let name = track.unwrap_or_else(|| broadcast.unique_name(suffix));
-	broadcast.reserve_track(name).map_err(|err| MoqError::Codec {
-		reason: format!("init failed: {err}"),
+	broadcast.reserve_track(name.clone()).ok_or_else(|| MoqError::Codec {
+		reason: format!("init failed: the track {name} already exists"),
 	})
 }
 

@@ -1,4 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Duration, wall } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -295,18 +296,15 @@ function installGatedWebAudio(addModule: () => Promise<void> = () => Promise.res
 
 	class GatedWorklet {
 		port = Object.assign(new EventTarget(), { start: () => {} });
-		zero: number;
-		constructor(_context: unknown, _name: string, options?: AudioWorkletNodeOptions) {
-			this.zero = options?.processorOptions?.zero;
+		constructor() {
 			worklets.push(this);
 		}
 		connect(): void {}
 		disconnect(): void {}
-		// What the processor posts once the graph renders a quantum.
-		render(timestamp = 0): void {
-			this.port.dispatchEvent(
-				new MessageEvent("message", { data: { timestamp, channels: [new Float32Array(128)] } }),
-			);
+		// What the processor posts once the graph renders a quantum, by default now.
+		render(rendered = wall().asUnixMillis(), samples = 128): void {
+			const data = { channels: [new Float32Array(samples)], rendered };
+			this.port.dispatchEvent(new MessageEvent("message", { data }));
 		}
 	}
 
@@ -389,12 +387,17 @@ test("captures once a gesture resumes a context built before one", async () => {
 	expect(capture.blocked.peek()).toBe(false);
 	expect(webaudio.worklets.length).toBe(1);
 
-	// The worklet is anchored when the graph starts, not when the source appeared, so audio stays on
-	// the same media clock as video however long the page waited for the click.
-	expect(webaudio.worklets[0].zero).toBeGreaterThanOrEqual(before);
-
+	const effect = new Effect();
+	const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
 	webaudio.worklets[0].render();
 	expect(capture.out.format.peek()).toEqual({ sampleRate: 48_000, channelCount: 1 });
+
+	// Audio is stamped when it was rendered, not when the source appeared, so it stays on the same
+	// media clock as video however long the page waited for the click. The render time is read in
+	// whole milliseconds, and the first sample was captured a quantum before it.
+	const quantum = (128 / 48_000) * 1_000_000;
+	expect((await reader?.read())?.value?.timestamp.asMicros()).toBeGreaterThanOrEqual(before - quantum - 1_000);
+	effect.close();
 
 	capture.close();
 	await settle();
@@ -660,18 +663,27 @@ test("microphone audio takes the media clock's suspend jumps", async () => {
 		if (!frames) throw new Error("no capture frames");
 		const reader = frames.getReader();
 		const worklet = webaudio.worklets[0];
-		const quantum = (128 / 48_000) * 1_000_000;
 
-		worklet.render(worklet.zero);
-		expect((await reader.read()).value?.timestamp.asMicros()).toBe(worklet.zero);
+		worklet.render();
+		const first = await reader.read();
+		const before = first.value?.timestamp.asMicros() ?? 0;
+		// The resampler holds the last sample back to interpolate toward.
+		const stamped = ((first.value?.channels[0].length ?? 0) / 48_000) * 1_000_000;
 
 		// An hour asleep: the wall clock moved on while the monotonic clock and the sample count stood.
 		const asleep = 3_600_000;
+		const slept = wall();
 		spyOn(host, "now").mockImplementation(() => wall() + asleep);
-		worklet.render(worklet.zero + quantum);
+		// Rendered before the sleep but delivered after it: captured before the jump, so it continues
+		// the timeline rather than taking the jump.
+		worklet.render(slept);
+		const flight = (await reader.read()).value;
+		expect(flight?.timestamp.asMicros()).toBeCloseTo(before + stamped, 0);
+		const flown = ((flight?.channels[0].length ?? 0) / 48_000) * 1_000_000;
+		worklet.render();
 		const after = (await reader.read()).value?.timestamp.asMicros() ?? 0;
 		// Date.now() reads whole milliseconds, so the jump is the sleep within a couple of them.
-		expect(Math.abs(after - (worklet.zero + quantum) - asleep * 1_000)).toBeLessThan(3_000);
+		expect(Math.abs(after - (before + stamped + flown) - asleep * 1_000)).toBeLessThan(3_000);
 		expect(Math.abs(after - MediaClock.now().asMicros())).toBeLessThan(1_000_000);
 	} finally {
 		mock.restore();
@@ -680,6 +692,124 @@ test("microphone audio takes the media clock's suspend jumps", async () => {
 		await settle();
 		// The sleep left the page's timeline an hour past the restored wall clock; another clock's
 		// origin starts a new one, so later tests start on the wall clock again.
+		const installed = new Manual().install();
+		MediaClock.now();
+		installed.close();
+	}
+});
+
+// A page stalled for seconds delivers every quantum the audio thread rendered meanwhile at once. Each
+// carries when it was rendered, so the backlog keeps its timeline: neither re-anchored as time no
+// sample covers, nor dropped as audio that ran ahead.
+test("a stalled page keeps the microphone's timeline", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	using webaudio = installGatedWebAudio();
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	const effect = new Effect();
+	try {
+		await settle();
+		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+		if (!reader) throw new Error("no capture frames");
+		const worklet = webaudio.worklets[0];
+		const quantum = Duration.millis(10);
+		const frames: { start: number; end: number }[] = [];
+		const render = async (rendered?: number) => {
+			worklet.render(rendered, 480);
+			const frame = (await reader.read()).value;
+			if (!frame) throw new Error("no frame");
+			const start = frame.timestamp.asMicros();
+			frames.push({ start, end: start + (frame.channels[0].length / 48_000) * 1_000_000 });
+		};
+
+		// Ten seconds on time, five rendered while the page stalls, then ten more on time.
+		for (let i = 0; i < 1_000; i++) {
+			await render();
+			clock.jump(quantum);
+		}
+		const stalled = wall().asUnixMillis();
+		clock.jump(Duration.millis(5_000));
+		for (let i = 0; i < 500; i++) await render(stalled + i * 10);
+		for (let i = 0; i < 1_000; i++) {
+			await render();
+			clock.jump(quantum);
+		}
+
+		expect(frames.length).toBe(2_500);
+		const gaps = frames.slice(1).filter((frame, i) => Math.abs(frame.start - frames[i].end) > 1);
+		expect(gaps).toEqual([]);
+	} finally {
+		effect.close();
+		capture.close();
+		await settle();
+		installed.close();
+	}
+});
+
+// A page still stalled for five seconds after a four second sleep: the backlog it then delivers was
+// rendered from the moment the host woke, so the timeline takes the jump on the first quantum
+// rendered after the sleep, not on whichever reaches the page first.
+test("a page stalled past a suspend takes the jump where the audio thread woke", async () => {
+	// The host clock, driven by hand: a suspend moves the wall clock while the monotonic one stands,
+	// which a Manual clock can't express, since its wall time anchors its origin.
+	// biome-ignore lint/style/noRestrictedGlobals: a suspend is the wall clock jumping past performance.now().
+	const [host, monotonic] = [Date, performance];
+	const [wall0, mono0] = [host.now(), monotonic.now()];
+	let elapsed = 0;
+	let slept = 0;
+	using webaudio = installGatedWebAudio();
+	webaudio.gesture();
+	const capture = new Capture({ enabled: true, source: new Signal(fakeSource()) as never });
+	const effect = new Effect();
+	try {
+		await settle();
+		spyOn(monotonic, "now").mockImplementation(() => mono0 + elapsed);
+		spyOn(host, "now").mockImplementation(() => wall0 + elapsed + slept);
+		const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+		if (!reader) throw new Error("no capture frames");
+		const worklet = webaudio.worklets[0];
+		const frames: { start: number; end: number }[] = [];
+		const render = async (rendered?: number) => {
+			worklet.render(rendered, 480);
+			const frame = (await reader.read()).value;
+			if (!frame) throw new Error("no frame");
+			const start = frame.timestamp.asMicros();
+			frames.push({ start, end: start + (frame.channels[0].length / 48_000) * 1_000_000 });
+		};
+
+		for (let i = 0; i < 1_000; i++) {
+			await render();
+			elapsed += 10;
+		}
+		// One quantum rendered just before the sleep, then five seconds of rendering after it before the
+		// page catches up.
+		const asleep = host.now();
+		slept = 4_000;
+		const awake = host.now();
+		elapsed += 5_000;
+		await render(asleep);
+		for (let i = 0; i < 500; i++) await render(awake + i * 10);
+		for (let i = 0; i < 1_000; i++) {
+			await render();
+			elapsed += 10;
+		}
+
+		expect(frames.length).toBe(2_501);
+		const gaps = frames
+			.slice(1)
+			.map((frame, i) => ({ at: i + 1, gap: frame.start - frames[i].end }))
+			.filter(({ gap }) => Math.abs(gap) > 1);
+		// The one gap is the sleep, after the quantum in flight across it.
+		expect(gaps.map(({ at }) => at)).toEqual([1_001]);
+		expect(Math.abs(gaps[0].gap - 4_000_000)).toBeLessThan(20_000);
+	} finally {
+		mock.restore();
+		effect.close();
+		capture.close();
+		await settle();
+		// The sleep left the page's timeline ahead of the restored wall clock; another clock's origin
+		// starts a new one, so later tests start on the wall clock again.
 		const installed = new Manual().install();
 		MediaClock.now();
 		installed.close();

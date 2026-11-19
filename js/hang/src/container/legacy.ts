@@ -307,6 +307,7 @@ export class Producer {
 	 * Abort the current group and the track with `err`, which readers see in place of a clean end. A
 	 * no-op after {@link finish}: the track is already complete.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	abort(err: Error) {
 		this.#group?.abort(err);
 		this.#group = undefined;

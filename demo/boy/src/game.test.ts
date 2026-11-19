@@ -65,6 +65,7 @@ test("status skips values that fail the schema and ends when the track errors", 
 	const origin = new Moq.Origin.Producer();
 	const publication = origin.route(Moq.Path.from("game", "test"));
 	const track = publication.broadcast.createTrack("status");
+	if (!track) throw new Error("the track already exists");
 
 	// One finished group per status, so between statuses the loop waits on the next group.
 	const publish = (value: unknown) => {

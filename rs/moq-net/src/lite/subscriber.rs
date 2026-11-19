@@ -11413,8 +11413,7 @@ impl SharedDatagrams {
 		let producer = serve
 			.source
 			.as_ref()?
-			.create_unlisted_datagrams(serve.name.as_str(), info)
-			.ok()?;
+			.create_unlisted_datagrams(serve.name.as_str(), info)?;
 		let key = (serve.path.clone(), serve.name.clone());
 		serve.subscriber.legacy_datagrams.lock().insert(
 			key.clone(),
@@ -13500,10 +13499,15 @@ impl kio::Task for FetchServeRun {
 							end: frame_end,
 						},
 					) {
-						Ok(producer) => producer,
+						Ok(Some(producer)) => producer,
+						// Already served, as by a concurrent fetch.
+						Ok(None) => {
+							tracing::debug!(track = %self.serve.name, group = self.group, "fetch already served");
+							cancel(stream);
+							return Poll::Ready(());
+						}
 						Err(err) => {
-							// Already served (a concurrent fetch) or the track closed. Nothing failed
-							// upstream: we only stopped wanting the answer.
+							// The track closed. Nothing failed upstream: we only stopped wanting the answer.
 							tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch not served");
 							cancel(stream);
 							return Poll::Ready(());

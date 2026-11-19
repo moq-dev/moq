@@ -515,6 +515,7 @@ export class Broadcast {
 					// Catalog JSON is small and repetitive.
 					compression: "deflate",
 				});
+				if (!track) throw new Error(`the track ${Broadcast.CATALOG_TRACK} already exists`);
 				effect.cleanup(() => {
 					track.finish();
 					track.close();
@@ -564,6 +565,7 @@ export class Broadcast {
 						entry.name,
 						rendition.kind === "video" ? { ...info, refresh: VIDEO_REFRESH } : info,
 					);
+					if (!entry.track) throw new Error(`the track ${entry.name} already exists`);
 				}
 				entry.owner = rendition;
 				const served = entry.track;

@@ -148,7 +148,7 @@ impl<I: DeferredImport> DeferredVideo<I> {
 		catalog: moq_mux::catalog::Producer,
 		suffix: &str,
 	) -> Result<Self> {
-		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video));
 		Ok(Self {
 			state: DeferredState::Pending(Box::new(PendingVideo { track, catalog })),
 		})

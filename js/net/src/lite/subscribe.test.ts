@@ -695,8 +695,8 @@ test("lite-07 updates edit only the changed ranges", async () => {
 			new Reader(undefined, await encodeMessage(version, update), version),
 			version,
 		);
-		const resolved = live.apply(got).map(({ id, range }) => [id, range]);
-		expect(resolved).toEqual(sent.entries());
+		live.apply(got);
+		expect(live.entries()).toEqual(sent.entries());
 	};
 	await step([b, a], [], []);
 	await step([a, c], [1n], [c]);
@@ -712,18 +712,25 @@ test("lite-07 updates edit only the changed ranges", async () => {
 	expect(() => refused([0n], [])).toThrow(ProtocolViolation);
 });
 
-// An edit that changes nothing hands back the snapshot it last did, so a stream of empty updates
-// copies nothing; one that changes a range takes a fresh one. Mirrors the Rust
-// `lite07_an_empty_edit_reuses_the_snapshot`.
-test("lite-07 an empty edit reuses the snapshot", () => {
+// An edit resolves to the Range IDs it names. Mirrors the Rust `lite07_an_edit_names_its_range_ids`.
+test("lite-07 an edit names its range ids", () => {
 	const live = new LiveRanges(Version.DRAFT_07, [{}]);
-	const empty = () => new SubscribeUpdate({ priority: 0, remove: [], ranges: [] });
-	const first = live.apply(empty());
-	expect(live.apply(empty())).toBe(first);
-	const range: WireRange = { start: { absolute: 4n } };
-	const edited = live.apply(new SubscribeUpdate({ priority: 0, remove: [0n], ranges: [range] }));
-	expect(edited).toEqual([{ id: 1n, range }]);
-	expect(live.apply(empty())).toBe(edited);
+	const range = (group: bigint): WireRange => ({ start: { absolute: group } });
+	const edit = (remove: bigint[], ranges: WireRange[]) =>
+		live.apply(new SubscribeUpdate({ priority: 0, remove, ranges }));
+	expect(edit([], [])).toEqual({ retired: [], added: [] });
+	expect(edit([0n], [range(4n), range(5n)])).toEqual({
+		retired: [0n],
+		added: [
+			[1n, range(4n)],
+			[2n, range(5n)],
+		],
+	});
+	expect(edit([1n], [range(6n)])).toEqual({ retired: [1n], added: [[3n, range(6n)]] });
+	expect(live.entries()).toEqual([
+		[2n, range(5n)],
+		[3n, range(6n)],
+	]);
 });
 
 // An edit to ranges too large for a SUBSCRIBE is refused before anything changes, so the live
