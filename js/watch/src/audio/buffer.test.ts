@@ -831,4 +831,20 @@ describe("AudioBuffer steering", () => {
 			clock.close();
 		}
 	});
+
+	// Pre-skip lands output behind the frame it was decoded from, so the playhead on the ring's timeline
+	// reports the media sounding a pre-skip later.
+	it("reports the playhead on the media's timeline", () => {
+		const clock = started();
+		const { buffer, state, context } = fake(100);
+		try {
+			buffer.decoded(ms(5020), ms(5013.5));
+			context.sounding = 1.1;
+			state(ms(5000), false, 0, 1.1);
+			expect(buffer.timestamp.peek()).toBe(ms(5006.5));
+		} finally {
+			buffer.close();
+			clock.close();
+		}
+	});
 });

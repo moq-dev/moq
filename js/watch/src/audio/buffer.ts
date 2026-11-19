@@ -295,7 +295,7 @@ export class AudioBuffer {
 	#context: AudioContext;
 
 	readonly #timestamp = new Signal<number>(0);
-	/** The playback timestamp sounding now, as of the worklet's last report. */
+	/** The media timestamp sounding now, as of the worklet's last report. */
 	readonly timestamp: Getter<number> = this.#timestamp;
 
 	readonly #output = new Signal<Duration>(Duration.ZERO);
@@ -422,7 +422,9 @@ export class AudioBuffer {
 				const heard = this.#sounding();
 				this.#observeOutput();
 				this.#observeLead(heard);
-				this.#timestamp.set(this.#heardAt(data, heard));
+				// The ring's timeline runs behind the media's by the Opus pre-skip, so add it back.
+				const sounding = this.#heardAt(data, heard);
+				this.#timestamp.set(data.anchored ? sounding + this.#backpressure.offset : sounding);
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
 				this.#skips.set(data.skips);
