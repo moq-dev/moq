@@ -66,6 +66,9 @@
 		{ "implements": "WebTransport", "members": ["*"] }
 	],
 	"rules": {
+		// fallow only warns on these by default.
+		"unused-dev-dependencies": "error",
+		"unused-optional-dependencies": "error",
 		// `export * as Track from "./track.ts"` namespaces reuse short names on purpose,
 		// and error.ts aliases its classes for the modules that would shadow them.
 		"duplicate-exports": "off",
