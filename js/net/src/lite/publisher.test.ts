@@ -3471,6 +3471,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 	// The FIN is never acknowledged: the close stays pending until the stream resets.
 	const inner = accepted.value.writable.getWriter();
 	let reset: unknown;
+	const { promise: closing, resolve: closed } = Promise.withResolvers<void>();
 	const writable = new WritableStream<Uint8Array>({
 		start(controller) {
 			controller.signal.addEventListener("abort", () => {
@@ -3479,7 +3480,10 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 			});
 		},
 		write: (chunk) => inner.write(chunk),
-		close: () => new Promise(() => undefined),
+		close: () => {
+			closed();
+			return new Promise(() => undefined);
+		},
 	});
 	const server = new Stream({ readable: accepted.value.readable, writable, version: Version.DRAFT_07 });
 
@@ -3493,8 +3497,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 		});
 		const serving = publisher.runFetch(msg, server);
 		// The whole group and its FIN go out before any successor arrives.
-		await client.reader.u8();
-		await flush();
+		await closing;
 		expect(reset).toBeUndefined();
 
 		// Then the track runs a second past its successor, with the FIN still unacknowledged.
@@ -3551,6 +3554,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 	// The FIN is never acknowledged: the close stays pending until the stream resets.
 	const inner = accepted.value.writable.getWriter();
 	let reset: unknown;
+	const { promise: closing, resolve: closed } = Promise.withResolvers<void>();
 	const writable = new WritableStream<Uint8Array>({
 		start(controller) {
 			controller.signal.addEventListener("abort", () => {
@@ -3559,7 +3563,10 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 			});
 		},
 		write: (chunk) => inner.write(chunk),
-		close: () => new Promise(() => undefined),
+		close: () => {
+			closed();
+			return new Promise(() => undefined);
+		},
 	});
 	const server = new Stream({ readable: accepted.value.readable, writable, version: Version.DRAFT_07 });
 
@@ -3569,8 +3576,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 		const msg = new Fetch({ broadcast: Path.from("live"), track: "video", priority: 0, maxDelay: 500, group: 0n });
 		const serving = publisher.runFetch(msg, server);
 		// The whole group and its FIN go out before any successor arrives.
-		await client.reader.u8();
-		await flush();
+		await closing;
 		expect(reset).toBeUndefined();
 
 		// Then the track runs a second past its successor upstream, with the FIN still unacknowledged.

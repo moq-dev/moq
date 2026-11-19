@@ -2042,6 +2042,13 @@ class FetchExpiry implements Expiry {
 		return this.#judging?.expiry.expired() ?? false;
 	}
 
+	/** Judge afresh once the group moves to another route: the old route's copy says nothing about it. */
+	moved(): void {
+		this.#unwatch();
+		this.#judging = undefined;
+		this.#relay.update((n) => n + 1);
+	}
+
 	/** Stop watching the copy, once nobody reads the group. */
 	close(): void {
 		this.#closed = true;
@@ -2505,6 +2512,7 @@ export class Front {
 					adopt: () => {
 						current.release();
 						current = next.source;
+						judge.moved();
 						// Its fetch may hold its subscription until its reader lets go, and the
 						// reader is now `fetched.group`.
 						void hooks.groupReleased(fetched.group).then(() => next.group.close());
