@@ -95,7 +95,7 @@ struct Live {
 	reorder: bool,
 	/// Payload bytes in each non-key video frame.
 	delta_size: usize,
-	/// Added to every timestamp written, in µs: changing it steps the timeline with no marker.
+	/// Added to every timestamp written, in µs: changing it steps the timeline undeclared.
 	offset: i64,
 	start: Instant,
 	tick: u64,
@@ -905,7 +905,7 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 }
 
 /// A changeover between two encoders whose clocks started hours apart steps the whole timeline
-/// forward with no marker, mid-group, as in the field. The export re-acquires its clock as at
+/// forward undeclared, mid-group, as in the field. The export re-acquires its clock as at
 /// startup, rather than read the step as drift and end, and renders on without a drop. So it
 /// does for a step back, even smaller than the delay: audio never regresses on one clock, and
 /// video that declares its `reorder` restarts when the step exceeds that depth. Video that

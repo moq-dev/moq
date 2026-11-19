@@ -1905,9 +1905,10 @@ pub(crate) mod tests {
 	}
 
 	/// The passthrough track crosses a relay byte for byte on the lite and the IETF wire, through
-	/// a flagged PCR jump twenty seconds forward. The jump crosses as one marker group, an object
-	/// with no bytes, and the timestamps carry it, so a budget shorter than the jump drops the
-	/// groups before it.
+	/// a flagged PCR jump twenty seconds forward. The timestamps carry the jump, so a budget
+	/// shorter than it drops the groups before it, and where the wire carries a group's end
+	/// (lite-07), the group before the jump ends whole at its content, short of the jump: the
+	/// break.
 	#[tokio::test]
 	async fn ts_passthrough_crosses_a_relay_through_a_flagged_jump() {
 		const KYRION: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts");
@@ -2027,8 +2028,8 @@ pub(crate) mod tests {
 				let first = kio::clock::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
 				(track, first)
 			};
-			// Each group's start and frames, read until the track ends. A read cut off as
-			// stale leaves `None` for that group's frames, and a marker leaves none.
+			// Each group's start, frames, and where it ended whole, read until the track ends. A
+			// read cut off as stale leaves `None` for that group's frames.
 			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
 				tokio::spawn(kio::clock::timeout(WAIT, async move {
 					let mut groups = Vec::new();
@@ -2037,7 +2038,6 @@ pub(crate) mod tests {
 						let mut frames = Some(Vec::new());
 						loop {
 							match group.read_frame().await {
-								Ok(Some(frame)) if frame.payload.is_empty() => {}
 								Ok(Some(frame)) => frames
 									.as_mut()
 									.unwrap()
@@ -2051,10 +2051,10 @@ pub(crate) mod tests {
 								Err(err) => panic!("{err}"),
 							}
 						}
-						groups.push((group.start, frames));
+						groups.push((group.start, frames, group.end()));
 						next = track.recv_group().await.unwrap();
 					}
-					groups.sort_by_key(|(start, _)| *start);
+					groups.sort_by_key(|(start, ..)| *start);
 					groups
 				}))
 			};
@@ -2074,11 +2074,11 @@ pub(crate) mod tests {
 				.unwrap()
 				.unwrap_or_else(|err| panic!("{version}: the recording ends with the track: {err}"))
 				.into_iter()
-				.map(|(start, frames)| (start, frames.expect("the recording reads every group whole")))
+				.map(|(start, frames, end)| (start, frames.expect("the recording reads every group whole"), end))
 				.collect();
 			let output = recording
 				.iter()
-				.flat_map(|(_, frames)| frames.iter().map(|frame| &frame.payload[..]))
+				.flat_map(|(_, frames, _)| frames.iter().map(|frame| &frame.payload[..]))
 				.collect::<Vec<_>>()
 				.concat();
 			assert!(output.len() > KYRION.len(), "{version}: both copies crossed");
@@ -2086,36 +2086,36 @@ pub(crate) mod tests {
 				input.ends_with(&output),
 				"{version}: byte-identical from the first group"
 			);
-			let media: Vec<_> = recording.iter().filter(|(_, frames)| !frames.is_empty()).collect();
 			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros().unwrap();
-			let jump = media
+			let jump = recording
 				.windows(2)
 				.find(|pair| first(&pair[1].1) > first(&pair[0].1) + 10_000_000)
 				.map(|pair| pair[1].0)
 				.unwrap_or_else(|| panic!("{version}: no jump crossed"));
 			// Groups are keyed by their starts, so a missing one shows in the bytes above rather than
 			// in the keys, which only have to rise.
-			let starts: Vec<u64> = recording.iter().map(|(start, _)| *start).collect();
+			let starts: Vec<u64> = recording.iter().map(|(start, ..)| *start).collect();
 			assert!(
 				starts.windows(2).all(|pair| pair[0] < pair[1]),
 				"{version}: groups in start order: {starts:?}"
 			);
 			let at = starts.iter().position(|start| *start == jump).unwrap();
-			let markers: Vec<u64> = recording
-				.iter()
-				.filter(|(_, frames)| frames.is_empty())
-				.map(|(start, _)| *start)
+			// Groups and their ends are in micros, the track's timescale.
+			let breaks: Vec<u64> = recording
+				.windows(2)
+				.filter(|pair| pair[0].2.is_some_and(|end| pair[1].0 > end + 1_000))
+				.map(|pair| pair[0].0)
 				.collect();
-			assert_eq!(
-				markers,
-				[starts[at - 1]],
-				"{version}: the break marker precedes the jump"
-			);
+			let carried: &[u64] = match version {
+				"moq-lite-07-wip" => &[starts[at - 1]],
+				_ => &[],
+			};
+			assert_eq!(breaks, carried, "{version}: the group before the jump ends short of it");
 
 			// Joining once every group is out, with a budget half the jump, reads every group
-			// after it past the marker, and none of the groups the jump left more than
-			// the budget behind. An IETF subscription starts at the newest group, so only lite
-			// has the groups behind it to read.
+			// after it, and none of the groups the jump left more than the budget behind. An IETF
+			// subscription starts at the newest group, so only lite has the groups behind it to
+			// read.
 			if version.starts_with("moq-lite") {
 				let late = read(
 					start(
@@ -2129,15 +2129,15 @@ pub(crate) mod tests {
 				.expect("the late read ends with the track");
 				let whole: Vec<u64> = late
 					.iter()
-					.filter(|(_, frames)| frames.is_some())
-					.map(|(start, _)| *start)
+					.filter(|(_, frames, _)| frames.is_some())
+					.map(|(start, ..)| *start)
 					.collect();
 				assert!(
 					whole.ends_with(&starts[at..]),
 					"{version}: a late subscriber reads every group from the jump on: {whole:?}"
 				);
 				assert!(
-					whole.iter().all(|start| *start >= starts[at - 2]),
+					whole.iter().all(|start| *start >= starts[at - 1]),
 					"{version}: only the group the jump follows is in budget before it: {whole:?}"
 				);
 			}

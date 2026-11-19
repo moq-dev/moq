@@ -101,8 +101,9 @@ const VIDEO_STREAM_TYPES: &[u8] = &[
 /// PCRs are unwrapped into a 64-bit count of 27 MHz ticks that never goes back. A step forward of
 /// at most half the 2^33 * 300 tick period adds to the count, across the wrap included. A PCR with
 /// `discontinuity_indicator` whose step is forward by that measure adds the step too, after the
-/// bytes before it are timed at the rate before it, and starts a group behind a break marker. Any
-/// step back ends the import: [`PcrRewind`](crate::Error::PcrRewind) without the flag,
+/// bytes before it are timed at the rate before it, and starts a group behind a break: the group
+/// before it ends whole at its last object rather than where the next starts. Any step back ends
+/// the import: [`PcrRewind`](crate::Error::PcrRewind) without the flag,
 /// [`PcrRestart`](crate::Error::PcrRestart) with it, since a signalled restart is new content and
 /// needs a new broadcast. The timeline therefore depends only on the bytes since the importer's
 /// first PCR and its shift, and two importers of one feed started at the same packet each placing

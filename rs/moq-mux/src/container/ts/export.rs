@@ -256,7 +256,7 @@ enum Feed {
 /// What a queued output frame tells [`Export::stats`], applied only once the frame is
 /// returned: a rewind drops the queue unwritten.
 struct Tally {
-	/// The frame's PCR in 27 MHz ticks, and whether a declared marker, rewind, or program
+	/// The frame's PCR in 27 MHz ticks, and whether a declared break, rewind, or program
 	/// switch started a new time base.
 	pcr: (u64, bool),
 	/// The PID of each access unit whose packets begin in the frame.
@@ -273,8 +273,8 @@ type Held = (Pending, Option<Bytes>);
 /// A frame read from its source.
 struct Pending {
 	frame: Frame,
-	/// How many marker groups had declared a break in the track's timeline when the frame
-	/// was read.
+	/// How many declared ends had broken the track's timeline when the frame was read: groups
+	/// that ended whole short of where the next started.
 	restart: u64,
 	/// How many times its playhead had jumped (a skipped group, or a restart) when the frame
 	/// was read.
@@ -333,15 +333,15 @@ struct Track {
 	subscribed: kio::clock::Instant,
 	/// The latest frame arrival or observed loss, which settles frames held for their DTS.
 	latest: kio::clock::Instant,
-	/// The marker count the decode clock runs under.
+	/// The declared end count the decode clock runs under.
 	restart: u64,
-	/// The marker, skip and cut counts of the sources the track read before this one, so the
+	/// The declared end, skip and cut counts of the sources the track read before this one, so the
 	/// counts keep rising across a resubscription.
 	base: (u64, u64, u64),
 	/// How many unmarked steps back the track's timeline took ([`Self::steps_back`]), each
-	/// counted as a marker of its own.
+	/// counted as a declared end of its own.
 	steps: u64,
-	/// The highest PTS read on the track's timeline, and the marker count it was read under.
+	/// The highest PTS read on the track's timeline, and the declared end count it was read under.
 	high: Option<(u64, Timestamp)>,
 	read: Read,
 	pid: u16,
@@ -453,7 +453,7 @@ impl Track {
 	/// strand a B-frame behind its reference or send it first.
 	fn queue(&mut self, name: &str, pending: Pending, jitter: &mut jitter::Buffer<TrackKey, Queued>) -> Result<()> {
 		if pending.restart != self.restart {
-			// A marker declared a break in the timeline, or it stepped back unmarked
+			// A declared end broke the timeline, or it stepped back undeclared
 			// ([`Self::steps_back`]), so the decode clock restarts too, and the last keyframe,
 			// on the timeline left behind, no longer marks what leads it.
 			self.release(name, jitter, true)?;
@@ -514,7 +514,7 @@ impl Track {
 		self.release(name, jitter, false)
 	}
 
-	/// Count a frame that steps the track's timeline back with no marker as a marker of its own,
+	/// Count a frame that steps the track's timeline back undeclared as a declared end of its own,
 	/// where a reorder bound proves no valid reordering explains it.
 	///
 	/// Audio presents in decode order, so any frame below one read before it is out of order.
@@ -526,9 +526,9 @@ impl Track {
 	///
 	/// The jitter buffer would not see the step: the group's declared clock would refuse the frame
 	/// and fail the export, and audio with slack left would decode before the frames ahead of it
-	/// on the same clock, which the output's buffers cannot carry. As a marker, the step restarts
-	/// the decode clock and opens a new generation, as one the source declared would. A placed
-	/// frame's timestamp is its arrival rather than its decode time, so it never steps.
+	/// on the same clock, which the output's buffers cannot carry. As a declared end, the step
+	/// restarts the decode clock and opens a new generation, as one the source declared would. A
+	/// placed frame's timestamp is its arrival rather than its decode time, so it never steps.
 	fn steps_back(&mut self, pending: &mut Pending) {
 		if self.kind.placed() {
 			return;
@@ -3092,7 +3092,7 @@ where
 	}
 
 	/// Discard what has not gone out and restart the program clock. Every rendition
-	/// joins the new generation: no track is fenced across a declared marker, since a
+	/// joins the new generation: no track is fenced across a declared break, since a
 	/// latency skip on one track says nothing about another's timeline. The continuity
 	/// counters run on, since they number only what went out.
 	fn rewind(&mut self) {
@@ -3403,18 +3403,16 @@ where
 	}
 
 	/// Rebuild the PMT from the listed tracks, leading the next frame muxed when it changed. The
-	/// clock stays on its PID unless the stream carrying it retired.
+	/// clock stays on its PID unless the stream carrying it retired with no track the catalog
+	/// lists taking the PID over: a rendition the source reopens (a language retag) can retire
+	/// before the one replacing it lists with its first frame.
 	fn revise(&mut self) -> Result<()> {
 		let Some(psi) = self.program.psi.as_ref() else {
 			return Ok(());
 		};
 		let current = psi.pcr_pid().context("PMT without a clock")?;
 		let kept = psi.own_clock() == Some(current)
-			|| self
-				.program
-				.tracks
-				.values()
-				.any(|track| track.listed && track.pid == current);
+			|| (self.program.tracks.values()).any(|track| track.pid == current && (track.listed || track.cataloged));
 		let pcr_pid = match kept {
 			true => current,
 			false => self.pick_clock()?,

@@ -63,21 +63,17 @@ async fn import(data: &[u8]) -> Imported {
 		.unwrap()
 	{
 		while let Some(frame) = group.read_frame().await.unwrap() {
-			if frame.payload.is_empty() {
-				let micros = objects.last().map_or(0, |object: &Object| object.micros);
-				objects.push(Object {
-					group: group.start,
-					micros,
-					payload: Bytes::new(),
-				});
-				continue;
-			}
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
 				group: group.start,
 				micros: frame.timestamp.as_micros().unwrap() as u64,
 				payload: frame.payload,
+				end: None,
 			});
+		}
+		if let (Some(end), Some(scale)) = (group.end(), group.timescale()) {
+			let end = moq_net::Timestamp::new(end, scale).unwrap().as_micros().unwrap() as u64;
+			objects.last_mut().expect("a group holds an object").end = Some(end);
 		}
 	}
 	// The importer appends each group, so nothing lies below its first or between two.
@@ -107,7 +103,8 @@ fn skips(objects: &[Object]) -> Vec<std::ops::Range<u64>> {
 
 /// Republish `objects` on a new broadcast's passthrough track, in the groups they were published in,
 /// each once `at` says it is due after the start and not before the one ahead of it, as a relay
-/// delivering them would, skipping the starts between them as the importer did.
+/// delivering them would, skipping the starts between them as the importer did. A group ends
+/// whole where its last object says.
 fn republish(objects: Vec<Object>, at: impl Fn(usize, &Object) -> Duration + Send + 'static) -> Republished {
 	let skips = skips(&objects);
 	republish_cut(objects, skips, &[], at)
@@ -138,6 +135,7 @@ fn republish_cut(
 	let task = tokio::spawn(async move {
 		let _keep = (&broadcast, &catalog);
 		let mut group: Option<(u64, moq_net::group::Producer)> = None;
+		let mut whole = None;
 		let mut skips = skips.into_iter().peekable();
 		let mut due = Duration::ZERO;
 		for (i, object) in objects.into_iter().enumerate() {
@@ -145,7 +143,7 @@ fn republish_cut(
 			kio::clock::sleep_until(start.saturating_add(due)).await;
 			if group.as_ref().map(|(sequence, _)| *sequence) != Some(object.group) {
 				if let Some((sequence, group)) = group.take() {
-					end(sequence, group, &cut);
+					end(sequence, group, whole.take(), &cut);
 				}
 				while let Some(run) = skips.next_if(|run| run.end <= object.group) {
 					track.skip_groups(run);
@@ -153,20 +151,15 @@ fn republish_cut(
 				let info = moq_net::group::Info { start: object.group };
 				group = Some((object.group, track.create_group(info).unwrap()));
 			}
-			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
-			let group = &mut group.as_mut().unwrap().1;
-			if object.payload.is_empty() {
-				group.write_frame(timestamp, Bytes::new()).unwrap();
-				continue;
-			}
+			whole = object.end;
 			let frame = hang::container::Frame {
-				timestamp,
+				timestamp: moq_net::Timestamp::from_micros(object.micros).unwrap(),
 				payload: object.payload,
 			};
-			frame.write_to(group).unwrap();
+			frame.write_to(&mut group.as_mut().unwrap().1).unwrap();
 		}
 		if let Some((sequence, group)) = group {
-			end(sequence, group, &cut);
+			end(sequence, group, whole, &cut);
 		}
 		let _track = track.finish().unwrap();
 		std::future::pending::<()>().await;
@@ -174,11 +167,15 @@ fn republish_cut(
 	Republished { consumer, task }
 }
 
-/// Finish `group`, or abort it as evicted if it is one of the `cut`.
-fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
-	match cut.contains(&sequence) {
-		true => group.abort(moq_net::Error::Old).unwrap(),
-		false => {
+/// Finish `group`, whole at `whole` micros (the track's scale) if given, or abort it as evicted
+/// if it is one of the `cut`.
+fn end(sequence: u64, group: moq_net::group::Producer, whole: Option<u64>, cut: &[u64]) {
+	match (cut.contains(&sequence), whole) {
+		(true, _) => group.abort(moq_net::Error::Old).unwrap(),
+		(false, Some(whole)) => {
+			group.finish_at(whole).unwrap();
+		}
+		(false, None) => {
 			group.finish().unwrap();
 		}
 	}
@@ -271,10 +268,12 @@ async fn a_flagged_jump_crosses_without_holding_the_output() {
 	}
 	let input = [KYRION, &second].concat();
 	let objects = import(&input).await.objects;
-	assert!(
-		objects.iter().any(|object| object.payload.is_empty()),
-		"a marker declares the break"
-	);
+	// The group before the jump ends whole at its last object, short of the next group's start.
+	let breaks = objects
+		.windows(2)
+		.filter(|pair| pair[0].end.is_some_and(|end| pair[1].group > end + 1_000))
+		.count();
+	assert_eq!(breaks, 1, "the import declares the break");
 
 	// The bytes keep coming at the source's pace across the jump: only the PCR leaps.
 	let mut arrivals = vec![Duration::from_millis(40)];

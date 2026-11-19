@@ -20,13 +20,14 @@ use crate::container::Frame;
 
 const PACKET: usize = 188;
 
-/// One object as published: its group, the PCR time of its first byte, and its packets. A break
-/// marker, an object with no bytes, has an empty payload and the time of the object before it.
+/// One object as published: its group, the PCR time of its first byte, and its packets.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Object {
 	pub group: u64,
 	pub micros: u64,
 	pub payload: Bytes,
+	/// Where its group ended whole, in micros, on the group's last object.
+	pub end: Option<u64>,
 }
 
 /// The published objects, placed on the source they came from.

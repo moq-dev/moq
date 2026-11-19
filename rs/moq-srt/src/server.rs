@@ -135,7 +135,7 @@ impl Egress {
 	/// Pace one muxer frame, returning the SRT payloads it completed.
 	///
 	/// `discontinuity` is the muxer's counter for `frame`. A change means the muxer
-	/// restarted its program clock (a marker breaking the timeline, or a switch to another
+	/// restarted its program clock (a break in the publisher's timeline, or a switch to another
 	/// publisher instance, whose timeline starts wherever its own does), so the anchor
 	/// this pacer holds belongs to a timeline that no longer applies: mapping a new
 	/// generation that starts earlier through it puts every frame of that span before the
@@ -877,7 +877,7 @@ mod tests {
 		);
 	}
 
-	/// End to end over a real SRT receiver: a publisher that declares a marker after
+	/// End to end over a real SRT receiver: a publisher that declares a break after
 	/// ten minutes must keep the program flowing, with the new generation stamped at
 	/// the wall clock it was muxed at rather than back at the connection's first packet.
 	///
@@ -887,7 +887,7 @@ mod tests {
 	/// already a latency in the past by the time it is sent, so it is released at once
 	/// (or dropped as too late) instead of on the media clock.
 	#[tokio::test]
-	async fn a_publisher_marker_keeps_an_srt_receiver_playing() {
+	async fn a_publisher_break_keeps_an_srt_receiver_playing() {
 		use moq_mux::catalog::hang::Container as MuxContainer;
 		use moq_mux::container::{Producer, ts};
 		use moq_net::Timestamp;
@@ -895,7 +895,7 @@ mod tests {
 		kio::clock::host_time(); // real SRT sockets
 
 		// Short enough to keep the test quick, long enough that the release instants
-		// either side of the marker are separated by more than clock noise.
+		// either side of the break are separated by more than clock noise.
 		const LATENCY: Duration = Duration::from_millis(300);
 		// Ten minutes in, the span from the evidence on #2833.
 		const OFFSET: u64 = 600_000_000;
@@ -963,7 +963,7 @@ mod tests {
 		let mut receiver = caller.await.unwrap();
 
 		// Three seconds of program, then wait until the receiver is actually playing it
-		// so the marker lands a real wall-clock distance after the first packet.
+		// so the break lands a real wall-clock distance after the first packet.
 		write(&mut producer, 30, OFFSET);
 		let mut received = Vec::new();
 		let first = kio::clock::timeout(Duration::from_secs(10), receiver.next())
@@ -973,10 +973,11 @@ mod tests {
 			.unwrap();
 		received.push(first);
 
-		// The publisher declares a break and continues forward, with half a second written at
-		// once: a longer burst would leave the marker's group stale before the egress reads it.
+		// The publisher's media stops at 3 s, where its last group ended whole, and resumes a
+		// second later, with half a second written at once: a longer burst would leave the first
+		// group after the break stale before the egress reads it.
 		producer.discontinuity().unwrap();
-		write(&mut producer, 5, OFFSET + 3_000_000);
+		write(&mut producer, 5, OFFSET + 4_000_000);
 
 		// Drain until the muxer flags the break, which it does exactly once, on the new
 		// generation's leading clock packet.
@@ -984,7 +985,7 @@ mod tests {
 			let payload = kio::clock::timeout(Duration::from_secs(10), receiver.next())
 				.await
 				.expect("the resumed generation never arrived")
-				.expect("the SRT egress closed before the marker")
+				.expect("the SRT egress closed before the break")
 				.unwrap();
 			received.push(payload);
 			if let Some(index) = received.iter().position(|(_, payload)| flags_a_break(payload)) {
