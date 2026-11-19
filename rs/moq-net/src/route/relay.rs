@@ -42,9 +42,9 @@
 //! chain, with it appended, names a relay twice or grows past the longest path: that claim
 //! left a relay's domain and came back. Floors order one claimant's claims, not the copies
 //! two grants announced again under two claimants, so a node that hears a claim's publisher
-//! ended it holds back every copy of it standing then, the same announcer, first in the
-//! chain, at no newer epoch, until each copy's own end arrives: no copy shows a moment
-//! between the two ends.
+//! ended it holds back every copy of it standing then (the same announcer, first in the
+//! chain, from the same prefix, at no newer epoch, at whatever path it is presented)
+//! until each copy's own end arrives: no copy shows a moment between the two ends.
 //!
 //! Each neighbour asks for a set of prefixes edited in place, as under the path rule: a
 //! routing neighbour forwards for the whole domain, so it asks for the whole tree, and
@@ -2091,45 +2091,67 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		// Its publisher ended the claim: every copy of it standing now is stale, and this
 		// node's own, taken across a grant from one, ends with it.
 		for (broadcast, of, epoch) in ended {
-			if self.withdraw(&broadcast, of, epoch) && self.givers.contains_key(&broadcast) {
-				self.restate(broadcast.clone(), Change::Ended);
+			for held in self.withdraw(&broadcast, of, epoch) {
+				if self.givers.contains_key(&held) {
+					self.restate(held, Change::Ended);
+				}
 			}
 		}
 	}
 
-	/// Hold back each copy of `broadcast` standing now of `announcer`'s claim at no newer
-	/// than `epoch`, which its publisher ended. Returns whether any stands.
-	fn withdraw(&mut self, broadcast: &Broadcast<I>, ended: Of, epoch: u64) -> bool {
-		let copy = |by: Of, claim: &Claim<A>| by == ended && claim.item.epoch() <= epoch;
+	/// Hold back each copy standing now of the claim of `broadcast` its publisher ended,
+	/// `ended`, at no newer than `epoch`, at every path a copy is presented at: at or below
+	/// the claim's own prefix, lowered by as many segments. Returns the broadcasts where
+	/// any stands.
+	fn withdraw(&mut self, broadcast: &Broadcast<I>, ended: Of, epoch: u64) -> Vec<Broadcast<I>> {
 		let (path, instance) = broadcast;
-		let origins: BTreeSet<NodeId> = (self.claimants.get(path).and_then(|claims| claims.get(instance)))
-			.into_iter()
-			.flatten()
-			.filter(|origin| {
-				let claim = self.known.get(origin).and_then(|known| known.items.get(broadcast));
-				claim.is_some_and(|claim| copy(of(claim, **origin), claim))
-			})
-			.copied()
-			.collect();
-		let peers: BTreeSet<N> = (self.givers.get(broadcast).into_iter().flatten())
-			.filter(|(_, claim)| given_of(claim).is_some_and(|by| copy(by, claim)))
-			.map(|(peer, _)| *peer)
-			.collect();
-		self.count(origins.len() + peers.len());
-		if origins.is_empty() && peers.is_empty() {
-			return false;
+		let (announcer, above) = ended;
+		let depth = path.parts().count();
+		let Some(base) = usize::try_from(above).ok().and_then(|above| depth.checked_sub(above)) else {
+			return Vec::new();
+		};
+		let own = path.head(base).expect("a head no deeper than the path");
+		// A copy a neighbour gives is this node's own claim there, unless already held.
+		let mut paths: BTreeSet<Path> = below(&self.claimants, &own).map(|(path, _)| path.clone()).collect();
+		paths.extend([own, path.clone()]);
+		self.count(paths.len());
+		let mut held = Vec::new();
+		for at in paths {
+			let of = (announcer, (at.parts().count() - base) as u64);
+			let copy = |by: Of, claim: &Claim<A>| by == of && claim.item.epoch() <= epoch;
+			let here = (at, instance.clone());
+			let origins: BTreeSet<NodeId> = (self.claimants.get(&here.0).and_then(|claims| claims.get(instance)))
+				.into_iter()
+				.flatten()
+				.filter(|origin| {
+					let claim = self.known.get(origin).and_then(|known| known.items.get(&here));
+					claim.is_some_and(|claim| copy(self::of(claim, **origin), claim))
+				})
+				.copied()
+				.collect();
+			let peers: BTreeSet<N> = (self.givers.get(&here).into_iter().flatten())
+				.filter(|(_, claim)| given_of(claim).is_some_and(|by| copy(by, claim)))
+				.map(|(peer, _)| *peer)
+				.collect();
+			self.count(origins.len() + peers.len());
+			if origins.is_empty() && peers.is_empty() {
+				continue;
+			}
+			let record = self.withdrawn.entry(here.clone()).or_default();
+			let record = record.entry(of).or_insert_with(|| Ended {
+				epoch,
+				origins: BTreeSet::new(),
+				peers: BTreeSet::new(),
+			});
+			record.epoch = record.epoch.max(epoch);
+			record.origins.extend(origins);
+			record.peers.extend(peers);
+			// Its publisher ended it, wherever a copy was presented.
+			self.ended.insert(here.clone());
+			self.dirty.insert(here.clone());
+			held.push(here);
 		}
-		let held = self.withdrawn.entry(broadcast.clone()).or_default();
-		let ended = held.entry(ended).or_insert_with(|| Ended {
-			epoch,
-			origins: BTreeSet::new(),
-			peers: BTreeSet::new(),
-		});
-		ended.epoch = ended.epoch.max(epoch);
-		ended.origins.extend(origins);
-		ended.peers.extend(peers);
-		self.dirty.insert(broadcast.clone());
-		true
+		held
 	}
 
 	/// A holder let go of its copy of an ended claim of `broadcast`, as `release` says:
@@ -4061,6 +4083,47 @@ mod tests {
 		let shown = router.shown();
 		let shown = shown.get(&(7, p("live"))).expect("the broader claim shows");
 		assert_eq!(shown.item.above, 1);
+	}
+
+	/// A copy of an ended claim presented at a deeper path, lowered by as many segments,
+	/// is held back there too, while another claim of the announcer at that path is not.
+	#[test]
+	fn a_copy_presented_below_an_ended_claim_is_never_shown() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		router.recv(4, route(4, 4, 2)).unwrap();
+		let at = |path: &str, origin: Id, above: u64, floor: Rev| {
+			let Change::Live(claim) = chained(vec![9, origin]) else {
+				unreachable!("a live claim");
+			};
+			Msg::Claims {
+				origin: node(origin),
+				changes: vec![(
+					(p(path), 7),
+					Change::Live(Claim {
+						item: Run { epoch: 0, above },
+						..claim
+					}),
+				)],
+				floor,
+			}
+		};
+		router.recv(2, at("live", 2, 0, 1)).unwrap();
+		router.recv(4, at("live/hd", 4, 1, 1)).unwrap();
+		router.recv(4, at("live/hd/a", 4, 0, 2)).unwrap();
+		let shown = |router: &Router<usize, u64, Run>, path: &str| router.shown().contains_key(&(7, p(path)));
+		assert!(shown(&router, "live/hd"));
+
+		let ended = Msg::Claims {
+			origin: node(2),
+			changes: vec![((p("live"), 7), Change::Ended)],
+			floor: 2,
+		};
+		router.recv(2, ended).unwrap();
+		assert!(!shown(&router, "live/hd"), "node 4's copy is of the ended claim");
+		assert!(shown(&router, "live/hd/a"), "node 4's own claim there is no copy");
 	}
 
 	/// A publisher that withdraws its claim and announces it again at the same epoch, as
