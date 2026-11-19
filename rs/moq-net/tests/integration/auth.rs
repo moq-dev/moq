@@ -2444,3 +2444,79 @@ async fn added(handle: &auth::Handle, token: impl Into<bytes::Bytes>) -> moq_net
 	credential.answered().await?;
 	Ok(credential)
 }
+
+/// A relay grants its client 18 disjoint regions over two tokens, half each, and publishes
+/// a broadcast in each; none widens within the grant. Each token's grant fits its own
+/// message, but their union's prefixes cannot all fit the one ANNOUNCE_REQUEST a
+/// subscriber's whole set must, so the client asks for all but the last region. A reader
+/// of the whole tree syncs without that region's broadcast, and a reader of the region
+/// alone syncs empty, though the region was never asked for.
+///
+/// Pinned until the maintainer settles the fix in the acceptance quest
+/// (`quest/m2/cluster-routes/acceptance.md`): the client either discovers every region,
+/// which takes a wire change to how much a subscriber may ask, or says it cannot, which
+/// takes an API change to how a reader learns it.
+#[kio::test]
+async fn residual_lite_07_a_grant_too_wide_to_ask_syncs_without_its_last_region() {
+	within(async {
+		let relay = produce_origin(1);
+		let regions: Vec<String> = (0..18).map(|i| format!("r{i:02}/{}", "x".repeat(3800))).collect();
+		let _published: Vec<origin::Route> = (regions.iter())
+			.map(|region| {
+				let route = relay
+					.route(format!("{region}/live"), origin::RouteOptions::hidden())
+					.unwrap();
+				route.announce().unwrap();
+				route
+			})
+			.collect();
+		let subscribe = |regions: &[String]| {
+			let subtrees = regions.iter().map(|region| Pattern::subtree(region).unwrap());
+			grant_of(Patterns::default(), subtrees.collect())
+		};
+		let client = produce_origin(9);
+		let mut pair = connect(Options {
+			server_publish: Some(relay.clone()),
+			client_subscribe: Some(client.clone()),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let (first, second) = (subscribe(&regions[..9]), subscribe(&regions[9..]));
+		let _issued = serve(pair.requests.take().unwrap(), move |token| match token {
+			b"" => Some(first.clone()),
+			b"t1" => Some(second.clone()),
+			_ => None,
+		});
+		let _t1 = added(&pair.client.auth(), "t1").await.expect("t1 granted");
+		let whole = subscribe(&regions).subscribe;
+		wait_for(pair.client.auth().grant(), |grant| {
+			grant.as_ref().is_some_and(|grant| grant.subscribe == whole)
+		})
+		.await;
+
+		let last = regions.last().unwrap();
+		let mut everything = client.consume().routes();
+		let mut region = (client.consume().scope(last, &Patterns::from(Pattern::all())))
+			.unwrap()
+			.routes();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+		let mut found = std::collections::BTreeSet::new();
+		while let Some(event) = everything.try_next() {
+			found.insert(event.announce.prefix.to_string());
+		}
+		assert!(everything.poll_synced(&kio::Waiter::noop()).is_ready());
+		let missing: Vec<&String> = (regions.iter())
+			.filter(|region| !found.contains(&format!("{region}/live")))
+			.collect();
+		assert_eq!(missing, [last], "synced without the last region");
+
+		assert!(region.try_next().is_none(), "the last region was asked for");
+		assert!(
+			region.poll_synced(&kio::Waiter::noop()).is_ready(),
+			"the last region's reader syncs empty"
+		);
+	})
+	.await
+	.expect("timed out");
+}

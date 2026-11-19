@@ -516,8 +516,8 @@ impl Publish {
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
-		let request = broadcast.reserve_track(name)?;
+		let name = broadcast.unique_name(init.format.track_suffix());
+		let request = broadcast.reserve_track(name).ok_or(moq_net::Error::Duplicate)?;
 
 		let track = import::Track::audio(request, catalog.reserve().with_interval(interval), init)?;
 		let children = children.clone();
@@ -538,8 +538,8 @@ impl Publish {
 			..
 		} = self.broadcast(broadcast)?;
 		let broadcast = broadcast.clone();
-		let name = broadcast.unique_name(&format!(".{}", init.format));
-		let request = broadcast.reserve_track(name)?;
+		let name = broadcast.unique_name(init.format.track_suffix());
+		let request = broadcast.reserve_track(name).ok_or(moq_net::Error::Duplicate)?;
 
 		let priority = init.priority;
 		let track = import::Track::video(request, catalog.reserve().with_interval(interval), init)?;
@@ -1190,7 +1190,10 @@ impl Publish {
 	/// indices they have in the group rather than restarting at 0.
 	pub fn group_request_accept(&mut self, request: Id) -> Result<Id, Error> {
 		let request = self.group_request.remove(request).ok_or(Error::NotFound)?;
-		let group = request.fill.accept(request.start, None)?;
+		let group = request
+			.fill
+			.accept(request.start, None)?
+			.ok_or(moq_net::Error::Duplicate)?;
 		self.insert_group(group)
 	}
 
@@ -1218,7 +1221,7 @@ impl Publish {
 		let children = self.children(broadcast)?;
 		let broadcast = self.producer(broadcast)?;
 		let info = info.unwrap_or_default();
-		let track = broadcast.create_track(name, info)?;
+		let track = broadcast.create_track(name, info).ok_or(moq_net::Error::Duplicate)?;
 		let raw = Kept {
 			inner: track,
 			children: children.clone(),
@@ -1334,7 +1337,10 @@ impl Publish {
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_compression(moq_net::track::Compression::Deflate);
 		info.refresh = moq_net::track::Refresh::default().with_ratio(refresh);
-		let track = broadcast.producer.create_track(name, info)?;
+		let track = broadcast
+			.producer
+			.create_track(name, info)
+			.ok_or(moq_net::Error::Duplicate)?;
 		let producer = publish(&broadcast.catalog, track)?;
 		Ok(Data {
 			producer,
@@ -1884,7 +1890,10 @@ struct DatagramDemand {
 impl Publish {
 	pub fn datagrams(&mut self, broadcast: Id, name: &str, info: moq_net::datagram::Info) -> Result<Id, Error> {
 		let children = self.children(broadcast)?;
-		let producer = self.producer(broadcast)?.create_datagrams(name, info)?;
+		let producer = self
+			.producer(broadcast)?
+			.create_datagrams(name, info)
+			.ok_or(moq_net::Error::Duplicate)?;
 		let entry = Datagrams {
 			producer,
 			children: children.clone(),

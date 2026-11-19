@@ -72,7 +72,7 @@ export interface Asker {
 
 // The fill operations a handle runs against the state it came from; assigned in its static block.
 let fillOps: {
-	accept(state: FillState, pending: Pending, key: bigint, info: Info | undefined): GroupProducer;
+	accept(state: FillState, pending: Pending, key: bigint, info: Info | undefined): GroupProducer | undefined;
 	drop(state: FillState, pending: Pending, start: bigint, end: bigint, hole?: { error: Error; stale?: number }): void;
 	refuse(state: FillState, pending: Pending, start: bigint, end: bigint, error: Error, stale?: number): void;
 	settle(state: FillState, pending: Pending): void;
@@ -393,11 +393,9 @@ export class FillState {
 				if (key < pending.start || key >= pending.end) {
 					throw new RangeError(`group ${key} is outside the fill ${pending.start}..${pending.end}`);
 				}
-				if (pending.resolved.some((run) => run.start <= key && key < run.end)) {
-					throw new Error(`group ${key} was already answered`);
-				}
+				if (pending.resolved.some((run) => run.start <= key && key < run.end)) return undefined;
 				// A copy missing its head is replaced from frame 0, as a bounded reader asked.
-				if (state.#track.holds(key) === true) throw new Error(`duplicate group: key=${key}`);
+				if (state.#track.holds(key) === true) return undefined;
 				// Landing in the cache answers it, as `arrived` records.
 				const group = state.#track.accept(key, info);
 				// A lookup waits only on its first answer.
@@ -540,6 +538,7 @@ export class Requests {
 	}
 
 	/** The track's name, unique within its broadcast. */
+	// fallow-ignore-next-line unused-class-member
 	get name(): string {
 		return fillOps.name(this.#state);
 	}
@@ -694,10 +693,10 @@ export class FillGroups {
 	 * Insert group `key` into the track's cache, handing it to the readers waiting on it,
 	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
 	 * if it has none yet. A cached copy missing its first frames, which a reader asked whole, is
-	 * replaced. Throws a `RangeError` outside the fill, and an error if the group was already
-	 * answered or cached whole, or the track is closed.
+	 * replaced. Returns `undefined` if the group was already answered or cached whole. Throws a
+	 * `RangeError` outside the fill, and an error if the track is closed.
 	 */
-	accept(start: bigint, info?: Info): GroupProducer {
+	accept(start: bigint, info?: Info): GroupProducer | undefined {
 		checkKey(start);
 		return fillOps.accept(this.#state, this.#pending, start, info);
 	}
@@ -768,6 +767,7 @@ export class FillLookup {
 	}
 
 	/** The most urgent delivery priority among the readers waiting on it now. */
+	// fallow-ignore-next-line unused-class-member
 	get priority(): number {
 		return priorityOf(this.#pending);
 	}
@@ -783,10 +783,11 @@ export class FillLookup {
 	/**
 	 * Insert the group starting at `start`, the one containing {@link time}, into the track's
 	 * cache, answering the lookup, and return the producer to write its frames into. `info` commits the track's
-	 * {@link Info} if it has none yet. Throws a `RangeError` at or past the live edge the lookup
-	 * was asked below, and an error if the group is cached whole or the track is closed.
+	 * {@link Info} if it has none yet. Returns `undefined` if the group is cached whole. Throws a
+	 * `RangeError` at or past the live edge the lookup was asked below, and an error if the track
+	 * is closed.
 	 */
-	accept(start: bigint, info?: Info): GroupProducer {
+	accept(start: bigint, info?: Info): GroupProducer | undefined {
 		checkKey(start);
 		return fillOps.accept(this.#state, this.#pending, start, info);
 	}

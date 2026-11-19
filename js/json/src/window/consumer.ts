@@ -45,6 +45,7 @@ export class Consumer<T> {
 	}
 
 	/** Absolute index of the oldest record in the window. */
+	// fallow-ignore-next-line unused-class-member
 	get offset(): number {
 		return this.#decoder.offset;
 	}

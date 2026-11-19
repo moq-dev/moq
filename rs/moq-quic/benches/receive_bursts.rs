@@ -24,6 +24,7 @@
 use std::{
 	alloc::{GlobalAlloc, Layout, System},
 	sync::atomic::{AtomicIsize, AtomicUsize, Ordering},
+	task::Poll,
 	time::Duration,
 };
 
@@ -36,7 +37,7 @@ use moq_quic::stream::Dir;
 )]
 mod common;
 
-use common::{Pair, Setup, Sink, ThreadCpu, payload};
+use common::{Pair, Setup, Sink, ThreadCpu, WriteNow, payload};
 
 /// Stream data per packet, so a stream of `n` packets spans about `n` datagrams.
 const PACKET: usize = 1100;
@@ -163,10 +164,11 @@ fn burst(pair: &mut Pair, mode: Mode, streams: usize, packets: usize) -> isize {
 					}
 					let mut chunks = stream.read().unwrap();
 					loop {
-						match chunks.next(usize::MAX) {
-							Ok(Some(chunk)) => pair.server.received.bytes += chunk.bytes.len() as u64,
-							Ok(None) => break,
-							Err(err) => panic!("read failed: {err}"),
+						match chunks.poll_next(&kio::Waiter::noop(), usize::MAX) {
+							Poll::Ready(Ok(Some(chunk))) => pair.server.received.bytes += chunk.bytes.len() as u64,
+							Poll::Ready(Ok(None)) => break,
+							Poll::Ready(Err(err)) => panic!("read failed: {err}"),
+							Poll::Pending => panic!("read blocked"),
 						}
 					}
 					pair.server.received.finished += 1;
@@ -212,7 +214,7 @@ fn open(pair: &mut Pair, streams: usize, packets: usize) {
 		for (client, ids) in ids.iter().enumerate() {
 			for &id in ids {
 				let mut stream = pair.clients[client].conn().send_stream(id);
-				assert_eq!(stream.write(&mut data.clone()).unwrap(), PACKET);
+				assert_eq!(stream.write_now(&mut data.clone()), PACKET);
 				written += 1;
 				if written % BATCH == 0 {
 					pair.step();

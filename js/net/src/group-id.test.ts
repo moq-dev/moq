@@ -3,6 +3,7 @@
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
+import { defined } from "./defined.test-util.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
@@ -49,7 +50,7 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 	const copy = new BroadcastProducer();
 	if (carriesDatagrams) {
 		const reader = input.datagrams("video");
-		const writer = copy.createDatagrams("video", await reader.info());
+		const writer = defined(copy.createDatagrams("video", await reader.info()));
 		void (async () => {
 			try {
 				for (let datagram = await reader.recv(); datagram; datagram = await reader.recv())
@@ -62,7 +63,7 @@ async function forward(input: BroadcastConsumer, carriesDatagrams: boolean): Pro
 			}
 		})();
 	}
-	const video = copy.createTrack("video", await subscription.info());
+	const video = defined(copy.createTrack("video", await subscription.info()));
 	void (async () => {
 		for (let group = await subscription.recvGroup(); group; group = await subscription.recvGroup()) {
 			const out = video.createGroup(group.start);
@@ -88,8 +89,8 @@ for (const wire of WIRES) {
 
 		const path = Path.from("big");
 		const publication = source.route(path);
-		const datagrams = wire.datagrams ? publication.broadcast.createDatagrams("video") : undefined;
-		const track = publication.broadcast.createTrack("video");
+		const datagrams = wire.datagrams ? defined(publication.broadcast.createDatagrams("video")) : undefined;
+		const track = defined(publication.broadcast.createTrack("video"));
 
 		const dynamic = relay.claim(path);
 		const inputs: BroadcastConsumer[] = [];
@@ -154,7 +155,7 @@ for (const wire of WIRES) {
 }
 
 test("a group sequence that is not a non-negative bigint is refused where a caller passes one", async () => {
-	const track = new BroadcastProducer().createTrack("video");
+	const track = defined(new BroadcastProducer().createTrack("video"));
 	// A plain JS caller can still pass a number, which would otherwise mix with bigints later.
 	expect(() => track.createGroup(1 as unknown as bigint)).toThrow(TypeError);
 	expect(() => track.createGroup(-1n)).toThrow(RangeError);

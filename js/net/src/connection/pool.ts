@@ -396,6 +396,7 @@ export class Connection {
 	}
 
 	/** Snapshot the live connection's transport counters, or undefined while disconnected. */
+	// fallow-ignore-next-line unused-class-member
 	async stats(): Promise<StatsType | undefined> {
 		return this.#established.peek()?.stats();
 	}
@@ -448,6 +449,7 @@ export class Connection {
 }
 
 /** Types on {@link Connection}: the handle is the class, these are its associated types. */
+// fallow-ignore-file unused-namespace-member
 export namespace Connection {
 	/** Options for {@link Connection}. @reexport */
 	export type Props = ConnectionProps;

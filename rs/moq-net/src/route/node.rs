@@ -102,6 +102,10 @@ pub(crate) struct Served {
 	/// The node a request through the session names, or `None` when the peer selects:
 	/// it gave this node the claim itself.
 	pub named: Option<NodeId>,
+	/// Which showing of the claim this is: every slot of it shares one, and a claim
+	/// shown again after every slot left gets a new one, so a session still releasing
+	/// the old showing's copy never takes the new one's with it.
+	pub lifecycle: u64,
 }
 
 /// A change to what a session serves into the origin.
@@ -115,21 +119,35 @@ pub(crate) enum Output {
 		instance: Instance,
 		served: Served,
 	},
-	/// Stop serving it. `ended` when its publisher withdrew it, as far as this node
-	/// knows; otherwise the node let go of it here.
+	/// Stop serving it, for the reason `gone` gives.
 	Unserve {
 		origin: NodeId,
 		path: Path,
 		instance: Instance,
-		ended: bool,
+		gone: Gone,
 	},
+}
+
+/// Why a session stops serving a claim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Gone {
+	/// Another session serves it now.
+	Moved,
+	/// The node let go of it here: every copy the origin holds goes, offline.
+	Lost,
+	/// Its publisher withdrew it, as far as this node knows: every copy the origin holds
+	/// ends.
+	Ended,
+	/// Its publisher withdrew this copy, and the reader shows the claim again at once:
+	/// this copy alone ends, and the copies still serving it stay.
+	Withdrawn,
 }
 
 /// A served claim's place in the origin, which outlives the session that served it until
 /// another session serves the claim or the reader lets it go.
 pub(crate) trait Orphan: Send {
-	/// Let go of it: `ended` when the claim's publisher withdrew it.
-	fn release(self: Box<Self>, ended: bool);
+	/// Let go of it, for the reason `gone` gives.
+	fn release(self: Box<Self>, gone: Gone);
 }
 
 /// Where a request a peer sent goes; see [`Node::poll_forward`].
@@ -181,6 +199,8 @@ struct State {
 	router: Router<Key, Instance, Attr>,
 	clock: Deadlines,
 	next_key: Key,
+	/// The next [`Served::lifecycle`].
+	next_lifecycle: u64,
 	queues: HashMap<Key, kio::Shared<Outbox>>,
 	/// Each session's own key, by the tag every stream of the session shares.
 	tags: HashMap<u64, Key>,
@@ -191,7 +211,7 @@ struct State {
 	/// The broadcasts each session has a slot for.
 	serving: HashMap<Key, BTreeSet<Broadcast>>,
 	/// Orphans to release once the lock is.
-	released: Vec<(Box<dyn Orphan>, bool)>,
+	released: Vec<(Box<dyn Orphan>, Gone)>,
 	/// Whether each of the origin's own claims is filed as having crossed a marked link.
 	own: BTreeMap<Broadcast, bool>,
 	/// Where each session counts what its peer causes.
@@ -253,13 +273,30 @@ impl Drop for Locked<'_> {
 		let released = std::mem::take(&mut state.released);
 		drop(state);
 		// An orphan's release reaches into the origin, which may be feeding this node.
-		for (orphan, ended) in released {
-			orphan.release(ended);
+		for (orphan, gone) in released {
+			orphan.release(gone);
 		}
 	}
 }
 
+/// Whether a node still exists, without keeping it alive.
+#[cfg(test)]
+pub(crate) struct WeakNode(std::sync::Weak<Mutex<State>>);
+
+#[cfg(test)]
+impl WeakNode {
+	pub fn alive(&self) -> bool {
+		self.0.strong_count() > 0
+	}
+}
+
 impl Node {
+	/// A handle that does not keep this node alive.
+	#[cfg(test)]
+	pub fn downgrade(&self) -> WeakNode {
+		WeakNode(Arc::downgrade(&self.state))
+	}
+
 	/// A node naming itself `me`, dating what it hears by `clock`, that carries claims
 	/// between its peers when it `forwards`, as a relay does.
 	pub fn new(me: NodeId, forwards: bool, clock: Deadlines) -> Self {
@@ -291,6 +328,7 @@ impl Node {
 				router,
 				clock,
 				next_key: LOCAL_MARKED + 1,
+				next_lifecycle: 0,
 				queues: HashMap::new(),
 				tags: HashMap::new(),
 				mounts: HashMap::new(),
@@ -405,6 +443,23 @@ impl Node {
 				false => Poll::Pending,
 			}));
 		}
+	}
+
+	/// Let go of everything closed sessions left behind, which nothing serves again once
+	/// nothing owns the origin: each claim goes offline, so no reader waits on it.
+	pub fn release_orphans(&self) {
+		let mut locked = self.lock();
+		let state = &mut *locked;
+		state.lanes.retain(|_, slots| {
+			slots.retain(|_, slot| match slot.orphan.take() {
+				Some(orphan) => {
+					state.released.push((orphan, Gone::Lost));
+					false
+				}
+				None => true,
+			});
+			!slots.is_empty()
+		});
 	}
 
 	/// Fire the router's timers due by the origin's clock.
@@ -640,7 +695,7 @@ impl Stream {
 		let key = (origin, self.key);
 		match (state.lanes.get_mut(broadcast)).and_then(|slots| slots.get_mut(&key)) {
 			Some(slot) => slot.orphan = Some(orphan),
-			None => state.released.push((orphan, false)),
+			None => state.released.push((orphan, Gone::Moved)),
 		}
 	}
 }
@@ -793,6 +848,15 @@ impl State {
 		let (path, instance) = broadcast;
 		let shown = self.router.shown().contains_key(&(instance.clone(), path.clone()));
 		let mut wanted: BTreeMap<SlotKey, Served> = BTreeMap::new();
+		// A slot still held keeps its showing; none, and this is a new one.
+		let held = (self.lanes.get(broadcast)).and_then(|slots| slots.values().next());
+		let lifecycle = match held {
+			Some(slot) => slot.served.lifecycle,
+			None => {
+				self.next_lifecycle += 1;
+				self.next_lifecycle
+			}
+		};
 		if shown {
 			for way in self.router.ways(broadcast) {
 				let (session, named) = match way.next {
@@ -813,6 +877,7 @@ impl State {
 					chain: way.claim.chain,
 					marked: way.claim.marked,
 					named,
+					lifecycle,
 				};
 				wanted.insert((way.origin, session), served);
 			}
@@ -880,6 +945,16 @@ impl State {
 		if shown && !served {
 			return;
 		}
+		// Unshown, every slot leaves at once, so each tells its copy all of them go: the
+		// origin then drops them together rather than showing the rest in turn. Shown, the
+		// staying slots share the leaving ones' showing, so a leaving slot speaks only for
+		// its own copy.
+		let gone = match (shown, ended) {
+			(false, true) => Gone::Ended,
+			(false, false) => Gone::Lost,
+			(true, true) => Gone::Withdrawn,
+			(true, false) => Gone::Moved,
+		};
 		let leaving: Vec<SlotKey> = (slots.iter())
 			.filter(|(_, slot)| slot.leaving)
 			.map(|(key, _)| *key)
@@ -895,7 +970,7 @@ impl State {
 				}
 			}
 			match slot.orphan {
-				Some(orphan) => self.released.push((orphan, ended)),
+				Some(orphan) => self.released.push((orphan, gone)),
 				None => {
 					let (path, instance) = broadcast.clone();
 					outputs.push((
@@ -904,7 +979,7 @@ impl State {
 							origin,
 							path,
 							instance,
-							ended,
+							gone,
 						},
 					));
 				}

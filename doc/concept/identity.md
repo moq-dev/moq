@@ -72,9 +72,12 @@ A route resolving a path is chosen in this order:
 2. Within one instance, only its highest epoch is eligible, even over a
    cheaper route. Readers continue across an epoch change without a seam,
    because the timeline continues.
-3. Among eligible routes: a route from a peer that has not sent GOAWAY
-   (a draining peer's routes rank below every other, whatever their preference
-   or cost, and serve only as a last resort), then the highest priority, which on
+3. Among eligible routes: a route that still reaches its publisher, from a
+   peer that has not sent GOAWAY (an unavailable route, held while the network
+   may recover a path, and a draining peer's routes rank below every other,
+   whatever their priority or cost, and serve only as a last resort, so a
+   restarted publisher's lingering instance never takes the path back), then
+   the highest priority, which on
    moq-lite 07 is the lowest of any link along the route's path, then an
    identified chain
    over an anonymous one, then the lowest cost, then a broadcast published on
@@ -194,7 +197,7 @@ while let Some(request) = claim.requested().await {
     // Takes the claim's instance, so readers resolved through the claim continue.
     // Hidden until its tracks exist.
     let job = request.route(RouteOptions::hidden())?;
-    let video = job.broadcast().create_track("video", info.clone())?;
+    let video = job.broadcast().create_track("video", info.clone()).context("video exists")?;
     // Announces the exact path under that instance and answers the waiting request.
     job.announce()?;
     spawn(run_job(video, job));

@@ -348,7 +348,7 @@ final class _Grants extends NativeStream<Grant?> {
 
   @override
   bool ended(Object error) =>
-      error is CancelledMoqException || error is ClosedMoqException;
+      error is MoqException && moqErrorIsShutdown(err: error);
 
   @override
   void release() {

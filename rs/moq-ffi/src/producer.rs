@@ -437,7 +437,10 @@ impl MoqBroadcastProducer {
 		let _guard = crate::ffi::enter();
 		self.with_state(|state| {
 			let info = raw_track_info(info)?;
-			let track = state.broadcast.create_track(name, Some(info))?;
+			let track = state
+				.broadcast
+				.create_track(name, Some(info))
+				.ok_or(moq_net::Error::Duplicate)?;
 			MoqTrackProducer::child(track, &state.children)
 		})
 	}
@@ -640,7 +643,7 @@ impl MoqFill {
 	/// at [`start`](Self::start)'s frame, so its frames keep their indices.
 	pub fn accept(&self, start: u64) -> Result<Arc<MoqGroupProducer>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let group = self.inner.accept(start, None)?;
+		let group = self.inner.accept(start, None)?.ok_or(moq_net::Error::Duplicate)?;
 		Ok(Arc::new(MoqGroupProducer::from_inner(group)))
 	}
 

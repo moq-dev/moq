@@ -12,7 +12,7 @@ import moq_ffi
 import pytest
 
 # Every group from the first, rather than only what the live edge still reaches.
-FROM_GROUP_0 = [moq.Range(start=moq.Anchor.ABSOLUTE(group=0))]
+FROM_GROUP_0 = [moq.Range(start=moq.Anchor.TIME(timestamp=moq.Timestamp.unscaled(0)))]
 
 
 async def until_wanted(demand: moq.TrackDemand, wanted: bool = True) -> None:
@@ -282,7 +282,7 @@ async def test_video_publish_consume():
     route = origin.route("video-test")
     broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
-        broadcast, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=h264_init())
+        broadcast, moq.media.VideoInit(format=moq.media.VideoFormat.H264, data=h264_init())
     )
 
     consumer = origin.consume()
@@ -321,7 +321,7 @@ async def test_video_publish_named_track():
     broadcast = route.broadcast
     media = moq.media.TrackProducer.video(
         broadcast,
-        moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=h264_init()),
+        moq.media.VideoInit(format=moq.media.VideoFormat.H264, data=h264_init()),
         target=moq.media.Named("hd"),
     )
     assert media.demand().name == "hd"

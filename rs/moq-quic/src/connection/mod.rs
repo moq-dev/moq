@@ -124,8 +124,8 @@ use timer::{Timer, TimerTable};
 /// - B. Handlers for incoming events from the network or system, named `handle_*`.
 /// - C. State machine mutators, for incoming commands from the application. For convenience we
 ///   refer to this as "performing I/O" below, however as per the design of this library none of the
-///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read) and
-///   [`write`](send::Stream::write), but also things like [`reset`](send::Stream::reset).
+///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read),
+///   but also things like [`reset`](send::Stream::reset).
 /// - D. Polling functions for outgoing events or actions for the caller to
 ///   take, named `poll_*`.
 ///
@@ -1473,7 +1473,7 @@ impl Connection {
 	/// This does not ensure delivery of outstanding data. It is the application's responsibility to
 	/// call this only when all important communications have been completed, e.g. by calling
 	/// [`send::Stream::finish`] on outstanding streams and waiting for
-	/// [`send::Stream::poll_end`].
+	/// [`send::Stream::poll_stopped`].
 	///
 	/// If [`Streams::send_streams`] returns 0, all outstanding stream data has been
 	/// delivered. There may still be data from the peer that has not been received.
@@ -3300,17 +3300,18 @@ impl Connection {
 						));
 					}
 
-					use crate::cid_queue::InsertError;
-					match self.rem_cids.insert(frame) {
-						Ok(None) => {}
-						Ok(Some((retired, reset_token))) => {
+					use crate::cid_queue::Inserted;
+					let inserted = self
+						.rem_cids
+						.insert(frame)
+						.map_err(|_| TransportError::CONNECTION_ID_LIMIT_ERROR(""))?;
+					match inserted {
+						Inserted::Queued => {}
+						Inserted::Advanced { retired, reset_token } => {
 							self.spaces[SpaceId::Data].pending.retire_cids(retired)?;
 							self.set_reset_token(reset_token);
 						}
-						Err(InsertError::ExceedsLimit) => {
-							return Err(TransportError::CONNECTION_ID_LIMIT_ERROR(""));
-						}
-						Err(InsertError::Retired) => {
+						Inserted::Stale => {
 							trace!("discarding already-retired");
 							// RETIRE_CONNECTION_ID might not have been previously sent if e.g. a
 							// range of connection IDs larger than the active connection ID limit

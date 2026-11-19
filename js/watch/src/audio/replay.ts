@@ -108,7 +108,7 @@ export interface Quantum {
  * raised-cosine level, with pauses of 100 to 400 ms between some. The floor stays above the harness's
  * -60 dBFS silence classifier, and no sample is exactly zero, which the output tap reads as missing.
  */
-export class Speech {
+class Speech {
 	readonly #rate: number;
 	readonly #origin: number;
 	#samples = new Float32Array(0);
@@ -325,7 +325,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const end = timestamp + micros((pcm.length / rate) * 1000);
 			gate.inserted(timestamp, end);
 			decoded.update((span) => ({ start: span?.start ?? media, end: Duration.micros(end) }));
-			gate.decoded(end, end);
+			gate.decoded(end, 0);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };

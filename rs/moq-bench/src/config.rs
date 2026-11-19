@@ -121,6 +121,8 @@ pub struct Config {
 pub(crate) enum Command {
 	/// Sample the CPU, memory, and sockets of the process under test (Linux only).
 	Host(crate::host::Args),
+	/// Publish and follow named broadcasts through one relay, reporting each reader's gaps.
+	Replay(Box<crate::replay::Args>),
 }
 
 impl Default for Config {
@@ -164,7 +166,10 @@ impl Config {
 		}
 		let config = Self::parse_and_merge(args)?;
 		config.refuse_unknown_env()?;
-		config.log.init()?;
+		// `replay` takes its own log flags and installs its own logger.
+		if !matches!(config.command, Some(Command::Replay(_))) {
+			config.log.init()?;
+		}
 		tracing::trace!(?config, "final config");
 		Ok(config)
 	}
@@ -211,14 +216,18 @@ impl Config {
 			.skip(1)
 			.map(std::ffi::OsString::as_os_str)
 			.collect::<Vec<_>>();
-		if let Some((command, rest)) = argv.split_first()
-			&& *command == "host"
-		{
-			let args = crate::host::parse(rest)?;
-			return Ok(Self {
-				command: Some(Command::Host(args)),
-				..Self::default()
-			});
+		if let Some((command, rest)) = argv.split_first() {
+			let command = match command.to_str() {
+				Some("host") => Some(Command::Host(crate::host::parse(rest)?)),
+				Some("replay") => Some(Command::Replay(Box::new(crate::replay::parse(rest)?))),
+				_ => None,
+			};
+			if command.is_some() {
+				return Ok(Self {
+					command,
+					..Self::default()
+				});
+			}
 		}
 		// Help and version are questions rather than failures. Answered and exited
 		// here, because wrapping them renders an empty `anyhow` error and exits
@@ -238,7 +247,7 @@ impl Config {
 		// load generator flags came first, and they configure nothing it runs.
 		anyhow::ensure!(
 			config.command.is_none(),
-			"`moq-bench host` takes only its own flags, given after `host`"
+			"`moq-bench host` and `moq-bench replay` take only their own flags, given after the subcommand"
 		);
 		let env = usage_rs::config::EnvLayer::from_process();
 		let file_path = config.file.clone();

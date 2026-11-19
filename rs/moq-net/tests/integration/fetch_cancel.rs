@@ -81,7 +81,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			.unwrap_or_else(|_| panic!("{ctx}: the publisher's fetch is still wanted"));
 		}
 		Stage::MidResponse => {
-			let mut group = request.accept(0, timed()).unwrap();
+			let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
 			group
 				.write_frame(group.at_start(), Bytes::from_static(b"head"))
 				.unwrap();
@@ -118,7 +118,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			assert_eq!(payloads, [&b"head"[..], &b"tail"[..]], "{ctx}");
 		}
 		Stage::Drained => {
-			let mut group = request.accept(0, timed()).unwrap();
+			let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
 			group
 				.write_frame(group.at_start(), Bytes::from_static(b"head"))
 				.unwrap();
@@ -204,7 +204,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 		}
 		futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 	};
-	let mut group = request.accept(0, timed()).unwrap();
+	let mut group = request.accept(0, timed()).unwrap().expect("a fresh group");
 	group
 		.write_frame(group.at_start(), Bytes::from_static(b"segment"))
 		.unwrap();

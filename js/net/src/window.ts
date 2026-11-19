@@ -359,7 +359,20 @@ export interface Holdings {
 	 * even in the history a handler serves. Absent for none.
 	 */
 	neverProduced?(start: bigint, end: bigint): boolean;
+	/**
+	 * Runs of times {@link containing} can't place, so a window skips its time starts in them rather
+	 * than try each again whenever the groups held change. Absent, or undefined, when it can't tell,
+	 * so each is tried. Mirrors the Rust `Holdings::unplaced`.
+	 */
+	unplaced?(): Unplaced | undefined;
 }
+
+/**
+ * The times a {@link Holdings} can't place: sorted, disjoint runs, apart from the times a placement
+ * that the groups and drops held don't decide places. `mark` changes whenever such a placement may
+ * have, so a window that sees it unchanged tries only the times outside `runs` again.
+ */
+export type Unplaced = { runs: readonly Run[]; mark: number };
 
 /** A hop that holds no groups of its own, such as a reader following route copies that resolve its ranges for it. */
 export const UNHELD: Holdings = Object.freeze({
@@ -397,6 +410,11 @@ type Span = {
 	looking?: Lookup;
 	/** A time start the groups held can't place yet: the span reads only the groups from that time until it can. */
 	waiting: boolean;
+	/**
+	 * A relative start counting back past every group held asks no miss below this: the oldest group
+	 * held when it was placed, since which of the older ones it reaches is unknown.
+	 */
+	reach?: bigint;
 };
 
 /**
@@ -428,8 +446,18 @@ export class Window {
 	#missable: Run[] = [];
 	/** A relative anchor waits on a first group, so nothing is filtered yet. */
 	#pending = false;
-	/** The spans, by position, whose time start waits on a group arriving. */
-	#waiting: number[] = [];
+	/**
+	 * The spans, by position, whose time start waits on a group arriving, by that time: a change to
+	 * the groups held tries only those its {@link Holdings.unplaced} leaves out.
+	 */
+	#waiting = new ByTime();
+	/** The {@link Unplaced.mark} every waiting span was last tried under. */
+	#waited: number | undefined;
+	/**
+	 * The spans, by position, still looking up their time start, which read nothing meanwhile, by
+	 * that time: kept apart so an answer finds them without visiting every span.
+	 */
+	#looking = new ByTime();
 	/**
 	 * The ranges, by index, of a live join whose reach back waits on the groups held to measure the
 	 * live edge, so they read nothing yet: a group held is no reason to start at it.
@@ -437,6 +465,12 @@ export class Window {
 	#reaching: number[] = [];
 	/** Nothing is left to resolve as groups arrive. */
 	#settled = false;
+	/**
+	 * How many spans name each start, lowest first, and how many name none: see {@link start}.
+	 * Counted so a read, and a span starting, costs no walk of the spans.
+	 */
+	#named: { start: bigint; count: number }[] = [];
+	#unnamed = 0;
 	/**
 	 * The subscriber's Min Age, which reaches a live join back from the live edge. Only a pending
 	 * window reads it, when it places its ranges, so a join already started stays where it started.
@@ -473,49 +507,78 @@ export class Window {
 			this.#place(latest, holdings);
 			return !this.#pending;
 		}
-		let moved = false;
+		// The spans placed or started here, each reading at least what it did before, unless one now
+		// looks up its start and reads nothing meanwhile.
+		const moved: number[] = [];
 		if (this.#reaching.length > 0) {
 			const placed = this.#spans.length;
 			const reaching = this.#reaching;
 			this.#reaching = [];
 			for (const index of reaching) this.#placeRange(index, latest, holdings);
-			if (this.#spans.length > placed) moved = true;
+			for (let position = placed; position < this.#spans.length; position++) moved.push(position);
 		}
-		if (this.#waiting.length > 0 && this.#startWaiting(holdings)) moved = true;
-		if (moved) this.#rebuild(holdings);
-		return moved;
+		const shrank = this.#waiting.size > 0 && this.#startWaiting(holdings, moved);
+		if (shrank) this.#rebuild();
+		else if (moved.length === 0) return false;
+		else this.#grow(moved);
+		return true;
 	}
 
 	// Start the spans whose time start waits on a group, once one arrived, or once nothing can
-	// arrive any more. Returns whether any did.
-	#startWaiting(holdings: Holdings): boolean {
-		let started = false;
-		const waiting = this.#waiting;
-		this.#waiting = [];
-		for (const position of waiting) {
-			const span = this.#spans[position];
-			// Only a time start waits on a group.
-			const at = time(span.anchor) ?? 0n;
-			const containing = holdings.containing(at);
+	// arrive any more, adding each one started to `started`. Only the times the holdings may now
+	// place are tried, so a change placing one of them costs that one, not every span still
+	// waiting. Returns whether one started reads less than before: it looks up its start, reading
+	// nothing meanwhile.
+	#startWaiting(holdings: Holdings, started: number[]): boolean {
+		const complete = holdings.complete();
+		const unplaced = complete ? undefined : holdings.unplaced?.();
+		let tried: Timed[];
+		if (unplaced !== undefined && this.#waited === unplaced.mark) {
+			tried = [];
+			for (const gap of outside(unplaced.runs)) {
+				for (const entry of this.#waiting.takeIn(gap.start, gap.end)) tried.push(entry);
+			}
+		} else {
+			tried = this.#waiting.takeAll();
+			this.#waited = unplaced?.mark;
+		}
+		let shrank = false;
+		for (const entry of tried) {
+			const containing = holdings.containing(entry.time);
 			let start: bigint;
 			let floored: boolean;
 			if (typeof containing === "object") [start, floored] = [containing.group, true];
 			// The group holding it is older than any held, or nothing can arrive.
-			else if (containing === "before" || holdings.complete()) [start, floored] = [0n, false];
+			else if (containing === "before" || complete) [start, floored] = [0n, false];
 			else {
-				this.#waiting.push(position);
+				this.#waiting.put(entry);
 				continue;
 			}
-			started = true;
-			span.start = start;
-			span.floored = floored;
-			span.waiting = false;
-			// Looked up where the groups held can't place it, as when first resolved.
-			const asked = time(this.ranges[span.index].start) !== undefined;
-			const below = asked ? unresolved(at, start, floored, holdings) : undefined;
-			if (below !== undefined) span.looking = { time: at, below };
+			for (const position of entry.positions) {
+				if (this.#startSpan(position, entry.time, start, floored, holdings)) shrank = true;
+				started.push(position);
+			}
 		}
-		return started;
+		return shrank;
+	}
+
+	// Start the span at `position`, whose time start `at` waited, at `start`: looked up where the
+	// groups held can't place it, as when first resolved, and otherwise reading its groups. Returns
+	// whether it looks its start up.
+	#startSpan(position: number, at: bigint, start: bigint, floored: boolean, holdings: Holdings): boolean {
+		const span = this.#spans[position];
+		const asked = time(this.ranges[span.index].start) !== undefined;
+		this.#unname(position);
+		span.start = start;
+		span.floored = floored;
+		span.waiting = false;
+		const below = asked ? unresolved(at, start, floored, holdings) : undefined;
+		if (below !== undefined) {
+			span.looking = { time: at, below };
+			this.#looking.add(at, position);
+		}
+		this.#name(position);
+		return below !== undefined;
 	}
 
 	/** Whether group `key` is in range. Everything is while a relative anchor waits. */
@@ -543,13 +606,8 @@ export class Window {
 	 * anchor waits.
 	 */
 	start(): bigint | undefined {
-		if (this.#pending || this.#reaching.length > 0) return undefined;
-		let start: bigint | undefined;
-		for (const span of this.#spans) {
-			if (!span.floored) return undefined;
-			start = min(start ?? span.start, span.start);
-		}
-		return start;
+		if (this.#pending || this.#reaching.length > 0 || this.#unnamed > 0) return undefined;
+		return this.#named[0]?.start;
 	}
 
 	/** The exclusive end past every group in range, undefined when one stays open or an anchor waits. Nothing in range ends at 0. */
@@ -569,7 +627,7 @@ export class Window {
 	/**
 	 * The part of {@link runs} a miss may ask a fill for: all of it but what starts before a time
 	 * start that fell before every group held, or below the oldest group held when a relative start
-	 * counted back past them all. Mirrors the Rust `Window::missable`.
+	 * counting back past them all was placed. Mirrors the Rust `Window::missable`.
 	 */
 	missable(from = 0n, end = UNBOUNDED): Run[] {
 		if (from >= end) return [];
@@ -609,9 +667,16 @@ export class Window {
 		});
 	}
 
-	/** The time starts still looked up. Mirrors the Rust `Window::lookups`. */
+	/** The time starts still looked up, by time. Mirrors the Rust `Window::lookups`. */
 	lookups(): Lookup[] {
-		return this.#spans.flatMap((span) => (span.looking ? [span.looking] : []));
+		const lookups: Lookup[] = [];
+		for (const { positions } of this.#looking.all) {
+			for (const position of positions) {
+				const looking = this.#spans[position].looking;
+				if (looking) lookups.push(looking);
+			}
+		}
+		return lookups;
 	}
 
 	/**
@@ -622,46 +687,70 @@ export class Window {
 	 * `Window::found`.
 	 */
 	found(at: bigint, group: bigint | undefined, holdings: Holdings = UNHELD): boolean {
-		const found = this.#spans.filter((span) => span.looking?.time === at);
-		if (found.length === 0) return false;
+		const found = this.#looking.take(at);
+		if (found === undefined) return false;
 		const held = group !== undefined && holdings.nextStart(group) === group ? group : undefined;
 		const containing = holdings.containing(at);
 		const start = held ?? (typeof containing === "object" ? containing.group : undefined);
-		for (const span of found) {
+		// A span looking up its start read nothing, so each one found only reads more.
+		for (const position of found) {
+			this.#unname(position);
+			const span = this.#spans[position];
 			span.looking = undefined;
 			span.start = start ?? 0n;
 			span.floored = start !== undefined;
+			this.#name(position);
 		}
-		this.#rebuild(holdings);
+		this.#grow(found);
 		return true;
+	}
+
+	/**
+	 * What rebuilding from the spans would read, may ask a miss for, and name as its start, for a test
+	 * to check the runs grown span by span against.
+	 */
+	fresh(): { runs: Run[]; missable: Run[]; named: bigint | undefined } {
+		const groups: Run[] = [];
+		const missable: Run[] = [];
+		let named: bigint | undefined;
+		for (const span of this.#spans) {
+			const [reads, asks] = spanReads(span);
+			if (reads) groups.push(reads);
+			if (asks) missable.push(asks);
+			if (span.floored) named = min(named ?? span.start, span.start);
+		}
+		return { runs: merge(groups), missable: merge(missable), named };
+	}
+
+	/** The lowest start the spans name, counted. */
+	named(): bigint | undefined {
+		return this.#named[0]?.start;
 	}
 
 	// Whether a time start or a join's reach back waits on the groups held to place it.
 	#unplaced(): boolean {
-		return this.#waiting.length > 0 || this.#reaching.length > 0;
+		return this.#waiting.size > 0 || this.#reaching.length > 0;
 	}
 
 	// The first run ending past `key`.
 	#runAt(key: bigint): Run | undefined {
-		let lo = 0;
-		let hi = this.#runs.length;
-		while (lo < hi) {
-			const mid = (lo + hi) >>> 1;
-			if (this.#runs[mid].end <= key) lo = mid + 1;
-			else hi = mid;
-		}
-		return this.#runs[lo];
+		return this.#runs[above(this.#runs, key)];
 	}
 
 	#place(latest: bigint | undefined, holdings: Holdings): void {
 		this.#spans = [];
 		this.#pending = false;
-		this.#waiting = [];
+		this.#waiting = new ByTime();
+		this.#looking = new ByTime();
 		this.#reaching = [];
+		this.#named = [];
+		this.#unnamed = 0;
 		for (let index = 0; index < this.ranges.length; index++) {
 			if (!isEmpty(this.ranges[index])) this.#placeRange(index, latest, holdings);
 		}
-		this.#rebuild(holdings);
+		// Each span waiting was just tried against these holdings.
+		this.#waited = holdings.unplaced?.()?.mark;
+		this.#rebuild();
 	}
 
 	// Resolve the non-empty range at `index` into a span, or note what it waits on.
@@ -692,8 +781,8 @@ export class Window {
 		}
 		if (start === "waiting") {
 			// Reads only the groups from its time until the groups held place it; see #startWaiting.
-			this.#waiting.push(this.#spans.length);
-			this.#spans.push({ index, anchor, start: 0n, end: until, floored: false, waiting: true });
+			this.#waiting.add(time(anchor) ?? 0n, this.#spans.length);
+			this.#push({ index, anchor, start: 0n, end: until, floored: false, waiting: true });
 			return;
 		}
 		// A time start the groups held can't place reads nothing until its lookup answers. A join's
@@ -701,49 +790,208 @@ export class Window {
 		const at = time(anchor);
 		const asked = time(range.start) !== undefined && at === time(range.start);
 		const below = at === undefined || !asked ? undefined : unresolved(at, start.group, start.floored, holdings);
-		this.#spans.push({
+		const looking = at !== undefined && below !== undefined ? { time: at, below } : undefined;
+		if (looking) this.#looking.add(looking.time, this.#spans.length);
+		const counted = !start.floored && relative(anchor) !== undefined;
+		this.#push({
 			index,
 			anchor,
 			start: start.group,
 			end: until,
 			floored: start.floored,
-			looking: at !== undefined && below !== undefined ? { time: at, below } : undefined,
+			looking,
 			waiting: false,
+			reach: counted ? (holdings.nextStart(0n) ?? start.group) : undefined,
 		});
+	}
+
+	#push(span: Span): void {
+		this.#spans.push(span);
+		this.#name(this.#spans.length - 1);
+	}
+
+	// Count where the span at `position` starts in {@link start}.
+	#name(position: number): void {
+		const span = this.#spans[position];
+		if (!span.floored) {
+			this.#unnamed++;
+			return;
+		}
+		const named = this.#named;
+		const at = lowerBound(named.length, (i) => named[i].start >= span.start);
+		if (named[at]?.start === span.start) named[at].count++;
+		else named.splice(at, 0, { start: span.start, count: 1 });
+	}
+
+	// Stop counting where the span at `position` starts, before it moves.
+	#unname(position: number): void {
+		const span = this.#spans[position];
+		if (!span.floored) {
+			this.#unnamed--;
+			return;
+		}
+		const named = this.#named;
+		const at = lowerBound(named.length, (i) => named[i].start >= span.start);
+		if (named[at]?.start !== span.start) return;
+		if (--named[at].count === 0) named.splice(at, 1);
+	}
+
+	#updateSettled(): void {
+		this.#settled = !this.#pending && !this.#unplaced() && this.#looking.size === 0;
 	}
 
 	// The groups in range: every span that knows where it starts, through its end, and every span
 	// waiting on a time start from that time.
-	#rebuild(holdings: Holdings): void {
-		this.#settled = !this.#pending && !this.#unplaced() && this.#spans.every((span) => !span.looking);
+	#rebuild(): void {
+		this.#updateSettled();
 		const groups: Run[] = [];
 		const missable: Run[] = [];
 		for (const span of this.#spans) {
-			if (span.looking) continue;
-			// A span waiting on its time start reads from that time meanwhile, and may ask a miss
-			// there, as one reaching back past every group held does: whichever group contains it
-			// starts at or before it, so every group from there on is in range.
-			if (span.waiting) {
-				const at = time(span.anchor) ?? 0n;
-				groups.push({ start: at, end: span.end });
-				missable.push({ start: at, end: span.end });
-				continue;
-			}
-			groups.push({ start: span.start, end: span.end });
-			// A time start before every group held reaches back to the group containing it, which is
-			// unknown here, so it asks no miss below its time: every key from there on is in range,
-			// the key at the time itself being the containing group if it exists. A relative one
-			// counting back past every group held asks none below the oldest, since which of them it
-			// reaches is unknown.
-			let reach = span.start;
-			if (!span.floored && span.anchor !== undefined) {
-				reach = time(span.anchor) ?? holdings.nextStart(0n) ?? span.start;
-			}
-			missable.push({ start: reach, end: span.end });
+			const [reads, asks] = spanReads(span);
+			if (reads) groups.push(reads);
+			if (asks) missable.push(asks);
 		}
 		this.#runs = merge(groups);
 		this.#missable = merge(missable);
 	}
+
+	// Take in the spans at `positions`, each now reading at least what it did before: their runs
+	// are inserted into the sorted runs, so a change to a few spans costs them, not every range.
+	#grow(positions: readonly number[]): void {
+		this.#updateSettled();
+		for (const position of positions) {
+			const [reads, asks] = spanReads(this.#spans[position]);
+			if (reads) insert(this.#runs, reads);
+			if (asks) insert(this.#missable, asks);
+		}
+	}
+}
+
+/** Spans by position, keyed by the time each waits on or looks up, lowest first. */
+type Timed = { time: bigint; positions: number[] };
+
+/** {@link Timed} entries kept sorted by time, so the times in a run are found without a walk. */
+class ByTime {
+	#entries: Timed[] = [];
+
+	get size(): number {
+		return this.#entries.length;
+	}
+
+	get all(): readonly Timed[] {
+		return this.#entries;
+	}
+
+	// The index of the first entry at or after `time`.
+	#at(time: bigint): number {
+		const entries = this.#entries;
+		return lowerBound(entries.length, (i) => entries[i].time >= time);
+	}
+
+	/** Add the span at `position` under `time`. */
+	add(time: bigint, position: number): void {
+		const at = this.#at(time);
+		const entry = this.#entries[at];
+		if (entry?.time === time) entry.positions.push(position);
+		else this.#entries.splice(at, 0, { time, positions: [position] });
+	}
+
+	/** Put back an entry taken out, whose time no entry holds. */
+	put(entry: Timed): void {
+		this.#entries.splice(this.#at(entry.time), 0, entry);
+	}
+
+	/** Take out the spans under `time`, if any. */
+	take(time: bigint): number[] | undefined {
+		const at = this.#at(time);
+		if (this.#entries[at]?.time !== time) return undefined;
+		return this.#entries.splice(at, 1)[0].positions;
+	}
+
+	/** Take out every entry whose time is in `[start, end)`, lowest first. */
+	takeIn(start: bigint, end: bigint): Timed[] {
+		const from = this.#at(start);
+		const to = end >= UNBOUNDED ? this.#entries.length : this.#at(end);
+		return to > from ? this.#entries.splice(from, to - from) : [];
+	}
+
+	/** Take out every entry, lowest first. */
+	takeAll(): Timed[] {
+		const entries = this.#entries;
+		this.#entries = [];
+		return entries;
+	}
+}
+
+// What `span` reads, and the part of it a miss may ask for, each undefined for none.
+function spanReads(span: Span): [Run | undefined, Run | undefined] {
+	// A span still looking up its start reads nothing until it knows which group that is.
+	if (span.looking) return [undefined, undefined];
+	// A span waiting on its time start reads from that time meanwhile, and may ask a miss there, as
+	// one reaching back past every group held does: whichever group contains it starts at or before
+	// it, so every group from there on is in range.
+	if (span.waiting) {
+		const at = time(span.anchor) ?? 0n;
+		if (at >= span.end) return [undefined, undefined];
+		return [
+			{ start: at, end: span.end },
+			{ start: at, end: span.end },
+		];
+	}
+	if (span.start >= span.end) return [undefined, undefined];
+	// A time start before every group held reaches back to the group containing it, which is unknown
+	// here, so it asks no miss below its time: every key from there on is in range, the key at the
+	// time itself being the containing group if it exists. A relative one counting back past every
+	// group held asks none below its reach.
+	let reach = span.start;
+	if (!span.floored && span.anchor !== undefined) {
+		reach = time(span.anchor) ?? span.reach ?? span.start;
+	}
+	return [{ start: span.start, end: span.end }, reach < span.end ? { start: reach, end: span.end } : undefined];
+}
+
+// The first index in `[0, length)` for which `past` holds, `past` being false then true.
+function lowerBound(length: number, past: (index: number) => boolean): number {
+	let lo = 0;
+	let hi = length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (past(mid)) hi = mid;
+		else lo = mid + 1;
+	}
+	return lo;
+}
+
+// The index of the first of sorted, disjoint `runs` ending past `key`.
+function above(runs: readonly Run[], key: bigint): number {
+	return lowerBound(runs.length, (i) => runs[i].end > key);
+}
+
+// Insert `run` into sorted, disjoint `runs`, merging what it overlaps or touches. An empty one
+// changes nothing.
+function insert(runs: Run[], run: Run): void {
+	if (run.end <= run.start) return;
+	const from = lowerBound(runs.length, (i) => runs[i].end >= run.start);
+	const to = lowerBound(runs.length, (i) => runs[i].start > run.end);
+	if (from === to) {
+		runs.splice(from, 0, { ...run });
+		return;
+	}
+	const merged = { start: min(runs[from].start, run.start), end: max(runs[to - 1].end, run.end) };
+	runs.splice(from, to - from, merged);
+}
+
+// The times outside sorted, disjoint `runs`, as runs lowest first.
+function outside(runs: readonly Run[]): Run[] {
+	const gaps: Run[] = [];
+	let from = 0n;
+	for (const run of runs) {
+		if (run.end <= run.start) continue;
+		if (run.start > from) gaps.push({ start: from, end: run.start });
+		from = max(from, run.end);
+	}
+	if (from < UNBOUNDED) gaps.push({ start: from, end: UNBOUNDED });
+	return gaps;
 }
 
 // `runs` merged into sorted, disjoint runs, the empty ones dropped.

@@ -54,8 +54,7 @@ is the first item after the cut.
 Decided 2026-11-19 (maintainer, in the coordinating session): ✅ **the port
 starts now, and the cut does not wait for it** (rejected: blocking the cut
 on warmth; starting only after the cut, as decided 2026-11-17). The cut now
-waits on [the mesh replay](/quest/m2/multicast/mesh-replay.md) and the
-flaws the audit found, so the port has that long. If it has landed and been
+waits on the mesh replay (`test/mesh-replay/`) and the flaws the audit found, so the port has that long. If it has landed and been
 through the mesh replay when the cut is made, its wire is in lite-07; if
 not, lite-07 freezes without it and the wire moves to the next wip version.
 [The cut](/quest/m2/lite07-finalize.md) checks it as one of its steps. The
@@ -63,13 +62,71 @@ reason for the change: a deployment expects warm pulls to cut what its
 backbone carries by a large part, and a release is the only way its
 production mesh gets them.
 
-First, before building: measure that saving. The simulator's shapes are
-generated, and against path joins the saving runs from under 1% on random
-region meshes to 8% on tiers and 70% on rings (the table below), so it
-depends on the graph. Let `warmth.rs` read a mesh from a file (relays, links
-with costs and marks, and where readers and publishers sit), run ranked
-readers and path joins on it, and report link-groups carried by each. A
-deployment's graph is private: take the file by path and commit none.
+Decided 2026-11-19 (the coordinating session, to which the maintainer
+delegated the call, on
+[moq-dev/moq#9157](https://github.com/moq-dev/moq/pull/9157#issuecomment-7005346052)):
+✅ **the measurement lands as the port's first step, and the port is not
+built until the maintainer answers the item under Waiting** (rejected:
+building the port now regardless; deciding there to drop or defer it).
+
+Measured 2026-11-18, before building. `warmth.rs` reads a
+mesh from a file (relays, links with costs, marks, and a label, and where
+publishers and readers sit) and `benchmark_warmth_mesh` reports the
+link-groups ranked readers and path joins each put on it, in all, per label,
+and per link. A deployment's graph is private: pass its file by path as
+`MOQ_WARMTH_MESH` and commit none. `warmth.mesh` beside it is the example.
+
+A tree feeding the same readers spans as many links under either rule, give
+or take a relay carrying for others, so the saving is in which links carry
+it. Generated meshes, five seeds each summed, every one settled right under
+both rules, path joins / ranked readers:
+
+| mesh | backbone link-groups | backbone cold cost | every link-group | control messages |
+|---|---|---|---|---|
+| CDN, full core mesh, equal uplinks | 95 / 95 | 1048 / 760 (-27%) | 339 / 339 | 718 / 2902 |
+| CDN, full core mesh, unequal uplinks | 125 / 90 (-28%) | 1408 / 736 (-48%) | 368 / 368 | 776 / 3193 |
+| CDN, ring of regions, equal uplinks | 97 / 95 (-2%) | 776 / 760 (-2%) | 341 / 339 | 722 / 2234 |
+| CDN, ring of regions, unequal uplinks | 134 / 94 (-30%) | 1072 / 752 (-30%) | 377 / 372 | 794 / 2735 |
+| CDN, one hub region, equal uplinks | 97 / 97 | 1088 / 1088 | 341 / 341 | 722 / 1914 |
+| CDN, one hub region, unequal uplinks | 128 / 93 (-27%) | 1432 / 1052 (-27%) | 371 / 371 | 782 / 2482 |
+| 8 relays with an uplink each, peered every pair | 71 / 20 (-72%) | 710 / 200 (-72%) | 71 / 71 | 182 / 1236 |
+| 8 relays with an uplink each, peered in a ring | 71 / 42 (-41%) | 710 / 420 (-41%) | 71 / 71 | 182 / 508 |
+
+A CDN here is six regions on a circle, two cores each, and four edges a
+region marking both cores upstream; the backbone is the links between
+regions, priced 4 plus 4 per step around the circle, warm a third. Four
+broadcasts are published at random edges and each read by a random half of
+the others. Equal uplinks cost 3, unequal ones 3 or 4 at random. In the last
+two rows the backbone is the uplinks to the publisher's relay (10 cold, 4
+warm, peer links 2), and half the relays read each of four broadcasts.
+
+What it shows:
+
+- With equal uplinks a region's edges already land on one core by the
+  rendezvous hash, the path joins already share the shortest-path tree, and
+  warmth saves no backbone link-group: 0% to 2%.
+- On a full core mesh it carries as many link-groups over shorter links: a
+  far region pulls from a nearer warm one instead of straight from the
+  publisher's, 27% off the cost where a link is priced by its length and
+  nothing where every backbone link costs the same. Each such pull adds a
+  relay hop.
+- With unequal uplinks a region's edges split over its cores and each core
+  pulls its own copy: 27% to 30% fewer backbone link-groups. Pricing each
+  edge's uplinks equally gets the same tree with no wire.
+- Relays with an uplink each and links between them, the drone meshes, save
+  41% to 72%, the whole of what item 9 of the
+  [epic](/quest/m2/multicast/README.md) asked for.
+- It costs 2.6 to 6.8 times the control messages.
+
+On a deployment's graph, measured by path and not committed: under its
+hop-count link costs, ranked readers cut backbone link-groups 4% against
+path joins. With latency link costs and a warm price at a third of the cold,
+they cut 20% (39% of latency-weighted backbone cost, 46% of intercontinental
+link-groups), at +7 to 21% mean reader latency and up to 8.7x the control
+messages. With latency costs and no warm discount, 2%. Latency link costs
+alone, with path joins, remove a 5 to 12% mean reader-latency stretch over
+the shortest path, with no wire change; the relay's cluster config already
+prices each peer link (`cost`).
 
 **Why ranked readers settle.** A relay's choice reads only copies feeding
 lower ranks, and what those feed never depends on a higher rank's choice.
@@ -432,7 +489,11 @@ later step, a query naming an Instance, answered once with an offer, path,
 mark, and rank or none. A rank is a route cost and a Node ID. Nothing
 lite-07 freezes changes.
 
+## Waiting
+
+- Maintainer: whether to build the port. Its saving on the deployment's graph depends on a warm discount that trades reader latency for backbone: 20% of backbone link-groups at +7 to 21% mean reader latency with a warm price at a third of the cold, and 2% to 4% without one. Options: (1) adopt latency link costs on the deployment first, which needs no change here, and build the port after the lite-07 cut only if that latency trade is accepted, its wire then in the first wip version after the cut, recommended, since the costs alone remove a 5 to 12% reader-latency stretch and the port's saving is the trade itself; (2) build the port now for lite-07, at the risk of rushing an XL wire into the cut for a trade not yet accepted; (3) drop the port. An agent cannot take the step: it is a product trade between reader latency and backbone cost, and no check or measurement decides it. Done when the answer is recorded in this Plan.
+
 ## Related
 
-- [Real relays replay a mesh and its faults](/quest/m2/multicast/mesh-replay.md) - the port runs through it before its wire may join lite-07
+- `test/mesh-replay/` - the port runs through it (`just test mesh-replay --new <its relay>`) before its wire may join lite-07
 - [Route health](/quest/m3/route-health/README.md) - its metadata-only subscription answers the same way

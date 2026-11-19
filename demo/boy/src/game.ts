@@ -334,6 +334,7 @@ export class Game {
 		});
 
 		const track = route.broadcast.createTrack("command", { timescale: Moq.Time.Timescale.MILLI });
+		if (!track) throw new Error("the track already exists");
 		const producer = new Json.Snapshot.Producer<Record<string, unknown>>({ track });
 		effect.cleanup(() => producer.finish());
 		effect.run(this.#runCommandTrack.bind(this, track, producer));

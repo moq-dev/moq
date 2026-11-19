@@ -217,6 +217,13 @@ require_tools() {
         echo "error: missing required tools: ${missing[*]}" >&2
         exit 1
     fi
+    # TEMPORARY migration, delete once every smoked channel ships a CLI with `import h264`:
+    # releases before it name the Annex-B import `avc3`.
+    if "$MOQ" import h264 --help >/dev/null 2>&1; then
+        ANNEXB_IMPORT=h264
+    else
+        ANNEXB_IMPORT=avc3
+    fi
 }
 
 # Run swift with the Xcode toolchain. A loaded nix devShell exports SDKROOT /
@@ -705,7 +712,7 @@ start_publisher() {
     local lang="$1" broadcast="$2" log="$TMP/pub-$1.log"
     case "$lang" in
         rust)
-            (ffmpeg_h264 | rust_moq "$URL" --broadcast "$broadcast" import avc3) >"$log" 2>&1 &
+            (ffmpeg_h264 | rust_moq "$URL" --broadcast "$broadcast" import "$ANNEXB_IMPORT") >"$log" 2>&1 &
             ;;
         python)
             (ffmpeg_h264 | run_client "$PY" "$CLIENTS/python/smoke.py" \

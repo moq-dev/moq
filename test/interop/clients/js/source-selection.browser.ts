@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import { createServer } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch } from "./harness";
 
 test("native decoder probes isolate malformed audio and conflicting video metadata", async () => {

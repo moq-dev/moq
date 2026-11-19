@@ -138,11 +138,19 @@ type ServedKey = (NodeId, Path, Instance);
 struct Left(crate::origin::Claim);
 
 impl node::Orphan for Left {
-	fn release(self: Box<Self>, ended: bool) {
-		// Dropped, a claim the node let go of goes offline rather than ending.
-		if ended {
-			self.0.withdrawn();
-		}
+	fn release(self: Box<Self>, gone: node::Gone) {
+		release(self.0, gone);
+	}
+}
+
+/// Let go of a copy of a claim the origin holds, for the reason `gone` gives.
+fn release(claim: crate::origin::Claim, gone: node::Gone) {
+	match gone {
+		// Dropped, it goes offline, while another copy serves.
+		node::Gone::Moved => drop(claim),
+		node::Gone::Lost => claim.retire(false),
+		node::Gone::Ended => claim.retire(true),
+		node::Gone::Withdrawn => claim.withdrawn(),
 	}
 }
 
@@ -430,6 +438,7 @@ impl Routed {
 		for ((origin, path, instance), mut served) in self.served.drain() {
 			let unavailable = served.route.route.clone().with_available(false);
 			served.route.update(unavailable);
+			served.route.dynamic.disown();
 			let left = Left(served.route.dynamic.clone());
 			self.stream.orphan(origin, &(path, instance), Box::new(left));
 		}
@@ -827,13 +836,10 @@ impl Routed {
 				origin,
 				path,
 				instance,
-				ended,
+				gone,
 			} => {
-				// Dropped, a claim the node let go of goes offline rather than ending.
-				if let Some(served) = self.served.remove(&(origin, path, instance))
-					&& ended
-				{
-					served.route.dynamic.withdrawn();
+				if let Some(served) = self.served.remove(&(origin, path, instance)) {
+					release(served.route.dynamic, gone);
 				}
 			}
 		}
@@ -885,6 +891,7 @@ impl Routed {
 			priority: Some(served.priority),
 			// A receiver refuses a claim above its path by more than the path's segments.
 			above: u8::try_from(served.attr.above).unwrap_or(u8::MAX),
+			lifecycle: served.lifecycle,
 		};
 		// A claim no route reaches is unavailable: it stays shown, and serves nothing.
 		let route = crate::origin::RouteInfo::new()

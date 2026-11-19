@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
+import { worklet } from "@moq/common/vite-plugin-worklet";
 import type MoqPublish from "@moq/publish/element";
 import type { JSHandle, Page } from "playwright";
 import { createServer } from "vite";
-import { worklet } from "../../../../js/common/vite-plugin-worklet";
 import { launch } from "./harness";
 
 /** The microphone and camera tracks a `<moq-publish>` holds open, in that order. */

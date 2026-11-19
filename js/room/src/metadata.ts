@@ -184,6 +184,7 @@ function serveSnapshot<T>(
 			maxAge: Duration.millis(86_400_000),
 			priority: PRIORITY,
 		});
+		if (!track) throw new Error(`the track ${name} already exists`);
 		effect.cleanup(() => {
 			track.finish();
 			track.close();

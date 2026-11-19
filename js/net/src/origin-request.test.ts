@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast";
+import { defined } from "./defined.test-util.ts";
 import { StreamCode, StreamError } from "./error";
 import { WireRoute } from "./hop";
 import * as Instance from "./instance.ts";
@@ -403,9 +404,10 @@ test("an application serves held content without an exact route", async () => {
 	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
 	const source = new BroadcastProducer();
-	source
-		.createTrack("data")
-		.writeFrame({ payload: new TextEncoder().encode("held"), timestamp: Timestamp.unscaled(0n) });
+	defined(source.createTrack("data")).writeFrame({
+		payload: new TextEncoder().encode("held"),
+		timestamp: Timestamp.unscaled(0n),
+	});
 	pending.serve(source.consume());
 	await settle();
 	const reader = request.active.peek()?.track("data").subscribe().ordered();
@@ -530,7 +532,7 @@ test("a throwing handler disposes its job route and leaves the claim answerable"
 	const failed = (async () => {
 		for await (const request of claim.requested()) {
 			using job = request.route({ hidden: true });
-			job.broadcast.createTrack("video");
+			defined(job.broadcast.createTrack("video"));
 			throw new Error("handler failed");
 		}
 	})();
@@ -1311,7 +1313,7 @@ test("a claim moving on keeps its held answers", async () => {
 	const minted = claim.instance;
 	const requests = claim.requested();
 	const held = new BroadcastProducer();
-	held.createTrack("data").writeFrame({
+	defined(held.createTrack("data")).writeFrame({
 		payload: new TextEncoder().encode("held"),
 		timestamp: Timestamp.unscaled(0n),
 	});

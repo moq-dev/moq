@@ -18,6 +18,7 @@
 		"typescript": "7.0.2",
 		"vitepress": "^1.6.4",
 		"vitepress-plugin-llms": "^1.14.0",
+		"vue": "^3.5.44",
 		"wrangler": "^4.158.0",
 		"yaml": "^2.9.1"
 	}

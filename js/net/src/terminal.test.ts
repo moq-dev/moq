@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { Producer as BroadcastProducer } from "./broadcast.ts";
+import { defined } from "./defined.test-util.ts";
 import { ProtocolViolation, SessionCode, StreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { Connection } from "./lite/connection.ts";
@@ -58,7 +59,7 @@ test("a lite protocol violation reaches the subscribed track and its open group"
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
 	const publication = origin.route(Path.from("room"));
-	const producer = publication.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const producer = defined(publication.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	hooks.appendNext(producer).writeFrame(textFrame("prefix"));
 	const url = new URL("https://example.com");
 	const client = new Connection({ url, quic: pair.client, version: Version.DRAFT_06 });

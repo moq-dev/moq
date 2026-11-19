@@ -1,0 +1,17 @@
+{
+	"name": "@moq/common",
+	"private": true,
+	"type": "module",
+	"description": "Shared build scripts and Vite plugins for the workspace",
+	"exports": {
+		"./vite-plugin-worklet": "./vite-plugin-worklet.ts",
+		"./vite-plugin-libav": "./vite-plugin-libav.ts"
+	},
+	"dependencies": {
+		"@babel/parser": "^8.1.0",
+		"publint": "^0.3.25",
+		"rolldown": "^1.3.0",
+		"typedoc": "^0.28.20",
+		"vite": "^8.3.6"
+	}
+}

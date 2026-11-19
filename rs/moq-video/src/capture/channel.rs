@@ -205,6 +205,12 @@ impl FrameChannel {
 		self.state.lock().unwrap().skipped
 	}
 
+	/// Whether [`recv`](Self::recv) reached the last frame pushed.
+	#[cfg(all(test, feature = "openh264"))]
+	pub(super) fn taken(&self) -> bool {
+		self.state.lock().unwrap().frame.is_none()
+	}
+
 	/// Stop repeating until the next frame, because the last picture no longer
 	/// stands: the source resized, minimized, or blanked, or freed the buffer it
 	/// lives in. A frame the consumer has not reached yet is the same stale

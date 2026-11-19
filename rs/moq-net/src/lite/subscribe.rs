@@ -839,13 +839,46 @@ pub(crate) struct LiveRanges {
 	size: usize,
 	/// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_OK reports.
 	initial: u64,
-	/// The live ranges [`Self::apply`] last returned, until one changes, so an edit that
-	/// changes nothing costs nothing.
-	snapshot: Option<Snapshot>,
 }
 
-/// Every live range with its Range ID, shared while none changes.
-pub(crate) type Snapshot = std::sync::Arc<[(u64, Range)]>;
+/// A received update's ranges, resolved against the live ones by Range ID.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Applied {
+	/// Lite-07: the Range IDs retired, then each range added with its Range ID, so applying
+	/// it costs the ranges it names.
+	Edit {
+		retired: Vec<u64>,
+		added: Vec<(u64, Range)>,
+	},
+	/// Before lite-07: every live range, numbered afresh.
+	Replace(Vec<(u64, Range)>),
+}
+
+impl Applied {
+	/// This followed by `later`, as one: a range `later` retires that this added never was.
+	/// Holds no more than the ranges live before this and after `later`.
+	pub fn then(self, later: Self) -> Self {
+		match (self, later) {
+			(
+				Self::Edit { mut retired, mut added },
+				Self::Edit {
+					retired: gone,
+					added: came,
+				},
+			) => {
+				let gone: std::collections::BTreeSet<u64> = gone.into_iter().collect();
+				// Each Range ID is added once, so one this added and `later` retired was never live.
+				let fresh: std::collections::BTreeSet<u64> =
+					added.iter().map(|(id, _)| *id).filter(|id| gone.contains(id)).collect();
+				added.retain(|(id, _)| !fresh.contains(id));
+				retired.extend(gone.difference(&fresh));
+				added.extend(came);
+				Self::Edit { retired, added }
+			}
+			(_, later) => later,
+		}
+	}
+}
 
 impl LiveRanges {
 	/// The ranges a SUBSCRIBE carried.
@@ -856,7 +889,6 @@ impl LiveRanges {
 			live: Default::default(),
 			size: 0,
 			initial: ranges.len() as u64,
-			snapshot: None,
 		};
 		live.add(ranges.iter().copied());
 		live
@@ -864,10 +896,6 @@ impl LiveRanges {
 
 	fn add(&mut self, ranges: impl IntoIterator<Item = Range>) {
 		let form: Form = self.version.into();
-		let mut ranges = ranges.into_iter().peekable();
-		if ranges.peek().is_some() {
-			self.snapshot = None;
-		}
 		for range in ranges {
 			// One past the varint's reach can't come off the wire, and is refused below.
 			self.size = self.size.saturating_add(range_size(&range, form).unwrap_or(usize::MAX));
@@ -878,7 +906,6 @@ impl LiveRanges {
 
 	fn remove(&mut self, id: u64) -> Option<Range> {
 		let range = self.live.remove(&id)?;
-		self.snapshot = None;
 		self.size = self
 			.size
 			.saturating_sub(range_size(&range, self.version.into()).unwrap_or(usize::MAX));
@@ -928,22 +955,24 @@ impl LiveRanges {
 		self.initial
 	}
 
-	/// Resolve a received edit, returning every live range with its Range ID: the same
-	/// snapshot as last time while nothing changed.
-	pub fn apply(&mut self, edit: RangeEdit) -> Result<Snapshot, DecodeError> {
-		match edit {
+	/// Resolve a received edit by Range ID, costing the ranges it names.
+	pub fn apply(&mut self, edit: RangeEdit) -> Result<Applied, DecodeError> {
+		let applied = match edit {
 			RangeEdit::Replace(ranges) if !self.version.has_ranges() => {
 				*self = Self::new(self.version, &ranges);
+				Applied::Replace(self.iter().map(|(id, range)| (id, *range)).collect())
 			}
 			RangeEdit::Edit { remove, add } if self.version.has_ranges() => {
-				for id in remove {
+				for id in &remove {
 					// An id never assigned, or already retired (including earlier in this list).
-					self.remove(id).ok_or(DecodeError::InvalidValue)?;
+					self.remove(*id).ok_or(DecodeError::InvalidValue)?;
 				}
+				let added = (self.next..).zip(add.iter().copied()).collect();
 				self.add(add);
+				Applied::Edit { retired: remove, added }
 			}
 			_ => return Err(DecodeError::Version),
-		}
+		};
 		// Asking for nothing is refused like a SUBSCRIBE that does, and a set no SUBSCRIBE
 		// could carry like one too large to send.
 		if self.live.is_empty() {
@@ -952,11 +981,7 @@ impl LiveRanges {
 		if self.size > super::message::MAX_MESSAGE_SIZE {
 			return Err(DecodeError::TooMany);
 		}
-		let live = &self.live;
-		let snapshot = self
-			.snapshot
-			.get_or_insert_with(|| live.iter().map(|(id, range)| (*id, *range)).collect());
-		Ok(snapshot.clone())
+		Ok(applied)
 	}
 
 	/// The edit that keeps the live ranges as they are.
@@ -1766,12 +1791,8 @@ mod test {
 		let got = crate::coding::decode_buf(&mut buf.as_ref(), Version::Lite07, |r, v| SubscribeUpdate::decode(r, v))
 			.unwrap();
 		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
-		let resolved: Vec<_> = live
-			.apply(got.ranges)
-			.unwrap()
-			.iter()
-			.map(|(_, range)| *range)
-			.collect();
+		live.apply(got.ranges).unwrap();
+		let resolved: Vec<_> = live.iter().map(|(_, range)| *range).collect();
 		assert_eq!(resolved, msg.ranges);
 	}
 
@@ -1860,7 +1881,8 @@ mod test {
 			let buf = update.encode_bytes(version).unwrap();
 			let got =
 				crate::coding::decode_buf(&mut buf.as_ref(), version, |r, v| SubscribeUpdate::decode(r, v)).unwrap();
-			assert_eq!(*live.apply(got.ranges).unwrap(), *sent.numbered());
+			live.apply(got.ranges).unwrap();
+			assert_eq!(live.numbered(), sent.numbered());
 		};
 
 		let edit = |remove: &[u64], add: &[Range]| RangeEdit::Edit {
@@ -1915,29 +1937,41 @@ mod test {
 		assert!(refused, "the live ranges are held to one SUBSCRIBE");
 	}
 
-	/// An edit that changes nothing hands back the snapshot it last did, so a stream of empty
-	/// updates copies nothing; one that changes a range takes a fresh one.
+	/// An edit resolves to the Range IDs it names, and edits waiting to apply fold into one
+	/// that names what stayed retired or added.
 	#[test]
-	fn lite07_an_empty_edit_reuses_the_snapshot() {
+	fn lite07_an_edit_names_its_range_ids() {
 		let mut live = LiveRanges::new(Version::Lite07, &[Range::OLDEST]);
-		let empty = || RangeEdit::Edit {
-			remove: Vec::new(),
-			add: Vec::new(),
-		};
-		let first = live.apply(empty()).unwrap();
-		assert!(std::sync::Arc::ptr_eq(&first, &live.apply(empty()).unwrap()));
-		let range = Range {
-			start: absolute(4, 0),
+		let range = |group| Range {
+			start: absolute(group, 0),
 			end: None,
 		};
-		let edited = live
+		let first = live
 			.apply(RangeEdit::Edit {
 				remove: vec![0],
-				add: vec![range],
+				add: vec![range(4), range(5)],
 			})
 			.unwrap();
-		assert_eq!(*edited, [(1, range)]);
-		assert!(std::sync::Arc::ptr_eq(&edited, &live.apply(empty()).unwrap()));
+		assert_eq!(
+			first,
+			Applied::Edit {
+				retired: vec![0],
+				added: vec![(1, range(4)), (2, range(5))],
+			}
+		);
+		let second = live
+			.apply(RangeEdit::Edit {
+				remove: vec![1],
+				add: vec![range(6)],
+			})
+			.unwrap();
+		assert_eq!(
+			first.then(second),
+			Applied::Edit {
+				retired: vec![0],
+				added: vec![(2, range(5)), (3, range(6))],
+			}
+		);
 	}
 
 	/// An edit to ranges too large for a SUBSCRIBE is refused before anything changes, so the

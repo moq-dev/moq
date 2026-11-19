@@ -1767,9 +1767,7 @@ async fn export_scte35_roundtrip() {
 	// Create and write the SCTE-35 cue track BEFORE moving `broadcast` into
 	// `Import` (which consumes it); the producer stays alive so the exporter can
 	// subscribe to the retained track.
-	let scte = broadcast
-		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
+	let scte = broadcast.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let scte_name = scte.name().to_string();
 	{
 		let track = tscat::Track {
@@ -1908,9 +1906,7 @@ async fn assert_unknown_stream_type(pes: bool) {
 	)
 	.unwrap();
 	let reserved = catalog.reserve();
-	let track = broadcast
-		.unique_track(".opaque", hang::container::track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
+	let track = broadcast.unique_track(".opaque", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let mut entry = tscat::Track::new(PID);
 	let payload = match pes {
 		true => {
@@ -2012,9 +2008,7 @@ async fn export_pes_packet_roundtrip() {
 
 	// Build the PES track BEFORE moving `broadcast` into `Import`; the
 	// producer stays alive so the exporter can subscribe to the retained track.
-	let data_track = broadcast
-		.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
+	let data_track = broadcast.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let data_name = data_track.name().to_string();
 	{
 		let mut track = tscat::Track::new(DATA_PID);
@@ -9115,6 +9109,107 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	end.expect("a track leaving the catalog is not a layout change");
 	frames.extend(rest);
 	assert_eq!(pes_count(&frames), 20 + 15, "every frame of both tracks went out");
+}
+
+/// A rendition whose track fails ends alone while another still reads, and a replacement the
+/// publisher lists joins the program, as `moq import capture` publishes a reopened microphone.
+#[tokio::test(start_paused = true)]
+async fn a_failed_rendition_is_replaced_while_the_rest_plays_on() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut kept = aac_rendition(&mut broadcast, &mut catalog, "kept.aac");
+	let mut failing = aac_rendition(&mut broadcast, &mut catalog, "0.aac");
+
+	let mut export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
+		.await
+		.unwrap()
+		.with_replay();
+	for ms in (0..200).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut failing, ms);
+	}
+	let mut frames = poll_frames(&mut export);
+
+	// The failed track stays listed while its retained groups drain, as a capture's does.
+	failing.abort(moq_net::Error::Transport("audio device lost".into()));
+	for ms in (200..300).step_by(20) {
+		write_aac(&mut kept, ms);
+	}
+	frames.extend(poll_frames(&mut export));
+	let mut replacement = aac_rendition(&mut broadcast, &mut catalog, "1.aac");
+	for ms in (300..400).step_by(20) {
+		write_aac(&mut kept, ms);
+		write_aac(&mut replacement, ms);
+	}
+	catalog.modify().unwrap().audio.renditions.remove("0.aac");
+	let _finished = kept.finish().unwrap();
+	let _finished = replacement.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let (rest, end) = drain_to_end(&mut export).await;
+	end.expect("a failed rendition with others still playing does not end the export");
+	frames.extend(rest);
+	assert_eq!(
+		pes_count(&frames),
+		20 + 10 + 5,
+		"every frame of all three tracks went out"
+	);
+}
+
+/// A video that fails before supplying its codec configuration leaves the program to the audio,
+/// which plays on without it.
+#[tokio::test(start_paused = true)]
+async fn a_track_failing_before_its_config_leaves_the_header_to_the_rest() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let vtrack = broadcast
+		.create_track("0.avc3", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut cfg = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x1f,
+		inline: true,
+	});
+	cfg.container = Container::Legacy;
+	catalog
+		.modify()
+		.unwrap()
+		.video
+		.renditions
+		.insert("0.avc3".to_string(), cfg);
+	let video = Producer::new(vtrack, HangContainer::Legacy(crate::container::Kind::Data));
+	let mut audio = aac_rendition(&mut broadcast, &mut catalog, "0.aac");
+
+	let mut export = open_export(crate::source::announced(&consumer).await, RECORDING_MAX_AGE)
+		.await
+		.unwrap()
+		.with_replay();
+	for ms in (0..100).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	let mut frames = poll_frames(&mut export);
+	assert_eq!(pes_count(&frames), 0, "the program waits on the video's config");
+
+	video.abort(moq_net::Error::Transport("camera lost".into()));
+	for ms in (100..200).step_by(20) {
+		write_aac(&mut audio, ms);
+	}
+	let _finished = audio.finish().unwrap();
+	catalog.finish().unwrap();
+
+	let (rest, end) = drain_to_end(&mut export).await;
+	end.expect("a video failing before its config does not end the export");
+	frames.extend(rest);
+	assert_eq!(pes_count(&frames), 10, "every audio frame went out");
+	let listed: Vec<_> = pmts(&frames).into_iter().map(|(_, types)| types).collect();
+	assert!(!listed.is_empty(), "the program went out");
+	assert!(
+		listed.iter().all(|types| *types == [StreamType::AdtsAac]),
+		"the PMT lists only the audio: {listed:?}"
+	);
 }
 
 /// Publish an empty catalog at `live` under `route`.
