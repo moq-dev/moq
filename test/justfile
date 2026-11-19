@@ -323,6 +323,10 @@ route-proof:
 route-sweep:
     bash ../sh/local.sh bash route-sweep.sh
 
+# Race a lite-07 relay's session tasks in seeded orders from a fresh replayable seed.
+route-race:
+    bash ../sh/local.sh bash route-race.sh
+
 # The TypeScript qmux peer as client and server against the in-tree Rust qmux
 # interop examples, per draft. The manifest path names the in-tree crate, which
 # shares its package name with the 0.6 release its tests interoperate with.

@@ -333,6 +333,13 @@ export interface Holdings {
 	 * undefined once fewer are held than that.
 	 */
 	back(latest: bigint, back: bigint): bigint | undefined;
+	/**
+	 * Where the publisher reported starting a range counting `back` groups before `latest`, which a
+	 * relative start, but never an end, takes over {@link back}: a delivery start may sit past the
+	 * group counted, such as above groups too stale for the budget. Absent for none. Mirrors the
+	 * Rust `Holdings::reported_start`.
+	 */
+	reportedStart?(latest: bigint, back: bigint): bigint | undefined;
 	/** Whether nothing more can arrive here, so a time start nothing contains reaches back to the oldest group rather than wait. */
 	complete(): boolean;
 	/**
@@ -785,7 +792,7 @@ function startOf(
 	if (anchor === undefined) return { group: 0n, floored: false };
 	if (anchor.relative !== undefined) {
 		if (latest === undefined) return "pending";
-		const group = holdings.back(latest, anchor.relative);
+		const group = holdings.reportedStart?.(latest, anchor.relative) ?? holdings.back(latest, anchor.relative);
 		// Fewer groups are held than it counts back, so reach back to the oldest.
 		return group === undefined ? { group: 0n, floored: false } : { group, floored: true };
 	}

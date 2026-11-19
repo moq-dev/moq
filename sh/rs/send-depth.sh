@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Prove the session driver and native downstream futures Send at the default
+# Prove the session driver Send, its Sync check settled, moq-tokio's spawned
+# session future Send, and native downstream futures Send at the default
 # recursion limit on the flake's pinned nightly, so only a pin bump changes the
 # compiler it checks. `async` is off by default, and without it the lib has no
 # driver and the `send` test compiles to nothing.
@@ -35,3 +36,5 @@ export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-D recursion_depth_exceeding_limit"
 rustc --version
 cargo --version
 cargo check --locked -p moq-net --features async --lib --test send
+# moq-tokio spawns the session future, which must prove Send at the same limit.
+cargo check --locked -p moq-tokio --lib

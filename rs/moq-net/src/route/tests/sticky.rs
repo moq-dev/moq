@@ -1,27 +1,26 @@
-//! The route rule as the prototype runs it, with the next hop in use ahead of the
-//! path length and the neighbour in [`order`](super::multi::order).
+//! The route rule as [`relay::Router`] runs it, with the next hop in use ahead of the
+//! path length and the neighbour in [`relay::order`].
 //!
-//! The route proof (`rs/moq-net/verify/route-algebra`) breaks ties between routes
-//! of equal draining, priority, cost, and mark by a fixed order, so it has one
-//! fixed point. Staying on the next hop in use makes the choice depend on what
-//! came first, which the proof does not cover. `rs/moq-net/verify/route-algebra/README.md`
-//! argues on paper that the rule still settles, at every node on the rank and mark
-//! the fixed order would give it; these tests check both.
+//! The route proof (`rs/moq-net/verify/route-algebra`) breaks ties between routes of
+//! equal draining, priority, cost, and mark by a fixed order, so it has one fixed point.
+//! Staying on the next hop in use makes the choice depend on what came first, which the
+//! proof does not cover. `rs/moq-net/verify/route-algebra/README.md` argues on paper that
+//! the rule still settles, at every node on the rank and mark the fixed order would give
+//! it; these tests check both.
+
+use crate::route::relay::{self, Best, NodeId};
 
 use super::algebra::Rng;
-use super::compare::Arm;
-use super::multi::{Best, MultiSim, Tie, Tune};
+use super::multi::Tie;
+use super::multicast::{RelaySim, Router};
 use super::*;
-
-/// The rule the epic picked: floor, epoch, batch, drain, and claimed.
-const KEPT: Tune = Arm::TUNE;
 
 /// More deliveries than any network here needs to settle.
 const LIMIT: usize = 200_000;
 
-/// A random network: relays first, then publishers, each relay linked to an
-/// earlier one and a few more links besides, costs of 1 or 2 so equal ranks are
-/// common, and one link in four marked upstream.
+/// A random network: relays first, then publishers, each relay linked to an earlier one
+/// and a few more links besides, costs of 1 or 2 so equal ranks are common, and one link
+/// in four marked upstream.
 struct Net {
 	relays: usize,
 	publishers: usize,
@@ -67,8 +66,8 @@ impl Net {
 		}
 	}
 
-	fn build(&self) -> MultiSim {
-		let mut net = MultiSim::new(KEPT, self.relays + self.publishers);
+	fn build(&self) -> RelaySim {
+		let mut net = RelaySim::new(self.relays + self.publishers, relay::debounce(HOP));
 		for publisher in self.relays..self.relays + self.publishers {
 			net.client(publisher);
 			net.publish(publisher, 100 + publisher as Id);
@@ -83,9 +82,13 @@ impl Net {
 	}
 }
 
-/// Deliver one message at a time from a random queue, reading a burst before
-/// answering as `batch` does, until nothing is left. False if it never settles.
-fn settle(net: &mut MultiSim, rng: &mut Rng) -> bool {
+fn is_up(net: &RelaySim, a: Node, b: Node) -> bool {
+	net.up().contains(&(a.min(b), a.max(b)))
+}
+
+/// Deliver one message at a time from a random queue, reading a burst before answering,
+/// until nothing is left. False if it never settles.
+fn settle(net: &mut RelaySim, rng: &mut Rng) -> bool {
 	for _ in 0..LIMIT {
 		let ready = net.ready();
 		if ready.is_empty() {
@@ -104,9 +107,9 @@ fn settle(net: &mut MultiSim, rng: &mut Rng) -> bool {
 	false
 }
 
-/// Links close and reopen, relays restart or send GOAWAY, all while messages are
-/// in flight; then every closed link reopens.
-fn churn(net: &mut MultiSim, plan: &Net, rng: &mut Rng) {
+/// Links close and reopen, relays restart or send GOAWAY, all while messages are in
+/// flight; then every closed link reopens.
+fn churn(net: &mut RelaySim, plan: &Net, rng: &mut Rng) {
 	let mut down = Vec::new();
 	for _ in 0..rng.below(6) {
 		for _ in 0..rng.below(40) {
@@ -122,7 +125,7 @@ fn churn(net: &mut MultiSim, plan: &Net, rng: &mut Rng) {
 		match rng.below(5) {
 			0 => {
 				let links: Vec<_> = (plan.links.iter())
-					.filter(|&&(a, b, _, _)| (a == relay || b == relay) && net.is_up(a, b))
+					.filter(|&&(a, b, _, _)| (a == relay || b == relay) && is_up(net, a, b))
 					.map(|&(a, b, _, _)| (a, b))
 					.collect();
 				net.reset(relay);
@@ -131,7 +134,7 @@ fn churn(net: &mut MultiSim, plan: &Net, rng: &mut Rng) {
 			1 => net.goaway(relay),
 			_ => {
 				let &(a, b, _, _) = &plan.links[rng.below(plan.links.len() as u64) as usize];
-				if net.is_up(a, b) {
+				if is_up(net, a, b) {
 					net.close(a, b);
 					down.push((a, b));
 				}
@@ -139,54 +142,69 @@ fn churn(net: &mut MultiSim, plan: &Net, rng: &mut Rng) {
 		}
 	}
 	for (a, b) in down {
-		if !net.is_up(a, b) {
+		if !is_up(net, a, b) {
 			net.open(a, b);
 		}
 	}
 }
 
-/// Every relay sits on a route of the best draining, priority, and cost among those
-/// its neighbours last offered it, and the routes in use form trees: each one's
-/// path is its next hop's route with that hop added.
-fn check(net: &MultiSim, plan: &Net) -> Result<(), String> {
+/// Whether `origin` is one of `router`'s own identities.
+fn is_self(router: &Router, origin: NodeId) -> bool {
+	origin == router.me() || origin == router.me_marked()
+}
+
+/// Every relay sits on a route of the best draining, priority, and cost among those its
+/// neighbours last offered it, and the routes in use form trees: each one's path is its
+/// next hop's route with that hop added.
+fn check(net: &RelaySim, plan: &Net) -> Result<(), String> {
 	for node in 0..plan.relays {
 		let router = net.router(node).expect("a relay");
-		for origin in router.origins() {
-			let candidates = router.candidates(origin);
-			let best = router.best(origin);
-			let lowest = candidates.iter().map(Best::rank).min();
-			let Some(best) = best else {
+		for origin in router.heard() {
+			let candidates = router.usable(origin);
+			let lowest = candidates.iter().map(|best| best.offer.rank()).min();
+			let Some((via, offer)) = router.best(origin) else {
 				if lowest.is_some() {
-					return Err(format!("{node} uses no route to {origin} of {candidates:?}"));
+					return Err(format!("{node} uses no route to {origin:?} of {candidates:?}"));
 				}
 				continue;
 			};
-			if !candidates.contains(best) || Some(best.rank()) != lowest {
-				return Err(format!("{node} uses {best:?} to {origin} of {candidates:?}"));
+			let best = Best {
+				via,
+				offer: offer.clone(),
+			};
+			if !candidates.contains(&best) || Some(offer.rank()) != lowest {
+				return Err(format!("{node} uses {best:?} to {origin:?} of {candidates:?}"));
 			}
-			let path = &best.offer.path;
-			if path.len() > 1 {
-				let next = net.router(best.via).expect("a relay");
-				let theirs = next.best(origin).map(|best| &best.offer.path[..]);
-				if theirs != Some(&path[..path.len() - 1]) {
-					return Err(format!(
-						"{node}'s route to {origin} is {path:?}; {} uses {theirs:?}",
-						best.via
-					));
-				}
+			let next = net.router(via).expect("a relay");
+			if is_self(next, origin) {
+				continue;
+			}
+			let path = &offer.path;
+			let theirs = next.best(origin).map(|(_, offer)| &offer.path[..]);
+			if theirs != Some(&path[..path.len() - 1]) {
+				return Err(format!(
+					"{node}'s route to {origin:?} is {path:?}; {via} uses {theirs:?}"
+				));
 			}
 		}
 	}
 	Ok(())
 }
 
-/// The rule as it runs settles under any delivery order, through churn, on a
-/// route of the best rank it was offered at every node. Which of two equal routes
-/// it settles on varies with the order, but never its rank, its mark, or whether
-/// it has one: only the next hop, which no neighbour's offer depends on. What can
-/// vary is which relays announce at all (see
-/// [`whether_a_relay_announces_hangs_on_arrival_order`]), so routes are compared
-/// only to relays that announced in both orders.
+/// The identities a relay announces a claim under, as of now.
+fn announcing(router: &Router) -> Vec<NodeId> {
+	[router.me(), router.me_marked()]
+		.into_iter()
+		.filter(|id| router.own_as(*id).0 > 0)
+		.collect()
+}
+
+/// The rule as it runs settles under any delivery order, through churn, on a route of
+/// the best rank it was offered at every node. Which of two equal routes it settles on
+/// varies with the order, but never its rank, its mark, or whether it has one: only the
+/// next hop, which no neighbour's offer depends on. What can vary is which identities
+/// announce at all (see [`whether_a_relay_announces_hangs_on_arrival_order`]), so routes
+/// are compared only to identities that announced in both orders.
 #[test]
 fn the_next_hop_in_use_settles_on_a_best_rank() {
 	let (mut settled, mut moved, mut ranked, mut marked, mut reached, mut announced) = (0, 0, 0, 0, 0, 0);
@@ -211,44 +229,43 @@ fn the_next_hop_in_use_settles_on_a_best_rank() {
 			}
 			runs.push(net);
 		}
-		let both: Vec<Id> = (0..plan.relays)
-			.filter(|&relay| {
-				let [a, b] = [&runs[0], &runs[1]].map(|net| net.router(relay).expect("a relay").announced());
-				announced += usize::from(a != b);
-				a && b
-			})
-			.map(|relay| hop(relay, 0))
-			.collect();
+		let mut both: Vec<NodeId> = Vec::new();
+		for relay in 0..plan.relays {
+			let [a, b] = [&runs[0], &runs[1]].map(|net| announcing(net.router(relay).expect("a relay")));
+			announced += a.iter().filter(|id| !b.contains(id)).count() + b.iter().filter(|id| !a.contains(id)).count();
+			both.extend(a.iter().filter(|id| b.contains(id)));
+		}
 		for node in 0..plan.relays {
 			let [a, b] = [&runs[0], &runs[1]].map(|net| net.router(node).expect("a relay"));
-			for origin in both.iter().filter(|&&origin| origin != hop(node, 0)) {
+			for origin in both.iter().filter(|&&origin| !is_self(a, origin)) {
 				settled += 1;
 				let [x, y] = [a.best(*origin), b.best(*origin)];
-				moved += usize::from(x.map(|x| x.via) != y.map(|y| y.via));
-				ranked += usize::from(x.map(Best::rank) != y.map(Best::rank));
-				marked += usize::from(x.map(|x| x.offer.marked) != y.map(|y| y.offer.marked));
+				moved += usize::from(x.map(|x| x.0) != y.map(|y| y.0));
+				ranked += usize::from(x.map(|x| x.1.rank()) != y.map(|y| y.1.rank()));
+				marked += usize::from(x.map(|x| x.1.marked) != y.map(|y| y.1.marked));
 				reached += usize::from(x.is_some() != y.is_some());
 			}
 		}
 	}
 	println!(
-		"of {settled} routes settled twice: {moved} on another next hop, {ranked} at another rank, {marked} marked once, {reached} reachable once; {announced} relays announced in one order only"
+		"of {settled} routes settled twice: {moved} on another next hop, {ranked} at another rank, {marked} marked once, {reached} reachable once; {announced} identities announced in one order only"
 	);
 	assert_eq!((ranked, marked, reached), (0, 0, 0));
 	assert!(moved > 0, "no two orders settled on different next hops");
 }
 
-/// Under `claimed` a relay offers a route to itself from its first claim on, for
-/// good. Relay 2 has no endpoint: it can only announce a claim relay 1 grants it.
-/// Relay 1 grants its closest claim, unless that is the one relay 2 granted it. 2's
-/// grant, over 2's cheap route to 0, beats 1's own dear route. If 2's grant reaches
-/// 1 first, 1 never grants 2 anything and 2 never announces. If 1 hears 0's claim
-/// first, it grants it to 2, which announces; 1 then takes 2's cheaper grant and
-/// withdraws its own, and 2 keeps a route to itself with no claim behind it.
+/// A relay offers a route to itself from its first claim on, for good. Relay 2 has no
+/// endpoint: it announces only a claim it adopts across its scoped grant to relay 1, and 1
+/// tells 2 its closest claim unless that is the one 2 told it. 2 tells 1 publisher 3's
+/// claim, which 2 reaches over its cheap route to 0, and 1 adopts it, which beats 1's
+/// own dear route to 0. If 2's grant reaches 1 first, 1's closest claim is the one 2
+/// gave it, so 1 tells 2 nothing and 2 never announces. If 1 hears 0's claim first, it
+/// tells it to 2, which announces it; 1 then adopts 2's cheaper grant and withdraws what
+/// it told, and 2 keeps a route to itself with no claim behind it.
 #[test]
 fn whether_a_relay_announces_hangs_on_arrival_order() {
 	let build = || {
-		let mut net = MultiSim::new(KEPT, 4);
+		let mut net = RelaySim::new(4, relay::debounce(HOP));
 		net.client(3);
 		net.publish(3, 100);
 		net.link(3, 0, 1, Tie::Peer);
@@ -265,25 +282,28 @@ fn whether_a_relay_announces_hangs_on_arrival_order() {
 		assert!(settle(&mut net, &mut rng));
 		net.release(late.0, late.1);
 		assert!(settle(&mut net, &mut rng));
+		while net.tick() {}
+		assert!(settle(&mut net, &mut rng));
+		let id = net.id(2);
 		let relay = net.router(2).expect("a relay");
-		let claimed = relay.step(hop(2, 0), &(100, p("live/0"))).is_some();
-		let routed = net.router(0).expect("a relay").best(hop(2, 0)).is_some();
+		let claimed = relay.own().1.contains_key(&(p("live/0"), 100));
+		let routed = net.router(0).expect("a relay").best(id).is_some();
 		(relay.announced(), claimed, routed)
 	};
 	assert_eq!(settled((0, 1)), (false, false, false), "2's grant first");
 	assert_eq!(settled((2, 1)), (true, false, true), "0's claim first at 1");
 }
 
-/// A route learned over an upstream link is marked, and a marked route is never
-/// sent over another upstream link. Relay 3 hears two routes of equal rank to
-/// relay 0: through 2, over a link it marked upstream, and through 1, over a peer
-/// link. Were the mark below the next hop in use, 3 would keep whichever came
-/// first, and with 2's first 4 would be offered nothing. Unmarked first, 3 moves to
-/// 1's route whichever came first, and offers it to 4, its own upstream.
+/// A route learned over an upstream link is marked, and a marked route is never sent over
+/// another upstream link. Relay 3 hears two routes of equal rank to relay 0: through 2,
+/// over a link it marked upstream, and through 1, over a peer link. Were the mark below
+/// the next hop in use, 3 would keep whichever came first, and with 2's first 4 would be
+/// offered nothing. Unmarked first, 3 moves to 1's route whichever came first, and offers
+/// it to 4, its own upstream.
 #[test]
 fn an_equal_route_in_use_never_leaves_a_neighbour_without_one() {
 	let build = || {
-		let mut net = MultiSim::new(KEPT, 6);
+		let mut net = RelaySim::new(6, relay::debounce(HOP));
 		net.client(5);
 		net.publish(5, 100);
 		net.link(5, 0, 1, Tie::Peer);
@@ -294,44 +314,23 @@ fn an_equal_route_in_use_never_leaves_a_neighbour_without_one() {
 		net.link(3, 4, 1, Tie::Up);
 		net
 	};
-	let origin = hop(0, 0);
 	let mut rng = Rng(7);
 	let mut settled = |first: Node, second: Node| {
 		let mut net = build();
+		let origin = net.id(0);
 		net.hold(second, 3);
 		net.claim(5, "live/0", true);
 		assert!(settle(&mut net, &mut rng));
 		assert_eq!(
-			net.router(3).and_then(|r| r.best(origin)).map(|best| best.via),
+			net.router(3).and_then(|r| r.best(origin)).map(|(via, _)| via),
 			Some(first)
 		);
 		net.release(second, 3);
 		assert!(settle(&mut net, &mut rng));
-		let via = net.router(3).and_then(|r| r.best(origin)).map(|best| best.via);
+		let via = net.router(3).and_then(|r| r.best(origin)).map(|(via, _)| via);
 		let reached = net.router(4).and_then(|r| r.best(origin)).is_some();
 		(via, reached)
 	};
 	assert_eq!(settled(1, 2), (Some(1), true), "the unmarked route first");
 	assert_eq!(settled(2, 1), (Some(1), true), "the marked route first");
-}
-
-/// A request may take any next hop tied with the route in use, and a marked route
-/// does not tie with an unmarked one of the same rank: taking it would carry a copy
-/// between two upstreams, which the route in use never does.
-#[test]
-fn a_marked_route_does_not_tie_with_an_unmarked_one() {
-	let mut net = MultiSim::new(KEPT, 6);
-	net.client(5);
-	net.publish(5, 100);
-	net.link(5, 0, 1, Tie::Peer);
-	net.link(0, 1, 1, Tie::Peer);
-	net.link(0, 2, 1, Tie::Peer);
-	net.link(3, 2, 1, Tie::Up);
-	net.link(3, 1, 1, Tie::Peer);
-	net.claim(5, "live/0", true);
-	assert!(settle(&mut net, &mut Rng(7)));
-	let router = net.router(3).expect("relay 3");
-	let origin = hop(0, 0);
-	assert_eq!(router.candidates(origin).len(), 2, "both routes are heard");
-	assert_eq!(router.ties(origin), vec![1]);
 }

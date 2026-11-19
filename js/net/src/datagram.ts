@@ -9,6 +9,7 @@ import { hooks } from "./internal.ts";
 import { rescaleIn } from "./rescale.ts";
 import { Timescale, type Timestamp } from "./time.ts";
 import { checkKey, max } from "./util/key.ts";
+import { checkName } from "./util/utf8.ts";
 
 /** A single unreliable payload, addressed within its datagram track. */
 export interface Datagram {
@@ -102,6 +103,7 @@ export class Producer {
 	#state = new State();
 
 	constructor(name: string) {
+		checkName(name);
 		this.name = name;
 	}
 

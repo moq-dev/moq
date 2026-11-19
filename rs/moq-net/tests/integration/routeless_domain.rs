@@ -157,6 +157,10 @@ async fn a_reader_moves_around_a_ring_without_routes() {
 		last.available && !seen.iter().any(withdrawn),
 		"B never lets go: {seen:?}"
 	);
+	assert!(
+		!seen.iter().any(|event| event.kind == support::Kind::Restart),
+		"B keeps the Instance: {seen:?}"
+	);
 	group.write_frame(group.at_start(), payload(0, 1)).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 1)));

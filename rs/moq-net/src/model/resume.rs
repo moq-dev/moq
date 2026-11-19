@@ -182,7 +182,20 @@ impl Producer {
 		for reader in readers {
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 			let preferences = reader.subscription.read().clone();
+			// A failed copy's resolution is no placement, as in `Reader::window`: the reader's
+			// own stands, or the anchors do for ranges it has yet to take up.
+			let failed = reader.route.end().is_none()
+				&& reader
+					.copies
+					.last()
+					.is_some_and(|copy| matches!(copy.sub, Sub::Ready(_)) && copy_failed(&copy.track));
+			let placed = match failed {
+				true if reader.mirrored.ranges == preferences.ranges => Some(reader.window().resolved()),
+				true => Some(Vec::new()),
+				false => None,
+			};
 			let resolved = match reader.copies.last_mut() {
+				_ if placed.is_some() => placed.unwrap_or_default(),
 				Some(Copy {
 					sub: Sub::Ready(sub),
 					from,
@@ -1249,11 +1262,18 @@ impl Reader {
 	/// where the ranges resolve. Kept once resolved, past that copy being let go. Pending
 	/// while a relative anchor waits on a copy to resolve it.
 	fn window(&mut self) -> &Window {
+		let concluded = self.route.end().is_some();
 		for index in 0..self.copies.len() {
 			if self.window.is_settled() {
 				break;
 			}
 			let copy = &mut self.copies[index];
+			// A copy whose delivery failed placed a time start past its last group as if nothing
+			// followed, but the front's next copy continues the track: only that copy knows
+			// which group holds it, until the track concludes.
+			if !concluded && copy_failed(&copy.track) {
+				continue;
+			}
 			let cap = copy.end();
 			let resolved = match &mut copy.sub {
 				Sub::Ready(sub) => sub.resolved_ranges(),
@@ -1357,9 +1377,14 @@ impl Reader {
 			// A ready copy just resolved the replaced ranges against its cache, before its
 			// failover cap raised them, so the reader takes that resolution now.
 			if replaced {
+				let concluded = self.route.end().is_some();
 				for index in (0..self.copies.len()).rev() {
 					if self.window.is_settled() {
 						break;
+					}
+					// As in [`Self::window`], a failed copy leaves the placement to the copy continuing the track.
+					if !concluded && copy_failed(&self.copies[index].track) {
+						continue;
 					}
 					if matches!(self.copies[index].sub, Sub::Ready(_)) {
 						let resolved = self.copies[index].resolved.clone();
@@ -1392,8 +1417,16 @@ impl Reader {
 			return;
 		}
 		// Where the serving copy resolved the reader's ranges: the floor raises each start
-		// there, never lowering a later range to the floor.
+		// there, never lowering a later range to the floor. A failed copy's resolution is no
+		// placement, as in `window`: the reader's own carries over, pending until a copy
+		// continuing the track places it.
+		let failed = self.route.end().is_none()
+			&& self
+				.copies
+				.last()
+				.is_some_and(|copy| matches!(copy.sub, Sub::Ready(_)) && copy_failed(&copy.track));
 		let resolved = match self.copies.last_mut() {
+			Some(_) if failed => self.window().resolved(),
 			Some(Copy {
 				sub: Sub::Ready(sub), ..
 			}) => sub.resolved_ranges(),
@@ -1683,6 +1716,7 @@ impl Reader {
 		let budget = self.mirrored.budget();
 		let floor = if ordered { delivered.floor() } else { 0 };
 		let mut lowest: Option<Candidate> = None;
+		let mut held = false;
 		for index in 0..self.copies.len() {
 			let copy = &mut self.copies[index];
 			// What a replaced copy holds is past the reader's budget once a newer group
@@ -1737,6 +1771,15 @@ impl Reader {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(reserved))) => {
 						let key = reserved.key();
+						// Nor does a failed copy's group go out before the window is placed, which only
+						// a copy continuing the track does: it stays there until then.
+						if self.route.end().is_none()
+							&& copy_failed(&self.copies[index].track)
+							&& self.window().is_pending()
+						{
+							held = true;
+							break;
+						}
 						// A copy resolves a time start against the groups it holds, which may place
 						// it below where the reader's window did: the window decides.
 						let deliverable = Self::deliverable(&self.copies[index], key, delivered);
@@ -1792,6 +1835,11 @@ impl Reader {
 			if late && !copy.replaced && copy.floor.is_some() && Some(copy.generation) == self.generation {
 				self.resumed.get_or_insert_with(|| (None, Vec::new()));
 			}
+		}
+		// A later copy placed the window this pass: a group held back above may now be the lowest.
+		if held && !self.window().is_pending() {
+			drop(lowest);
+			return self.poll_lowest(ordered, parks, delivered, waiter);
 		}
 		if let Some(lowest) = lowest {
 			return Some(Poll::Ready(Ok(Some(lowest))));
@@ -3476,6 +3524,104 @@ mod test {
 		drop(held);
 	}
 
+	/// A copy that ended holds nothing past its last group, so it reaches a time start past
+	/// that group back to its oldest. The serving copy continues the track and places the
+	/// start where the track holds it, which is where the reader's range starts: a group of
+	/// the ended copy below it is no part of that range, and nothing between is owed.
+	#[kio::test]
+	async fn an_ended_copy_leaves_a_time_start_to_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let ended = received_copy();
+		ended.anchored();
+		routes.serve(ended.consume());
+		write(&ended, 64);
+		let mut live = subscribe(&logical, HOUR);
+		let held = recv(&mut live);
+		assert_eq!(held.start, 64);
+
+		// The source fails, and a reader joins before its replacement's copy is served.
+		ended.clone().abort(Error::Cancel).unwrap();
+		let joined = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([track::Range {
+				start: Anchor::Time(66),
+				end: None,
+			}]);
+		let mut joined = logical.consume().subscribe(joined).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut joined, false), Vec::<u64>::new());
+		let serving = received_copy();
+		serving.anchored();
+		routes.serve(serving.consume());
+		// Fetched ahead of the live feed's 66.
+		write(&serving, 67);
+		write(&serving, 66);
+		let mut read = drain(&mut joined, false);
+		read.sort_unstable();
+		assert_eq!(read, [66, 67]);
+		assert_eq!(joined.resolved()[0].map(|resolved| resolved.start), Some(66));
+		drop(held);
+	}
+
+	/// As [`an_ended_copy_leaves_a_time_start_to_the_serving_copy`], for a reader that replaces
+	/// its ranges while its copy has failed: the replacement places them.
+	#[kio::test]
+	async fn an_ended_copy_leaves_replaced_ranges_to_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let ended = received_copy();
+		routes.serve(ended.consume());
+		write(&ended, 64);
+		let mut live = subscribe(&logical, HOUR);
+		let held = recv(&mut live);
+		assert_eq!(held.start, 64);
+		drop(held);
+
+		ended.clone().abort(Error::Cancel).unwrap();
+		let ranges = live.subscription().with_ranges([track::Range {
+			start: Anchor::Time(66),
+			end: None,
+		}]);
+		live.update(ranges).unwrap();
+		assert_eq!(drain(&mut live, false), Vec::<u64>::new());
+		let serving = received_copy();
+		routes.serve(serving.consume());
+		write(&serving, 67);
+		write(&serving, 66);
+		let mut read = drain(&mut live, false);
+		read.sort_unstable();
+		assert_eq!(read, [66, 67]);
+	}
+
+	/// A failed copy's group held back for a placement goes out in key order once a later copy
+	/// in the same pass places the window below it, rather than being passed over.
+	#[kio::test]
+	async fn a_held_back_group_goes_out_once_a_later_copy_places_the_window() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let ended = received_copy();
+		routes.serve(ended.consume());
+		write(&ended, 64);
+		let mut live = subscribe(&logical, HOUR);
+		let held = recv(&mut live);
+		assert_eq!(held.start, 64);
+
+		ended.clone().abort(Error::Cancel).unwrap();
+		let joined = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([track::Range {
+				start: Anchor::Time(64),
+				end: None,
+			}]);
+		let mut joined = logical.consume().subscribe(joined).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut joined, true), Vec::<u64>::new());
+		let serving = received_copy();
+		write(&serving, 65);
+		routes.serve(serving.consume());
+		assert_eq!(drain(&mut joined, true), [64, 65]);
+		drop(held);
+	}
+
 	#[kio::test]
 	async fn a_returning_route_keeps_its_relative_end() {
 		returning_route(Anchor::Relative(2)).await;
@@ -3533,6 +3679,49 @@ mod test {
 		let mut widened = drain(&mut sub, false);
 		widened.sort_unstable();
 		assert_eq!(widened, [9, 10], "end={end:?}");
+		drop(held);
+	}
+
+	/// A route capped while replaced and then returned to reads on to the end of the reader's
+	/// bounded range: the cap never becomes the range's own end. Mirrors the `@moq/net` "a
+	/// returning route keeps the reader's bounded end across its cap".
+	#[kio::test]
+	async fn a_returning_route_keeps_the_readers_bounded_end_across_its_cap() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		let mut open = a.create_group(group::Info { start: 0 }).unwrap();
+		open.write_frame(ts(0), b"x".as_ref()).unwrap();
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: Anchor::Time(0),
+				end: Some(Anchor::Time(100)),
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription.clone())
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		let held = recv(&mut sub);
+		assert_eq!(held.start, 0);
+
+		let b = copy();
+		routes.serve(b.consume());
+		write(&b, 10);
+		write(&b, 20);
+		assert_eq!(drain(&mut sub, false), [10, 20]);
+
+		routes.serve(a.consume());
+		write(&a, 30);
+		assert_eq!(drain(&mut sub, false), [30], "past the cap A had while replaced");
+		// An update keeping the ranges asks A again with its own resolution of them.
+		sub.update(subscription.with_priority(1)).unwrap();
+		write(&a, 40);
+		assert_eq!(drain(&mut sub, false), [40], "an update keeps the reader's end");
+		open.finish().unwrap();
 		drop(held);
 	}
 

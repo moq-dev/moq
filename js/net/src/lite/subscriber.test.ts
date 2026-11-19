@@ -2858,15 +2858,21 @@ test("a widened range's SUBSCRIBE_STARTED resolves the feed's start", async () =
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const request = await opened(1);
+		const sent = new Reader(request.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
 		await request.reading;
 		expect(hooks.sourceStart(track)).toBe("pending");
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
 		track.update({ ranges: [{ start: { time: 0n }, end: { time: 1n } }] });
-		await drainReactions();
+		// The feed goes pending before the update is written, so reading it waits for both.
+		const update = await SubscribeUpdate.decode(sent, version);
 		expect(hooks.sourceStart(track)).toBe("pending");
-		// The widened range took the next Range ID.
+		// The widened range retires Range ID 0 and takes the next one.
+		expect(update.remove).toEqual([0n]);
+		expect(update.ranges).toHaveLength(1);
 		await respond(request, version, [{ started: new SubscribeStarted(1n, 1n) }]);
 		await drainReactions();
 		expect(await track.start()).toBe(1n);
