@@ -42,7 +42,3 @@ Work:
   max buffer fills, which #8799's playhead covered. A trace recorded with
   `--trace` holds only the frames that arrived, so replaying such a group
   also needs the trace to record when each group opens.
-
-## Related
-
-- [moq-net's last pub items with a single container-reader caller go private](/quest/m2/unused-api/net.md) - the Rust container reader moving onto `Gap`, this quest's native counterpart

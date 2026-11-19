@@ -11,8 +11,8 @@ that needs gaps in order: moq-mux's container reader.
 
 Decided 2026-11-18 (maintainer, /quest-plan): ✅ two methods (rejected:
 keeping `Item` as the only return; replacing gaps with a counter, which
-[unused-api/net](/quest/m2/unused-api/net.md)'s reader cannot use, since it
-needs each gap's range in order).
+moq-mux's container reader cannot use, since it needs each gap's range in
+order and when what it gave up landed).
 
 Every production caller skips `Item::Gap` today: libmoq, moq-ffi, moq-json
 snapshot and window, moq-hls, moq-mux's TS export and MSF catalog,
@@ -21,14 +21,11 @@ moq-archive, moq-stats, and moq-net's benches
 `.and_then(Item::group)` read a gap as the end of the track; they move to
 `next_group`. `Item::group` goes if nothing needs it after.
 
-Whichever lands second of this and [unused-api/net](/quest/m2/unused-api/net.md)
-points the container reader at `next_item`.
+moq-mux's container reader (`container/consumer.rs`, which reads through
+`Ordered` since [moq-dev/moq#9196](https://github.com/moq-dev/moq/pull/9196))
+moves onto `next_item`, the one production caller that reads gaps.
 
 Public API: breaking in moq-net; callers of `next_group` that matched `Item`
 drop the match, and the gap-reading one calls `next_item`. No JS or binding
 change: js/net's `Ordered` already has `nextGroup` and `nextItem`, and moq-ffi
 hides gaps. Wire: none.
-
-## Related
-
-- [moq-net's last pub items](/quest/m2/unused-api/net.md) - moves the container reader onto `Ordered`'s gaps

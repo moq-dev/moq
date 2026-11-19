@@ -39,8 +39,9 @@ removal, a rename, or a wire, catalog, or format change that is free until
   what the binding sends.
 - **moq-net API.** [Socket endpoints](https://github.com/moq-dev/moq/pull/9029) leave for Kixel, and the
   demos return to their earlier format.
-- **Unused API.** [One sweep per area](/quest/m2/unused-api/README.md), each
-  item re-checked for a downstream caller first.
+- **Unused API.** One sweep per area (done: the last,
+  [moq-dev/moq#9196](https://github.com/moq-dev/moq/pull/9196)), each item
+  re-checked for a downstream caller first.
 - **Auth and crypto.** End-to-end encryption is its own unpublished crate again
   ([moq-dev/moq#8947](https://github.com/moq-dev/moq/pull/8947)); its
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
