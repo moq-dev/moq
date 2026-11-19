@@ -232,7 +232,10 @@ async fn an_ordered_reader_starts_at_the_publishers_start_over_a_frameless_newes
 		.await
 		.expect("group timeout")
 		.unwrap();
-	assert_eq!(item.and_then(moq_net::track::Item::group).map(|group| group.start), Some(5));
+	assert_eq!(
+		item.and_then(moq_net::track::Item::group).map(|group| group.start),
+		Some(5)
+	);
 	let _track = track.finish().unwrap();
 }
 

@@ -1967,7 +1967,10 @@ mod tests {
 					"the budget wakes the reader"
 				);
 			} else {
-				let read = kio::clock::timeout(Duration::ZERO, reader.read()).await.unwrap().unwrap();
+				let read = kio::clock::timeout(Duration::ZERO, reader.read())
+					.await
+					.unwrap()
+					.unwrap();
 				assert!(matches!(read, Some(Read::Gap { .. })));
 			}
 			assert!(
@@ -1980,10 +1983,12 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_filled_sequence_hole_gives_the_next_hole_a_fresh_budget() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
-		let subscriber = copy.subscribe_with(
-			moq_net::track::Subscription::default()
-				.with_delay(Delay::default().with_min(None).with_max(Duration::from_millis(100))),
-		).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default()
+					.with_delay(Delay::default().with_min(None).with_max(Duration::from_millis(100))),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut copy.track, 0, &[ts(0)]);
 		carried().await;
@@ -2210,9 +2215,11 @@ mod tests {
 	async fn holes_behind_a_stalled_source_share_one_budget() {
 		let budget = Duration::from_millis(100);
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
-		let subscriber = copy.subscribe_with(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_min(None).with_max(budget)),
-		).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_min(None).with_max(budget)),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut copy.track, 0, &[ts(0)]);
 		carried().await;
@@ -2250,9 +2257,11 @@ mod tests {
 			None,
 		] {
 			let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
-			let subscriber = copy.subscribe_with(
-				moq_net::track::Subscription::default().with_delay(Delay::default().with_min(min).with_max(max)),
-			).await;
+			let subscriber = copy
+				.subscribe_with(
+					moq_net::track::Subscription::default().with_delay(Delay::default().with_min(min).with_max(max)),
+				)
+				.await;
 			let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 			write_group(&mut copy.track, 0, &[ts(0)]);
 			carried().await;
@@ -2275,9 +2284,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_burst_past_the_min_delay_does_not_age_out_a_hole() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
-		let subscriber = copy.subscribe_with(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
-		).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		reader.set_delay(
 			Delay::default()
@@ -2320,9 +2331,11 @@ mod tests {
 	async fn a_hole_is_late_from_the_earliest_arrival_past_it() {
 		let budget = Duration::from_millis(100);
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
-		let subscriber = copy.subscribe_with(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_min(None).with_max(budget)),
-		).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_min(None).with_max(budget)),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut copy.track, 0, &[ts(0)]);
 		carried().await;
@@ -2356,9 +2369,11 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_hole_and_an_arrived_group_both_wait_up_to_the_max_delay() {
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.audio)).await;
-		let subscriber = copy.subscribe_with(
-			moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
-		).await;
+		let subscriber = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default().with_delay(Delay::default().with_max(Duration::from_secs(1))),
+			)
+			.await;
 		let mut reader = Consumer::new(subscriber, Container::Legacy(crate::container::Kind::Data));
 		reader.set_delay(
 			Delay::default()
@@ -3329,7 +3344,8 @@ mod tests {
 			copy.subscribe_with(
 				moq_net::track::Subscription::default()
 					.with_delay(Delay::default().with_min(None).with_max(Duration::from_secs(30))),
-			).await,
+			)
+			.await,
 			Container::Legacy(crate::container::Kind::Audio),
 		);
 		consumer.max_delay = Duration::from_millis(300);
@@ -3924,10 +3940,12 @@ mod tests {
 	async fn gap_keeps_late_arriving_group_within_max_delay() {
 		tokio::time::pause();
 		let mut copy = Received::with_info(hang::container::track_info(hang::catalog::PRIORITY.video)).await;
-		let consumer_track = copy.subscribe_with(
-			moq_net::track::Subscription::default()
-				.with_delay(Delay::default().with_min(None).with_max(Duration::from_millis(500))),
-		).await;
+		let consumer_track = copy
+			.subscribe_with(
+				moq_net::track::Subscription::default()
+					.with_delay(Delay::default().with_min(None).with_max(Duration::from_millis(500))),
+			)
+			.await;
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		// Group 2's stream beats group 1's, which hasn't arrived at all yet.
@@ -4108,13 +4126,8 @@ mod tests {
 			write_group(&mut copy.track, 3, &[ts(4_400_000)]);
 			write_group(&mut copy.track, 4, &[ts(4_700_000)]);
 			write_group(&mut copy.track, 5, &[ts(5_000_000)]);
-			let mut consumer = reach_reader(
-				&copy,
-				Duration::from_millis(200),
-				Duration::from_millis(200),
-				warmup,
-			)
-			.await;
+			let mut consumer =
+				reach_reader(&copy, Duration::from_millis(200), Duration::from_millis(200), warmup).await;
 			let _track = copy.track.finish().unwrap();
 
 			let frames = read_all(&mut consumer).await.unwrap();
@@ -4323,7 +4336,7 @@ mod tests {
 		)
 		.consumer(consumer_track, Container::Legacy(crate::container::Kind::Data));
 		assert!(
-			matches!(consumer.startup, Startup::Earliest { .. }),
+			matches!(consumer.startup, Startup::Earliest),
 			"a local range names no start, so the start still reaches back"
 		);
 

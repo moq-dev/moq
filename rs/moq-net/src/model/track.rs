@@ -18148,7 +18148,8 @@ mod test {
 			}
 			// The group given up is reported, then the read ends.
 			if given_up {
-				let Poll::Ready(Ok(Some(Item::Gap { range, error, .. }))) = ordered.poll_next_group(&kio::Waiter::noop())
+				let Poll::Ready(Ok(Some(Item::Gap { range, error, .. }))) =
+					ordered.poll_next_group(&kio::Waiter::noop())
 				else {
 					panic!("the given up group is reported")
 				};
