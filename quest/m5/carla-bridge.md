@@ -46,8 +46,8 @@ probe opens the camera's own backend with a CPU picture.
     `VERSION`, so a mismatched bridge and worker fail at hello naming both
     versions; test the refusal both ways. Open, if mixed versions must run:
     negotiate at hello and keep the v1 layout for H.264.
-  - `sim/moq_carla_sim/bridge.py` publishes `AVC3` or `HEV1` instead of
-    hardcoding `AVC3`.
+  - `sim/moq_carla_sim/bridge.py` publishes `H264` or `H265` instead of
+    hardcoding `H264`.
 - Scaling: one render still feeds the 426x240 and 1280x720 renditions,
   scaled on the GPU. GPU-side copies are allowed; a CPU round trip is not.
 - Test: the stand-in (`tests/standin/mod.rs`) stops requiring vendor
