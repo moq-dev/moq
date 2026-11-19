@@ -1033,6 +1033,12 @@ let answeredEmpty: (producer: Producer, time: bigint, budget: number) => boolean
 // `TrackState::landing_from` and `TrackState::landed_through`.
 let landedFrom: (producer: Producer, time: bigint, covering: bigint | undefined) => bigint | undefined;
 
+// The first run of `[start, end)` a received copy's live feed has not accounted for: not arrived,
+// not dropped, before the track's end, and in a gap whose grace has not folded. Unlike
+// {@link mayLand}, a key below where the feed starts counts. Mirrors the Rust
+// `TrackState::find_unaccounted`.
+let unaccounted: (producer: Producer, start: bigint, end: bigint) => { folds?: Instant } | undefined;
+
 // When a received copy's time start at `time`, waiting to be placed, next may place itself with no
 // change to wake its readers: the grace of the lowest gap {@link landedFrom} still waits on
 // folds. Mirrors the Rust `TrackState::time_start_folds`.
@@ -1585,18 +1591,24 @@ export class Producer {
 				// An open range never resolves empty, so such an answer says nothing.
 				if (start === undefined && through === undefined) continue;
 				const held = merged.get(time);
+				if (held === undefined) {
+					merged.set(time, start === undefined ? { empty: budget, through } : { start, through });
+					continue;
+				}
 				// Two ranges asked from one time: the lower start and the farther reach hold for both.
+				// A start reaches only as far as the answers placing it, never an empty one's.
+				if (held.start !== undefined && start === undefined) continue;
+				if (held.start === undefined && start !== undefined) {
+					merged.set(time, { start, through });
+					continue;
+				}
 				const reach =
-					held === undefined
-						? through
-						: held.through === undefined || through === undefined
-							? undefined
-							: max(held.through, through);
-				const lower =
-					held?.start === undefined || start === undefined ? (held?.start ?? start) : min(held.start, start);
+					held.through === undefined || through === undefined ? undefined : max(held.through, through);
 				merged.set(
 					time,
-					lower === undefined ? { empty: budget, through: reach } : { start: lower, through: reach },
+					held.start === undefined || start === undefined
+						? { empty: budget, through: reach }
+						: { start: min(held.start, start), through: reach },
 				);
 			}
 			producer.#timeStarts = merged;
@@ -1728,6 +1740,10 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
+		unaccounted = (producer, start, end) => {
+			const next = producer.#unaccounted(start, end, producer.#grace()).next();
+			return next.done ? undefined : { folds: next.value.folds };
+		};
 		wireFed = (producer) => producer.#wire !== undefined;
 		feedFloor = (producer) => {
 			if (!producer.#wire) return undefined;
@@ -1786,10 +1802,17 @@ export class Producer {
 		// asks the feed for the groups below it, which a fill must not duplicate.
 		const feed = this.#feedStart();
 		if (typeof feed === "bigint") start = max(start, feed);
+		yield* this.#unaccounted(start, land.end, land.grace);
+	}
+
+	// The runs of `[start, end)` the live feed has not accounted for, lowest first: not arrived, not
+	// dropped, before the track's end, and in a gap whose grace has not folded. Mirrors the Rust
+	// `TrackState::find_unaccounted`.
+	*#unaccounted(start: bigint, end: bigint, limit: Duration): Generator<Run & { folds?: Instant }> {
+		if (this.#state.closed.peek() !== undefined) return;
 		const declared = this.#state.end.peek()?.at;
-		const end = declared === undefined ? land.end : min(land.end, finalKey(declared));
+		if (declared !== undefined) end = min(end, finalKey(declared));
 		const at = now();
-		const limit = land.grace;
 		const drops = this.#state.drops;
 		for (const gap of this.#arrivals.gaps(start, end)) {
 			const folds = gap.since?.saturatingAdd(limit);
@@ -4428,6 +4451,7 @@ export class Subscriber {
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
 		// A reader following route copies leaves its ranges to the serving copy, which resolves
 		// their anchors against the groups it holds, then narrows them to its own local bounds.
+		hooks.gapHeld = (subscriber, at, end) => subscriber.#gapHeld(at, end);
 		hooks.servingRuns = (subscriber, start, end) => {
 			const cursor = subscriber.#cursor.peek();
 			const from = max(start, cursor.start);
@@ -5404,10 +5428,10 @@ export class Subscriber {
 
 	// Whether a time start still waiting below `end` holds back a gap an ordered read at `at` would
 	// return, as #waitTimeStart holds a group: the group containing it may lie below the gap, and an
-	// ordered read never goes back. A resumed reader's copies hold their own groups, and its gaps go
-	// as found. Mirrors the Rust `Cursor::poll_gap_held`.
+	// ordered read never goes back. A resumed reader asks its serving copy, whose runs it reads. Mirrors
+	// the Rust `Cursor::poll_gap_held`.
 	#gapHeld(at: bigint, end: bigint): boolean {
-		if (this.#resume) return false;
+		if (this.#resume) return this.#resume.gapHeld(at, end);
 		this.#settle();
 		const start = max(max(this.#cursor.peek().start, this.#nextKey), at);
 		return this.#waitTimeStart(start, end, this.#drift());
@@ -5574,6 +5598,13 @@ export class Subscriber {
 		const producer = this.#state.producer;
 		let waits = false;
 		for (const time of this.#window.waitingIn(start, key)) {
+			if (producer && wireFed(producer)) {
+				// With every key from the floor through the time accounted for, a group still to come
+				// containing it lies below the floor, which the read never hands out.
+				const open = unaccounted(producer, start, time + 1n);
+				if (open === undefined) continue;
+				if (open.folds !== undefined) this.#wakeAt(open.folds.since(Instant.ZERO).asNanos());
+			}
 			// Its range had no group to deliver, so the feed lands none of it. Its successor is this
 			// group's or one below: the group containing the time is judged as an owed group at it would be.
 			if (producer && answeredEmpty(producer, time, drift.budget)) continue;

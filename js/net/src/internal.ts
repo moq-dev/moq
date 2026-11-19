@@ -519,6 +519,8 @@ export interface ResumeSource {
 	resolved(): (Resolved | undefined)[];
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
 	runs(start: bigint, end: bigint): Run[] | undefined;
+	/** Whether a time start the serving copy still waits to place holds back a gap; see `hooks.gapHeld`. */
+	gapHeld(at: bigint, end: bigint): boolean;
 	/** Whether a route's copy serves the reader now. */
 	serving(): boolean;
 	/** Where the run of keys from `key` the serving copy says no group arrives at ends; see `hooks.holeEnd`. */
@@ -823,6 +825,11 @@ export const hooks: {
 	 * Assigned by `track.ts`.
 	 */
 	servingRuns: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
+	/**
+	 * Whether a time start still waiting below `end` holds back a gap an ordered read at `at` would
+	 * return. Assigned by `track.ts`.
+	 */
+	gapHeld: (subscriber: Subscriber, at: bigint, end: bigint) => boolean;
 	/**
 	 * The exclusive end past every group a subscriber reads, or undefined while one of its ranges
 	 * stays open. Assigned by `track.ts`.
@@ -1185,6 +1192,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	servingRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	gapHeld: () => {
 		throw new Error("track.ts not loaded");
 	},
 	servingEnd: () => {

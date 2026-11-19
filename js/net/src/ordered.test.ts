@@ -528,6 +528,42 @@ test("a waiting time start below an ordered read's own floor holds nothing", () 
 	expect(items(ordered)).toEqual(["group 2000"]);
 });
 
+test("a waiting time start holds no gap once nothing from the read's floor through it may land", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	const ordered = () =>
+		producer
+			.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+			.withRange({ start: { included: 1500n }, end: { excluded: 1600n } })
+			.ordered();
+	drop(producer, 1501n, 1600n);
+	const waiting = ordered();
+	expect(items(waiting)).toEqual([]);
+	// The group containing the time, if still to come, lies below the read's floor.
+	drop(producer, 1500n, 1501n);
+	expect(items(waiting)[0]).toStartWith("gap 1500..");
+	expect(items(ordered())[0]).toStartWith("gap 1500..");
+});
+
+test("an empty answer never extends the reach of a start reported for its time", () => {
+	for (const emptyFirst of [false, true]) {
+		const producer = receivedTrack();
+		const starts: [bigint, bigint | undefined, bigint | undefined][] = [
+			[1000n, 1200n, 1300n],
+			[1000n, undefined, 1800n],
+		];
+		if (emptyFirst) starts.reverse();
+		hooks.timeStarts(producer, starts, NO_MAX_DELAY);
+		drop(producer, 1200n, 1201n);
+		producer.skipGroups(1201n, 1600n);
+		const at = (time: bigint) =>
+			hooks.servingResolved(producer.subscribe({ delay: { max: null }, ranges: [{ start: { time } }] }));
+		expect(at(1250n)).toEqual([{ start: 1200n, end: undefined, floored: true }]);
+		// No answer reaches 1500.
+		expect(at(1500n)).toEqual([undefined]);
+	}
+});
+
 test("a skip is no group to place a waiting time start from", () => {
 	const producer = receivedTrack();
 	// GROUP 2000 says the group before it is 1000, which is still on its way.

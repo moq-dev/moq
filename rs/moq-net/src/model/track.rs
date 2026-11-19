@@ -3447,16 +3447,28 @@ impl TrackState {
 		groups: ops::Range<u64>,
 		floor: bool,
 		grace: Duration,
-		mut f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
+		f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
 	) -> Option<R> {
 		let start = match floor {
 			true => groups.start,
 			false => groups.start.max(self.arrivals.first()?),
 		};
 		let start = start.max(self.start.key().unwrap_or(0));
-		let end = groups.end.min(self.final_key().unwrap_or(u64::MAX));
+		self.find_unaccounted(start..groups.end, grace, f)
+	}
+
+	/// The first `f` answers of the runs of `keys` the live feed has not accounted for, lowest
+	/// first: not arrived, not dropped, before the track's end, and in a gap whose grace has not
+	/// folded. Unlike [`Self::find_landable`], a key below where the feed starts counts.
+	fn find_unaccounted<R>(
+		&self,
+		keys: ops::Range<u64>,
+		grace: Duration,
+		mut f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
+	) -> Option<R> {
+		let end = keys.end.min(self.final_key().unwrap_or(u64::MAX));
 		let now = self.cache.pool().now_wall();
-		for (gap, opened) in self.arrivals.gaps(start..end) {
+		for (gap, opened) in self.arrivals.gaps(keys.start..end) {
 			let folds = opened.and_then(|opened| opened.checked_add(grace));
 			if folds.is_some_and(|folds| now >= folds) {
 				continue;
@@ -4974,15 +4986,17 @@ impl Producer {
 			}
 			let answer = start.map_or(Answer::Empty(budget), Answer::At);
 			// Two ranges asked from one time: the lower start and the farther reach hold for both.
+			// A start reaches only as far as the answers placing it, never an empty one's.
 			merged
 				.entry(time)
 				.and_modify(|held| {
-					held.answer = match (held.answer, answer) {
-						(Answer::At(held), Answer::At(start)) => Answer::At(held.min(start)),
-						(Answer::At(start), _) | (_, Answer::At(start)) => Answer::At(start),
-						(empty, _) => empty,
+					let reach = held.through.zip(through).map(|(a, b)| a.max(b));
+					(held.answer, held.through) = match (held.answer, answer) {
+						(Answer::At(held), Answer::At(start)) => (Answer::At(held.min(start)), reach),
+						(Answer::At(_), Answer::Empty(_)) => (held.answer, held.through),
+						(Answer::Empty(_), Answer::At(_)) => (answer, through),
+						(Answer::Empty(_), Answer::Empty(_)) => (held.answer, reach),
 					};
-					held.through = held.through.zip(through).map(|(a, b)| a.max(b));
 				})
 				.or_insert(TimeStart { answer, through });
 		}
@@ -9687,7 +9701,20 @@ impl Cursor {
 				waited.borrow_mut().clear();
 				// An unjudgeable old gap cannot hold a finite read, as for an owed group.
 				let floor = times.start.max(state.cache_floor(drift.budget));
+				let grace = state.arrival_grace();
 				for time in window.waiting_in(floor..times.end) {
+					// With every key from the floor through the time accounted for, a group still
+					// to come containing it lies below the floor, which the read never hands out.
+					let unaccounted = match state.anchors.received() {
+						true => state.find_unaccounted(floor..time.saturating_add(1), grace, |_, folds| Some(folds)),
+						false => Some(None),
+					};
+					let Some(unaccounted) = unaccounted else {
+						continue;
+					};
+					if let Some(folds) = unaccounted {
+						state.cache.watch_wall(folds, waiter);
+					}
 					// Its range had no group to deliver, so the feed lands none of it. Its
 					// successor is this group's or one below: the group containing the time is
 					// judged as an owed group at it would be.
@@ -11103,8 +11130,9 @@ impl Subscriber {
 	}
 
 	/// Pending while a waiting time start below `end` holds back a gap an [`Ordered`] read at
-	/// `from` would return; see [`Cursor::poll_gap_held`]. A resumed reader's copies hold their
-	/// own groups, and its gaps go as found.
+	/// `from` would return; see [`Cursor::poll_gap_held`]. A resumed reader's own window owes
+	/// every key from the read until a copy places its time starts, so [`Self::next_in_range`]
+	/// already holds such a gap.
 	fn poll_gap_held(&mut self, from: u64, end: u64, waiter: &kio::Waiter) -> Poll<()> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_gap_held(from, end, waiter),
@@ -16458,6 +16486,66 @@ mod test {
 		match ordered.next_group().now_or_never() {
 			Some(Ok(Some(Item::Group(group)))) => assert_eq!(group.start, 2000),
 			other => panic!("2000 waited: {:?}", other.map(|res| res.map(|item| item.is_some()))),
+		}
+	}
+
+	/// A waiting time start whose time the read's floor reaches holds no gap once every key from
+	/// the floor through the time is accounted for: the group containing it lies below the floor,
+	/// which the read never hands out.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_waiting_time_start_holds_no_gap_once_nothing_past_the_floor_may_contain_it() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+		let ordered = |producer: &Producer| {
+			producer
+				.subscribe(
+					Subscription::default()
+						.with_ranges([Range {
+							start: Anchor::Time(1500),
+							end: None,
+						}])
+						.with_delay(Delay::default().with_max(None)),
+				)
+				.with_range(1500..1600)
+				.ordered()
+		};
+		let next = |ordered: &mut Ordered| match ordered.next_group().now_or_never() {
+			None => None,
+			Some(Ok(Some(Item::Gap { range, .. }))) => Some(range),
+			Some(res) => panic!("not a gap: {:?}", res.map(|item| item.is_some())),
+		};
+		producer.drop_groups(1501..1600, StreamError::NotFound);
+		let mut waiting = ordered(&producer);
+		assert_eq!(next(&mut waiting), None, "1500 may still land");
+		producer.drop_groups(1500..1501, StreamError::NotFound);
+		assert_eq!(next(&mut waiting).map(|gap| gap.start), Some(1500));
+		assert_eq!(next(&mut ordered(&producer)).map(|gap| gap.start), Some(1500));
+	}
+
+	/// A range answered empty reaches no time for the start another range asked from the same
+	/// time reported: that start covers only the times its own answer reaches.
+	#[test]
+	fn an_empty_answer_never_extends_the_reach_of_a_start() {
+		for empty_first in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			producer.received();
+			producer.anchored();
+			write_group(&producer, 500);
+			let mut starts = vec![(1000, Some(1200), Some(1300)), (1000, None, Some(1800))];
+			if empty_first {
+				starts.reverse();
+			}
+			producer.time_starts(starts, Duration::MAX);
+			let cut = producer.create_group(group::Info { start: 1200 }).unwrap();
+			cut.abort(Error::Cancel).unwrap();
+			producer.modify().unwrap().reclaim_aborted(1200);
+			producer.skip_groups(1201..1600);
+			let state = producer.state.read();
+			assert_eq!(state.containing(1250), Containing::Group(1200));
+			assert_eq!(state.containing(1500), Containing::Unknown, "no answer reaches it");
 		}
 	}
 
