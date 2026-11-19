@@ -104,6 +104,27 @@ describe("replay", () => {
 		expect(warn).toHaveBeenCalled();
 	});
 
+	// A publisher keying groups by timestamp never uses the keys between them, so only keys around
+	// missing media are owed. Media that overlaps the group below counts as back to back, as the consumer
+	// reads it.
+	it("waits out only the keys around missing media when groups are keyed by timestamp", async () => {
+		const options = { rate: RATE, config: CONFIG, delay: Duration.millis(100), duration: observed(10) };
+		const keyed = (duration: number) =>
+			paced(10, () => 30).map((arrival) => ({ ...arrival, group: arrival.timestamp * 1000, duration }));
+		// Audio heard, in ms: owed keys nobody sends would starve the whole replay.
+		const heard = async (trace: Arrival[]) => {
+			let samples = 0;
+			for await (const { output } of replay(trace, options)) samples += output.filter((v) => v !== 0).length;
+			return (samples * 1000) / RATE;
+		};
+		const whole = await heard(keyed(20));
+		expect(whole).toBeGreaterThan(9000);
+		expect(await heard(keyed(22))).toBe(whole);
+		expect(await underruns(keyed(20), options)).toBe(0);
+		const missing = keyed(20).filter((arrival) => arrival.timestamp !== 5000);
+		expect(await underruns(missing, options)).toBeGreaterThan(0);
+	});
+
 	it("leaves a frame missing inside a group as missing audio", async () => {
 		// Five frames a group, delivered on time, with one from the middle of a group never sent.
 		const trace = paced(10, () => 30)
