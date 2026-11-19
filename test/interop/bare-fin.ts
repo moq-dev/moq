@@ -53,6 +53,7 @@ if (version !== undefined) {
 	liteSubscriber = subscriber;
 	reader = subscriber.consume(path).track("video").subscribe();
 	const info = await Stream.accept(pair.server, version);
+	if (!info) throw new Error("the group was already answered");
 	assert(info);
 	assert.equal(await info.reader.u53(), StreamId.Track);
 	await Track.decode(info.reader, version);

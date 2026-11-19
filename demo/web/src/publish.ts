@@ -410,6 +410,7 @@ meta.run((effect) => {
 		timescale: Net.Time.Timescale.MILLI,
 		maxAge: Duration.millis(86_400_000),
 	});
+	if (!track) throw new Error("the track already exists");
 	effect.cleanup(() => {
 		track.finish();
 		track.close();

@@ -148,7 +148,7 @@ test("createTrack with invalid info rejects the queued request it answers", asyn
 	const pulled = wireOf(broadcast).requested();
 	const subscriber = broadcast.track("media").subscribe();
 
-	expect(() => defined(broadcast.createTrack("media", { priority: 256 }))).toThrow();
+	expect(() => broadcast.createTrack("media", { priority: 256 })).toThrow();
 	expect(await subscriber.closed).toBeInstanceOf(Error);
 
 	// The refused request no longer holds the name.
@@ -556,7 +556,7 @@ test("createTrack commits info up front", async () => {
 	expect(info.priority).toBe(3);
 });
 
-test("createTrack rejects a duplicate live name", () => {
+test("createTrack returns undefined for a duplicate live name", () => {
 	const broadcast = new BroadcastProducer();
 	defined(broadcast.createTrack("dup", { timescale: Timescale.MILLI }));
 	expect(broadcast.createTrack("dup", { timescale: Timescale.MILLI })).toBeUndefined();
@@ -754,8 +754,8 @@ test("a track name with a lone surrogate is refused where it is named, since UTF
 	const broadcast = new BroadcastProducer();
 	const consumer = broadcast.consume();
 	for (const name of ["\uD800", "a\uDC00", "\uDC00\uD800"]) {
-		expect(() => defined(broadcast.createTrack(name))).toThrow("lone surrogate");
-		expect(() => defined(broadcast.createDatagrams(name))).toThrow("lone surrogate");
+		expect(() => broadcast.createTrack(name)).toThrow("lone surrogate");
+		expect(() => broadcast.createDatagrams(name)).toThrow("lone surrogate");
 		expect(() => broadcast.track(name)).toThrow("lone surrogate");
 		expect(() => consumer.track(name)).toThrow("lone surrogate");
 		expect(() => consumer.datagrams(name)).toThrow("lone surrogate");

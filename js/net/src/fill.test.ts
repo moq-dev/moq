@@ -691,7 +691,7 @@ test("fill: a group arriving live answers the fill", async () => {
 	live.writeFrame({ payload: enc.encode("live"), timestamp: Timestamp.unscaled(live.start) });
 	live.finish();
 	expect(fill.wanted()).toBeUndefined();
-	expect(() => defined(fill.accept(1n))).toThrow();
+	expect(fill.accept(1n)).toBeUndefined();
 	expect(await frames(await fetching)).toEqual(["live"]);
 
 	fill.close();

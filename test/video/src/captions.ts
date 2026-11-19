@@ -21,6 +21,7 @@ export function captions() {
 	]) {
 		textCatalog.renditions[name] = { format: "utf8", role: "subtitle", container: { kind: "legacy" } };
 		const track = producer.createTrack(name);
+		if (!track) throw new Error("the track already exists");
 		const group = track.appendGroup(Time.Timestamp.unscaled(0n));
 		group.writeFrame({
 			payload: Legacy.encodeFrame(new TextEncoder().encode(text), Duration.micros(1_000_000)),

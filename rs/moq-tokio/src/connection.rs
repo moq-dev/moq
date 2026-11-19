@@ -888,8 +888,8 @@ pub struct Snapshot {
 /// and [`recv_bandwidth`](Self::recv_bandwidth) track the live session and reset while disconnected.
 /// The extra toggle a plain session doesn't have is the connection lifecycle: [`established`](Self::established)
 /// waits for the first session, [`connected`](Self::connected) reads the current state synchronously,
-/// [`connects`](Self::connects) counts the sessions so far, and [`status`](Self::status) waits for the
-/// next change. [`closed`](Self::closed) waits for the loop to stop. Clones share the loop; it
+/// [`connects`](Self::connects) counts the sessions so far, and [`Monitor::state_changed`] waits for
+/// the next change. [`closed`](Self::closed) waits for the loop to stop. Clones share the loop; it
 /// stops when the last clone drops (or on an explicit [`abort`](Self::abort)).
 #[derive(Clone)]
 #[must_use = "dropping the Connection stops the dial; hold it for as long as you want the session"]

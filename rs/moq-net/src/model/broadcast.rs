@@ -1594,6 +1594,21 @@ mod test {
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
 	}
 
+	/// A live track holds its name against every creator, a minted name skips it, and the
+	/// name frees once the track ends.
+	#[test]
+	fn a_live_name_is_taken_until_its_track_ends() {
+		let producer = Info::new().produce();
+		let track = producer.create_track("0.opus", crate::track::Info::timed()).unwrap();
+		assert!(producer.create_track("0.opus", None).is_none());
+		assert!(producer.reserve_track("0.opus").is_none());
+		assert!(producer.reserve_unlisted_track("0.opus").is_none());
+		assert_eq!(producer.unique_track(".opus", None).name(), "1.opus");
+
+		drop(track);
+		assert!(producer.create_track("0.opus", None).is_some());
+	}
+
 	/// A track handle reads what an open broadcast serves now, so a track that went away
 	/// reads empty rather than its stale cache.
 	#[test]

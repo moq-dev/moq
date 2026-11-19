@@ -106,7 +106,11 @@ const payload = (track: Track, sequence: number, frame: number) => `${track.name
 const origin = new Moq.Origin.Producer();
 const publication = origin.route(Moq.Path.from(broadcastName));
 // No publisher age limit: each reader's budget alone decides which groups are still worth sending.
-const tracks = plan.tracks.map((track) => publication.broadcast.createTrack(track.name, { maxAge: null }));
+const tracks = plan.tracks.map((track) => {
+	const created = publication.broadcast.createTrack(track.name, { maxAge: null });
+	if (!created) throw new Error("the track already exists");
+	return created;
+});
 publication.announce();
 // Bun has no WebTransport, so this dials the WebSocket, whose qmux stream limit @moq/net raises
 // far past what 300 subscriptions need: the only cap in play is the browser's.
