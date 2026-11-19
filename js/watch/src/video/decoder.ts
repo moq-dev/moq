@@ -165,6 +165,9 @@ export class Decoder {
 	// The path of the media the last rendition read, and its instance. Every handle to one instance
 	// shares `closed`, so it identifies the instance where the handle itself does not.
 	#instance?: { path: Moq.Path.Valid; closed: unknown };
+	// The consumer the last released rendition read, and its path, so a rendition resumed after a pause
+	// or a hidden tab continues its arrival estimate: the viewer's stop says nothing about the path.
+	#retired?: { path: Moq.Path.Valid; consumer: Container.Consumer };
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
 
 	#signals = new Effect();
@@ -331,10 +334,12 @@ export class Decoder {
 		this.#instance = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
 
-		// Only a rendition read from the same path continues the outgoing arrival estimate: another
-		// path's arrivals have nothing to do with what this one learned.
+		// Only a rendition read from the same path continues the outgoing arrival estimate, or the one
+		// released last when none is active: another path's arrivals have nothing to do with what this
+		// one learned.
 		const outgoing = this.#active.peek();
-		const predecessor = outgoing?.broadcast.path === active.path ? outgoing.consumer : undefined;
+		const previous = outgoing ? { path: outgoing.broadcast.path, consumer: outgoing.consumer } : this.#retired;
+		const predecessor = previous?.path === active.path ? previous.consumer : undefined;
 
 		const rendition = new Rendition({
 			sync: this.sync,
@@ -405,7 +410,10 @@ export class Decoder {
 			return;
 		}
 
-		effect.cleanup(() => active.close());
+		effect.cleanup(() => {
+			if (active.consumer) this.#retired = { path: active.broadcast.path, consumer: active.consumer };
+			active.close();
+		});
 
 		effect.run((inner) => {
 			const error = inner.get(active.error);

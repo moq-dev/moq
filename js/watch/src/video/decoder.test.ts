@@ -1209,6 +1209,68 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 	}
 });
 
+// A pause releases the rendition and a resume subscribes again on the same path. Restarting its
+// arrival estimate from the cold-start prior gave the first outage after the resume a tenth of the
+// histogram, so one late keyframe group held the shared delay near a second and froze the picture.
+it("a resumed video track keeps its estimate, so one late burst does not raise the delay", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true);
+	const track = playback.track as Moq.Track.Producer;
+	// One frame every 33ms in one-second groups, each written as it is due unless `held`.
+	const FRAME = 33;
+	const GOP = 30;
+	let frame = 0;
+	let group: Moq.Group.Producer | undefined;
+	let held = false;
+	const queued: number[] = [];
+	const run = async (until: number) => {
+		while (frame * FRAME <= until) {
+			await clock.advance(FRAME);
+			queued.push(frame * FRAME);
+			frame++;
+			if (!held) {
+				for (const media of queued.splice(0)) {
+					if (media % (FRAME * GOP) === 0) {
+						group?.finish();
+						group = track.createGroup(BigInt(media / (FRAME * GOP)));
+					}
+					group?.writeFrame(legacyFrame(Duration.millis(media)));
+				}
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			await microtasks();
+		}
+	};
+
+	try {
+		playback.delay.set("auto");
+		await microtasks();
+
+		// Long enough for the estimate to settle on a path where every frame lands on time.
+		await run(20_000);
+		const warm = playback.sync.out.delay.peek();
+
+		playback.enabled.set(false);
+		await run(23_000);
+		playback.enabled.set(true);
+		// Past the join, so the outage below is measured as the path's.
+		await run(25_000);
+
+		// One outage: the frames from a keyframe on held back for 800ms and flushed at once.
+		held = true;
+		await run(25_740 + 800);
+		held = false;
+		await run(28_000);
+
+		expect(playback.decoder.out.timestamp.peek()?.asMillis()).toBeGreaterThan(27_000);
+		expect(playback.sync.out.delay.peek().asMillis()).toBeLessThan(warm.asMillis() + 100);
+	} finally {
+		playback.close();
+		await microtasks();
+		clock.installed.close();
+	}
+});
+
 // Another path's arrivals say nothing about this one's, so a rendition read from elsewhere, such as
 // through a `broadcast` override, learns its own estimate instead of inheriting the outgoing one.
 it("a video track read from another path does not inherit the outgoing delay", async () => {

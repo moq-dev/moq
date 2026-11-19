@@ -5537,6 +5537,8 @@ impl Finished {
 /// from upstream. While at least one is alive a reader's miss queues a [`Fill`] for it
 /// to serve; with none, the miss is named dropped, and a cache-miss
 /// [`Consumer::fetch_group`] on an accepted track fails fast with [`Error::NotFound`].
+/// Keep taking fills until it drops: a reader waits on its [`FillLookup`] until it is
+/// answered or dropped, so a handle left alive but unread stalls that reader.
 ///
 /// A live handle also lets a reader at a frame a group copy shed replay it: a [`FillGroups`] of
 /// that one group from that frame asks for a flight, a copy of its own paced by the readers
