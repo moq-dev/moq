@@ -1539,21 +1539,33 @@ mod tests {
 		groups
 	}
 
-	/// A discontinuity lands as its own marker group (one empty frame) between the
-	/// content either side, so a consumer can see the break instead of inferring
-	/// continuity from adjacent sequences.
+	/// Drain all groups, returning each group's declared end in the track's microseconds.
+	async fn collect_ends(mut consumer: moq_net::track::Subscriber) -> Vec<Option<u64>> {
+		let mut ends = Vec::new();
+		while let Some(mut group) = consumer.recv_group().await.unwrap() {
+			while group.read_frame().await.unwrap().is_some() {}
+			ends.push(group.end());
+		}
+		ends
+	}
+
+	/// A discontinuity writes no group of its own: the open group ends whole where its media does,
+	/// below where the media resumes, so a reader learns of the break from the group itself.
 	#[tokio::test]
-	async fn discontinuity_publishes_an_empty_group() {
+	async fn discontinuity_ends_the_group_where_its_media_does() {
 		// The resumed clock jumps forty minutes, so both the max age and the
 		// drift budget have to cover it or the pre-discontinuity group reads as ancient.
 		let discontinuity_max_age = std::time::Duration::from_secs(41 * 60);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(discontinuity_max_age);
 		let track = track_producer("test", info);
-		let consumer = track.subscribe(
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(discontinuity_max_age)),
-		);
-		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+		let subscribe = || {
+			track.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(discontinuity_max_age)),
+			)
+		};
+		let (payloads, ends) = (subscribe(), subscribe());
+		let mut producer = Producer::new(track.clone(), Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();
 		producer.write(frame(10_000, false)).unwrap();
@@ -1562,40 +1574,34 @@ mod tests {
 		producer.write(frame(2_405_070_000, true)).unwrap();
 		let _finished = producer.finish().unwrap();
 
-		let groups = collect_payloads(consumer).await;
-		assert_eq!(groups.len(), 3);
-		assert_eq!(groups[0], vec![(0, 2), (10_000, 2)]);
+		let groups = collect_payloads(payloads).await;
+		assert_eq!(groups, vec![vec![(0, 2), (10_000, 2)], vec![(2_405_070_000, 2)]]);
 		assert_eq!(
-			groups[1],
-			vec![(10_000, 0)],
-			"the marker is one empty frame at the last frame, which has no duration to end later"
+			collect_ends(ends).await[0],
+			Some(10_000),
+			"the group ends at its last frame, which has no duration to end later"
 		);
-		assert_eq!(groups[2][0], (2_405_070_000, 2));
 	}
 
-	/// A subscription starts at the track's LATEST group, and the marker advances it even
-	/// though it carries nothing. So a subscriber arriving mid-break waits for real media
-	/// rather than being handed the pre-break group as if it were live -- which is how a
-	/// 40-minute-stale frame once reached a VOD recording.
-	#[test]
-	fn discontinuity_moves_the_live_edge_off_stale_content() {
+	/// A lone frame without a duration reaches only its own start, so its group ends one unit of the
+	/// track's timescale past it: a group's end has to pass its start.
+	#[tokio::test]
+	async fn discontinuity_ends_a_lone_frame_one_unit_on() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
-		producer.write(frame(0, true)).unwrap();
-		let stale = producer.track().largest().map(|largest| largest.group);
-
+		producer.write(frame(10_000, true)).unwrap();
 		producer.discontinuity().unwrap();
-		let fresh = producer.track().largest().map(|largest| largest.group);
+		let _finished = producer.finish().unwrap();
 
-		assert!(fresh > stale, "the marker group is the live edge now");
+		assert_eq!(collect_ends(consumer).await, vec![Some(10_001)]);
 	}
 
-	/// The marker sits a unit before the duration marker a cut wrote, not at the last frame below
-	/// it, which a consumer bounding groups by their reach would read as a rewind.
+	/// After a cut, the group already ended where the cut said, so a discontinuity writes nothing.
 	#[tokio::test]
-	async fn discontinuity_after_a_cut_starts_at_the_duration_marker() {
-		for (end, marker) in [(Some(25_000), 25_000), (None, 20_000)] {
+	async fn discontinuity_after_a_cut_writes_nothing() {
+		for (end, ended) in [(Some(25_000), 25_000), (None, 20_000)] {
 			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 			let consumer = track.subscribe(replay());
 			let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
@@ -1607,15 +1613,10 @@ mod tests {
 			// With no group open, a cut's bound is a point nothing reached.
 			producer.cut(Some(Timestamp::from_micros(90_000).unwrap())).unwrap();
 			producer.discontinuity().unwrap();
+			assert_eq!(producer.live_edge(), Some(Timestamp::from_micros(ended).unwrap()));
 			let _finished = producer.finish().unwrap();
 
-			let groups = collect_payloads(consumer).await;
-			assert_eq!(
-				groups[0].last(),
-				Some(&(marker, 0)),
-				"cut({end:?}) writes its duration marker"
-			);
-			assert_eq!(groups[1], vec![(marker - 1, 0)], "cut({end:?}) then discontinuity");
+			assert_eq!(collect_ends(consumer).await, vec![Some(ended)], "cut({end:?}) then discontinuity");
 		}
 	}
 
@@ -1676,30 +1677,43 @@ mod tests {
 		groups
 	}
 
-	/// A video group ends with an empty frame at the next keyframe's timestamp.
+	/// A cut ends a video group whole at the caller's bound, with no marker frame.
 	#[tokio::test]
-	async fn cut_writes_a_duration_marker_at_the_callers_bound() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
+	async fn cut_ends_the_group_at_the_callers_bound() {
+		for container in [
+			Container::Legacy(crate::container::Kind::Video),
+			Container::Loc(crate::container::Kind::Video),
+		] {
+			let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+			let (payloads, ends) = (track.subscribe(replay()), track.subscribe(replay()));
+			let mut producer = Producer::new(track, container);
 
-		producer.write(frame(0, true)).unwrap();
-		producer.write(frame(10_000, false)).unwrap();
-		producer
-			.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
-			.unwrap();
-		producer.write(frame(20_000, true)).unwrap();
-		let _finished = producer.finish().unwrap();
+			producer.write(frame(0, true)).unwrap();
+			producer.write(frame(10_000, false)).unwrap();
+			producer
+				.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
+				.unwrap();
+			producer.write(frame(20_000, true)).unwrap();
+			let _finished = producer.finish().unwrap();
 
-		let groups = collect_payloads(consumer).await;
-		assert_eq!(groups[0], vec![(0, 2), (10_000, 2), (15_000, 0)]);
-		assert_eq!(groups[1][0], (20_000, 2));
-		assert_eq!(groups[1].last().unwrap().1, 0, "finish closes the last group");
+			let mut counts = Vec::new();
+			let mut payloads = payloads;
+			while let Some(mut group) = payloads.recv_group().await.unwrap() {
+				let mut count = 0;
+				while group.read_frame().await.unwrap().is_some() {
+					count += 1;
+				}
+				counts.push(count);
+			}
+			assert_eq!(counts, vec![2, 1], "no frame beyond the media");
+			// The last group's end is estimated from the cadence before it, 10ms.
+			assert_eq!(collect_ends(ends).await, vec![Some(15_000), Some(30_000)]);
+		}
 	}
 
-	/// Audio never writes a duration marker, even at finish.
+	/// Audio writes nothing past its media, even at finish.
 	#[tokio::test]
-	async fn audio_cut_writes_no_duration_marker() {
+	async fn audio_writes_only_media() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
@@ -1725,30 +1739,9 @@ mod tests {
 		groups
 	}
 
-	/// A LOC video group ends with an empty frame at the next keyframe's timestamp, like Legacy.
+	/// LOC audio writes nothing past its media, even at finish.
 	#[tokio::test]
-	async fn loc_cut_writes_a_duration_marker_at_the_callers_bound() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let consumer = track.subscribe(replay());
-		let mut producer = Producer::new(track, Container::Loc(crate::container::Kind::Video));
-
-		producer.write(frame(0, true)).unwrap();
-		producer.write(frame(10_000, false)).unwrap();
-		producer
-			.cut(Some(moq_net::Timestamp::from_micros(15_000).unwrap()))
-			.unwrap();
-		producer.write(frame(20_000, true)).unwrap();
-		let _finished = producer.finish().unwrap();
-
-		let groups = collect_loc_payloads(consumer).await;
-		assert_eq!(groups[0], vec![(0, 2), (10_000, 2), (15_000, 0)]);
-		assert_eq!(groups[1][0], (20_000, 2));
-		assert_eq!(groups[1].last().unwrap().1, 0, "finish closes the last group");
-	}
-
-	/// LOC audio never writes a duration marker, even at finish.
-	#[tokio::test]
-	async fn loc_audio_writes_no_duration_marker() {
+	async fn loc_audio_writes_only_media() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Loc(crate::container::Kind::Audio));
@@ -1767,9 +1760,9 @@ mod tests {
 		);
 	}
 
-	/// LOC data tracks never write a duration marker, so an empty data frame stays data.
+	/// LOC data writes nothing past its items.
 	#[tokio::test]
-	async fn loc_data_writes_no_duration_marker() {
+	async fn loc_data_writes_only_items() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Loc(crate::container::Kind::Data));
@@ -1871,10 +1864,9 @@ mod tests {
 		assert_eq!(collect_starts(consumer).await, vec![5, 10_000]);
 	}
 
-	/// A marker after a seek takes the seek's start, stamped past the groups before it even when
-	/// nothing says where their content ended.
+	/// A discontinuity writes no group, so a seek's start waits for the next keyframe.
 	#[tokio::test]
-	async fn discontinuity_after_a_seek_takes_its_start() {
+	async fn a_seek_outlives_a_discontinuity() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
@@ -1882,6 +1874,7 @@ mod tests {
 		producer.write(frame(0, true)).unwrap();
 		producer.seek(100_000).unwrap();
 		producer.discontinuity().unwrap();
+		producer.write(frame(50_000, true)).unwrap();
 		let _finished = producer.finish().unwrap();
 
 		assert_eq!(collect_starts(consumer).await, vec![0, 100_000]);
@@ -1976,7 +1969,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn duration_marker_uses_cadence_not_batching_delay() {
+	async fn the_estimated_end_uses_cadence_not_batching_delay() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
@@ -1985,9 +1978,11 @@ mod tests {
 		producer.write(frame(20_000, false)).unwrap();
 		producer.write(frame(40_000, false)).unwrap();
 		let _finished = producer.finish().unwrap();
-		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(60_000, 0)));
+		assert_eq!(collect_ends(consumer).await, vec![Some(60_000)]);
 	}
 
+	/// A reordered group's presentation end bounds no frame in decode order, so a cut with no bound
+	/// ends it without one; the next, ordered group ends at its bound.
 	#[tokio::test]
 	async fn reordered_group_does_not_mark_the_decode_tail_with_the_presentation_end() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
@@ -1999,18 +1994,18 @@ mod tests {
 		producer.write(frame(160_000, true)).unwrap();
 		producer.write(frame(200_000, false)).unwrap();
 		producer.cut(Some(Timestamp::from_micros(240_000).unwrap())).unwrap();
+		producer.write(frame(240_000, true)).unwrap();
+		producer.write(frame(200_000, false)).unwrap();
 		let _finished = producer.finish().unwrap();
-		let groups = collect_payloads(consumer).await;
-		assert_eq!(groups[0], vec![(0, 2), (120_000, 2), (40_000, 2), (80_000, 2)]);
 		assert_eq!(
-			groups[1].last(),
-			Some(&(240_000, 0)),
-			"the next group can mark its tail"
+			collect_ends(consumer).await,
+			vec![Some(160_000), Some(240_000), None],
+			"the keyframe bounds the reordered group, the cut the next, and nothing the reordered last"
 		);
 	}
 
 	#[tokio::test]
-	async fn duration_marker_follows_a_slower_cadence() {
+	async fn the_estimated_end_follows_a_slower_cadence() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
@@ -2018,7 +2013,7 @@ mod tests {
 			producer.write(frame(timestamp, index == 0)).unwrap();
 		}
 		let _finished = producer.finish().unwrap();
-		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(131_000, 0)));
+		assert_eq!(collect_ends(consumer).await, vec![Some(131_000)]);
 	}
 
 	#[tokio::test]
@@ -2031,7 +2026,7 @@ mod tests {
 		producer.write(first).unwrap();
 		producer.write(frame(40_000, false)).unwrap();
 		let _finished = producer.finish().unwrap();
-		assert_eq!(collect_payloads(consumer).await[0].last(), Some(&(80_000, 0)));
+		assert_eq!(collect_ends(consumer).await, vec![Some(80_000)]);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2061,7 +2056,8 @@ mod tests {
 					.unwrap(),
 			);
 		}
-		assert_eq!(timestamps, vec![20_000, 30_000, 35_000]);
+		assert_eq!(timestamps, vec![20_000, 30_000]);
+		assert_eq!(group.end(), Some(35_000));
 	}
 
 	#[tokio::test]
@@ -2157,7 +2153,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn duration_marker_resets_after_discontinuity() {
+	async fn the_estimated_end_resets_after_discontinuity() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video));
@@ -2167,13 +2163,12 @@ mod tests {
 		producer.write(frame(1_020_000, true)).unwrap();
 		producer.write(frame(1_040_000, false)).unwrap();
 		let _finished = producer.finish().unwrap();
-		let groups = collect_payloads(consumer).await;
-		assert_eq!(groups.last().unwrap().last(), Some(&(1_060_000, 0)));
+		assert_eq!(collect_ends(consumer).await, vec![Some(1_010_000), Some(1_060_000)]);
 	}
 
 	/// A capture that reopens at once resumes sooner than one frame after the break. Guessing
-	/// the closing group's end from its cadence would put a duration marker past the resumed
-	/// keyframe, which a consumer reads as a rewind and refuses.
+	/// the closing group's end from its cadence would put it past the resumed keyframe, which a
+	/// reader takes for continuity rather than the break.
 	#[tokio::test]
 	async fn a_prompt_resume_after_a_discontinuity_is_not_a_rewind() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));

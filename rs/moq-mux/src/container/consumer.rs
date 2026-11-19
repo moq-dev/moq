@@ -740,19 +740,20 @@ impl<F: Container> Consumer<F> {
 			if let Some(group) = self.pending.front_mut()
 				&& group.start <= self.current
 			{
-				// The group after a declared end has started: one starting at the end continues the
-				// media, and a later one resumes it after a pause the end declared. A loss reads as
-				// the gap instead.
-				if let Some(declared) = self.declared.take()
-					&& !self.gap
-					&& !group
-						.group
-						.timescale()
-						.and_then(|scale| Timestamp::new(group.start, scale).ok())
-						.and_then(time)
-						.is_some_and(|start| pts_contiguous(time(declared.end), start))
-				{
-					return Poll::Ready(self.declare(declared));
+				// The group after a declared end shows where it starts with its first frame: one
+				// starting at the end continues the media, and a later one resumes it after a pause
+				// the end declared. A marker opening it says so itself, and a loss reads as the gap.
+				if self.declared.is_some() {
+					let _ = group.poll_min_timestamp(waiter, &self.format, true);
+					let marked = group.markers.front().is_some_and(|(index, _)| *index == 0);
+					let first = group.buffered.front().and_then(|(frame, ..)| time(frame.timestamp));
+					if marked || self.gap || first.is_some() {
+						let declared = self.declared.take().unwrap();
+						let ended = time(declared.end);
+						if !marked && !self.gap && first.is_some_and(|first| !pts_contiguous(ended, first)) {
+							return Poll::Ready(self.declare(declared));
+						}
+					}
 				}
 				match group.poll_read(waiter, &self.format) {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => {
@@ -2159,10 +2160,10 @@ mod tests {
 		assert!(matches!(read().await, Some(Read::End { group: 16, end }) if end == ts(1_000_000)));
 	}
 
-	/// A data track's marker carries no timestamp, so it reads as an end at the furthest point
-	/// read rather than as a gap, and as nothing before the first item.
+	/// A data track's discontinuity ends its group whole past its last item, which reads as an end
+	/// once the next group starts later, and as nothing before the first item.
 	#[tokio::test(start_paused = true)]
-	async fn a_data_marker_reads_as_an_end_at_the_edge() {
+	async fn a_data_discontinuity_reads_as_an_end() {
 		let hour = Duration::from_secs(3600);
 		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(hour);
 		let track = track_producer("data", info);
@@ -2191,7 +2192,8 @@ mod tests {
 		producer.write(frame(2_405_070_000, b"b")).unwrap();
 		let _finished = producer.finish().unwrap();
 
-		assert_eq!(items(&mut reader).await, ["0", "10000", "end 10000", "2405070000"]);
+		// A lone item reaches only its own start, so its group ends one unit past it.
+		assert_eq!(items(&mut reader).await, ["0", "10000", "end 10001", "2405070000"]);
 	}
 
 	/// A data marker has no timestamp, so a group missing between the content read and the marker's
@@ -3108,6 +3110,164 @@ mod tests {
 		let _track = track.finish().unwrap();
 
 		assert_eq!(items(&mut consumer).await, ["0", "end 10000", "1000000"]);
+	}
+
+	/// Append a group at its first frame's microseconds, declaring the starts before it skipped as
+	/// a publisher does, ended whole at `end`.
+	fn write_whole(track: &mut moq_net::track::Producer, timestamps: &[u64], end: u64) {
+		let mut group = track.append_group(ts(timestamps[0])).unwrap();
+		for &micros in timestamps {
+			let frame = Frame {
+				timestamp: ts(micros),
+				payload: Bytes::from_static(&[0xDE, 0xAD]),
+				keyframe: false,
+				duration: None,
+			};
+			Container::Legacy(crate::container::Kind::Audio)
+				.write(&mut group, &[frame])
+				.unwrap();
+		}
+		group.finish_at(end).unwrap();
+	}
+
+	fn audio_reader(track: &moq_net::track::Producer, delay: Delay) -> Consumer<Container> {
+		let subscribed = track.subscribe(moq_net::track::Subscription::default().with_delay(delay));
+		Consumer::new(subscribed, Container::Legacy(crate::container::Kind::Audio))
+	}
+
+	/// A group ending whole below where the next group starts declares the same end a marker group
+	/// did, with no marker on the wire.
+	#[kio::test]
+	async fn a_group_end_declares_an_end_like_a_marker() {
+		let delay = Delay::default().with_max(Duration::from_secs(2));
+
+		let mut marked = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut old = audio_reader(&marked, delay);
+		write_group(&mut marked, 0, &[ts(0)]);
+		write_marker_group(&mut marked, 1, ts(10_000));
+		write_group(&mut marked, 2, &[ts(1_000_000)]);
+		let _marked = marked.finish().unwrap();
+
+		let mut ended = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut new = audio_reader(&ended, delay);
+		write_whole(&mut ended, &[0], 10_000);
+		write_whole(&mut ended, &[1_000_000], 1_020_000);
+		let _ended = ended.finish().unwrap();
+
+		let expected = ["0", "end 10000", "1000000"];
+		assert_eq!(items(&mut old).await, expected);
+		assert_eq!(items(&mut new).await, expected);
+	}
+
+	/// A group starting where the previous one ended continues its media.
+	#[kio::test]
+	async fn a_group_starting_at_the_end_continues_it() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut reader = audio_reader(&track, Delay::default().with_max(Duration::from_secs(2)));
+		write_whole(&mut track, &[0, 20_000], 40_000);
+		write_whole(&mut track, &[40_000], 60_000);
+		let _track = track.finish().unwrap();
+
+		assert_eq!(items(&mut reader).await, ["0", "20000", "40000"]);
+	}
+
+	/// A push-to-talk stop: the group ends whole and nothing follows. A player reads the end once
+	/// the wait a missing group gets has passed, with no marker on the wire.
+	#[kio::test]
+	async fn a_stop_with_nothing_after_it_reads_as_an_end() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let wait = Duration::from_millis(100);
+		let mut reader = audio_reader(&track, Delay::default().with_min(wait).with_max(Duration::from_secs(2)));
+		write_whole(&mut track, &[0, 20_000], 40_000);
+
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
+		let finished = kio::clock::now();
+		let read = reader.read().await.unwrap();
+		assert!(
+			matches!(read, Some(Read::End { group: 0, end }) if end == ts(40_000)),
+			"{read:?}"
+		);
+		assert!(finished.elapsed() >= wait, "the end waits out a continuing group");
+
+		// The talker resumes later: a fresh group, no gap.
+		write_whole(&mut track, &[5_000_000], 5_020_000);
+		let _track = track.finish().unwrap();
+		assert_eq!(items(&mut reader).await, ["5000000"]);
+	}
+
+	/// An export reads an end only once the next group shows where it starts, never on a guess.
+	#[kio::test]
+	async fn an_export_waits_for_the_next_group_to_read_an_end() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut reader = audio_reader(&track, Delay::default().with_min(Duration::ZERO).with_max(Duration::ZERO));
+		write_whole(&mut track, &[0], 20_000);
+
+		async fn next(
+			reader: &mut Consumer<Container>,
+		) -> Result<Result<Option<Item>, crate::Error>, kio::clock::Elapsed> {
+			kio::clock::timeout(
+				Duration::from_secs(10),
+				std::future::poll_fn(|cx| reader.poll_item(&kio::Waiter::new(cx.waker().clone()))),
+			)
+			.await
+		}
+		let mut ends = Vec::new();
+		while let Ok(item) = next(&mut reader).await {
+			match item.unwrap() {
+				Some(Item::End { end, .. }) => ends.push(end),
+				Some(Item::GroupEnd) => break,
+				_ => {}
+			}
+		}
+		assert!(next(&mut reader).await.is_err(), "nothing reads while no group follows");
+		assert!(ends.is_empty());
+
+		write_whole(&mut track, &[1_000_000], 1_020_000);
+		let mut items = Vec::new();
+		while let Ok(Ok(Some(item))) = next(&mut reader).await {
+			items.push(match item {
+				Item::End { end, .. } => format!("end {}", end.as_micros().unwrap()),
+				Item::Frame { frame, .. } => frame.timestamp.as_micros().unwrap().to_string(),
+				_ => continue,
+			});
+			if items.len() == 2 {
+				break;
+			}
+		}
+		assert_eq!(items, ["end 20000", "1000000"]);
+	}
+
+	/// An audio terminal marker reads as the end ahead of its group's final packets, and the group's
+	/// own end, the same point, is not read again.
+	#[kio::test]
+	async fn a_terminal_marker_ends_its_group_once() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut reader = audio_reader(&track, Delay::default().with_max(Duration::from_secs(2)));
+		write_whole(&mut track, &[0], 10_000);
+		let mut terminal = track.create_group(moq_net::group::Info { start: 10_000 }).unwrap();
+		write_marker(&mut terminal, ts(25_000));
+		for micros in [10_000, 20_000, 30_000] {
+			Container::Legacy(crate::container::Kind::Audio)
+				.write(
+					&mut terminal,
+					&[Frame {
+						timestamp: ts(micros),
+						payload: Bytes::from_static(&[0xDE, 0xAD]),
+						keyframe: false,
+						duration: None,
+					}],
+				)
+				.unwrap();
+		}
+		terminal.finish_at(25_000).unwrap();
+		write_whole(&mut track, &[1_000_000], 1_020_000);
+		let _track = track.finish().unwrap();
+
+		assert_eq!(
+			items(&mut reader).await,
+			["0", "end 25000", "10000", "20000", "30000", "1000000"]
+		);
 	}
 
 	/// Missing media reads as a gap; only the publisher can declare an end.
