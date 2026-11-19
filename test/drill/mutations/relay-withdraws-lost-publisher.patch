@@ -49,10 +49,10 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
 diff --git a/rs/moq-net/src/lite/subscriber/routed.rs b/rs/moq-net/src/lite/subscriber/routed.rs
 --- a/rs/moq-net/src/lite/subscriber/routed.rs
 +++ b/rs/moq-net/src/lite/subscriber/routed.rs
-@@ -291,7 +291,7 @@ impl Routed {
- 		for ((origin, path, instance), mut served) in self.served.drain() {
+@@ -292,7 +292,7 @@ impl Routed {
  			let unavailable = served.route.route.clone().with_available(false);
  			served.route.update(unavailable);
+ 			served.route.dynamic.disown();
 -			let left = Left(served.route.dynamic.clone());
 +			let left = Left((*served.route.dynamic).clone());
  			self.stream.orphan(origin, &(path, instance), Box::new(left));

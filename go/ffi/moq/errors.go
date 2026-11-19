@@ -2,14 +2,14 @@ package moq
 
 import "errors"
 
-// IsAuthError reports whether err is a connection rejected by the server on
-// authentication or authorization grounds: Unauthorized (HTTP 401), Forbidden
-// (HTTP 403), or an Expired token. Unlike a transport failure, retrying without new credentials won't
-// help, so callers should surface these rather than reconnect.
+// IsAuthError reports whether err refused the credentials: HTTP 401 or 403, an
+// expired or malformed token, a protocol Unauthorized or Expired session close,
+// or a track revocation. Unlike a transport failure, retrying without new
+// credentials won't help, so callers should surface these rather than reconnect.
 //
-// The ErrMoqError* sentinels live in the generated bindings (moq.go), so this
-// file, like cgo.go, only builds once those are staged alongside it.
+// MoqError lives in the generated bindings (moq.go), so this file, like cgo.go,
+// only builds once those are staged alongside it.
 func IsAuthError(err error) bool {
-	return errors.Is(err, ErrMoqErrorUnauthorized) || errors.Is(err, ErrMoqErrorForbidden) ||
-		errors.Is(err, ErrMoqErrorExpired)
+	var native *MoqError
+	return errors.As(err, &native) && native != nil && MoqErrorIsAuth(native)
 }

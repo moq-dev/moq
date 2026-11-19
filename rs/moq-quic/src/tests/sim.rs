@@ -371,10 +371,10 @@ impl Peer {
 			let mut stream = conn.send_stream(id);
 			while sending.written < sending.spec.len {
 				let end = sending.spec.len.min(sending.written + PAYLOAD_MAX);
-				match stream.write(&mut payload(index, sending.written..end)) {
-					Ok(written) => sending.written += written,
-					Err(send::Error::Blocked) => break,
-					Err(error) => panic!("writing stream {index}: {error}"),
+				match stream.try_write(&mut payload(index, sending.written..end)) {
+					Poll::Ready(Ok(written)) => sending.written += written,
+					Poll::Pending => break,
+					Poll::Ready(Err(error)) => panic!("writing stream {index}: {error}"),
 				}
 			}
 			if sending.written == sending.spec.len && !sending.finished {
@@ -416,8 +416,8 @@ impl Peer {
 			let mut stream = conn.recv_stream(id);
 			let mut chunks = stream.read().unwrap();
 			loop {
-				match chunks.next(usize::MAX) {
-					Ok(Some(chunk)) => {
+				match chunks.try_next(usize::MAX) {
+					Poll::Ready(Ok(Some(chunk))) => {
 						let end = receiving.read + chunk.bytes.len();
 						prop_assert!(end <= len, "stream {index} ran past its {len} bytes");
 						prop_assert!(
@@ -428,14 +428,14 @@ impl Peer {
 						receiving.read = end;
 						receiving.first.get_or_insert(now);
 					}
-					Ok(None) => {
+					Poll::Ready(Ok(None)) => {
 						prop_assert_eq!(receiving.read, len, "stream {} ended early", index);
 						receiving.first.get_or_insert(now);
 						receiving.done = Some(now);
 						break;
 					}
-					Err(recv::Error::Blocked) => break,
-					Err(error) => panic!("reading stream {index}: {error}"),
+					Poll::Pending => break,
+					Poll::Ready(Err(error)) => panic!("reading stream {index}: {error}"),
 				}
 			}
 			chunks.finalize();

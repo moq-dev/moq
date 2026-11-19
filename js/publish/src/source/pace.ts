@@ -1,4 +1,4 @@
-import { sleepUntil as clockSleepUntil, Duration, Instant, now } from "@moq/clock";
+import { sleepUntil as clockSleepUntil, Duration, type Instant, now } from "@moq/clock";
 import type { Timeline } from "./timeline";
 
 // Not exported from `source/index.ts`: this is an implementation detail of the file source.
@@ -109,11 +109,11 @@ export function pace<S extends Sample, T extends { close(): void }>(
 						return;
 					}
 
-					// Restamp onto our wall clock, the same epoch live capture uses, so a publish that
-					// mixes sources keeps one timeline.
+					// Restamp onto the media clock live capture uses, so a publish that mixes sources keeps
+					// one timeline.
 					let value: T;
 					try {
-						sample.setTimestamp(timestamp.since(Instant.ZERO).asSecs());
+						sample.setTimestamp(timeline.stamp(timestamp).asSecs());
 						value = convert(sample);
 					} finally {
 						sample.close();

@@ -181,7 +181,7 @@ impl Producer {
 		let mut ranges = Vec::new();
 		for reader in readers {
 			let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
-			let preferences = reader.subscription.read().clone();
+			let preferences = reader.subscription.read().subscription();
 			// A failed copy's resolution is no placement, as in `Reader::window`: the reader's
 			// own stands, or the anchors do for ranges it has yet to take up.
 			let failed = reader.route.end().is_none()
@@ -462,14 +462,23 @@ impl Consumer {
 
 	/// Subscribe to the logical track with the reader's own preferences.
 	pub(super) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
-		let mirrored = subscription.read().clone();
-		let window = Window::new(&mirrored.ranges, None, None, &Unheld).expect("an unheld hop refuses nothing");
+		let (mirrored, keys, revision) = {
+			let prefs = subscription.read();
+			(
+				prefs.subscription(),
+				prefs.ranges().map(|(key, _)| key).collect::<Vec<_>>(),
+				prefs.revision,
+			)
+		};
+		let window = keyed(&keys, &mirrored.ranges, &Unheld);
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
 				this: this.clone(),
 				route: self.clone(),
 				subscription: subscription.clone(),
 				mirrored,
+				keys,
+				revision,
 				generation: None,
 				copies: Vec::new(),
 				newest: None,
@@ -1009,14 +1018,11 @@ impl Subscriber {
 		self.reader().window().start()
 	}
 
-	/// Where each of the reader's ranges starts; see [`track::Subscriber::starts`].
-	pub(super) fn starts(&self, from: u64) -> Vec<Option<u64>> {
-		self.reader().window().starts(from)
-	}
-
-	/// Each of the reader's ranges resolved; see [`track::Subscriber::resolved`].
-	pub(super) fn resolved(&self) -> Vec<Option<Resolved>> {
-		self.reader().window().resolved()
+	/// The reader's ranges keyed in `keys` resolved; see [`track::Subscriber::resolved_keys`].
+	pub(super) fn resolved_keys(&self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
+		let mut reader = self.reader();
+		let window = reader.window();
+		keys.into_iter().map(|key| window.resolved_key(key)).collect()
 	}
 
 	/// The lowest group at or above `from` the reader's ranges cover; see
@@ -1224,6 +1230,11 @@ struct Reader {
 	/// The reader's own preferences, mirrored into every copy's subscription.
 	subscription: track::Preferences,
 	mirrored: Subscription,
+	/// The key of each of [`Self::mirrored`]'s ranges, in order, so the reader's window answers
+	/// a range by the key an edit names it with.
+	keys: Vec<u64>,
+	/// The preferences' revision [`Self::mirrored`] holds.
+	revision: u64,
 	/// The route generation last read.
 	generation: Option<u64>,
 	/// Oldest first, except that a backfill goes before the copy of the route it backfills: the
@@ -1335,7 +1346,7 @@ impl Reader {
 		if unplaced {
 			return;
 		}
-		let window = Window::new(&ranges, None, None, &Placed).expect("a placed hop refuses nothing");
+		let window = keyed(&self.keys, &ranges, &Placed);
 		if !window.is_pending() {
 			self.window = window;
 		}
@@ -1349,16 +1360,26 @@ impl Reader {
 		// Snapshot and re-arm together, including when a change was observed: another
 		// update must wake a reader that parks after applying this one.
 		let mut changed = None;
+		let mirrored = &self.mirrored;
+		let revision = self.revision;
 		let _ = self.subscription.poll_ref(waiter, |sub| {
-			if **sub != self.mirrored {
-				changed = Some((**sub).clone());
+			let moved = (sub.priority, sub.delay, sub.order, sub.feed)
+				!= (mirrored.priority, mirrored.delay, mirrored.order, mirrored.feed);
+			if moved || sub.revision != revision {
+				let keys = (sub.revision != revision).then(|| sub.ranges().map(|(key, _)| key).collect());
+				changed = Some((sub.subscription(), keys, sub.revision));
 			}
 			Poll::<()>::Pending
 		});
-		if let Some(sub) = changed {
-			let replaced = sub.ranges != self.mirrored.ranges;
+		if let Some((sub, keys, revision)) = changed {
+			self.revision = revision;
+			let replaced = keys.is_some_and(|keys: Vec<u64>| {
+				let replaced = sub.ranges != self.mirrored.ranges || keys != self.keys;
+				self.keys = keys;
+				replaced
+			});
 			if replaced {
-				self.window = Window::new(&sub.ranges, None, None, &Unheld).expect("an unheld hop refuses nothing");
+				self.window = keyed(&self.keys, &sub.ranges, &Unheld);
 				// The serving copy's resume point may cut off groups the new ranges cover, judged
 				// by the reader's window.
 				self.resumed = Some((None, Vec::new()));
@@ -1779,7 +1800,14 @@ impl Reader {
 						if !deliverable || !self.window().contains(key) {
 							// Skipping an ordered cursor past a group the window still owes below
 							// would lose it, though it may yet land on this copy: leave it there.
+							// The peek returned the held group, so only the copy's arrivals wake
+							// the read when the owed one lands: one already landed is peeked again.
 							if ordered && deliverable && self.owes_below(floor, key, delivered) {
+								let copy = &self.copies[index];
+								if copy.track.poll_arrived(arrivals, waiter).is_ready() {
+									arrivals = copy.track.arrived();
+									continue;
+								}
 								break;
 							}
 							let Sub::Ready(sub) = &mut self.copies[index].sub else {
@@ -2927,6 +2955,12 @@ impl kio::Task for Fetching {
 	}
 }
 
+/// A window over `ranges`, each keyed as `keys` names it, on a hop that refuses nothing.
+fn keyed(keys: &[u64], ranges: &[track::Range], holdings: &impl Holdings) -> Window {
+	Window::keyed(keys.iter().copied().zip(ranges.iter().copied()), None, None, holdings)
+		.expect("a hop that holds nothing or holds it placed refuses nothing")
+}
+
 #[cfg(test)]
 mod test {
 	use std::time::Duration;
@@ -3552,7 +3586,7 @@ mod test {
 		let mut read = drain(&mut joined, false);
 		read.sort_unstable();
 		assert_eq!(read, [66, 67]);
-		assert_eq!(joined.resolved()[0].map(|resolved| resolved.start), Some(66));
+		assert_eq!(joined.resolved_range(0).map(|resolved| resolved.start), Some(66));
 		drop(held);
 	}
 
@@ -3920,12 +3954,12 @@ mod test {
 			// the oldest group rather than naming one.
 			assert_eq!(sub.floor(), None, "routed={routed}");
 			assert_eq!(
-				sub.resolved(),
-				[Some(Resolved {
+				sub.resolved_range(0),
+				Some(Resolved {
 					start: 0,
 					end: Some(6),
 					floored: false,
-				})],
+				}),
 				"routed={routed}"
 			);
 			assert_eq!(sub.runs_in_range(0, 10), [0..6], "routed={routed}");
@@ -4690,9 +4724,7 @@ mod test {
 		write(&a, 2);
 		a.skip_groups(3..5);
 		routes.serve(a.consume());
-		let sub = routes
-			.consume()
-			.subscribe(kio::Producer::new(Subscription::default()).into());
+		let sub = routes.consume().subscribe(Subscription::default().into());
 		let b = copy();
 		write(&b, 4);
 		write(&b, 5);
@@ -6004,6 +6036,50 @@ mod test {
 		b.skip_groups(6..10);
 		sub.set_range(..);
 		assert_eq!(drain(&mut sub, true), [0, 10, 11]);
+	}
+
+	/// A key-order read holding a copy's cursor on a group outside its window, for a group the
+	/// window still owes below it, wakes when that group lands on the copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_key_order_read_holding_a_copy_wakes_when_the_owed_group_lands() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 10);
+		routes.serve(a.consume());
+		let from_ten = track::Range {
+			start: track::Anchor::Time(10),
+			end: None,
+		};
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range::groups(0..1), from_ten]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		// a places the window at 0 and from 10; the cap holds 10 back.
+		sub.set_range(..10);
+		assert!(drain(&mut sub, true).is_empty());
+
+		// b holds 5 but not 10, so it places the second range at 5, and 0 is owed below it.
+		let b = received_copy();
+		write(&b, 5);
+		routes.serve(b.consume());
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(sub.poll_next_group(&waiter).is_pending());
+		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+		write(&b, 0);
+		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+		// The same task's read hands it out, not the idle answer it parked with.
+		let Poll::Ready(Ok(Some(group))) = sub.poll_next_group(&waiter) else {
+			panic!("the owed group is handed out")
+		};
+		assert_eq!(group.start, 0);
 	}
 
 	#[test]
@@ -7427,9 +7503,7 @@ mod test {
 		let routes = Producer::new();
 		let a = copy();
 		routes.serve(a.consume());
-		let sub = routes
-			.consume()
-			.subscribe(kio::Producer::new(Subscription::default()).into());
+		let sub = routes.consume().subscribe(Subscription::default().into());
 		let mut reader = sub.reader.lock().unwrap();
 		let copy = &mut reader.copies[0];
 		copy.floor = Some(0);
@@ -7455,9 +7529,7 @@ mod test {
 			write(&a, sequence);
 		}
 		routes.serve(a.consume());
-		let sub = routes
-			.consume()
-			.subscribe(kio::Producer::new(Subscription::default()).into());
+		let sub = routes.consume().subscribe(Subscription::default().into());
 		let mut reader = sub.reader.lock().unwrap();
 		let copy = &mut reader.copies[0];
 		copy.floor = Some(0);
@@ -7808,7 +7880,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(Duration::from_secs(30)))
 			.with_ranges([range]);
-		let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
+		let sub = routes.consume().subscribe(subscription.into());
 		let mut reader = sub.reader.lock().unwrap();
 		let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
 		let old = &mut reader.copies[0];
@@ -7863,7 +7935,7 @@ mod test {
 			let subscription = Subscription::default()
 				.with_delay(Delay::default().with_max(HOUR))
 				.with_ranges([range]);
-			let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
+			let sub = routes.consume().subscribe(subscription.into());
 			let mut reader = sub.reader.lock().unwrap();
 			let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
 			let old = &mut reader.copies[0];
@@ -7893,7 +7965,7 @@ mod test {
 		let subscription = Subscription::default()
 			.with_delay(Delay::default().with_max(HOUR))
 			.with_ranges([range]);
-		let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
+		let sub = routes.consume().subscribe(subscription.into());
 		let mut reader = sub.reader.lock().unwrap();
 		let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
 		let old = &mut reader.copies[0];
@@ -7918,8 +7990,7 @@ mod test {
 			let routes = Producer::new();
 			let a = copy();
 			routes.serve(a.consume());
-			let subscription = kio::Producer::new(Subscription::default());
-			let sub = routes.consume().subscribe(subscription.into());
+			let sub = routes.consume().subscribe(Subscription::default().into());
 			let mut reader = sub.reader.lock().unwrap();
 			let old = &mut reader.copies[0];
 			old.until = Some(last);
@@ -8073,8 +8144,8 @@ mod test {
 					end: None,
 				}])
 		};
-		let preferences = kio::Producer::new(ranges(5));
-		let mut sub = routes.consume().subscribe(preferences.clone().into());
+		let preferences = track::Preferences::from(ranges(5));
+		let mut sub = routes.consume().subscribe(preferences.clone());
 		let delivered = Delivered::default();
 		let Poll::Ready(Ok(Some(candidate))) = sub.poll_peek_group(false, false, &delivered, &kio::Waiter::noop())
 		else {
@@ -8088,18 +8159,14 @@ mod test {
 		assert_eq!(start(), track::Anchor::Time(5));
 
 		// Changed, but not yet mirrored into the copies.
-		if let Ok(mut changed) = preferences.write() {
-			*changed = ranges(0);
-		}
+		preferences.update(ranges(0)).unwrap();
 		assert_eq!(start(), track::Anchor::Time(20));
 
 		sub.mirror().sync();
 		let (b, _requests) = pending_copy();
 		routes.serve(b.consume());
 		assert_eq!(start(), track::Anchor::Time(20));
-		if let Ok(mut changed) = preferences.write() {
-			*changed = ranges(3);
-		}
+		preferences.update(ranges(3)).unwrap();
 		assert_eq!(start(), track::Anchor::Relative(3));
 	}
 
@@ -9176,12 +9243,22 @@ mod test {
 				.unwrap()
 				.unwrap();
 			let _ = sub.poll_start(&kio::Waiter::noop());
-			assert_eq!(sub.starts(0), [Some(0)]);
+			// Where the range starts once delivery starts at `from`, none past its end.
+			let start = |sub: &mut track::Subscriber, from: u64| {
+				let resolved = sub.resolved_range(0)?;
+				let from = resolved.start.max(from);
+				resolved.end.is_none_or(|end| end > from).then_some(from)
+			};
+			assert_eq!(start(&mut sub, 0), Some(0));
 			for key in 1..3 {
 				write(&a, key);
 			}
-			assert_eq!(sub.starts(10), [None]);
-			assert_eq!(sub.starts(0), [Some(0)], "the start stays pinned while the end settles");
+			assert_eq!(start(&mut sub, 10), None);
+			assert_eq!(
+				start(&mut sub, 0),
+				Some(0),
+				"the start stays pinned while the end settles"
+			);
 		}
 	}
 

@@ -664,7 +664,7 @@ func CatalogSnapshot(ctx context.Context, broadcast *moq.BroadcastConsumer) (*Ca
 	defer consumer.Cancel()
 	snapshot, err := consumer.Next(ctx)
 	if err == nil && snapshot == nil {
-		err = moq.ErrClosed
+		err = ffi.NewMoqErrorClosed()
 	}
 	return snapshot, err
 }

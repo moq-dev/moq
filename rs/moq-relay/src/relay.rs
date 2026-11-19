@@ -290,6 +290,7 @@ impl Relay {
 			.with_stats(config.stats);
 		cluster_options.client = config.limits.client;
 		cluster_options.peer = config.limits.peer;
+		cluster_options.shutdown = Some(shutdown.clone());
 		// The node's stats broadcast has one instance at a time: the relay this one
 		// replaces keeps it until it exits, and its last counters are read first.
 		let alone = sockets.replacing().then(|| {

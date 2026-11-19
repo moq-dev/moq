@@ -34,6 +34,8 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 /// to the relay, with `bcast` resolved at the relay and the far end.
 struct Relayed {
 	_publisher: moq_net::origin::Producer,
+	/// Held as a relay holds its origin: one whose sessions all end tears down.
+	_relay: moq_net::origin::Producer,
 	broadcast: moq_net::origin::Route,
 	upstream: MockPair,
 	_downstream: MockPair,
@@ -76,6 +78,7 @@ async fn relayed(version: &str) -> Relayed {
 		_downstream: downstream,
 		relayed: resolve(&relay).await,
 		remote: resolve(&far).await,
+		_relay: relay,
 	}
 }
 
