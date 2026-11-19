@@ -619,8 +619,18 @@ impl Anchors {
 /// counted from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RelativeStart {
-	start: u64,
+	start: CountedStart,
 	latest: u64,
+}
+
+/// Where a publisher reported starting a range counting back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CountedStart {
+	/// At this group.
+	At(u64),
+	/// At or past this exclusive end, holding no group of the range there: it says nothing of
+	/// a range ending later.
+	Past(u64),
 }
 
 #[derive(Default)]
@@ -716,6 +726,9 @@ pub(crate) struct TrackState {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	evicted: Option<(u64, Timestamp)>,
+	// The highest key of any group that left the cache, checked start or not: a received copy
+	// counting a relative start back can't tell a gap at or below it from one it never held.
+	uncached: Option<u64>,
 
 	// The key of the newest cached group: the live edge, protected from
 	// eviction by never entering the eviction order until no producer remains.
@@ -1197,12 +1210,17 @@ impl Holdings for TrackState {
 	/// newer one moved the live edge, which the copy then counts from itself. A lite-07 copy
 	/// that may still learn where, from a report or the groups between, counts only where it
 	/// holds them (see [`Self::counted_received`]); once it can't, over the groups held.
-	fn counted_start(&self, latest: u64, back: u64) -> Option<Containing> {
+	fn counted_start(&self, latest: u64, back: u64, end: Option<u64>) -> Option<Containing> {
 		let reported = self
 			.relative_starts
 			.get(&back)
 			.filter(|reported| reported.latest == latest)
-			.map(|reported| Containing::Group(reported.start));
+			.and_then(|reported| match reported.start {
+				CountedStart::At(start) => Some(start),
+				// Past a range ending no earlier than this one, so this one holds no group either.
+				CountedStart::Past(past) => end.filter(|end| *end <= past),
+			})
+			.map(Containing::Group);
 		let learns = self.anchors == Anchors::Reported && !self.outcome.is_final() && !self.unfed;
 		reported.or_else(|| learns.then(|| self.counted_received(latest, back)))
 	}
@@ -1328,6 +1346,11 @@ impl TrackState {
 				_ => below,
 			};
 			if !self.lookup.contains_key(&below) {
+				// The cache may have made this gap, which no report or arrival fills, so start at
+				// the lowest group counted: whatever the publisher counted to lies below it.
+				if self.uncached.is_some_and(|uncached| below <= uncached) {
+					return Containing::Group(at);
+				}
 				return Containing::Unknown;
 			}
 			at = below;
@@ -1486,6 +1509,7 @@ impl TrackState {
 	/// Take group `key` out of the cache, raising the eviction watermark to its start.
 	fn uncache(&mut self, key: u64) -> Option<Slot> {
 		let slot = self.remove_slot(key)?;
+		self.uncached = self.uncached.max(Some(key));
 		if let Some(start) = slot.bound()
 			&& self.evicted.is_none_or(|(evicted, _)| key > evicted)
 		{
@@ -4846,9 +4870,9 @@ impl Producer {
 
 	/// Record where the upstream publisher started each of this lite-07 copy's live wire
 	/// ranges counting back, as `(back, start, latest)` triples, replacing the last set. A
-	/// reader's relative anchor counting back `back` groups from `latest` resolves to `start`.
+	/// reader's relative start counting back `back` groups from `latest` resolves to `start`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn relative_starts(&self, starts: impl IntoIterator<Item = (u64, u64, u64)>) {
+	pub(crate) fn relative_starts(&self, starts: impl IntoIterator<Item = (u64, CountedStart, u64)>) {
 		let starts: BTreeMap<u64, RelativeStart> = starts
 			.into_iter()
 			.map(|(back, start, latest)| (back, RelativeStart { start, latest }))
@@ -15721,7 +15745,7 @@ mod test {
 			write_group(&producer, key);
 		}
 		producer.report_edge(9);
-		producer.relative_starts([(2, 7, 9)]);
+		producer.relative_starts([(2, CountedStart::At(7), 9)]);
 
 		let mut reported = producer.subscribe(back(2));
 		assert_eq!(placed(&mut reported), Some(7), "the publisher's start, not group 1");
@@ -15762,11 +15786,64 @@ mod test {
 			"an earlier reader stays where it started"
 		);
 
+		// A publisher with no group to deliver in a range ending at 10 has none in one ending
+		// sooner, but says nothing of one ending later.
+		producer.relative_starts([(5, CountedStart::Past(10), 10)]);
+		let until = |end| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Relative(5),
+					end: Some(Anchor::Time(end)),
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let mut empty = producer.subscribe(until(8));
+		assert_eq!(
+			empty.resolved_range(0).map(|resolved| (resolved.start, resolved.end)),
+			Some((9, Some(9)))
+		);
+		let mut longer = producer.subscribe(until(10));
+		assert_eq!(placed(&mut longer), Some(1), "counted through the groups held instead");
+
 		// Nothing more can arrive, so it counts over the groups held, fewer than it asks: it
 		// reaches back to the oldest.
 		drop(producer.finish().unwrap());
 		assert_eq!(placed(&mut gap), Some(0));
 		assert_eq!(read(&mut gap), vec![1, 2, 7, 8, 9, 10]);
+	}
+
+	/// A gap the cache made in a lite-07 copy is one no report or arrival fills, so a relative
+	/// start counting into it starts at the lowest group counted, while a gap above everything
+	/// the cache let go of still waits.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_counts_a_relative_start_to_a_gap_the_cache_made() {
+		let back = |back| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Relative(back),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.reported();
+		for key in [1, 5, 8, 9] {
+			write_group(&producer, key);
+		}
+		producer.skip_groups(6..8);
+		producer.report_edge(9);
+
+		evict(&producer, 1);
+		let mut unknown = producer.subscribe(back(3));
+		assert_eq!(placed(&mut unknown), None, "groups the copy never held may sit below 5");
+
+		evict(&producer, 8);
+		let mut evicted = producer.subscribe(back(1));
+		assert_eq!(placed(&mut evicted), Some(9));
+		assert_eq!(placed(&mut unknown), Some(9), "a later count passes the gap too");
 	}
 
 	#[test]

@@ -517,6 +517,11 @@ test("integration: lite-07 starts a later reader's relative range where the publ
 		const first = subscribe([{ start: { time: 1n }, end: { time: 2n } }]);
 		expect(await read(first)).toEqual([1n, 2n, undefined]);
 
+		// The publisher counts back past the end, so it has no group there to deliver.
+		const empty = subscribe([{ start: { relative: 2n }, end: { time: 6n } }]);
+		expect(await read(empty)).toEqual([undefined]);
+		empty.close();
+
 		const second = subscribe([{ start: { relative: 2n }, end: { time: 8n } }]);
 		expect(await read(second)).toEqual([7n, 8n, undefined]);
 		first.close();

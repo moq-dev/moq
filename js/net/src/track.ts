@@ -24,6 +24,7 @@ import { type Frame, type Consumer as GroupConsumer, Producer as GroupProducer }
 import type { IetfVersion } from "./ietf/version.ts";
 import {
 	type Ask,
+	type CountedStart,
 	cutRun,
 	type DropRun,
 	dropAt,
@@ -1053,7 +1054,9 @@ let keysOf: (producer: Producer) => readonly bigint[];
 let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
 	starts: ReadonlyMap<bigint, bigint>;
-	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
+	relative: ReadonlyMap<bigint, { start: CountedStart; latest?: bigint }>;
+	/** The highest key of any group that left the cache. */
+	uncached: bigint | undefined;
 	/** Whether its publisher reports where each range starts (lite-07), which `relative` holds. */
 	reported: boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
@@ -1321,7 +1324,11 @@ export class Producer {
 	// it asked from. Mirrors the Rust `TrackState::time_starts`.
 	#timeStarts = new Map<bigint, bigint>();
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
-	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
+	#relativeStarts = new Map<bigint, { start: CountedStart; latest?: bigint }>();
+	// The highest key of any group that left the cache: a received copy counting a relative start
+	// back can't tell a gap at or below it from one it never held. Mirrors the Rust
+	// `TrackState::uncached`.
+	#uncached?: bigint;
 	// Whether a copy's publisher reports where each range starts, so a relative start the copy
 	// can't count back over its own groups waits for that. Mirrors the Rust `Anchors::Reported`.
 	#reportsStarts = false;
@@ -1561,6 +1568,7 @@ export class Producer {
 			starts: producer.#timeStarts,
 			relative: producer.#relativeStarts,
 			reported: producer.#reportsStarts,
+			uncached: producer.#uncached,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -1579,9 +1587,12 @@ export class Producer {
 			const last = producer.#relativeStarts;
 			const same =
 				next.size === last.size &&
-				[...next].every(
-					([back, at]) => last.get(back)?.start === at.start && last.get(back)?.latest === at.latest,
-				);
+				[...next].every(([back, at]) => {
+					const was = last.get(back);
+					return (
+						was?.start.at === at.start.at && was?.start.past === at.start.past && was?.latest === at.latest
+					);
+				});
 			if (same) return;
 			producer.#relativeStarts = next;
 			// A reader whose relative start waits on the report reads again.
@@ -2163,6 +2174,7 @@ export class Producer {
 		if (this.#cached.get(entry.group.start) === entry) {
 			this.#cached.delete(entry.group.start);
 			removeKey(this.#keys, entry.group.start);
+			this.#uncached = max(this.#uncached ?? entry.group.start, entry.group.start);
 		}
 		this.#unbound(entry, evicted);
 		this.#account.remove(entry);
@@ -3703,9 +3715,14 @@ export class Subscriber {
 			// feeds counts only through the groups it holds and the starts skipped between them, since
 			// any other gap may hold groups it never saw, and waits on the report there; once nothing
 			// feeds it, over the groups held. Mirrors the Rust `TrackState::counted_start`.
-			countedStart: (latest, back) => {
+			countedStart: (latest, back, end) => {
 				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
-				if (reported !== undefined && reported.latest === latest) return { group: reported.start };
+				if (reported !== undefined && reported.latest === latest) {
+					const { at, past } = reported.start;
+					if (at !== undefined) return { group: at };
+					// Past a range ending no earlier than this one, so this one holds no group either.
+					if (end <= past) return { group: end };
+				}
 				if (!anchors.reported || !receivedCopy(producer) || state.closed.peek() !== undefined) return undefined;
 				// Each step lands on a group held, so a huge count walks the cache once.
 				let at = latest;
@@ -3718,7 +3735,11 @@ export class Subscriber {
 						if (run.start === 0n) return "before";
 						below = run.start - 1n;
 					}
-					if (keys[keyIndex(keys, below)] !== below) return "unknown";
+					if (keys[keyIndex(keys, below)] !== below) {
+						// The cache may have made this gap, which no report or arrival fills, so start at
+						// the lowest group counted: whatever the publisher counted to lies below it.
+						return anchors.uncached !== undefined && below <= anchors.uncached ? { group: at } : "unknown";
+					}
 					at = below;
 				}
 				return { group: at };

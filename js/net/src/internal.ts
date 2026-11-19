@@ -588,6 +588,13 @@ export interface StagedTrack {
  * widened budget reaches lower groups through the feed's re-offer. Anywhere else, a reader fills
  * below the start only the groups its ranges name.
  */
+/**
+ * Where a publisher reported starting a range counting back: at a group, or at or past an exclusive
+ * end where the range held no group, which says nothing of a range ending later. Mirrors the Rust
+ * `track::CountedStart`.
+ */
+export type CountedStart = { at: bigint; past?: never } | { past: bigint; at?: never };
+
 export interface FillStarts {
 	/** The wire's start is resolved from the subscriber's budget: lite SUBSCRIBE_START from lite-06. */
 	resolvesStart?: boolean;
@@ -755,7 +762,7 @@ export const hooks: {
 	 * track, so a reader's relative start counts back as the publisher did, until a group past
 	 * the `latest` it counted from moves the live edge. Assigned by `track.ts`.
 	 */
-	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint, bigint | undefined]>) => void;
+	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, CountedStart, bigint | undefined]>) => void;
 	/**
 	 * Mark a received copy whose publisher reports where each range starts (lite-07), so a reader's
 	 * relative start the copy can't count back over its own groups waits for {@link relativeStarts}.

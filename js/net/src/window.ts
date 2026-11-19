@@ -334,13 +334,13 @@ export interface Holdings {
 	 */
 	back(latest: bigint, back: bigint): bigint | undefined;
 	/**
-	 * Where a range counting `back` groups before `latest` starts, which a relative start, but never
-	 * an end, takes over {@link back}: where the publisher reported starting it, since a delivery
+	 * Where a range counting `back` groups before `latest`, up to the exclusive `end` ({@link UNBOUNDED}
+	 * for none), starts, which a relative start, but never an end, takes over {@link back}: where the publisher reported starting it, since a delivery
 	 * start may sit past the group counted, such as above groups too stale for the budget, or
 	 * `"unknown"` while a received copy can count it neither that way nor over its own groups yet.
 	 * Undefined, or absent, counts it with {@link back}. Mirrors the Rust `Holdings::counted_start`.
 	 */
-	countedStart?(latest: bigint, back: bigint): Containing | undefined;
+	countedStart?(latest: bigint, back: bigint, end: bigint): Containing | undefined;
 	/** Whether nothing more can arrive here, so a time start nothing contains reaches back to the oldest group rather than wait. */
 	complete(): boolean;
 	/**
@@ -793,7 +793,7 @@ export class Window {
 			}
 			anchor = reached.anchor;
 		}
-		const start = startOf(anchor, latest, holdings);
+		const start = startOf(anchor, latest, until, holdings);
 		if (start === "pending") {
 			this.#pending = true;
 			return;
@@ -1058,13 +1058,14 @@ function joins(range: Range, min: Duration | undefined, holdings: Holdings): Dur
 function startOf(
 	anchor: Anchor | undefined,
 	latest: bigint | undefined,
+	until: bigint,
 	holdings: Holdings,
 ): { group: bigint; floored: boolean } | "waiting" | "pending" | "counting" {
 	// Nothing sits below group 0, so the oldest start needs no latest group.
 	if (anchor === undefined) return { group: 0n, floored: false };
 	if (anchor.relative !== undefined) {
 		if (latest === undefined) return "pending";
-		const counted = holdings.countedStart?.(latest, anchor.relative);
+		const counted = holdings.countedStart?.(latest, anchor.relative, until);
 		if (counted === "unknown") return "counting";
 		// Fewer groups are held than it counts back, so reach back to the oldest.
 		if (counted === "before") return { group: 0n, floored: false };

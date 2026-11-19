@@ -359,6 +359,17 @@ async fn a_later_relative_start_on_a_partial_copy_reads_only_its_groups() {
 		.unwrap();
 	assert_eq!(read(&mut first, 3).await, [Some(1), Some(2), None]);
 
+	// The publisher counts back past the end, so it has no group there to deliver.
+	let mut empty = kio::clock::timeout(
+		TIMEOUT,
+		subscribe(vec![range(Anchor::Relative(2), Some(Anchor::Time(6)))]),
+	)
+	.await
+	.expect("subscribe timeout")
+	.unwrap();
+	assert_eq!(read(&mut empty, 1).await, [None], "nothing to deliver");
+	drop(empty);
+
 	let mut second = kio::clock::timeout(
 		TIMEOUT,
 		subscribe(vec![range(Anchor::Relative(2), Some(Anchor::Time(8)))]),

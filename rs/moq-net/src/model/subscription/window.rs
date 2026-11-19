@@ -82,13 +82,14 @@ pub(in crate::model) trait Holdings {
 	/// held: `None` once fewer are held than that.
 	fn back(&self, latest: u64, back: u64) -> Option<u64>;
 
-	/// Where a range counting `back` groups before `latest` starts, which a relative start,
-	/// but never an end, takes over [`Self::back`]: where the publisher reported starting it,
+	/// Where a range counting `back` groups before `latest`, up to the exclusive `end`, starts,
+	/// which a relative start, but never an end, takes over [`Self::back`]: where the publisher
+	/// reported starting it,
 	/// since a delivery start may sit past the group counted, such as above groups too stale
 	/// for the budget, or [`Containing::Unknown`] while a received copy can count it neither
 	/// that way nor over its own groups yet. `None` counts it with [`Self::back`].
-	fn counted_start(&self, latest: u64, back: u64) -> Option<Containing> {
-		let _ = (latest, back);
+	fn counted_start(&self, latest: u64, back: u64, end: Option<u64>) -> Option<Containing> {
+		let _ = (latest, back, end);
 		None
 	}
 
@@ -672,7 +673,7 @@ impl Window {
 				}
 			},
 		};
-		let (start, floored) = match start(anchor, latest, holdings) {
+		let (start, floored) = match start(anchor, latest, end, holdings) {
 			Start::At(start, floored) => (start, floored),
 			Start::Pending => {
 				self.pending.insert(key);
@@ -867,13 +868,14 @@ enum Start {
 	Counting,
 }
 
-fn start(anchor: Anchor, latest: Option<u64>, holdings: &impl Holdings) -> Start {
+/// Where `anchor` starts a range ending at the exclusive `end`.
+fn start(anchor: Anchor, latest: Option<u64>, end: Option<u64>, holdings: &impl Holdings) -> Start {
 	match anchor {
 		// Nothing sits below group 0, so the oldest start needs no latest group.
 		Anchor::Oldest => Start::At(0, false),
 		Anchor::Relative(back) => match latest {
 			None => Start::Pending,
-			Some(latest) => match holdings.counted_start(latest, back).unwrap_or_else(|| {
+			Some(latest) => match holdings.counted_start(latest, back, end).unwrap_or_else(|| {
 				holdings
 					.back(latest, back)
 					.map_or(Containing::Before, Containing::Group)
@@ -1003,7 +1005,7 @@ mod tests {
 			self.held.range(..latest).rev().nth(back as usize).copied()
 		}
 
-		fn counted_start(&self, _: u64, _: u64) -> Option<Containing> {
+		fn counted_start(&self, _: u64, _: u64, _: Option<u64>) -> Option<Containing> {
 			self.counted
 		}
 

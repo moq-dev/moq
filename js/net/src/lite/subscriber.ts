@@ -28,6 +28,7 @@ import { Cost, type Hop, MAX_HOPS, routesEqual, UNKNOWN_HOP, type WireRoute } fr
 import * as Instance from "../instance.ts";
 import {
 	type Arriving,
+	type CountedStart,
 	hiddenBelow,
 	hooks,
 	maxDelayOf,
@@ -2879,15 +2880,26 @@ export class Subscriber {
 		const times: [bigint, bigint][] = [];
 		// And each one counting back, which the copy, holding only part of the track, can't count,
 		// with the latest group it counted back from.
-		const relative: [bigint, bigint, bigint | undefined][] = [];
+		const relative: [bigint, CountedStart, bigint | undefined][] = [];
 		for (const id of entry.live.ids()) {
 			const range = entry.live.get(id);
 			const time = range?.start?.time ?? range?.start?.absolute;
 			const back = range?.start?.relative;
+			if (!entry.starts.has(id)) continue;
+			// Undefined for a range with no group to deliver.
 			const at = entry.starts.get(id);
-			if (at === undefined) continue;
-			if (time !== undefined) times.push([time, at]);
-			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
+			if (time !== undefined && at !== undefined) times.push([time, at]);
+			else if (back !== undefined) {
+				const latest = entry.edges.get(id);
+				// With no group to deliver, the start lies at or past the range's exclusive end: an
+				// absolute end names it, a time end includes its group, and an open one the latest.
+				const end = range?.end;
+				const past =
+					end?.absolute ??
+					(end?.time !== undefined ? end.time + 1n : latest === undefined ? undefined : latest + 1n);
+				const start = at !== undefined ? { at } : past !== undefined ? { past } : undefined;
+				if (start) relative.push([back, start, latest]);
+			}
 		}
 		hooks.timeStarts(entry.track, times);
 		hooks.relativeStarts(entry.track, relative);

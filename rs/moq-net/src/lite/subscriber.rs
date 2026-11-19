@@ -253,7 +253,7 @@ struct Duplicate {
 	/// The copy still arriving, whose readers wait while this holds it.
 	arriving: track::Hold,
 	track: track::Producer,
-	/// Counted already, and kept open while held, since the stream may still carry the group.
+	/// CountedStart already, and kept open while held, since the stream may still carry the group.
 	reading: Reading,
 }
 
@@ -411,7 +411,7 @@ impl TrackEntry {
 				);
 			}
 		}
-		// The subscription's end waits until this stream is read. Counted
+		// The subscription's end waits until this stream is read. CountedStart
 		// whatever the cache said, since the publisher counts every stream it
 		// opens (a resubscribe resends a cached group), and only after the
 		// cache holds the group, so a fetch held for the feed that sees it
@@ -5133,7 +5133,7 @@ mod tests {
 			let waiter = kio::Waiter::noop();
 			assert!(duplicate.poll_serve(&waiter).is_pending(), "first fails: {first_fails}");
 			assert_eq!(duplicate.state.name(), "Hold", "first fails: {first_fails}");
-			// Counted and holding the end open while it waits, since it may carry the group.
+			// CountedStart and holding the end open while it waits, since it may carry the group.
 			assert_eq!(tail.read().streams(), 1);
 
 			let mut original = reader.assert_group();
@@ -10152,14 +10152,22 @@ impl SubStream {
 		let mut times = Vec::new();
 		let mut relative = Vec::new();
 		for (id, range) in self.live.iter() {
-			let Some(Some(start)) = self.starts.get(&id) else {
+			// `None` for a range with no group to deliver.
+			let Some(&start) = self.starts.get(&id) else {
 				continue;
 			};
-			match range.start {
-				Some(lite::Anchor::Absolute(time)) if time.frame == 0 => times.push((time.group, *start)),
-				Some(lite::Anchor::Relative(back)) => {
+			match (range.start, start) {
+				(Some(lite::Anchor::Absolute(time)), Some(start)) if time.frame == 0 => times.push((time.group, start)),
+				(Some(lite::Anchor::Relative(back)), start) => {
 					if let Some(Some(latest)) = self.edges.get(&id) {
-						relative.push((back, *start, *latest));
+						// With no group to deliver, the start lies at or past the range's end:
+						// an absolute end names its exclusive group, and an open one the latest.
+						let start = match (start, range.end) {
+							(Some(start), _) => track::CountedStart::At(start),
+							(None, Some(lite::Anchor::Absolute(end))) => track::CountedStart::Past(end.group),
+							(None, _) => track::CountedStart::Past(latest.saturating_add(1)),
+						};
+						relative.push((back, start, *latest));
 					}
 				}
 				_ => {}
