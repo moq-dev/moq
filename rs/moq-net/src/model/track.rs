@@ -705,8 +705,8 @@ pub(crate) struct TrackState {
 	// The frames of each group a reader already held when it asked this copy to resume that
 	// group past them, by key, which the group adopts as it arrives (see
 	// [`Consumer::lend_head`]). Filled through a read guard, so it needs its own lock. One per
-	// group, taken as that group arrives, so it holds at most the groups readers resumed
-	// this copy at.
+	// group, taken as that group arrives or dropped as it is given up, so it holds only the
+	// groups readers resumed this copy at that are still to come.
 	lent: Mutex<BTreeMap<u64, Arc<group::Head>>>,
 
 	// The key and start of the highest-key group that left the cache holding a
@@ -1581,6 +1581,11 @@ impl TrackState {
 	/// Keep the change index aligned with the range map, including the neighbours an
 	/// insertion coalesces and the two pieces a removal can leave.
 	fn change_drops(&mut self, groups: ops::Range<u64>, hole: Option<Hole>) {
+		// A group given up never arrives to take the head lent for it.
+		if hole.is_some() {
+			let lent = self.lent.get_mut().unwrap_or_else(PoisonError::into_inner);
+			lent.retain(|key, _| !groups.contains(key));
+		}
 		if hole.as_ref().is_none_or(|hole| hole.stale_budget().is_none())
 			&& self
 				.drops
@@ -15838,6 +15843,10 @@ mod test {
 		consumer.lend_head(9, head(9, 1));
 		// A shorter loan for the same group leaves the longer one standing.
 		consumer.lend_head(7, head(7, 1));
+		// A group given up drops its loan.
+		consumer.lend_head(8, head(8, 1));
+		producer.skip_groups(8..9);
+		assert!(!producer.modify().unwrap().lent.get_mut().unwrap().contains_key(&8));
 		for (key, at) in [(7, 2), (9, 1)] {
 			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at).unwrap() else {
 				panic!("nothing else holds group {key}");
