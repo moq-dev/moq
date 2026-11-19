@@ -64,7 +64,12 @@ async fn read_from_expired(version: &str) -> Vec<u64> {
 		.unwrap()
 		.unwrap()
 		.unwrap();
-	let _local = local.track("video").unwrap().subscribe(Subscription::default()).await.unwrap();
+	let _local = local
+		.track("video")
+		.unwrap()
+		.subscribe(Subscription::default())
+		.await
+		.unwrap();
 	play(&track, 1000..2000).await;
 
 	let _down = link(version.parse::<Version>().unwrap(), &relay, &downstream).await;
@@ -96,7 +101,11 @@ async fn an_older_start_on_a_shared_copy_is_fed() {
 	for version in ["moq-lite-06", "moq-lite-07-wip"] {
 		let read = read_from_expired(version).await;
 		// Everything from the oldest group the relay still holds, through the live edge.
-		assert_eq!(read.last(), Some(&2900), "{version}: fed to the live edge, read {read:?}");
+		assert_eq!(
+			read.last(),
+			Some(&2900),
+			"{version}: fed to the live edge, read {read:?}"
+		);
 		assert!(
 			read.windows(2).all(|pair| pair[1] - pair[0] == STEP),
 			"{version}: no gap once started, read {read:?}"

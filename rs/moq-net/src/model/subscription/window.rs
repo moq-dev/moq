@@ -314,7 +314,7 @@ impl Window {
 	pub fn is_waiting_above(&self, floor: u64) -> bool {
 		self.waiting
 			.iter()
-			.any(|&position| matches!(self.spans[position].anchor, Anchor::Time(time) if time > floor))
+			.any(|&position| matches!(self.spans[&position].anchor, Anchor::Time(time) if time > floor))
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and

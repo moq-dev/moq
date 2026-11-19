@@ -15472,8 +15472,9 @@ mod test {
 				}])
 				.with_delay(Delay::default().with_max(None))
 		};
-		let placed =
-			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges()[0].map(|resolved| (resolved.start, resolved.floored))
+		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
