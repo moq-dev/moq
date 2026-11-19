@@ -463,8 +463,10 @@ impl Lan {
 /// publisher only over the CDN's own expensive link, never through the LAN.
 ///
 /// At the cut `lan[0]` moves onto the route through the CDN at once: its reader's
-/// announcement stays, available, and the subscription the closed session carried reads on
-/// through the CDN.
+/// announcement stays. `cdn[0]` reached the local broadcast through `lan[0]`, so it offered
+/// it nothing until the cut, and `lan[0]` shows it unavailable until that route lands, here
+/// in the same instant. The subscription the closed session carried reads on through the
+/// CDN.
 #[kio::test]
 async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let mut lan = Lan::new().await;
@@ -498,9 +500,13 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let partitioned = island.seen();
 	// The local publisher's push, `lan[1]`'s uplink, the CDN's link, and `lan[0]`'s uplink.
 	let through_cdn = 1 + 1 + CDN_INTERNAL + 1;
-	let [moved] = partitioned.as_slice() else {
+	let [lost, moved] = partitioned.as_slice() else {
 		panic!("the island moved once: {partitioned:?}");
 	};
+	assert!(
+		lost.kind == Kind::Update && !lost.available && lost.instance == instance && lost.at == cut_at,
+		"unavailable until the CDN's route lands: {partitioned:?}"
+	);
 	assert!(
 		moved.kind == Kind::Update
 			&& moved.available
@@ -991,8 +997,8 @@ impl Origin {
 /// over its own session. A client lists only `live`. It holds `L`'s route and never `V`'s:
 /// `V` churning costs the client no byte. A request outside that interest still resolves
 /// through the relay. A Rust client's request discovers its own path, so it names `V`'s
-/// node; Node ID 0, the publisher selecting, comes only from other implementations and
-/// is covered at the publisher (`an_answered_track_stream_holds_the_track_until_the_requester_closes`).
+/// node; Node ID 0, the publisher selecting, comes only from other implementations: the
+/// native JS claims lanes of `just test interop` cover a relay answering it.
 #[kio::test]
 async fn a_client_watching_one_prefix_holds_only_the_origins_meeting_it() {
 	let relay = produce_origin(1);

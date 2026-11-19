@@ -18,7 +18,10 @@ WebCodecs output painted to a canvas and drives the player's pause/resume contro
 The native JS tail lanes also resolve on-demand claims on lite-07, under Node
 and Bun over WebSocket and WebTransport. Fresh readers request or follow the
 claim's own path and child paths. A reader-first case checks that an absent
-request ends while its follower waits for the publisher to arrive.
+request ends while its follower waits for the publisher to arrive. A browser forwards
+nothing and knows no node, so every request `@moq/net` sends names Node ID 0, leaving the
+relay to pick the claim's node: these lanes are where a relay answers that end to end,
+since a Rust client always names one.
 
 Every publisher also sends an Opus tone, one sine per channel, and every subscriber
 decodes it. Python and C++ send a mono 440 Hz tone; the rest send 440 Hz left and
