@@ -144,7 +144,8 @@ wall time. The media clock runs at the wall clock's rate, slewing toward it by a
 jumping forward across a suspend, so camera and screen video wall times stay on UTC however long
 the page publishes. Microphone audio counts its own samples, taking the same suspend jumps, and
 resamples by up to 2000 ppm to keep that count on the media clock, so it stays within a frame of
-its video over hours. A file is placed on the media clock where it starts, keeps its own spacing
+its video over hours. A device clock further off than that drifts until the audio is 100 ms behind,
+then re-anchors. A file is placed on the media clock where it starts, keeps its own spacing
 after that, and jumps with a suspend. Stamp your own tracks (e.g. text cues) with
 `MediaClock.now()` to stay in sync.
 

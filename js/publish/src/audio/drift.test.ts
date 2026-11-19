@@ -148,12 +148,13 @@ function stamp(
 	device: Device,
 	seconds: number,
 	options: { rate?: number; samples?: number; jumps?: [number, number][] } = {},
-): { errors: [number, number][]; stamps: number[] } {
+): { errors: [number, number][]; stamps: number[]; ends: number[] } {
 	const rate = options.rate ?? 8_000;
 	const samples = options.samples ?? 80;
 	const stamper = new Stamper(rate);
 	const errors: [number, number][] = [];
 	const stamps: number[] = [];
+	const ends: number[] = [];
 	const jumps = [...(options.jumps ?? [])];
 	let jumped = 0;
 	let shift = 0;
@@ -172,10 +173,11 @@ function stamp(
 		if (!frame) continue;
 		const timestamp = frame.timestamp.asMicros();
 		stamps.push(timestamp);
+		ends.push(timestamp + (frame.channels[0].length / rate) * 1e6);
 		// The first sample out sits the resampler's 12-sample lookahead back in the previous quantum.
 		errors.push([host, timestamp / 1e6 - captured]);
 	}
-	return { errors, stamps };
+	return { errors, stamps, ends };
 }
 
 describe("Stamper", () => {
@@ -199,8 +201,9 @@ describe("Stamper", () => {
 	// Never back: every frame starts at or after where the last one ended.
 	test("stamps only forward", () => {
 		for (const ppm of [-3000, 3000]) {
-			const { stamps } = stamp({ ppm, jitter: 0.01 }, 60);
-			for (let i = 1; i < stamps.length; i++) expect(stamps[i]).toBeGreaterThan(stamps[i - 1]);
+			const { stamps, ends } = stamp({ ppm, jitter: 0.01 }, 60);
+			expect(stamps.length).toBeGreaterThan(1);
+			for (let i = 1; i < stamps.length; i++) expect(stamps[i]).toBeGreaterThanOrEqual(ends[i - 1] - 1e-6);
 		}
 	});
 });
