@@ -10,9 +10,9 @@ function refuse(what: string): never {
 // Values live under a symbol rather than a `#private` field so test matchers such as `toEqual`
 // compare them by value; a private field is invisible to them, so every pair would match.
 /** @internal */
-export const VALUE: unique symbol = Symbol("clock value");
+const VALUE: unique symbol = Symbol("clock value");
 /** @internal */
-export const NANOS: unique symbol = Symbol("clock nanos");
+const NANOS: unique symbol = Symbol("clock nanos");
 
 // Package-private bridges for backends that count in plain numbers.
 /** @internal */

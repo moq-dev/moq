@@ -8,7 +8,7 @@
  */
 
 /** A host as a dial reads it: an IPv4 or IPv6 literal, or a name left to DNS. */
-export type Host =
+type Host =
 	| { readonly kind: "ipv4"; readonly octets: readonly number[] }
 	| { readonly kind: "ipv6"; readonly segments: readonly number[] }
 	| { readonly kind: "name"; readonly name: string };
