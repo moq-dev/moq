@@ -81,7 +81,8 @@ and claims cross as route-free announces with a chain, drain, and the
 - Without the marks, a cycle echoes: when the publisher ends a claim, each
   relay holds its neighbour's copy, which no route or revision orders, and
   shows it unavailable until the debounce lets it go, as offline rather
-  than ended. Nothing loops or revives, but readers lose the end's cause.
+  than ended in the implementation as checked. Nothing loops or revives,
+  but readers lose the end's cause.
   Route-free claims carry no announcer revision or floor (`Msg::Claims` from
   a peer with no route is refused), so a design that wants cycles inside a
   domain needs a wire change in a later version.

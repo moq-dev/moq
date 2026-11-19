@@ -7,11 +7,11 @@
 //! ID, so each end files the other as scoped: claims cross with a chain and no route is
 //! ever offered. Relays pulling from each other over such sessions form the domain.
 
-use crate::path_routes::{DEBOUNCE, land, lite07, publish, quiesce, record, withdrawn};
+use crate::path_routes::{DEBOUNCE, cut, land, lite07, publish, quiesce, record, withdrawn};
 use crate::route_change::{link, next, payload, produce_origin, read, timed};
 use crate::support::{self, AppendNext, AtStart};
 
-use moq_net::{Error, Version, origin, track};
+use moq_net::{Version, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// `to` pulls everything `from` publishes over a link both ends mark upstream, so
@@ -70,8 +70,8 @@ async fn a_marked_mesh_without_routes_ends_a_claim_at_once() {
 /// The ring `A`, `B`, `C` with nothing marked, so each relay passes on what it learns. A
 /// claim on `A` reaches the others once each and never comes back to `A`. Its withdrawal
 /// leaves each holding the other's echo, which no route or revision orders, so each lets
-/// go only when the debounce runs out, as offline rather than ended, and never
-/// revives it.
+/// go only when the debounce runs out and never revives it. This pins only that much:
+/// how the end shows (offline, as of this writing) is left to a later fix.
 #[kio::test]
 async fn a_ring_without_routes_lets_an_echo_go_within_the_debounce() {
 	let version = lite07();
@@ -116,10 +116,14 @@ async fn a_reader_moves_around_a_ring_without_routes() {
 	let broadcast = a.route("live", origin::RouteOptions::hidden()).unwrap();
 	let track = broadcast.broadcast().create_track("video", timed()).unwrap();
 	broadcast.announce().unwrap();
+	let mut at_b = record(&b, "live").await;
+	let start = kio::clock::now();
 	let ab = both(version, &a, &b).await;
 	let _bc = both(version, &b, &c).await;
 	let _ca = both(version, &c, &a).await;
 	land().await;
+	let seen = at_b.seen(start);
+	assert_eq!(seen.last().unwrap().cost, 1, "B is served straight from A: {seen:?}");
 
 	let remote = b
 		.consume()
@@ -141,11 +145,18 @@ async fn a_reader_moves_around_a_ring_without_routes() {
 	group.write_frame(group.at_start(), payload(0, 0)).unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 0)));
 
+	let moved = kio::clock::now();
 	for pair in &ab {
-		pair.server.abort(Error::Cancel);
-		pair.client.abort(Error::Cancel);
+		cut(pair);
 	}
-	land().await;
+	quiesce().await;
+	let seen = at_b.seen(moved);
+	let last = seen.last().unwrap_or_else(|| panic!("B moves: {seen:?}"));
+	assert_eq!(last.cost, 2, "B moves onto the copy through C: {seen:?}");
+	assert!(
+		last.available && !seen.iter().any(withdrawn),
+		"B never lets go: {seen:?}"
+	);
 	group.write_frame(group.at_start(), payload(0, 1)).unwrap();
 	group.finish().unwrap();
 	assert_eq!(next(&mut rx).await, (0, payload(0, 1)));
