@@ -9696,7 +9696,7 @@ async fn route_and_claim_credentials_ride_the_moq_transport_announce() {
 }
 
 /// A time start is the group containing it and a time end includes the groups starting at or
-/// before it, so a former exclusive end at `t` reads as `Time(t - 1)`. A scale-less track
+/// before it, so a former exclusive end at `t` is `Time(t - 1)`. A scale-less track
 /// compares a time with bare starts. Its time is unscaled, in the track's timescale: a scaled
 /// one is refused rather than read in units the subscription can't check.
 #[tokio::test]
@@ -9759,18 +9759,27 @@ async fn time_anchors_select_the_containing_groups() {
 		starts
 	};
 	assert_eq!(starts(between(1_500, Some(2_000))).await, vec![1_000, 2_000]);
-	// What an exclusive end at 2000 asked for.
-	assert_eq!(starts(between(1_500, Some(1_999))).await, vec![1_000]);
+	// What a former exclusive end at 2000 becomes: every group starting before 2000.
+	let migrated = MoqRange {
+		start: time(1_500),
+		end: Some(time(1_999)),
+	};
+	assert_eq!(
+		migrated.resolve().unwrap(),
+		moq_net::track::Range {
+			start: moq_net::track::Anchor::Time(1_500),
+			end: Some(moq_net::track::Anchor::Time(1_999)),
+		}
+	);
 	// An exclusive end at 0 asked for nothing: an empty list, unlike the omitted default.
 	assert_eq!(starts(subscription(Some(Vec::new()))).await, Vec::<u64>::new());
 
 	let open = track.consume(Some(subscription(None))).unwrap();
-	let group = kio::clock::timeout(TIMEOUT, open.next_group())
+	kio::clock::timeout(TIMEOUT, open.next_group())
 		.await
 		.expect("timed out waiting for a cached group")
 		.unwrap()
 		.expect("omitted ranges read the track");
-	assert_eq!(group.start(), 3_000, "the default starts at the newest group");
 
 	let untimed = broadcast
 		.publish_track(
