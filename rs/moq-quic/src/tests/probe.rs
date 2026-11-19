@@ -362,7 +362,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if let Some((client, _, id, _)) = &competing {
 			let mut stream = pair.client_send(*client, *id);
-			while stream.write(&mut &[0; 16_384][..]).is_ok() {}
+			while matches!(stream.try_write(&mut &[0; 16_384][..]), Poll::Ready(Ok(_))) {}
 		}
 
 		pair.drive_client();
@@ -384,7 +384,7 @@ fn run(scenario: &Scenario) -> Outcome {
 			if let Some(id) = *recv {
 				let mut stream = pair.server_recv(*server, id);
 				let mut chunks = stream.read().unwrap();
-				while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+				while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 					outcome.competitor += chunk.bytes.len() as u64;
 				}
 				chunks.finalize();
@@ -489,10 +489,10 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 	for group in groups.iter_mut().filter(|g| g.reset.is_none() && !g.finished) {
 		let mut stream = pair.client_send(ch, group.id);
 		while !group.backlog.is_empty() {
-			match stream.write(&mut &group.backlog[..]) {
-				Ok(n) => drop(group.backlog.drain(..n)),
-				Err(send::Error::Blocked) => return,
-				Err(e) => panic!("write: {e}"),
+			match stream.try_write(&mut &group.backlog[..]) {
+				Poll::Ready(Ok(n)) => drop(group.backlog.drain(..n)),
+				Poll::Pending => return,
+				Poll::Ready(Err(e)) => panic!("write: {e}"),
 			}
 		}
 		if group.ended.is_some() {
@@ -546,14 +546,14 @@ fn receive(
 			continue;
 		};
 		loop {
-			match chunks.next(usize::MAX) {
-				Ok(Some(chunk)) => reading.read += chunk.bytes.len() as u64,
-				Ok(None) => {
+			match chunks.try_next(usize::MAX) {
+				Poll::Ready(Ok(Some(chunk))) => reading.read += chunk.bytes.len() as u64,
+				Poll::Ready(Ok(None)) => {
 					reading.done = true;
 					break;
 				}
-				Err(recv::Error::Blocked) => break,
-				Err(_) => {
+				Poll::Pending => break,
+				Poll::Ready(Err(_)) => {
 					reading.done = true;
 					break;
 				}

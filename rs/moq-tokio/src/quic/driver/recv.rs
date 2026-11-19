@@ -7,14 +7,16 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes};
-use moq_quic::{
-	connection::Error as ConnectionError,
-	recv::{Chunk, Chunks},
-};
+use moq_quic::{connection::Error as ConnectionError, recv::Chunks};
 use thiserror::Error;
 use tokio::io::ReadBuf;
 
-use crate::quic::driver::{VarInt, connection::ConnectionRef, stream};
+use crate::quic::driver::{
+	VarInt,
+	connection::{ConnectionRef, State},
+	mutex::MutexGuard,
+	stream,
+};
 
 /// A stream that can only be used to receive data
 ///
@@ -58,10 +60,19 @@ pub struct Stream {
 struct Reader {
 	conn: ConnectionRef,
 	id: stream::Id,
-	all_data_read: bool,
-	reset: Option<VarInt>,
+	end: End,
 	/// The code a drop before the end stops with
 	drop_stop: VarInt,
+}
+
+/// How far a [`Reader`] got, which moq-quic forgets once it frees the stream
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+	Reading,
+	/// Every byte up to the finish was read
+	Finished,
+	/// The peer reset the stream with this code, after the bytes it still delivered
+	Reset(VarInt),
 }
 
 impl Stream {
@@ -70,8 +81,7 @@ impl Stream {
 			reader: Reader {
 				conn,
 				id,
-				all_data_read: false,
-				reset: None,
+				end: End::Reading,
 				drop_stop: VarInt::from_u32(0),
 			},
 			park: kio::Park::default(),
@@ -120,11 +130,11 @@ impl Stream {
 	/// This operation is cancel-safe.
 	pub async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Error> {
 		kio::wait(|waiter| {
-			self.reader
-				.poll_read_generic(waiter, |chunks, waiter| match poll_next(chunks, waiter, max) {
-					Ok(Some(chunk)) => ReadStatus::Readable(chunk.bytes),
-					res => (None, res.err()).into(),
-				})
+			self.reader.poll_read_generic(waiter, |chunks, waiter| {
+				chunks
+					.poll_next(waiter, max)
+					.map_ok(|chunk| chunk.map(|chunk| chunk.bytes))
+			})
 		})
 		.await
 	}
@@ -225,22 +235,18 @@ impl Stream {
 	}
 	/// Observe FIN without consuming application bytes, including an empty stream's end.
 	pub(crate) fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-		// A read that met the reset marks every byte read, so only the cached code still says how it ended.
-		if let Some(code) = self.reader.reset {
-			return Poll::Ready(Ok(Some(code)));
-		}
-		let read = self
-			.reader
-			.poll_read_generic(waiter, |chunks, waiter| match chunks.poll_next(waiter, 0) {
-				Poll::Ready(Ok(Some(_))) => ReadStatus::Readable(()),
-				Poll::Ready(res) => (None, res.err()).into(),
-				Poll::Pending => ReadStatus::Failed(None, moq_quic::recv::Error::Blocked),
-			});
+		// An empty read takes no bytes, but reaches a finish or a reset once every byte before
+		// it was read.
+		let read = self.reader.poll_read_generic(waiter, |chunks, waiter| {
+			chunks.poll_next(waiter, 0).map_ok(|chunk| chunk.map(|_| ()))
+		});
 		match ready!(read) {
 			Ok(Some(())) => self.reader.poll_received_reset(waiter),
 			Ok(None) => Poll::Ready(Ok(None)),
-			Err(Error::Reset(code)) => Poll::Ready(Ok(Some(code))),
-			Err(err) => Poll::Ready(Err(err)),
+			Err(err) => match self.reader.end {
+				End::Reset(code) => Poll::Ready(Ok(Some(code))),
+				_ => Poll::Ready(Err(err)),
+			},
 		}
 	}
 }
@@ -249,20 +255,21 @@ impl Reader {
 	/// Take the connection's lease, which [`Lease`] wraps once this returns: the borrow of `self`
 	/// it holds cannot start inside a poll that may return `Pending`.
 	fn poll_take(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<moq_quic::recv::Lease, Error>> {
-		// moq-quic freed the stream when it reported the reset.
-		if let Some(code) = self.reset {
+		// moq-quic freed the stream once it gave the reset's code.
+		if let End::Reset(code) = self.end {
 			return Poll::Ready(Err(Error::Reset(code)));
 		}
 		let mut conn = self.conn.state.lock();
 		// moq-quic wakes the driver for any credit the lease returned.
-		let result = conn.inner.recv_stream(self.id).poll_lease(waiter, want);
-		let err = match ready!(result) {
+		let err = match ready!(conn.inner.recv_stream(self.id).poll_lease(waiter, want)) {
 			Ok(lease) => return Poll::Ready(Ok(lease)),
 			Err(err) => err,
 		};
-		let closed = conn.error();
-		drop(conn);
-		Poll::Ready(Err(lease_error(err, closed)))
+		Poll::Ready(Err(match err {
+			moq_quic::recv::Error::Evicted => Error::Evicted,
+			moq_quic::recv::Error::TooLarge => Error::TooLarge,
+			err => read_error(conn, self.id, &mut self.end, err),
+		}))
 	}
 
 	fn poll_read_buf(&mut self, waiter: &kio::Waiter, buf: &mut impl BufMut) -> Poll<Result<Option<usize>, Error>> {
@@ -273,7 +280,7 @@ impl Reader {
 	}
 
 	fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
-		if let Some(code) = self.reset {
+		if let End::Reset(code) = self.end {
 			return Poll::Ready(Ok(Some(code)));
 		}
 		let mut conn = self.conn.state.lock();
@@ -281,7 +288,7 @@ impl Reader {
 			match ready!(conn.inner.recv_stream(self.id).poll_received_reset(waiter)) {
 				Ok(error_code) => {
 					// Stream state has just now been freed, so later reads fail with the cached code.
-					self.reset = Some(error_code);
+					self.end = End::Reset(error_code);
 					Ok(Some(error_code))
 				}
 				// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
@@ -294,125 +301,83 @@ impl Reader {
 
 	/// Handle common logic related to reading out of a receive stream
 	///
-	/// This takes an `FnMut` closure that takes care of the actual reading process, matching
-	/// the detailed read semantics for the calling function with a particular return type.
-	/// The closure can read from the passed `&mut Chunks` and has to return the status after
-	/// reading: the amount of data read, and the status after the final read call. It reports
-	/// [`Blocked`](moq_quic::recv::Error::Blocked) with nothing read only once it registered
-	/// the waiter, as [`poll_next`] does.
-	fn poll_read_generic<T, U>(&mut self, waiter: &kio::Waiter, mut read_fn: T) -> Poll<Result<Option<U>, Error>>
-	where
-		T: FnMut(&mut Chunks<'_>, &kio::Waiter) -> ReadStatus<U>,
-	{
-		use moq_quic::recv::Error::{Blocked, Reset};
-
-		// A reset stays the answer to every later read, never a clean end.
-		if self.all_data_read && self.reset.is_none() {
-			return Poll::Ready(Ok(None));
+	/// `read_fn` reads from the passed `&mut Chunks`, waiting on the waiter only when it read
+	/// nothing. It yields what it read, or `None` once the stream finished with nothing read.
+	fn poll_read_generic<U>(
+		&mut self,
+		waiter: &kio::Waiter,
+		read_fn: impl FnOnce(&mut Chunks<'_>, &kio::Waiter) -> Poll<Result<Option<U>, moq_quic::recv::Error>>,
+	) -> Poll<Result<Option<U>, Error>> {
+		match self.end {
+			End::Reading => {}
+			End::Finished => return Poll::Ready(Ok(None)),
+			End::Reset(code) => return Poll::Ready(Err(Error::Reset(code))),
 		}
 
 		let mut conn = self.conn.state.lock();
-
-		// If we stored an error during a previous call, return it now. This can happen if a
-		// `read_fn` both wants to return data and also returns an error in its final stream status.
-		let status = match self.reset {
-			Some(code) => ReadStatus::Failed(None, Reset(code)),
-			None => {
-				let mut recv = conn.inner.recv_stream(self.id);
-				match recv.read() {
-					Ok(mut chunks) => {
-						let status = read_fn(&mut chunks, waiter);
-						// moq-quic wakes the driver for the credit the read returned.
-						chunks.finalize();
-						status
-					}
-					Err(err) => ReadStatus::Failed(None, err),
+		let read = match conn.inner.recv_stream(self.id).read() {
+			Ok(mut chunks) => {
+				let read = read_fn(&mut chunks, waiter);
+				// What was read may have reached the finish, after which moq-quic forgets the stream.
+				if chunks.is_finished() {
+					self.end = End::Finished;
 				}
+				// moq-quic wakes the driver for the credit the read returned.
+				chunks.finalize();
+				read
 			}
+			Err(err) => Poll::Ready(Err(err)),
 		};
-
-		match status {
-			ReadStatus::Readable(read) => Poll::Ready(Ok(Some(read))),
-			ReadStatus::Finished(read) => {
-				self.all_data_read = true;
-				Poll::Ready(Ok(read))
-			}
-			ReadStatus::Failed(Some(read), Blocked) => Poll::Ready(Ok(Some(read))),
-			// moq-quic registered the waiter.
-			ReadStatus::Failed(None, Blocked) => Poll::Pending,
-			ReadStatus::Failed(read, Reset(error_code)) => {
-				self.reset = Some(error_code);
-				if read.is_some() {
-					return Poll::Ready(Ok(read));
-				}
-				self.all_data_read = true;
-				Poll::Ready(Err(Error::Reset(error_code)))
-			}
-			ReadStatus::Failed(_, err) => {
-				let error = conn.error();
-				drop(conn);
-				Poll::Ready(Err(read_error(err, error)))
-			}
+		match ready!(read) {
+			Ok(read) => Poll::Ready(Ok(read)),
+			Err(err) => Poll::Ready(Err(read_error(conn, self.id, &mut self.end, err))),
 		}
 	}
 }
 
-/// [`Chunks::poll_next`], reporting a registered wait as [`Blocked`](moq_quic::recv::Error::Blocked)
-fn poll_next(
-	chunks: &mut Chunks<'_>,
-	waiter: &kio::Waiter,
-	max: usize,
-) -> Result<Option<Chunk>, moq_quic::recv::Error> {
-	match chunks.poll_next(waiter, max) {
-		Poll::Ready(result) => result,
-		Poll::Pending => Err(moq_quic::recv::Error::Blocked),
+/// The error for a read or lease moq-quic refused: the peer's reset, or the connection's loss,
+/// which is all that ends a stream the handle still holds.
+fn read_error(mut conn: MutexGuard<'_, State>, id: stream::Id, end: &mut End, err: moq_quic::recv::Error) -> Error {
+	// Asking for the reset's code frees the stream.
+	if let Ok(Some(code)) = conn.inner.recv_stream(id).received_reset() {
+		*end = End::Reset(code);
+		return Error::Reset(code);
+	}
+	let closed = conn.error();
+	// Panicking under the lock would poison it for every handle.
+	drop(conn);
+	match closed {
+		Some(closed) => Error::Connection(closed),
+		None => panic!("a held receive stream failed to read: {err:?}"),
 	}
 }
 
 /// Copy from `chunks` until `buf` is full or nothing more is readable, returning how much.
 ///
-/// It waits on `waiter` only when it read nothing.
-fn fill(chunks: &mut Chunks<'_>, waiter: &kio::Waiter, buf: &mut impl BufMut) -> ReadStatus<usize> {
+/// It waits on `waiter` only when it read nothing. What it read is returned first: a reset or
+/// the connection's loss after it is reported by the next read.
+fn fill(
+	chunks: &mut Chunks<'_>,
+	waiter: &kio::Waiter,
+	buf: &mut impl BufMut,
+) -> Poll<Result<Option<usize>, moq_quic::recv::Error>> {
+	let noop = kio::Waiter::noop();
 	let mut read = 0;
-	loop {
-		if !buf.has_remaining_mut() {
-			// We know `read` is not 0 because `buf` had room before
-			return ReadStatus::Readable(read);
-		}
-
-		let max = buf.remaining_mut();
-		let next = match read {
-			0 => poll_next(chunks, waiter, max),
-			_ => chunks.next(max),
-		};
-		match next {
-			Ok(Some(chunk)) => {
+	while buf.has_remaining_mut() {
+		let waiter = if read == 0 { waiter } else { &noop };
+		match chunks.poll_next(waiter, buf.remaining_mut()) {
+			Poll::Ready(Ok(Some(chunk))) => {
 				buf.put_slice(&chunk.bytes);
 				read += chunk.bytes.len();
 			}
-			res => return ((read > 0).then_some(read), res.err()).into(),
+			_ if read > 0 => break,
+			Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
+			Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			Poll::Pending => return Poll::Pending,
 		}
 	}
-}
-
-/// The error for a lease moq-quic refused, which forgets a stream only once the connection
-/// closed.
-fn lease_error(err: moq_quic::recv::Error, closed: Option<ConnectionError>) -> Error {
-	match err {
-		moq_quic::recv::Error::Reset(code) => Error::Reset(code),
-		moq_quic::recv::Error::Evicted => Error::Evicted,
-		moq_quic::recv::Error::TooLarge => Error::TooLarge,
-		err => read_error(err, closed),
-	}
-}
-
-/// The error for a read moq-quic refused on a stream the handle still holds, which it forgets
-/// only once the connection closed.
-fn read_error(err: moq_quic::recv::Error, closed: Option<ConnectionError>) -> Error {
-	match closed {
-		Some(closed) => Error::Connection(closed),
-		None => panic!("a held receive stream failed to read: {err:?}"),
-	}
+	// `buf` had room, so something was read.
+	Poll::Ready(Ok(Some(read)))
 }
 
 /// Unreleased bytes of a [`Stream`] from [`Stream::poll_lease`], read as a [`Buf`]
@@ -484,21 +449,6 @@ impl Drop for Lease<'_> {
 	}
 }
 
-enum ReadStatus<T> {
-	Readable(T),
-	Finished(Option<T>),
-	Failed(Option<T>, moq_quic::recv::Error),
-}
-
-impl<T> From<(Option<T>, Option<moq_quic::recv::Error>)> for ReadStatus<T> {
-	fn from(status: (Option<T>, Option<moq_quic::recv::Error>)) -> Self {
-		match status {
-			(read, None) => Self::Finished(read),
-			(read, Some(e)) => Self::Failed(read, e),
-		}
-	}
-}
-
 impl tokio::io::AsyncRead for Stream {
 	fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
 		let this = self.get_mut();
@@ -516,7 +466,7 @@ impl Drop for Stream {
 		let Some(mut conn) = reader.conn.state.lock_for_drop() else {
 			return;
 		};
-		if reader.all_data_read || conn.is_lost() {
+		if reader.end != End::Reading || conn.is_lost() {
 			return;
 		}
 
