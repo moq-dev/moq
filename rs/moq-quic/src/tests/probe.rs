@@ -545,21 +545,29 @@ fn receive(
 			reading.done = true;
 			continue;
 		};
-		loop {
+		let reset = loop {
 			match chunks.try_next(usize::MAX) {
 				Poll::Ready(Ok(Some(chunk))) => reading.read += chunk.bytes.len() as u64,
 				Poll::Ready(Ok(None)) => {
 					reading.done = true;
-					break;
+					break false;
 				}
-				Poll::Pending => break,
+				Poll::Pending => break false,
 				Poll::Ready(Err(_)) => {
 					reading.done = true;
-					break;
+					break true;
 				}
 			}
-		}
+		};
 		chunks.finalize();
+		// A read that reaches an expired group's reset keeps its stream, and the stream ID credit
+		// the sender opens later groups with, until the reset's code is asked for.
+		if reset {
+			assert!(
+				stream.received_reset().expect("an expiry ends a read early").is_some(),
+				"only an expiry ends a read early"
+			);
+		}
 
 		// The sender opens each group's stream in order, after any it opened before the media
 		let frames = &groups[(id.index() - groups[0].id.index()) as usize].written;
