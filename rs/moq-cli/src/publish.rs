@@ -112,6 +112,12 @@ pub struct CaptureArgs {
 	#[usage(long)]
 	pub bitrate: Option<u64>,
 
+	/// Also publish a smaller rendition as `video/NAME`, scaled from each captured frame to
+	/// SCALE of its pixels (0.25 is half the width and height). Repeatable. Each one encodes only
+	/// while watched, and under congestion the smallest keeps playing while larger ones pause.
+	#[usage(long = "rendition", value_name = "NAME=SCALE")]
+	pub renditions: Vec<moq_video::encode::Rendition>,
+
 	/// Video codec to encode. H.265 is hardware-only (VideoToolbox on macOS).
 	#[usage(long, value_enum, default = "h264")]
 	pub codec: VideoCodec,
@@ -1286,6 +1292,7 @@ impl CaptureArgs {
 		options.bandwidth = bandwidth;
 		options.on_demand = self.video == Mode::Demand;
 		options.device = crate::device(&self.vaapi_device, &self.v4l2_encoder);
+		options.renditions = self.renditions.clone();
 		Ok(options)
 	}
 
@@ -1444,6 +1451,33 @@ pub(crate) mod tests {
 				video == "demand"
 			);
 			assert_eq!(args.audio_capture(Allocator::unlimited()).2, audio == "demand");
+		}
+	}
+
+	/// `--rendition` repeats, each `NAME=SCALE` reaching the video capture, and a malformed one
+	/// fails parsing.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn renditions_reach_the_video_capture() {
+		use moq_net::bandwidth::Allocator;
+
+		let args = capture_args(&["--rendition", "sd=0.25", "--rendition", "ld=0.1"]);
+		let renditions = args.video_capture(Allocator::unlimited()).unwrap().renditions;
+		let parsed: Vec<_> = renditions.iter().map(|r| (r.name(), r.scale())).collect();
+		assert_eq!(parsed, [("sd", 0.25), ("ld", 0.1)]);
+		assert!(capture_args(&[]).renditions.is_empty());
+
+		for bad in ["sd", "sd=1", "a/b=0.5"] {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://localhost",
+				"import",
+				"capture",
+				"--rendition",
+				bad,
+			];
+			assert!(crate::args::Invocation::try_parse_from(argv).is_err(), "{bad}");
 		}
 	}
 
