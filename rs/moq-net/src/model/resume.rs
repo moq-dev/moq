@@ -4717,9 +4717,7 @@ mod test {
 		write(&a, 2);
 		a.skip_groups(3..5);
 		routes.serve(a.consume());
-		let sub = routes
-			.consume()
-			.subscribe(kio::Producer::new(Subscription::default()).into());
+		let sub = routes.consume().subscribe(Subscription::default().into());
 		let b = copy();
 		write(&b, 4);
 		write(&b, 5);
@@ -7871,7 +7869,7 @@ mod test {
 			let subscription = Subscription::default()
 				.with_delay(Delay::default().with_max(HOUR))
 				.with_ranges([range]);
-			let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
+			let sub = routes.consume().subscribe(subscription.into());
 			let mut reader = sub.reader.lock().unwrap();
 			let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
 			let old = &mut reader.copies[0];
