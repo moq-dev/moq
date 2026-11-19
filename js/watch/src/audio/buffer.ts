@@ -295,7 +295,7 @@ export class AudioBuffer {
 	#context: AudioContext;
 
 	readonly #timestamp = new Signal<number>(0);
-	/** The media timestamp sounding now, as of the worklet's last report. */
+	/** The presentation timestamp sounding now, as of the worklet's last report. */
 	readonly timestamp: Getter<number> = this.#timestamp;
 
 	readonly #output = new Signal<Duration>(Duration.ZERO);
@@ -422,9 +422,7 @@ export class AudioBuffer {
 				const heard = this.#sounding();
 				this.#observeOutput();
 				this.#observeLead(heard);
-				// The ring's timeline runs behind the media's by the Opus pre-skip, so add it back.
-				const sounding = this.#heardAt(data, heard);
-				this.#timestamp.set(data.anchored ? sounding + this.#backpressure.offset : sounding);
+				this.#timestamp.set(this.#heardAt(data, heard));
 				this.#stalled.set(data.stalled);
 				this.#underruns.set(data.underruns);
 				this.#skips.set(data.skips);
@@ -522,7 +520,9 @@ export class AudioBuffer {
 		}
 		// A reference move is a step of the clock, not where a reading landed, so the offset takes it whole.
 		const moved = last !== undefined && reference !== undefined ? (last - reference) * 1000 : 0;
-		const offset = position * 1000 - this.#backpressure.offset - heard * 1_000_000;
+		// The ring already holds presentation time (Opus output lands a pre-skip before its frame
+		// timestamp), so the clock maps onto it unshifted.
+		const offset = position * 1000 - heard * 1_000_000;
 		const previous = this.#offset === undefined ? undefined : this.#offset + moved;
 		this.#offset =
 			previous !== undefined && Math.abs(offset - previous) < JUMP ? Math.max(offset, previous - FALL) : offset;
