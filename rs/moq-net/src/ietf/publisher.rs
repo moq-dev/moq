@@ -2749,10 +2749,14 @@ impl RunFill {
 			tracing::debug!(%err, fill = %self.request_id, "fill stream close failed");
 			return Poll::Ready(());
 		}
-		let closed = wait!(Settle => writer.poll_close(waiter));
+		// Or until the group expires: stale bytes must not hold the connection.
+		let closed = wait!(Settle => match write.poll_stale(waiter) {
+			true => Poll::Ready(Err(Error::Old)),
+			false => writer.poll_close(waiter),
+		});
 		match closed {
 			Ok(()) => tracing::debug!(fill = %self.request_id, "fill complete"),
-			Err(err) => tracing::debug!(%err, fill = %self.request_id, "fill stream close failed"),
+			Err(err) => return self.fail(writer, err),
 		}
 		Poll::Ready(())
 	}
@@ -5484,10 +5488,22 @@ impl FetchRespond {
 			request_id: self.request_id,
 		})?;
 		wait!(Header => writer.poll_flush(waiter))?;
-		wait!(Body => self.write.poll(waiter, writer))?;
-		// Settle: the writer keeps the stream, and its rank, until the acknowledgement.
+		let body = wait!(Body => self.write.poll(waiter, writer));
+		if let Err(err) = body {
+			writer.abort(&err);
+			return Poll::Ready(Err(err));
+		}
+		// Settle: the writer keeps the stream, and its rank, until the acknowledgement, or
+		// until the group expires, which resets it.
 		writer.finish()?;
-		Poll::Ready(wait!(Settle => writer.poll_close(waiter)))
+		let settled = wait!(Settle => match self.write.poll_stale(waiter) {
+			true => Poll::Ready(Err(Error::Old)),
+			false => writer.poll_close(waiter),
+		});
+		if let Err(err) = &settled {
+			writer.abort(err);
+		}
+		Poll::Ready(settled)
 	}
 }
 
@@ -7444,11 +7460,21 @@ impl FetchGroupWrite {
 		}
 		let res = self.poll_objects(waiter, stream);
 		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
-		// bill it.
+		// bill it. Parked on flow control, the group's budget still applies, as it does to a
+		// subgroup stream: flow control must not pin a stale group.
 		if res.is_pending() {
 			stream.poll_settle(waiter);
+			if let Some(err) = poll_given_up(&mut self.group, waiter) {
+				return Poll::Ready(Err(err));
+			}
 		}
 		res
+	}
+
+	/// Whether the group expired, so a written stream awaiting its acknowledgement resets
+	/// rather than hold the connection for stale bytes.
+	fn poll_stale(&mut self, waiter: &kio::Waiter) -> bool {
+		self.group.poll_expired(waiter)
 	}
 
 	fn poll_objects(
@@ -14769,6 +14795,61 @@ mod serve_tests {
 		let wire = bytes::Bytes::from(h.log.writes.lock().unwrap().to_vec());
 		let mut buf = Decoder::new(&wire, version.into());
 		assert_eq!(fetch_object_priorities(&mut buf, version), [Some(55)]);
+	}
+
+	/// A fill sent whole whose FIN the subscriber never acknowledges resets once its group goes
+	/// stale, rather than hold the connection for stale bytes until the subscription ends.
+	#[kio::test]
+	async fn a_fill_resets_once_its_unacknowledged_group_goes_stale() {
+		let version = Version::Draft22;
+		let budget = Duration::from_secs(2);
+		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_uni_fins(1);
+		let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
+		// Frozen timestamps, so only the wall clock since group 5 arrived convicts group 4.
+		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		group.write_frame(group.key_time(), b"fill".as_slice()).unwrap();
+		group.finish().unwrap();
+
+		let ranking = Ranking {
+			queue: h.publisher.priority.clone(),
+			group: None,
+			request_id: RequestId(REQUEST_ID),
+			priority: kio::Producer::new(PRIORITY).consume(),
+			publisher: 0,
+			order: Order::Descending,
+			lapse: Lapse::default(),
+		};
+		let opened = AtomicU64::new(0);
+		let fill = FillServe::Group {
+			key: 4,
+			skip: 0,
+			until: None,
+		};
+		let mut run =
+			std::pin::pin!(
+				h.publisher
+					.run_fill(fill, &ranking, h.track.consume(), &opened, ranking.request_id)
+			);
+		let finished = || h.log.trail().iter().any(|(_, sent)| *sent == Sent::Finish);
+		kio::clock::timeout(Duration::from_secs(1), async {
+			while !finished() {
+				assert!(futures::poll!(run.as_mut()).is_pending(), "the FIN is unacknowledged");
+				kio::clock::sleep(Duration::from_millis(1)).await;
+			}
+		})
+		.await
+		.expect("the fill went out whole");
+
+		let mut next = h.track.create_group(group::Info { start: 5 }).unwrap();
+		next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
+		next.finish().unwrap();
+		kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
+		assert!(futures::poll!(run.as_mut()).is_pending(), "still within the budget");
+		assert!(h.log.resets().is_empty());
+
+		kio::clock::sim::advance(Duration::from_millis(1)).await;
+		kio::clock::timeout(budget, run).await.expect("the stale fill resets");
+		assert_eq!(h.log.resets().len(), 1, "the fill's stream reset");
 	}
 
 	/// The Track Properties block a publisher upstream of a relay sent on `version`: an even

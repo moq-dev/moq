@@ -3449,6 +3449,71 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 	}
 });
 
+// A fetch sent whole whose FIN the requester has yet to acknowledge still holds the connection, so
+// it resets as too old once its budget gives the group up, as the Rust `FetchServe` does.
+test("lite draft-07: a fetch sent whole resets as too old when it goes stale unacknowledged", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("live"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
+	const whole = track.createGroup(0n);
+	whole.writeFrame(frame(0));
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const incoming = pair.server.incomingBidirectionalStreams.getReader();
+	const accepted = await incoming.read();
+	incoming.releaseLock();
+	if (accepted.done) throw new Error("publisher never accepted the fetch stream");
+	// The FIN is never acknowledged: the close stays pending until the stream resets.
+	const inner = accepted.value.writable.getWriter();
+	let reset: unknown;
+	const writable = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = controller.signal.reason;
+				void inner.abort(controller.signal.reason);
+			});
+		},
+		write: (chunk) => inner.write(chunk),
+		close: () => new Promise(() => undefined),
+	});
+	const server = new Stream({ readable: accepted.value.readable, writable, version: Version.DRAFT_07 });
+
+	try {
+		const msg = new Fetch({
+			broadcast: Path.from("live"),
+			track: "video",
+			priority: 0,
+			maxDelay: 500,
+			group: 0n,
+		});
+		const serving = publisher.runFetch(msg, server);
+		// The frame is on the wire, then its successor arrives, and the group finishes: the whole
+		// group and its FIN go out, with the group still inside its budget.
+		await client.reader.u8();
+		const next = track.createGroup(1n);
+		next.writeFrame(frame(100));
+		whole.finish();
+		await flush();
+		expect(reset).toBeUndefined();
+
+		// Its successor arrived the budget ago, with the FIN still unacknowledged.
+		await clock.advance(Duration.millis(500));
+		await serving;
+		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
+	} finally {
+		installed.close();
+		publisher.close();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
 test.each([0, 1])("lite draft-07 reports the cached largest position when starting at time %s", async (start) => {
 	const startGroup = BigInt(start);
 	const version = Version.DRAFT_07;

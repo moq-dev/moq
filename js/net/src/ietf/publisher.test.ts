@@ -4571,6 +4571,51 @@ test("draft-22: cancellation releases a fill parked on flow control", async () =
 	}
 });
 
+// A fill whose FIN waits on an acknowledgement still holds the connection, so the subscriber
+// leaving resets it, as it does a fill still writing, rather than leave it to the session.
+test("draft-22: cancellation resets a fill whose FIN is unacknowledged", async () => {
+	const fx = fixture();
+	const finished = Promise.withResolvers<void>();
+	let reset = false;
+	const unacknowledged = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = true;
+			});
+		},
+		close() {
+			finished.resolve();
+			return new Promise<void>(() => {});
+		},
+	});
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	writeGroup(track, 1);
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 10n, startObject: 0n },
+			fill: { filter: { kind: "unfiltered" }, rangeFilters: false },
+		}),
+	);
+	try {
+		await finished.promise;
+		expect(reset).toBe(false);
+		client.close();
+		while (track.subscription.peek() !== undefined) await track.subscription.changed();
+		expect(reset).toBe(true);
+	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
 // A fill reads the cache through forks of its own, ranked at the converted subscriber
 // priority. Copied unconverted, wire 100 would raise the track's aggregate from 27 to 100,
 // and wire 191 is outside the model's -128..=127, so the fork throws and the fill never runs.

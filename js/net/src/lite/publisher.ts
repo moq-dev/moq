@@ -308,7 +308,10 @@ type ServeGroup = {
 };
 
 /** What serving fetched frames needs beyond the group and destination stream. */
-type ServeFetch = Omit<ServeGroup, "sub">;
+type ServeFetch = Omit<ServeGroup, "sub"> & {
+	/** Why to stop writing the group, which a write parked on flow control races. */
+	givenUp: GivenUp;
+};
 
 /** What the serving loop takes from the subscribe stream instead of serving a group. */
 type Control =
@@ -1287,16 +1290,27 @@ export class Publisher {
 					hooks.releaseGroupReader(group, unauthorized(msg.broadcast));
 					return;
 				}
-				await this.#runFetchGroup(group, stream.writer, {
-					stamp: stamping(this.version, info),
-					compress: info.compress,
-					start: msg.startFrame,
-					end: msg.endFrame,
-				});
-				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
-				stream.close();
-				group.close();
-				await acknowledged(stream.writer);
+				// The FETCH's own budget gives the group up, while a write waits on flow control and
+				// while its FIN waits for the acknowledgement, as the Rust `FetchServe` does: stale
+				// bytes must not hold the send window ahead of the streams behind them.
+				const givenUp = new GivenUp(group);
+				try {
+					await this.#runFetchGroup(group, stream.writer, {
+						stamp: stamping(this.version, info),
+						compress: info.compress,
+						start: msg.startFrame,
+						end: msg.endFrame,
+						givenUp,
+					});
+					console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+					stream.close();
+					// Held until the acknowledgement, so its budget still judges it meanwhile.
+					const stop = await givenUp.write(() => acknowledged(stream.writer));
+					if (stop) throw stop;
+					group.close();
+				} finally {
+					givenUp.close();
+				}
 			} catch (err: unknown) {
 				const e = error(err);
 				console.warn(
@@ -2295,8 +2309,12 @@ export class Publisher {
 	async #runFetchGroup(
 		group: group.Consumer,
 		stream: Writer,
-		{ stamp, compress, start: startFrame, end: endFrame }: ServeFetch,
+		{ stamp, compress, start: startFrame, end: endFrame, givenUp }: ServeFetch,
 	) {
+		const write = async (op: () => Promise<unknown>) => {
+			const stop = await givenUp.write(op);
+			if (stop) throw stop;
+		};
 		// The response carries no header, so the receiver numbers the first frame it gets
 		// as `startFrame`. Skipping the head here is the only thing keeping those numbers
 		// honest; a group that ends before we reach it can't be served at all.
@@ -2321,16 +2339,25 @@ export class Publisher {
 				prevTs = ts;
 			}
 
-			await stream.write(
-				frameHeader(stream.version, delta, read.inflated, readSize(read), hasLengthFirst(this.version)),
+			const header = frameHeader(
+				stream.version,
+				delta,
+				read.inflated,
+				readSize(read),
+				hasLengthFirst(this.version),
 			);
-			if (read.chunks) await sendPayload(read.chunks, (chunk) => stream.write(chunk), stream.closed);
-			else if (frame.payload.length > 0) await stream.write(frame.payload);
+			const chunks = read.chunks;
+			// One budget race covers the frame's header and payload.
+			await write(async () => {
+				await stream.write(header);
+				if (chunks) await sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed);
+				else if (frame.payload.length > 0) await stream.write(frame.payload);
+			});
 		}
 		// Lite-07: a response that reached a finished group's end says so before the FIN.
 		const end = group.end;
 		if (hasGroupEnd(this.version) && end !== undefined && hooks.groupIndex(group) >= group.frameCount)
-			await stream.write(groupEnd(stream.version, end));
+			await write(() => stream.write(groupEnd(stream.version, end)));
 	}
 
 	/**

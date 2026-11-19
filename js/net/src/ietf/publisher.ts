@@ -1503,12 +1503,17 @@ export class Publisher {
 					slice: groupSlice(fill, group.start),
 					cancelled: given.signal,
 				});
+				stream.close();
+				// Its bytes still hold the connection until acknowledged, so a group gone stale
+				// meanwhile, or the subscriber leaving, resets it, as the Rust `RunFill` does.
+				await untilAborted(
+					stream.closed.catch(() => undefined),
+					given.signal,
+				);
 			} finally {
 				given.release();
 				group.close();
 			}
-
-			stream.close();
 			console.debug(`fill complete: fill=${requestId}`);
 		} catch (err: unknown) {
 			// A fill never fails the subscription; its own stream carries the failure.

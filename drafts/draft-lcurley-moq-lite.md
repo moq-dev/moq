@@ -839,7 +839,7 @@ Timestamp age means a burst of groups delivered together still reads as its true
 Arrival age bounds what timestamps cannot: a publisher whose timestamps stop advancing, a successor that never presents a frame, and a run of empty groups.
 
 A publisher stops sending an expired group: it resets the group's Group Stream with OLD and names the group in a [SUBSCRIBE_DROP](#subscribe-drop) with OLD, as it does a group it opened no stream for.
-This includes a stream whose GROUP_END the publisher already sent but the subscriber has yet to acknowledge, since its unacknowledged bytes would otherwise hold the connection's flow control and stall the streams behind them, such as the Subscribe Stream and higher-priority Tracks.
+This includes a stream whose GROUP_END was sent but not yet acknowledged, whose bytes would otherwise hold flow control the streams behind it need.
 A subscriber that already read such a stream whole, through its GROUP_END and FIN, keeps the group: the OLD drop changes nothing for its readers.
 
 ## Unidirectional Streams
@@ -1997,6 +1997,7 @@ See the [Prioritization](#prioritization) section for more information.
 **Subscriber Max Age**:
 The optional maximum age in milliseconds that the subscriber accepts, encoded as the value plus one; 0 omits the reader bound.
 The publisher still applies `Publisher Max Age`, and MUST use the tighter bound while serving and while the returned group remains open.
+A response whose group expires under that bound before the subscriber acknowledges it is reset with OLD, even after its GROUP_END, as a Group Stream is (see [Expiration](#expiration)).
 
 **Group Start**:
 The start of the group to fetch.
@@ -2355,7 +2356,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
-- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
+- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`. A response whose group expires before it is acknowledged is reset with OLD.
 - A receiver drops a claim whose resolved path it cannot hold, such as one past the path limits once joined beneath its own root, rather than closing the session ([Announce](#announce)).
 
 ## moq-lite-06

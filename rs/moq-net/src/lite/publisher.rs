@@ -1608,6 +1608,12 @@ trait Request: Sized {
 	const HOLDS: bool;
 	/// The message that opens the stream, owned so it outlives the bytes it came from.
 	type Message: std::fmt::Debug;
+
+	/// The group a finished reply carried, kept until the peer acknowledges it so the stream
+	/// resets if the group expires first.
+	fn stale(self) -> Option<group::Consumer> {
+		None
+	}
 	/// What the requester may send after the request, as it travels; [`NoUpdate`] for nothing.
 	type Update: Resolve<Self::Message>;
 
@@ -1772,6 +1778,8 @@ enum RequestState<M, R> {
 	/// FIN and wait for the acknowledgement.
 	Finish {
 		finished: bool,
+		/// The group a reply carried, which resets the stream if it expires first.
+		stale: Option<group::Consumer>,
 	},
 }
 
@@ -1827,6 +1835,9 @@ impl<R: Request> RequestServe<R> {
 					Error::Unauthorized | Error::Stream(crate::StreamError::Unauthorized) => {
 						tracing::info!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track(), "{} unauthorized", R::KIND)
 					}
+					Error::Old => {
+						tracing::debug!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track(), "{} expired", R::KIND)
+					}
 					err => {
 						tracing::warn!(broadcast = %crate::path::Rooted(self.shared.origin.root(), &self.broadcast), track = %self.track(), %err, "{} error", R::KIND)
 					}
@@ -1868,9 +1879,13 @@ impl<R: Request> RequestServe<R> {
 				// Drop the reply mid-flight: anything half-sent is cancelled rather than
 				// completed for nobody. A request that never started moves its name into the log
 				// context, as `start` would.
-				if let RequestState::Resolve { mut msg, .. } =
-					std::mem::replace(&mut self.state, RequestState::Finish { finished: false })
-				{
+				if let RequestState::Resolve { mut msg, .. } = std::mem::replace(
+					&mut self.state,
+					RequestState::Finish {
+						finished: false,
+						stale: None,
+					},
+				) {
 					self.track = R::take_track(&mut msg);
 				}
 			}
@@ -1915,9 +1930,13 @@ impl<R: Request> RequestServe<R> {
 					}
 					let broadcast = ready!(requesting.as_ref().expect("requesting").poll_ok(waiter))?;
 					// Any placeholder but `Decode`, so a failed start is answered on the stream.
-					let RequestState::Resolve { mut msg, .. } =
-						std::mem::replace(&mut self.state, RequestState::Finish { finished: false })
-					else {
+					let RequestState::Resolve { mut msg, .. } = std::mem::replace(
+						&mut self.state,
+						RequestState::Finish {
+							finished: false,
+							stale: None,
+						},
+					) else {
 						unreachable!()
 					};
 					self.track = R::take_track(&mut msg);
@@ -1935,9 +1954,13 @@ impl<R: Request> RequestServe<R> {
 						stream.writer.poll_settle(waiter);
 					}
 					if ready!(step)?.is_break() {
-						let RequestState::Serve(request) =
-							std::mem::replace(&mut self.state, RequestState::Finish { finished: false })
-						else {
+						let RequestState::Serve(request) = std::mem::replace(
+							&mut self.state,
+							RequestState::Finish {
+								finished: false,
+								stale: None,
+							},
+						) else {
 							unreachable!()
 						};
 						if R::HOLDS {
@@ -1945,6 +1968,11 @@ impl<R: Request> RequestServe<R> {
 								_request: request,
 								finished: false,
 								acked: false,
+							};
+						} else {
+							self.state = RequestState::Finish {
+								finished: false,
+								stale: request.stale(),
 							};
 						}
 					}
@@ -1955,7 +1983,10 @@ impl<R: Request> RequestServe<R> {
 						// leaving before it is out cancels it and lets go of the request.
 						if stream.writer.poll_flush(waiter)?.is_pending() {
 							let closed = ready!(self.poll_closed(waiter));
-							self.state = RequestState::Finish { finished: false };
+							self.state = RequestState::Finish {
+								finished: false,
+								stale: None,
+							};
 							closed?;
 							return Poll::Ready(Err(Error::Cancel));
 						}
@@ -1970,7 +2001,10 @@ impl<R: Request> RequestServe<R> {
 					}
 					let closed = ready!(self.poll_closed(waiter));
 					// Let go of the request now, not when the serve is dropped.
-					self.state = RequestState::Finish { finished: true };
+					self.state = RequestState::Finish {
+						finished: true,
+						stale: None,
+					};
 					// A FIN or a reset both end the requester's interest; only a stray byte
 					// is a fault.
 					if let Err(err) = closed
@@ -1982,7 +2016,12 @@ impl<R: Request> RequestServe<R> {
 						return Poll::Ready(Ok(()));
 					}
 				}
-				RequestState::Finish { finished } => {
+				RequestState::Finish { finished, stale } => {
+					// Those bytes hold the connection until acknowledged, so a reply gone stale
+					// meanwhile is reset rather than left to stall the streams behind it.
+					if stale.as_mut().is_some_and(|group| group.poll_expired(waiter)) {
+						return Poll::Ready(Err(Error::Old));
+					}
 					if !*finished {
 						ready!(stream.writer.poll_flush(waiter))?;
 						stream.writer.finish()?;
@@ -3097,6 +3136,13 @@ impl Request for FetchServe {
 		match update {}
 	}
 
+	fn stale(self) -> Option<group::Consumer> {
+		match self {
+			Self::Fetch { .. } => None,
+			Self::Serve { group, .. } => Some(group),
+		}
+	}
+
 	fn poll(
 		&mut self,
 		shared: &Shared,
@@ -3155,12 +3201,20 @@ impl Request for FetchServe {
 					batch_pos,
 					records,
 				} => loop {
-					ready!(writer.poll_flush(waiter))?;
+					// Parked on the transport, the group's budget still applies, as it does to
+					// a subscription's Group Stream: flow control must not pin a stale reply.
+					let Poll::Ready(flushed) = writer.poll_flush(waiter) else {
+						return poll_given_up(group, waiter).map_or(Poll::Pending, |err| Poll::Ready(Err(err)));
+					};
+					flushed?;
 					if let Some(records) = records {
 						ready!(records.poll_state(writer, group, waiter))?;
 					}
 					if let Some(pending) = chunk {
-						ready!(writer.poll_write(waiter, pending))?;
+						let Poll::Ready(written) = writer.poll_write(waiter, pending) else {
+							return poll_given_up(group, waiter).map_or(Poll::Pending, |err| Poll::Ready(Err(err)));
+						};
+						written?;
 						if !bytes::Buf::has_remaining(pending) {
 							*chunk = None;
 						}
@@ -6879,7 +6933,10 @@ mod serve_group_test {
 		assert!(!fin, "FIN");
 		// Nothing past the GROUP header the transport took before blocking.
 		assert!(!bytes.windows(4).any(|w| w == b"more"), "{bytes:?}");
-		assert!(outcomes.dropped.lock().unwrap().is_empty(), "serve_group settles nothing");
+		assert!(
+			outcomes.dropped.lock().unwrap().is_empty(),
+			"serve_group settles nothing"
+		);
 	}
 
 	/// Egress counts only payload the transport took: a group reset while its frames wait in
@@ -11775,9 +11832,17 @@ mod tests {
 	}
 
 	/// A FETCH whose own budget gives up on its group partway resets as too old: a FIN
-	/// would tell the requester the prefix it got is the whole group.
+	/// would tell the requester the prefix it got is the whole group. One sent whole whose
+	/// FIN the requester has yet to acknowledge resets too, so stale bytes stop holding the
+	/// connection.
 	#[kio::test]
 	async fn an_expired_fetch_resets_rather_than_finishing() {
+		for whole in [false, true] {
+			expired_fetch_resets(whole).await;
+		}
+	}
+
+	async fn expired_fetch_resets(whole: bool) {
 		const VERSION: Version = Version::Lite07;
 		let origin = crate::origin::Config::new(std::num::NonZeroU64::new(1).unwrap()).produce();
 		let broadcast = origin.route("room", crate::origin::RouteOptions::hidden()).unwrap();
@@ -11788,6 +11853,9 @@ mod tests {
 		broadcast.announce().unwrap();
 		let mut open = track.append_next().unwrap();
 		open.write_frame(open.key_time(), b"a".to_vec()).unwrap();
+		if whole {
+			open.finish().unwrap();
+		}
 
 		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
 		peer_setup.set(crate::lite::Setup::default()).unwrap();
@@ -11820,7 +11888,10 @@ mod tests {
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
 		.unwrap();
-		let session = ScriptedSession::new(script);
+		let session = match whole {
+			true => ScriptedSession::new(script).with_unacked_fin(),
+			false => ScriptedSession::new(script),
+		};
 		let (send, recv) = kio::wait(|waiter| {
 			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
 		})
@@ -11831,7 +11902,8 @@ mod tests {
 			reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), VERSION),
 		};
 		let mut serve = RequestServe::<FetchServe>::new(publisher.shared.clone(), stream);
-		assert!(!drive(&mut serve).await, "the open group holds the response");
+		assert!(!drive(&mut serve).await, "whole={whole}: the response is held");
+		assert!(session.log.resets().is_empty(), "whole={whole}");
 
 		// The track runs a full second past the group's successor.
 		for ms in [1000, 2000] {
@@ -11841,8 +11913,12 @@ mod tests {
 				.unwrap();
 			group.finish().unwrap();
 		}
-		assert!(drive(&mut serve).await, "the budget ends the response");
-		assert_eq!(session.log.resets(), vec![crate::StreamError::Old.to_code()]);
+		assert!(drive(&mut serve).await, "whole={whole}: the budget ends the response");
+		assert_eq!(
+			session.log.resets(),
+			vec![crate::StreamError::Old.to_code()],
+			"whole={whole}"
+		);
 	}
 
 	#[kio::test]
