@@ -8893,9 +8893,9 @@ fn shutdown_waits_for_an_in_place_poll() {
 			// Holds this poll open while shutdown starts on another thread.
 			release_rx.recv().unwrap();
 			// Arms a timer on tokio's host driver, which shutdown must not stop under this poll.
-			// Never due within the test, so only the shutdown finishes this call.
-			kio::clock::sleep(Duration::from_secs(3600)).await;
-			unreachable!("the timer outlives the test")
+			// The clock never reaches its last instant, so only the shutdown finishes this call.
+			kio::clock::sleep_until(kio::clock::now().saturating_add(Duration::MAX)).await;
+			unreachable!("the clock reached its last instant")
 		});
 		tokio::runtime::Builder::new_current_thread()
 			.build()
