@@ -1,0 +1,7 @@
+# Workspace settings for mbx, the Cargo wrapper that caches our builds.
+
+[scheduler]
+# Never queue a test for a scheduler permit. nextest starts a test's timeout when
+# it starts mbx's runner, so a test held in the queue on a loaded host is killed
+# before it runs. `quest gate` and nextest's own thread count bound test load.
+tests = false

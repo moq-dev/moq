@@ -21617,6 +21617,11 @@ rec {
         ];
         devDependencies = [
           {
+            name = "hang";
+            packageId = "hang";
+            features = [ "async" ];
+          }
+          {
             name = "kio";
             packageId = "kio";
             features = [ "runtime" ];
