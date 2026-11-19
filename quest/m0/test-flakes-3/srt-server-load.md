@@ -12,3 +12,5 @@ Reproduce under load first, then fix what waits on wall time.
 
 Run alone, the test target does not compile: `src/server.rs` calls `hang::Catalog::subscribe`, which needs hang's `async` feature, and only workspace feature unification enables it.
 Enable it in moq-srt's dev-dependencies, as moq-json does for its own wrappers.
+
+Decided 2026-11-19 (coordinator, maintainer away, merge granted): keep this follow-up.
