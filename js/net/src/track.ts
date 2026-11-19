@@ -3155,6 +3155,18 @@ export class Subscriber {
 		};
 	}
 
+	// {@link #drift} under a fetch's own budget, in milliseconds, in place of this reader's, still
+	// capped by the track's max age.
+	#driftWithin(budget: number): Drift {
+		const drift = this.#drift();
+		const fresh = this.#state.info.peek()?.maxAge?.asMillis();
+		return {
+			...drift,
+			budget: fresh === undefined ? budget : Math.min(budget, fresh),
+			bounded: fresh !== undefined && budget >= fresh,
+		};
+	}
+
 	// The group after `key` that bounds it: the first servable one below `end` that
 	// counts as content (its first frame landed, or it ended), stamped or not.
 	//
@@ -4291,10 +4303,11 @@ export class Subscriber {
 			(subscriber.#state.closed.peek() !== undefined || subscriber.#complete()) &&
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
-		hooks.staleAt = (subscriber, key) => {
+		hooks.staleAt = (subscriber, key, budget) => {
 			const held: Superseded = {};
+			const drift = budget === undefined ? () => subscriber.#drift() : () => subscriber.#driftWithin(budget);
 			return {
-				expired: () => subscriber.#staleAt(key, subscriber.#drift(), true, held),
+				expired: () => subscriber.#staleAt(key, drift(), true, held),
 				changed: subscriber.#expiryChanged(),
 			};
 		};

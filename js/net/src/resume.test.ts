@@ -1949,6 +1949,54 @@ test("a fetched group continues from the next route once its own fails", async (
 	b.close();
 });
 
+// A wire answers a FETCH with a bare group, which carries no budget of its own: the fetch's own
+// budget judges it against a reader's copy of the route, as a Rust relay judges a fetch landed in
+// that copy's cache. Nothing newer is known before a reader subscribes one, and a fetch never does.
+test.each([
+	{ budget: "500ms", maxDelay: Duration.millis(500), stale: true },
+	{ budget: "none", maxDelay: undefined, stale: false },
+])("a group fetched over a wire goes stale by the fetch's own budget ($budget)", async ({ maxDelay, stale }) => {
+	// Still, so only presentation time judges.
+	const { installed } = manual();
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	ta.write(0n);
+	const { route } = counted(a, (key) => {
+		const answer = new GroupProducer(key);
+		answer.writeFrame({ payload: enc.encode(`${key}.0`), timestamp: Timestamp.unscaled(answer.start) });
+		answer.finish();
+		return answer.consume();
+	});
+	front.serve(route);
+	try {
+		const group = await front.consumer.track("seq").fetchGroup(0n, { maxDelay });
+		ta.write(1000n);
+		await settle();
+		// Fetch-only: nothing pulls the track, so nothing newer is known here.
+		expect(ta.producer.demand().wanted.peek()).toBe(false);
+		expect(group.expired.peek()).toBeUndefined();
+		const verdict = group.expired.then((err) => err);
+
+		// A reader whose own budget is far wider subscribes a copy.
+		const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+		await settle();
+		expect(group.expired.peek()).toBeUndefined();
+
+		// The copy's live edge runs a second past group 0's successor.
+		ta.write(2000n);
+		if (stale) expect(await verdict).toMatchObject({ code: StreamCode.Old });
+		else expect(await isPending(verdict)).toBe(true);
+
+		sub.close();
+		group.close();
+	} finally {
+		front.consumer.close();
+		a.close();
+		installed.close();
+	}
+});
+
 test("a held fetch lets go of the route it resumed onto once its reader releases the group", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
