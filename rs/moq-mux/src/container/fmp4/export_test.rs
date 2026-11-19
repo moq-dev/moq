@@ -1581,7 +1581,11 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 		fragments.extend(drain_now(&mut exporter).await);
 
 		let samples = samples_per_track(&fragments);
-		assert_eq!(samples.get(&ids.1), Some(&12), "listed first: {listed_first}: {samples:?}");
+		assert_eq!(
+			samples.get(&ids.1),
+			Some(&12),
+			"listed first: {listed_first}: {samples:?}"
+		);
 		assert!(samples[&ids.0] >= 3, "the video played on: {samples:?}");
 		assert_eq!(samples.len(), 2, "no track beyond the init's: {samples:?}");
 	}

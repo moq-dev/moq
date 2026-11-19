@@ -121,13 +121,7 @@ enum Read {
 impl MkvTrack {
 	/// A track numbered `track_number` reading rendition `name` from `source`, with the video
 	/// `config` it was added under.
-	fn new(
-		name: &str,
-		source: ExportSource,
-		kind: TrackKind,
-		config: Option<VideoConfig>,
-		track_number: u64,
-	) -> Self {
+	fn new(name: &str, source: ExportSource, kind: TrackKind, config: Option<VideoConfig>, track_number: u64) -> Self {
 		Self {
 			clock: Default::default(),
 			declared: None,
@@ -655,8 +649,14 @@ impl<S: Stream> Export<S> {
 		names.sort();
 		for name in names {
 			let (kind, source) = match (catalog.video.renditions.get(&name), catalog.audio.renditions.get(&name)) {
-				(Some(config), _) => (TrackKind::Video, ExportSource::for_video(&self.source, &name, config, self.delay)),
-				(None, Some(config)) => (TrackKind::Audio, ExportSource::for_audio(&self.source, &name, config, self.delay)),
+				(Some(config), _) => (
+					TrackKind::Video,
+					ExportSource::for_video(&self.source, &name, config, self.delay),
+				),
+				(None, Some(config)) => (
+					TrackKind::Audio,
+					ExportSource::for_audio(&self.source, &name, config, self.delay),
+				),
 				(None, None) => continue,
 			};
 			let failed = self
@@ -681,7 +681,11 @@ impl<S: Stream> Export<S> {
 				self.replaced.insert(failed);
 				continue;
 			}
-			if !self.tracks.values().any(|track| track.kind == kind && !track.finished()) {
+			if !self
+				.tracks
+				.values()
+				.any(|track| track.kind == kind && !track.finished())
+			{
 				return Err(Error::HeaderAddedTrack(name).into());
 			}
 		}

@@ -1758,9 +1758,15 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 			let track = producer.create_track(producer.unique_name(name), timed()).unwrap();
 			let mut modify = catalog.modify().unwrap();
 			if video {
-				modify.video.renditions.insert(track.name().to_string(), video_config.clone());
+				modify
+					.video
+					.renditions
+					.insert(track.name().to_string(), video_config.clone());
 			} else {
-				modify.audio.renditions.insert(track.name().to_string(), audio_config.clone());
+				modify
+					.audio
+					.renditions
+					.insert(track.name().to_string(), audio_config.clone());
 			}
 			crate::container::Producer::new(track, legacy())
 		};

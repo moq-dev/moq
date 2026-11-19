@@ -9156,7 +9156,11 @@ async fn a_failed_rendition_is_replaced_while_the_rest_plays_on() {
 	let (rest, end) = drain_to_end(&mut export).await;
 	end.expect("a failed rendition with others still playing does not end the export");
 	frames.extend(rest);
-	assert_eq!(pes_count(&frames), 20 + 10 + 5, "every frame of all three tracks went out");
+	assert_eq!(
+		pes_count(&frames),
+		20 + 10 + 5,
+		"every frame of all three tracks went out"
+	);
 }
 
 /// Publish an empty catalog at `live` under `route`.

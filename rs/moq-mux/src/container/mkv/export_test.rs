@@ -1006,7 +1006,11 @@ async fn a_failed_rendition_continues_on_its_replacement() {
 			.filter(|(_, payload)| payload.as_slice() == b"old" || payload.as_slice() == b"new")
 			.collect();
 		let payloads: Vec<&[u8]> = audio.iter().map(|(_, payload)| payload.as_slice()).collect();
-		assert_eq!(payloads, [&b"old"[..], b"old", b"new", b"new", b"new"], "listed first: {listed_first}");
+		assert_eq!(
+			payloads,
+			[&b"old"[..], b"old", b"new", b"new", b"new"],
+			"listed first: {listed_first}"
+		);
 		let numbers: std::collections::HashSet<u64> = audio.iter().map(|(number, _)| *number).collect();
 		assert_eq!(numbers.len(), 1, "the replacement writes under the declared track");
 		assert_eq!(blocks.len(), audio.len() + 3, "the video played on");

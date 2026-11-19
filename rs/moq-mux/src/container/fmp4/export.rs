@@ -1128,7 +1128,11 @@ impl<S: Stream> Export<S> {
 			if active.contains(&name) || !listed.insert(name.clone()) || self.replaced.contains(&name) {
 				continue;
 			}
-			if !self.tracks.contains_key(&name) && !self.departed.contains_key(&name) && self.init.written() && !self.late {
+			if !self.tracks.contains_key(&name)
+				&& !self.departed.contains_key(&name)
+				&& self.init.written()
+				&& !self.late
+			{
 				if !self.spares.contains_key(&name) {
 					tracing::warn!(track = %name, "rendition joined after the init; it waits to continue a failed one");
 				}
@@ -1229,7 +1233,11 @@ impl<S: Stream> Export<S> {
 			self.tracks.remove(name);
 		}
 		self.settle_spares()?;
-		if !self.tracks.values().any(|track| matches!(track.phase, Phase::Reading(_))) {
+		if !self
+			.tracks
+			.values()
+			.any(|track| matches!(track.phase, Phase::Reading(_)))
+		{
 			return Err(err);
 		}
 		if self.tracks.get(name).is_some_and(Fmp4Track::lost) {

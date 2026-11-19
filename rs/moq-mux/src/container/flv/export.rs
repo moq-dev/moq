@@ -624,7 +624,10 @@ impl<S: Stream> Export<S> {
 		if self.tracks().all(FlvTrack::finished) {
 			return Err(err);
 		}
-		if self.tracks().any(|track| track.name == name && track.read == Read::Lost) {
+		if self
+			.tracks()
+			.any(|track| track.name == name && track.read == Read::Lost)
+		{
 			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
 		}
 		Ok(())
