@@ -772,7 +772,7 @@ jobs:
   sizes:
     name: Shipping sizes
     # Measures what these release jobs upload rather than rebuilding it.
-    needs: [release-py-ffi, release-shared-ffi, release-libmoq, release-moq-relay, release-moq-cli]
+    needs: [release-py-ffi, release-shared-ffi, release-libmoq, release-c, release-moq-relay, release-moq-cli]
     runs-on: ubuntu-24.04-arm
     # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
