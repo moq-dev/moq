@@ -25,6 +25,7 @@ struct Node {
 	stats: Registry,
 	origin: moq_net::origin::Producer,
 	trigger: shutdown::Trigger,
+	shutdown: shutdown::Observer,
 	running: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
 
@@ -68,6 +69,7 @@ impl Node {
 		let stats = relay.cluster().stats.clone();
 		let origin = relay.cluster().origin.clone();
 		let trigger = relay.shutdown_trigger().clone();
+		let shutdown = relay.shutdown().clone();
 		let ready = relay.ready();
 		let running = tokio::spawn(relay.run());
 		ready.wait().await.expect("relay ready");
@@ -76,6 +78,7 @@ impl Node {
 			stats,
 			origin,
 			trigger,
+			shutdown,
 			running,
 		}
 	}
@@ -219,7 +222,10 @@ async fn a_draining_relay_drains_the_links_it_dialed() {
 
 	// The draining relay, which sent the GOAWAY, names itself in no DRAIN.
 	let sent = l.routes().sent.count(Withdrawal::Drain);
+	let observer = l.shutdown.clone();
 	l.stop().await;
+	// The links it held to the deadline by design are no session it failed to drain.
+	assert_eq!(observer.drained().await.forced, 0, "the held links counted as forced");
 	assert_eq!(sent, 0, "the draining relay sent a DRAIN");
 	assert!(started.elapsed() >= DRAIN, "L left before its drain deadline");
 

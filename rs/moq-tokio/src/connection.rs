@@ -1114,8 +1114,9 @@ impl Connection {
 	/// At `timeout` the session is closed with [`moq_net::Error::GoawayTimeout`] on
 	/// this side's own timer, so a peer stalling the GOAWAY's write cannot hold it
 	/// open. A predecessor still finishing a handover closes as in
-	/// [`close`](Self::close), unless no replacement has connected yet and it is the
-	/// session that serves, and tokens stay presented until both end. Returns `Ok`
+	/// [`close`](Self::close), aborted by `timeout` if its handover deadline is later,
+	/// unless no replacement has connected yet and it is the session that serves.
+	/// Tokens stay presented until both end. Returns `Ok`
 	/// when nothing was live or the peer left before `timeout`, whatever its close
 	/// code, and [`moq_net::Error::GoawayTimeout`] when `timeout` closed the session.
 	pub async fn drain(self, timeout: Duration) -> crate::Result<()> {
@@ -1123,8 +1124,11 @@ impl Connection {
 		let deadline = kio::clock::now().saturating_add(timeout);
 		let (session, predecessor) = self.stop();
 		// A predecessor that still serves, its replacement not yet connected, drains as the
-		// live session rather than closing on its handover deadline.
-		let predecessor = predecessor.filter(|(predecessor, _)| session.as_ref() != Some(predecessor));
+		// live session rather than closing on its handover deadline. A distinct one closes
+		// by its handover deadline, but no later than this drain's.
+		let predecessor = predecessor
+			.filter(|(predecessor, _)| session.as_ref() != Some(predecessor))
+			.map(|(predecessor, handover)| (predecessor, handover.min(deadline)));
 		let session = async move {
 			let Some(session) = session else {
 				return Ok(());

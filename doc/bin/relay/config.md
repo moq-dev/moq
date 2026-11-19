@@ -407,6 +407,8 @@ closed when the window ends. An embedder can take over the signals; see
 
 An embedder's drain alert can page on the `forced` count returned by
 [`Observer::drained`](https://docs.rs/moq-relay/latest/moq_relay/shutdown/struct.Observer.html#method.drained).
+It leaves out the dialed links the drain holds to its end, so a routine
+restart reports none.
 Its `ending` count distinguishes sessions already closed before the deadline
 but still reporting their end. The live tally separates open sessions from
 that cleanup, and the summary's elapsed time stays the same for late observers.

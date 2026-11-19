@@ -130,7 +130,8 @@ pub struct Tally {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Drained {
-	/// Sessions still open at the deadline that were force-closed.
+	/// Sessions still open at the deadline that were force-closed. Cluster links the
+	/// relay dialed are held to the deadline by design, so they are never counted.
 	pub forced: usize,
 	/// Sessions closed strictly before the deadline and still reporting their end at it.
 	pub ending: usize,
@@ -344,7 +345,7 @@ impl Observer {
 			elapsed: ended.saturating_duration_since(window.started),
 		};
 		match drained.forced {
-			0 => tracing::info!(elapsed = ?drained.elapsed, "drain ended with every session gone; exiting"),
+			0 => tracing::info!(elapsed = ?drained.elapsed, "drain ended with no session force-closed; exiting"),
 			forced => {
 				tracing::warn!(elapsed = ?drained.elapsed, forced, "drain deadline force-closed sessions; exiting")
 			}
@@ -353,8 +354,9 @@ impl Observer {
 	}
 
 	/// Count a session as draining until the returned guard drops, and as forced
-	/// if it is still open at `deadline`.
-	fn draining(&self, deadline: Instant) -> Draining {
+	/// if it is still open at `deadline`. `None` counts a link the drain holds to
+	/// its end by design, which is never forced.
+	fn draining(&self, deadline: Option<Instant>) -> Draining {
 		self.state.send_modify(|state| state.draining += 1);
 		Draining {
 			state: self.state.clone(),
@@ -387,7 +389,7 @@ impl Observer {
 		let remaining = deadline.saturating_duration_since(now);
 		// Dropped when this returns or is cancelled (a WebSocket driver ending
 		// first), so the count holds whichever way the session goes.
-		let _draining = counted.then(|| self.draining(deadline));
+		let _draining = counted.then(|| self.draining(Some(deadline)));
 
 		// "Reconnect to me": the relay is restarting, not moving. An empty URI is
 		// legal from either side and this runs once per session, so neither error
@@ -411,7 +413,9 @@ impl Observer {
 	async fn drain_link(&self, link: moq_tokio::Connection, counted: bool) {
 		let now = Instant::now();
 		let deadline = self.deadline().unwrap_or(now.saturating_add(self.drain_timeout));
-		let _draining = counted.then(|| self.draining(deadline));
+		// A neighbour keeps serving a link that sent it a GOAWAY, so reaching the
+		// deadline is how this link ends, not a session that failed to leave.
+		let _draining = counted.then(|| self.draining(None));
 		if let Err(err) = link.drain(deadline.saturating_duration_since(now)).await {
 			tracing::debug!(%err, "dialed link did not leave before the drain deadline");
 		}
@@ -489,14 +493,15 @@ impl Drop for Serving {
 /// A session sent a GOAWAY; see [`Observer::draining`].
 struct Draining {
 	state: watch::Sender<State>,
-	deadline: Instant,
+	/// When the session counts as forced, or `None` for a link held to the end.
+	deadline: Option<Instant>,
 }
 
 impl Drop for Draining {
 	fn drop(&mut self) {
 		// The force-close fires at `deadline`, so every session it closes is
 		// counted. A peer leaving in that sliver was still there at the deadline too.
-		let forced = Instant::now() >= self.deadline;
+		let forced = self.deadline.is_some_and(|deadline| Instant::now() >= deadline);
 		self.state.send_modify(|state| {
 			state.draining -= 1;
 			state.forced += usize::from(forced);
@@ -818,7 +823,7 @@ mod tests {
 		let window = Duration::from_secs(10);
 		let (trigger, shutdown) = Observer::new(window);
 		let mut established = shutdown.serve();
-		let draining = shutdown.draining(kio::clock::now().saturating_add(window));
+		let draining = shutdown.draining(Some(kio::clock::now().saturating_add(window)));
 		trigger.start();
 		kio::clock::sleep(window / 2).await;
 		established.closed();
@@ -865,9 +870,11 @@ mod tests {
 		trigger.start();
 		let deadline = shutdown.deadline().expect("started");
 
-		let left = shutdown.draining(deadline);
-		let straggler = shutdown.draining(deadline);
-		assert_eq!(shutdown.draining_count(), 2);
+		let left = shutdown.draining(Some(deadline));
+		let straggler = shutdown.draining(Some(deadline));
+		let mut link_serving = shutdown.serve();
+		let link = shutdown.draining(None);
+		assert_eq!(shutdown.draining_count(), 3);
 
 		kio::clock::sleep(window / 2).await;
 		left_serving.closed();
@@ -875,12 +882,18 @@ mod tests {
 		kio::clock::sleep(window / 2).await;
 		drop(straggler);
 		edge_serving.closed();
+		drop(link);
+		link_serving.closed();
 
 		let state = *shutdown.state.borrow();
 		assert_eq!(state.draining, 0);
-		assert_eq!(state.forced, 1, "only the session open at the deadline is forced");
+		assert_eq!(
+			state.forced, 1,
+			"only the session open at the deadline is forced, not the link held to it"
+		);
 		drop(left_serving);
 		drop(edge_serving);
+		drop(link_serving);
 		assert_eq!(
 			shutdown.drained().await,
 			Drained {

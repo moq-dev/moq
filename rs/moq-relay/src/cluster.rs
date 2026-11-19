@@ -1291,6 +1291,11 @@ impl Mesh {
 
 	/// Apply one source's change to the dial set.
 	fn apply(&mut self, command: DialCommand) {
+		// Once the relay drains, the dial set is frozen: replacing or releasing a dial
+		// would drop its link mid-drain, and a new one would only return at once.
+		if self.cluster.shutdown.deadline().is_some() {
+			return;
+		}
 		let mut dial = dialer(&self.cluster, &self.token);
 		match command {
 			DialCommand::Api(desired) => self.dialed.reconcile_api(&desired, &mut dial),
@@ -3538,6 +3543,52 @@ mod tests {
 
 		mesh.apply(DialCommand::Api(HashMap::new()));
 		assert!(nodes.snapshot().nodes.is_empty(), "a removed peer takes its history");
+	}
+
+	/// Once the relay drains, no source change replaces, releases, or adds a dial, so
+	/// each link's own task finishes its drain to the deadline.
+	#[tokio::test]
+	async fn mesh_freezes_its_dials_once_the_relay_drains() {
+		let (trigger, shutdown) = crate::shutdown::Observer::new(Duration::from_secs(10));
+		let mut options = Options::new(Config::default());
+		options.shutdown = Some(shutdown);
+		let mut mesh = Mesh {
+			cluster: Cluster::spawn(options).expect("cluster"),
+			token: ClusterToken::default(),
+			dialed: DialMap::new(None),
+			sources: kio::Tasks::new(),
+			commands: DialCommands::default(),
+		};
+		let api = |peers: &[&str]| {
+			DialCommand::Api(
+				peers
+					.iter()
+					.map(|peer| {
+						let target = DialTarget::parse(peer).unwrap();
+						(target.key.clone(), target)
+					})
+					.collect(),
+			)
+		};
+		mesh.apply(api(&["https://a.example/?cost=1", "https://b.example/"]));
+		let task = mesh.dialed.entries[&key("https://a.example/")].task;
+
+		trigger.start();
+		mesh.apply(api(&["https://a.example/?cost=2", "https://c.example/"]));
+		assert_eq!(
+			mesh.dialed.entries[&key("https://a.example/")].task,
+			task,
+			"a changed target must not replace a draining dial"
+		);
+		assert!(
+			mesh.dialed.contains(&key("https://b.example/")),
+			"a removed peer must keep draining"
+		);
+		assert!(
+			!mesh.dialed.contains(&key("https://c.example/")),
+			"a draining relay dials nothing new"
+		);
+		assert_eq!(mesh.dialed.tasks.len(), 2);
 	}
 
 	/// A dial task's panic ends the mesh with it, rather than unwinding the task
