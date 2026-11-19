@@ -72,7 +72,7 @@ import { grace } from "./ledger.ts";
 import { keyOf, type Lister, type Tracks, type TracksEvent } from "./listing.ts";
 import * as track from "./track.ts";
 import { max, min, UNBOUNDED } from "./util/key.ts";
-import { clamped, type Resolved, sameRanges, type Window } from "./window.ts";
+import { clamped, type Resolved, sameRanges, Window } from "./window.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 /** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
@@ -832,11 +832,16 @@ class Reader implements ResumeSource {
 		);
 	}
 
-	/** The reader's ranges as {@link #placed} resolves them now. */
+	/**
+	 * The reader's ranges as {@link #placed} resolves them now, or as they resolve with no copy at
+	 * all: a range from the oldest group needs no copy to place it. Mirrors the Rust reader's
+	 * window starting unheld.
+	 */
 	#placement(): (Resolved | undefined)[] {
 		const ranges = (this.#shell.subscription.peek() ?? track.Subscription.default()).ranges ?? [{}];
 		const placed = this.#placed(ranges);
-		return ranges.map((_, index) => placed[index]);
+		const unheld = new Window(ranges, undefined).resolved();
+		return ranges.map((_, index) => placed[index] ?? unheld[index]);
 	}
 
 	// Whether a failed copy's next group waits for a copy continuing the track to place the

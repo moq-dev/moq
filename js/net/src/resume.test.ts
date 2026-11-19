@@ -4368,3 +4368,26 @@ test("a failed copy leaves a time start to the serving copy", async () => {
 		b.close();
 	}
 });
+
+// A range from the oldest group needs no copy to place it, so a failed copy's buffered group goes
+// out without waiting for a replacement, as the Rust reader's window starting unheld places it.
+test("a failed copy hands out its buffered group under ranges no copy places", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ delay: { max: null } });
+	try {
+		ta.write(64n);
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		const group = sub.tryRecvGroup();
+		expect(group?.start).toBe(64n);
+		group?.close();
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
