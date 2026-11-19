@@ -28,7 +28,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Position, Range as TrackRange, Producer as TrackProducer } from "./track.ts";
+import type { Position, Producer as TrackProducer, Range as TrackRange } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
@@ -501,7 +501,10 @@ test("integration: lite-07 starts a later reader's relative range where the publ
 
 	const remote = wireOf(client).consume(Path.from("test"));
 	const subscribe = (ranges: TrackRange[]) =>
-		remote.track("video").subscribe({ delay: { max: null }, order: "ascending", ranges }).ordered();
+		remote
+			.track("video")
+			.subscribe({ delay: { max: null }, order: "ascending", ranges })
+			.ordered();
 	const read = async (reader: ReturnType<typeof subscribe>) => {
 		const got: (bigint | undefined)[] = [];
 		for (;;) {

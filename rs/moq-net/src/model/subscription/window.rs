@@ -1254,7 +1254,10 @@ mod tests {
 		let mut window = Window::new(&ranges, None, Some(9), &keys).unwrap();
 		assert!(window.is_counting() && !window.is_pending() && !window.is_settled());
 		assert_eq!(covered(&window, 0..10), vec![1]);
-		assert_eq!((window.floor(), window.start(), window.named(), window.end()), (None, None, None, None));
+		assert_eq!(
+			(window.floor(), window.start(), window.named(), window.end()),
+			(None, None, None, None)
+		);
 		assert_eq!(window.resolved_key(0), None);
 
 		// Nothing to count from while the latest group is unknown.
@@ -1270,7 +1273,9 @@ mod tests {
 
 		// Retiring a range still counting takes it out of the count.
 		keys.counted = Some(Containing::Unknown);
-		window.edit([], &[(2, range(Anchor::Relative(3), None))], Some(9), &keys).unwrap();
+		window
+			.edit([], &[(2, range(Anchor::Relative(3), None))], Some(9), &keys)
+			.unwrap();
 		assert!(window.is_counting());
 		window.edit([2], &[], Some(9), &keys).unwrap();
 		assert!(window.is_settled());

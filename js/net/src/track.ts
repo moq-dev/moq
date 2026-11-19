@@ -1579,7 +1579,9 @@ export class Producer {
 			const last = producer.#relativeStarts;
 			const same =
 				next.size === last.size &&
-				[...next].every(([back, at]) => last.get(back)?.start === at.start && last.get(back)?.latest === at.latest);
+				[...next].every(
+					([back, at]) => last.get(back)?.start === at.start && last.get(back)?.latest === at.latest,
+				);
 			if (same) return;
 			producer.#relativeStarts = next;
 			// A reader whose relative start waits on the report reads again.
