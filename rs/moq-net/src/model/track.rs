@@ -20090,6 +20090,37 @@ mod test {
 		);
 	}
 
+	/// `next_group` passes over every gap `next_item` reports, trailing ones included, and ends
+	/// where it does.
+	#[test]
+	#[cfg(feature = "async")]
+	fn next_group_passes_the_gaps_next_item_reports() {
+		let mut producer = track_producer("test", None);
+		let mut every = producer.subscribe(replay()).ordered();
+		let mut groups = producer.subscribe(replay()).ordered();
+		put(&producer, 2, None);
+		put(&producer, 4, None);
+		producer.drop_groups(0..2, StreamError::DeliveryTimeout);
+		producer.drop_groups(3..4, StreamError::DeliveryTimeout);
+		producer.drop_groups(5..7, StreamError::DeliveryTimeout);
+		producer.finish_at(Position::group(7)).unwrap();
+		assert_eq!(
+			items(&mut every),
+			[
+				"gap 0..2 (delivery timeout)",
+				"group 2",
+				"gap 3..4 (delivery timeout)",
+				"group 4",
+				"gap 5..7 (delivery timeout)",
+			]
+		);
+		let mut read = Vec::new();
+		while let Some(group) = groups.next_group().now_or_never().expect("ready").unwrap() {
+			read.push(group.start);
+		}
+		assert_eq!(read, [2, 4]);
+	}
+
 	/// A gap a moved range only partly covers returns that part, and the rest stays for the
 	/// range to widen over.
 	#[test]
