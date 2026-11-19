@@ -1404,8 +1404,16 @@ impl Reader {
 			return;
 		}
 		// Where the serving copy resolved the reader's ranges: the floor raises each start
-		// there, never lowering a later range to the floor.
+		// there, never lowering a later range to the floor. A failed copy's resolution is no
+		// placement, as in `window`: the reader's own carries over, pending until a copy
+		// continuing the track places it.
+		let failed = self.route.end().is_none()
+			&& self
+				.copies
+				.last()
+				.is_some_and(|copy| matches!(copy.sub, Sub::Ready(_)) && copy_failed(&copy.track));
 		let resolved = match self.copies.last_mut() {
+			Some(_) if failed => self.window().resolved(),
 			Some(Copy {
 				sub: Sub::Ready(sub), ..
 			}) => sub.resolved_ranges(),
