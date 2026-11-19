@@ -7460,13 +7460,9 @@ impl FetchGroupWrite {
 		}
 		let res = self.poll_objects(waiter, stream);
 		// Parked, perhaps right after writing a frame: an acknowledgement then wakes this to
-		// bill it. Parked on flow control, the group's budget still applies, as it does to a
-		// subgroup stream: flow control must not pin a stale group.
+		// bill it.
 		if res.is_pending() {
 			stream.poll_settle(waiter);
-			if let Some(err) = poll_given_up(&mut self.group, waiter) {
-				return Poll::Ready(Err(err));
-			}
 		}
 		res
 	}
@@ -7540,7 +7536,10 @@ impl FetchGroupWrite {
 				}
 				FetchGroupState::Batch { next, payload } => {
 					if let Some(write) = payload {
-						ready!(write.poll(waiter, stream))?;
+						let Poll::Ready(written) = write.poll(waiter, stream) else {
+							return poll_parked(&mut self.group, waiter);
+						};
+						written?;
 						*payload = None;
 						self.index += 1;
 						self.group.keep_alive();
@@ -7582,9 +7581,15 @@ impl FetchGroupWrite {
 					}
 				}
 				FetchGroupState::Partial { frame, chunk } => {
-					ready!(stream.poll_flush(waiter))?;
+					let Poll::Ready(flushed) = stream.poll_flush(waiter) else {
+						return poll_parked(&mut self.group, waiter);
+					};
+					flushed?;
 					if let Some(bytes) = chunk {
-						ready!(stream.poll_write_all(waiter, bytes))?;
+						let Poll::Ready(written) = stream.poll_write_all(waiter, bytes) else {
+							return poll_parked(&mut self.group, waiter);
+						};
+						written?;
 						*chunk = None;
 					}
 					if stream.poll_closed(waiter).is_ready() {
@@ -7774,6 +7779,12 @@ fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Er
 		Poll::Ready(Err(err)) => Some(err),
 		_ => None,
 	}
+}
+
+/// A fetch write parked on flow control: still pending, unless the group's budget gave it up,
+/// as it does a subgroup stream's, since flow control must not pin a stale group.
+fn poll_parked(group: &mut group::Consumer, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	poll_given_up(group, waiter).map_or(Poll::Pending, |err| Poll::Ready(Err(err)))
 }
 
 /// Serves one group on its own unidirectional stream in the moq-transport
