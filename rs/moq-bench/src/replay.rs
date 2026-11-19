@@ -118,8 +118,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 	let consume = moq_tokio::origin::spawn();
 	let mut tasks = tokio::task::JoinSet::new();
 
-	// Hold every route for the run so each broadcast stays announced.
+	// Hold every route for the run so each broadcast stays announced, and a handle on each
+	// track so a stop finishes it rather than dropping it unfinished, which reads as a failure.
 	let mut routes = Vec::new();
+	let mut tracks = Vec::new();
 	for path in &args.publish {
 		let route = publish.route(path.as_str(), moq_net::origin::RouteOptions::hidden())?;
 		let track = route.broadcast().create_track(
@@ -130,6 +132,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 		)?;
 		route.announce()?;
 		routes.push(route);
+		tracks.push(track.clone());
 		tasks.spawn(produce(track, interval));
 	}
 
@@ -188,6 +191,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 		}
 	};
 
+	// A stop is a publisher leaving on purpose: finish every track before the producers go.
+	// After a failure they are dropped, which ends them as one.
+	if result.is_ok() {
+		for track in tracks.drain(..) {
+			// Fails only once the track already ended, which is what a stop wants.
+			let _ = track.finish();
+		}
+	}
+	drop(tracks);
 	// End the session with a close rather than leaving the relay to wait out its idle
 	// timeout, so a stopped publisher is a source ending now.
 	tasks.shutdown().await;

@@ -699,7 +699,9 @@ class Run:
         rate = ""
         if "rate" in shape:
             rate = f'bits_per_second = {int(shape["rate"])}\nburst = 12500\nqueue = "{shape.get("queue", "100ms")}"\n'
-        body = f'name = "{link.name}"\nseed = {zlib.crc32(link.name.encode()) % 1000}\n'
+        # Shared: every flow on the link, a predecessor's and its replacement's alike, draws on one
+        # rate limit and queue each way, as one physical link would.
+        body = f'name = "{link.name}"\nseed = {zlib.crc32(link.name.encode()) % 1000}\nshared = true\n'
         for side in ("up", "down"):
             body += f"\n[{side}]\n" + "\n".join(direction) + "\n"
             if rate:
