@@ -7712,6 +7712,98 @@ mod test {
 		assert_eq!(rest, vec![10_000, 11_000]);
 	}
 
+	/// Ranges a front's reader edits one key at a time reach each of its copies as an edit,
+	/// keyed as the reader keys them, and place the reader's window where the same ranges
+	/// given whole do, across a route switch and copies answered or not.
+	#[test]
+	fn edited_ranges_reach_every_copy_as_given_whole() {
+		use rand::{RngExt, SeedableRng};
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x66726f6e74);
+		let routes = Producer::new();
+		let groups = || {
+			let copy = copy();
+			for key in (0..20_000).step_by(1000) {
+				write(&copy, key);
+			}
+			copy
+		};
+		let (a, b) = (groups(), groups());
+		routes.serve(a.consume());
+		let range = |rng: &mut rand::rngs::StdRng| {
+			let start = match rng.random_range(0..4) {
+				0 => Anchor::Relative(rng.random_range(0..5)),
+				_ => Anchor::Time(rng.random_range(0..24_000)),
+			};
+			let end = rng.random_bool(0.6).then(|| Anchor::Time(rng.random_range(0..24_000)));
+			track::Range { start, end }
+		};
+		let answer = |sub: &Subscriber| {
+			let mut reader = sub.reader();
+			let groups = reader.groups;
+			for copy in &mut reader.copies {
+				let _ = copy.poll_ready(groups, &kio::Waiter::noop());
+			}
+		};
+		// Key 0 is the default subscription's one range.
+		let mut live = BTreeMap::from([(0, track::Range::oldest())]);
+		let (mut next, mut placed) = (0, 0);
+		let edited = routes.consume().subscribe(Subscription::default().into());
+		for step in 0..300 {
+			match step {
+				50 => answer(&edited),
+				150 => routes.serve(b.consume()),
+				200 => answer(&edited),
+				_ => {}
+			}
+			let retire: Vec<u64> = live.keys().copied().filter(|_| rng.random_bool(0.2)).collect();
+			let add: Vec<(u64, track::Range)> = (0..rng.random_range(0..3))
+				.map(|_| {
+					next += 1;
+					(next, range(&mut rng))
+				})
+				.collect();
+			for key in &retire {
+				live.remove(key);
+			}
+			live.extend(add.iter().copied());
+			edited
+				.subscription()
+				.edit(track::Edit {
+					retire,
+					add,
+					priority: 0,
+					delay: Delay::default(),
+					order: track::Order::default(),
+				})
+				.unwrap();
+			edited.mirror().sync();
+			{
+				let reader = edited.reader();
+				assert!(reader.mirrored.ranges.iter().eq(live.iter()), "step {step}");
+				for copy in &reader.copies {
+					let held = copy.preferences().read();
+					let keys: Vec<u64> = held.ranges().map(|(key, _)| key).collect();
+					assert!(keys.iter().eq(live.keys()), "step {step}: the copy keys as the reader does");
+					for key in keys {
+						assert_eq!(held.range(key), copy.wire(&reader.mirrored, key), "step {step}, key {key}");
+					}
+				}
+			}
+			if step < 50 {
+				continue;
+			}
+			let whole = routes
+				.consume()
+				.subscribe(Subscription::default().with_ranges(live.values().copied()).into());
+			answer(&whole);
+			let resolved = edited.resolved_keys(live.keys().copied());
+			assert_eq!(resolved, whole.resolved_keys(0..live.len() as u64), "step {step}");
+			assert_eq!(edited.runs(0), whole.runs(0), "step {step}");
+			placed += resolved.iter().flatten().count();
+		}
+		assert!(placed > 1000, "the copies placed the ranges: {placed}");
+	}
+
 	/// A replacement updated to a time range it cannot resolve yet asks for that range,
 	/// not everything from the floor: before it answers, and once it answers with nothing
 	/// to resolve it against.
