@@ -405,6 +405,16 @@ test("the literal draft-07 stream matches what Rust decodes", async () => {
 	expect(await resolveStream(wire)).toEqual(GOLDEN_RESOLVED);
 });
 
+// Rust's `a_leading_bom_is_part_of_the_path` pins the same bytes: U+FEFF opens the path's text.
+const BOM_LITE06 = "00150aefbbbf636f6e636572740000ffffffffffffffff";
+
+test("a path opening with U+FEFF keeps it across the lite-06 wire", async () => {
+	const v = Version.DRAFT_06;
+	const msg: AnnounceBroadcast = { status: "active", suffix: Path.from("\uFEFFconcert"), hops: [] };
+	expect(hex(await bytes((w) => encodeAnnounceBroadcast(w, msg, v), v))).toBe(BOM_LITE06);
+	expect(await decodeAnnounceBroadcast(new Reader(undefined, unhex(BOM_LITE06), v), v)).toEqual({ ...msg, cost: 0n });
+});
+
 // A claim says its cost, how far above its path it is, whether it is unavailable, draining, or
 // behind a marked session, the lowest priority on its way, and the relays it entered or left a
 // routing domain by.

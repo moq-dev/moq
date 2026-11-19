@@ -6,6 +6,7 @@
 mod conformance;
 mod disconnect;
 mod finish;
+mod import;
 mod restart;
 mod server;
 mod support;

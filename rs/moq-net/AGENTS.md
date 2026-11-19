@@ -5,6 +5,7 @@ The wire layer: generic over the transport and media-agnostic.
 - Nothing is local-only: every field and behavior survives the wire, so it means the same through a relay as in-process. Local-only knobs belong above moq-net (moq-mux, hang).
 - Local and remote paths behave the same: a local close, cancel, or error reaches readers exactly as the remote one would, never as a cleaner end.
 - Closes never cascade: aborting a group leaves its track, broadcast, and siblings alone.
+- Never finish a stream or producer and forget it: something, such as expiry, a cancel, or the session's close, must abort it eventually, or a stale stream holds connection credit and stalls the streams behind it.
 - A subscription stays on the instance it started on while that instance has a route, even after a newer route wins the path. When none is left, it ends with an error, never a clean end, and never stitches onto another instance. A clean end means only a deliberate publisher finish. Apps restart on announcements, never on request errors. See "Stream instances" in `doc/concept/moq-lite.md`.
 - The cache is only an optimization: a relay behaves the same warm or cold, reporting upstream state (such as the largest group) rather than what it holds.
 - A relay never blocks an answer on other nodes finishing something; it reports what it knows now. One exception: a track listing's synced mark waits for the upstream's, while its tracks still flow live.

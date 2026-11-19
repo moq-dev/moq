@@ -382,7 +382,9 @@ import URL, URL-encode its literal `%` characters too: instance `a/b` records un
 
 Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
 `gs://bucket/prefix`, or `az://container/prefix`, with credentials from the
-usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables.
+usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables. A store URL
+with a password, query, or fragment is refused, since no store reads them, and
+logs and errors print it without its userinfo.
 
 ## Multiple stages
 

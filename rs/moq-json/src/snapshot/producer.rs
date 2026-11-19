@@ -266,7 +266,8 @@ impl<T> Finished<T> {
 		take(&self.inner).track.inner.demand()
 	}
 
-	/// Release the track's cache, reporting `err` to readers that have not drained it.
+	/// Abort the track with `err`; see [`moq_net::track::Finished::abort`]. Readers still draining
+	/// get the clean end instead once every group below the end finished.
 	pub fn abort(self, err: moq_net::Error) -> Result<()> {
 		take(&self.inner).abort(err.into());
 		Ok(())
