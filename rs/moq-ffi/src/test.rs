@@ -8886,15 +8886,16 @@ fn shutdown_waits_for_an_in_place_poll() {
 
 	let (entered, entered_rx) = std::sync::mpsc::channel();
 	let (release, release_rx) = std::sync::mpsc::channel::<()>();
-	let poller = std::thread::spawn(move || {
+	let poller = std::thread::spawn(move || -> Result<(), MoqError> {
 		let task = crate::ffi::Task::new(());
 		let run = task.run(|_| async move {
 			entered.send(()).unwrap();
 			// Holds this poll open while shutdown starts on another thread.
 			release_rx.recv().unwrap();
-			kio::clock::sleep(Duration::from_millis(1)).await;
-			// Even if the sleep is already due, only the shutdown may finish this call.
-			std::future::pending::<Result<(), MoqError>>().await
+			// Arms a timer on tokio's host driver, which shutdown must not stop under this poll.
+			// The clock never reaches its last instant, so only the shutdown finishes this call.
+			kio::clock::sleep_until(kio::clock::now().saturating_add(Duration::MAX)).await;
+			unreachable!("the clock reached its last instant")
 		});
 		tokio::runtime::Builder::new_current_thread()
 			.build()
