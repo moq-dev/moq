@@ -1,0 +1,128 @@
+name: Gate cost
+
+# The merge gate's own build and test cost under fixed scenarios, for the
+# benchmark history (see bench/README.md). On the merge queue's runners,
+# because hosted VMs expose no hardware counters. Those runners are
+# systemd-nspawn containers on the maintainer's NixOS host, which share its
+# PMU but must allow perf_event_open, which nspawn's seccomp filter denies by
+# default. No Rust cache, which would replay compilations rather than measure
+# them, and checkout's clean leaves an empty target directory. The scenarios
+# run every module in turn, cold and then after a moq-net edit, for an hour
+# or more.
+#
+# Its own schedule rather than Nightly's: it holds a queue runner throughout,
+# so it runs at the hour the merge queue lands the fewest PRs, where it slows
+# the queue least and the queue adds the least noise to its timings.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 11 * * *"
+
+jobs:
+  gate-cost:
+    name: Gate cost
+    # Main's reviewed code alone, as for Nightly's Gate: these runners keep state the queue builds with.
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, moq-queue]
+    # Shared with Nightly's Gate, so the two, or a dispatch beside the
+    # schedule, never hold both queue runners and stall the merge queue.
+    concurrency:
+      group: moq-queue-nightly
+      cancel-in-progress: false
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The runner's home persists across jobs, so a Queue build's mbx Cargo
+      # shim and Cargo config are there, and the dev shell would put the shim
+      # back on PATH. A fresh home finds neither; the guest's Nix config is
+      # system-wide, so the cache still applies.
+      - name: Measure the gate
+        id: measure
+        run: |
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
+          nix develop --command just gh gate-cost
+      - name: Record benchmark outcome
+        if: ${{ !cancelled() }}
+        run: nix develop --command just gh benchmark-report status "${{ steps.measure.outcome }}" target/bench/nightly/gate-cost
+      - name: Preserve results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-gate-cost
+          path: target/bench/nightly/gate-cost
+          retention-days: 45
+
+  # Writes bench/gate-cost/ and rerenders the benchmark table, which marks a
+  # source stale only against its own publisher's latest run. See Nightly's
+  # benchmark-site for the shared gh-pages writers and the benchmark-pages group.
+  benchmark-site:
+    name: Benchmark site
+    needs: gate-cost
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    concurrency:
+      group: benchmark-pages
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      # Delete a Pages artifact left by an earlier run attempt.
+      actions: write
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Only main-branch publishers push the shared history branch.
+          persist-credentials: true
+      - uses: ./.github/actions/nix
+      # A pattern, so a run that uploaded nothing still rerenders the table with its source stale.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: bench-*
+          path: benchmark-inputs
+      - name: Validate the completed report
+        id: reports
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-report prepare benchmark-inputs benchmark-reports
+      - name: Prepare history
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish init
+      - name: Store history
+        if: steps.reports.outputs.costs == 'true'
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          name: MoQ gate cost
+          tool: customSmallerIsBetter
+          output-file-path: benchmark-reports/costs.json
+          benchmark-data-dir-path: bench/gate-cost
+          skip-fetch-gh-pages: true
+          github-token: ${{ github.token }}
+          ref: ${{ github.sha }}
+          auto-push: false
+          comment-on-alert: false
+          fail-on-alert: false
+      - name: Publish shared history
+        run: nix shell --inputs-from . nixpkgs#just --command just gh benchmark-publish finish benchmark-site gate-cost
+      - name: Drop a stale Pages artifact
+        run: nix shell --inputs-from . nixpkgs#just --command just gh pages-clean
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: benchmark-site
+      - name: Deploy site
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

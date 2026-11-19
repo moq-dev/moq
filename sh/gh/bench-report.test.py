@@ -581,6 +581,22 @@ class ReportTest(unittest.TestCase):
         page, rows = self.rows("c10")
         self.assertEqual(rows, {"bench-a/x": "muted", "bench-b/y": "muted"})
 
+    def test_each_publisher_stales_only_its_own_sources(self):
+        self.history("costs", [(f"c{day}", day, {"bench-a/x": 100, "bench-gate-cost/y": 100}) for day in range(1, 3)])
+        self.history("gate-cost", [("g3", 3, {"bench-gate-cost/y": 100})])
+        # Gate cost's own run moved the source; Nightly's latest run is still c2.
+        page, rows = self.rows()
+        self.assertEqual(rows, {"bench-a/x": "muted", "bench-gate-cost/y": "muted"})
+        self.assertNotIn("stale", page)
+        # A Nightly run whose bench-a failed stales bench-a alone.
+        page = report.regressions(self.root, "c4", now=START + 31 * DAY)
+        self.assertIn("bench-a (1) <span", page)
+        self.assertNotIn("bench-gate-cost (1) <span", page)
+        # A gate cost run that failed stales only its source.
+        page = report.regressions(self.root, "g5", now=START + 31 * DAY, publisher="gate-cost")
+        self.assertNotIn("bench-a (1) <span", page)
+        self.assertIn("bench-gate-cost (1) <span", page)
+
     def test_table_replaces_charts_and_keeps_history(self):
         with self.assertRaises(ValueError):
             report.index(self.root)
@@ -649,7 +665,8 @@ class ReportTest(unittest.TestCase):
             git("worktree", "remove", str(history), cwd=checkout)
             site = self.root / f"site-{iteration}"
             subprocess.run(
-                ["bash", str(publisher), "finish", str(site), str(paired)],
+                # Nightly publishes first, then gate cost, which has no paired comparison.
+                ["bash", str(publisher), "finish", str(site), *(["nightly", str(paired)] if iteration == 1 else ["gate-cost"])],
                 cwd=checkout,
                 env=env,
                 check=True,
@@ -657,8 +674,11 @@ class ReportTest(unittest.TestCase):
             )
             self.assertFalse((site / "source").exists())
             self.assertEqual((site / "bench/costs/data.js").read_text(), stored)
-            # The source checkout's commit has no point, so the only source is stale.
-            self.assertIn("stale: last measured", (site / "bench/index.html").read_text())
+            # The source checkout's commit has no point, so Nightly's only source is stale, but
+            # only to Nightly: gate cost's run reads Nightly's newest point as its latest.
+            page = (site / "bench/index.html").read_text()
+            self.assertEqual("stale: last measured" in page, iteration == 1)
+            self.assertEqual(json.loads((site / "bench/paired.json").read_text()), {"sources": {}})
             git("worktree", "remove", str(site), cwd=checkout)
             git("branch", "-D", "gh-pages", cwd=checkout)
         self.assertEqual(git("--git-dir", str(remote), "show", "gh-pages:bench/costs/data.js").stdout, stored)

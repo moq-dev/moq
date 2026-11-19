@@ -350,6 +350,8 @@ def prepare(directory, output):
 
 
 HISTORY_PREFIX = "window.BENCHMARK_DATA = "
+# Each history directory under bench/ and the workflow that publishes it, on its own schedule.
+HISTORY = {"costs": "nightly", "rates": "nightly", "gate-cost": "gate-cost"}
 BASELINE = 7
 TREND = 30
 
@@ -357,7 +359,7 @@ TREND = 30
 def history(directory):
     """Read github-action-benchmark's stored runs into one point per series and commit."""
     series = {}
-    for kind in ("costs", "rates"):
+    for kind, publisher in HISTORY.items():
         path = directory / "bench" / kind / "data.js"
         if not path.exists():
             continue
@@ -373,6 +375,7 @@ def history(directory):
                         "commit": commit["id"],
                         "order": (when, run["date"]),
                         "date": run["date"],
+                        "publisher": publisher,
                         "unit": bench["unit"],
                         "value": value(bench["value"]),
                     }
@@ -515,14 +518,18 @@ exceeds {threshold}%. {"; ".join(notes)}</p>"""
     return "\n".join(parts) + "\n<h2>Nightly trend</h2>\n"
 
 
-def regressions(directory, commit=None, now=None):
+def regressions(directory, commit=None, now=None, publisher="nightly"):
     """Render every series' newest point against its own baseline as one static table."""
     series = history(directory)
     if not series:
         raise ValueError("no benchmark history to publish")
     now = time.time() if now is None else now
-    if commit is None:
-        commit = max((points[-1] for points in series.values()), key=lambda point: point["order"])["commit"]
+    # Each publisher's latest commit: the publishing run's own, else its newest point.
+    latest = {}
+    for point in sorted((point for points in series.values() for point in points), key=lambda point: point["order"]):
+        latest[point["publisher"]] = point["commit"]
+    if commit is not None:
+        latest[publisher] = commit
     # A source records every series or none, so a series missing from its source's newest run was retired.
     sources = {}
     for name, points in series.items():
@@ -534,7 +541,8 @@ def regressions(directory, commit=None, now=None):
         source = name.split("/", 1)[0]
         if points[-1]["commit"] != sources[source]["commit"]:
             continue
-        row = {**assess(points), "name": name, "stale": sources[source]["commit"] != commit}
+        newest = sources[source]
+        row = {**assess(points), "name": name, "stale": newest["commit"] != latest[newest["publisher"]]}
         if row["stale"]:
             row.pop("flag", None)
         (flagged if "flag" in row else sections[source]).append(row)
@@ -546,7 +554,7 @@ def regressions(directory, commit=None, now=None):
     for source, rows in sections.items():
         newest = sources[source]
         label = f"{html.escape(source)} ({len(rows)})"
-        if newest["commit"] != commit:
+        if newest["commit"] != latest[newest["publisher"]]:
             measured = datetime.fromtimestamp(newest["date"] / 1000, timezone.utc)
             days = math.floor((now - newest["date"] / 1000) / 86400)
             label += (
@@ -568,10 +576,11 @@ td{{font-variant-numeric:tabular-nums}}polyline{{fill:none;stroke:#555}}.worse{{
 .better{{background:#cec}}.muted{{color:#888;font-weight:400}}input{{font:inherit;width:100%;padding:.3rem}}
 </style>
 <h1>MoQ nightly benchmarks</h1>
-<p>Nightly <a href="https://github.com/moq-dev/moq/commit/{commit}">{commit[:9]}</a>, {len(flagged)} flagged
+<p>Published by the {publisher} run at
+<a href="https://github.com/moq-dev/moq/commit/{latest[publisher]}">{latest[publisher][:9]}</a>, {len(flagged)} flagged
 of {sum(map(len, sections.values())) + len(flagged)} series. Each series compares its newest point with the median
 of its previous {BASELINE}. Red is worse and green is better by more than 10% and 3 times that window's median
-absolute deviation. Grey rows lack history or come from a source that did not finish tonight.
+absolute deviation. Grey rows lack history or come from a source that did not finish on its publisher's latest run.
 <a href="https://github.com/moq-dev/moq/blob/main/bench/README.md#nightly-trends">Metrics and local
 reproduction</a></p>
 <input id="filter" type="search" placeholder="Filter series">
@@ -592,14 +601,14 @@ filter.oninput = () => {{
 """
 
 
-def index(directory, commit=None, paired_path=None):
+def index(directory, commit=None, paired_path=None, publisher="nightly"):
     destination = directory / "bench"
     destination.mkdir(parents=True, exist_ok=True)
     if paired_path is not None:
         (destination / "paired.json").write_text(paired_path.read_text())
-    (destination / "index.html").write_text(regressions(directory, commit))
+    (destination / "index.html").write_text(regressions(directory, commit, publisher=publisher))
     # The table replaces the action's chart pages, which it only writes when missing.
-    for kind in ("costs", "rates"):
+    for kind in HISTORY:
         if (destination / kind).is_dir():
             (destination / kind / "index.html").write_text(
                 '<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=../">'
@@ -641,7 +650,8 @@ def main():
     sub.add_argument("directory", type=Path)
     sub = commands.add_parser("index")
     sub.add_argument("directory", type=Path)
-    sub.add_argument("--commit", help="the nightly commit; sources without a point for it are stale")
+    sub.add_argument("--publisher", choices=sorted(set(HISTORY.values())), default="nightly", help="the workflow publishing this run")
+    sub.add_argument("--commit", help="the publishing run's commit; its sources without a point for it are stale")
     sub.add_argument("--paired", type=Path, help="tonight's prepared paired comparisons, replacing the published ones")
     args = parser.parse_args()
     if args.command == "rust":
@@ -664,7 +674,7 @@ def main():
         args.directory.mkdir(parents=True, exist_ok=True)
         (args.directory / "outcome.json").write_text(json.dumps({"status": args.status}) + "\n")
     else:
-        index(args.directory, args.commit, args.paired)
+        index(args.directory, args.commit, args.paired, args.publisher)
 
 
 if __name__ == "__main__":

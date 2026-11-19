@@ -822,17 +822,20 @@ filter. A series with fewer than 8 points is grey.
 
 A failed or cancelled source records no point, so its section is grey and
 marked stale with the date and commit of its last measurement; it is never
-flagged as tonight's result. A series missing from its source's newest run was
+flagged as tonight's result. Staleness is judged against the source's own
+publisher: gate cost runs on its own schedule, so a Nightly without it, or a
+gate cost run without the Nightly sources, stales neither. A series missing from its source's newest run was
 retired and leaves the table. Re-runs of the same commit collapse to the latest
 point.
 
 The Nightly workflow keeps history on one `gh-pages` branch, where
 `github-action-benchmark` appends each night's points to `bench/{costs,rates}/data.js`
-with its alerts, comments, and charts unused. The publisher runs only on `main`,
+with its alerts, comments, and charts unused; the Gate cost workflow appends its own to
+`bench/gate-cost/data.js` and rerenders the same table. Each publisher runs only on `main`,
 serializes history writes, renders the table from that history even when every
 source failed, and deploys the branch explicitly. Re-running its job in place
 fails, because the earlier attempt's `github-pages` artifact remains; delete
-that artifact first or wait for the next Nightly.
+that artifact first or wait for the next scheduled run.
 
 The table includes these measurements:
 
@@ -858,7 +861,8 @@ The table includes these measurements:
   night its growth check fails. Release build times stay out.
 - The merge gate's own cost (`bench-gate-cost`), described below.
 
-The gate cost source runs `just gh gate-cost` on a merge queue runner in two
+The gate cost source runs `just gh gate-cost` on a merge queue runner, in
+`gate-cost.yml` at the queue's quietest hour rather than in Nightly, in two
 scenarios: `cold`, a `just ci --all` from an empty target directory with no
 Rust cache, then `moq-net`, the diff-scoped `just ci` an agent runs after an
 edit to moq-net, on what `cold` built. Modules run one at a time
@@ -881,7 +885,7 @@ and the toolchain versions. Reproduce it from a clean checkout with an empty
 target directory, the Rust cache off (no mbx shim on PATH), and
 `kernel.perf_event_paranoid` at 2 or below, and `perf_event_open` allowed by
 any seccomp filter (a systemd-nspawn container needs
-`--system-call-filter=perf_event_open`); it takes hours.
+`--system-call-filter=perf_event_open`); it takes an hour or more.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
