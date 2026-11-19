@@ -45,8 +45,8 @@ struct Span<'a> {
 }
 
 /// Import `spans` one by one, each opened by a PAT and a PMT at the next version and running
-/// for `intervals` PCRs 40 ms apart (the first for three seconds), with an AAC frame on each
-/// audio stream and a PES on each private one every interval. The export polls after each,
+/// for `intervals` PCRs 40 ms apart (the first for three seconds), with a PES of AAC frames on
+/// each audio stream, back to back across them, and a PES on each private one every interval. The export polls after each,
 /// as a live one keeps up with the catalog, and runs to its end after the last. Returns
 /// every PMT it wrote, each run of repeats once.
 async fn reexport(spans: &[Span<'_>], intervals: u64) -> Vec<Table> {
@@ -67,6 +67,8 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Fram
 	let mut import = super::Import::new(broadcast, catalog.reserve());
 
 	let mut ticks = 1_000 * MS;
+	// Where each audio stream's next frame presents, in 90 kHz ticks.
+	let mut audio = std::collections::HashMap::new();
 	let mut export = None;
 	let mut frames = Vec::new();
 	for (version, &(pmt_pid, span)) in spans.iter().enumerate() {
@@ -77,13 +79,25 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Fram
 		let intervals = if version == 0 { 75 } else { intervals };
 		for _ in 0..intervals {
 			mux.packet(CLOCK_PID, Flags::pcr(ticks));
+			let (start, end) = (ticks / 300 + 9_000, (ticks + 40 * MS) / 300 + 9_000);
 			for &(stream_type, pid, _) in span.streams {
-				let payload = match stream_type {
-					AUDIO => aac(ticks / 300 + 9_000, pid as u8),
-					PRIVATE => pes(0xbd, pid as u8),
-					_ => pes(0xfc, pid as u8),
-				};
-				mux.whole(pid, &payload);
+				match stream_type {
+					// Back to back, so the stream ends only where the span drops it: a gap between
+					// frames would end each PES's group short of the next.
+					AUDIO => {
+						let next: &mut u64 = audio.entry(pid).or_insert(start);
+						*next = (*next).max(start);
+						let frames = (end - *next).div_ceil(AAC_TICKS);
+						mux.whole(pid, &aac(*next, pid as u8, frames as usize));
+						*next += frames * AAC_TICKS;
+					}
+					PRIVATE => {
+						mux.whole(pid, &pes(0xbd, pid as u8));
+					}
+					_ => {
+						mux.whole(pid, &pes(0xfc, pid as u8));
+					}
+				}
 			}
 			ticks += 40 * MS;
 		}
@@ -142,10 +156,15 @@ where
 	}
 }
 
-/// An ADTS AAC frame presenting at `pts`, its payload filled with `fill`.
-fn aac(pts: u64, fill: u8) -> Vec<u8> {
+/// How long an AAC frame of 1024 samples at 48 kHz lasts, in 90 kHz ticks.
+const AAC_TICKS: u64 = 1024 * 90_000 / 48_000;
+
+/// A PES of `count` ADTS AAC frames back to back, the first presenting at `pts`, their payload
+/// filled with `fill`.
+fn aac(pts: u64, fill: u8, count: usize) -> Vec<u8> {
 	let mut frame = super::adts::write_header(2, 48_000, 2, 64).unwrap().to_vec();
 	frame.resize(7 + 64, fill);
+	let frame = frame.repeat(count);
 	let field = [
 		0x21 | ((pts >> 29) & 0x0e) as u8,
 		(pts >> 22) as u8,

@@ -4131,7 +4131,7 @@ fn publish_sdt(
 	track
 }
 
-/// A declared marker restarts the program clock and table cadence. An audio-only
+/// A declared break restarts the program clock and table cadence. An audio-only
 /// program is the worst case: the PSI has no keyframe to recover at, and the PCR-only
 /// packet is the only adaptation field it ever writes.
 #[tokio::test(start_paused = true)]
@@ -4180,17 +4180,18 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Audio));
 	let mut export = export_of(&consumer).await;
 
-	// A ten-minute offset exercises the long rewind from the controlled stimulus
-	// campaign. Drain five seconds before restarting at zero.
+	// A ten-minute offset exercises a long clock from the controlled stimulus campaign. Drain
+	// five seconds before the break.
 	write(&mut producer, 50, 600_000_000);
 	let before = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), 0, "no rewind yet");
 	assert_eq!(count_pid(&before, 0x0000), 10, "PAT on its 500ms cadence");
 	assert_eq!(count_pid(&before, 0x0011), 3, "SDT at 0, 2 and 4s");
 
-	// A forward marker must flush the last old frame instead of discarding it.
+	// The last group ended whole at 605 s, and media resumes a second later: the break is on
+	// the wire, and it must flush the last old frame instead of discarding it.
 	producer.discontinuity().unwrap();
-	write(&mut producer, 20, 605_000_000);
+	write(&mut producer, 20, 606_000_000);
 	producer.cut(None).unwrap();
 	let marked = drain_frames(&mut export).await;
 	let tail: Vec<_> = before
@@ -4207,13 +4208,13 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 			preserved |= pes.header.pts.unwrap().as_u64() == 604_900_000 * 90 / 1000;
 		}
 	}
-	assert!(preserved, "forward marker discarded the pre-boundary tail");
+	assert!(preserved, "the break discarded the pre-boundary tail");
 	assert!(!audio_pts.is_empty());
-	assert_eq!(export.discontinuity(), 1, "the marker was observed");
+	assert_eq!(export.discontinuity(), 1, "the break was observed");
 
 	let resume = marked
 		.iter()
-		.position(|f| f.timestamp.as_micros().unwrap() >= 605_000_000);
+		.position(|f| f.timestamp.as_micros().unwrap() >= 606_000_000);
 	let resume = resume.unwrap_or_else(|| {
 		panic!(
 			"resumed media missing, marked timestamps {:?}",
@@ -4237,7 +4238,7 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	// Tables come back on cadence rather than waiting for the old 10-minute clock.
 	assert!(
 		count_pid(&marked[resume..], 0x0000) >= 1,
-		"PAT re-emitted after the marker"
+		"PAT re-emitted after the break"
 	);
 	assert_eq!(count_discontinuity(&before), 0);
 	assert_eq!(count_discontinuity(&marked), 1, "the break is flagged exactly once");
@@ -4320,7 +4321,7 @@ async fn reordered_video_keeps_the_table_cadence() {
 }
 
 /// A program with more than one track marks the break once, not once per track. A
-/// declared marker joins every rendition; no track is fenced across it.
+/// declared break joins every rendition; no track is fenced across it.
 #[tokio::test(start_paused = true)]
 async fn discontinuity_flags_the_break_once_across_tracks() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -4402,11 +4403,9 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 	assert_eq!(export.discontinuity(), 0);
 	assert_eq!(count_discontinuity(&before), 0);
 
-	// Independent counters can differ before the shared rewind. Forward markers
-	// affect only video; audio must not be fenced out of a continuous timeline.
-	for _ in 0..3 {
-		video.discontinuity().unwrap();
-	}
+	// A break on video alone: its group at 4 s ends whole one unit past its lone frame, however
+	// many times the break is declared, and the next starts 100 ms later. Audio must not be fenced
+	// out of a continuous timeline by it. The group at 4.1 s stays open for the shared break below.
 	video
 		.write(Frame {
 			timestamp: Timestamp::from_micros(MINUTE + 4_000_000).unwrap(),
@@ -4415,7 +4414,9 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 			keyframe: true,
 		})
 		.unwrap();
-	video.cut(None).unwrap();
+	for _ in 0..3 {
+		video.discontinuity().unwrap();
+	}
 	video
 		.write(Frame {
 			timestamp: Timestamp::from_micros(MINUTE + 4_100_000).unwrap(),
@@ -4424,8 +4425,7 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 			keyframe: true,
 		})
 		.unwrap();
-	video.cut(None).unwrap();
-	// Audio stays quiet through the marker, so video waits for it and then goes
+	// Audio stays quiet through the break, so video waits for it and then goes
 	// out around it once the wait lapses. The rewind restarts that wait for the new
 	// generation, so it lapses twice.
 	let mut marked = drain_frames(&mut export).await;
@@ -4433,10 +4433,11 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 		kio::clock::sleep(RECORDING_MAX_AGE).await;
 		marked.extend(drain_frames(&mut export).await);
 	}
-	assert_eq!(export.discontinuity(), 1, "local marker counts are not program epochs");
+	assert_eq!(export.discontinuity(), 1, "repeated declarations are one program epoch");
 	let epoch = export.discontinuity();
 
-	// Both tracks declare the same break and continue forward. Neither is fenced.
+	// Both tracks break where their media stops (video at 4.1 s, audio at 4 s) and resume at
+	// 5 s. Neither is fenced.
 	video.discontinuity().unwrap();
 	audio.discontinuity().unwrap();
 	write(&mut video, &mut audio, 5, 2);

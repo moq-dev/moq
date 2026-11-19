@@ -8062,9 +8062,9 @@ pub(super) mod test {
 		audio_pes_packet(pid, cc, pts, &payload)
 	}
 
-	/// Read every retained frame of `name`, with the count of declared timeline breaks the consumer
-	/// crossed reading them. Gaps are not counted: these streams carry a PES of two frames a second
-	/// apart, and the hole after each reads as a gap.
+	/// Read every retained frame of `name`, with the count of ends the consumer crossed reading
+	/// them: each group that ended whole short of where the next starts. Lost groups are not
+	/// counted, which read as gaps.
 	async fn read_breaks(
 		consumer: &moq_net::broadcast::Consumer,
 		name: &str,
@@ -8438,6 +8438,72 @@ pub(super) mod test {
 		(consumer, catalog, import)
 	}
 
+	/// A program of MP2 audio on the clock's PID and on [`PEER_PID`], and H264 video on [`VIDEO`],
+	/// its tables imported.
+	fn av_import() -> (moq_net::broadcast::Consumer, crate::catalog::Producer, super::Import) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+		let pmt = synth_pmt(
+			&[
+				(StreamType::Mpeg1Audio, PCR_PID),
+				(StreamType::Mpeg1Audio, PEER_PID),
+				(StreamType::H264, VIDEO),
+			],
+			false,
+		);
+		import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+		(consumer, catalog, import)
+	}
+
+	/// The [`av_import`] audio's second PES on each PID, back to back with its first, with the
+	/// counters `cc` gives them.
+	fn av_audio(cc: [u8; 2]) -> Vec<u8> {
+		let mut out = mp2_pes(PCR_PID, cc[0], 90_000 + RESET_PES_TICKS, [0xCC, 0xDD]);
+		out.extend(mp2_pes(PEER_PID, cc[1], 90_000 + RESET_PES_TICKS, [0xCC, 0xDD]));
+		out
+	}
+
+	/// Import an [`av_import`] program whose media runs back to back across `middle`: a PES on each
+	/// audio PID and two GOPs of video, then `middle`, then two more GOPs. Returns the video's
+	/// frames and the ends read crossing them.
+	///
+	/// Back to back audio closes each PES's group at its end, so a break the import takes reads
+	/// the same there as none. The video is where it shows: a break ends the open group where its
+	/// pictures stop, short of the next keyframe, which otherwise ends it.
+	async fn av_breaks(middle: &[u8]) -> (Vec<crate::container::Frame>, u64) {
+		let (consumer, catalog, mut import) = av_import();
+		let mut mux = Mux::default();
+		for pid in [PCR_PID, PEER_PID] {
+			mux.out.extend(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]));
+		}
+		mux.gops(VIDEO, 90_000, 2);
+		mux.out.extend_from_slice(middle);
+		mux.gops(VIDEO, 90_000 + 8 * FRAME, 2);
+		import.decode(&mux.out).unwrap();
+		let _finished = import.finish().unwrap();
+		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+		read_breaks(&consumer, &name, crate::container::Kind::Video).await
+	}
+
+	/// A flagged break on the clock's PID ends the open video group where its pictures stop,
+	/// though the media continues: the one break [`av_breaks`] reads where the import took one.
+	#[tokio::test(start_paused = true)]
+	async fn a_flagged_break_ends_the_video_where_its_pictures_stop() {
+		let mut middle = clock_break_packet(PCR_PID);
+		middle.extend(av_audio([1, 1]));
+		let (frames, breaks) = av_breaks(&middle).await;
+		// Nothing vouches that the last picture ahead of the break is whole, so it goes with the
+		// old clock's partial access units.
+		assert_eq!(frames.len(), 15, "every whole picture either side of the break");
+		assert_eq!(breaks, 1, "the break ends the video short of the next keyframe");
+
+		let (frames, breaks) = av_breaks(&av_audio([1, 1])).await;
+		assert_eq!(frames.len(), 16);
+		assert_eq!(breaks, 0, "without the flag the next keyframe continues the video");
+	}
+
 	#[test]
 	fn timebase_reset_clears_unpublished_pending() {
 		let (_, _, mut import) = two_stream_import();
@@ -8506,11 +8572,15 @@ pub(super) mod test {
 		let _finished = import.finish().unwrap();
 		let name = track_on(&catalog.snapshot().ext.mpegts, 0x21);
 		let (frames, breaks) = read_breaks(&consumer, &name, crate::container::Kind::Data).await;
-		assert_eq!(frames.len(), 3);
-		assert_eq!(
-			breaks, 2,
-			"each break on the data track reads once, as its declared end"
+		let stamps: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
+		assert_eq!(stamps.len(), 3);
+		assert!(
+			stamps.windows(2).all(|pair| pair[1] - pair[0] == 1_000_000),
+			"each era's section a second on: {stamps:?}"
 		);
+		// A section has no duration, so its group closes without an end, and the break is not on
+		// this track's wire: the media tracks carry it.
+		assert_eq!(breaks, 0);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -8675,6 +8745,8 @@ pub(super) mod test {
 		assert!(!import.published);
 	}
 
+	/// A clock packet retransmitted with its payload repeats neither its frames nor its break: the
+	/// leap it declares reads once on each track, and the media after it continues the new clock.
 	#[tokio::test(start_paused = true)]
 	async fn duplicate_payload_clock_packet_declares_one_break() {
 		let (consumer, catalog, mut import) = two_stream_import();
@@ -8687,11 +8759,21 @@ pub(super) mod test {
 		for pid in [PCR_PID, PEER_PID] {
 			let cc = if pid == PCR_PID { 2 } else { 1 };
 			import
-				.decode(mp2_pes(pid, cc, 270_000, [0xEE, 0xFF]).as_slice())
+				.decode(mp2_pes(pid, cc, 180_000 + RESET_PES_TICKS, [0xEE, 0xFF]).as_slice())
 				.unwrap();
 		}
 		let _finished = import.finish().unwrap();
-		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
+		let tracks = read_all_breaks(&consumer, &catalog).await;
+		let stamps = |frames: &[crate::container::Frame]| -> Vec<u128> {
+			frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect()
+		};
+		assert_eq!(
+			stamps(&tracks[0].0),
+			[1_000_000, 1_072_000, 2_000_000, 2_072_000, 2_144_000, 2_216_000],
+			"the retransmitted payload published again"
+		);
+		assert_eq!(stamps(&tracks[1].0), [1_000_000, 1_072_000, 2_144_000, 2_216_000]);
+		for (_, breaks) in tracks {
 			assert_eq!(breaks, 1, "a retransmitted packet declared another break");
 		}
 	}
@@ -10112,8 +10194,8 @@ pub(super) mod test {
 	}
 
 	/// A break closes the video group where its content stops, not a GOP later at the next
-	/// keyframe. An open GOP's leading pictures present below that keyframe, so an end marker
-	/// there would sit past them and the exporter refused them as a rewind.
+	/// keyframe. An open GOP's leading pictures present below that keyframe, so an end there
+	/// would sit past them and the exporter refused them as a rewind.
 	#[tokio::test(start_paused = true)]
 	async fn damaged_video_closes_its_group_at_the_break() {
 		use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
@@ -10158,7 +10240,7 @@ pub(super) mod test {
 		import.finish_in_place().unwrap();
 		assert_eq!(import.stats().streams[&VIDEO].damaged, 1);
 
-		// Each group as published, its empty end marker included.
+		// Each group as published: its pictures, and where it ended whole.
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
 		let subscription = moq_net::track::Subscription::default()
 			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
@@ -10168,16 +10250,19 @@ pub(super) mod test {
 			let mut frames = Vec::new();
 			while let Some(mut frame) = group.next_frame().await.unwrap() {
 				let frame = hang::container::Frame::decode(frame.read_all().await.unwrap()).unwrap();
-				frames.push((frame.timestamp.as_micros().unwrap(), frame.payload.is_empty()));
+				frames.push(frame.timestamp.as_micros().unwrap());
 			}
-			groups.push(frames);
+			let end = group
+				.end()
+				.map(|end| Timestamp::new(end, group.timescale().unwrap()).unwrap().as_micros().unwrap());
+			groups.push((frames, end));
 		}
 		let us = |ms: u64| u128::from(at(ms)) * 1_000_000 / 90_000;
 		assert_eq!(
 			groups,
 			[
-				vec![(us(0), false), (us(40), false), (us(80), true)],
-				vec![(us(1200), false), (us(1040), false), (us(1280), false)],
+				(vec![us(0), us(40)], Some(us(80))),
+				(vec![us(1200), us(1040), us(1280)], None),
 			],
 			"the first group ends at the break, one frame after its last picture"
 		);
@@ -10632,45 +10717,29 @@ pub(super) mod test {
 
 	/// The same flag on an elementary PID declares only that the continuity counter jumped.
 	/// The partial it interrupts is dropped, as ever, but the program clock is untouched, so
-	/// no track takes a break and the peer PID never notices.
+	/// no track takes a break: the video runs on to its next keyframe.
 	#[tokio::test(start_paused = true)]
 	async fn elementary_discontinuity_is_not_a_timebase_break() {
-		let (consumer, catalog, mut import) = two_stream_import();
-
-		for pid in [PCR_PID, PEER_PID] {
-			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
-		}
-		import
-			.decode(flag_discontinuity(mp2_pes(PEER_PID, 5, 180_000, [0xCC, 0xDD])).as_slice())
-			.unwrap();
-		import
-			.decode(mp2_pes(PCR_PID, 1, 180_000, [0xCC, 0xDD]).as_slice())
-			.unwrap();
-		let _finished = import.finish().unwrap();
-
-		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
-			assert_eq!(breaks, 0, "a counter jump is not a program timebase reset");
-		}
+		let mut middle = mp2_pes(PCR_PID, 1, 90_000 + RESET_PES_TICKS, [0xCC, 0xDD]);
+		middle.extend(flag_discontinuity(mp2_pes(
+			PEER_PID,
+			5,
+			90_000 + RESET_PES_TICKS,
+			[0xCC, 0xDD],
+		)));
+		let (frames, breaks) = av_breaks(&middle).await;
+		assert_eq!(frames.len(), 16);
+		assert_eq!(breaks, 0, "a counter jump is not a program timebase reset");
 	}
 
 	/// A counter gap on the PCR PID with no flag anywhere is loss, not a signalled reset: the
 	/// partial goes, the clock stays.
 	#[tokio::test(start_paused = true)]
 	async fn a_counter_gap_is_not_a_timebase_break() {
-		let (consumer, catalog, mut import) = two_stream_import();
-
-		for pid in [PCR_PID, PEER_PID] {
-			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
-		}
 		// cc 1 -> 7 on the clock's own PID.
-		import
-			.decode(mp2_pes(PCR_PID, 7, 180_000, [0xCC, 0xDD]).as_slice())
-			.unwrap();
-		let _finished = import.finish().unwrap();
-
-		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
-			assert_eq!(breaks, 0, "lost packets are not a signalled clock reset");
-		}
+		let (frames, breaks) = av_breaks(&av_audio([7, 1])).await;
+		assert_eq!(frames.len(), 16);
+		assert_eq!(breaks, 0, "lost packets are not a signalled clock reset");
 	}
 
 	/// The 33-bit PTS field wraps every 26.5 hours with nothing set anywhere, and that is
@@ -10679,20 +10748,22 @@ pub(super) mod test {
 	async fn a_timestamp_rollover_is_not_a_timebase_break() {
 		let (consumer, catalog, mut import) = two_stream_import();
 
+		// Two PES back to back across the wrap.
 		const FIELD: u64 = 1 << 33;
 		for pid in [PCR_PID, PEER_PID] {
 			import
-				.decode(mp2_pes(pid, 0, FIELD - 90_000, [0xAA, 0xBB]).as_slice())
+				.decode(mp2_pes(pid, 0, FIELD - RESET_PES_TICKS, [0xAA, 0xBB]).as_slice())
 				.unwrap();
-			import.decode(mp2_pes(pid, 1, 90_000, [0xCC, 0xDD]).as_slice()).unwrap();
+			import.decode(mp2_pes(pid, 1, 0, [0xCC, 0xDD]).as_slice()).unwrap();
 		}
 		let _finished = import.finish().unwrap();
 
 		for (frames, breaks) in read_all_breaks(&consumer, &catalog).await {
 			assert_eq!(breaks, 0, "a rollover is not a break");
 			let stamps: Vec<u128> = frames.iter().map(|f| f.timestamp.as_micros().unwrap()).collect();
+			assert_eq!(stamps.len(), 4);
 			assert!(
-				stamps.windows(2).all(|pair| pair[0] < pair[1]),
+				stamps.windows(2).all(|pair| pair[1] - pair[0] == 72_000),
 				"the rollover broke the timeline: {stamps:?}"
 			);
 		}
@@ -10728,25 +10799,13 @@ pub(super) mod test {
 	/// the program.
 	#[tokio::test(start_paused = true)]
 	async fn a_corrupt_packet_declares_no_break() {
-		let (consumer, catalog, mut import) = two_stream_import();
-
-		for pid in [PCR_PID, PEER_PID] {
-			import.decode(mp2_pes(pid, 0, 90_000, [0xAA, 0xBB]).as_slice()).unwrap();
-		}
 		// transport_error_indicator, on a clock packet that also sets the discontinuity flag.
-		let mut corrupt = clock_break_packet(PCR_PID);
-		corrupt[1] |= 0x80;
-		import.decode(corrupt.as_slice()).unwrap();
-		for pid in [PCR_PID, PEER_PID] {
-			import
-				.decode(mp2_pes(pid, 1, 180_000, [0xCC, 0xDD]).as_slice())
-				.unwrap();
-		}
-		let _finished = import.finish().unwrap();
-
-		for (_, breaks) in read_all_breaks(&consumer, &catalog).await {
-			assert_eq!(breaks, 0, "a corrupt packet's adaptation field was trusted");
-		}
+		let mut middle = clock_break_packet(PCR_PID);
+		middle[1] |= 0x80;
+		middle.extend(av_audio([1, 1]));
+		let (frames, breaks) = av_breaks(&middle).await;
+		assert_eq!(frames.len(), 16);
+		assert_eq!(breaks, 0, "a corrupt packet's adaptation field was trusted");
 	}
 
 	/// A flag arriving before anything has been published breaks nothing: a capture joining
@@ -10836,9 +10895,9 @@ pub(super) mod test {
 	/// The end-to-end shape the #2833 stimulus campaign graded: source, MoQ frames, exported
 	/// TS. A +30 s leap the source declared must come out declared, where before the flag
 	/// died in the demuxer and a downstream saw the leap as an unsignalled timebase change,
-	/// i.e. a stream error. The same leap with nothing set at the source stays unflagged:
-	/// the exporter reports what the source declared, and does not infer a break from a
-	/// timestamp step.
+	/// i.e. a stream error. The same leap with nothing set at the source comes out declared
+	/// too: either way the audio's last group ends at its last frame, 30 s short of the next,
+	/// and that end is all a break is on the wire.
 	#[tokio::test(start_paused = true)]
 	async fn a_signalled_reset_reaches_the_exported_clock() {
 		const PID: u16 = 0x0061;
@@ -10866,8 +10925,8 @@ pub(super) mod test {
 		);
 		assert_eq!(
 			export_discontinuities(&before, &unsignalled).await,
-			0,
-			"a leap the source did not declare must not be flagged"
+			1,
+			"the media stopped 30 s short of where it resumed"
 		);
 	}
 
