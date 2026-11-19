@@ -1899,7 +1899,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		heard.floor = floor;
 		// What a request may follow through the sender moved with its copy, even when this
 		// node's view of `origin` did not.
-		self.dirty.extend(changes.iter().map(|(broadcast, _)| broadcast.clone()));
+		self.dirty
+			.extend(changes.iter().map(|(broadcast, _)| broadcast.clone()));
 		let known = self.known.entry(origin).or_default();
 		// The newest floor wins, so an older copy never revives what a newer one withdrew.
 		if floor <= known.floor && !mutated!(self, OldFloor) {

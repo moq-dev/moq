@@ -42,7 +42,7 @@ waits on this epic's children, the other flaw,
 whose fix changes the wire,
 and two flaws the mesh replay found,
 [feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
-and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
+and [a lite-07 front that stops delivering after it switches copies](/quest/m2/multicast/splice-stall.md);
 and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. It does not wait on

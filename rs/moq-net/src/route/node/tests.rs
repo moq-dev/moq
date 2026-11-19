@@ -590,7 +590,14 @@ fn a_neighbour_serves_a_claim_once_its_copy_holds_it() {
 	let route = |via: u64, cost| Msg::Route {
 		origin: far,
 		offer: Some(Offer {
-			path: [Hop { node: far, session: 0 }, Hop { node: id(via), session: 1 }].into(),
+			path: [
+				Hop { node: far, session: 0 },
+				Hop {
+					node: id(via),
+					session: 1,
+				},
+			]
+			.into(),
 			draining: false,
 			priority: i8::MAX,
 			cost,
