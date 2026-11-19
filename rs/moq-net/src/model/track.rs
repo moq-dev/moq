@@ -28,6 +28,7 @@ pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscriptio
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
+pub(crate) use demand::Edit;
 pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
@@ -7582,7 +7583,7 @@ struct GroupExpiry {
 	/// locking `state`.
 	cache: Arc<cache::Track>,
 	reading: Reading,
-	subscription: kio::Consumer<Subscription>,
+	subscription: kio::Consumer<demand::Prefs>,
 	/// What the cursor can be served; see [`Cursor::published`].
 	servable: kio::Consumer<Published>,
 	key: u64,
@@ -8522,6 +8523,14 @@ impl DropCursor {
 	}
 }
 
+/// What changed in a cursor's ranges since its window resolved them.
+enum Change {
+	/// The ranges keyed so, each as it stands now: `None` for one retired.
+	Edit(Vec<(u64, Option<Range>)>),
+	/// Every range, in key order, when the changes are no longer known one by one.
+	All(Vec<(u64, Range)>),
+}
+
 /// A cursor's own ranges, resolved, and what keeps them current.
 struct Filter {
 	/// Only the groups in it are read.
@@ -8532,6 +8541,8 @@ struct Filter {
 	revision: u64,
 	/// Why the ranges can't be served here: a time anchor on an untimed track.
 	refused: Option<Error>,
+	/// The window was left as it was by a refused change, so the next one resolves every range.
+	stale: bool,
 	/// What the arrival walk reads: the window from the floor, below the cap. The walk
 	/// passes a group outside it holding nothing, so widening it re-scans the cache.
 	admitted: Admitted,
@@ -8555,10 +8566,10 @@ impl Cursor {
 		}
 		let (filter, cache) = {
 			let preferences = subscription.read();
-			let ranges_revision = subscription.ranges_revision();
+			let ranges_revision = preferences.revision;
 			let state = state.read();
 			let (window, refused) =
-				match Window::new(&preferences.ranges, preferences.delay.min, state.latest_live(), &*state) {
+				match Window::keyed(preferences.ranges(), preferences.delay.min, state.latest_live(), &*state) {
 					Ok(window) => (window, None),
 					Err(err) => (
 						Window::new(&[], None, None, &*state).expect("nothing to refuse"),
@@ -8569,6 +8580,7 @@ impl Cursor {
 				window,
 				resolved: ranges_revision,
 				revision: 0,
+				stale: refused.is_some(),
 				refused,
 				admitted: Admitted::default(),
 				admitted_at: None,
@@ -8703,37 +8715,59 @@ impl Cursor {
 		}
 	}
 
-	/// Bring [`Self::window`] up to date: resolved again once the subscriber replaces its
-	/// ranges, counting relative anchors back from the latest group then, and settled as
-	/// the groups it waits on arrive. Returns whether the window moved.
+	/// Bring [`Self::window`] up to date: the ranges the subscriber changed resolved, counting
+	/// relative anchors back from the latest group then, and settled as the groups it waits on
+	/// arrive. Returns whether the window moved.
 	fn sync(&mut self) -> bool {
-		let (replaced, min) = {
+		let (changed, min) = {
 			let preferences = self.subscription.read();
-			let revision = self.subscription.ranges_revision();
-			let min = preferences.delay.min;
-			(
-				(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone())),
-				min,
-			)
+			let changed = (preferences.revision != self.filter.resolved).then(|| {
+				let keys = match self.filter.stale {
+					true => None,
+					false => preferences.changes(self.filter.resolved),
+				};
+				let change = match keys {
+					Some(keys) => Change::Edit(keys.into_iter().map(|key| (key, preferences.range(key))).collect()),
+					None => Change::All(preferences.ranges().collect()),
+				};
+				(preferences.revision, change)
+			});
+			(changed, preferences.delay.min)
 		};
 		// A settled window has nothing to read from the track, whose lock every subscriber
 		// of it takes.
-		if replaced.is_none() && self.filter.window.is_settled() {
+		if changed.is_none() && self.filter.window.is_settled() {
 			return false;
 		}
 		let state = self.state.read();
 		let holdings = &*state;
-		let moved = match replaced {
-			Some((revision, ranges)) => {
+		let moved = match changed {
+			Some((revision, change)) => {
 				self.filter.resolved = revision;
-				match Window::new(&ranges, min, state.latest_live(), holdings) {
-					Ok(window) => {
-						self.filter.window = window;
-						self.filter.refused = None;
-						self.filter.lookups.clear();
+				let applied = match change {
+					Change::Edit(changes) => {
+						let added: Vec<(u64, Range)> =
+							changes.iter().filter_map(|(key, range)| Some((*key, (*range)?))).collect();
+						self.filter.window.set_min(min);
+						let applied =
+							self.filter
+								.window
+								.edit(changes.iter().map(|(key, _)| *key), &added, state.latest_live(), holdings);
+						// A time looked up and answered is asked again for a range that names it anew.
+						self.filter.lookups.retain(|lookup| lookup.join.is_some());
+						applied
 					}
-					Err(err) => self.filter.refused = Some(err),
-				}
+					Change::All(ranges) => Window::keyed(ranges, min, state.latest_live(), holdings).map(|window| {
+						self.filter.window = window;
+						self.filter.lookups.clear();
+					}),
+				};
+				// A refused change leaves the window as it was, which no longer matches the ranges,
+				// so the next change resolves them all.
+				(self.filter.refused, self.filter.stale) = match applied {
+					Ok(()) => (None, false),
+					Err(err) => (Some(err), true),
+				};
 				true
 			}
 			None if self.filter.window.is_settled() => false,
@@ -9569,11 +9603,13 @@ impl Cursor {
 	/// Ask a fill for the head of `key`, as a fetch from frame 0 would, taking in an
 	/// answer already at hand.
 	fn ask_head(&mut self, key: u64, waiter: &kio::Waiter) {
-		let asking = self.subscription.read().clone();
+		let asking = self.subscription.read();
+		let (priority, max_delay) = (asking.priority, asking.delay.max);
+		drop(asking);
 		let request = FetchOptions {
 			options: group::Fetch {
-				priority: asking.priority,
-				max_delay: asking.delay.max,
+				priority,
+				max_delay,
 				frame_start: 0,
 			},
 			end: None,
@@ -9928,14 +9964,14 @@ impl Republish {
 		};
 		let (ranges, min, revision) = {
 			let current = preferences.read();
-			(current.ranges.clone(), current.delay.min, preferences.ranges_revision())
+			(current.ranges().collect::<Vec<_>>(), current.delay.min, current.revision)
 		};
 		if published.read().revision >= revision {
 			return;
 		}
 		let state = self.state.read();
 		// The update was refused before it got here if the track can't resolve it.
-		let Ok(window) = Window::new(&ranges, min, state.latest_live(), &*state) else {
+		let Ok(window) = Window::keyed(ranges, min, state.latest_live(), &*state) else {
 			return;
 		};
 		drop(state);
@@ -9951,7 +9987,7 @@ impl Republish {
 impl Control {
 	/// This subscriber's current preferences.
 	pub fn subscription(&self) -> Subscription {
-		self.subscription.read().clone()
+		self.subscription.read().subscription()
 	}
 
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
@@ -10570,35 +10606,21 @@ impl Subscriber {
 		Some(start?.max(self.bounds().start))
 	}
 
-	/// Where each of this subscriber's ranges starts, by index, as resolved here and raised
-	/// to `from`, where delivery starts: `None` for one with no group there or still waiting
-	/// on the first group from the live feed.
+	/// This subscriber's range keyed `key` as resolved here: its first group and exclusive
+	/// end, `None` while open, or `None` for one whose start still waits on the live feed or a
+	/// lookup, or that isn't held. One empty as given, or that only resolves empty, ends at or
+	/// below its start.
 	///
 	/// A publisher tells its peer where a relative or time start landed, which the peer
 	/// can't work out from the groups it receives.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn starts(&mut self, from: u64) -> Vec<Option<u64>> {
+	pub(crate) fn resolved_range(&mut self, key: u64) -> Option<Resolved> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.starts(from)
+				cursor.filter.window.resolved_key(key)
 			}
-			Inner::Resume(resume, _) => resume.starts(from),
-		}
-	}
-
-	/// Each of this subscriber's ranges as resolved here, by index: its first group and
-	/// exclusive end, `None` while open, or `None` for one whose start still waits on the
-	/// live feed or a lookup. One empty as given, or that only resolves empty, ends at or
-	/// below its start.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn resolved(&mut self) -> Vec<Option<Resolved>> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => {
-				cursor.sync();
-				cursor.filter.window.resolved()
-			}
-			Inner::Resume(resume, _) => resume.resolved(),
+			Inner::Resume(resume, _) => resume.resolved_range(key),
 		}
 	}
 
@@ -10920,6 +10942,28 @@ impl Subscriber {
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
 		// A reader the pool ended reports it on its next read.
+		let _ = self.settle_record(None);
+		Ok(())
+	}
+
+	/// Apply `edit` to this subscriber's preferences, costing the ranges it names: only the
+	/// ranges it adds resolve, and every other keeps where it resolved; see [`Edit`].
+	///
+	/// The keys are the caller's. The ranges the subscription started with, or that
+	/// [`Self::update`] last gave, are keyed by position.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn edit(&mut self, edit: Edit) -> Result<()> {
+		let channel = match &self.inner {
+			Inner::Plain(cursor) => &cursor.subscription,
+			Inner::Resume(resume, _) => resume.subscription(),
+		};
+		channel.edit(edit)?;
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+			}
+			Inner::Resume(resume, _) => resume.mirror().sync(),
+		}
 		let _ = self.settle_record(None);
 		Ok(())
 	}
@@ -13196,7 +13240,7 @@ mod test {
 	#[cfg(feature = "async")]
 	fn a_received_copy_reaches_back_only_to_groups_it_holds() {
 		let placed =
-			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+			|subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| (resolved.start, resolved.floored));
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -15280,7 +15324,7 @@ mod test {
 				.with_delay(Delay::default().with_max(None))
 		};
 		let placed =
-			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+			|subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| (resolved.start, resolved.floored));
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -26246,6 +26290,72 @@ mod test {
 		producer.abort(Error::Cancel).unwrap();
 		assert!(pending.await.is_err());
 		drop(dynamic);
+	}
+
+	/// Ranges edited one key at a time resolve and cover what the same ranges given whole do,
+	/// so an edit leaves the subscriber as a fresh subscription to the ranges it keeps would be.
+	#[test]
+	#[cfg(feature = "async")]
+	fn edited_ranges_match_the_same_ranges_given_whole() {
+		use rand::{RngExt, SeedableRng};
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x65646974);
+		let producer = track_producer("test", Info::timed());
+		for key in (0..20_000).step_by(1000) {
+			write_group(&producer, key);
+		}
+		let range = |rng: &mut rand::rngs::StdRng| {
+			let start = match rng.random_range(0..4) {
+				0 => Anchor::Relative(rng.random_range(0..5)),
+				_ => Anchor::Time(rng.random_range(0..24_000)),
+			};
+			let end = rng
+				.random_bool(0.6)
+				.then(|| Anchor::Time(rng.random_range(0..24_000)));
+			Range { start, end }
+		};
+		// Key 0 is the default subscription's one range.
+		let mut live = BTreeMap::from([(0, Range::oldest())]);
+		let mut next = 0;
+		let mut edited = producer.subscribe(Subscription::default());
+		for step in 0..400 {
+			let retire: Vec<u64> = live
+				.keys()
+				.copied()
+				.filter(|_| rng.random_bool(0.2))
+				.collect();
+			let add: Vec<(u64, Range)> = (0..rng.random_range(0..3))
+				.map(|_| {
+					next += 1;
+					(next, range(&mut rng))
+				})
+				.collect();
+			for key in &retire {
+				live.remove(key);
+			}
+			live.extend(add.iter().copied());
+			edited
+				.edit(Edit {
+					retire,
+					add,
+					priority: 0,
+					delay: Delay::default(),
+					order: Order::default(),
+				})
+				.unwrap();
+			let mut whole = producer.subscribe(Subscription::default().with_ranges(live.values().copied()));
+			for (index, key) in live.keys().enumerate() {
+				assert_eq!(
+					edited.resolved_range(*key),
+					whole.resolved_range(index as u64),
+					"step {step}, key {key}"
+				);
+			}
+			assert_eq!(
+				edited.runs_in_range(0, 30_000),
+				whole.runs_in_range(0, 30_000),
+				"step {step}"
+			);
+		}
 	}
 
 	/// Write a finished one-frame group, presented at its key in milliseconds.

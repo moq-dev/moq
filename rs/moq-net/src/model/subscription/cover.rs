@@ -88,6 +88,7 @@ impl Want {
 
 impl Cover {
 	/// The runs given, each counted once.
+	#[cfg(test)]
 	pub fn new(runs: impl IntoIterator<Item = RangeInclusive<u64>>) -> Self {
 		let mut cover = Self::default();
 		for run in runs {
@@ -117,6 +118,8 @@ impl Cover {
 		self.root = merge(merge(below, at), above);
 	}
 
+	/// Whether no run is counted.
+	#[cfg(test)]
 	pub fn is_empty(&self) -> bool {
 		self.root.is_none()
 	}
@@ -582,9 +585,9 @@ mod tests {
 		}
 	}
 
-	/// An edit to a large cover is found by visiting what it touched, not every key.
+	/// An edit to a large cover moves exactly the span it touched, and undoing it moves nothing.
 	#[test]
-	fn moved_costs_the_edit() {
+	fn an_edit_moves_only_what_it_touched() {
 		let mut cover = Cover::new((0..10_000u64).map(|key| 4 * key..=4 * key + 1));
 		let old = cover.clone();
 		cover.add(20_001..=20_002, 1);

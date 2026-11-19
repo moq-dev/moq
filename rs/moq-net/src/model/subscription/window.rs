@@ -432,19 +432,6 @@ impl Window {
 		self.ranges.keys().map(|key| self.resolved_key(*key)).collect()
 	}
 
-	/// Where each range starts once delivery starts at `from`, in key order: `None` for one
-	/// with no group there, or whose start still waits.
-	pub fn starts(&self, from: u64) -> Vec<Option<u64>> {
-		self.resolved()
-			.into_iter()
-			.map(|r| {
-				let r = r?;
-				let start = r.start.max(from);
-				r.end.is_none_or(|end| end > start).then_some(start)
-			})
-			.collect()
-	}
-
 	/// The exclusive end past every group in range, `None` when one stays open or an anchor
 	/// waits.
 	pub fn end(&self) -> Option<u64> {
@@ -940,9 +927,6 @@ mod tests {
 				}),
 			]
 		);
-		// Delivery starting inside a range raises its start; past its end leaves it none.
-		assert_eq!(window.starts(3), [Some(3), Some(7)]);
-		assert_eq!(window.starts(5), [None, Some(7)]);
 
 		// Nothing asked for is nothing in range, floored nowhere.
 		let window = Window::new(&[], None, None, &keys).unwrap();

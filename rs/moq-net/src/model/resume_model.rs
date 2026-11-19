@@ -695,7 +695,7 @@ impl Model {
 					// Only an arrival cursor says where its range resolved.
 					let resolved = match reader.cursor.as_mut().unwrap() {
 						Cursor::Arrival(sub) => {
-							sub.resolved().first().copied().flatten().map(|resolved| resolved.start)
+							sub.resolved_range(0).map(|resolved| resolved.start)
 						}
 						Cursor::Ordered(_) => None,
 					};

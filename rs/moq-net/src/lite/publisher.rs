@@ -1670,6 +1670,13 @@ trait Resolve<M>: for<'a> Decode<'a, Version> + std::fmt::Debug {
 
 	fn state(msg: &M, version: Version) -> Self::State;
 	fn resolve(self, state: &mut Self::State) -> Result<Self::Resolved, DecodeError>;
+
+	/// `earlier` followed by `later`, for updates that wait on the reply to start: by default
+	/// the later replaces the earlier.
+	fn then(earlier: Self::Resolved, later: Self::Resolved) -> Self::Resolved {
+		let _ = earlier;
+		later
+	}
 }
 
 /// The update a request applies.
@@ -1711,10 +1718,20 @@ impl Resolve<lite::Subscribe<'static>> for lite::SubscribeUpdate {
 		let ranges = live.apply(edit)?;
 		Ok(self.with_ranges(ranges))
 	}
+
+	fn then(earlier: LiveUpdate, later: LiveUpdate) -> LiveUpdate {
+		then(earlier, later)
+	}
 }
 
-/// A SUBSCRIBE_UPDATE resolved to every live range, by Range ID.
-type LiveUpdate = lite::SubscribeUpdate<lite::Snapshot>;
+/// A SUBSCRIBE_UPDATE resolved by Range ID.
+type LiveUpdate = lite::SubscribeUpdate<lite::Applied>;
+
+/// `earlier` followed by `later`: the later's preferences, and both edits as one.
+fn then(earlier: LiveUpdate, mut later: LiveUpdate) -> LiveUpdate {
+	let ranges = std::mem::replace(&mut later.ranges, lite::Applied::Replace(Vec::new()));
+	later.with_ranges(earlier.ranges.then(ranges))
+}
 
 /// Serves one request stream: decode the request, resolve its broadcast, drive the
 /// kind's reply, then FIN.
@@ -1736,8 +1753,7 @@ struct RequestServe<R: Request> {
 	_working: Option<crate::session::Working>,
 	// What resolves each update, seeded once the request decodes.
 	history: Option<<R::Update as Resolve<R::Message>>::State>,
-	// The latest update to arrive before the reply started. Each one, resolved, replaces the
-	// last.
+	// The updates that arrived before the reply started, folded into one.
 	update: Option<Resolved<R>>,
 	/// Ends the request, even mid-reply, once the session stops allowing its broadcast.
 	gate: Option<crate::auth::Gate>,
@@ -2030,7 +2046,12 @@ impl<R: Request> RequestServe<R> {
 	fn apply(&mut self, update: Resolved<R>) {
 		match &mut self.state {
 			RequestState::Serve(request) => request.update(update),
-			_ => self.update = Some(update),
+			_ => {
+				self.update = Some(match self.update.take() {
+					Some(earlier) => <R::Update as Resolve<R::Message>>::then(earlier, update),
+					None => update,
+				})
+			}
 		}
 	}
 }
@@ -2334,7 +2355,12 @@ impl Request for SubscribeServe {
 
 	fn update(&mut self, update: LiveUpdate) {
 		match self {
-			Self::Confirm { update: pending, .. } => *pending = Some(update),
+			Self::Confirm { update: pending, .. } => {
+				*pending = Some(match pending.take() {
+					Some(earlier) => then(earlier, update),
+					None => update,
+				})
+			}
 			Self::Run(run) => run.update(update),
 			Self::Datagrams {
 				consumer,
@@ -4599,6 +4625,98 @@ impl Bounds {
 	}
 }
 
+/// A subscription's requested ranges in the model's whole groups, by Range ID, with the
+/// bounds the read cursor takes from them counted, so an edit moves them in what it costs.
+#[derive(Debug, Default)]
+struct Requested {
+	ranges: std::collections::BTreeMap<u64, crate::track::Range>,
+	/// The time starts of the non-empty ranges, and how many of them start otherwise.
+	starts: std::collections::BTreeMap<u64, usize>,
+	unnamed: usize,
+	/// The time ends of the non-empty ranges, and how many of them end otherwise.
+	ends: std::collections::BTreeMap<u64, usize>,
+	unbounded: usize,
+	/// The ranges with no end, empty ones included.
+	open: usize,
+}
+
+impl Requested {
+	fn new(ranges: impl IntoIterator<Item = (u64, crate::track::Range)>) -> Self {
+		let mut requested = Self::default();
+		for (id, range) in ranges {
+			requested.insert(id, range);
+		}
+		requested
+	}
+
+	fn insert(&mut self, id: u64, range: crate::track::Range) {
+		self.remove(id);
+		self.count(&range, 1);
+		self.ranges.insert(id, range);
+	}
+
+	fn remove(&mut self, id: u64) {
+		if let Some(range) = self.ranges.remove(&id) {
+			self.count(&range, -1);
+		}
+	}
+
+	fn count(&mut self, range: &crate::track::Range, delta: isize) {
+		use crate::track::Anchor;
+		let tally = |counts: &mut std::collections::BTreeMap<u64, usize>, key: u64| {
+			let count = counts.entry(key).or_default();
+			*count = count.checked_add_signed(delta).expect("a counted range");
+			if *count == 0 {
+				counts.remove(&key);
+			}
+		};
+		let shift = |count: &mut usize| *count = count.checked_add_signed(delta).expect("a counted range");
+		if range.end.is_none() {
+			shift(&mut self.open);
+		}
+		if range.is_empty() {
+			return;
+		}
+		match range.start {
+			Anchor::Time(start) => tally(&mut self.starts, start),
+			_ => shift(&mut self.unnamed),
+		}
+		match range.end {
+			Some(Anchor::Time(last)) => tally(&mut self.ends, last),
+			_ => shift(&mut self.unbounded),
+		}
+	}
+
+	/// The lowest group the ranges name, `None` unless each names its start; see
+	/// [`crate::track::Subscription::start`].
+	fn start(&self) -> Option<u64> {
+		match self.unnamed {
+			0 => self.starts.first_key_value().map(|(start, _)| *start),
+			_ => None,
+		}
+	}
+
+	/// The exclusive end past every range, `None` when one is open or counts back; see
+	/// [`crate::track::Subscription::end`].
+	fn end(&self) -> Option<u64> {
+		match self.unbounded {
+			0 => self.ends.last_key_value().map_or(Some(0), |(last, _)| last.checked_add(1)),
+			_ => None,
+		}
+	}
+
+	/// Whether every range has an end; see [`Bounds::ends`].
+	fn bounded(&self) -> bool {
+		self.open == 0
+	}
+
+	/// One past the highest Range ID held.
+	#[cfg(test)]
+	fn next(&self) -> u64 {
+		self.ranges.last_key_value().map_or(0, |(id, _)| id + 1)
+	}
+}
+
 /// The part of each group's rank a SUBSCRIBE_UPDATE can move.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Steer {
@@ -4774,15 +4892,12 @@ struct TrackRun {
 	steer_tx: kio::Producer<Steer>,
 	// The frame bounds of the requested ranges, which the model leaves to `position_group`.
 	frames: Frames,
-	// The lowest group the requested ranges name, `None` unless each names its start: kept
-	// with the ranges, so a wake reads it without copying every range.
-	named: Option<u64>,
+	/// The requested ranges in the model's whole groups, by Range ID, and what the read
+	/// cursor needs of them, kept current per edit.
+	requested: Requested,
 	// A SUBSCRIBE_UPDATE this track cannot serve, such as a time anchor on a track the
 	// peer was told is untimed, which ends the subscription.
 	refused: Option<Error>,
-	/// The live ranges the last update applied and the model subscription made of them, so
-	/// an update leaving every range live costs nothing for them.
-	applied: Option<(lite::Snapshot, crate::track::Subscription)>,
 	// Where delivery starts, which SUBSCRIBE_START reports.
 	start: Start,
 	end_sent: bool,
@@ -4805,13 +4920,11 @@ struct TrackRun {
 	idle: Option<Box<Idle>>,
 	/// Lite-05/06: the name's datagram track, which the subscription carries too.
 	datagrams: Option<LegacyDatagrams>,
-	/// The Range ID of each requested range, in the order the model holds them.
-	ids: Vec<u64>,
 	/// How many ranges the SUBSCRIBE carried, whose starts SUBSCRIBE_START reports.
 	initial: u64,
 	/// Lite-07: the ranges an update added whose start no SUBSCRIBE_STARTED reported yet, by
 	/// Range ID.
-	unstarted: Vec<u64>,
+	unstarted: std::collections::BTreeSet<u64>,
 	/// Lite-07: the skipped runs not sent as SUBSCRIBE_SKIP, each by the start of the cached
 	/// group just above it, whose GROUP's Previous Start passes over the run instead. Each
 	/// waits for that group to be served, when its stream carries the run, or given up, when
@@ -4849,16 +4962,14 @@ impl TrackRun {
 		let initial = bounds.ranges.len() as u64;
 
 		Self {
-			ids: (0..initial).collect(),
 			initial,
-			unstarted: Vec::new(),
+			unstarted: Default::default(),
 			elided: Default::default(),
 			recheck_elided: false,
 			bounded,
+			requested: Requested::new((0..).zip(bounds.ranges.iter().copied())),
 			frames: bounds.frames,
-			named: groups.start(),
 			refused: None,
-			applied: None,
 			ctx,
 			track,
 			floor,
@@ -4921,50 +5032,17 @@ impl TrackRun {
 			min: upd.min_delay,
 			max: upd.max_delay,
 		};
-		// Every range still live as last applied: the model's ranges stand, and only the
-		// preferences beside them may move.
-		if let Some((ranges, model)) = &self.applied
-			&& std::sync::Arc::ptr_eq(ranges, &upd.ranges)
-		{
-			if (model.priority, model.delay, model.order) == (upd.priority, delay, upd.order) {
-				return;
-			}
-			let model = crate::track::Subscription {
-				priority: upd.priority,
-				delay,
-				order: upd.order,
-				..model.clone()
-			};
-			match self.track.update(model.clone()) {
-				Ok(()) => self.applied = Some((upd.ranges, model)),
-				Err(err) => self.refused = Some(err),
-			}
-			return;
-		}
-		// Feed the full update into the model subscriber so the producer's
-		// aggregate reflects it (and a relay re-forwards it upstream).
-		// Read first: `update` replaces these preferences.
-		let requested = self.named;
-		let floored = requested.is_some_and(|group| group > 0);
-		let (ids, ranges): (Vec<u64>, Vec<lite::Range>) = upd.ranges.iter().copied().unzip();
-		let ranges = self.pin(&ids, ranges);
-		let bounds = Bounds::new(&ranges, !self.ctx.version.has_ranges());
-
-		let groups = bounds.groups();
-		let (start, end) = (groups.start(), groups.end());
-		// A refusal leaves the model's ranges as they were, so this side keeps them too.
-		let model = crate::track::Subscription {
-			priority: upd.priority,
-			delay,
-			order: upd.order,
-			..groups
+		// Read first: the edit moves it.
+		let requested = self.requested.start();
+		let edited = match upd.ranges {
+			lite::Applied::Edit { retired, added } => self.edit(retired, added, upd.priority, delay, upd.order),
+			lite::Applied::Replace(ranges) => self.replace_ranges(ranges, upd.priority, delay, upd.order),
 		};
-		if let Err(err) = self.track.update(model.clone()) {
-			self.refused = Some(err);
+		if !edited {
 			return;
 		}
-		self.applied = Some((upd.ranges.clone(), model));
-		self.named = start;
+		let floored = requested.is_some_and(|group| group > 0);
+		let (start, end) = (self.requested.start(), self.requested.end());
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
 		// drop back to 0: the cursor only rises on its own, and a finished group
@@ -5003,53 +5081,79 @@ impl TrackRun {
 		if (self.floor, self.cap) != range {
 			self.move_cursor();
 		}
-		self.bounded = bounds.ends(self.ctx.version);
-		self.frames = bounds.frames;
-		if self.ctx.version.has_ranges() {
+		self.bounded = self.ctx.version.has_ranges() && self.requested.bounded();
+	}
+
+	/// Lite-07: retire the ranges with Range IDs `retired` and add `added`, passing the edit
+	/// straight to the model, so it costs the ranges it names whatever else is live. Returns
+	/// whether the ranges moved.
+	///
+	/// A range left live keeps where it resolved: the model keeps each by its Range ID, so it
+	/// never counts relative anchors back from a newer latest group, nor looks a time start up
+	/// again in newer groups.
+	fn edit(
+		&mut self,
+		retired: Vec<u64>,
+		added: Vec<(u64, lite::Range)>,
+		priority: i8,
+		delay: crate::track::Delay,
+		order: Order,
+	) -> bool {
+		let added: Vec<(u64, crate::track::Range)> = added
+			.into_iter()
+			.map(|(id, range)| (id, Bounds::new(std::slice::from_ref(&range), false).ranges[0]))
+			.collect();
+		let moved = !retired.is_empty() || !added.is_empty();
+		let edit = crate::track::Edit {
+			retire: retired.clone(),
+			add: added.clone(),
+			priority,
+			delay,
+			order,
+		};
+		// A refusal leaves the model's ranges as they were, so this side keeps them too.
+		if let Err(err) = self.track.edit(edit) {
+			self.refused = Some(err);
+			return false;
+		}
+		for id in &retired {
+			self.requested.remove(*id);
 			// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
-			// Both list Range IDs in ascending order, since each one assigned is the next.
-			self.unstarted.retain(|id| ids.binary_search(id).is_ok());
-			let added = ids
-				.iter()
-				.filter(|id| **id >= self.initial && self.ids.binary_search(id).is_err());
-			self.unstarted.extend(added);
+			self.unstarted.remove(id);
 		}
-		self.ids = ids;
-	}
-
-	/// Where each live Range ID sits among the model's ranges.
-	fn positions(&self) -> HashMap<u64, usize> {
-		self.ids.iter().enumerate().map(|(index, id)| (*id, index)).collect()
-	}
-
-	/// `ranges`, numbered by `ids`, with each range this subscription already held resolved
-	/// as it was: a range resolves once, so an update that leaves it live never counts its
-	/// relative anchors back from a newer latest group, nor looks a time start up again in
-	/// newer groups. A start reaching back to the oldest group held stays as it was, since an
-	/// absolute start would turn it into a floor the subscriber never named. Lite-07 only: an
-	/// older update replaces every range.
-	fn pin(&mut self, ids: &[u64], mut ranges: Vec<lite::Range>) -> Vec<lite::Range> {
-		if !self.ctx.version.has_ranges() {
-			return ranges;
-		}
-		let resolved = self.track.resolved();
-		let positions = self.positions();
-		for (id, range) in ids.iter().zip(&mut ranges) {
-			let Some(resolved) = positions
-				.get(id)
-				.and_then(|index| resolved.get(*index).copied().flatten())
-			else {
-				continue;
-			};
-			if resolved.floored && matches!(range.start, Some(lite::Anchor::Relative(_) | lite::Anchor::Time(_))) {
-				range.start = Some(lite::Anchor::Absolute(track::Position::group(resolved.start)));
-			}
-			// An end resolves once it settles; until then it is reported open.
-			if let (Some(lite::Anchor::Relative(_) | lite::Anchor::Time(_)), Some(end)) = (range.end, resolved.end) {
-				range.end = Some(lite::Anchor::Absolute(track::Position::group(end)));
+		for (id, range) in added {
+			self.requested.insert(id, range);
+			if id >= self.initial {
+				self.unstarted.insert(id);
 			}
 		}
-		ranges
+		moved
+	}
+
+	/// Before lite-07: replace every range, as an update there does. Returns whether it applied.
+	fn replace_ranges(
+		&mut self,
+		ranges: Vec<(u64, lite::Range)>,
+		priority: i8,
+		delay: crate::track::Delay,
+		order: Order,
+	) -> bool {
+		let (ids, ranges): (Vec<u64>, Vec<lite::Range>) = ranges.into_iter().unzip();
+		let bounds = Bounds::new(&ranges, !self.ctx.version.has_ranges());
+		let model = crate::track::Subscription {
+			priority,
+			delay,
+			order,
+			..bounds.groups()
+		};
+		// A refusal leaves the model's ranges as they were, so this side keeps them too.
+		if let Err(err) = self.track.update(model) {
+			self.refused = Some(err);
+			return false;
+		}
+		self.requested = Requested::new(ids.into_iter().zip(bounds.ranges.iter().copied()));
+		self.frames = bounds.frames;
+		true
 	}
 
 	/// Report where each range an update added starts, once it resolves, or with no start
@@ -5066,20 +5170,17 @@ impl TrackRun {
 		if self.unstarted.is_empty() {
 			return Ok(false);
 		}
-		let resolved = self.track.resolved();
-		let positions = self.positions();
-		let mut waiting = Vec::new();
+		let mut waiting = std::collections::BTreeSet::new();
 		let mut reported = false;
 		for id in std::mem::take(&mut self.unstarted) {
-			let index = *positions.get(&id).expect("unstarted ranges are live");
-			let start = match resolved.get(index).copied().flatten() {
+			let start = match self.track.resolved_range(id) {
 				Some(resolved) => {
 					let start = resolved.start.max(from);
 					resolved.end.is_none_or(|end| end > start).then_some(start)
 				}
 				None if finished => None,
 				None => {
-					waiting.push(id);
+					waiting.insert(id);
 					continue;
 				}
 			};
@@ -5094,8 +5195,15 @@ impl TrackRun {
 	/// lite-07 does.
 	#[cfg(test)]
 	fn replace(&mut self, update: lite::SubscribeUpdate<Vec<lite::Range>>) {
-		let next = self.ids.iter().max().map_or(0, |last| last + 1).max(self.initial);
-		let ranges = (next..).zip(update.ranges.iter().copied()).collect();
+		let next = self.requested.next().max(self.initial);
+		let added = (next..).zip(update.ranges.iter().copied()).collect();
+		let ranges = match self.ctx.version.has_ranges() {
+			true => lite::Applied::Edit {
+				retired: self.requested.ranges.keys().copied().collect(),
+				added,
+			},
+			false => lite::Applied::Replace(added),
+		};
 		self.update(update.with_ranges(ranges));
 	}
 
@@ -5222,7 +5330,7 @@ impl TrackRun {
 		// what it holds against the answer.
 		if self.start.is_unresolved()
 			&& self.ctx.version.has_largest()
-			&& let Some(start) = self.named
+			&& let Some(start) = self.requested.start()
 			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
 			&& (track::Position {
 				group: start,
@@ -5586,10 +5694,12 @@ impl TrackRun {
 		}
 		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
 		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
-		let starts = self.track.starts(start);
-		let positions = self.positions();
 		(0..self.initial)
-			.map(|id| starts.get(*positions.get(&id)?).copied().flatten())
+			.map(|id| {
+				let resolved = self.track.resolved_range(id)?;
+				let from = resolved.start.max(start);
+				resolved.end.is_none_or(|end| end > from).then_some(from)
+			})
 			.collect()
 	}
 
@@ -5628,7 +5738,7 @@ impl TrackRun {
 		// floor. Lite-06 encodes a floor of group 0 as 0, which decodes as no named floor;
 		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
 		// landed while the group was held may already have raised it past.
-		if self.named.is_none() && !self.ctx.version.resolves_start() {
+		if self.requested.start().is_none() && !self.ctx.version.resolves_start() {
 			self.raise_floor(start);
 		}
 		self.serve(group);
@@ -8094,7 +8204,6 @@ mod serve_group_test {
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		// The SUBSCRIBE carried the subscriber's four ranges.
 		run.initial = 4;
-		run.ids = (0..4).collect();
 		let mut run = std::pin::pin!(kio::wait(move |waiter| run.poll(&mut writer, waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -8125,18 +8234,31 @@ mod serve_group_test {
 		responses
 	}
 
-	/// A lite-07 update that keeps every live range and adds `added`, each taking the next
-	/// Range ID after `next`.
-	fn lite07_add(live: &[(u64, lite::Range)], next: u64, added: &[lite::Range]) -> LiveUpdate {
-		let mut ranges = live.to_vec();
-		ranges.extend((next..).zip(added.iter().copied()));
+	/// A lite-07 update that keeps the ranges of `live` and adds `added`, each taking the next
+	/// Range ID from `next`: every other range `run` holds is retired.
+	fn lite07_add(run: &TrackRun, live: &[(u64, lite::Range)], next: u64, added: &[lite::Range]) -> LiveUpdate {
+		let kept: Vec<u64> = live.iter().map(|(id, _)| *id).collect();
 		lite::SubscribeUpdate {
 			wanted_group: None,
 			priority: 0,
 			max_delay: Some(Duration::from_secs(3600)),
 			min_delay: None,
-			ranges: ranges.into(),
+			ranges: lite::Applied::Edit {
+				retired: run.requested.ranges.keys().filter(|id| !kept.contains(id)).copied().collect(),
+				added: (next..).zip(added.iter().copied()).collect(),
+			},
 			order: Order::Descending,
+		}
+	}
+
+	/// An update to `version` that keeps the one range the subscription holds, `range`.
+	fn kept_range(version: Version, range: lite::Range) -> lite::Applied {
+		match version.has_ranges() {
+			true => lite::Applied::Edit {
+				retired: Vec::new(),
+				added: Vec::new(),
+			},
+			false => lite::Applied::Replace(vec![(0, range)]),
 		}
 	}
 
@@ -8170,7 +8292,7 @@ mod serve_group_test {
 			end: None,
 		};
 		let live = [(0, first)];
-		run.update(lite07_add(&live, 1, &[back]));
+		run.update(lite07_add(&run, &live, 1, &[back]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let started: Vec<_> = responses(&mut writer, &log)
 			.await
@@ -8187,8 +8309,8 @@ mod serve_group_test {
 			write_group(&mut track, key, key * 1000);
 		}
 		let live = [(0, first), (1, back)];
-		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
-		let resolved = run.track.resolved()[1].map(|r| (r.start, r.end));
+		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
+		let resolved = run.track.resolved_range(1).map(|r| (r.start, r.end));
 		assert_eq!(resolved, Some((2, None)), "the update kept where it started");
 	}
 
@@ -8222,7 +8344,7 @@ mod serve_group_test {
 			start: Some(lite::Anchor::Relative(2)),
 			end: Some(lite::Anchor::Time(100_000)),
 		};
-		run.update(lite07_add(&[], 1, &[later]));
+		run.update(lite07_add(&run, &[], 1, &[later]));
 		let result = (0..100)
 			.find_map(|_| match run.poll_step(&mut writer, &kio::Waiter::noop()) {
 				Poll::Ready(Err(err)) => Some(err),
@@ -8258,14 +8380,14 @@ mod serve_group_test {
 			start: Some(lite::Anchor::Time(time)),
 			end: None,
 		};
-		run.update(lite07_add(&[(0, served)], 1, &[time]));
+		run.update(lite07_add(&run, &[(0, served)], 1, &[time]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		let before = run.track.resolved()[1].expect("resolved");
+		let before = run.track.resolved_range(1).expect("resolved");
 
 		write_group(&mut track, newer, newer);
 		let live = [(0, served), (1, time)];
-		run.update(lite07_add(&live, 2, &[lite::Range::span(Some(99), 0, None, None)]));
-		let after = run.track.resolved()[1].expect("resolved");
+		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(99), 0, None, None)]));
+		let after = run.track.resolved_range(1).expect("resolved");
 		[(before.start, before.floored), (after.start, after.floored)]
 	}
 
@@ -8312,8 +8434,8 @@ mod serve_group_test {
 		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
 		let added = lite::Range::span(Some(4), 0, None, None);
 		// Added and retired before the run reported it.
-		run.update(lite07_add(&[(0, first)], 1, &[added]));
-		run.update(lite07_add(&[(0, first)], 2, &[]));
+		run.update(lite07_add(&run, &[(0, first)], 1, &[added]));
+		run.update(lite07_add(&run, &[(0, first)], 2, &[]));
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		assert!(run.start.resolved().is_some());
 		assert!(
@@ -8750,7 +8872,7 @@ mod serve_group_test {
 					priority: 0,
 					max_delay: Some(if widen { Duration::from_secs(10) } else { budget }),
 					min_delay: Some(Duration::ZERO),
-					ranges: [(0, lite::Range::span(None, 0, None, None))].into(),
+					ranges: kept_range(version, lite::Range::span(None, 0, None, None)),
 					order: Order::Descending,
 				});
 				while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -8791,7 +8913,7 @@ mod serve_group_test {
 				priority: 0,
 				max_delay: Some(max_delay),
 				min_delay: None,
-				ranges: [(0, lite::Range::span(None, 0, None, None))].into(),
+				ranges: kept_range(version, lite::Range::span(None, 0, None, None)),
 				order: Order::Descending,
 			};
 
