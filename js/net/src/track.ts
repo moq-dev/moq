@@ -1678,10 +1678,10 @@ export class Producer {
 			return reported?.empty !== undefined && budget <= reported.empty;
 		};
 		timeStartFolds = (producer, time) => {
-			if (!producer.#wire || producer.#timeStarts.has(time)) return undefined;
+			// A reported start places it. An empty answer places nothing, as for `containing`, so a
+			// reader wider than its budget still waits on folds.
+			if (!producer.#wire || producer.#timeStarts.get(time)?.start !== undefined) return undefined;
 			const covering = coveringStart(producer.#timeStarts, time);
-			// Its range had no group to deliver, so no read waits on it.
-			if (covering && covering.start === undefined) return undefined;
 			const from = producer.#landingFrom(time, covering?.start);
 			return from === undefined ? undefined : producer.#landingThrough(time, from)?.folds;
 		};
@@ -5374,9 +5374,21 @@ export class Subscriber {
 				if (!lowest) return { kind: "idle" };
 				const owed = this.nextInRange(items.at);
 				const ready = lowest.span.start <= items.at || owed === undefined || owed >= lowest.span.start;
-				return ready ? this.#takeGap(items, lowest.index, lowest.span, lowest.span.end) : { kind: "idle" };
+				if (!ready || this.#gapHeld(items.at, lowest.span.end)) return { kind: "idle" };
+				return this.#takeGap(items, lowest.index, lowest.span, lowest.span.end);
 			}
 		}
+	}
+
+	// Whether a time start still waiting below `end` holds back a gap an ordered read at `at` would
+	// return, as #waitTimeStart holds a group: the group containing it may lie below the gap, and an
+	// ordered read never goes back. A resumed reader's copies hold their own groups, and its gaps go
+	// as found. Mirrors the Rust `Cursor::poll_gap_held`.
+	#gapHeld(at: bigint, end: bigint): boolean {
+		if (this.#resume) return false;
+		this.#settle();
+		const start = max(max(this.#cursor.peek().start, this.#nextKey), at);
+		return this.#waitTimeStart(start, end, this.#drift());
 	}
 
 	// The group held behind a gap, while the bounds still cover it, else the cursor's next. A group

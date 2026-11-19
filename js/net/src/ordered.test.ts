@@ -478,6 +478,19 @@ test("a folded time start wakes its read when the grace for a gap below it passe
 	}
 });
 
+test("a waiting time start holds back a gap above its group", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	drop(producer, 1500n, 1600n);
+	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] }).ordered();
+	expect(items(ordered)).toEqual([]);
+	hooks.timeStarts(producer, [[1500n, 1000n]], NO_MAX_DELAY);
+	put(producer, 1000n, false);
+	producer.skipGroups(1001n, 1500n);
+	producer.skipGroups(1600n, 2000n);
+	expect(items(ordered)).toEqual(["group 1000", "gap 1500..1600 (delivery timeout)", "group 2000"]);
+});
+
 test("a waiting time start holds an ordered read only within its budget", async () => {
 	const clock = new Manual();
 	const installed = clock.install();

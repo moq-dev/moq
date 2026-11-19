@@ -1413,17 +1413,17 @@ impl TrackState {
 	/// itself with no change to wake its readers: the arrival grace of the lowest gap
 	/// [`Self::landed_through`] still waits on folds.
 	fn time_start_folds(&self, time: u64) -> Option<crate::time::Instant> {
-		if !self.anchors.received() || self.time_starts.contains_key(&time) {
+		// A reported start places it. An empty answer places nothing, as for
+		// [`Self::containing_received`], so a reader wider than its budget still waits on folds.
+		if !self.anchors.received()
+			|| self
+				.time_starts
+				.get(&time)
+				.is_some_and(|reported| reported.start().is_some())
+		{
 			return None;
 		}
-		let covering = match self.covering_start(time) {
-			// Its range had no group to deliver, so no read waits on it.
-			Some(TimeStart {
-				answer: Answer::Empty(_),
-				..
-			}) => return None,
-			covering => covering.and_then(|reported| reported.start()),
-		};
+		let covering = self.covering_start(time).and_then(|reported| reported.start());
 		let from = self.landing_from(time, covering)?;
 		self.landing_through(time, from).flatten()
 	}
@@ -9619,6 +9619,22 @@ impl Cursor {
 		Poll::Pending
 	}
 
+	/// Pending while a time start below `end` holds a gap there as [`Self::poll_time_start`]
+	/// holds a group: the group containing it may lie below the gap, and an ordered read never
+	/// goes back. `from` is where the ordered read stands.
+	fn poll_gap_held(&mut self, from: u64, end: u64, waiter: &kio::Waiter) -> Poll<()> {
+		self.sync();
+		let drift = match ready!(self.poll_drift(&self.servable, waiter)) {
+			Ok(drift) => drift,
+			// The read reports the error.
+			Err(_) => return Poll::Ready(()),
+		};
+		let from = from.max(self.next_key).max(self.floor());
+		// One placed meanwhile changed the runs, which the caller looks at again.
+		while ready!(self.poll_time_start(from..end, &drift, waiter)) {}
+		Poll::Ready(())
+	}
+
 	/// Whether the drift budget says to skip `group`, against a [`Drift`] already resolved
 	/// for this poll.
 	fn poll_stale(&self, group: &group::Consumer, drift: &Drift, waiter: &kio::Waiter) -> Poll<Result<bool>> {
@@ -10985,6 +11001,16 @@ impl Subscriber {
 		record.tell(keys, Report::Settled);
 	}
 
+	/// Pending while a waiting time start below `end` holds back a gap an [`Ordered`] read at
+	/// `from` would return; see [`Cursor::poll_gap_held`]. A resumed reader's copies hold their
+	/// own groups, and its gaps go as found.
+	fn poll_gap_held(&mut self, from: u64, end: u64, waiter: &kio::Waiter) -> Poll<()> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.poll_gap_held(from, end, waiter),
+			Inner::Resume(..) => Poll::Ready(()),
+		}
+	}
+
 	/// The key cursor behind [`Ordered`], which owns the only public door to it.
 	pub(super) fn poll_next_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.poll_group(true, waiter)
@@ -11950,7 +11976,7 @@ impl Ordered {
 				}
 			}
 			// What the read still owes lies above the gap, so the gap goes first.
-			Poll::Pending => match self.next_gap() {
+			Poll::Pending => match self.next_gap(waiter) {
 				Some(item) => Poll::Ready(Ok(Some(item))),
 				None => Poll::Pending,
 			},
@@ -12067,8 +12093,13 @@ impl Ordered {
 		}
 	}
 
-	/// The lowest gap, once nothing the read still owes lies below it.
-	fn next_gap(&mut self) -> Option<Item> {
+	/// The lowest gap, once nothing the read still owes lies below it, and no time start still
+	/// waiting below its end may resolve to a group below it.
+	fn next_gap(&mut self, waiter: &kio::Waiter) -> Option<Item> {
+		let (_, span) = self.lowest_gap()?;
+		if self.inner.poll_gap_held(self.at, span.end, waiter).is_pending() {
+			return None;
+		}
 		let (at, span) = self.lowest_gap()?;
 		let ready = span.start <= self.at || self.inner.next_in_range(self.at).is_none_or(|owed| owed >= span.start);
 		let resume = span.end;
@@ -15963,6 +15994,42 @@ mod test {
 		assert_eq!(next(), Some(Ok(2000)));
 	}
 
+	/// A gap at a time start still waiting goes after the group the start resolves to, as a
+	/// later group does: that group may lie below the gap, and an ordered read never goes back.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_waiting_time_start_holds_back_a_gap_above_its_group() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+		producer.drop_groups(1500..1600, StreamError::NotFound);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Time(1500),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.ordered();
+		let mut next = || match ordered.next_group().now_or_never() {
+			None => None,
+			Some(Ok(Some(Item::Group(group)))) => Some(Ok(group.start)),
+			Some(Ok(Some(Item::Gap { range, .. }))) => Some(Err(range)),
+			Some(res) => panic!("ended: {:?}", res.map(|_| ())),
+		};
+		assert_eq!(next(), None, "the gap waits on the start");
+		producer.time_starts([(1500, Some(1000), None)], Duration::MAX);
+		write_group(&producer, 1000);
+		producer.skip_groups(1001..1500);
+		producer.skip_groups(1600..2000);
+		assert_eq!(next(), Some(Ok(1000)));
+		assert_eq!(next(), Some(Err(1500..1600)));
+		assert_eq!(next(), Some(Ok(2000)));
+	}
+
 	/// A range its publisher answered with no group to deliver, under a budget, lands none of
 	/// its groups for a reader within that budget, so that reader's ordered read holds no later
 	/// group back for the time it asks from, or one folded into it. A wider reader may still
@@ -16163,6 +16230,39 @@ mod test {
 		assert!(!woken.load(Ordering::SeqCst), "woken before the grace");
 		assert!(subscriber.poll_start(&waiter).is_pending());
 		elapse(&producer, Duration::from_millis(1));
+		assert!(woken.load(Ordering::SeqCst), "the grace never woke the start");
+		assert!(subscriber.poll_start(&waiter).is_ready());
+	}
+
+	/// A time start its own range answered empty, under a budget narrower than the reader's,
+	/// places nothing, so the reader still waits on the feed placing it, and the grace of a gap
+	/// below folding wakes it as it does any start the copy places from its own groups.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_time_start_answered_empty_wakes_poll_start_when_a_gap_below_folds() {
+		let grace = replay().budget();
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		elapse(&producer, Duration::ZERO);
+		producer.time_starts([(1500, None, Some(1800))], Duration::from_millis(1));
+		// The feed's first group, cut since, and a later one with the gap between still folding.
+		let cut = producer.create_group(group::Info { start: 1000 }).unwrap();
+		cut.abort(Error::Cancel).unwrap();
+		producer.modify().unwrap().reclaim_aborted(1000);
+		write_group(&producer, 2000);
+		let mut subscriber = producer.subscribe(replay().with_ranges([Range {
+			start: Anchor::Time(1500),
+			end: None,
+		}]));
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(
+			subscriber.poll_start(&waiter).is_pending(),
+			"a group above 1000 may still land"
+		);
+		elapse(&producer, grace);
 		assert!(woken.load(Ordering::SeqCst), "the grace never woke the start");
 		assert!(subscriber.poll_start(&waiter).is_ready());
 	}
