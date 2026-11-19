@@ -307,9 +307,14 @@ impl Window {
 		!self.reaching.is_empty()
 	}
 
-	/// Whether a time start still waits on the groups held to place it.
-	pub fn is_waiting(&self) -> bool {
-		!self.waiting.is_empty()
+	/// Whether a time start still waits on the groups held to place it, where the group
+	/// containing it may start above `floor`. One at or below the floor needs no placing: the
+	/// floor already keeps out every group but one starting there, and serves the first group
+	/// from it either way.
+	pub fn is_waiting_above(&self, floor: u64) -> bool {
+		self.waiting
+			.iter()
+			.any(|&position| matches!(self.spans[position].anchor, Anchor::Time(time) if time > floor))
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and

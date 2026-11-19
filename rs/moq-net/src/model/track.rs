@@ -10641,7 +10641,8 @@ impl Subscriber {
 	/// none: groups arrive newest first, so the first to arrive is not the oldest served.
 	///
 	/// Pending too while a time start waits on the groups held to place it, since where its
-	/// range starts is unknown until then.
+	/// range starts is unknown until then, unless the floor sits at or past that time, as a
+	/// pre-lite-07 wire's start does: the group containing it is out of range then.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_start(&mut self, waiter: &kio::Waiter) -> Poll<Option<u64>> {
 		let cursor = match &mut self.inner {
@@ -10650,12 +10651,12 @@ impl Subscriber {
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		cursor.sync();
-		if cursor.filter.window.is_waiting() {
+		if cursor.filter.window.is_waiting_above(cursor.min_key) {
 			// Registered before syncing again, so a change placing it after this wakes it. A
 			// closed track places it at once, since nothing more can arrive.
 			let closed = cursor.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
 			cursor.sync();
-			if !closed && cursor.filter.window.is_waiting() {
+			if !closed && cursor.filter.window.is_waiting_above(cursor.min_key) {
 				return Poll::Pending;
 			}
 		}
@@ -15493,6 +15494,34 @@ mod test {
 		assert!(before.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(drain(&mut before), vec![1000]);
 		assert_eq!(placed(&mut after), None, "a group past 1000 may still arrive");
+	}
+
+	/// A floor at or past a time start, as a pre-lite-07 wire's start sets, keeps out the group
+	/// containing that time unless it starts there, so where the range starts waits on nothing
+	/// a lite-07 copy has yet to place. Without the floor, it waits.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_floor_at_a_time_start_waits_on_no_placing() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 1000);
+
+		let mut open = producer.subscribe(from(500));
+		assert!(open.poll_start(&kio::Waiter::noop()).is_pending());
+		let mut floored = producer.subscribe(from(500)).with_range(500..);
+		assert!(floored.poll_start(&kio::Waiter::noop()).is_ready());
+		let mut below = producer.subscribe(from(500)).with_range(499..);
+		assert!(below.poll_start(&kio::Waiter::noop()).is_pending());
+		assert_eq!(drain(&mut floored), vec![1000]);
 	}
 
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its
