@@ -8,7 +8,8 @@ const GameStatsSchema = z.object({
 	wall_secs: z.number(),
 });
 
-/** One component of a viewer's latency. */
+/** One component of a viewer's latency, exported so `Game`'s declaration can name it. */
+// fallow-ignore-next-line unused-type
 export interface LatencyEntry {
 	/** The component's name. */
 	label: string;

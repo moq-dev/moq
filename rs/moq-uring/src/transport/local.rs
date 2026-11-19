@@ -128,7 +128,7 @@ impl<T: poll::SendStream> poll::SendStream for Local<T> {
 		self.0.offset()
 	}
 
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 		self.0.poll_acked(waiter, offset)
 	}
 

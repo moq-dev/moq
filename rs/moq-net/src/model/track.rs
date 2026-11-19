@@ -3864,13 +3864,13 @@ impl TrackState {
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
 	/// subscription). The group lands in the cache so a waiting
-	/// [`Fetching`] resolves via [`Self::poll_fetch`].
+	/// [`Fetching`] resolves via [`Self::poll_fetch`]. `None` when a copy already covers it.
 	pub(super) fn insert_group_request(
 		&mut self,
 		key: u64,
 		frames: group::Bounds,
 		info: Option<Info>,
-	) -> Result<group::Producer> {
+	) -> Result<Option<group::Producer>> {
 		if let Some(err) = self.outcome.aborted() {
 			return Err(err.clone());
 		}
@@ -3895,7 +3895,7 @@ impl TrackState {
 		let info = self.info.clone().unwrap();
 
 		if self.covering_range(key, frames).is_some() {
-			return Err(Error::Duplicate);
+			return Ok(None);
 		}
 		let content = self.content_for_copy(key)?;
 
@@ -3953,7 +3953,7 @@ impl TrackState {
 			None => self.insert_group(&group.handle(), false),
 		}
 		self.evict_expired();
-		Ok(group)
+		Ok(Some(group))
 	}
 }
 
@@ -12527,7 +12527,7 @@ mod test {
 				.unwrap();
 			let fetch = consumer.fetch_group(key, None);
 			let request = dynamic.requested_fill_group().await.unwrap();
-			let mut head = request.accept(Info::timed()).unwrap();
+			let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 			for payload in [&b"snapshot"[..], b"delta"] {
 				head.write_frame(head.key_time(), bytes::Bytes::from_static(payload))
 					.unwrap();
@@ -12562,7 +12562,7 @@ mod test {
 			.unwrap();
 		let _fetch = consumer.fetch_group(0, None);
 		let request = dynamic.requested_fill_group().await.unwrap();
-		let mut head = request.accept(Info::timed()).unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"snapshot"))
 			.unwrap();
 		(live, head)
@@ -12853,7 +12853,8 @@ mod test {
 			.await
 			.unwrap()
 			.accept(Info::timed())
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		bounded.write_frame(bounded.key_time(), &b"a"[..]).unwrap();
 		bounded.finish().unwrap();
 		fetch.await.unwrap();
@@ -14957,7 +14958,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds::default(), None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		let state = state.read();
 		assert_eq!(state.info.as_ref().unwrap().max_age, None);
 		assert_eq!(state.max_age_bound(), None);
@@ -14969,7 +14971,10 @@ mod test {
 	fn a_refusal_releases_the_live_edge_a_fill_cached() {
 		let state = TrackState::spawn(Arc::new(broadcast::Info::default()));
 		let mut guard = state.write().ok().unwrap();
-		let _group = guard.insert_group_request(0, group::Bounds::default(), None).unwrap();
+		let _group = guard
+			.insert_group_request(0, group::Bounds::default(), None)
+			.unwrap()
+			.expect("a fresh group");
 		assert!(guard.protects(0));
 		guard.reject(Error::NotFound, None);
 		assert!(!guard.protects(0));
@@ -15292,7 +15297,7 @@ mod test {
 			assert_eq!(read_now(&mut reader, false), None, "the fill is still owed");
 			assert_eq!(fill.wanted(), Some(5), "the fresh suffix stays wanted");
 			for key in 3..6 {
-				let mut group = fill.accept(key, None).unwrap();
+				let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 				group
 					.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
 					.unwrap();
@@ -15357,7 +15362,7 @@ mod test {
 		);
 		assert!(fill.wanted().is_some(), "the fresh suffix stays wanted");
 		for key in 3..6 {
-			let mut group = fill.accept(key, None).unwrap();
+			let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 			group
 				.write_frame(crate::Timestamp::unscaled(group.start), &b"x"[..])
 				.unwrap();
@@ -17174,7 +17179,7 @@ mod test {
 		let Poll::Ready(Ok(req)) = dynamic.poll_requested_fill_group(&waiter) else {
 			panic!("fetch request should be ready");
 		};
-		let mut fetched = req.accept(None).unwrap();
+		let mut fetched = req.accept(None).unwrap().expect("a fresh group");
 		fetched
 			.write_frame(crate::Timestamp::unscaled(fetched.start), b"2-0".as_ref())
 			.unwrap();
@@ -17218,7 +17223,7 @@ mod test {
 			.now_or_never()
 			.expect("fetch request is ready")
 			.unwrap();
-		let mut fetched = req.accept(Info::timed()).unwrap();
+		let mut fetched = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		fetched
 			.write_frame(
 				Timestamp::from_millis(100_000).unwrap(),
@@ -17254,7 +17259,11 @@ mod test {
 				.now_or_never()
 				.expect("fill request is ready")
 				.unwrap();
-			req.accept(None).unwrap().abort(error.clone()).unwrap();
+			req.accept(None)
+				.unwrap()
+				.expect("a fresh group")
+				.abort(error.clone())
+				.unwrap();
 			drop(pending);
 			let waiter = kio::Waiter::noop();
 			assert!(
@@ -18102,7 +18111,7 @@ mod test {
 
 		let _fetch = consumer.fetch_group(0, None);
 		let request = dynamic.requested_fill_group().await.unwrap();
-		let mut head = request.accept(Info::timed()).unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		head.write_frame(head.key_time(), bytes::Bytes::from_static(b"snapshot"))
 			.unwrap();
 		let mut reading = consumer.peek_group(0).expect("the head serves group 0");
@@ -18960,7 +18969,7 @@ mod test {
 
 		let _pending = consumer.fetch_group(0, None);
 		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		req.accept(None).unwrap().finish().unwrap();
+		req.accept(None).unwrap().expect("a fresh group").finish().unwrap();
 		assert!(
 			arrival.recv_group().now_or_never().is_none(),
 			"the live group 0 is still owed"
@@ -19855,7 +19864,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
 			head.write_frame(at(millis), &payload[..]).unwrap();
 		}
@@ -19881,7 +19891,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		let mut reader = head.consume().with_range(..3);
 		for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
 			head.write_frame(at(millis), &payload[..]).unwrap();
@@ -19927,7 +19938,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(3, group::Bounds { start: 2, end: Some(3) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		drop(hold);
 		cut.write_frame(at(302), &b"c"[..]).unwrap();
 		let waiter = kio::Waiter::noop();
@@ -20016,7 +20028,8 @@ mod test {
 				.ok()
 				.unwrap()
 				.insert_group_request(3, group::Bounds { start: 0, end: Some(3) }, None)
-				.unwrap();
+				.unwrap()
+				.expect("a fresh group");
 			for (millis, payload) in [(300, b"a"), (301, b"b"), (302, b"c")] {
 				head.write_frame(at(millis), &payload[..]).unwrap();
 			}
@@ -21681,7 +21694,7 @@ mod test {
 		assert_eq!(req.priority(), 7);
 
 		// Serve it by accepting the request; the fetch then resolves.
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"hi"))
 			.unwrap();
@@ -21760,7 +21773,12 @@ mod test {
 			.unwrap();
 		drop(req);
 		assert!(fresh.poll_unwanted(&kio::Waiter::noop()).is_pending());
-		fresh.accept(Info::timed()).unwrap().finish().unwrap();
+		fresh
+			.accept(Info::timed())
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		assert_eq!(retry.await.unwrap().start, 5);
 	}
 
@@ -21805,7 +21823,12 @@ mod test {
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
-		fresh.accept(Info::timed()).unwrap().finish().unwrap();
+		fresh
+			.accept(Info::timed())
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		assert_eq!(retry.await.unwrap().start, 5);
 	}
 
@@ -21833,7 +21856,10 @@ mod test {
 			.expect("the retry queues a fresh request")
 			.unwrap();
 
-		let mut group = req.accept(Info::timed()).expect("a withdrawn request still accepts");
+		let mut group = req
+			.accept(Info::timed())
+			.expect("a withdrawn request still accepts")
+			.expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"hi"))
 			.unwrap();
@@ -21842,7 +21868,7 @@ mod test {
 		let mut fetched = retry.await.unwrap();
 		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"hi");
 		assert!(!fresh.is_wanted(), "the retry left the fresh request");
-		assert!(matches!(fresh.accept(Info::timed()), Err(Error::Duplicate)));
+		assert!(matches!(fresh.accept(Info::timed()), Ok(None)));
 	}
 
 	/// Dropping an auto trait from a published type is a semver break, so the group
@@ -21869,7 +21895,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -21901,7 +21927,7 @@ mod test {
 		let bounded = consumer.fetch_range(0, request(2, Some(4)));
 		let fill = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!((fill.frame_start(), fill.frame_end()), (0, Some(4)));
-		let mut prefix = fill.accept(Info::timed()).unwrap();
+		let mut prefix = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 		for _ in 0..4 {
 			prefix.write_frame(prefix.key_time(), b"prefix".as_slice()).unwrap();
 		}
@@ -21928,7 +21954,7 @@ mod test {
 		assert!(kio::Task::poll(&mut *whole, &kio::Waiter::noop()).is_pending());
 		let fill = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!((fill.frame_start(), fill.frame_end()), (0, None));
-		let mut complete = fill.accept(Info::timed()).unwrap();
+		let mut complete = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 		for _ in 0..6 {
 			complete.write_frame(complete.key_time(), b"prefix".as_slice()).unwrap();
 		}
@@ -21964,7 +21990,7 @@ mod test {
 			);
 			let fill = dynamic.requested_fill_group().await.unwrap();
 			assert_eq!((fill.frame_start(), fill.frame_end()), (start, Some(start + 1)));
-			let mut tail = fill.accept(Info::timed()).unwrap();
+			let mut tail = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 			tail.write_frame(tail.key_time(), b"tail".as_slice()).unwrap();
 			tail.finish().unwrap();
 			assert_eq!(fetched.await.unwrap().index(), start);
@@ -22003,7 +22029,7 @@ mod test {
 		let fill = async |frames: std::ops::Range<u64>| {
 			let fill = dynamic.requested_fill_group().await.unwrap();
 			assert_eq!((fill.frame_start(), fill.frame_end()), (frames.start, Some(frames.end)));
-			let mut group = fill.accept(Info::timed()).unwrap();
+			let mut group = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 			for _ in frames {
 				group.write_frame(group.key_time(), b"tail".as_slice()).unwrap();
 			}
@@ -22031,7 +22057,7 @@ mod test {
 		let fill = async |start: u64, end: Option<u64>| {
 			let fill = dynamic.requested_fill_group().await.unwrap();
 			assert_eq!((fill.frame_start(), fill.frame_end()), (start, end));
-			let mut group = fill.accept(Info::timed()).unwrap();
+			let mut group = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 			group.write_frame(group.key_time(), b"tail".as_slice()).unwrap();
 			group
 		};
@@ -22078,7 +22104,7 @@ mod test {
 				(fill.frame_start(), fill.frame_end()),
 				(frames.options.frame_start, frames.end)
 			);
-			let mut group = fill.accept(Info::timed()).unwrap();
+			let mut group = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 			group.write_frame(group.key_time(), b"copy".as_slice()).unwrap();
 			group
 		};
@@ -22134,7 +22160,8 @@ mod test {
 			.await
 			.unwrap()
 			.accept(Info::timed())
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		for _ in 0..2 {
 			group.write_frame(group.key_time(), b"copy".as_slice()).unwrap();
 		}
@@ -22164,7 +22191,7 @@ mod test {
 		);
 		let fill = dynamic.requested_fill_group().await.unwrap();
 		assert_eq!(fill.frame_end(), Some(1));
-		let mut group = fill.accept(Info::timed()).unwrap();
+		let mut group = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 		group.write_frame(group.key_time(), b"copy".as_slice()).unwrap();
 		// The end is reached while the copy is still being written, so only the abort
 		// can find it settled.
@@ -22206,7 +22233,8 @@ mod test {
 				.await
 				.unwrap()
 				.accept(Info::timed())
-				.unwrap();
+				.unwrap()
+				.expect("a fresh group");
 			group.write_frame(group.key_time(), b"head".as_slice()).unwrap();
 			group.finish().unwrap();
 			fetch.await.unwrap();
@@ -22285,7 +22313,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let _group = req.accept(Info::timed()).unwrap();
+		let _group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 
 		let mut whole = consumer.fetch_group(5, None);
 		let req = dynamic
@@ -22312,7 +22340,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let group = req.accept(Info::timed()).unwrap();
+		let group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		drop(first.await.unwrap());
 		assert!(group.handle().abort_unwanted(Error::Cancel));
 
@@ -22322,7 +22350,11 @@ mod test {
 			.now_or_never()
 			.expect("the retry queues a fresh request")
 			.unwrap();
-		req.accept(Info::timed()).unwrap().finish().unwrap();
+		req.accept(Info::timed())
+			.unwrap()
+			.expect("a fresh group")
+			.finish()
+			.unwrap();
 		assert!(retry.await.unwrap().read_frame().await.unwrap().is_none());
 	}
 
@@ -22348,7 +22380,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"retry"))
 			.unwrap();
@@ -22399,7 +22431,7 @@ mod test {
 		assert_eq!((request.key(), request.frame_start()), (0, 0));
 
 		// Serving it replaces the too-narrow entry rather than colliding with it.
-		let mut whole = request.accept(Info::timed()).unwrap();
+		let mut whole = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		whole
 			.write_frame(whole.key_time(), bytes::Bytes::from_static(b"head"))
 			.unwrap();
@@ -22430,7 +22462,7 @@ mod test {
 
 		let fetch = consumer.fetch_group(0, None);
 		let request = dynamic.requested_fill_group().await.unwrap();
-		let mut head = request.accept(Info::timed()).unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(head.key_time(), bytes::Bytes::from_static(payload))
 				.unwrap();
@@ -22488,7 +22520,7 @@ mod test {
 			.expect("the head is asked")
 			.unwrap();
 		assert_eq!(request.frame_start(), 0);
-		let mut head = request.accept(Info::timed()).unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(head.key_time(), bytes::Bytes::from_static(payload))
 				.unwrap();
@@ -22527,7 +22559,7 @@ mod test {
 			.await
 			.expect("the head is asked")
 			.unwrap();
-		let mut head = request.accept(Info::timed()).unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(head.key_time(), bytes::Bytes::from_static(payload))
 				.unwrap();
@@ -22609,7 +22641,7 @@ mod test {
 			}
 			assert_eq!(requests.len(), 2, "{order:?}: both heads are asked");
 			for request in requests {
-				let mut head = request.accept(Info::default()).unwrap();
+				let mut head = request.accept(Info::default()).unwrap().expect("a fresh group");
 				head.write_frame(
 					crate::Timestamp::unscaled(head.start),
 					bytes::Bytes::from_static(b"snapshot"),
@@ -22655,7 +22687,7 @@ mod test {
 		assert_eq!(request.key(), 0);
 
 		sub.update(replay().with_range(1..2)).unwrap();
-		let mut head = request.accept(Info::default()).unwrap();
+		let mut head = request.accept(Info::default()).unwrap().expect("a fresh group");
 		head.write_frame(
 			crate::Timestamp::unscaled(head.start),
 			bytes::Bytes::from_static(b"snapshot"),
@@ -22723,7 +22755,8 @@ mod test {
 			.await
 			.unwrap()
 			.accept(Info::timed())
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		for index in 0..3 {
 			let payload = if index == 0 {
 				b"x".as_slice()
@@ -22755,7 +22788,7 @@ mod test {
 
 		let fetch = consumer.fetch_group(0, None);
 		let request = dynamic.requested_fill_group().await.unwrap();
-		let mut head = request.accept(Info::timed()).unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(head.key_time(), bytes::Bytes::from_static(payload))
 				.unwrap();
@@ -22784,7 +22817,8 @@ mod test {
 			.await
 			.unwrap()
 			.accept(Info::timed())
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(head.key_time(), bytes::Bytes::from_static(payload))
 				.unwrap();
@@ -22919,7 +22953,8 @@ mod test {
 				.await
 				.unwrap()
 				.accept(Info::timed())
-				.unwrap();
+				.unwrap()
+				.expect("a fresh group");
 			fetched
 				.write_frame(fetched.key_time(), bytes::Bytes::from_static(b"backfill"))
 				.unwrap();
@@ -22974,7 +23009,7 @@ mod test {
 
 		let _fetch = consumer.fetch_group(0, None);
 		let request = dynamic.requested_fill_group().await.unwrap();
-		let mut head = request.accept(Info::timed()).unwrap();
+		let mut head = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		for payload in [&b"snapshot"[..], b"delta"] {
 			head.write_frame(head.key_time(), bytes::Bytes::from_static(payload))
 				.unwrap();
@@ -23084,7 +23119,8 @@ mod test {
 			.await
 			.unwrap()
 			.accept(Info::timed())
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		head.write_frame(head.key_time(), bytes::Bytes::from(vec![0u8; 10_000]))
 			.unwrap();
 		head.finish().unwrap();
@@ -23155,7 +23191,7 @@ mod test {
 		// A handler may keep tracking the group's readers past the accept, as the lite
 		// subscriber does, which holds the result channel open.
 		let _readers = request.readers();
-		let mut group = request.accept(Info::timed()).unwrap();
+		let mut group = request.accept(Info::timed()).unwrap().expect("a fresh group");
 		// A handler numbers the frames from where it was asked to start, as `serve_fetch`
 		// does; that offset is what makes the cached group too narrow for `widest`.
 		group.start_at(2).unwrap();
@@ -23170,7 +23206,7 @@ mod test {
 		assert!(futures::poll!(widest.as_mut()).is_pending());
 		group.finish().unwrap();
 
-		let mut group = whole.accept(None).unwrap();
+		let mut group = whole.accept(None).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"from0"))
 			.unwrap();
@@ -23218,7 +23254,7 @@ mod test {
 		let third = consumer.fetch_group(5, None);
 
 		// One accept resolves all of them.
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"hi"))
 			.unwrap();
@@ -23250,7 +23286,7 @@ mod test {
 
 		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(req.max_delay(), None);
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"hi"))
 			.unwrap();
@@ -23628,7 +23664,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut backfill = req.accept(Info::timed()).unwrap();
+		let mut backfill = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		pending.await.unwrap();
 		backfill
 			.write_frame(backfill.key_time(), bytes::Bytes::from(vec![0u8; 30_000]))
@@ -23827,7 +23863,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut backfill = req.accept(Info::timed()).unwrap();
+		let mut backfill = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		pending.await.unwrap();
 
 		// Accept, then demote the backfill with a live group.
@@ -23889,7 +23925,7 @@ mod test {
 				.now_or_never()
 				.expect("should not block")
 				.unwrap();
-			let mut group = req.accept(Info::timed()).unwrap();
+			let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 			group
 				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 100]))
 				.unwrap();
@@ -24014,7 +24050,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"backfill"))
 			.unwrap();
@@ -24060,7 +24096,7 @@ mod test {
 				.now_or_never()
 				.expect("should not block")
 				.unwrap();
-			let mut group = req.accept(Info::timed()).unwrap();
+			let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 			group
 				.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 100]))
 				.unwrap();
@@ -24124,7 +24160,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 1000]))
 			.unwrap();
@@ -24167,7 +24203,7 @@ mod test {
 			.unwrap();
 		assert_eq!(req.key(), 0);
 
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"refetched"))
 			.unwrap();
@@ -24232,7 +24268,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut fetched = req.accept(Info::timed()).unwrap();
+		let mut fetched = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		fetched
 			.write_frame(fetched.key_time(), bytes::Bytes::from_static(b"backfill"))
 			.unwrap();
@@ -24280,7 +24316,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"backfill"))
 			.unwrap();
@@ -24322,7 +24358,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut fetching = req.accept(Info::timed()).unwrap();
+		let mut fetching = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		fetching
 			.write_frame(fetching.key_time(), bytes::Bytes::from_static(b"snapshot"))
 			.unwrap();
@@ -24368,7 +24404,7 @@ mod test {
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
-		let mut group = req.accept(Info::timed()).unwrap();
+		let mut group = req.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from(vec![0u8; 1000]))
 			.unwrap();
@@ -24931,8 +24967,8 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
 			panic!("the fill is ready");
 		};
-		let group = fill.accept(3, Info::timed()).unwrap();
-		assert!(matches!(fill.accept(3, None), Err(Error::Duplicate)));
+		let group = fill.accept(3, Info::timed()).unwrap().expect("a fresh group");
+		assert!(matches!(fill.accept(3, None), Ok(None)));
 		assert!(matches!(fill.accept(4, None), Err(Error::InvalidRange)));
 		assert!(
 			matches!(kio::Task::poll(&mut *fetch, &waiter), Poll::Ready(Ok(_))),
@@ -24953,8 +24989,8 @@ mod test {
 		(producer, dynamic, subscriber)
 	}
 
-	fn write_filled(group: Result<group::Producer>, millis: u64) {
-		let mut group = group.unwrap();
+	fn write_filled(group: Result<Option<group::Producer>>, millis: u64) {
+		let mut group = group.unwrap().expect("a fresh group");
 		group
 			.write_frame(Timestamp::from_millis(millis).unwrap(), &b"x"[..])
 			.unwrap();
@@ -25232,7 +25268,7 @@ mod test {
 		let Poll::Ready(Ok(first)) = dynamic.poll_requested_groups(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		let group = first.accept(3, None).unwrap();
+		let group = first.accept(3, None).unwrap().expect("a fresh group");
 		drop(fetch);
 		group.abort(Error::Cancel).unwrap();
 		drop(first);
@@ -25344,7 +25380,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(3, group::Bounds::default(), None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		assert!(subscriber.poll_recv_group(&waiter).is_pending());
 		assert!(fill.is_wanted(3), "the answer has not reached the reader yet");
 	}
@@ -25367,7 +25404,7 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		let _writing = fill.accept(0, None).unwrap();
+		let _writing = fill.accept(0, None).unwrap().expect("a fresh group");
 		let Poll::Ready(Ok(Some(group))) = subscriber.poll_next_group(&waiter) else {
 			panic!("the filled group is read");
 		};
@@ -25512,7 +25549,10 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_groups(&waiter) else {
 			panic!("below the start is a miss");
 		};
-		let _writing = [fill.accept(0, None).unwrap(), fill.accept(1, None).unwrap()];
+		let _writing = [
+			fill.accept(0, None).unwrap().expect("a fresh group"),
+			fill.accept(1, None).unwrap().expect("a fresh group"),
+		];
 		for key in 2..10 {
 			fill.group(key).reject(Error::NotFound);
 		}
@@ -25548,7 +25588,7 @@ mod test {
 		};
 		let group = fill.group(9);
 		let readers = group.readers();
-		let _writing = group.accept(None).unwrap();
+		let _writing = group.accept(None).unwrap().expect("a fresh group");
 		assert!(readers.poll_unwanted(&waiter).is_pending());
 
 		subscriber.update(descending(Range::groups(0..9))).unwrap();
@@ -26067,8 +26107,8 @@ mod test {
 		let (producer, _pool) = pooled_producer((cached * size) as u64);
 		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_order(Order::Ascending));
-		let write = |group: Result<group::Producer>, key: u64| {
-			let mut group = group.unwrap();
+		let write = |group: Result<Option<group::Producer>>, key: u64| {
+			let mut group = group.unwrap().expect("a fresh group");
 			group
 				.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; size])
 				.unwrap();
@@ -26108,7 +26148,7 @@ mod test {
 			taken
 		};
 		for key in 0..GROUPS {
-			write(producer.create_group(group::Info { start: key }), key);
+			write(producer.create_group(group::Info { start: key }).map(Some), key);
 			if key % 4 < pace {
 				take(&mut subscriber);
 			}
@@ -26169,15 +26209,15 @@ mod test {
 		let (mut producer, _pool) = pooled_producer(4 * size as u64);
 		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..).with_order(Order::Ascending));
-		let write = |group: Result<group::Producer>, key: u64| {
-			let mut group = group.unwrap();
+		let write = |group: Result<Option<group::Producer>>, key: u64| {
+			let mut group = group.unwrap().expect("a fresh group");
 			group
 				.write_frame(Timestamp::from_millis(key).unwrap(), vec![0u8; size])
 				.unwrap();
 			group.finish().unwrap();
 		};
 		producer.start_at(GROUPS).unwrap();
-		write(producer.create_group(group::Info { start: GROUPS }), GROUPS);
+		write(producer.create_group(group::Info { start: GROUPS }).map(Some), GROUPS);
 		let waiter = kio::Waiter::noop();
 		assert!(subscriber.poll_next_group(&waiter).is_pending(), "group 0 is a miss");
 		let Poll::Ready(Ok(mut fill)) = dynamic.poll_requested_groups(&waiter) else {
@@ -27156,7 +27196,7 @@ mod test {
 		let mut early = producer.subscribe(replay().with_ranges([Range::live()]));
 		let _fetching = consumer.fetch_group(5, None);
 		let req = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		req.accept(None).unwrap().finish().unwrap();
+		req.accept(None).unwrap().expect("a fresh group").finish().unwrap();
 		producer
 			.create_group(group::Info { start: 0 })
 			.unwrap()
@@ -27962,7 +28002,7 @@ mod test {
 		let mut joined = reader();
 		assert!(joined.poll_recv_group(&waiter).is_pending(), "it joins the taken fill");
 		for key in 0..2 {
-			let mut group = fill.accept(key, None).unwrap();
+			let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 			group
 				.write_frame(Timestamp::from_millis(key).unwrap(), &b"x"[..])
 				.unwrap();
@@ -28708,7 +28748,7 @@ mod test {
 		live.write_frame(live.key_time(), &b"delta"[..]).unwrap();
 		let _fetch = consumer.fetch_group(0, None);
 		let fill = dynamic.requested_groups().await.unwrap();
-		let mut head = fill.accept(0, Info::timed()).unwrap();
+		let mut head = fill.accept(0, Info::timed()).unwrap().expect("a fresh group");
 		head.write_frame(head.key_time(), &b"snapshot"[..]).unwrap();
 
 		producer.drop_groups(0..1, StreamError::App(5));
@@ -29220,7 +29260,7 @@ mod test {
 						},
 					);
 					let fill = dynamic.requested_fill_group().await.unwrap();
-					let mut tail = fill.accept(Info::timed()).unwrap();
+					let mut tail = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 					for frame in start..end {
 						tail.write_frame(tail.key_time(), vec![frame as u8; size]).unwrap();
 					}
@@ -29299,7 +29339,8 @@ mod test {
 					},
 					None,
 				)
-				.unwrap();
+				.unwrap()
+				.expect("a fresh group");
 			tail.write_frame(tail.key_time(), vec![start as u8; 4]).unwrap();
 			let tail = tail.finish().unwrap();
 			held.push(tail.consume().with_range(start..));
@@ -29324,7 +29365,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		assert!(Arc::ptr_eq(&owner, &refill.handle().content().unwrap()));
 		refill.write_frame(refill.key_time(), b"zero".as_slice()).unwrap();
 		let refill = refill.finish().unwrap();
@@ -29344,7 +29386,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		new.write_frame(new.key_time(), b"new zero".as_slice()).unwrap();
 		assert!(!Arc::ptr_eq(&owner, &new.handle().content().unwrap()));
 		assert_eq!(held[0].read_frame().await.unwrap().unwrap().payload.as_ref(), &[4; 4]);
@@ -29381,7 +29424,8 @@ mod test {
 				.ok()
 				.unwrap()
 				.insert_group_request(0, group::Bounds { start: 3, end: Some(5) }, None)
-				.unwrap();
+				.unwrap()
+				.expect("a fresh group");
 			second.write_frame(second.key_time(), b"three".as_slice()).unwrap();
 			let mut second_read = second.consume().with_range(4..);
 			let mut second = second
@@ -29493,7 +29537,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds { start: 1, end: Some(3) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		head.set_wire(wire(90)).unwrap();
 		let head = write(head, 90, b"b");
 		let head = write(head, 100, b"a");
@@ -29509,7 +29554,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds { start: 0, end: Some(2) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		earlier.set_wire(wire(90)).unwrap();
 		let earlier = write(earlier, 90, b"b");
 		let earlier = write(earlier, 95, b"c");
@@ -29632,7 +29678,7 @@ mod test {
 		);
 		let fill = requests.requested_fill_group().await.unwrap();
 		assert_eq!((fill.frame_start(), fill.frame_end()), (0, None));
-		let mut head = fill.accept(info).unwrap();
+		let mut head = fill.accept(info).unwrap().expect("a fresh group");
 		for object in &stored[..8] {
 			head = ingest(head, object);
 		}
@@ -29726,7 +29772,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds { start: 3, end: Some(4) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		head.write_frame(head.key_time(), b"three".as_slice()).unwrap();
 		head.finish().unwrap();
 		let identity = Arc::downgrade(&observing.content().unwrap());
@@ -29749,7 +29796,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds { start: 4, end: Some(5) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		assert!(Arc::ptr_eq(
 			&identity.upgrade().unwrap(),
 			&refill.handle().content().unwrap()
@@ -29789,7 +29837,8 @@ mod test {
 			.ok()
 			.unwrap()
 			.insert_group_request(0, group::Bounds { start: 0, end: Some(1) }, None)
-			.unwrap();
+			.unwrap()
+			.expect("a fresh group");
 		head.write_frame(head.key_time(), bytes::Bytes::new()).unwrap();
 		let head = head.finish().unwrap();
 		assert_eq!(live.handle().content().unwrap().cost().0, FRAMES + 1);
@@ -29920,7 +29969,7 @@ mod test {
 			Poll::Pending => panic!("a flight is asked"),
 		};
 		assert_eq!(fill.start(), Position { group: 0, frame: 0 });
-		let mut flight = fill.accept(0, None).unwrap();
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
 		assert_eq!(read_numbered(&mut late), None, "aboard, waiting on the handler");
 		let unwanted = |flight: &group::Producer| flight.handle().poll_unwanted(&kio::Waiter::noop()).is_ready();
 		assert!(!unwanted(&flight), "ridden");
@@ -29983,7 +30032,7 @@ mod test {
 		assert_eq!(read_numbered(&mut behind), None);
 		let fill = asked(&requests).expect("a flight");
 		assert_eq!(fill.start(), Position { group: 0, frame: 0 }, "from frame 0");
-		let mut flight = fill.accept(0, None).unwrap();
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
 		let unwanted = |flight: &group::Producer| flight.handle().poll_unwanted(&kio::Waiter::noop()).is_ready();
 		for index in 0..10 {
 			flight
@@ -30058,7 +30107,7 @@ mod test {
 		assert_eq!(read_numbered(&mut second), None);
 		let fill = asked(&requests).expect("a flight");
 		assert!(asked(&requests).is_none(), "the second joiner shares it");
-		let mut flight = fill.accept(0, None).unwrap();
+		let mut flight = fill.accept(0, None).unwrap().expect("a fresh group");
 		// 8 MiB in, half the reach.
 		for index in 0..500 {
 			flight
@@ -30109,7 +30158,11 @@ mod test {
 				.unwrap();
 		}
 		assert_eq!(read_numbered(&mut late), None);
-		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap();
+		let mut flight = asked(&requests)
+			.expect("a flight")
+			.accept(0, None)
+			.unwrap()
+			.expect("a fresh group");
 		assert_eq!(read_numbered(&mut late), None);
 		for index in 0..1_000 {
 			flight
@@ -30217,7 +30270,7 @@ mod test {
 		assert_eq!(read_numbered(&mut loose), None, "asks again");
 		let req = requests.requested_fill_group().now_or_never().unwrap().unwrap();
 		assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
-		let mut flight = req.accept(None).unwrap();
+		let mut flight = req.accept(None).unwrap().expect("a fresh group");
 		flight
 			.write_frame(crate::Timestamp::unscaled(flight.start), numbered(0))
 			.unwrap();
@@ -30249,7 +30302,11 @@ mod test {
 				.unwrap();
 		}
 		assert_eq!(read_numbered(&mut late), None);
-		let mut flight = asked(&requests).expect("a flight").accept(0, None).unwrap();
+		let mut flight = asked(&requests)
+			.expect("a flight")
+			.accept(0, None)
+			.unwrap()
+			.expect("a fresh group");
 		assert_eq!(read_numbered(&mut late), None);
 		// A newer group leaves group 0 cold, and its cached copy goes whole.
 		let mut newer = producer.append_next().unwrap();
@@ -30309,7 +30366,11 @@ mod test {
 		let (mut fast, mut slow) = (live.consume(), live.consume());
 		assert_eq!(read_numbered(&mut fast), None);
 		assert_eq!(read_numbered(&mut slow), None);
-		let mut flight = asked(&requests).unwrap().accept(0, None).unwrap();
+		let mut flight = asked(&requests)
+			.unwrap()
+			.accept(0, None)
+			.unwrap()
+			.expect("a fresh group");
 		assert_eq!(read_numbered(&mut fast), None);
 		assert_eq!(read_numbered(&mut slow), None);
 		assert_eq!(read_numbered(&mut slow), None);
@@ -30504,7 +30565,7 @@ mod test {
 			.expect("the miss asks a fill")
 			.unwrap();
 		assert_eq!(fill.key(), 1);
-		let mut group = fill.accept(Info::timed()).unwrap();
+		let mut group = fill.accept(Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"filled"))
 			.unwrap();
@@ -30615,7 +30676,7 @@ mod test {
 			.expect("the holes are asked at once")
 			.unwrap();
 		assert_eq!((fill.start(), fill.end()), (Position::group(0), 2));
-		let mut group = fill.accept(0, Info::timed()).unwrap();
+		let mut group = fill.accept(0, Info::timed()).unwrap().expect("a fresh group");
 		group
 			.write_frame(group.key_time(), bytes::Bytes::from_static(b"filled"))
 			.unwrap();

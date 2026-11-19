@@ -3,6 +3,7 @@ import { Duration } from "@moq/clock";
 import { Manual } from "@moq/clock/test";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
+import { defined } from "../defined.test-util.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer } from "../origin.ts";
@@ -18,8 +19,8 @@ for (const downstream of [ALPN_06, ALPN_07_WIP]) {
 		const destination = new Producer();
 		const broadcastRoute = source.route(Path.from("compressed"), { hidden: true });
 		const broadcast = broadcastRoute.broadcast;
-		const datagrams = broadcast.createDatagrams("data");
-		const track = broadcast.createTrack("data", { compression: "deflate" });
+		const datagrams = defined(broadcast.createDatagrams("data"));
+		const track = defined(broadcast.createTrack("data", { compression: "deflate" }));
 		broadcastRoute.announce();
 		const peers: { abort(): void }[] = [];
 		async function link(publish: Producer, consume: Producer, alpn: string) {

@@ -134,8 +134,9 @@ pub struct Config {
 	/// leaving each track's own window in force.
 	pub cache_duration: Option<Duration>,
 
-	/// How long an announce cursor holds a changed route before delivering it: a
-	/// [`lite06_churn`] mitigation.
+	/// How long an announce cursor holds a changed route that arrived over a hop chain
+	/// before delivering it: a [`lite06_churn`] mitigation. A moq-lite-07 route and one
+	/// published here never wait.
 	///
 	/// A new route, a removed one, and another instance are delivered at once; only an
 	/// update waits, and a newer change during the wait replaces it. When a publisher
@@ -157,7 +158,9 @@ pub struct Config {
 /// through a lite-06 mesh's hop-chain paths, which go with lite-06. They are the update
 /// hold and the retraction quarantine ([`Config::update_hold`]) and the same-clock dedup
 /// of a retraction's queue entry ([`Routes::quarantine`]). The cursor every version
-/// shares applies them; each site names this module, so deleting it finds them all.
+/// shares applies them, to the routes [`hunts`](lite06_churn::hunts) picks out alone, so
+/// a reader of a lite-06 mesh keeps them whatever version it speaks; each site names this
+/// module, so deleting it finds them all.
 pub(super) mod lite06_churn {
 	use std::time::Duration;
 
@@ -168,6 +171,14 @@ pub(super) mod lite06_churn {
 	/// [`Config::update_hold`](super::Config::update_hold). Path hunting after a
 	/// withdrawal settles within it on random meshes with links of up to 250 ms.
 	pub(super) const RETRACT_QUARANTINE: Duration = Duration::from_secs(2);
+
+	/// Whether a route arrived over a hop chain (moq-lite-03 to 06, or moq-transport),
+	/// whose withdrawals hunt through stale paths: the only routes these mitigations
+	/// hold. A moq-lite-07 route names the node claiming it, whose withdrawal is final,
+	/// and one published here crossed no hop.
+	pub(super) fn hunts(hops: &super::Hops, node: Option<crate::route::NodeId>) -> bool {
+		node.is_none() && !hops.is_empty()
+	}
 }
 use lite06_churn::{DEFAULT_UPDATE_HOLD, RETRACT_QUARANTINE};
 
@@ -594,6 +605,10 @@ pub(crate) struct Lane {
 	/// exactly there. The longer prefix wins, so a claim at 0 outranks every broader one.
 	/// A path has at most 32 segments, so a byte holds it, and the route entry stays small.
 	pub above: u8,
+	/// Which showing of the claim the route layer serves: a new one each time the claim
+	/// is shown again after every copy of it left, so a copy retired late never retires
+	/// the copies a later showing serves. See [`Claim::retire`].
+	pub lifecycle: u64,
 }
 
 impl Default for Lane {
@@ -602,6 +617,7 @@ impl Default for Lane {
 			primary: true,
 			priority: None,
 			above: 0,
+			lifecycle: 0,
 		}
 	}
 }
@@ -1016,7 +1032,8 @@ impl Quarantine {
 	/// first hop, instance and epoch, ranked strictly worse. A republish ranks the same
 	/// and a restart carries a new instance or epoch, so neither waits.
 	fn holds(&self, meta: &RouteMeta) -> bool {
-		self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
+		lite06_churn::hunts(&meta.0, meta.6)
+			&& self.publisher.is_some_and(|hop| meta.0.iter().next() == Some(&hop))
 			&& meta.3 == self.instance.0
 			&& meta.4 == self.instance.1
 			&& (meta.1, meta.0.len()) > self.rank
@@ -1305,7 +1322,9 @@ impl OriginConsumerState {
 			}
 			let pending = self.pending.get_mut(prefix).unwrap();
 			let wake = match pending.update.as_ref().unwrap() {
-				PendingUpdate::Announce(_) if self.delivered.contains_key(prefix) => {
+				PendingUpdate::Announce((meta, _))
+					if self.delivered.contains_key(prefix) && lite06_churn::hunts(&meta.0, meta.6) =>
+				{
 					// The clock reads the driver's last advance, which may be stale: anchor
 					// the hold on the first advance after the update arrived, by waking the
 					// driver.
@@ -1463,6 +1482,9 @@ struct RouteEntry {
 	/// The route was derived from that peer's advertisement, so it serves nobody
 	/// until the peer announces again. See [`Claim::withdrawn`].
 	stale: bool,
+	/// The route layer let go of the claim this entry follows through another of its
+	/// copies, whose own retraction is on its way. See [`Claim::retire`].
+	retired: bool,
 	/// [`prefix_claim`] of [`Self::prefix`], built once at announce time.
 	///
 	/// The announce sync evaluates a route's claim once per (cursor, route) pair,
@@ -1496,7 +1518,7 @@ impl RouteEntry {
 
 	/// Whether cursors see the entry and requests resolve through it.
 	fn live(&self) -> bool {
-		self.advertised && !self.stale
+		self.advertised && !self.stale && !self.retired
 	}
 
 	fn is_anonymous(&self) -> bool {
@@ -3084,6 +3106,7 @@ impl Announcing {
 				source: serving.source.clone(),
 				advertised: serving.advertised,
 				stale,
+				retired: false,
 				claim: claim.clone(),
 				reach: reach(&self.scope, claim),
 				lends: serving.lends,
@@ -3575,6 +3598,15 @@ impl Claim {
 		self.state.announcement.retract(Retract::Withdrawn);
 	}
 
+	/// The route layer let go of the claim this follows: every copy of it the table holds,
+	/// each of the same node, instance and [`Lane::lifecycle`] at any epoch, goes with this one
+	/// under one lock, rather than readers seeing the rest in turn as their sessions
+	/// retract them. They end with `ended`, else go offline.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn retire(self, ended: bool) {
+		self.state.announcement.retract(Retract::Retired { ended });
+	}
+
 	/// Retire a route its announcer ended without a hop chain to stale, such as a
 	/// moq-transport PUBLISH_NAMESPACE_DONE: readers see it end, not go offline.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -3603,6 +3635,9 @@ enum Retract {
 	Ended,
 	/// A peer withdrew it, which also stales the routes derived through that peer.
 	Withdrawn,
+	/// The route layer let go of the claim it follows: see [`Claim::retire`]. Ended, it
+	/// stales as [`Self::Withdrawn`] does.
+	Retired { ended: bool },
 }
 
 /// The write half of an advertisement: a live claim that paths under a
@@ -3823,24 +3858,32 @@ impl AnnounceProducer {
 				continue;
 			};
 			servers.extend(entry.server.clone());
+			if let Retract::Retired { .. } = how {
+				shared.retire_copies(&entry);
+			}
 			// A peer remains reachable while any of its sessions advertises this
 			// prefix. Remove this session's route before testing the remaining
 			// claims, under the same lock, so overlapping withdrawals cannot
-			// invalidate a newer advertisement or miss the last withdrawal.
-			if how == Retract::Withdrawn
+			// invalidate a newer advertisement or miss the last withdrawal. A live copy
+			// of the same lite-07 claim, such as one a later showing serves over another
+			// chain, says its claimant still advertises it too.
+			let same_claim = |other: &RouteEntry| {
+				entry.node.is_some() && other.node == entry.node && other.instance == entry.instance
+			};
+			if matches!(how, Retract::Withdrawn | Retract::Retired { ended: true })
 				&& let Some(&peer) = entry.hops.iter().last()
 				&& peer != Hop::UNKNOWN
 				&& !shared
 					.routes
 					.at(prefix)
-					.any(|other| other.live() && other.hops.iter().last() == Some(&peer))
+					.any(|other| other.live() && (other.hops.iter().last() == Some(&peer) || same_claim(other)))
 			{
 				shared.withdrawn.entry(prefix.clone()).or_default().insert(peer);
 				shared.restale(prefix);
 			}
 			let gone = match how {
-				Retract::Lost => Gone::Offline,
-				Retract::Ended | Retract::Withdrawn => Gone::End,
+				Retract::Lost | Retract::Retired { ended: false } => Gone::Offline,
+				Retract::Ended | Retract::Withdrawn | Retract::Retired { ended: true } => Gone::End,
 			};
 			shared.sync_route(&entry.prefix, &entry.claim, gone);
 			if entry.advertised
@@ -6501,6 +6544,24 @@ impl OriginState {
 			.is_some_and(|peers| hops.iter().any(|hop| peers.contains(hop)))
 	}
 
+	/// Retire every other copy at its prefix of the claim `entry` follows: the same
+	/// forwarding node, instance and showing ([`Lane::lifecycle`]), at any epoch, since a
+	/// copy whose session has yet to take a newer epoch would otherwise be left as the
+	/// fallback. See [`Claim::retire`].
+	fn retire_copies(&mut self, entry: &RouteEntry) {
+		let Some(node) = entry.node else {
+			return;
+		};
+		for other in self.routes.at_mut(&entry.prefix) {
+			if other.node == Some(node)
+				&& other.instance == entry.instance
+				&& other.lane.lifecycle == entry.lane.lifecycle
+			{
+				other.retired = true;
+			}
+		}
+	}
+
 	/// Recompute which entries at `prefix` are stale after its withdrawals changed.
 	fn restale(&mut self, prefix: &Path) {
 		let peers = self.withdrawn.get(prefix);
@@ -8612,7 +8673,7 @@ impl Routes {
 		else {
 			return;
 		};
-		if self.update_hold.is_zero() {
+		if self.update_hold.is_zero() || !lite06_churn::hunts(&update.route.hops, update.route.node) {
 			return;
 		}
 		// An anonymous route names no publisher, so its quarantine holds nothing.
@@ -10146,7 +10207,10 @@ mod tests {
 
 		let fetch = track.consume().fetch_group(0, None);
 		let fill = requests.requested_fill_group().await.unwrap();
-		let mut fetched = fill.accept(crate::track::Info::timed()).unwrap();
+		let mut fetched = fill
+			.accept(crate::track::Info::timed())
+			.unwrap()
+			.expect("a fresh group");
 		fetched
 			.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref())
 			.unwrap();
@@ -12350,7 +12414,10 @@ mod tests {
 		let serving = fetched.clone();
 		let _fetching = kio::clock::sim::spawn(async move {
 			while let Ok(request) = fetches.requested_fill_group().await {
-				let mut group = request.accept(crate::track::Info::timed()).unwrap();
+				let mut group = request
+					.accept(crate::track::Info::timed())
+					.unwrap()
+					.expect("a fresh group");
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(group.key_time(), frame.as_ref()).unwrap();
 				}
@@ -13333,6 +13400,88 @@ mod tests {
 		drop(relayed);
 		announced.expect_next_ended("room").await;
 		assert!(producer.shared.lock().withdrawn.is_empty());
+	}
+
+	/// The route layer letting go of one copy of a lite-07 claim takes every copy of the
+	/// same node, instance and showing with it, a copy still at an older epoch too: a
+	/// cursor sees the claim end or go offline, never a move onto another copy first.
+	/// Another node's claim of the instance stays.
+	#[kio::test]
+	async fn retiring_a_claim_retires_every_copy() {
+		for ended in [true, false] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let mut announced = producer.consume().routes();
+			let copy = |node: u64, cost: u64| {
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(&[node]))
+					.with_cost(cost)
+					.with_node(Some(node_id(node)))
+			};
+			let near = peer.forward("room", copy(7, 1)).unwrap();
+			let _far = peer.forward("room", copy(7, 2)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			near.retire(ended);
+			match ended {
+				true => announced.expect_next_ended("room").await,
+				false => announced.expect_next_offline("room").await,
+			}
+			announced.assert_next_wait();
+
+			// A session that has yet to take the newer epoch still holds the older one.
+			let newer = |node: u64, cost: u64| copy(node, cost).with_instance(instance(), 1);
+			let near = peer.forward("room", newer(7, 1)).unwrap();
+			let _stale = peer.forward("room", copy(7, 2)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			near.retire(ended);
+			match ended {
+				true => announced.expect_next_ended("room").await,
+				false => announced.expect_next_offline("room").await,
+			}
+			announced.assert_next_wait();
+
+			let near = peer.forward("room", copy(7, 1)).unwrap();
+			let _other = peer.forward("room", copy(8, 3)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			near.retire(ended);
+			let other = announced.expect_next_active("room").await;
+			assert_eq!(other.node, Some(node_id(8)), "ended: {ended}");
+		}
+	}
+
+	/// A copy whose session releases it only after the route layer showed the claim again
+	/// through another session retires its own showing, not the new one, even when the new
+	/// one's chain passes through the old one's last hop.
+	#[kio::test]
+	async fn a_late_retirement_spares_a_later_showing() {
+		for ended in [true, false] {
+			let producer = origin(1).produce();
+			let peer = producer.clone().with_link(Link::Peer);
+			let mut announced = producer.consume().routes();
+			let copy = |chain: &[u64], cost: u64, lifecycle: u64| {
+				RouteInfo::new()
+					.with_instance(instance(), 0)
+					.with_hops(hops(chain))
+					.with_cost(cost)
+					.with_node(Some(node_id(7)))
+					.with_lane(Lane {
+						lifecycle,
+						..Lane::default()
+					})
+			};
+			let old = peer.forward("room", copy(&[7], 1, 1)).unwrap();
+			announced.expect_next_active("room").await;
+			announced.assert_next_wait();
+			let _new = peer.forward("room", copy(&[7, 9], 2, 2)).unwrap();
+			old.retire(ended);
+			let new = announced.expect_next_active("room").await;
+			assert_eq!(new.cost, Cost::from(2), "ended: {ended}");
+			announced.assert_next_wait();
+		}
 	}
 
 	/// Overlapping sessions carrying one instance are independent claims, regardless of

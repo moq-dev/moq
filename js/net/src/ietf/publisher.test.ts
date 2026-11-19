@@ -5,6 +5,7 @@ import { Once, Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
+import { defined } from "../defined.test-util.ts";
 import {
 	error,
 	fromTransport,
@@ -235,11 +236,13 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 			const session = new NativeSession(pair.server, version, true);
 			const { pub, origin } = publisher(pair.server, { session });
 			const broadcast = publish(origin, Path.from("room"));
-			const track = broadcast.createTrack("video", {
-				timescale: Timescale.MILLI,
-				maxAge: Duration.millis(5000),
-				priority: 2,
-			});
+			const track = defined(
+				broadcast.createTrack("video", {
+					timescale: Timescale.MILLI,
+					maxAge: Duration.millis(5000),
+					priority: 2,
+				}),
+			);
 			const group = track.createGroup(4n);
 			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 			group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
@@ -286,7 +289,7 @@ test("TRACK_STATUS finished at once is answered on every draft", async () => {
 		if (!pending) throw new Error("no request for room");
 		finish();
 		const served = new BroadcastProducer();
-		served.createTrack("video");
+		defined(served.createTrack("video"));
 		pending.serve(served);
 		await task;
 		expect(await wire().u53()).toBe(TrackStatusOk.id);
@@ -303,7 +306,7 @@ test("TRACK_STATUS for an empty track names no largest", async () => {
 	const pair = createMockTransportPair(ALPNS[version]);
 	const session = new NativeSession(pair.server, version, true);
 	const { pub, origin } = publisher(pair.server, { session });
-	publish(origin, Path.from("room")).createTrack("video");
+	defined(publish(origin, Path.from("room")).createTrack("video"));
 
 	const { stream, wire } = requestStream(version);
 	await pub.runTrackStatusRequest(trackStatus("room"), stream);
@@ -860,7 +863,9 @@ test("a blocked group header is reset when the group expires", async () => {
 
 	const { pub, origin } = publisher(pair.server);
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(5000) });
+	const track = defined(
+		broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(5000) }),
+	);
 	const client = await Stream.open(pair.client, { version: VERSION });
 	const server = await Stream.accept(pair.server, VERSION);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -938,7 +943,7 @@ test("a group stream whose FIN never completes is reset when the group expires",
 	const { pub, origin } = publisher(pair.server);
 	const broadcast = publish(origin, Path.from("test"));
 	// No subscriber max age, so the track's caps the budget.
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget }));
 	const client = await Stream.open(pair.client, { version: VERSION });
 	const server = await Stream.accept(pair.server, VERSION);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -1022,7 +1027,7 @@ test("a group stream whose FIN never completes is reset after the cache evicts i
 	const budget = Duration.millis(60_000);
 	const { pub, origin } = publisher(pair.server);
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: budget }));
 	const client = await Stream.open(pair.client, { version: VERSION });
 	const server = await Stream.accept(pair.server, VERSION);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -1112,7 +1117,9 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 
 	const { pub, origin } = publisher(pair.server);
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(5000) });
+	const track = defined(
+		broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(5000) }),
+	);
 	const client = await Stream.open(pair.client, { version: VERSION });
 	const server = await Stream.accept(pair.server, VERSION);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
@@ -2212,7 +2219,7 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			const path = Path.from("test");
 			const { pub, origin } = publisher(pair.server, { session });
 			const broadcast = publish(origin, path);
-			const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 			const client = await Stream.open(pair.client, { version });
 			const server = await Stream.accept(pair.server, version);
@@ -2507,7 +2514,7 @@ async function readFill(
 test("draft-22: an absolute filter trims the range it serves", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	for (let i = 0; i < 4; i++) writeGroup(track, 3);
 
 	const { client } = await runSubscribe(
@@ -2564,7 +2571,7 @@ test("draft-22: an absolute filter trims the range it serves", async () => {
  */
 test("draft-22: a filter starting past a group's end claims no END_OF_GROUP", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	writeGroup(track, 2);
 	writeGroup(track, 2);
 
@@ -2591,7 +2598,7 @@ test("draft-22: a filter starting past a group's end claims no END_OF_GROUP", as
 /** An absolute filter has a fixed start, so its SUBSCRIBE is no join even over the refresh ratio. */
 test("draft-22: an absolute subscribe is no join", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, refresh: { ratio: 0 } });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, refresh: { ratio: 0 } }));
 	writeGroup(track, 3);
 
 	const { client } = await runSubscribe(
@@ -2627,7 +2634,7 @@ test.each(IETF_VERSIONS)("version %d: only an absolute start replays history", a
 	] as const) {
 		const fx = fixture(version);
 		// Unlimited max age, so the first group is still served once its successor exists.
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		writeGroup(track, 1);
 		writeGroup(track, 1);
 
@@ -2666,7 +2673,7 @@ test.each(["nextObject", "unfiltered"] as const)(
 	"draft-22: a %s fill serves the current group head once",
 	async (kind) => {
 		const fx = fixture();
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 		writeGroup(track, 1);
 		const group = hooks.appendNext(track);
@@ -2720,7 +2727,7 @@ test.each(["nextObject", "unfiltered"] as const)(
 
 test("draft-22: a fill never rewinds an absolute live join", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 2);
 	const { client } = await runSubscribe(
 		fx,
@@ -2761,7 +2768,7 @@ test("draft-22: a fill never rewinds an absolute live join", async () => {
  */
 test("draft-22: an open group with a shed front refuses a tail join", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const group = hooks.appendNext(track);
 	for (let i = 0; i < 40; i++) {
@@ -2797,7 +2804,7 @@ test("draft-22: an open group with a shed front refuses a tail join", async () =
  */
 test("draft-22: a backwards range within one group serves nothing and ends the stream", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	// Deliberately left open: a hang here would outlive the group rather than end with it.
 	const group = hooks.appendNext(track);
@@ -2829,7 +2836,7 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 	const fx = fixture();
 	// No max age: group 9 is served live, and a zero budget would give it up mid-write once the
 	// live group supersedes it, racing this test's read of the refused fill.
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	for (const key of [0n, 3n, 9n]) {
 		const group = track.createGroup(key);
 		for (let i = 0; i < 2; i++)
@@ -2876,7 +2883,7 @@ test.each(["ascending", "descending"] as const)("draft-22: a wider fill is refus
 test("draft-22: an empty track opens no fill stream", async () => {
 	using clock = manual();
 	const fx = fixture();
-	fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const { client, ok } = await runSubscribe(
 		fx,
@@ -2905,7 +2912,7 @@ test("draft-22: an empty track opens no fill stream", async () => {
  */
 async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["largest"]> {
 	const fx = fixture(version);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	const group = track.createGroup(5n);
 	for (let i = 0; i < 4; i++) {
@@ -2949,7 +2956,7 @@ test.each([
 ] as const)("%s: opt-out omits the Track Properties", async (_alpn, version) => {
 	for (const propertiesWanted of [true, false]) {
 		const fx = fixture(version);
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 		const { client, ok } = await runSubscribe(
 			fx,
@@ -2988,7 +2995,7 @@ test.each([[Version.DRAFT_18, GroupOrder.Descending]] as const)(
 	"%s: SUBSCRIBE_OK announces the served order",
 	async (version, announced) => {
 		const fx = fixture(version);
-		fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 		const { client, ok } = await runSubscribe(
 			fx,
@@ -3011,7 +3018,7 @@ test.each([[Version.DRAFT_18, GroupOrder.Descending]] as const)(
 test("a timed track declares TIMESCALE and sends no Timestamp", async () => {
 	for (const version of IETF_VERSIONS) {
 		const fx = fixture(version);
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const { client, ok } = await runSubscribe(
 			fx,
 			new Subscribe({
@@ -3040,7 +3047,7 @@ test("a timed track declares TIMESCALE and sends no Timestamp", async () => {
  */
 test.each(["skipGroups", "append"] as const)("our object 0 names the skipped keys below it: %s", async (how) => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video");
+	const track = defined(fx.broadcast.createTrack("video"));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3089,7 +3096,7 @@ test.each(["skipGroups", "append"] as const)("our object 0 names the skipped key
 
 test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", async (finished) => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video");
+	const track = defined(fx.broadcast.createTrack("video"));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3160,7 +3167,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 		return writer;
 	});
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video");
+	const track = defined(fx.broadcast.createTrack("video"));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3229,7 +3236,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DONE", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 1); // group 0, the whole requested range
 
 	const { client } = await runSubscribe(
@@ -3267,7 +3274,7 @@ test("draft-22: a clean close past a bounded filter's end still sends PUBLISH_DO
 
 test("draft-22: a bounded filter that reaches the track's end still sends END_OF_TRACK", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	writeGroup(track, 1); // group 0
 	writeGroup(track, 1); // group 1, the filter's last and the track's
 
@@ -3358,7 +3365,7 @@ for (const synchronous of [true, false]) {
 	test(`a ${synchronous ? "thrown" : "rejected"} group open does not escape the subscription`, async () => {
 		using clock = manual();
 		const fx = fixture();
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const attempted = Promise.withResolvers<void>();
 		const failure = new Error("stream opening failed");
 		const create = spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(() => {
@@ -3402,7 +3409,7 @@ for (const synchronous of [true, false]) {
 test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 
 	// Park the first stream open, the way a transport at its stream cap does.
 	const slot = Promise.withResolvers<void>();
@@ -3570,7 +3577,7 @@ for (const version of [Version.DRAFT_18] as const) {
 
 test("requester FIN keeps a draft-22 subscription serving; STOP_SENDING cancels it", async () => {
 	const fx = fixture(Version.DRAFT_22);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const client = await Stream.open(fx.pair.client, { version: fx.version });
 	const server = await Stream.accept(fx.pair.server, fx.version);
 	if (!server) throw new Error("missing stream");
@@ -3608,7 +3615,7 @@ test("requester FIN keeps a draft-22 subscription serving; STOP_SENDING cancels 
 for (const version of [Version.DRAFT_18] as const) {
 	test(`requester FIN cancels a ${version.toString(16)} subscription`, async () => {
 		const fx = fixture(version);
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		const client = await Stream.open(fx.pair.client, { version: fx.version });
 		const server = await Stream.accept(fx.pair.server, fx.version);
 		if (!server) throw new Error("missing stream");
@@ -3638,7 +3645,7 @@ for (const version of [Version.DRAFT_18] as const) {
 
 test("REQUEST_UPDATE applies priority and preserves it when omitted", async () => {
 	const fx = fixture(Version.DRAFT_18);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3671,7 +3678,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 
 test("REQUEST_UPDATE accepts delivery timeouts without changing the subscription", async () => {
 	const fx = fixture(Version.DRAFT_18);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3697,7 +3704,7 @@ test("REQUEST_UPDATE accepts delivery timeouts without changing the subscription
 
 test("TRACK_PROPERTY_FILTER on a subscription update closes with PROTOCOL_VIOLATION", async () => {
 	const fx = fixture(Version.DRAFT_18);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const client = await Stream.open(fx.pair.client, { version: fx.version });
 	const server = await Stream.accept(fx.pair.server, fx.version);
 	if (!server) throw new Error("missing subscribe stream");
@@ -3733,7 +3740,7 @@ test("TRACK_PROPERTY_FILTER on a subscription update closes with PROTOCOL_VIOLAT
 
 test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async () => {
 	const fx = fixture(Version.DRAFT_18);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3765,7 +3772,7 @@ test("unsupported REQUEST_UPDATE is refused and ends with UPDATE_FAILED", async 
 test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async () => {
 	for (const startPaused of [false, true]) {
 		const fx = fixture(V22);
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const write = (text: string) => {
 			const group = hooks.appendNext(track);
 			group.writeFrame({
@@ -3829,8 +3836,8 @@ test("a SUBSCRIBE pauses without demand and resumes as a new subscriber", async 
 test("a paused relay subscription reacquires its upstream datagrams", async () => {
 	const source = new OriginProducer();
 	const route = source.route(Path.from("test"));
-	const track = route.broadcast.createTrack("audio", {});
-	const datagrams = route.broadcast.createDatagrams("audio", {});
+	const track = defined(route.broadcast.createTrack("audio", {}));
+	const datagrams = defined(route.broadcast.createDatagrams("audio", {}));
 	const upstream = createMockTransportPair(ALPN.DRAFT_18);
 	const url = new URL("https://localhost/resume");
 	const peers = await Promise.all([
@@ -3900,7 +3907,7 @@ test.each(["writable", "createWritable"] as const)(
 	"concurrent IETF subscriptions share the %s datagram transport",
 	async (datagramWritable) => {
 		const fx = fixture(V22, undefined, createMockTransportPair(ALPN.DRAFT_22, { datagramWritable }));
-		const producers = ["audio", "video"].map((name) => fx.broadcast.createDatagrams(name, {}));
+		const producers = ["audio", "video"].map((name) => defined(fx.broadcast.createDatagrams(name, {})));
 		const received = fx.pair.client.datagrams.readable.getReader();
 		const clients: Stream[] = [];
 		try {
@@ -3947,7 +3954,7 @@ test("a paused IETF subscription leaves a blocked datagram write", async () => {
 		}),
 	});
 	const fx = fixture(V22, undefined, pair);
-	const datagrams = fx.broadcast.createDatagrams("audio", {});
+	const datagrams = defined(fx.broadcast.createDatagrams("audio", {}));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -3979,7 +3986,7 @@ test("a paused IETF subscription leaves a blocked datagram write", async () => {
 test("a datagram-only SUBSCRIBE releases demand on pause and resumes", async () => {
 	for (const startPaused of [false, true]) {
 		const fx = fixture(V22);
-		const datagrams = fx.broadcast.createDatagrams("audio", {});
+		const datagrams = defined(fx.broadcast.createDatagrams("audio", {}));
 		const received = fx.pair.client.datagrams.readable.getReader();
 		const { client } = await runSubscribe(
 			fx,
@@ -4028,7 +4035,7 @@ test("a datagram-only SUBSCRIBE releases demand on pause and resumes", async () 
 test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
 	const grant = new Signal<Grant | undefined>(undefined);
 	const fx = fixture(V22, grant);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4084,7 +4091,7 @@ test("a pause resets a group stream parked on flow control", async () => {
 	const fx = fixture(V22);
 	const { stream: stalled, parked, state } = stalledStream();
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4118,7 +4125,7 @@ test("draft-22: narrowing resets a group stream parked on flow control", async (
 	const fx = fixture(V22);
 	const { stream: stalled, parked, aborted } = stalledStream();
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4280,7 +4287,7 @@ test.each([0, Number.MAX_SAFE_INTEGER + 2])(
 
 test("draft-22: a range update replaces the live subscription bounds", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4334,7 +4341,7 @@ test("draft-22: a range update replaces the live subscription bounds", async () 
 
 test("IETF draft-18: range updates preserve the shared subscription", async () => {
 	const fx = fixture(Version.DRAFT_18);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4365,7 +4372,7 @@ test("IETF draft-18: range updates preserve the shared subscription", async () =
 
 test("draft-22: an update fills its snapshot under its own request ID", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	for (let i = 0; i < 3; i++) writeGroup(track, 2);
 	const { client } = await runSubscribe(
 		fx,
@@ -4414,7 +4421,7 @@ test("draft-22: an update fills its snapshot under its own request ID", async ()
 test("draft-22: an empty newer group is not an object in Largest or a relative fill", async () => {
 	const fx = fixture();
 	// No max age, so the superseded group stays fresh enough to fill.
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	writeGroup(track, 2);
 	const empty = hooks.appendNext(track);
 	const { client, ok } = await runSubscribe(
@@ -4447,7 +4454,7 @@ test("draft-22: an empty newer group is not an object in Largest or a relative f
 test("draft-22: reported Largest survives absent headers, older cache entries, and eviction", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	hooks.reportedLargest(track, { group: 4n, frame: 3 }, false);
 	const { client, ok } = await runSubscribe(
 		fx,
@@ -4485,7 +4492,7 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 
 test("draft-22: Next Object behind an upstream group report still delivers its first object", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	// What an IETF SUBSCRIBE_OK leaves on a cold copy: the group, but no frame it can name.
 	hooks.reportedGroup(track, 0n);
 	const { client, ok } = await runSubscribe(
@@ -4518,7 +4525,7 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 
 test("draft-22: Next Object on an empty group still delivers its first object", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const group = hooks.appendNext(track);
 	const { client, ok } = await runSubscribe(
 		fx,
@@ -4562,7 +4569,7 @@ test("draft-22: cancellation releases a fill parked on flow control", async () =
 		},
 	});
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 1);
 	const { client } = await runSubscribe(
 		fx,
@@ -4606,7 +4613,7 @@ test("draft-22: cancellation resets a fill whose FIN is unacknowledged", async (
 		},
 	});
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 1);
 	const { client } = await runSubscribe(
 		fx,
@@ -4651,7 +4658,7 @@ test("draft-22: a later frame failing leaves a fill whose FIN is unacknowledged"
 		},
 	});
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const group = hooks.appendNext(track);
 	group.writeFrame({ payload: new TextEncoder().encode("0.0"), timestamp: Timestamp.fromMillis(0) });
 	const { client } = await runSubscribe(
@@ -4703,7 +4710,9 @@ test.each(["plain", "routed"])(
 			},
 		});
 		spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => unacknowledged);
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) });
+		const track = defined(
+			fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Duration.millis(500) }),
+		);
 		writeGroup(track, 1);
 		const { client } = await runSubscribe(
 			fx,
@@ -4740,7 +4749,7 @@ test.each(["plain", "routed"])(
 // and wire 191 is outside the model's -128..=127, so the fork throws and the fill never runs.
 test("draft-22: a SUBSCRIBE's fill reads the cache at the converted subscriber priority", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 2);
 	const { client } = await runSubscribe(
 		fx,
@@ -4780,7 +4789,7 @@ test("draft-22: an update's fill reads the cache at the converted subscriber pri
 				return new Promise<void>(() => {});
 			},
 		});
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 		writeGroup(track, 1);
 		const { client } = await runSubscribe(
 			fx,
@@ -4818,7 +4827,7 @@ test("draft-22: an update's fill reads the cache at the converted subscriber pri
 
 test("draft-22: narrowing gives up an excluded group's open stream", async () => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const open = hooks.appendNext(track);
 	open.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(Number(open.start)) });
 	const { client } = await runSubscribe(
@@ -4863,7 +4872,7 @@ test("draft-22: an update reopening a drained subscription serves its tail", asy
 		await credit.promise;
 		return createUni(options);
 	});
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const open = hooks.appendNext(track);
 	open.writeFrame({ payload: new TextEncoder().encode("head"), timestamp: Timestamp.now() });
 	const { client } = await runSubscribe(
@@ -4907,7 +4916,7 @@ test("draft-22: an update reopening a drained subscription serves its tail", asy
 test("draft-22: widening with a fill keeps the open live group", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
 	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
@@ -4950,7 +4959,7 @@ test("draft-22: widening with a fill keeps the open live group", async () => {
 test("draft-22: a fill-only update short of the edge keeps the live join's floor", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
 	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
@@ -4996,7 +5005,7 @@ test("draft-22: a fill-only update short of the edge keeps the live join's floor
 test("draft-22: a fill-only update keeps the subscription's floor", async () => {
 	using clock = manual();
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
 	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
@@ -5040,7 +5049,7 @@ test.each([
 	[1n, 1n],
 ])("draft-22: widening with a fill resumes a group a narrowing to %p.%p gave up", async (group, object) => {
 	const fx = fixture();
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	writeGroup(track, 1);
 	const open = hooks.appendNext(track);
 	open.writeFrame({ payload: new TextEncoder().encode("1.0"), timestamp: Timestamp.fromMillis(Number(open.start)) });
@@ -5098,7 +5107,7 @@ async function readServed(
 
 test("a SUBSCRIBE carries no budget, so the publisher's own policy bounds it", async () => {
 	const fx = fixture(Version.DRAFT_18);
-	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI }));
 	const { client } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -5128,7 +5137,7 @@ for (const endObject of [BigInt(Number.MAX_SAFE_INTEGER), (1n << 60n) + 1n]) {
 	test(`an IETF filter ending at object ${endObject} serves bounded model frames`, async () => {
 		using _clock = manual();
 		const fx = fixture();
-		const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+		const track = defined(fx.broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 		const { client } = await runSubscribe(
 			fx,
 			new Subscribe({

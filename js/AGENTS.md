@@ -27,4 +27,5 @@ The `/js` Bun workspace, published as `@moq/<package>`. Run recipes via `just js
 - Only browser performance counts; accept a small regression that shows only on node or bun.
 - Give each entrypoint a `@module` block. Hide deprecated exports with `@internal` or drop them; never annotate "use X".
 - `just js check` includes the build, since declaration emit catches errors `--noEmit` misses, and rejects importing a `@moq/*` package the manifest doesn't declare.
+- `just js dead-code` (fallow, in `just check`) rejects any unused file, export, type, class member, or dependency in the workspace. Delete what it finds. A public member with no caller in the repository gets `// fallow-ignore-next-line unused-class-member`; a file only a script or Rust test runs goes in `.fallowrc.jsonc`'s `entry`.
 - Test UI or playback changes with `just dev` in a real browser. `<moq-watch>` renders black in a background tab unless `visible="always"`.

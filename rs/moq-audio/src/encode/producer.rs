@@ -165,13 +165,15 @@ impl Reserved {
 			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
 			// Lite05 subscribers know what scale to expect and the model layer accepts
 			// Frame::timestamp on append, plus whatever max age the catalog declared.
-			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
+			Some(name) => broadcast
+				.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))
+				.ok_or_else(|| hang::Error::Duplicate(name.clone()))?,
 			// Mirrors the video side, which derives a unique name from the codec
 			// rather than making every caller invent one.
 			None => broadcast.unique_track(
 				&format!(".{}", options.config.codec),
 				catalog.track_info(hang::catalog::PRIORITY.audio),
-			)?,
+			),
 		};
 		let track = catalog.audio(
 			track,
