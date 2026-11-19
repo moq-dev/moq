@@ -1,31 +1,23 @@
-# [S] OBS runs capped VBR on VideoToolbox and VA-API
+# [S] OBS runs capped VBR on VideoToolbox
 
 ## Goal
 
-The OBS plugin's dock profiles run VideoToolbox (macOS) and VA-API encoders at
-constant quality under the profile's peak, where that peak is measured to hold,
-instead of the CBR they fall back to today.
+The OBS plugin's dock profiles run VideoToolbox (macOS) at constant quality
+under the profile's peak, if that peak is measured to hold, instead of the
+CBR it falls back to today.
 
 ## Plan
 
 The epic's decisions apply: quality mode with a peak where honored, otherwise
 CBR.
 
-Done: the MoQ output owns the cap on every video encoder it starts (maintainer
-decision on the PR). `EnforceCap` in `cpp/obs/src/moq-encoder-rate.h` writes it
-before OBS initializes the encoder, replaces any conflicting user rate option
-with a logged warning, and the catalog advertises exactly that cap: x264 keeps
-CBR and otherwise runs `VBR` (CRF under a VBV whose max rate and buffer are the
-bitrate; `x264opts` is never rewritten, and a rate option in it logs a warning that
-recommends the dock profiles), NVENC keeps
-CBR and VBR and otherwise runs `CQVBR` with `max_bitrate`, and every other
-encoder runs CBR at the cap. The output prices and retunes that peak (NVENC
-under `max_bitrate`). Quick Sync (ICQ has no max rate) and AMF (QVBR sets no
-peak) stay CBR for good. An encoder already running when the output starts keeps its
-settings and the catalog advertises the cap it runs with; one running uncapped (CQP, CRF,
-lossless) refuses the output.
+`EnforceCap` in `cpp/obs/src/moq-encoder-rate.h` owns the cap on every video
+encoder the MoQ output starts. x264 and NVENC run constant quality under it;
+Quick Sync, AMF, and VA-API stay CBR for good. VA-API's QVBR was measured past
+the cap on Mesa radeonsi (Radeon 610M and RX 9070) and Intel iHD (Arrow Lake),
+for H.264, HEVC, and AV1 ([moq-dev/moq#9193](https://github.com/moq-dev/moq/pull/9193)).
 
-Remaining, each needing hardware to measure that the peak holds:
+Remaining, which needs an Apple Silicon Mac to measure that the peak holds:
 
 - VideoToolbox: `rate_control` `CRF` (Apple Silicon only) with `limit_bitrate`,
   `max_bitrate` and `max_bitrate_window`, which becomes a `DataRateLimits` hint
@@ -33,11 +25,12 @@ Remaining, each needing hardware to measure that the peak holds:
   re-applies on a `bitrate` change, so `SetBitrate` must write `bitrate` beside
   `max_bitrate` and clamp it to the granted peak, as it does for NVENC's plain
   VBR (`MoQPeak::average_kbps`); `Reset()` restores both.
-- VA-API: `QVBR` where the driver lists it (`vaapi_device_rc_supported`), with
-  `maxrate` as the peak; check what the driver does with `bitrate` and whether
-  the encoder advertises `OBS_ENCODER_CAP_DYN_BITRATE` (it does not today).
+- Measure it the way VA-API was: encode the same 40 s clips (Big Buck Bunny,
+  with heavy noise, light grain, a still frame, and a still frame that turns to
+  noise) at a 3 Mbps cap in CBR and in CRF with the limit, and compare the worst
+  1 s window of each against the cap and against CBR's own.
 
-Whatever measures as not holding stays CBR. Decided by the maintainer: "Use
+If it measures as not holding, it stays CBR. Decided by the maintainer: "Use
 OBS Output settings" in Simple mode stays CBR, and every encoder keeps its own
 default quality level (x264 CRF 23, NVENC target quality 20) until the VMAF
 harness ([quest/m9/video-quality](/quest/m9/video-quality/README.md)) picks one. Extend `EnforceCap` and
@@ -49,4 +42,3 @@ Public API: none. Wire: none.
 ## Hosts
 
 - macos - VideoToolbox's rate limit can only be measured on a Mac
-- linux - VA-API's quality mode depends on the driver, so it is measured on one

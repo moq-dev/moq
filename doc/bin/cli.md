@@ -23,7 +23,7 @@ install. It needs an ARMv7 CPU, so not a Pi 1, Zero, or Zero W.
 
 | Verb | Endpoint | |
 | --- | --- | --- |
-| `import` | `ts`, `fmp4`, `flv`, `avc3` | Read a container from stdin (usually FFmpeg). |
+| `import` | `ts`, `fmp4`, `flv`, `h264` | Read a container from stdin (usually FFmpeg). |
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Follow a remote live HLS playlist. |
 | `import` | `rtmp`, `srt`, `webrtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
@@ -141,10 +141,20 @@ keyframe when it re-enables. The muxed exports declare only enabled renditions
 in their header; one disabled afterwards keeps its track, idle until it
 re-enables.
 
+A rendition whose track fails ends alone while the export still reads another, with
+a warning: the muxed exports keep the other media, and the export fails only when
+nothing else is left reading. A rendition of the same medium that the catalog
+lists afterwards takes its place, as `import capture` publishes a reopened
+microphone. `ts` adds it as a new stream; `fmp4`, `mkv`, and `flv` continue the
+failed track with it, from its first sync frame past what was written, as long as
+it has the same codec configuration.
+
 fMP4 writes one fragment per publisher group; `--fragment-duration` caps it.
 The init segment declares every enabled rendition, so it is written only once each can
 be described, and the track set is then fixed: a new rendition or a changed
-codec configuration ends the export. Restart it to pick up the change.
+codec configuration ends the export. Restart it to pick up the change. A new
+rendition waits instead while a track of its medium could still fail, to take
+that track's place.
 Annex-B H.264 and H.265 whose catalog codec string and dimensions fix the sample
 entry are described at once as `avc3` or `hev1`, with SPS, PPS, and VPS kept in
 the samples, so an encoder restarting with a new SPS does not end the export.
@@ -244,6 +254,7 @@ moq ... import capture --window 39193 --audio off        # one window (macOS, Wi
 moq ... import capture --window --audio off              # system window picker (Linux Portal)
 moq ... import capture --camera 0 --width 1280 --height 720 --fps 30 --bitrate 3000000 --codec h265
 moq ... import capture --video demand                    # also gate video on demand
+moq ... import capture --rendition sd=0.25              # add a quarter-size simulcast rendition
 moq ... import capture --audio on                        # encode audio continuously
 ```
 
@@ -252,7 +263,8 @@ fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-
 backends. An audio device that fails mid-session, such as a USB microphone
 re-enumerating, is reopened every 0.5 to 4 seconds as a new audio track. One
 still failing after 10 seconds ends only the audio track: video keeps
-publishing, and the import exits with the audio error once it stops. A device
+publishing, and the import exits with the audio error once it stops. A muxed
+export of the broadcast follows each reopened track. A device
 that fails to open at startup ends the import at once. Audio appears
 in the catalog once its device opens; a microphone permission prompt leaves
 other media available. The camera and
@@ -267,6 +279,12 @@ has a subscriber, leaving nothing to fetch from before the first viewer; video
 still opens its source once at startup to probe the mode it negotiates.
 `--bitrate` is a ceiling that
 backends with live bitrate control lower to fit the connection.
+`--rendition NAME=SCALE`, repeatable, also publishes `video/NAME` from the same
+capture, each frame scaled to SCALE of its pixels (0.25 is half the width and
+height) at a bitrate derived from that size, like the web publisher's simulcast.
+Each one encodes only while watched, and with `--video demand` the source stays
+open while any rendition is. The renditions share the connection smallest
+first: under congestion the smallest keeps playing while larger ones pause.
 `moq devices` prints every source id. On Windows, `display:N` is an
 enumeration index rather than a stable monitor id, so re-run `moq devices` if a
 saved selector picks the wrong screen.

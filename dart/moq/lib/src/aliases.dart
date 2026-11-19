@@ -193,10 +193,10 @@ extension type Subscription._(MoqSubscription _subscription)
 /// A null subscription and a bare `Subscription()` mean the same.
 Subscription defaultSubscription() => Subscription._(moqSubscriptionDefaults());
 
-/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+/// A span of a track to deliver: from `start` through `end`, or onward when `end` is null. Every end includes its whole group.
 typedef Range = MoqRange;
 
-/// Where one end of a [Range] falls: the oldest group (a start only), absolute, relative to the latest group, or the group containing a time.
+/// Where one end of a [Range] falls: the oldest group (a start only), relative to the latest group, or the group containing a time.
 typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.

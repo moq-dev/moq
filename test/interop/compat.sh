@@ -35,39 +35,10 @@ uv run --no-project python sh/js/install.py frozen
 bun "$DIR/compat/resolve.ts" resolve "$HARNESS_RUN/versions.json"
 value() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$HARNESS_RUN/versions.json" "$1"; }
 
-# The binary asset and registry version must agree. A missing asset builds the
-# exact published crate instead; a corrupt/mismatched asset is a hard failure.
-release_binary() {
-    local crate="$1" binary="$2" version asset digest url
-    version=$(value "$crate")
-    mkdir -p "$HARNESS_RUN/released/bin"
-    if gh release view "$crate-v$version" --repo moq-dev/moq --json assets >"$HARNESS_RUN/$crate-assets.json" 2>"$HARNESS_RUN/$crate-assets.log"; then
-        asset=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next((a["url"] for a in d["assets"] if a["name"]==sys.argv[2]),""))' "$HARNESS_RUN/$crate-assets.json" "$crate-v$version-x86_64-unknown-linux-gnu")
-    else
-        asset=""
-    fi
-    if [[ -n "$asset" ]]; then
-        # Release assets are an optimization for Linux x86_64, the nightly host.
-        [[ "$(uname -sm)" == "Linux x86_64" ]] || asset=""
-    fi
-    if [[ -n "$asset" ]]; then
-        url="https://github.com/moq-dev/moq/releases/download/$crate-v$version/SHA256SUMS"
-        curl -fLS "$url" -o "$HARNESS_RUN/$crate-sums"
-        digest=$(awk -v name="$crate-v$version-x86_64-unknown-linux-gnu" '$2 == name { print $1 }' "$HARNESS_RUN/$crate-sums")
-        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "release is missing its asset checksum" >&2
-            exit 1
-        }
-        curl -fLS "$asset" -o "$HARNESS_RUN/released/bin/$binary"
-        printf '%s  %s\n' "$digest" "$HARNESS_RUN/released/bin/$binary" | sha256sum -c -
-        chmod +x "$HARNESS_RUN/released/bin/$binary"
-    else
-        cargo install --locked --version "$version" --root "$HARNESS_RUN/released" --target-dir "$WORKSPACE/target/compat-released" "$crate"
-    fi
-    "$HARNESS_RUN/released/bin/$binary" --version
-}
-release_binary moq-cli moq
-release_binary moq-relay moq-relay
+# shellcheck source-path=SCRIPTDIR source=../lib/release.sh
+source "$DIR/../lib/release.sh"
+release_binary moq-cli moq "$(value moq-cli)" "$HARNESS_RUN/released"
+release_binary moq-relay moq-relay "$(value moq-relay)" "$HARNESS_RUN/released"
 cargo build --locked -p moq-cli -p moq-relay
 TARGET=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
 harness_stage current/moq "$TARGET/debug/moq"
@@ -193,8 +164,15 @@ cell() {
 fetch() {
     local relay="$1" pub="$2" sub="$3" js="$4" version="$5"
     RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 INTEROP_PUB_ANNEXB="$(annexb_import "$pub")" \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
+}
+
+# TEMPORARY migration, delete once the released CLI names it `h264`: releases before
+# it name the Annex-B import `avc3`. Probed once, so a release with the rename needs no edit.
+if "$RELEASED" import h264 --help >/dev/null 2>&1; then released_annexb=h264; else released_annexb=avc3; fi
+annexb_import() {
+    [[ "$1" == "$RELEASED" ]] && echo "$released_annexb" || echo h264
 }
 
 # The released CLI's fMP4 import restamps media on its arrival clock, so its tone

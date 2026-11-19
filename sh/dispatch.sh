@@ -149,6 +149,11 @@ module biome '' \
 # Root Nix inputs own the browser version every npm Playwright pin matches.
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3 uv' lane=bun fix
+# fallow over the whole workspace: removing the last use of an export in one
+# package leaves it dead in the package that defines it, which a run scoped to
+# the changed packages would never analyze.
+module dead_code '(\.([mc]?[jt]sx?|vue)|(^|/)package\.json|^bun\.lock|^\.fallowrc\.jsonc)$' \
+    tools='bun uv' lane=bun
 # The recorded-trace replays play through the player's container consumer and
 # ring on a simulated clock: deterministic, seconds long, and only Bun (plus uv
 # for the install step), so they gate every diff that can move a row. It shares
@@ -420,6 +425,7 @@ step() {
     case "$1:$2" in
         check:js) run just js check-changed "$js_list" ;;
         check:workers) run just js workers ;;
+        check:dead_code) run just js dead-code ;;
         check:moq_sh) run just infra moq-sh test ;;
         # The check keeps docs and the isolated default-media lint; the test
         # phase enforces the other clippy checks in its existing build.

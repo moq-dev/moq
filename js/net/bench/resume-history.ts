@@ -22,6 +22,7 @@ import { Manual } from "@moq/clock/test";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { hooks } from "../src/internal.ts";
 import { ALPN_06 } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
@@ -227,7 +228,7 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 	for (const broadcast of broadcasts) {
 		const all = new Set(Array.from({ length: routes }, (_, route) => names(history, route, perRoute)).flat());
 		for (const name of all) {
-			const track = broadcast.createTrack(name);
+			const track = defined(broadcast.createTrack(name));
 			const group = hooks.appendNext(track);
 			group.writeFrame({ payload, timestamp: Timestamp.unscaled(group.start) });
 			group.finish();

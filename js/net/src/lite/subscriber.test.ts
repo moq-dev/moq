@@ -2985,16 +2985,20 @@ test("a stale drop is recorded under the narrowest budget asked on lite-07", asy
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
 		const stream = await opened(1);
+		const sent = new Reader(stream.outbound, undefined, version);
+		expect(await sent.u53()).toBe(StreamId.Subscribe);
+		await Subscribe.decode(sent, version);
 		await stream.reading;
-		await drainReactions();
 		if (!entry) throw new Error("no subscription");
 		expect(entry.staleBudget).toBe(500);
 
+		// Each update is sent only once the previous write is credited, which may take tasks, so wait
+		// for it on the wire: the budget narrows before its update is written.
 		track.update({ delay: { max: Duration.millis(5000) } });
-		await drainReactions();
+		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(5000);
 		expect(entry.staleBudget).toBe(500);
 		track.update({ delay: { max: Duration.millis(200) } });
-		await drainReactions();
+		expect((await SubscribeUpdate.decode(sent, version)).maxDelay).toBe(200);
 		expect(entry.staleBudget).toBe(200);
 	} finally {
 		responses.mockRestore();

@@ -843,8 +843,8 @@ impl Import {
 /// from stdin; the gateways bridge another protocol.
 #[derive(usage_rs::Subcommands, Clone)]
 pub enum ImportSource {
-	/// Raw H.264 Annex-B from stdin.
-	Avc3,
+	/// Raw H.264 Annex B elementary stream from stdin.
+	H264,
 	/// Fragmented MP4 / CMAF from stdin.
 	Fmp4(Fmp4Import),
 	/// MPEG-TS from stdin.
@@ -876,7 +876,7 @@ impl ImportSource {
 	/// The stdin container format, when this source is one of the container formats.
 	pub fn stdin_format(&self) -> Option<PublishFormat> {
 		Some(match self {
-			Self::Avc3 => PublishFormat::Avc3,
+			Self::H264 => PublishFormat::H264,
 			Self::Fmp4(args) => PublishFormat::Fmp4 { cmaf: args.cmaf },
 			Self::Ts(args) if args.passthrough => PublishFormat::TsPassthrough {
 				pcr_pid: args.pcr_pid.map(|pid| pid.0),
@@ -906,7 +906,7 @@ impl ImportSource {
 			| Self::Archive(_) => Some("the gateway and archive imports build their own catalogs"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => None,
-			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
+			Self::H264 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
 	}
 
@@ -923,7 +923,7 @@ impl ImportSource {
 			Self::Archive(_) => Some("`import archive` serves its recording until stopped"),
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` has no clean end"),
-			Self::Avc3
+			Self::H264
 			| Self::Fmp4(_)
 			| Self::Ts(_)
 			| Self::Flv
@@ -1837,7 +1837,7 @@ mod tests {
 				["ts"].as_slice(),
 				&["fmp4"],
 				&["flv"],
-				&["avc3"],
+				&["h264"],
 				&["ts", "--program", "1"],
 			] {
 				import(flags, source).validate().unwrap();

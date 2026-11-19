@@ -49,7 +49,7 @@ function checkU32(value: number): void {
  * `TextEncoder` maps a lone surrogate to U+FFFD, so two distinct strings would share one name
  * and one payload key while claims and budgets, keyed by string, told them apart.
  */
-export function utf8(text: string): Uint8Array<ArrayBuffer> {
+function utf8(text: string): Uint8Array<ArrayBuffer> {
 	if (!text.isWellFormed()) throw new Failure("identity");
 	return encoder.encode(text);
 }
@@ -201,10 +201,4 @@ export function decode(name: string): Uint8Array<ArrayBuffer> {
 	const padded = material.byteLength - NAME_NONCE_LEN - TAG_LEN;
 	if (padded < NAME_BLOCK || padded % NAME_BLOCK !== 0) throw new Failure("identity");
 	return material;
-}
-
-/** Accept a physical name learned from a track request; see {@link decode}. */
-export function parse(name: string): Name {
-	decode(name);
-	return name as Name;
 }

@@ -9,6 +9,14 @@
 //! is read from later. A broadcast built under one runtime and written from another, or from a
 //! plain thread, stays on one timeline instead of jumping between the two clocks.
 //!
+//! The timeline runs at the host wall clock's rate rather than its monotonic clock's, so `wall + pts`
+//! stays on UTC for any session length. A monotonic clock drifts off UTC by its oscillator's error
+//! (seconds a day on macOS and Windows), so each read nudges the timeline toward the wall clock by at
+//! most 500 ppm, NTP's own slew cap: a wall clock that steps either way is followed that slowly,
+//! and media never jumps. A suspend is a gap instead, which the timeline jumps forward across, since
+//! no media exists for that time: it counts the host's [`suspended`](kio::clock::Clock::suspended)
+//! time, where the monotonic clock stops.
+//!
 //! The clock also owns the broadcast's wall mapping, advertised at the catalog root as
 //! `clock: { wall, timescale }`: `wall` is the wall-clock time of PTS zero in
 //! [`Clock::TIMESCALE`] units since the moq epoch (2020-01-01). A consumer derives any
@@ -22,7 +30,10 @@
 //! onto the clock (see [`catalog::Timebase`](crate::catalog::Timebase)).
 
 use kio::clock::Wall;
-use std::time::Duration;
+use std::{
+	sync::{Arc, Mutex, PoisonError},
+	time::Duration,
+};
 
 use hang::catalog::MAX_SAFE_INTEGER;
 use kio::clock::Instant;
@@ -71,21 +82,89 @@ fn wall_clock(wall: Wall) -> crate::Result<hang::catalog::Clock> {
 	Ok(hang::catalog::Clock::new(moq_net::Timestamp::from_micros(wall)?)?)
 }
 
-/// A monotonic clock for stamping media frames so that tracks produced
-/// concurrently, e.g. an audio and a video capture running on separate
-/// threads, land on a single timeline.
+/// A clock for stamping media frames so that tracks produced concurrently, e.g. an audio and a
+/// video capture running on separate threads, land on a single timeline.
 ///
+/// It never runs backward, and runs at the host wall clock's rate: each read nudges it toward the
+/// wall clock by at most 500 ppm, and it jumps forward across a suspend.
 /// Clones share the timeline and the wall mapping, so handing them to several producers keeps
 /// the broadcast on one clock. Two clocks are equal only when they are one timeline.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Clock {
 	/// The ambient clock captured where this one was created, read wherever it is read.
 	source: kio::clock::Clock,
-	/// An instant on `source`, and what the clock read then in micros.
-	instant: Instant,
-	reading: u64,
+	timeline: Arc<Mutex<Timeline>>,
 	/// `None` when the host's wall clock was unset at construction.
 	wall: Option<hang::catalog::Clock>,
+}
+
+/// The most a timeline gains or loses on the host's monotonic time to follow its wall clock, as a
+/// divisor: 500 ppm, the cap NTP slews the host's own clocks by.
+const SLEW: u64 = 2_000;
+
+/// A wall error, in nanoseconds, left alone, so two clocks read a moment apart don't dither the
+/// timeline's rate.
+const SETTLED: i128 = 1_000_000;
+
+/// Nanoseconds from the Unix epoch to `wall`.
+fn unix_nanos(wall: Wall) -> i128 {
+	wall.saturating_duration_since(Wall::UNIX_EPOCH).as_nanos() as i128
+}
+
+/// Where a clock's timeline last read, and the wall clock it follows.
+#[derive(Debug)]
+struct Timeline {
+	/// The host's monotonic instant and the time it had spent suspended at the last read.
+	instant: Instant,
+	suspended: Duration,
+	/// What the clock read then, in nanoseconds.
+	reading: u64,
+	/// The host wall time, in Unix nanoseconds, at which the timeline reads zero; `None` when the
+	/// host's wall clock was unset at the start, leaving nothing to follow.
+	zero: Option<i128>,
+}
+
+impl Timeline {
+	/// A timeline reading `reading` nanoseconds at `instant` on `source`, which may be past or ahead.
+	fn start(source: &kio::clock::Clock, instant: Instant, reading: u64) -> Arc<Mutex<Self>> {
+		let now = source.now();
+		let ahead = now.saturating_duration_since(instant).as_nanos() as i128
+			- instant.saturating_duration_since(now).as_nanos() as i128;
+		Arc::new(Mutex::new(Self {
+			instant,
+			suspended: source.suspended(),
+			reading,
+			zero: set(source.wall()).map(|wall| unix_nanos(wall) - ahead - reading as i128),
+		}))
+	}
+
+	/// What the timeline reads at `instant`, after `suspended` of sleep, with the host wall at `wall`.
+	///
+	/// It advances by the time that passed, suspends included, nudged toward the wall clock by at
+	/// most [`SLEW`] of it, so it never runs backward and a wall step is followed gradually.
+	fn read(&mut self, instant: Instant, suspended: Duration, wall: Option<Wall>) -> u64 {
+		// Each kept at its largest, so a read's jitter is counted once rather than piling up.
+		let elapsed = instant.saturating_duration_since(self.instant) + suspended.saturating_sub(self.suspended);
+		self.instant = self.instant.max(instant);
+		self.suspended = self.suspended.max(suspended);
+
+		// u128 -> u64 truncation is unreachable: u64 nanoseconds is ~584 years.
+		let elapsed = elapsed.as_nanos() as u64;
+		let free = self.reading.saturating_add(elapsed);
+		let error = match (self.zero, wall) {
+			(Some(zero), Some(wall)) => unix_nanos(wall) - zero - free as i128,
+			_ => 0,
+		};
+		let cap = (elapsed / SLEW) as i128;
+		let nudge = if error.abs() <= SETTLED {
+			0
+		} else {
+			error.clamp(-cap, cap)
+		};
+		// Within u64: the nudge is at most what elapsed, either way.
+		self.reading = (free as i128 + nudge) as u64;
+		self.reading
+	}
 }
 
 impl Clock {
@@ -109,8 +188,7 @@ impl Clock {
 	pub fn new() -> Self {
 		let source = kio::clock::Clock::current();
 		Self {
-			instant: source.now(),
-			reading: Self::LEAD.as_micros() as u64,
+			timeline: Timeline::start(&source, source.now(), Self::LEAD.as_nanos() as u64),
 			wall: set(source.wall()).and_then(|now| wall_clock(now.checked_sub(Self::LEAD)?).ok()),
 			source,
 		}
@@ -122,11 +200,12 @@ impl Clock {
 	/// sampling. `epoch` is an instant on the ambient clock, which the clock keeps reading wherever
 	/// it is read from. Refuses an unrepresentable wall.
 	pub fn at(epoch: Instant, wall: Wall) -> crate::Result<Self> {
+		let wall = Some(wall_clock(wall)?);
+		let source = kio::clock::Clock::current();
 		Ok(Self {
-			source: kio::clock::Clock::current(),
-			instant: epoch,
-			reading: 0,
-			wall: Some(wall_clock(wall)?),
+			timeline: Timeline::start(&source, epoch, 0),
+			source,
+			wall,
 		})
 	}
 
@@ -136,7 +215,6 @@ impl Clock {
 	/// Refuses a `since` so large that PTS zero lands before the moq epoch (2020), which the wall
 	/// mapping cannot name. On a host whose wall clock is unset, the clock has no wall mapping.
 	pub(crate) fn arrival(&self, since: Duration) -> crate::Result<Self> {
-		let instant = self.source.now();
 		let unmappable = || crate::Error::UnmappableTimestamp(format!("{since:?} puts PTS zero before 2020"));
 		let wall = match set(self.source.wall()) {
 			Some(now) => {
@@ -148,10 +226,10 @@ impl Clock {
 			None if since.as_micros() > MAX_SAFE_INTEGER as u128 => return Err(unmappable()),
 			None => None,
 		};
+		let reading = u64::try_from(since.as_nanos()).map_err(|_| unmappable())?;
 		Ok(Self {
+			timeline: Timeline::start(&self.source, self.source.now(), reading),
 			source: self.source.clone(),
-			instant,
-			reading: u64::try_from(since.as_micros()).map_err(|_| unmappable())?,
 			wall,
 		})
 	}
@@ -204,16 +282,14 @@ impl Clock {
 	///
 	/// No `Instant` arithmetic, so a PTS zero before this host booted still maps.
 	fn mapped(&self, zero: hang::catalog::Clock, unmappable: impl Fn(&str) -> crate::Error) -> crate::Result<Self> {
-		let instant = self.source.now();
 		let now = set(self.source.wall()).ok_or_else(|| unmappable("needs the host wall clock, which is unset"))?;
 		// Saturating would stamp everything early by the skew without saying so.
 		let zero_micros = zero.wall.as_micros().map_err(|_| unmappable("has no timescale"))?;
 		let reading =
 			u64::try_from(moq_micros(now) - zero_micros as i128).map_err(|_| unmappable("puts PTS zero after now"))?;
 		Ok(Self {
+			timeline: Timeline::start(&self.source, self.source.now(), reading * 1_000),
 			source: self.source.clone(),
-			instant,
-			reading,
 			wall: Some(zero),
 		})
 	}
@@ -233,10 +309,17 @@ impl Clock {
 
 	/// The current timestamp on this clock.
 	pub fn now(&self) -> moq_net::Timestamp {
-		// u128 -> u64 truncation is unreachable: u64 microseconds is ~584,000 years.
-		let elapsed = self.source.now().saturating_duration_since(self.instant).as_micros() as u64;
-		moq_net::Timestamp::from_micros(self.reading + elapsed)
-			.expect("an instant elapsed duration fits in a timestamp")
+		let (_, reading) = self.read();
+		moq_net::Timestamp::from_micros(reading / 1_000).expect("an instant elapsed duration fits in a timestamp")
+	}
+
+	/// The host's instant now, and what the timeline reads at it.
+	fn read(&self) -> (Instant, u64) {
+		let mut timeline = self.timeline.lock().unwrap_or_else(PoisonError::into_inner);
+		// Read under the lock, so racing reads land on the timeline in order.
+		let now = self.source.now();
+		let reading = timeline.read(now, self.source.suspended(), set(self.source.wall()));
+		(now, reading)
 	}
 
 	/// Map the instant a payload was captured (a datagram's arrival, a sensor read) onto this clock.
@@ -245,17 +328,12 @@ impl Clock {
 	/// outside tests. Refuses an instant ahead of now, which would claim the payload reached the
 	/// transport before it existed, and one before PTS zero, which no timestamp can name.
 	pub fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
-		if at > self.source.now() {
-			return Err(crate::Error::InvalidCapture);
-		}
-		let micros = match at.checked_duration_since(self.instant) {
-			Some(after) => self.reading + after.as_micros() as u64,
-			None => self
-				.reading
-				.checked_sub(self.instant.duration_since(at).as_micros() as u64)
-				.ok_or(crate::Error::InvalidCapture)?,
-		};
-		Ok(moq_net::Timestamp::from_micros(micros).expect("an instant elapsed duration fits in a timestamp"))
+		let (now, reading) = self.read();
+		let before = now.checked_duration_since(at).ok_or(crate::Error::InvalidCapture)?;
+		let nanos = reading
+			.checked_sub(before.as_nanos() as u64)
+			.ok_or(crate::Error::InvalidCapture)?;
+		Ok(moq_net::Timestamp::from_micros(nanos / 1_000).expect("an instant elapsed duration fits in a timestamp"))
 	}
 
 	/// Units per second for [`wall`](Self::wall): [`TIMESCALE`](Self::TIMESCALE).
@@ -277,6 +355,14 @@ impl Clock {
 		Ok(self.mapping()?.wall_clock(pts)?)
 	}
 }
+
+impl PartialEq for Clock {
+	fn eq(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.timeline, &other.timeline)
+	}
+}
+
+impl Eq for Clock {}
 
 impl Default for Clock {
 	fn default() -> Self {
@@ -362,6 +448,85 @@ mod tests {
 			clock.capture(epoch.saturating_sub(Duration::from_secs(1))),
 			Err(crate::Error::InvalidCapture)
 		));
+	}
+
+	/// How far `wall + now` reads ahead of the host's wall clock, in nanoseconds.
+	fn error(clock: &Clock) -> i128 {
+		unix_nanos(clock.wall_clock(clock.now()).unwrap()) - unix_nanos(kio::clock::wall())
+	}
+
+	/// How often [`run`] reads the clock.
+	const TICK: Duration = Duration::from_secs(10);
+
+	/// Let `duration` pass a [`TICK`] at a time, checking that each advances the clock by a tick
+	/// give or take the slew, and return the error after it.
+	async fn run(clock: &Clock, duration: Duration) -> i128 {
+		let tick = TICK.as_micros();
+		for _ in 0..duration.as_secs() / TICK.as_secs() {
+			let before = clock.now().as_micros().unwrap();
+			kio::clock::sleep(TICK).await;
+			let step = clock.now().as_micros().unwrap() - before;
+			assert!(step.abs_diff(tick) <= tick / SLEW as u128 + 1, "a tick read {step} us");
+		}
+		error(clock)
+	}
+
+	/// The broadcast's wall times stay on the host's wall clock across a day of its monotonic clock
+	/// drifting 500 ppm either way, follow a wall step either way at the slew cap without jumping,
+	/// and jump forward across a suspend.
+	#[kio::test]
+	async fn wall_times_follow_the_host_wall_clock() {
+		let second = 1_000_000_000;
+		let clock = Clock::new();
+		let settled = |error: i128| error.abs() <= SETTLED + TICK.as_nanos() as i128 / SLEW as i128;
+
+		for ppm in [500, -500] {
+			kio::clock::sim::set_drift(ppm);
+			let error = run(&clock, Duration::from_secs(12 * 3600)).await;
+			assert!(settled(error), "{ppm} ppm for 12 h left {error} ns");
+		}
+		kio::clock::sim::set_drift(0);
+
+		// A wall step either way is slewed out at the cap: 10 s takes 20,000 s.
+		for step in [10i128, -10] {
+			let wall = kio::clock::wall();
+			let stepped = match step > 0 {
+				true => wall + Duration::from_secs(10),
+				false => wall - Duration::from_secs(10),
+			};
+			kio::clock::sim::step_wall(stepped);
+			let error = run(&clock, Duration::from_secs(10_000)).await;
+			let half = -step * second / 2;
+			assert!(
+				(error - half).abs() <= SETTLED,
+				"halfway through a {step} s step: {error} ns"
+			);
+			let error = run(&clock, Duration::from_secs(10_100)).await;
+			assert!(settled(error), "after a {step} s step: {error} ns");
+		}
+
+		// No media exists while the host sleeps: the clock jumps the gap and stays on the wall clock.
+		let before = clock.now().as_micros().unwrap();
+		kio::clock::sim::suspend(Duration::from_secs(3600));
+		let after = clock.now().as_micros().unwrap();
+		assert_eq!(after - before, 3_600_000_000, "a suspend is a gap");
+		assert!(settled(error(&clock)));
+		assert!(settled(run(&clock, Duration::from_secs(60)).await));
+	}
+
+	/// Clones share one timeline, so the slew one applies is the others' too.
+	#[kio::test]
+	async fn clones_share_the_slew() {
+		let clock = Clock::new();
+		let clone = clock.clone();
+		assert_eq!(clock, clone);
+		assert_ne!(clock, Clock::new(), "a new clock is a new timeline");
+
+		kio::clock::sim::step_wall(kio::clock::wall() + Duration::from_secs(5));
+		kio::clock::sleep(Duration::from_secs(100)).await;
+		let slewed = clock.now();
+		assert_eq!(slewed.as_micros().unwrap(), 10_000_000 + 100_000_000 + 50_000);
+		assert_eq!(clone.now(), slewed);
 	}
 
 	#[test]

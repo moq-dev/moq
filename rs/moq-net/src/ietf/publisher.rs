@@ -1652,12 +1652,14 @@ impl Serving {
 						match datagrams.poll_info(waiter) {
 							Poll::Ready(Ok(info)) => {
 								let local = crate::broadcast::Producer::new(crate::broadcast::Info::default());
-								let producer = local.create_track(
-									request.msg.track_name.as_ref(),
-									track::Info::default()
-										.with_timescale(info.timescale)
-										.with_priority(info.priority),
-								)?;
+								let producer = local
+									.create_track(
+										request.msg.track_name.as_ref(),
+										track::Info::default()
+											.with_timescale(info.timescale)
+											.with_priority(info.priority),
+									)
+									.expect("a fresh broadcast holds no track");
 								let cache = producer.consume();
 								let mut serve = TrackServe::new(
 									request.publisher.session.clone(),
@@ -2749,10 +2751,14 @@ impl RunFill {
 			tracing::debug!(%err, fill = %self.request_id, "fill stream close failed");
 			return Poll::Ready(());
 		}
-		let closed = wait!(Settle => writer.poll_close(waiter));
+		// Or until the group expires: stale bytes must not hold the connection.
+		let closed = wait!(Settle => match writer.poll_close(waiter) {
+			Poll::Pending if write.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+			closed => closed,
+		});
 		match closed {
 			Ok(()) => tracing::debug!(fill = %self.request_id, "fill complete"),
-			Err(err) => tracing::debug!(%err, fill = %self.request_id, "fill stream close failed"),
+			Err(err) => return self.fail(writer, err),
 		}
 		Poll::Ready(())
 	}
@@ -5483,11 +5489,31 @@ impl FetchRespond {
 		writer.buffer(&FetchHeader {
 			request_id: self.request_id,
 		})?;
-		wait!(Header => writer.poll_flush(waiter))?;
-		wait!(Body => self.write.poll(waiter, writer))?;
-		// Settle: the writer keeps the stream, and its rank, until the acknowledgement.
+		// Parked on flow control, a group gone stale resets its stream rather than pin it.
+		let header = wait!(Header => match writer.poll_flush(waiter) {
+			Poll::Pending if self.write.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+			flushed => flushed,
+		});
+		if let Err(err) = header {
+			writer.abort(&err);
+			return Poll::Ready(Err(err));
+		}
+		let body = wait!(Body => self.write.poll(waiter, writer));
+		if let Err(err) = body {
+			writer.abort(&err);
+			return Poll::Ready(Err(err));
+		}
+		// Settle: the writer keeps the stream, and its rank, until the acknowledgement, or
+		// until the group expires, which resets it.
 		writer.finish()?;
-		Poll::Ready(wait!(Settle => writer.poll_close(waiter)))
+		let settled = wait!(Settle => match writer.poll_close(waiter) {
+			Poll::Pending if self.write.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+			closed => closed,
+		});
+		if let Err(err) = &settled {
+			writer.abort(err);
+		}
+		Poll::Ready(settled)
 	}
 }
 
@@ -7288,11 +7314,7 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		self.inner.lock().unwrap().stream.offset()
 	}
 
-	fn poll_acked(
-		&self,
-		waiter: &kio::Waiter,
-		offset: &Self::Offset,
-	) -> Poll<Result<crate::transport::poll::Acked, Self::Error>> {
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &Self::Offset) -> Poll<Result<(), Self::Error>> {
 		self.inner.lock().unwrap().stream.poll_acked(waiter, offset)
 	}
 
@@ -7451,6 +7473,12 @@ impl FetchGroupWrite {
 		res
 	}
 
+	/// Whether the group expired, so a written stream awaiting its acknowledgement resets
+	/// rather than hold the connection for stale bytes.
+	fn poll_stale(&mut self, waiter: &kio::Waiter) -> bool {
+		self.group.poll_expired(waiter)
+	}
+
 	fn poll_objects(
 		&mut self,
 		waiter: &kio::Waiter,
@@ -7514,7 +7542,10 @@ impl FetchGroupWrite {
 				}
 				FetchGroupState::Batch { next, payload } => {
 					if let Some(write) = payload {
-						ready!(write.poll(waiter, stream))?;
+						let Poll::Ready(written) = write.poll(waiter, stream) else {
+							return poll_parked(&mut self.group, waiter);
+						};
+						written?;
 						*payload = None;
 						self.index += 1;
 						self.group.keep_alive();
@@ -7556,9 +7587,15 @@ impl FetchGroupWrite {
 					}
 				}
 				FetchGroupState::Partial { frame, chunk } => {
-					ready!(stream.poll_flush(waiter))?;
+					let Poll::Ready(flushed) = stream.poll_flush(waiter) else {
+						return poll_parked(&mut self.group, waiter);
+					};
+					flushed?;
 					if let Some(bytes) = chunk {
-						ready!(stream.poll_write_all(waiter, bytes))?;
+						let Poll::Ready(written) = stream.poll_write_all(waiter, bytes) else {
+							return poll_parked(&mut self.group, waiter);
+						};
+						written?;
 						*chunk = None;
 					}
 					if stream.poll_closed(waiter).is_ready() {
@@ -7748,6 +7785,12 @@ fn poll_given_up(group: &mut group::Consumer, waiter: &kio::Waiter) -> Option<Er
 		Poll::Ready(Err(err)) => Some(err),
 		_ => None,
 	}
+}
+
+/// A fetch write parked on flow control: still pending, unless the group's budget gave it up,
+/// as it does a subgroup stream's, since flow control must not pin a stale group.
+fn poll_parked(group: &mut group::Consumer, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+	poll_given_up(group, waiter).map_or(Poll::Pending, |err| Poll::Ready(Err(err)))
 }
 
 /// Serves one group on its own unidirectional stream in the moq-transport
@@ -14771,6 +14814,125 @@ mod serve_tests {
 		assert_eq!(fetch_object_priorities(&mut buf, version), [Some(55)]);
 	}
 
+	/// A fill sent whole whose FIN the subscriber never acknowledges resets once its group goes
+	/// stale, rather than hold the connection for stale bytes until the subscription ends.
+	#[kio::test]
+	async fn a_fill_resets_once_its_unacknowledged_group_goes_stale() {
+		let version = Version::Draft22;
+		let budget = Duration::from_secs(2);
+		let session = ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_uni_fins(1);
+		let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
+		// Frozen timestamps, so only the wall clock since group 5 arrived convicts group 4.
+		let mut group = h.track.create_group(group::Info { start: 4 }).unwrap();
+		group.write_frame(group.key_time(), b"fill".as_slice()).unwrap();
+		group.finish().unwrap();
+
+		let ranking = Ranking {
+			queue: h.publisher.priority.clone(),
+			group: None,
+			request_id: RequestId(REQUEST_ID),
+			priority: kio::Producer::new(PRIORITY).consume(),
+			publisher: 0,
+			order: Order::Descending,
+			lapse: Lapse::default(),
+		};
+		let opened = AtomicU64::new(0);
+		let fill = FillServe::Group {
+			key: 4,
+			skip: 0,
+			until: None,
+		};
+		let mut run =
+			std::pin::pin!(
+				h.publisher
+					.run_fill(fill, &ranking, h.track.consume(), &opened, ranking.request_id)
+			);
+		let finished = || h.log.trail().iter().any(|(_, sent)| *sent == Sent::Finish);
+		kio::clock::timeout(Duration::from_secs(1), async {
+			while !finished() {
+				assert!(futures::poll!(run.as_mut()).is_pending(), "the FIN is unacknowledged");
+				kio::clock::sleep(Duration::from_millis(1)).await;
+			}
+		})
+		.await
+		.expect("the fill went out whole");
+
+		let mut next = h.track.create_group(group::Info { start: 5 }).unwrap();
+		next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
+		next.finish().unwrap();
+		kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
+		assert!(futures::poll!(run.as_mut()).is_pending(), "still within the budget");
+		assert!(h.log.resets().is_empty());
+
+		kio::clock::sim::advance(Duration::from_millis(1)).await;
+		kio::clock::timeout(budget, run).await.expect("the stale fill resets");
+		assert_eq!(h.log.resets().len(), 1, "the fill's stream reset");
+	}
+
+	/// A standalone FETCH whose FETCH_HEADER is parked on flow control resets once its group
+	/// goes stale, rather than hold the stream and its rank for a response nobody wants.
+	#[kio::test]
+	async fn a_fetch_parked_on_its_header_resets_once_its_group_goes_stale() {
+		for version in FETCH_DRAFTS {
+			let budget = Duration::from_secs(2);
+			// One byte of credit, so the FETCH_HEADER starts and then parks.
+			let session = ScriptedSession::per_stream(vec![Vec::new()]).with_uni_send_window(1);
+			let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
+			// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(group.key_time(), b"fetch".as_slice()).unwrap();
+			group.finish().unwrap();
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let fetch_type = fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 0 },
+			);
+			let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					authorization_token: None,
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type,
+					range_filters: false,
+					fill_timeout: true,
+					properties_wanted: false,
+				},
+			));
+			serve_until(fetching.as_mut(), "the FETCH_HEADER started", || {
+				!data_streams(&h.log).is_empty()
+			})
+			.await;
+
+			let mut next = h.track.create_group(group::Info { start: 1 }).unwrap();
+			next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
+			next.finish().unwrap();
+			kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
+			assert!(
+				futures::poll!(fetching.as_mut()).is_pending(),
+				"{version}: within the budget"
+			);
+			assert!(h.log.resets().is_empty(), "{version}");
+
+			kio::clock::sim::advance(Duration::from_millis(1)).await;
+			let _ = kio::clock::timeout(budget, fetching.as_mut())
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the stale fetch stayed parked"));
+			let resets: Vec<_> = data_streams(&h.log)
+				.into_values()
+				.flatten()
+				.filter(|sent| matches!(sent, Sent::Reset(_)))
+				.collect();
+			assert_eq!(resets.len(), 1, "{version}: the fetch stream reset");
+		}
+	}
+
 	/// The Track Properties block a publisher upstream of a relay sent on `version`: an even
 	/// property the draft defines but moq-net does not implement (OBJECT_DELIVERY_TIMEOUT),
 	/// and an odd one from the application range.
@@ -15174,7 +15336,13 @@ mod serve_tests {
 		let request = h._broadcast.broadcast().reserve_track("cam").unwrap();
 		let dynamic = request.requests();
 		let fetching = request.consume().fetch_group(4, None);
-		let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
+		let mut fetched = dynamic
+			.requested_fill_group()
+			.await
+			.unwrap()
+			.accept(None)
+			.unwrap()
+			.expect("a fresh group");
 		for object in 0..2 {
 			fetched
 				.write_frame(

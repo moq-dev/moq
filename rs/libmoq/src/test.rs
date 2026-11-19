@@ -18,6 +18,19 @@ fn micros(value: u64) -> moq_timestamp {
 	}
 }
 
+/// An anchor at the group containing `value`, unscaled in the track's timescale.
+fn time(value: u64) -> moq_anchor {
+	moq_anchor {
+		kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
+		groups: 0,
+		timestamp: moq_timestamp {
+			value,
+			scale: 0,
+			has_scale: false,
+		},
+	}
+}
+
 /// The timestamp a read points at, which is never NULL.
 fn read_timestamp(timestamp: *const moq_timestamp) -> moq_timestamp {
 	*unsafe { timestamp.as_ref() }.expect("a read always carries a timestamp")
@@ -889,7 +902,7 @@ fn publish_media_owns_its_rendition_before_the_first_keyframe() {
 	// nothing until a keyframe lands.
 	let media = id(publish_video(
 		broadcast,
-		moq_video_format::MOQ_VIDEO_FORMAT_AVC3,
+		moq_video_format::MOQ_VIDEO_FORMAT_H264,
 		&[],
 		None,
 	));
@@ -2726,23 +2739,18 @@ fn raw_track_subscription_options_and_update() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
-	let absolute = |group| moq_anchor {
-		kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-		group,
-		timestamp: moq_timestamp::default(),
-	};
-	// An absolute anchor is a group's start, in the track's microseconds, and an absolute end
-	// is exclusive. The open range starts at the group containing 100 s, the newest one held:
-	// `two`, and every group after it.
+	// A time anchor names the group containing it, in the track's microseconds, and an end
+	// includes its group. The open range starts at the group containing 100 s, the newest one
+	// held: `two`, and every group after it.
 	let ranges = [
 		moq_range {
-			start: absolute(20_000),
-			end: absolute(20_001),
+			start: time(20_000),
+			end: time(20_000),
 			end_present: true,
 		},
 		moq_range {
-			start: absolute(100_000_000),
-			end: absolute(0),
+			start: time(100_000_000),
+			end: time(0),
 			end_present: false,
 		},
 	];
@@ -2787,7 +2795,7 @@ fn raw_track_subscription_options_and_update() {
 	// Replace both ranges with one that ends at `three`, so the read ends once it reads it
 	// and never sees `four`.
 	let bounded = [moq_range {
-		end: absolute(60_001),
+		end: time(60_000),
 		..ranges[0]
 	}];
 	let update = moq_subscription {
@@ -2845,20 +2853,8 @@ fn raw_track_time_anchor() {
 
 	let frame_cb = Callback::new();
 	let ranges = [moq_range {
-		start: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
-			timestamp: moq_timestamp {
-				value: 30_000,
-				scale: 0,
-				has_scale: false,
-			},
-		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			timestamp: moq_timestamp::default(),
-		},
+		start: time(30_000),
+		end: time(0),
 		end_present: false,
 	}];
 	let subscription = moq_subscription {
@@ -2902,6 +2898,62 @@ fn raw_track_time_anchor() {
 	assert_eq!(moq_consume_close(consume), 0);
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A time end includes the group starting at it, so `Time(t - 1)` is a former exclusive end at
+/// `t`. A non-NULL empty list asks for nothing, unlike NULL, and a zeroed anchor names no kind.
+#[test]
+fn subscription_ranges_parse() {
+	let parse = |ranges: &[moq_range], null: bool| {
+		let subscription = moq_subscription {
+			priority: 0,
+			delay: moq_delay::default(),
+			ranges: if null { std::ptr::null() } else { ranges.as_ptr() },
+			ranges_len: ranges.len(),
+			order: 0,
+		};
+		unsafe { crate::api::parse_subscription(&subscription) }.map(|subscription| subscription.ranges)
+	};
+	let span = moq_range {
+		start: time(1_500),
+		end: time(1_999),
+		end_present: true,
+	};
+	assert_eq!(
+		parse(&[span], false).unwrap(),
+		vec![moq_net::track::Range {
+			start: moq_net::track::Anchor::Time(1_500),
+			end: Some(moq_net::track::Anchor::Time(1_999)),
+		}]
+	);
+	assert_eq!(parse(&[], false).unwrap(), Vec::new());
+	assert_eq!(
+		parse(&[], true).unwrap(),
+		moq_net::track::Subscription::default().ranges,
+		"NULL keeps the default"
+	);
+
+	let zeroed = moq_anchor {
+		kind: 0,
+		groups: 0,
+		timestamp: moq_timestamp::default(),
+	};
+	assert!(matches!(
+		parse(&[moq_range { start: zeroed, ..span }], false),
+		Err(crate::Error::InvalidCode)
+	));
+	// An absent end is never read.
+	assert!(
+		parse(
+			&[moq_range {
+				end: zeroed,
+				end_present: false,
+				..span
+			}],
+			false
+		)
+		.is_ok()
+	);
 }
 
 /// An update with a scaled time anchor is refused at the call, keeping its ranges: a time
@@ -2950,14 +3002,10 @@ fn raw_track_update_refuses_a_scaled_time_anchor() {
 	let ranges = [moq_range {
 		start: moq_anchor {
 			kind: moq_anchor_kind::MOQ_ANCHOR_TIME as u32,
-			group: 0,
+			groups: 0,
 			timestamp: micros(0),
 		},
-		end: moq_anchor {
-			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
-			group: 0,
-			timestamp: moq_timestamp::default(),
-		},
+		end: time(0),
 		end_present: false,
 	}];
 	let update = moq_subscription {
@@ -6312,7 +6360,7 @@ fn video_publish_consume() {
 	let broadcast = publish_broadcast(origin, path);
 
 	let init = h264_init();
-	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_H264;
 	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
@@ -7337,7 +7385,7 @@ fn video_raw_decode() {
 	// The init's SPS/PPS only seed catalog metadata; avc3 frames carry their own
 	// inline parameter sets, so the decoder reads the true 320x240 from the wire.
 	let init = h264_init();
-	let format = moq_video_format::MOQ_VIDEO_FORMAT_AVC3;
+	let format = moq_video_format::MOQ_VIDEO_FORMAT_H264;
 	let media = id(publish_video(broadcast, format, &init, None));
 
 	let consume = request_broadcast(origin, path);
@@ -9273,7 +9321,7 @@ fn track_request_media_carries_hints() {
 	let h264 = h264_init();
 	let video_config = moq_video_init {
 		lower: 0,
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 		init: h264.as_ptr(),
 		init_len: h264.len(),
 		label: std::ptr::null(),
@@ -9328,7 +9376,7 @@ fn invalid_hints_are_refused() {
 	let video = |hint: moq_video_hint| {
 		let config = moq_video_init {
 			lower: 0,
-			format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+			format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 			init: h264.as_ptr(),
 			init_len: h264.len(),
 			label: std::ptr::null(),
@@ -9444,7 +9492,7 @@ fn preencoded_rungs_and_rate_control() {
 	let broadcast = publish_broadcast(origin, b"preencoded-rungs");
 	let init = h264_init();
 	let config = |lower| moq_video_init {
-		format: moq_video_format::MOQ_VIDEO_FORMAT_AVC3 as u32,
+		format: moq_video_format::MOQ_VIDEO_FORMAT_H264 as u32,
 		init: init.as_ptr(),
 		init_len: init.len(),
 		label: std::ptr::null(),

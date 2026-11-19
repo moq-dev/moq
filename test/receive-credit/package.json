@@ -8,5 +8,8 @@
 	"dependencies": {
 		"@moq/net": "workspace:*",
 		"@moq/web-transport": "^0.1.6"
+	},
+	"devDependencies": {
+		"typescript": "7.0.2"
 	}
 }

@@ -10698,7 +10698,7 @@ impl TrackServe {
 			(None, Sub::Active(active)) if !fills.is_empty() => active.demand.clone(),
 			(pref, _) => pref,
 		};
-		let request = self.wire_request(pref, opening, producer.idle_newest());
+		let request = self.wire_request(pref, producer.idle_newest().filter(|_| opening));
 		// The demand's ranges and the fills' groups, widened together until they fit.
 		let (request, groups) = match ranged {
 			true => {
@@ -10865,12 +10865,11 @@ impl TrackServe {
 	/// What a SUBSCRIBE carries for the demand `pref`: the subscription and its ranges, or
 	/// `None` when it asks for nothing.
 	///
-	/// `opening` when this opens a subscription for a copy whose newest cached group, while
-	/// idle, is `newest`.
+	/// `newest` when this opens a subscription for a copy whose newest cached group, while
+	/// idle, is that group.
 	fn wire_request(
 		&self,
 		pref: Option<Subscription>,
-		opening: bool,
 		newest: Option<u64>,
 	) -> Option<(Subscription, Vec<lite::Range>)> {
 		// An empty half-open range asks for nothing, and the wire cannot say that: its
@@ -10890,14 +10889,15 @@ impl TrackServe {
 		// the subscriber has no start of its own: a quiet track (a catalog) sends
 		// that group again, which says the cache is current. A lite-07 list keeps
 		// any range of its own, so only one asking just for the live or oldest group
-		// counts.
+		// counts. A copy that cached nothing keeps the subscriber's ranges: no start
+		// would widen a live viewer's ask to every group from the oldest.
 		let idle = subscription.start().is_none()
 			&& (!ranged
 				|| subscription
 					.ranges
 					.iter()
 					.all(|range| range.end.is_none() && matches!(range.start, Anchor::Oldest | Anchor::Relative(0))));
-		if opening && idle {
+		if let Some(newest) = newest.filter(|_| idle) {
 			subscription = subscription.with_start(newest);
 		}
 		wire_ranges(&subscription).map(|ranges| (subscription, ranges))
@@ -10907,7 +10907,7 @@ impl TrackServe {
 	/// registered with its copy pending. `None` when it asks for nothing.
 	fn pipeline(&self, pref: Subscription) -> Result<Option<Pipelined>, Error> {
 		// A copy not accepted yet caches nothing.
-		let Some((subscription, ranges)) = self.wire_request(Some(pref.clone()), true, None) else {
+		let Some((subscription, ranges)) = self.wire_request(Some(pref.clone()), None) else {
 			return Ok(None);
 		};
 		let ranges = match self.subscriber.version.has_ranges() {
@@ -11404,8 +11404,7 @@ impl SharedDatagrams {
 		let producer = serve
 			.source
 			.as_ref()?
-			.create_unlisted_datagrams(serve.name.as_str(), info)
-			.ok()?;
+			.create_unlisted_datagrams(serve.name.as_str(), info)?;
 		let key = (serve.path.clone(), serve.name.clone());
 		serve.subscriber.legacy_datagrams.lock().insert(
 			key.clone(),
@@ -13491,10 +13490,15 @@ impl kio::Task for FetchServeRun {
 							end: frame_end,
 						},
 					) {
-						Ok(producer) => producer,
+						Ok(Some(producer)) => producer,
+						// Already served, as by a concurrent fetch.
+						Ok(None) => {
+							tracing::debug!(track = %self.serve.name, group = self.group, "fetch already served");
+							cancel(stream);
+							return Poll::Ready(());
+						}
 						Err(err) => {
-							// Already served (a concurrent fetch) or the track closed. Nothing failed
-							// upstream: we only stopped wanting the answer.
+							// The track closed. Nothing failed upstream: we only stopped wanting the answer.
 							tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch not served");
 							cancel(stream);
 							return Poll::Ready(());

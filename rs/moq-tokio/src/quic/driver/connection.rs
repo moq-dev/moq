@@ -501,7 +501,7 @@ impl Connection {
 	#[cfg(test)]
 	pub(crate) fn send_released(&self, id: StreamId) -> bool {
 		let mut state = self.0.state.lock();
-		matches!(state.inner.send_stream(id).end(), Err(moq_quic::send::Error::Closed))
+		state.inner.send_stream(id).stopped().is_err()
 	}
 
 	/// The wire counters the driver updates as it sends and receives.
