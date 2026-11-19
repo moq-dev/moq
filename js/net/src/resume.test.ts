@@ -4324,3 +4324,47 @@ test("a group an inner front hands out already failed still continues on the out
 	a.close();
 	b.close();
 });
+
+// Mirrors `an_ended_copy_leaves_a_time_start_to_the_serving_copy` in rs/moq-net/src/model/resume.rs:
+// a copy that failed holds nothing past its last group, so it reaches a time start past that group
+// back to its oldest. The copy continuing the track places it where the track holds it.
+test("a failed copy leaves a time start to the serving copy", async () => {
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	hooks.receiveTrack(ta.producer);
+	hooks.receiveTrack(tb.producer);
+	const front = new Front();
+	front.serve(a.consume());
+	ta.write(64n);
+	const waiting = front.consumer.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	try {
+		const read: bigint[] = [];
+		const reading = (async () => {
+			for (let group = await waiting.recvGroup(); group; group = await waiting.recvGroup()) {
+				read.push(group.start);
+				group.close();
+				if (read.length === 2) return;
+			}
+		})();
+		await settle();
+		// The source fails before the group holding the start arrives.
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		expect(read).toEqual([]);
+		front.serve(b.consume());
+		await settle();
+		// Fetched ahead of the live feed's 66.
+		tb.write(67n);
+		tb.write(66n);
+		await reading;
+		expect(read.sort()).toEqual([66n, 67n]);
+		expect(hooks.servingResolved(waiting)[0]?.start).toBe(66n);
+	} finally {
+		waiting.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});

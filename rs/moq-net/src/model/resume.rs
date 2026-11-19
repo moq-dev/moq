@@ -1364,9 +1364,14 @@ impl Reader {
 			// A ready copy just resolved the replaced ranges against its cache, before its
 			// failover cap raised them, so the reader takes that resolution now.
 			if replaced {
+				let concluded = self.route.end().is_some();
 				for index in (0..self.copies.len()).rev() {
 					if self.window.is_settled() {
 						break;
+					}
+					// As in [`Self::window`], a failed copy leaves the placement to the copy continuing the track.
+					if !concluded && copy_failed(&self.copies[index].track) {
+						continue;
 					}
 					if matches!(self.copies[index].sub, Sub::Ready(_)) {
 						let resolved = self.copies[index].resolved.clone();
@@ -1690,6 +1695,7 @@ impl Reader {
 		let budget = self.mirrored.budget();
 		let floor = if ordered { delivered.floor() } else { 0 };
 		let mut lowest: Option<Candidate> = None;
+		let mut held = false;
 		for index in 0..self.copies.len() {
 			let copy = &mut self.copies[index];
 			// What a replaced copy holds is past the reader's budget once a newer group
@@ -1750,6 +1756,7 @@ impl Reader {
 							&& copy_failed(&self.copies[index].track)
 							&& self.window().is_pending()
 						{
+							held = true;
 							break;
 						}
 						// A copy resolves a time start against the groups it holds, which may place
@@ -1807,6 +1814,11 @@ impl Reader {
 			if late && !copy.replaced && copy.floor.is_some() && Some(copy.generation) == self.generation {
 				self.resumed.get_or_insert_with(|| (None, Vec::new()));
 			}
+		}
+		// A later copy placed the window this pass: a group held back above may now be the lowest.
+		if held && !self.window().is_pending() {
+			drop(lowest);
+			return self.poll_lowest(ordered, parks, delivered, waiter);
 		}
 		if let Some(lowest) = lowest {
 			return Some(Poll::Ready(Ok(Some(lowest))));
@@ -3527,6 +3539,65 @@ mod test {
 		read.sort_unstable();
 		assert_eq!(read, [66, 67]);
 		assert_eq!(joined.resolved()[0].map(|resolved| resolved.start), Some(66));
+		drop(held);
+	}
+
+	/// As [`an_ended_copy_leaves_a_time_start_to_the_serving_copy`], for a reader that replaces
+	/// its ranges while its copy has failed: the replacement places them.
+	#[kio::test]
+	async fn an_ended_copy_leaves_replaced_ranges_to_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let ended = received_copy();
+		routes.serve(ended.consume());
+		write(&ended, 64);
+		let mut live = subscribe(&logical, HOUR);
+		let held = recv(&mut live);
+		assert_eq!(held.start, 64);
+		drop(held);
+
+		ended.clone().abort(Error::Cancel).unwrap();
+		let ranges = live.subscription().with_ranges([track::Range {
+			start: Anchor::Time(66),
+			end: None,
+		}]);
+		live.update(ranges).unwrap();
+		assert_eq!(drain(&mut live, false), Vec::<u64>::new());
+		let serving = received_copy();
+		routes.serve(serving.consume());
+		write(&serving, 67);
+		write(&serving, 66);
+		let mut read = drain(&mut live, false);
+		read.sort_unstable();
+		assert_eq!(read, [66, 67]);
+	}
+
+	/// A failed copy's group held back for a placement goes out in key order once a later copy
+	/// in the same pass places the window below it, rather than being passed over.
+	#[kio::test]
+	async fn a_held_back_group_goes_out_once_a_later_copy_places_the_window() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let ended = received_copy();
+		routes.serve(ended.consume());
+		write(&ended, 64);
+		let mut live = subscribe(&logical, HOUR);
+		let held = recv(&mut live);
+		assert_eq!(held.start, 64);
+
+		ended.clone().abort(Error::Cancel).unwrap();
+		let joined = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([track::Range {
+				start: Anchor::Time(64),
+				end: None,
+			}]);
+		let mut joined = logical.consume().subscribe(joined).now_or_never().unwrap().unwrap();
+		assert_eq!(drain(&mut joined, true), Vec::<u64>::new());
+		let serving = received_copy();
+		write(&serving, 65);
+		routes.serve(serving.consume());
+		assert_eq!(drain(&mut joined, true), [64, 65]);
 		drop(held);
 	}
 

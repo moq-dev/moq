@@ -657,6 +657,10 @@ class Reader implements ResumeSource {
 		const placed = this.#resolution;
 		for (const copy of this.#copies) {
 			if (copy.floor !== undefined || copy.until !== undefined) continue;
+			// A copy whose delivery failed places a time start past its last group as if nothing
+			// followed, but the front's next copy continues the track: only that copy knows which
+			// group holds it, until the track concludes. Mirrors the Rust `Reader::window`.
+			if (!this.route.concluded && copyFailed(copy)) continue;
 			if (!copy.from || !sameRanges(copy.from, ranges)) continue;
 			const own = hooks.servingResolved(copy.sub);
 			placed.resolved = ranges.map((_, index) => placed.resolved[index] ?? own[index]);
@@ -819,7 +823,26 @@ class Reader implements ResumeSource {
 
 	#deliverable(copy: Copy, key: bigint, delivered: Delivered): boolean {
 		const end = copyEnd(copy);
-		return (end === undefined || key < end) && !delivered.has(key);
+		if ((end !== undefined && key >= end) || delivered.has(key)) return false;
+		// A failed copy resolved the reader's ranges as if nothing followed its last group: the
+		// placement a copy continuing the track made decides. Mirrors the Rust `Reader::window`.
+		if (this.route.concluded || !copyFailed(copy)) return true;
+		return this.#placement().some(
+			(range) => range !== undefined && key >= range.start && (range.end === undefined || key < range.end),
+		);
+	}
+
+	/** The reader's ranges as {@link #placed} resolves them now. */
+	#placement(): (Resolved | undefined)[] {
+		const ranges = (this.#shell.subscription.peek() ?? track.Subscription.default()).ranges ?? [{}];
+		const placed = this.#placed(ranges);
+		return ranges.map((_, index) => placed[index]);
+	}
+
+	// Whether a failed copy's next group waits for a copy continuing the track to place the
+	// reader's ranges, which decides whether it goes out. Mirrors the Rust `Reader::poll_lowest`.
+	#waits(copy: Copy): boolean {
+		return !this.route.concluded && copyFailed(copy) && this.#placement().includes(undefined);
 	}
 
 	tryGroup(ordered: boolean, delivered: Delivered, dispositions: boolean): Recv {
@@ -853,7 +876,10 @@ class Reader implements ResumeSource {
 			const copy = this.#copies[index];
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1n);
+				const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
+				// Its group stays there until placed; a drained copy still reports how it ran out.
+				if (this.#waits(copy) && hooks.peekGroup(copy.sub, ordered, newest) !== undefined) break;
+				const recv = take(copy, ordered, newest);
 				if (recv.kind === "group") {
 					if (!this.#deliverable(copy, recv.group.start, delivered)) {
 						recv.group.close();
@@ -1018,7 +1044,7 @@ class Reader implements ResumeSource {
 					ordered,
 					this.#newest === undefined ? undefined : this.#newest + 1n,
 				);
-				if (key === undefined) break;
+				if (key === undefined || this.#waits(copy)) break;
 				if (this.#deliverable(copy, key, delivered)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
 					// bounds the copies it replaced.
