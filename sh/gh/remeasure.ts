@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
 
 /** Whether a published package changed a pin in a planned break. */
 export function changedPins(
@@ -15,6 +15,24 @@ export function changedPins(
 	);
 }
 
+// What wire-compat leaves at the top of its run to explain the matrix it measured.
+const RUN_EVIDENCE = new Set(["versions.json", "measured", "current-help", "released-help", "resolved-js.lock"]);
+
+/** Copy the logs and reports from harness RUNS into DEST, leaving the staged binaries and installs behind. */
+export function keepEvidence(runs: string, dest: string) {
+	// A measurement that failed before its harness began left nothing to keep.
+	if (!existsSync(runs)) return;
+	for (const entry of readdirSync(runs, { recursive: true, withFileTypes: true })) {
+		if (!entry.isFile()) continue;
+		const path = relative(runs, join(entry.parentPath, entry.name));
+		const parts = path.split(sep);
+		if (parts.includes("node_modules")) continue;
+		if (!entry.name.endsWith(".log") && !(parts.length === 2 && RUN_EVIDENCE.has(entry.name))) continue;
+		mkdirSync(dirname(join(dest, path)), { recursive: true });
+		copyFileSync(join(runs, path), join(dest, path));
+	}
+}
+
 function run(command: string, args: string[]) {
 	const result = spawnSync(command, args, { stdio: "inherit" });
 	if (result.error) throw result.error;
@@ -23,8 +41,12 @@ function run(command: string, args: string[]) {
 
 if (import.meta.main) {
 	const directory = ".tmp/remeasure";
+	// Kept runs hold gigabytes of staged binaries, so they live beside the uploaded directory.
+	const runs = resolve(".tmp/remeasure-runs");
+	rmSync(directory, { recursive: true, force: true });
+	rmSync(runs, { recursive: true, force: true });
 	mkdirSync(directory, { recursive: true });
-	process.env.HARNESS_RUNS ??= resolve(directory, "runs");
+	process.env.HARNESS_RUNS = runs;
 	process.env.HARNESS_KEEP = "1";
 	process.env.REMEASURE_REPORT = resolve(directory, "report.txt");
 	let report = "Measurement skipped: published pins are unchanged.";
@@ -33,7 +55,13 @@ if (import.meta.main) {
 	run("bun", ["test/interop/compat/resolve.ts", "resolve", `${directory}/versions.json`]);
 	const releases = JSON.parse(readFileSync(`${directory}/versions.json`, "utf8"));
 	if (process.env.REMEASURE_FORCE === "1" || changedPins(JSON.parse(before), releases)) {
-		run("just", ["test", "wire-compat", "--remeasure"]);
+		try {
+			run("just", ["test", "wire-compat", "--remeasure"]);
+		} finally {
+			// A failed measurement is when the logs matter most.
+			keepEvidence(runs, `${directory}/logs`);
+			rmSync(runs, { recursive: true, force: true });
+		}
 		report = readFileSync(process.env.REMEASURE_REPORT, "utf8");
 	}
 	const changed = before !== readFileSync(file, "utf8");
