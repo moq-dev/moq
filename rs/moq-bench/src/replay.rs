@@ -229,7 +229,7 @@ async fn follow(
 	let mut newest: Option<(moq_net::Instance, u64)> = None;
 	loop {
 		let change = match &serving {
-			None => following.available().await?,
+			None => next(&mut following, &path, &out).await?,
 			Some(broadcast) => {
 				let instance = broadcast.info().instance.clone();
 				let mut seen = newest
@@ -237,7 +237,7 @@ async fn follow(
 					.filter(|(was, _)| Some(was) == instance.as_ref())
 					.map(|(_, group)| *group);
 				let result = tokio::select! {
-					change = following.available() => Ok(change?),
+					change = following.available() => change.map_err(anyhow::Error::from),
 					err = read(broadcast, &path, &reader, &out, gap, &mut seen) => Err(err),
 				};
 				if let (Some(instance), Some(group)) = (instance, seen) {
@@ -250,7 +250,7 @@ async fn follow(
 							path: &path,
 							error: err.to_string(),
 						})?;
-						following.available().await?
+						next(&mut following, &path, &out).await?
 					}
 				}
 			}
@@ -263,6 +263,24 @@ async fn follow(
 			false => Line::Offline { path: &path },
 		};
 		out.write(&line)?;
+	}
+}
+
+/// The next change to what serves `path`. A refusal ends only this path's current read, as a
+/// viewer would take it: the next call waits for the serving route to change.
+async fn next(
+	following: &mut moq_net::origin::Following,
+	path: &str,
+	out: &Sink,
+) -> anyhow::Result<Option<broadcast::Consumer>> {
+	loop {
+		match following.available().await {
+			Ok(change) => return Ok(change),
+			Err(err) => out.write(&Line::Ended {
+				path,
+				error: err.to_string(),
+			})?,
+		}
 	}
 }
 

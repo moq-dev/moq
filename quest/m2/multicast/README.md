@@ -38,9 +38,11 @@ children, the two flaws it found,
 [a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md)
 and [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
 whose fix changes the wire,
-[draining dialed links](/quest/m2/multicast/drain-dialed-links.md), and
-[feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md),
-which the mesh replay found; and on
+[draining dialed links](/quest/m2/multicast/drain-dialed-links.md),
+and two flaws the mesh replay found,
+[feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
+and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
+and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. After the cut come warmth's wire
 ([cache-aware routing](/quest/m3/cache-routing/README.md)),

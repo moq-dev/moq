@@ -55,6 +55,13 @@ class MeshTest(unittest.TestCase):
     def test_nightly_sweep_meshes(self):
         self.assertEqual(replay.load_mesh(HERE / "ring4.toml").diameter(), 2)
 
+    def test_reopen_runs_the_faults_without_a_roll(self):
+        mesh = replay.load_mesh(HERE / "ring4.toml")
+        script = replay.load_script(HERE / "reopen.toml", mesh)
+        self.assertEqual(script.start, "new")
+        self.assertEqual([event["kind"] for event in script.events], ["reopen-link", "reopen-relay", "kill"])
+        self.assertEqual(script.known, [])
+
     def test_half_roll_stops_mid_roll(self):
         mesh = replay.load_mesh(HERE / "ring6.toml")
         script = replay.load_script(HERE / "half-roll.toml", mesh)

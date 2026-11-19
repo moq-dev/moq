@@ -84,6 +84,7 @@ settles, then starts it again. After the script every publisher stops.
 
 [`half-roll.toml`](half-roll.toml) rolls only `a` and `b` and stops: the middle of a roll,
 where a new relay sits between a new one and an old one.
+[`reopen.toml`](reopen.toml) runs the script's faults on the new build alone, with no roll.
 
 ## What fails a run
 
@@ -91,6 +92,7 @@ where a new relay sits between a new one and an old one.
   nothing for `stall`. `stuck` means its follow holds a broadcast whose track ended and
   never handed out another; `starved` means it holds one whose groups stopped.
 - **shown**: once an event settles, a relay still shows a broadcast whose publisher stopped.
+- **hung**: a rolled relay still had not exited 20s after its 10s drain, so the run killed it.
 - **died**: once an event settles, a relay, publisher, reader, or shaper the run meant to
   be running has exited.
 - **noisy**: once every publisher stopped and the mesh settled, a route or announce
