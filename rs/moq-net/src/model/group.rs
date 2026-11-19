@@ -370,9 +370,10 @@ pub(super) struct Head {
 ///
 /// Read from the copy while it holds its frames. Once it fails, its release moves them
 /// here instead, so a plain consumer of the failed copy still reads the abort and pins
-/// nothing, and the frames go with the last reader holding this.
+/// nothing, and the frames go with the last reader holding this. A loan (see
+/// [`Self::lent`]) holds a head with no copy behind it.
 pub(super) struct Handoff {
-	state: kio::ConsumerWeak<GroupState>,
+	state: Option<kio::ConsumerWeak<GroupState>>,
 	salvaged: Mutex<Option<Salvage>>,
 }
 
@@ -387,11 +388,24 @@ impl Handoff {
 	pub(super) fn head(&self) -> Option<Arc<Head>> {
 		// The group's lock first, in `release`'s order: under it the frames are either
 		// still in the copy or already moved here, never in neither.
-		let state = self.state.read();
+		let state = self.state.as_ref().map(|state| state.read());
 		let salvaged = (self.salvaged.lock().unwrap_or_else(PoisonError::into_inner))
 			.as_ref()
 			.map(|salvage| salvage.head.clone());
-		salvaged.or_else(|| state.head().map(Arc::new))
+		salvaged.or_else(|| state?.head().map(Arc::new))
+	}
+
+	/// Hold `head` for a copy of its group still to arrive, which adopts it then, billed to
+	/// that copy's pool and reclaimed like a failed copy's head: under capacity pressure, or
+	/// once idle. `None` when the pool has no room for it.
+	pub(super) fn lent(head: Arc<Head>, cache: &Arc<cache::Track>) -> Option<Arc<Self>> {
+		let bill = cache.hold(head.bytes())?;
+		let handoff = Arc::new(Self {
+			state: None,
+			salvaged: Mutex::new(Some(Salvage { head, bill })),
+		});
+		cache.pool().hold_head(&handoff);
+		Some(handoff)
 	}
 
 	/// Drop the held head when `reclaim`, or once the pool's idle window passed, returning
@@ -415,7 +429,7 @@ impl Head {
 	}
 
 	/// Roughly what holding it costs: payloads, fields, and their slots.
-	pub(super) fn bytes(&self) -> u64 {
+	fn bytes(&self) -> u64 {
 		let payload: u64 = self.entries.iter().map(|entry| entry.frame.payload.len() as u64).sum();
 		let fields: u64 = self
 			.entries
@@ -3999,7 +4013,7 @@ impl Consumer {
 			return handoff;
 		}
 		let shared = Arc::new(Handoff {
-			state: self.cursor.state.weak(),
+			state: Some(self.cursor.state.weak()),
 			salvaged: Mutex::default(),
 		});
 		*handoff = Arc::downgrade(&shared);
@@ -5744,6 +5758,32 @@ mod test {
 		pool.sweep();
 		assert!(handoff.head().is_none(), "the sweep drops a held head past the window");
 		assert_eq!(pool.used(), 0);
+	}
+
+	/// A head lent to a copy for a group still to arrive is billed to that copy's pool like a
+	/// failed copy's held head, and reclaimed the same way: refused when the pool is full, and
+	/// dropped once idle past the window.
+	#[test]
+	fn a_lent_head_is_billed_and_expires_with_the_pool_window() {
+		let source = cache::Track::new(cache::Pool::unbounded(), Default::default(), kio::Weak::new());
+		let mut producer = Producer::new(Info::from(0u64), track::Info::default(), source);
+		producer
+			.write_frame(crate::Timestamp::unscaled(producer.start), Bytes::from_static(b"a"))
+			.unwrap();
+		let head = producer.consume().handoff().head().unwrap();
+
+		let pool = cache::Pool::new(cache::Config::default().with_expiry(std::time::Duration::from_secs(1)));
+		let cache = cache::Track::new(pool.clone(), Default::default(), kio::Weak::new());
+		let loan = Handoff::lent(head.clone(), &cache).expect("room for it");
+		assert!(pool.used() > 0, "billed while lent");
+		pool.step(std::time::Duration::from_secs(2));
+		pool.sweep();
+		assert!(loan.head().is_none(), "the sweep drops an idle loan");
+		assert_eq!(pool.used(), 0);
+
+		let full = cache::Pool::new(cache::Config::default().with_capacity(1));
+		let cache = cache::Track::new(full, Default::default(), kio::Weak::new());
+		assert!(Handoff::lent(head, &cache).is_none(), "a full pool lends nothing");
 	}
 
 	/// The registry the sweep expires held heads from grows with the heads held, not with
