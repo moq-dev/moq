@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location("replay", HERE / "replay.py")
@@ -173,6 +174,18 @@ class ReaderTest(unittest.TestCase):
         self.assertEqual(reader.paths["p"].ended, "no error")
         reader.apply({"ms": 3000, "event": "offline", "path": "p"})
         self.assertIsNone(reader.paths["p"].ended)
+
+
+class KnownTest(unittest.TestCase):
+    def test_a_known_flaw_never_excuses_the_start(self):
+        run = SimpleNamespace(
+            script=SimpleNamespace(known=[{"check": "unfed", "kind": "starved", "quest": "/q.md"}]),
+            violations=[],
+        )
+        for name in ("start", "kill"):
+            replay.Run.violation(run, {"name": name, "kind": name}, "unfed", [{"reader": "a"}], "starved")
+        self.assertNotIn("known", run.violations[0])
+        self.assertEqual(run.violations[1]["known"], "/q.md")
 
 
 class ProcTest(unittest.TestCase):

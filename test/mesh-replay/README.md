@@ -74,7 +74,7 @@ The script ([`script.toml`](script.toml)) is the sequence of events:
 | `settle` | The longest an event waits for quiet and for every reader to read again. |
 | `stall` | How long a reader may read nothing and still count as fed. |
 | `[[events]]` | `roll` (`to = "new"` or `"old"`), `reopen-link` (`link = "a-b"`), `reopen-relay`, `kill`, `end-source` (each `relay = "c"`), with an optional `times`. An event naming no relay takes the one with the most links. |
-| `[[known]]` | A violation a quest already owns: `check`, its `kind`, optionally the event `kind`, and the `quest`. It is reported and does not fail the run. |
+| `[[known]]` | A violation a quest already owns: `check`, its `kind`, optionally the event `kind`, and the `quest`. It is reported and does not fail the run, except at the start, before any fault. |
 
 A roll drains each relay in the mesh file's order with SIGTERM and starts the other
 build on its port once it exits. Reopening a link pauses its shaper for `down`, then

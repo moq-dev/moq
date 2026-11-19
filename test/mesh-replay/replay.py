@@ -911,11 +911,13 @@ class Run:
             self.violation(report, "died", died)
 
     def violation(self, report: dict, check: str, items: list, kind: str | None = None) -> None:
+        # The start is the baseline before any fault, so no known flaw excuses it.
         known = next(
             (
                 k
                 for k in self.script.known
-                if k["check"] == check
+                if report["kind"] != "start"
+                and k["check"] == check
                 and k.get("kind", kind) == kind
                 and k.get("event", report["kind"]) == report["kind"]
             ),
