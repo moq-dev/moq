@@ -258,9 +258,17 @@ impl Window {
 	/// Whether a time start still waiting on the groups held may resolve below `key`: the
 	/// group containing its time starts at or before it, so it may still land below `key`.
 	pub fn waits_below(&self, key: u64) -> bool {
+		self.waiting_below(key).next().is_some()
+	}
+
+	/// The times of the waiting time starts before `key`, as [`Self::waits_below`] finds them.
+	pub fn waiting_below(&self, key: u64) -> impl Iterator<Item = u64> + '_ {
 		self.waiting
 			.iter()
-			.any(|&position| matches!(self.spans[position].anchor, Anchor::Time(time) if time < key))
+			.filter_map(move |&position| match self.spans[position].anchor {
+				Anchor::Time(time) if time < key => Some(time),
+				_ => None,
+			})
 	}
 
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and

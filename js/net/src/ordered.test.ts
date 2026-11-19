@@ -433,3 +433,43 @@ test("a time start folded upstream into an earlier range places from the range c
 	]);
 	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
 });
+
+test("a folded time start wakes its read when the grace for a gap below it passes", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		const producer = receivedTrack();
+		// An oldest-group reader holds the feed open from its answered start, 1000.
+		const oldest = producer.subscribe({ delay: { max: Duration.millis(50) } });
+		hooks.startTrack(producer, { start: 1000n });
+		hooks.timeStarts(producer, [[0n, 1000n]]);
+		// Group 1000's stream reset before its header: only 2000 and the skips below it land.
+		producer.skipGroups(1001n, 2000n);
+		put(producer, 2000n, false);
+		const ordered = producer
+			.subscribe({ delay: { max: Duration.millis(50) }, ranges: [{ start: { time: 1500n } }] })
+			.ordered();
+		expect(items(ordered)).toEqual([]);
+		let read: bigint | undefined;
+		const next = ordered.nextGroup().then((group) => {
+			read = group?.start;
+		});
+		// Let the read settle into its wait, so only a timer can wake it.
+		await flush();
+		clock.jump(Duration.millis(49));
+		await flush();
+		expect(read).toBeUndefined();
+		clock.jump(Duration.millis(1));
+		await flush();
+		expect(read).toBe(2000n);
+		await next;
+		oldest.close();
+	} finally {
+		installed.close();
+	}
+});
+
+// Run every pending microtask and the ones they queue, as a timer firing would.
+async function flush() {
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+}

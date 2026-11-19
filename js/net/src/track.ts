@@ -1068,6 +1068,22 @@ interface TimeStart {
 // static block. Mirrors the Rust `TrackState::landed_through`.
 let landedThrough: (producer: Producer, time: bigint, from: bigint | undefined) => boolean;
 
+// When a received copy's time start at `time`, waiting to be placed, next may place itself with no
+// change to wake its readers: the grace of the lowest gap {@link landedThrough} still waits on
+// folds. Mirrors the Rust `TrackState::time_start_folds`.
+let timeStartFolds: (producer: Producer, time: bigint) => Instant | undefined;
+
+// Where a range asked from an earlier time that reaches `time` started, which upstream folded a
+// range asked from `time` into, so it reports nothing for this time itself.
+function coveringStart(starts: ReadonlyMap<bigint, TimeStart>, time: bigint): bigint | undefined {
+	let covering: [bigint, bigint] | undefined;
+	for (const [asked, reported] of starts) {
+		if (asked >= time || (reported.through !== undefined && reported.through < time)) continue;
+		if (covering === undefined || asked > covering[0]) covering = [asked, reported.start];
+	}
+	return covering?.[1];
+}
+
 /** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
 type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
 
@@ -1583,13 +1599,13 @@ export class Producer {
 				);
 			}
 			producer.#timeStarts = merged;
+			// The answer may place a time start an ordered read waits at.
+			for (const state of [producer.#state, ...producer.#sinks]) state.timelineChanged.update((rev) => rev + 1);
 		};
-		landedThrough = (producer, time, from) => {
-			const first = producer.#arrivals.first();
-			const start = from ?? (first !== undefined && first <= time ? first : undefined);
-			if (start === undefined) return false;
-			const landing = producer.#landing({ start, end: time + 1n, floor: true, grace: producer.#grace() });
-			return landing.next().done === true;
+		landedThrough = (producer, time, from) => producer.#landingThrough(time, from) === undefined;
+		timeStartFolds = (producer, time) => {
+			if (!producer.#wire || producer.#timeStarts.has(time)) return undefined;
+			return producer.#landingThrough(time, coveringStart(producer.#timeStarts, time))?.folds;
 		};
 		hooks.relativeStarts = (producer, starts) => {
 			producer.#relativeStarts = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
@@ -1695,6 +1711,16 @@ export class Producer {
 			for (const run of owedRuns(producer, start, end)) return { key: run.start, folds: run.folds };
 			return undefined;
 		};
+	}
+
+	// Undefined once {@link landedThrough} holds, else the lowest gap it still waits on, with when
+	// its grace folds, if it ever does.
+	#landingThrough(time: bigint, from: bigint | undefined): { folds?: Instant } | undefined {
+		const first = this.#arrivals.first();
+		const start = from ?? (first !== undefined && first <= time ? first : undefined);
+		if (start === undefined) return {};
+		const landing = this.#landing({ start, end: time + 1n, floor: true, grace: this.#grace() }).next();
+		return landing.done ? undefined : { folds: landing.value.folds };
 	}
 
 	// The first group that may still land from the live feed, by the rule a pending tail is judged
@@ -3653,20 +3679,14 @@ export class Subscriber {
 					const start = anchors.starts.get(time)?.start;
 					// The publisher serves nothing at or before it, as for a time older than every group.
 					if (start !== undefined) return start <= time ? { group: start } : "before";
-					// A range asked from an earlier time that reaches this one, which upstream folded this
-					// reader's range into, so it reports nothing for this time itself.
-					let covering: [bigint, bigint] | undefined;
-					for (const [asked, reported] of anchors.starts) {
-						if (asked >= time || (reported.through !== undefined && reported.through < time)) continue;
-						if (covering === undefined || asked > covering[0]) covering = [asked, reported.start];
-					}
+					const covering = coveringStart(anchors.starts, time);
 					if (below !== undefined && (covered(below + 1n, time + 1n, () => true) || index < keys.length)) {
 						return { group: below };
 					}
 					if (below === undefined && covered(0n, time + 1n, () => true)) return "before";
 					// The live feed accounted for every key it could land through the time, so the group
 					// containing it came already: the newest one held, or one since evicted.
-					if (producer && landedThrough(producer, time, covering?.[1])) {
+					if (producer && landedThrough(producer, time, covering)) {
 						return below !== undefined ? { group: below } : "before";
 					}
 					return "unknown";
@@ -5381,6 +5401,21 @@ export class Subscriber {
 		if (this.#dropsSeen) this.#pending = insertDrop(this.#pending, run.start, run.end, hole);
 	}
 
+	// In order, the group a waiting time start resolves to comes first: it starts at or before that
+	// time, below `key`, and may still land. Its landing, the answer placing the start, or the grace
+	// for a gap below it folding wakes the read; a closed track places the start.
+	#waitTimeStart(key: bigint): boolean {
+		const waiting = this.#window.waitingBelow(key);
+		if (waiting.length === 0) return false;
+		const producer = this.#state.producer;
+		for (const time of waiting) {
+			const folds = producer && timeStartFolds(producer, time);
+			if (folds !== undefined) this.#wakeAt(folds.since(Instant.ZERO).asNanos());
+		}
+		this.#state.waitingOrdered = true;
+		return true;
+	}
+
 	// A missing group the subscription still owes holds sequence order until it lands,
 	// is accounted for, or the same drift budget as a buffered group gives up on it.
 	#waitOwed(start: bigint, end: bigint, drift: Drift): boolean {
@@ -5415,6 +5450,7 @@ export class Subscriber {
 		for (const group of this.#state.groups.peek()) {
 			if (group.start < start || !this.#window.contains(group.start)) continue;
 			if (cursor.end !== undefined && group.start >= cursor.end) return undefined;
+			if (ordered && this.#waitTimeStart(group.start)) return undefined;
 			if (!this.#delivered.has(group.start) && !this.#staleAt(group.start, drift)) {
 				return group.start;
 			}
@@ -5461,6 +5497,7 @@ export class Subscriber {
 				index++;
 				continue;
 			}
+			if (this.#waitTimeStart(group.start)) return { kind: "idle" };
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.start, drift)) {

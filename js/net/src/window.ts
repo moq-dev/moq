@@ -518,6 +518,20 @@ export class Window {
 		return started;
 	}
 
+	/**
+	 * The times of the time starts still waiting on the groups held that may resolve below `key`:
+	 * the group containing each starts at or before its time, so it may still land below `key`.
+	 * Mirrors the Rust `Window::waiting_below`.
+	 */
+	waitingBelow(key: bigint): bigint[] {
+		const times: bigint[] = [];
+		for (const position of this.#waiting) {
+			const at = time(this.#spans[position].anchor);
+			if (at !== undefined && at < key) times.push(at);
+		}
+		return times;
+	}
+
 	/** Whether group `key` is in range. Everything is while a relative anchor waits. */
 	contains(key: bigint): boolean {
 		if (this.#pending) return true;

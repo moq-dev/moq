@@ -2075,6 +2075,8 @@ for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
 			expect((await ordered.nextGroup())?.start).toBe(4n);
 			ta.write(6n);
 			tb.write(7n);
+			// The session reports where the range the front asked from time 4 started, as with its START.
+			hooks.timeStarts(tb.producer, [[4n, 7n]]);
 			hooks.startTrack(tb.producer, { start: 7n, requested: 4n });
 			front.serve(b.consume());
 			await settle();

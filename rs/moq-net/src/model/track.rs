@@ -1246,14 +1246,7 @@ impl TrackState {
 			Some(_) => return Containing::Before,
 			None => {}
 		}
-		// A range asked from an earlier time that reaches this one, which upstream folded this
-		// reader's range into, so it reports nothing for this time itself.
-		let covering = self
-			.time_starts
-			.range(..time)
-			.rev()
-			.find(|(_, reported)| reported.through.is_none_or(|through| through >= time))
-			.map(|(_, reported)| reported.start);
+		let covering = self.covering_start(time);
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _))
 				if self.dropped_cover(key.saturating_add(1)..time.saturating_add(1))
@@ -1272,6 +1265,26 @@ impl TrackState {
 		}
 	}
 
+	/// Where a range asked from an earlier time that reaches `time` started, which upstream
+	/// folded a range asked from `time` into, so it reports nothing for this time itself.
+	fn covering_start(&self, time: u64) -> Option<u64> {
+		self.time_starts
+			.range(..time)
+			.rev()
+			.find(|(_, reported)| reported.through.is_none_or(|through| through >= time))
+			.map(|(_, reported)| reported.start)
+	}
+
+	/// When a received copy's time start at `time`, waiting to be placed, next may place
+	/// itself with no change to wake its readers: the arrival grace of the lowest gap
+	/// [`Self::landed_through`] still waits on folds.
+	fn time_start_folds(&self, time: u64) -> Option<crate::time::Instant> {
+		if !self.anchors.received() || self.time_starts.contains_key(&time) {
+			return None;
+		}
+		self.landing_through(time, self.covering_start(time)).flatten()
+	}
+
 	/// Whether the live feed may land nothing more at or below `time` that could contain it:
 	/// every key from `from`, where a range covering the time started, or else from the feed's
 	/// first arrival at or below `time`, through `time` arrived, was dropped, or is no longer
@@ -1280,19 +1293,21 @@ impl TrackState {
 	/// of the group containing the time. Arrival order is not key order, so with neither, a
 	/// lower key may still land.
 	fn landed_through(&self, time: u64, from: Option<u64>) -> bool {
+		self.landing_through(time, from).is_none()
+	}
+
+	/// `None` once [`Self::landed_through`] holds, else `Some` of when the arrival grace of the
+	/// lowest gap it still waits on folds, if it ever does.
+	fn landing_through(&self, time: u64, from: Option<u64>) -> Option<Option<crate::time::Instant>> {
 		if !self.readable() {
-			return false;
+			return Some(None);
 		}
 		let Some(from) = from.or_else(|| self.arrivals.first().filter(|&first| first <= time)) else {
-			return false;
+			return Some(None);
 		};
-		self.find_landable(
-			from..time.saturating_add(1),
-			true,
-			self.arrival_grace(),
-			|_, _| Some(()),
-		)
-		.is_none()
+		self.find_landable(from..time.saturating_add(1), true, self.arrival_grace(), |_, folds| {
+			Some(folds)
+		})
 	}
 
 	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
@@ -9952,10 +9967,21 @@ impl Cursor {
 				}
 				// In order means the group a waiting time start resolves to comes first: it
 				// starts at or before that time, below this group, and may still land. Its
-				// landing, or the answer placing the start, wakes us. Registered before syncing
-				// again, so a change placing it meanwhile is not missed; a closed track places it.
+				// landing, the answer placing the start, or the grace for a gap below it folding
+				// wakes us. Registered before syncing again, so a change placing it meanwhile is
+				// not missed; a closed track places it.
 				if self.filter.window.waits_below(group.start) {
-					let closed = self.poll(waiter, |_| Poll::<Result<()>>::Pending).is_ready();
+					let window = &self.filter.window;
+					let closed = self
+						.poll(waiter, |state| {
+							for time in window.waiting_below(group.start) {
+								if let Some(folds) = state.time_start_folds(time) {
+									state.cache.watch_wall(folds, waiter);
+								}
+							}
+							Poll::<Result<()>>::Pending
+						})
+						.is_ready();
 					self.sync();
 					if !self.filter.window.waits_below(group.start) {
 						continue;
@@ -15611,6 +15637,50 @@ mod test {
 			}
 		}
 		assert_eq!(groups.last(), Some(&3000), "the read goes on past the evicted group");
+	}
+
+	/// A time start folded into an open range waits out the grace of a gap below its time,
+	/// where the group containing it may still land, and that grace folding alone wakes an
+	/// ordered read parked on it, with no change to the track.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_folded_time_start_wakes_its_read_when_a_gap_below_folds() {
+		let grace = replay().budget();
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		elapse(&producer, Duration::ZERO);
+		producer.start_resolved(1000).unwrap();
+		producer.time_starts([(0, 1000, None)]);
+		// Group 1000's stream reset before its header: only 2000 and the skips below it land.
+		producer.skip_groups(1001..2000);
+		write_group(&producer, 2000);
+		let mut ordered = producer
+			.subscribe(replay().with_ranges([Range {
+				start: Anchor::Time(1500),
+				end: None,
+			}]))
+			.ordered();
+
+		let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let waiter = kio::Waiter::new(futures::task::waker(Arc::new(FlagWake(woken.clone()))));
+		assert!(ordered.poll_next_group(&waiter).is_pending(), "1000 may still land");
+		elapse(&producer, grace - Duration::from_millis(1));
+		assert!(!woken.load(Ordering::SeqCst), "woken before the grace");
+		assert!(ordered.poll_next_group(&waiter).is_pending());
+		elapse(&producer, Duration::from_millis(1));
+		assert!(woken.load(Ordering::SeqCst), "the grace never woke the read");
+		let mut read = Vec::new();
+		while let Poll::Ready(item) = ordered.poll_next_group(&waiter) {
+			match item.unwrap().expect("an item") {
+				Item::Group(group) => {
+					read.push(group.start);
+					break;
+				}
+				Item::Gap { .. } => {}
+			}
+		}
+		assert_eq!(read, [2000]);
 	}
 
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its
