@@ -336,20 +336,22 @@ mod tests {
 		Some((name.clone(), config.clone()))
 	}
 
-	async fn collect_groups(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
+	/// Each group `consumer` reads until the track ends: its start, its frames, and its end once
+	/// finished whole.
+	async fn collect_groups(mut consumer: moq_net::track::Subscriber) -> Vec<(u64, usize, Option<u64>)> {
 		let mut groups = Vec::new();
 		while let Some(mut group) = consumer.recv_group().await.unwrap() {
 			let mut frames = 0;
 			while group.next_frame().await.unwrap().is_some() {
 				frames += 1;
 			}
-			groups.push(frames);
+			groups.push((group.start, frames, group.end()));
 		}
 		groups
 	}
 
 	/// An on-demand capture resumes on the same wall clock after releasing its camera and encoder,
-	/// so the idle transition must publish a marker group between the two runs. This uses synthetic
+	/// so the idle transition must end the run before it whole, short of where the next resumes. This uses synthetic
 	/// frames and the software encoder to exercise the transition without capture hardware.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
@@ -393,7 +395,11 @@ mod tests {
 		}
 		let _finished = producer.finish().unwrap();
 
-		assert_eq!(collect_groups(consumer).await, vec![1, 1, 1]);
+		let groups = collect_groups(consumer).await;
+		let [(_, 1, Some(end)), (resumed, 1, _)] = groups[..] else {
+			panic!("one frame per run, the first ended whole: {groups:?}");
+		};
+		assert!(end < resumed, "{groups:?}");
 	}
 
 	#[tokio::test]

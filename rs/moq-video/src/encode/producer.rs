@@ -1376,22 +1376,32 @@ mod tests {
 			.unwrap()
 	}
 
-	/// The frames in each group `consumer` reads, until the track ends.
+	/// Each group `consumer` reads until the track ends: its start, its frames, and its end once
+	/// finished whole.
 	#[cfg(feature = "openh264")]
-	async fn read(mut consumer: moq_net::track::Subscriber) -> Vec<usize> {
+	async fn read(mut consumer: moq_net::track::Subscriber) -> Vec<(u64, usize, Option<u64>)> {
 		let mut groups = Vec::new();
 		while let Some(mut group) = consumer.recv_group().await.unwrap() {
 			let mut frames = 0;
 			while group.next_frame().await.unwrap().is_some() {
 				frames += 1;
 			}
-			groups.push(frames);
+			groups.push((group.start, frames, group.end()));
 		}
 		groups
 	}
 
-	/// A discontinuity drains the encoder and marks the break once, however often it is called,
-	/// and the next frame opens a fresh encoder on a keyframe.
+	/// Two one-frame groups, the first ended whole short of where the second starts: a break.
+	#[cfg(feature = "openh264")]
+	fn assert_break(groups: &[(u64, usize, Option<u64>)]) {
+		let [(_, 1, Some(end)), (resumed, 1, _)] = groups[..] else {
+			panic!("one frame each side of the break, the first group ended whole: {groups:?}");
+		};
+		assert!(end < resumed, "{groups:?}");
+	}
+
+	/// A discontinuity drains the encoder and ends its group whole once, however often it is
+	/// called, and the next frame opens a fresh encoder on a keyframe in a group of its own.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
 	async fn a_discontinuity_marks_the_break_once() {
@@ -1409,10 +1419,10 @@ mod tests {
 		producer.write(frame(&mut micros)).await.unwrap();
 		let _finished = producer.finish().await.unwrap();
 
-		assert_eq!(read(consumer).await, [1, 1, 1]);
+		assert_break(&read(consumer).await);
 	}
 
-	/// A disabled rung's last frames reach the track before its break marker, and it resumes on
+	/// A disabled rung's last frames reach the track before its group ends whole, and it resumes on
 	/// a keyframe, so a subscriber reads the gap as a break rather than a stall.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
@@ -1435,7 +1445,7 @@ mod tests {
 		producer.write(frame(&mut micros)).await.unwrap();
 		let _finished = producer.finish().await.unwrap();
 
-		assert_eq!(read(consumer).await, [1, 1, 1]);
+		assert_break(&read(consumer).await);
 	}
 
 	/// A rung resumed at a ceiling past its declared level publishes a new track, and its
