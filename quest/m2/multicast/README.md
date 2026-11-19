@@ -42,10 +42,7 @@ waits on this epic's children, the other flaw,
 whose fix changes the wire,
 and two flaws the mesh replay found,
 [feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
-and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
-and on
-[route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
-scoped subscriber whose grant is too wide to ask for. It does not wait on
+and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md). It does not wait on
 [warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
 only if the port has landed and passed the mesh replay when the cut is made,
 and otherwise moves to the first wip version after it (maintainer,
@@ -140,7 +137,7 @@ Settled:
    one. Redundant ingest is two relays claiming one Instance. This removes
    the Route Key Parameter with its proof, qualified Node IDs, and routes per
    prefix, and reverses Plan items 18 and 26 of
-   [Routes and announces](/quest/m2/cluster-routes/README.md) (rejected:
+   Routes and announces (rejected:
    every publisher an origin node, as today; measuring both, which doubles
    the prototype).
 4. ✅ **Evidence, not timers.** The route layer is a plain path vector with
@@ -351,6 +348,5 @@ Lessons from the history that bind every child:
 
 ## Related
 
-- [Routes and announces](/quest/m2/cluster-routes/README.md) - the path rule this replaced, and the acceptance fixtures the cut still waits on
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - implements the warmth pick
 - [Route health](/quest/m3/route-health/README.md) - the metadata-only secondary
