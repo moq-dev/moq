@@ -46,7 +46,7 @@ removal, a rename, or a wire, catalog, or format change that is free until
   [finished format](/quest/m3/e2ee-format.md) follows in m3.
 - **Catalog, drafts, and formats.** hang-04 (done: the `sync` section, a version per entry, no video `warmup`, the TS passthrough under
   `mpegts`, one strict rule);
-  [declared ends](/quest/m2/time-addressing/consumers.md), back from m3.
+  declared ends (done: [moq-dev/moq#9192](https://github.com/moq-dev/moq/pull/9192)), back from m3.
 - **Native media and gateways.** [Upstream str0m](https://github.com/moq-dev/moq/pull/8963), which reverses the
   2026-10-30 vendoring.
 - **Bindings.** The C API as `libmoq` (done), reversing 2026-10-25.
@@ -284,7 +284,7 @@ what would need a breaking release had it landed right after the cut:
   returned to m2 on 2026-11-15 (maintainer, on
   [moq-dev/moq#8832](https://github.com/moq-dev/moq/pull/8832)) and became
   the request quest of [cache-aware multicast](/quest/m2/multicast/README.md);
-  [media consumers](/quest/m2/time-addressing/consumers.md) to m3 (its API
+  [media consumers](https://github.com/moq-dev/moq/pull/9192) to m3 (its API
   breaks ride the model; dropping hang's markers is tolerated by readers),
   until it returned to m2 on 2026-11-16;
   [moq-transport time addressing](https://github.com/moq-dev/moq/pull/8918) to m4

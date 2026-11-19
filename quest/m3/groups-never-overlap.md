@@ -60,6 +60,4 @@ Public API: none expected. Wire: none; the draft's group rule tightens.
 
 ## Related
 
-- [Media readers take declared ends from the group](/quest/m2/time-addressing/consumers.md) - a group's declared end (lite-07 GROUP_END) is what a reader bounds it by; this rule keeps every frame below the next start
-
 - [An fMP4 group start never rewinds the decode timeline](/quest/m3/fmp4-group-start-tfdt.md) - a keyframe repeating its predecessor's timestamp would now continue the group; check which of its cases remain
