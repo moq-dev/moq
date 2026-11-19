@@ -64,6 +64,12 @@ const INIT_SHARE: usize = crate::container::consumer::DEFAULT_MAX_BUFFER;
 /// the new track's first sync sample past what was read. A new rendition, a changed sample
 /// entry, or a return that replays media already written fails the export.
 ///
+/// A rendition whose track fails ends alone while another track still reads, and a new
+/// rendition of its medium continues it the same way, under its declared track: a publisher
+/// that loses a source, such as a microphone, lists a replacement under a new name. A new
+/// rendition that joins while a track of its medium still reads waits to continue that one
+/// should it fail, and fails the export once no track of its medium could.
+///
 /// [`poll_next_chunk`](Self::poll_next_chunk) returns the same bytes as a [`Chunk`], which
 /// separates the init segment from a [`Fragment`] carrying whether it begins at a
 /// sync sample and how long it lasts. A segmenting consumer (e.g. an HLS/LL-HLS

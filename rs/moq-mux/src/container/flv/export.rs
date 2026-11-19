@@ -16,7 +16,10 @@
 //! the stream yields are muxed and the rest are ignored. Each pick follows the
 //! catalog until the stream header goes out, then stays, following that rendition to another
 //! track when the catalog moves it (under a new sequence-header tag when its codec config
-//! record changes; a move back in time fails the export). With
+//! record changes; a move back in time fails the export). A pick whose track fails ends alone
+//! while another track still reads, and continues on the best rendition of its kind and codec
+//! that the catalog lists and no track reads, as a publisher that loses a microphone lists the
+//! reopened one under a new name. With
 //! [`with_multitrack`](Export::with_multitrack) every rendition the stream yields
 //! is muxed instead, each as an enhanced-RTMP multitrack track addressed by its own
 //! track id (use this only for a player that advertised the `Multitrack` capability).

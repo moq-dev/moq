@@ -50,7 +50,10 @@ const TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// A rendition the catalog moves to another track (a new `track` or `broadcast`) goes on
 /// under its track number from the new track's first sync frame past what was read, when
 /// the header's TrackEntry still describes it; otherwise, or when it goes back in time, the
-/// export fails.
+/// export fails. A rendition whose track fails ends alone while another track still reads, and
+/// a rendition of its kind that joins after the header continues it the same way: a publisher
+/// that loses a source, such as a microphone, lists a replacement under a new name. One that
+/// joins while a track of its kind still reads waits to continue that one should it fail.
 pub struct Export<S: Stream> {
 	source: crate::Source,
 	catalog: Option<S>,
@@ -699,8 +702,9 @@ impl<S: Stream> Export<S> {
 			active.insert(name.clone(), ());
 		}
 
-		// The MKV `Tracks` element is written once and can't be amended, so reject a
-		// rendition added once the header has been emitted.
+		// The MKV `Tracks` element is written once and can't be amended, so a rendition added
+		// once the header has been emitted only continues a declared track of its kind that
+		// failed ([`Self::settle_spares`]).
 		//
 		// A declared rendition that leaves the catalog (disabled, or retired) keeps its
 		// track and is read to its own end: a disabled rendition idles until it re-enables,
