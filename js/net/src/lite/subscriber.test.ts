@@ -466,6 +466,9 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	await send((w) => claimer(v)(w, Path.from("b/x"), { instance: Instance.random(), hops: [] }));
 	await ok();
 	expect(await b.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
+	// Synced once the reader asks past the region's claim.
+	void b.next();
+	await settle();
 	expect(b.synced.peek()).toBe(true);
 
 	b.close();
