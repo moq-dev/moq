@@ -1628,17 +1628,18 @@ impl Reader {
 	}
 
 	/// Whether the window and the local bounds name a group from `floor` up to `key` the reader
-	/// lacks: one outside the local bounds never lands on a copy.
-	fn owes_below(&mut self, floor: u64, key: u64, delivered: &Delivered) -> bool {
+	/// lacks and that may yet land on copy `index`: one outside the local bounds never lands on a
+	/// copy, nor one that copy declares skipped.
+	fn owes_below(&mut self, index: usize, floor: u64, key: u64, delivered: &Delivered) -> bool {
 		let (start, cap) = self.groups;
 		let key = cap.map_or(key, |cap| key.min(cap));
+		let copy = self.copies[index].track.clone();
 		self.window()
 			.runs(floor.max(start))
 			.take_while(|run| *run.start() < key)
-			.any(|run| {
-				!delivered
-					.gaps(*run.start()..run.end().saturating_add(1).min(key))
-					.is_empty()
+			.flat_map(|run| delivered.gaps(*run.start()..run.end().saturating_add(1).min(key)))
+			.any(|gap| {
+				track::first_open(std::iter::once(gap.start..=gap.end - 1), |at| copy.hole_end(at, false)).is_some()
 			})
 	}
 
@@ -1789,7 +1790,7 @@ impl Reader {
 						if !deliverable || !self.window().contains(key) {
 							// Skipping an ordered cursor past a group the window still owes below
 							// would lose it, though it may yet land on this copy: leave it there.
-							if ordered && deliverable && self.owes_below(floor, key, delivered) {
+							if ordered && deliverable && self.owes_below(index, floor, key, delivered) {
 								break;
 							}
 							let Sub::Ready(sub) = &mut self.copies[index].sub else {
@@ -5645,6 +5646,51 @@ mod test {
 		a.clone().abort(Error::Cancel).unwrap();
 		// Published in order, so its ordered cursor waits on no group between.
 		let b = copy();
+		write(&b, 80);
+		write(&b, 120);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, true), [120]);
+	}
+
+	/// A window group the replacement declares skipped never lands on it, so it is no reason to
+	/// hold its ordered cursor on a group the window leaves out.
+	#[test]
+	fn an_ordered_reader_owes_no_window_group_its_copy_declares_skipped() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		a.anchored();
+		routes.serve(a.consume());
+		write(&a, 10);
+		let mut open = a.create_group(group::Info { start: 100 }).unwrap();
+		open.write_frame(ts(100), b"x".as_ref()).unwrap();
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([
+				track::Range {
+					start: Anchor::Time(10),
+					end: Some(Anchor::Time(30)),
+				},
+				track::Range {
+					start: Anchor::Time(100),
+					end: Some(Anchor::Time(200)),
+				},
+			]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(peek(&mut sub, true).key(), 10);
+		assert_eq!(drain(&mut sub, true), [10]);
+
+		// The replacement places time 100 at group 80, which the window leaves out, and skips the
+		// rest of the first range. Published in order, so its ordered cursor waits on no group
+		// between.
+		a.clone().abort(Error::Cancel).unwrap();
+		let b = copy();
+		b.skip_groups(11..31);
 		write(&b, 80);
 		write(&b, 120);
 		routes.serve(b.consume());

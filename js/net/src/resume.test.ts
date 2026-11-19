@@ -2085,6 +2085,45 @@ test("an ordered resumed reader owes no window group under its local floor", asy
 	}
 });
 
+// A window group the replacement declares skipped never lands on it, so it is no reason to hold
+// its ordered cursor on a group the window leaves out.
+test("an ordered resumed reader owes no window group its copy declares skipped", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(10n);
+	ta.write(100n, 1, false);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({
+		delay: { max: null },
+		ranges: [
+			{ start: { time: 10n }, end: { time: 30n } },
+			{ start: { time: 100n }, end: { time: 200n } },
+		],
+	});
+	const ordered = sub.ordered();
+	try {
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(10n);
+		// The replacement places time 100 at group 80, which the window leaves out, and skips the
+		// rest of the first range.
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		tb.producer.skipGroups(11n, 31n);
+		tb.write(80n);
+		tb.write(120n);
+		front.serve(b.consume());
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(120n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 test("a routed read right after an update picks its group under the new preferences", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

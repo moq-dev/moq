@@ -749,13 +749,23 @@ class Reader implements ResumeSource {
 
 	/**
 	 * Whether the reader's window and cursor name a group from `floor` up to `key` that `delivered`
-	 * lacks: one outside the cursor never lands on a copy. Mirrors the Rust `Reader::owes_below`.
+	 * lacks and that may yet land on `copy`: one outside the cursor never lands on a copy, nor one
+	 * `copy` declares skipped. Mirrors the Rust `Reader::owes_below`.
 	 */
-	#owesBelow(floor: bigint, key: bigint, delivered: Delivered): boolean {
+	#owesBelow(copy: Copy, floor: bigint, key: bigint, delivered: Delivered): boolean {
 		const cursor = this.#shell.cursor.peek();
 		return this.#window()
 			.runs(max(floor, cursor.start), min(key, cursor.end ?? key))
-			.some((run) => delivered.gaps(run.start, run.end).length > 0);
+			.some((run) =>
+				delivered.gaps(run.start, run.end).some((gap) => {
+					for (let at = gap.start; at < gap.end; ) {
+						const past = hooks.holeEnd(copy.sub, at, false);
+						if (past === undefined || past <= at) return true;
+						at = past;
+					}
+					return false;
+				}),
+			);
 	}
 
 	#update(copy: Copy): void {
@@ -1181,7 +1191,7 @@ class Reader implements ResumeSource {
 					break;
 				}
 				// Skipping an ordered cursor past a group the window still owes below would lose it.
-				if (ordered && deliverable && this.#owesBelow(floor, key, delivered)) {
+				if (ordered && deliverable && this.#owesBelow(copy, floor, key, delivered)) {
 					owing.push(copy);
 					break;
 				}
