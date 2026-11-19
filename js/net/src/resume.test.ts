@@ -2318,7 +2318,7 @@ test("a resumed reader drops a taken group outside its window when the offered o
 		expect(hooks.servingResolved(sub).map((range) => range?.start)).toEqual([10n, 100n]);
 		// The replacement holds group 10 from frame 1 only, which a bounded copy gives up with no fill to
 		// ask, and places time 100 at group 80, which the window leaves out.
-		const tb = b.createTrack("seq", { maxAge: null });
+		const tb = defined(b.createTrack("seq", { maxAge: null }));
 		const tail = hooks.receiveGroup(tb, { start: 10n, offset: 1 });
 		tail.writeFrame({ payload: enc.encode("10.1"), timestamp: Timestamp.unscaled(10n) });
 		tail.finish();
