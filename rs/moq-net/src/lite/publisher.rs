@@ -6048,7 +6048,7 @@ enum GroupState {
 		ending: Ending,
 	},
 	/// Every frame is written and the FIN sent: wait for the acknowledgement so a late
-	/// cancel can still reset the stream, and before lite-07 a late expiry too.
+	/// cancel can still reset the stream.
 	Closed {
 		writer: Writer<crate::transport::boxed::SendStream, Version>,
 	},
@@ -6476,22 +6476,13 @@ impl GroupServe {
 					// poll_close releases the stream on completion: the peer acknowledged
 					// everything, so the Drop fallback must not reset the stream and
 					// discard bytes still retransmitting.
-					let res = match writer.poll_close(waiter) {
-						Poll::Ready(res) => res,
-						// Those bytes still hold the connection until acknowledged, so before
-						// lite-07 a group gone stale meanwhile releases them like one still
-						// serving. Lite-07 already said how the group ended, which a reset
-						// would take back.
-						Poll::Pending if !self.ctx.version.has_group_end() && self.group.poll_expired(waiter) => {
-							let GroupState::Closed { writer } = std::mem::replace(&mut self.state, GroupState::Done)
-							else {
-								unreachable!()
-							};
-							writer.abort(&Error::Old);
-							return Poll::Ready(Err(Error::Old));
-						}
-						Poll::Pending => return Poll::Pending,
-					};
+					//
+					// Going stale meanwhile resets nothing: the FIN said the group ended whole,
+					// and a reset takes that back, discarding the tail the peer has yet to read
+					// (quinn clears a reset stream's buffer). A live group's successor usually
+					// lands before its FIN is acknowledged, so a zero budget would cut nearly
+					// every group.
+					let res = ready!(writer.poll_close(waiter));
 					self.state = GroupState::Done;
 					return Poll::Ready(res.map(|()| {
 						tracing::debug!(key = self.key, "finished group");
@@ -7491,10 +7482,10 @@ mod serve_group_test {
 		);
 	}
 
-	/// A FIN holds the group's bytes until the peer acknowledges it, so a group that
-	/// goes stale while waiting still expires instead of pinning them.
+	/// A group whose FIN went out is whole on the wire, so going stale before the
+	/// acknowledgement resets nothing: a reset would discard the tail the peer has yet to read.
 	#[kio::test]
-	async fn unacknowledged_fin_expires_with_the_group() {
+	async fn an_unacknowledged_fin_outlives_its_group_going_stale() {
 		let session = SinkSession::new(Log::default()).with_unacked_fin();
 		let log = session.log.clone();
 		let steer = kio::Producer::new(Steer::default());
@@ -7535,8 +7526,11 @@ mod serve_group_test {
 			.unwrap();
 		edge.finish().unwrap();
 
-		assert!(matches!(futures::poll!(serve.as_mut()), Poll::Ready(Err(Error::Old))));
-		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+		assert!(
+			futures::poll!(serve.as_mut()).is_pending(),
+			"still awaiting the acknowledgement"
+		);
+		assert!(log.resets().is_empty(), "the stale group's stream is not reset");
 	}
 
 	/// The transport keeps scheduling a finished stream's retransmissions until the
@@ -8651,11 +8645,9 @@ mod serve_group_test {
 		}
 	}
 
-	/// A group whose stream wrote its FIN but goes stale before the acknowledgement is never
-	/// served again, though the subscriber may have read the first stream whole. Before lite-07
-	/// the stream resets with OLD and a stale drop names it, which is final even when a later
-	/// update widens the budget; lite-07 leaves a stream whose end it wrote alone, and needs no
-	/// drop.
+	/// A group whose stream wrote its FIN but goes stale before the acknowledgement is left
+	/// alone, with no reset and no drop, and is never served again when a later update widens
+	/// the budget.
 	#[kio::test]
 	async fn a_stale_unacknowledged_fin_is_never_served_again() {
 		for version in [Version::Lite06, Version::Lite07] {
@@ -8693,12 +8685,8 @@ mod serve_group_test {
 			write_group(&mut track, 1, 1000);
 			write_group(&mut track, 2, 6000);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-			let (dropped, resets): (&[(u64, u64)], &[u32]) = match version.has_group_end() {
-				true => (&[], &[]),
-				false => (&[(0, 0)], &[StreamError::Old.to_code()]),
-			};
-			assert_eq!(drops(&mut writer, &log, version).await, dropped, "{version}");
-			assert_eq!(session.resets(), resets, "{version}");
+			assert!(drops(&mut writer, &log, version).await.is_empty(), "{version}");
+			assert!(session.resets().is_empty(), "{version}");
 
 			let opened = run.ctx.outcomes.opened.load(Ordering::Relaxed);
 			run.update(update(Duration::from_secs(10)));
@@ -8708,7 +8696,7 @@ mod serve_group_test {
 				opened,
 				"{version}: group 0 is not served again"
 			);
-			assert_eq!(drops(&mut writer, &log, version).await, dropped, "{version}");
+			assert!(drops(&mut writer, &log, version).await.is_empty(), "{version}");
 		}
 	}
 
