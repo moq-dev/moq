@@ -367,8 +367,9 @@ def withdrawn_twice(path: Follow, start: float, end: float) -> bool:
     return False
 
 
-def interruption(path: Follow, start: float, end: float, gap: float) -> tuple[float, int]:
-    """The longest pause in arrivals overlapping [start, end], and the groups it missed."""
+def interruption(path: Follow, start: float, end: float, gap: float, known: float | None = None) -> tuple[float, int]:
+    """The longest pause in arrivals overlapping [start, end], and the groups it missed. `known` is
+    when the reader last reported, so a pause still going is measured to then, not to `end`."""
     longest, missed = 0.0, 0
     for begin, finish, lost in path.gaps:
         if finish >= start and begin <= end:
@@ -377,8 +378,11 @@ def interruption(path: Follow, start: float, end: float, gap: float) -> tuple[fl
     # A pause still going at the end of the window counts up to it; a path never fed, all of it.
     if path.last is None:
         longest = end - start
-    elif end - path.last > gap:
-        longest = max(longest, end - path.last)
+    else:
+        # A gap logged after the status line moved `last` past it, so that pause already ended.
+        still = min(end, max(known if known is not None else end, path.last)) - path.last
+        if still > gap:
+            longest = max(longest, still)
     return longest, missed
 
 
@@ -825,7 +829,7 @@ class Run:
             known = max(start, min(end, relay.readout.status_at))
             for path, state in relay.readout.paths.items():
                 source = path.split("/")[1]
-                longest, missed = interruption(state, start, known, gap)
+                longest, missed = interruption(state, start, end, gap, known)
                 rows.append(
                     {
                         "reader": relay.name,

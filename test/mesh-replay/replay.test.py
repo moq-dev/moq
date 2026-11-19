@@ -187,6 +187,10 @@ class ReaderReportTest(unittest.TestCase):
         # The window ends almost a second after the reader last reported, as every window may.
         report = replay.Run.reader_report(run, 1.0, 6.9, {"c"})
         self.assertEqual(report["all"]["interrupted"], 0)
+        # A gap that ended after that status line still counts in full.
+        readout.apply({"ms": 6800, "event": "gap", "path": "replay/b/0", "from": 6100, "missed": 6})
+        report = replay.Run.reader_report(run, 1.0, 6.9, {"c"})
+        self.assertEqual((report["all"]["interrupted"], report["all"]["missed"]), (1, 6))
 
 
 class KnownTest(unittest.TestCase):
