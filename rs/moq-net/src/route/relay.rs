@@ -2025,6 +2025,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let mut unclaimed = Vec::new();
 		let mut lost = Vec::new();
 		let mut ended = Vec::new();
+		// What each claim this message lost was a copy of, and at which epoch.
+		let mut gone = Vec::new();
 		for (broadcast, change) in &changes {
 			match change {
 				Change::Live(claim) => {
@@ -2036,8 +2038,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				Change::Ended | Change::Lost => {
 					if let Some(claim) = known.items.remove(broadcast) {
 						unclaimed.push(broadcast.clone());
-						if *change == Change::Ended {
-							ended.push((broadcast.clone(), of(&claim, origin), claim.item.epoch()));
+						match change {
+							Change::Ended => ended.push((broadcast.clone(), of(&claim, origin), claim.item.epoch())),
+							_ => gone.push((broadcast.clone(), of(&claim, origin), claim.item.epoch())),
 						}
 						// `restate` keeps its own claim's source.
 						if *change == Change::Lost && !own {
@@ -2090,12 +2093,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		}
 		// Its publisher ended the claim: every copy of it standing now is stale, and this
 		// node's own, taken across a grant from one, ends with it.
-		let lost: BTreeSet<Broadcast<I>> = (changes.iter())
-			.filter(|(_, change)| *change == Change::Lost)
-			.map(|(broadcast, _)| broadcast.clone())
-			.collect();
 		for (broadcast, of, epoch) in ended {
-			for held in self.withdraw(&broadcast, of, epoch, &lost) {
+			for held in self.withdraw(&broadcast, of, epoch, &gone) {
 				if self.givers.contains_key(&held) {
 					self.restate(held, Change::Ended);
 				}
@@ -2106,13 +2105,14 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// Hold back each copy standing now of the claim of `broadcast` its publisher ended,
 	/// `ended`, at no newer than `epoch`, at every path a copy is presented at: at or below
 	/// the claim's own prefix, lowered by as many segments. Returns the broadcasts where
-	/// any stands. `lost` are the broadcasts the same message lost a claim of.
+	/// any stands. `lost` are the claims the same message lost, each with what it was a
+	/// copy of and its epoch.
 	fn withdraw(
 		&mut self,
 		broadcast: &Broadcast<I>,
 		ended: Of,
 		epoch: u64,
-		lost: &BTreeSet<Broadcast<I>>,
+		lost: &[(Broadcast<I>, Of, u64)],
 	) -> Vec<Broadcast<I>> {
 		let (path, instance) = broadcast;
 		let (announcer, above) = ended;
@@ -2156,9 +2156,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			record.epoch = record.epoch.max(epoch);
 			record.origins.extend(origins);
 			record.peers.extend(peers);
-			// The reader there showed the copy, a claim that stands, or one that went with
-			// this end: one lost waits out the debounce.
-			if !lost.contains(&here) {
+			// The reader there showed a copy, a claim that stands, or one that went with this
+			// end: a lost claim that was no copy of the ended one waits out the debounce.
+			let other =
+				|(at, by, at_epoch): &(Broadcast<I>, Of, u64)| *at == here && !(*by == of && *at_epoch <= epoch);
+			if !lost.iter().any(other) {
 				self.ended.insert(here.clone());
 			}
 			self.dirty.insert(here.clone());
@@ -4208,6 +4210,39 @@ mod tests {
 		let shown = router.shown().get(&(7, p("live/hd"))).cloned();
 		let shown = shown.expect("the lost claim shows for the debounce");
 		assert!(!shown.available);
+	}
+
+	/// A copy of an ended claim that the same message loses ends with it: the publisher's
+	/// end covers every copy.
+	#[test]
+	fn a_copy_lost_beside_its_ended_claim_ends() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		router.recv(4, route(4, 4, 2)).unwrap();
+		let live = |path: &str, chain: Vec<Id>, above: u64| {
+			let Change::Live(claim) = chained(chain) else {
+				unreachable!("a live claim");
+			};
+			let item = Run { epoch: 0, above };
+			((p(path), 7), Change::Live(Claim { item, ..claim }))
+		};
+		let claims = |origin: Id, changes, floor: Rev| Msg::Claims {
+			origin: node(origin),
+			changes,
+			floor,
+		};
+		let changes = vec![live("live", vec![9, 2], 0), live("live/hd", vec![9, 2], 1)];
+		router.recv(2, claims(2, changes, 1)).unwrap();
+		router
+			.recv(4, claims(4, vec![live("live/hd", vec![9, 4], 1)], 1))
+			.unwrap();
+		assert!(router.shown().contains_key(&(7, p("live/hd"))));
+
+		let changes = vec![((p("live"), 7), Change::Ended), ((p("live/hd"), 7), Change::Lost)];
+		router.recv(2, claims(2, changes, 2)).unwrap();
+		assert!(!router.shown().contains_key(&(7, p("live/hd"))), "ended, not lost");
 	}
 
 	/// A publisher that withdraws its claim and announces it again at the same epoch, as
