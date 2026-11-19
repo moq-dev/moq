@@ -22133,7 +22133,10 @@ rec {
           {
             name = "kio";
             packageId = "kio";
-            features = [ "sim" ];
+            features = [
+              "manual"
+              "sim"
+            ];
           }
           {
             name = "moq-congestion";
