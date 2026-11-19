@@ -11,8 +11,11 @@ name: Gate cost
 # or more.
 #
 # Its own schedule rather than Nightly's: it holds a queue runner throughout,
-# so it runs at the hour the merge queue lands the fewest PRs, where it slows
-# the queue least and the queue adds the least noise to its timings.
+# so it aims for the queue's quietest hours, 12:00 to 16:00 UTC, where it slows
+# the queue least and the queue adds the least noise to its timings. GitHub
+# fires this repository's schedules 6 to 10 hours late (Nightly's 07:00 started
+# between 13:50 and 16:35 in November), so the cron sits that much earlier;
+# move it if that lag changes.
 
 permissions:
   contents: read
@@ -20,7 +23,7 @@ permissions:
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 11 * * *"
+    - cron: "17 5 * * *"
 
 jobs:
   gate-cost:
