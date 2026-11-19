@@ -976,7 +976,7 @@ class Rendition {
 	// A container gap keeps the clock, and the codec unless the media resumes at or below a picture
 	// already fed to it (see #resetAtKeyframe): resetting at every gap would visibly stall each group
 	// whose tail a zero max delay gave up on. Only a declared end followed by a later group establishes
-	// another timeline; a marker from older history cannot end live media.
+	// another timeline; an end from older history cannot end live media.
 	#onRead(read: Container.Read, latest: bigint | undefined): void {
 		if (read.kind === "gap") {
 			if (latest !== undefined) this.#holed = true;

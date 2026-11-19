@@ -190,112 +190,107 @@ test("Legacy Producer accepts open-GOP leading pictures above the previous group
 	producer.finish();
 });
 
-test("Legacy Producer writes a duration marker at the next keyframe", async () => {
+test("Legacy Producer ends a group whole at the next keyframe, with no marker", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([0xde, 0xad]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([0xbe, 0xef]), Duration.micros(10_000), false);
 	producer.encode(new Uint8Array([0xca, 0xfe]), Duration.micros(20_000), true);
 	producer.finish();
 
-	const group = await subscriber.recvGroup();
-	expect(group).toBeDefined();
-	const frames: { timestamp: number; size: number }[] = [];
-	for (;;) {
-		const frame = await group?.readFrame();
-		if (!frame) break;
-		const [timestamp, payload] = Varint.decode(frame.payload);
-		frames.push({ timestamp: timestamp, size: payload.byteLength });
-	}
-	expect(frames).toEqual([
-		{ timestamp: 0, size: 2 },
-		{ timestamp: 10_000, size: 2 },
-		{ timestamp: 20_000, size: 0 },
+	expect(await readGroups(subscriber, 20_000n)).toEqual([
+		[
+			0n,
+			20_000n,
+			[
+				[0, 2],
+				[10_000, 2],
+			],
+		],
+		// The tail ends where the cadence puts it.
+		[20_000n, 30_000n, [[20_000, 2]]],
 	]);
 });
 
-test("Legacy Producer omits a reordered group's presentation endpoint marker", async () => {
+// A reordered group's presentation end bounds no frame in decode order, so only an explicit end
+// closes it whole.
+test("Legacy Producer ends a reordered group whole only at an explicit end", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 120_000, 40_000, 80_000].entries()) {
 		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), index === 0);
 	}
 	producer.encode(new Uint8Array([1]), Duration.micros(160_000), true);
-	producer.discontinuity(Duration.micros(200_000));
+	producer.encode(new Uint8Array([1]), Duration.micros(240_000), false);
+	producer.encode(new Uint8Array([1]), Duration.micros(200_000), false);
+	producer.discontinuity(Duration.micros(280_000));
 	producer.finish();
-	const group = await subscriber.recvGroup();
-	expect(group).toBeDefined();
-	let count = 0;
-	while (await group?.readFrame()) count++;
-	expect(count).toBe(4);
-	const next = await subscriber.recvGroup();
-	expect(next).toBeDefined();
-	await next?.readFrame();
-	const marker = await next?.readFrame();
-	expect(marker).toBeDefined();
-	if (!marker) throw new Error("expected a presentation endpoint marker");
-	const [timestamp, payload] = Varint.decode(marker.payload);
-	expect(timestamp).toBe(200_000);
-	expect(payload.byteLength).toBe(0);
+
+	expect((await readGroups(subscriber, 160_000n)).map(([start, end]) => [start, end])).toEqual([
+		[0n, undefined],
+		[160_000n, 280_000n],
+	]);
 });
 
-test("Legacy Producer estimates the tail from the current cadence", async () => {
+test("Legacy Producer ends the tail whole where the current cadence puts it", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	for (const [index, timestamp] of [0, 16_000, 32_000, 65_000, 98_000].entries()) {
 		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), index === 0);
 	}
 	producer.finish();
-	const group = await subscriber.recvGroup();
-	expect(group).toBeDefined();
-	let end = 0;
-	for (;;) {
-		const frame = await group?.readFrame();
-		if (!frame) break;
-		const [timestamp, payload] = Varint.decode(frame.payload);
-		if (!payload.byteLength) end = timestamp;
+	const [[, end, frames]] = await readGroups(subscriber, 0n);
+	expect(end).toBe(131_000n);
+	expect(frames).toHaveLength(5);
+});
+
+// A data track's items have no cadence, so its tail ends whole only where a caller says.
+test("Legacy Producer estimates no end for a data track's tail", async () => {
+	const track = micro("data");
+	const subscriber = replay(track);
+	const producer = new LegacyProducer(track, new LegacyFormat("data"));
+	for (const timestamp of [0, 10_000, 20_000]) {
+		producer.encode(new Uint8Array([1]), Duration.micros(timestamp), timestamp === 0);
 	}
-	expect(end).toBe(131_000);
+	producer.finish();
+	const [[, end]] = await readGroups(subscriber, 0n);
+	expect(end).toBeUndefined();
 });
 
 test("Legacy Producer rejects a backwards discontinuity without closing the group", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
 	expect(() => producer.discontinuity(Duration.micros(10_000))).toThrow();
 	producer.encode(new Uint8Array([2]), Duration.micros(30_000), false);
 	producer.discontinuity(Duration.micros(35_000));
 	producer.finish();
-	const group = await subscriber.recvGroup();
-	const timestamps = [];
-	for (;;) {
-		const frame = await group?.readFrame();
-		if (!frame) break;
-		timestamps.push(Varint.decode(frame.payload)[0]);
-	}
-	expect(timestamps).toEqual([20_000, 30_000, 35_000]);
+	expect(await readGroups(subscriber, 20_000n)).toEqual([
+		[
+			20_000n,
+			35_000n,
+			[
+				[20_000, 1],
+				[30_000, 1],
+			],
+		],
+	]);
 });
 
 test("Legacy Producer keeps the cadence after rejecting a backwards discontinuity", async () => {
 	const track = micro("test");
-	const subscriber = track.subscribe({ delay: { max: Duration.millis(30_000) } });
+	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
 	producer.encode(new Uint8Array([2]), Duration.micros(30_000), false);
 	expect(() => producer.discontinuity(Duration.micros(10_000))).toThrow();
 	producer.finish();
-	const group = await subscriber.recvGroup();
-	const timestamps = [];
-	for (;;) {
-		const frame = await group?.readFrame();
-		if (!frame) break;
-		timestamps.push(Varint.decode(frame.payload)[0]);
-	}
-	expect(timestamps).toEqual([20_000, 30_000, 40_000]);
+	const [[, end]] = await readGroups(subscriber, 20_000n);
+	expect(end).toBe(40_000n);
 });
 
 test("Legacy Producer refuses a keyframe that rewinds the timeline", () => {
@@ -309,9 +304,9 @@ test("Legacy Producer refuses a keyframe that rewinds the timeline", () => {
 	producer.finish();
 });
 
-/** Read every group a subscriber is served until `last`, as (sequence, [timestamp, payload size][]). */
+/** Read every group a subscriber is served until `last`, as (start, whole end, [timestamp, payload size][]). */
 async function readGroups(subscriber: Track.Subscriber, last: bigint) {
-	const groups: [bigint, [number, number][]][] = [];
+	const groups: [bigint, bigint | undefined, [number, number][]][] = [];
 	for (;;) {
 		const group = await subscriber.recvGroup();
 		if (!group) throw new Error("track ended before the last group");
@@ -322,32 +317,31 @@ async function readGroups(subscriber: Track.Subscriber, last: bigint) {
 			const [timestamp, payload] = Varint.decode(frame.payload);
 			frames.push([timestamp, payload.byteLength]);
 		}
-		groups.push([group.start, frames]);
+		groups.push([group.start, group.end, frames]);
 		if (group.start === last) return groups;
 	}
 }
 
-test("Legacy Producer discontinuity marks the break with one empty frame at the live edge", async () => {
+test("Legacy Producer discontinuity ends a lone frame's group one unit past it, writing no group", async () => {
 	const track = micro("test");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("audio"));
 	producer.encode(new Uint8Array([1]), Duration.micros(0), true);
 	producer.encode(new Uint8Array([1]), Duration.micros(20_000), true);
 	producer.discontinuity();
-	producer.discontinuity(); // nothing new to mark
+	producer.discontinuity(); // no group left open to end
 	producer.encode(new Uint8Array([1]), Duration.micros(5_000_000), true);
 	producer.finish();
 
-	// The marker can't start below the newest frame, so it starts just past the newest group.
+	// A frame with no duration reaches only its start, and a group's end has to pass it.
 	expect(await readGroups(subscriber, 5_000_000n)).toEqual([
-		[0n, [[0, 1]]],
-		[20_000n, [[20_000, 1]]],
-		[20_001n, [[20_001, 0]]],
-		[5_000_000n, [[5_000_000, 1]]],
+		[0n, 20_000n, [[0, 1]]],
+		[20_000n, 20_001n, [[20_000, 1]]],
+		[5_000_000n, undefined, [[5_000_000, 1]]],
 	]);
 });
 
-test("Legacy Producer discontinuity marks the break at the caller's end", async () => {
+test("Legacy Producer discontinuity ends the group whole at the caller's end", async () => {
 	const track = micro("test");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
@@ -355,20 +349,10 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 	producer.discontinuity(Duration.micros(33_000));
 	producer.finish();
 
-	// The marker starts one microsecond before the edge, so media resuming right at it follows.
-	expect(await readGroups(subscriber, 32_999n)).toEqual([
-		[
-			0n,
-			[
-				[0, 1],
-				[33_000, 0],
-			],
-		],
-		[32_999n, [[32_999, 0]]],
-	]);
+	expect(await readGroups(subscriber, 0n)).toEqual([[0n, 33_000n, [[0, 1]]]]);
 });
 
-test("Legacy Producer discontinuity writes no end estimated from the cadence", async () => {
+test("Legacy Producer discontinuity ends the group at its furthest frame, not the cadence", async () => {
 	const track = micro("test");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
@@ -383,26 +367,26 @@ test("Legacy Producer discontinuity writes no end estimated from the cadence", a
 	expect(await readGroups(subscriber, 80_000n)).toEqual([
 		[
 			0n,
+			66_000n,
 			[
 				[0, 1],
 				[33_000, 1],
 				[66_000, 1],
 			],
 		],
-		[66_000n, [[66_000, 0]]],
-		[80_000n, [[80_000, 1]]],
+		[80_000n, undefined, [[80_000, 1]]],
 	]);
 });
 
-test("Legacy Producer discontinuity marks nothing before any frame", async () => {
+test("Legacy Producer discontinuity writes nothing before any frame", async () => {
 	const empty = micro("empty");
 	new LegacyProducer(empty, new LegacyFormat("video")).discontinuity();
 	expect(empty.largest()).toBeUndefined();
 });
 
-// An empty payload is data on a data track, so its marker is an object with no bytes, which reads
-// as an end where the reader got to rather than as a gap.
-test("Legacy Producer discontinuity on a data track reads as an end at the edge", async () => {
+// A data track's break ends its group whole too, which reads as an end once the next group starts
+// past it.
+test("Legacy Producer discontinuity on a data track reads as an end", async () => {
 	const track = micro("data");
 	const subscriber = replay(track);
 	const producer = new LegacyProducer(track, new LegacyFormat("data"));
@@ -418,12 +402,10 @@ test("Legacy Producer discontinuity on a data track reads as an end at the edge"
 	});
 	const items: string[] = [];
 	for (let read = await consumer.next(); read; read = await consumer.next()) items.push(describe(read));
-	expect(items).toEqual(["0", "20000", "end 20000", "5000000"]);
+	expect(items).toEqual(["0", "20000", "end 20001", "5000000"]);
 	consumer.close();
 });
 
-// A group's reach runs to its successor's first frame, so without the marker the group before a
-// pause would stretch across the whole gap and read as live to anyone joining after the resume.
 // A data track's marker is alone in its group, so one sharing it is refused rather than read as
 // a break or dropped in silence.
 test("Consumer refuses a data marker that shares its group", async () => {
@@ -450,6 +432,8 @@ test("Consumer refuses a data marker that shares its group", async () => {
 	}
 });
 
+// A group's reach runs to its successor's first frame, so without its end the group before a pause
+// would stretch across the whole gap and read as live to anyone joining after the resume.
 test("Legacy Producer discontinuity keeps pre-pause media from reading as live", async () => {
 	const track = micro("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
@@ -460,7 +444,7 @@ test("Legacy Producer discontinuity keeps pre-pause media from reading as live",
 	producer.finish();
 
 	const subscriber = track.subscribe({ delay: { max: Duration.millis(1_000) } });
-	expect((await readGroups(subscriber, 5_000_000n)).map(([start]) => start)).toEqual([33_000n, 5_000_000n]);
+	expect((await readGroups(subscriber, 5_000_000n)).map(([start]) => start)).toEqual([5_000_000n]);
 });
 
 test("LegacyFormat throws on truncated input", () => {

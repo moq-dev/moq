@@ -682,7 +682,7 @@ export class Encoder {
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
 				// The broadcast owns this static track across gaps (a disable, or with `onDemand: "all"` a demand
-				// gap). Close the current group, marking the break so a later subscriber resumes on the same
+				// gap). End the current group whole at the break, so a later subscriber resumes on the same
 				// track without the pre-gap group reading as live. A fatal encoder error aborts the track instead.
 				if (track.closed.peek() === undefined) producer.discontinuity();
 			}
