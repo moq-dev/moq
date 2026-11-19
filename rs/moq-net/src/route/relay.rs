@@ -4154,7 +4154,9 @@ mod tests {
 		};
 		let changes = vec![live("live", vec![9, 2], 0), live("live/hd", vec![8, 2], 0)];
 		router.recv(2, claims(2, changes, 1)).unwrap();
-		router.recv(4, claims(4, vec![live("live/hd", vec![9, 4], 1)], 1)).unwrap();
+		router
+			.recv(4, claims(4, vec![live("live/hd", vec![9, 4], 1)], 1))
+			.unwrap();
 		let shown = |router: &Router<usize, u64, Run>| router.shown().get(&(7, p("live/hd"))).cloned();
 		assert_eq!(shown(&router).map(|shown| shown.item.above), Some(0));
 
