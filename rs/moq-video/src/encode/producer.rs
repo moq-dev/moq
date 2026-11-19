@@ -749,8 +749,9 @@ impl Producer {
 	/// opens. A failed open changes nothing.
 	///
 	/// One that cannot retune still opens, at the ceiling, which the grant then follows on from.
-	/// A rung disables instead, as a refused resume does, since the ceiling would overshoot its
-	/// grant, and from then on resumes only at its full ceiling: `None` then.
+	/// A rung whose lower rendition still serves disables instead, as a refused resume does, since
+	/// the ceiling would overshoot its grant, and from then on resumes only at its full ceiling:
+	/// `None` then.
 	async fn reopen(&mut self, wanted: Rate) -> Result<Option<Sink>, Error> {
 		let mut sink = Sink::open(&self.config).await?;
 		let ceiling = *self.ceiling.read();
@@ -758,7 +759,14 @@ impl Producer {
 		let applied = match wanted < ceiling {
 			true => match sink.set_bitrate(wanted).await {
 				Ok(()) => wanted,
-				Err(err) if self.lower.is_some() => {
+				// Only while a lower rendition still serves below this one, as the grant disables.
+				Err(err)
+					if self
+						.lower
+						.as_ref()
+						.and_then(|lower| lower.ceiling(&kio::Waiter::noop()))
+						.is_some_and(|lower| lower < ceiling) =>
+				{
 					tracing::warn!(error = %err, bitrate = wanted.as_bps(), "reopened encoder refused the funded bitrate; resuming only at the ceiling");
 					self.ceiling_only = true;
 					self.publisher.set_enabled(false)?;
@@ -1080,6 +1088,43 @@ mod tests {
 		let _low = low.finish().await.unwrap();
 	}
 
+	/// A rung whose lower rendition ended has nothing to fall back to, so an encoder reopened at a
+	/// rate it refuses keeps the ceiling rather than disabling the last rendition.
+	#[tokio::test(start_paused = true)]
+	#[expect(
+		clippy::await_holding_lock,
+		reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+	)]
+	async fn a_rung_without_a_lower_rendition_keeps_encoding() {
+		let _probe = probe::exclusive();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let unlimited = moq_net::bandwidth::Allocator::unlimited();
+		let low = probed(
+			&broadcast,
+			&catalog,
+			"low",
+			Rate::from_kbps(500),
+			unlimited.clone(),
+			None,
+		);
+		let ceiling = Rate::from_mbps(2);
+		let mut high = probed(&broadcast, &catalog, "high", ceiling, unlimited, Some(low.rung()));
+		let mut micros = 0;
+		high.write(frame(&mut micros)).await.unwrap();
+		let funded = Rate::from_kbps(1_200);
+		high.apply(rate::Target::Enabled(funded)).await.unwrap();
+		high.discontinuity().await.unwrap();
+
+		let _low = low.finish().await.unwrap();
+		probe::refuse_once(funded.as_bps());
+		high.write(frame(&mut micros)).await.unwrap();
+		assert!(enabled(&catalog, "high"));
+		assert_eq!(high.bitrate(), Some(ceiling));
+
+		let _high = high.finish().await.unwrap();
+	}
+
 	/// A rung re-enabled with nothing written whose encoder then refuses the funded rate disables
 	/// again rather than send at its ceiling, and from then on resumes only once its slice covers
 	/// the ceiling.
@@ -1120,7 +1165,10 @@ mod tests {
 		assert_eq!(high.bitrate(), Some(funded));
 		probe::refuse_once(funded.as_bps());
 		high.write(frame(&mut micros)).await.unwrap();
-		assert!(!enabled(&catalog, "high"), "the rung sent past its grant at the ceiling");
+		assert!(
+			!enabled(&catalog, "high"),
+			"the rung sent past its grant at the ceiling"
+		);
 		assert_eq!(high.bitrate(), None);
 
 		// The same partial grant no longer resumes it; one covering the ceiling does.
