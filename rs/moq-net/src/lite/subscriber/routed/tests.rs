@@ -520,6 +520,19 @@ fn a_set_past_one_request_is_asked_for_more_coarsely() {
 			.all(|prefix| regions.iter().any(|region| prefix.has_prefix(region)))
 	);
 	assert_eq!(asked.len(), 17);
+
+	// Regions too many on their own give way to the longest prefix at least two of them
+	// share, up to the root, and none goes unasked.
+	let mut regions = prefixes("g/h", 16, 4000);
+	let lone = prefixes("g/i", 1, 4000);
+	regions.extend(lone.iter().cloned());
+	regions.insert(path("k"));
+	assert!(!fits(&regions));
+	let mut expected = lone;
+	expected.extend([path("g/h"), path("k")]);
+	assert_eq!(super::coarsen(regions.clone(), &regions), expected);
+	let regions: std::collections::BTreeSet<Path> = (0..17).map(|i| path(&format!("r{i}/{}", "x".repeat(4000)))).collect();
+	assert_eq!(super::coarsen(regions.clone(), &regions), [Path::empty()].into_iter().collect());
 }
 
 /// A claim whose path this node cannot resolve lies in a prefix it cannot name, so

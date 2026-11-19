@@ -4110,6 +4110,49 @@ test("a lite-07 edit answers each added prefix under its own Prefix ID", async (
 	}
 });
 
+// A prefix wider than our grant is answered region by region: a claim above a granted region is
+// presented at the region, which the grant covers, and nothing outside the grant is told. A grant
+// change is answered before the ANNOUNCE_OK of the next edit, even one that changes nothing.
+test("a lite-07 prefix wider than the grant is answered region by region", async () => {
+	const origin = new OriginProducer();
+	const regions = (...paths: string[]): Grant => ({
+		publish: new Path.Patterns(paths.map((path) => Path.Pattern.subtree(path))),
+		subscribe: new Path.Patterns([]),
+	});
+	const grant = new Signal<Grant | undefined>(regions("a/b"));
+	const broadcasts = ["a", "a/b/x", "c/y", "d/z"].map((path) => publish(origin, Path.from(path)));
+	const { next, ok, request, close } = routedAnswer(origin, grant);
+	const until = async (status: AnnounceBroadcast["status"]) => {
+		const msgs: AnnounceBroadcast[] = [];
+		for (;;) {
+			const msg = await next();
+			msgs.push(msg);
+			if (msg.status === status) return msgs;
+		}
+	};
+	const started = (msgs: AnnounceBroadcast[]) =>
+		msgs.flatMap((msg) => (msg.status === "start" ? [[msg.suffix, msg.claim.above]] : [])).sort();
+	try {
+		await ok();
+		const first = await until("synced");
+		// `a` covers the region from one segment above it; `c/y` and `d/z` lie outside.
+		expect(started(first)).toEqual([
+			["a/b", 1n],
+			["a/b/x", 0n],
+		]);
+
+		// The grant widens to `c`; the edit after it changes nothing, and its answer follows `c/y`.
+		grant.set(regions("a/b", "c"));
+		request([], []);
+		const widened = await until("ok");
+		expect(started(widened)).toEqual([["c/y", 0n]]);
+	} finally {
+		for (const broadcast of broadcasts) broadcast.close();
+		close();
+		origin.close();
+	}
+});
+
 // An edit swapping one prefix for another drops every claim within the one it removes, on both
 // ends, and tells again what the one it adds covers, under the next Announce IDs.
 test("a lite-07 swap edit tells again what the added prefix covers", async () => {

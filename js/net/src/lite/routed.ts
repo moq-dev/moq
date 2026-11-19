@@ -10,8 +10,9 @@
 // Each claim is one instance's at a path, with what the peer's own reader shows of it: its cost,
 // how far above the path it was made, and whether a route still reaches it.
 
-import { type Dispose, type GetPromise, race } from "@moq/signals";
+import { type Dispose, type GetPromise, type Getter, race } from "@moq/signals";
 import type * as announce from "../announced.ts";
+import type { Grant } from "../auth.ts";
 import type { Goaway } from "../connection/goaway.ts";
 import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
@@ -53,6 +54,8 @@ export interface Session {
 	/** Rank a route last once the peer sent GOAWAY. */
 	drained(route: WireRoute): WireRoute;
 	goaway?: GetPromise<Goaway>;
+	/** Our grant: the peer answers a prefix wider than what it lets us subscribe to region by region. */
+	grant?: Getter<Grant | undefined>;
 	/** Send one message on this session's Announce Stream. */
 	send(msg: AnnounceBroadcast): Promise<void>;
 }
@@ -109,6 +112,9 @@ export class Routed {
 	#finished = false;
 	/** This side finished its stream: it asks for nothing more. */
 	#silent = false;
+	/** The grant changed since the last edit: the next goes even when it changes nothing, since its
+	 * ANNOUNCE_OK follows what the change shows under a wider prefix, and new readers wait for it. */
+	#regranted = false;
 
 	// Each live claim holds one of the session's announce slots.
 	#claims: SlotMap<bigint, Live>;
@@ -119,6 +125,7 @@ export class Routed {
 	// Set once the session lets go of its claims, which then show nothing anew.
 	#closing = false;
 	#stopDrain?: Dispose;
+	#stopGrant?: Dispose;
 
 	constructor(session: Session) {
 		this.#session = session;
@@ -127,6 +134,15 @@ export class Routed {
 		this.#stopDrain = session.goaway?.changed(() => {
 			if (this.#closing) return;
 			for (const [id, live] of this.#claims) this.#serve(id, live, false, false);
+		});
+		let granted = session.grant?.peek()?.subscribe;
+		this.#stopGrant = session.grant?.subscribe((grant) => {
+			const next = grant?.subscribe;
+			if (next === granted || (next && granted?.equals(next))) return;
+			granted = next;
+			if (this.#asked.size === 0) return;
+			this.#regranted = true;
+			this.#ask();
 		});
 	}
 
@@ -195,7 +211,8 @@ export class Routed {
 	#ask(): void {
 		if (this.#editing || this.#finished || this.#silent || this.#closing) return;
 		const { remove, add } = this.#edit();
-		if (remove.length === 0 && add.length === 0) return;
+		if (remove.length === 0 && add.length === 0 && !this.#regranted) return;
+		this.#regranted = false;
 		const added: bigint[] = [];
 		for (const { prefix, hidden } of add) {
 			const id = this.#nextPrefix++;
@@ -250,6 +267,7 @@ export class Routed {
 		if (this.#closing) return;
 		this.#closing = true;
 		this.#stopDrain?.();
+		this.#stopGrant?.();
 		for (const live of this.#claims.values()) {
 			if (live.path !== undefined && live.taken) this.#session.consumes.withdraw(live.path, live.owner);
 		}
