@@ -325,7 +325,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 			const end = timestamp + micros((pcm.length / rate) * 1000);
 			gate.inserted(timestamp, end);
 			decoded.update((span) => ({ start: span?.start ?? media, end: Duration.micros(end) }));
-			gate.decoded(end, end);
+			gate.decoded(end, 0);
 		}
 	})().catch((error: unknown) => {
 		failure = { error };
