@@ -1630,7 +1630,7 @@ struct Horizon {
 	/// hidden. `Some(UNKNOWN)` marks an anonymous peer: no hop is excluded, but
 	/// local-only broadcasts are not advertised. `None` is a local reader.
 	exclude: Option<Hop>,
-	/// Hide the routes that entered from a cluster peer ([`Consumer::local_view`]).
+	/// Hide the routes that entered from a cluster peer ([`Consumer::local`]).
 	local: bool,
 	/// Hide the routes learned on an upstream link, because this reader is one
 	/// ([`Link::Upstream`]): a relay never transits between two upstreams.
@@ -7802,21 +7802,14 @@ impl Consumer {
 	}
 
 	/// A view of the routes that entered here: every route a handle marked
-	/// [`Link::Peer`] or [`Link::Upstream`] handle announced is hidden from [`Self::announced`] and never
-	/// resolved by [`Self::request`].
+	/// [`Link::Peer`] or [`Link::Upstream`] announced is hidden from [`Self::announced`]
+	/// and never resolved by [`Self::request`].
 	///
 	/// On a relay, this is what the relay ingests itself, from clients and
-	/// in-process producers, as opposed to what its cluster peers forward.
-	///
-	/// Public only behind the `test-support` feature: a test's door, not an API.
-	#[cfg(feature = "test-support")]
-	pub fn local(self) -> Self {
-		self.local_view()
-	}
-
-	/// See [`Self::local`].
-	#[cfg_attr(not(test), allow(dead_code, reason = "only tests read the local view"))]
-	pub(crate) fn local_view(mut self) -> Self {
+	/// in-process producers, as opposed to what its cluster peers forward. An embedder
+	/// that records, republishes, or meters each broadcast once, on the node that
+	/// ingests it, reads this view.
+	pub fn local(mut self) -> Self {
 		self.horizon.local = true;
 		self
 	}
@@ -9485,7 +9478,7 @@ mod tests {
 
 		// A local view never waits on a peer's routes.
 		let _peer = producer.clone().with_link(Link::Peer).snapshot("room");
-		assert!(producer.consume().local_view().routes().is_synced());
+		assert!(producer.consume().local().routes().is_synced());
 		assert!(!producer.consume().routes().is_synced());
 	}
 
@@ -13352,7 +13345,7 @@ mod tests {
 	async fn local_view_hides_peer_routes() {
 		let producer = origin(1).produce();
 		let peer = producer.clone().with_link(Link::Peer);
-		let mut local = producer.consume().local_view().routes();
+		let mut local = producer.consume().local().routes();
 
 		let _forwarded = peer
 			.forward("remote", RouteInfo::new().with_hops(hops(&[7])).with_via(origin(7)))
@@ -13379,7 +13372,7 @@ mod tests {
 		// while the full view queues the request on the peer's route.
 		let err = producer
 			.consume()
-			.local_view()
+			.local()
 			.request("remote/alice", None)
 			.now_or_never()
 			.expect("unroutable")
@@ -17261,7 +17254,7 @@ mod tests {
 			.consume()
 			.scope("project", &Patterns::from("**/*.chat".parse::<Pattern>().unwrap()))
 			.unwrap()
-			.local_view()
+			.local()
 			.with_stats(
 				registry
 					.tier(stats::Tier::default())
@@ -17273,7 +17266,7 @@ mod tests {
 		let resolved = consumer.request("cam.chat", None).await.unwrap();
 		let original = producer
 			.consume()
-			.local_view()
+			.local()
 			.request("project/cam.chat", None)
 			.await
 			.unwrap();
