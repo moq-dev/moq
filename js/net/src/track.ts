@@ -55,6 +55,7 @@ import { grace, Ledger } from "./ledger.ts";
 import { rescale } from "./rescale.ts";
 import { floorAt, Timescale, type Timestamp } from "./time.ts";
 import { checkEnd, checkKey, max, min, UNBOUNDED } from "./util/key.ts";
+import { checkName } from "./util/utf8.ts";
 import {
 	bounded,
 	type Holdings,
@@ -1373,6 +1374,7 @@ export class Producer {
 	#appended?: bigint;
 
 	constructor(name: string) {
+		checkName(name);
 		this.name = name;
 		// Whatever serves the track reading a request sends it.
 		this.#demand = makeDemand(

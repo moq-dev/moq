@@ -17,6 +17,7 @@ import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
 import type * as track from "./track.ts";
+import { checkName } from "./util/utf8.ts";
 
 /** The protocol-facing operations behind a broadcast handle. */
 export interface Broadcast {
@@ -215,5 +216,6 @@ export function registerTrackConsumer(factory: (name: string, source: Broadcast)
 /** Create a track handle backed by a broadcast's private wire view. */
 export function trackOf(name: string, source: broadcast.Producer | broadcast.Consumer): track.Consumer {
 	if (!makeTrack) throw new Error("track module is not loaded");
+	checkName(name);
 	return makeTrack(name, wireOf(source));
 }
