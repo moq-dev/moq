@@ -45,6 +45,10 @@ pub(super) struct Candidate {
 	/// a carried instance says the answer is the same stream. A minted one names the
 	/// announcement, and the route could answer with whatever stream now wins upstream.
 	pub carried: bool,
+	/// Whether the route is a lite-07 claim. A session that closes leaves its claims in
+	/// the table, unavailable, until another session serves them or the claim's debounce
+	/// runs out, and a request through one waits for either.
+	pub claim: bool,
 }
 
 /// Why an upstream request through a route did not produce a source.
@@ -518,8 +522,11 @@ impl Front {
 		}
 		// A standing route can outlive the source it produced. Asking it again
 		// would re-request the broadcast that just ended; another route may still
-		// resume it.
-		self.excluded.insert(candidate.route);
+		// resume it. A claim is asked again: the request waits until another session
+		// serves the claim, which the front then resumes on, or the claim goes.
+		if !candidate.claim {
+			self.excluded.insert(candidate.route);
+		}
 		self.serving = None;
 		self.serving_closing = false;
 		actions.push(Action::Detach { source, drain: true });
@@ -654,6 +661,14 @@ impl Front {
 				return;
 			}
 			if !spliced {
+				// The source closed under the copy and nothing serves yet: what the copy died
+				// of is what ends the track, unless a route the front waits on resumes it.
+				if let Err(err) = result
+					&& serving.is_none()
+					&& track.ended.is_none()
+				{
+					track.lost.get_or_insert(err);
+				}
 				return;
 			}
 		}
@@ -956,6 +971,7 @@ mod tests {
 			route,
 			local: false,
 			carried: true,
+			claim: false,
 		}
 	}
 
@@ -964,6 +980,7 @@ mod tests {
 			route,
 			local: true,
 			carried: true,
+			claim: false,
 		}
 	}
 
@@ -1223,6 +1240,115 @@ mod tests {
 				serving_closing: false,
 			}),
 			&[Action::End { err: Error::Unroutable }],
+		);
+	}
+
+	fn claim(route: u64) -> Candidate {
+		Candidate {
+			claim: true,
+			..remote(route)
+		}
+	}
+
+	/// A front whose claim's session closed under `video` before its copy failed, and that
+	/// asks the claim again, which waits until another session serves it or the claim goes.
+	fn orphaned() -> Front {
+		let mut front = serving(claim(1), 100);
+		assert_actions(
+			front.step(Event::SourceClosed { source: 100 }),
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
+		);
+		assert!(front.excluded_routes().is_empty());
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(claim(1)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 1 }],
+		);
+		assert_actions(
+			front.step(Event::TrackEnded {
+				track: name("video"),
+				source: 100,
+				closing: false,
+				result: Err(Error::Session(crate::SessionError::Cancel)),
+				delivered: true,
+			}),
+			&[],
+		);
+		// The claim went, whether a session took it over or it ran out its debounce.
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 1,
+				result: Err(Refusal {
+					err: Error::Unroutable,
+					standing: false,
+				}),
+			}),
+			&[Action::Reselect],
+		);
+		front
+	}
+
+	/// The claim comes back on another session, a detour learned after the close: the
+	/// front resumes on it rather than end.
+	#[test]
+	fn a_closed_claim_resumes_on_the_session_that_serves_it_next() {
+		let mut front = orphaned();
+		assert_actions(
+			front.step(Event::Selected {
+				best: Some(claim(2)),
+				serving_closing: false,
+			}),
+			&[Action::Request { route: 2 }],
+		);
+		assert_actions(
+			front.step(Event::Resolved {
+				route: 2,
+				result: Ok(200),
+			}),
+			&[Action::Query {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 200,
+				closing: false,
+				result: Ok(info()),
+				retry: None,
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 200,
+			}],
+		);
+		assert!(front.lost("video").is_none());
+	}
+
+	/// Nothing serves the claim again: the front ends, and its track with what ended the
+	/// copy, the session's error, not the later `Unroutable`.
+	#[test]
+	fn a_closed_claim_nothing_resumes_ends_with_the_sessions_error() {
+		let mut front = orphaned();
+		assert_actions(
+			front.step(Event::Selected {
+				best: None,
+				serving_closing: false,
+			}),
+			&[Action::End { err: Error::Unroutable }],
+		);
+		assert_eq!(
+			front.lost("video").map(|err| err.to_string()),
+			Some(Error::Session(crate::SessionError::Cancel).to_string())
 		);
 	}
 
@@ -1594,6 +1720,7 @@ mod tests {
 					route: 1,
 					local,
 					carried,
+					claim: false,
 				};
 				let abort = [Action::Abort {
 					track: name("video"),
@@ -1846,6 +1973,7 @@ mod tests {
 					route: 1,
 					local,
 					carried: false,
+					claim: false,
 				},
 				100,
 			);
@@ -2725,8 +2853,9 @@ mod tests {
 				best: Some(remote(1)),
 				serving_closing: false,
 			},
+			// A claim, which its source closing leaves to be asked again.
 			Event::Selected {
-				best: Some(remote(2)),
+				best: Some(claim(2)),
 				serving_closing: false,
 			},
 			Event::Selected {
@@ -2749,6 +2878,7 @@ mod tests {
 				}),
 			},
 			Event::SourceClosed { source: 100 },
+			Event::SourceClosed { source: 200 },
 			Event::TrackAssigned {
 				track: name("v"),
 				now: t0,

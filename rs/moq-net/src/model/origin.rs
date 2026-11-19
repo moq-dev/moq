@@ -4780,6 +4780,7 @@ impl FrontServe {
 			route: entry.id,
 			local: entry.local,
 			carried: !entry.instance.is_minted(),
+			claim: entry.node.is_some(),
 		});
 		// No candidate irreversibly ends this front. Leave the cache under the same lock
 		// a lookup takes, before a route can return and a newcomer join the broadcast the
