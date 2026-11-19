@@ -85,7 +85,7 @@ import {
 	EMPTY_RANGE,
 	inclusiveGroupEnd,
 	LiveRanges,
-	requestedRanges,
+	requestedRange,
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
@@ -2686,7 +2686,7 @@ export class Subscriber {
 				if (!entry.starts.has(id)) return false;
 				const at = entry.starts.get(id);
 				if (at === undefined) continue;
-				const [model] = requestedRanges({ startFrame: 0, ranges: [range] });
+				const model = requestedRange(range);
 				owed.push({ ...model, start: { time: at } });
 			}
 			// Each starts at the group its publisher reported starting it at.
