@@ -1810,6 +1810,10 @@ impl Schedule {
 			if !held && self.release(unit) <= index {
 				while n < unit.remaining() && budget > 0 {
 					let pid = unit.pid_at(unit.sent + n);
+					// As padded, tables wait for any others already on their way.
+					if self.transport_buffer(pid) == 0 && held_back(&self.units, i) {
+						break;
+					}
 					let cap = self
 						.buffers
 						.get(&pid)
@@ -2368,6 +2372,45 @@ mod tests {
 		for pair in pats.windows(2) {
 			assert!(pair[1] - pair[0] <= REPEAT_SLOTS, "tables {pair:?} slots apart");
 		}
+	}
+
+	/// Unpadded too, a revision waits for a repeat already on its way, so no table of the old
+	/// version follows one of the new.
+	#[test]
+	fn a_revision_waits_for_a_begun_repeat_unpadded() {
+		let mut schedule = Schedule::new(Duration::ZERO);
+		schedule.set_tables(100);
+		schedule.set_clock(1);
+		schedule.set_buffer(1, VIDEO);
+		let psi = |mark: u8| Psi {
+			packets: marked_tables(mark, 11),
+			flagged: None,
+			clock: 1,
+		};
+		schedule.set_psi(psi(1));
+		for ms in (0..2_000).step_by(40) {
+			schedule.lead(Tables {
+				rate: None,
+				added: Vec::new(),
+			});
+			schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
+		}
+		let mut marks = Vec::new();
+		let mut revised = false;
+		while let Some(slot) = schedule.next(Some(slot(ms(4_000)))).unwrap() {
+			marks.extend(table_marks(&slot));
+			let begun = schedule.units.iter().any(|unit| unit.repeat && unit.sent > 0);
+			if !revised && begun {
+				schedule.set_psi(psi(2));
+				revised = true;
+			}
+		}
+		assert!(revised, "a repeat began");
+		let first = marks.iter().position(|&mark| mark == 2).expect("the revision goes out");
+		assert!(
+			marks[first..].iter().all(|&mark| mark == 2),
+			"an old table follows the new: {marks:?}"
+		);
 	}
 
 	/// Only the first copy of the tables to go out after a switch flags the break.
