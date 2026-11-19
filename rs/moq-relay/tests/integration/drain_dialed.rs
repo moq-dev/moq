@@ -138,7 +138,14 @@ async fn a_draining_relay_drains_the_links_it_dialed() {
 		}
 	})
 	.await
-	.unwrap_or_else(|_| panic!("every link connects: A {}, C {}, L {}", a.active(), c.active(), l.active()));
+	.unwrap_or_else(|_| {
+		panic!(
+			"every link connects: A {}, C {}, L {}",
+			a.active(),
+			c.active(),
+			l.active()
+		)
+	});
 
 	let started = tokio::time::Instant::now();
 	l.trigger.start();
@@ -154,13 +161,24 @@ async fn a_draining_relay_drains_the_links_it_dialed() {
 		}
 	})
 	.await
-	.unwrap_or_else(|_| panic!("each neighbour told the other that L drains: A {:?}, C {:?}, L {:?}", a.routes(), c.routes(), l.routes()));
+	.unwrap_or_else(|_| {
+		panic!(
+			"each neighbour told the other that L drains: A {:?}, C {:?}, L {:?}",
+			a.routes(),
+			c.routes(),
+			l.routes()
+		)
+	});
 
 	// ...before any link dropped: L holds them open to its deadline.
 	assert!(started.elapsed() < DRAIN, "the DRAINs took {:?}", started.elapsed());
 	for (name, node) in [("A", &a), ("C", &c)] {
 		let routes = node.routes();
-		assert_eq!(routes.sent.count(Withdrawal::Dead), 0, "{name} sent a DEAD before L left");
+		assert_eq!(
+			routes.sent.count(Withdrawal::Dead),
+			0,
+			"{name} sent a DEAD before L left"
+		);
 		assert_eq!(
 			routes.received.count(Withdrawal::Dead),
 			0,

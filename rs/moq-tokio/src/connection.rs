@@ -18,9 +18,7 @@ use crate::{Addrs, Client, Error};
 pub use moq_net::reconnect::Restart;
 
 /// Close a predecessor still finishing a handover, aborting it at its deadline.
-async fn close_predecessor(
-	predecessor: Option<(moq_net::Session, kio::clock::Instant)>,
-) -> Result<(), moq_net::Error> {
+async fn close_predecessor(predecessor: Option<(moq_net::Session, kio::clock::Instant)>) -> Result<(), moq_net::Error> {
 	let Some((session, deadline)) = predecessor else {
 		return Ok(());
 	};
@@ -1150,7 +1148,12 @@ impl Connection {
 
 	/// Refuse redials for every clone and stop the loop, returning the live session
 	/// and any predecessor still finishing a handover, with its deadline.
-	fn stop(&self) -> (Option<moq_net::Session>, Option<(moq_net::Session, kio::clock::Instant)>) {
+	fn stop(
+		&self,
+	) -> (
+		Option<moq_net::Session>,
+		Option<(moq_net::Session, kio::clock::Instant)>,
+	) {
 		// Refuse redials and take the sessions under one lock: see [`CloseGuard`].
 		let taken = {
 			let mut closed = self.task.closed.lock().unwrap();
