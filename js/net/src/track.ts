@@ -4288,7 +4288,6 @@ export class Subscriber {
 			!hooks.hasUnreadGroup(subscriber, start, end, delivered);
 		hooks.awaitsFill = (subscriber) => subscriber.#fillWait;
 		hooks.staleAt = (subscriber, key) => {
-			if (subscriber.#resume) return subscriber.#resume.staleAt(key);
 			const held: Superseded = {};
 			return {
 				expired: () => subscriber.#staleAt(key, subscriber.#drift(), true, held),
@@ -4299,6 +4298,12 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.cachedGroup(key, from);
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, key, from);
+		};
+		hooks.judgedGroup = (subscriber, key) => {
+			if (subscriber.#resume) return subscriber.#resume.judgedGroup(key);
+			const group = hooks.cachedGroup(subscriber, key);
+			if (group) hooks.expireGroup(group, hooks.staleAt(subscriber, key));
+			return group;
 		};
 		hooks.holdsGroup = (subscriber, key) => {
 			const producer = subscriber.#state.producer;

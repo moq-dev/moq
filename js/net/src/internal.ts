@@ -548,8 +548,8 @@ export interface ResumeSource {
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
 	cachedGroup(key: bigint, from?: number): GroupConsumer | undefined;
-	/** Whether group `key` is stale, judged by the copy {@link cachedGroup} would hand it out from. */
-	staleAt(key: bigint): Expiry;
+	/** As {@link cachedGroup} from its first frame, judged by the budget of the copy it comes from. */
+	judgedGroup(key: bigint): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -876,6 +876,11 @@ export const hooks: {
 	staleAt: (subscriber: Subscriber, key: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
+	/**
+	 * As {@link cachedGroup} from its first frame, the reader given up once the subscription's
+	 * budget gives up on it, judged by the route copy it is read from when routed.
+	 */
+	judgedGroup: (subscriber: Subscriber, key: bigint) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
 	holdsGroup: (subscriber: Subscriber, key: bigint) => boolean;
 	/**
@@ -1250,6 +1255,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	judgedGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	holdsGroup: () => {

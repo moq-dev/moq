@@ -5487,7 +5487,15 @@ impl FetchRespond {
 		writer.buffer(&FetchHeader {
 			request_id: self.request_id,
 		})?;
-		wait!(Header => writer.poll_flush(waiter))?;
+		// Parked on flow control, a group gone stale resets its stream rather than pin it.
+		let header = wait!(Header => match writer.poll_flush(waiter) {
+			Poll::Pending if self.write.poll_stale(waiter) => Poll::Ready(Err(Error::Old)),
+			flushed => flushed,
+		});
+		if let Err(err) = header {
+			writer.abort(&err);
+			return Poll::Ready(Err(err));
+		}
 		let body = wait!(Body => self.write.poll(waiter, writer));
 		if let Err(err) = body {
 			writer.abort(&err);
@@ -14861,6 +14869,70 @@ mod serve_tests {
 		kio::clock::sim::advance(Duration::from_millis(1)).await;
 		kio::clock::timeout(budget, run).await.expect("the stale fill resets");
 		assert_eq!(h.log.resets().len(), 1, "the fill's stream reset");
+	}
+
+	/// A standalone FETCH whose FETCH_HEADER is parked on flow control resets once its group
+	/// goes stale, rather than hold the stream and its rank for a response nobody wants.
+	#[kio::test]
+	async fn a_fetch_parked_on_its_header_resets_once_its_group_goes_stale() {
+		for version in FETCH_DRAFTS {
+			let budget = Duration::from_secs(2);
+			// One byte of credit, so the FETCH_HEADER starts and then parks.
+			let session = ScriptedSession::per_stream(vec![Vec::new()]).with_uni_send_window(1);
+			let h = serve_session(version, track::Info::timed().with_max_age(Some(budget)), session);
+			// Frozen timestamps, so only the wall clock since group 1 arrived convicts group 0.
+			let mut group = h.track.create_group(group::Info { start: 0 }).unwrap();
+			group.write_frame(group.key_time(), b"fetch".as_slice()).unwrap();
+			group.finish().unwrap();
+
+			let stream = Stream::open(&crate::driver::Transport::new(h.session.clone()), version)
+				.await
+				.unwrap();
+			let fetch_type = fetch_range(
+				version,
+				"video",
+				Location { group: 0, object: 0 },
+				Location { group: 0, object: 0 },
+			);
+			let mut fetching = std::pin::pin!(h.publisher.clone().run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					authorization_token: None,
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type,
+					range_filters: false,
+					fill_timeout: true,
+					properties_wanted: false,
+				},
+			));
+			serve_until(fetching.as_mut(), "the FETCH_HEADER started", || {
+				!data_streams(&h.log).is_empty()
+			})
+			.await;
+
+			let mut next = h.track.create_group(group::Info { start: 1 }).unwrap();
+			next.write_frame(next.key_time(), b"next".as_slice()).unwrap();
+			next.finish().unwrap();
+			kio::clock::sim::advance(budget - Duration::from_millis(1)).await;
+			assert!(
+				futures::poll!(fetching.as_mut()).is_pending(),
+				"{version}: within the budget"
+			);
+			assert!(h.log.resets().is_empty(), "{version}");
+
+			kio::clock::sim::advance(Duration::from_millis(1)).await;
+			let _ = kio::clock::timeout(budget, fetching.as_mut())
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the stale fetch stayed parked"));
+			let resets: Vec<_> = data_streams(&h.log)
+				.into_values()
+				.flatten()
+				.filter(|sent| matches!(sent, Sent::Reset(_)))
+				.collect();
+			assert_eq!(resets.len(), 1, "{version}: the fetch stream reset");
+		}
 	}
 
 	/// The Track Properties block a publisher upstream of a relay sent on `version`: an even

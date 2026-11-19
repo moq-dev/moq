@@ -54,7 +54,6 @@ import type { Consumer as GroupConsumer } from "./group.ts";
 import {
 	type Ask,
 	type DropRun,
-	type Expiry,
 	finalKey,
 	type GroupRecover,
 	hooks,
@@ -797,15 +796,16 @@ class Reader implements ResumeSource {
 		return undefined;
 	}
 
-	staleAt(key: bigint): Expiry {
-		// Judged by the copy holding the group, the one `cachedGroup` hands it out from: this
-		// reader's own timeline stays empty.
+	judgedGroup(key: bigint): GroupConsumer | undefined {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
-			if (hooks.holdsGroup(copy.sub, key)) return hooks.staleAt(copy.sub, key);
+			const group = hooks.cachedGroup(copy.sub, key);
+			if (!group) continue;
+			// Judged by the copy it is read from: this reader's own timeline stays empty.
+			hooks.expireGroup(group, hooks.staleAt(copy.sub, key));
+			return this.#handOut(copy, group);
 		}
-		const serving = this.#copies.at(-1);
-		return serving ? hooks.staleAt(serving.sub, key) : { expired: () => false, changed: [] };
+		return undefined;
 	}
 
 	/**

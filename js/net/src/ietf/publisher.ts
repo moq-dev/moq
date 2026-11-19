@@ -1493,11 +1493,10 @@ export class Publisher {
 			}
 
 			const out = new FetchWriter({ stream, version, priority: publisherPriority });
-			const group = hooks.cachedGroup(cache, fill.start.group);
-			if (!group) throw new NotFound("fill group unavailable");
 			// Judged by the subscription's budget, as the Rust fill's fetched group is, so a fill
 			// parked on flow control or awaiting its acknowledgement gives up once it goes stale.
-			hooks.expireGroup(group, hooks.staleAt(cache, group.start));
+			const group = hooks.judgedGroup(cache, fill.start.group);
+			if (!group) throw new NotFound("fill group unavailable");
 			const given = untilGivenUp(group, cancelled);
 			try {
 				await this.#writeFetchGroup({
@@ -1507,6 +1506,9 @@ export class Publisher {
 					cancelled: given.signal,
 				});
 				stream.close();
+				// The stream holds every byte it owes, so frames past its range failing upstream can
+				// no longer give it up: release the read, leaving the budget, as `#runGroup` does.
+				group.close();
 				// Its bytes still hold the connection until acknowledged, so a group gone stale
 				// meanwhile, or the subscriber leaving, resets it, as the Rust `RunFill` does.
 				await untilAborted(
