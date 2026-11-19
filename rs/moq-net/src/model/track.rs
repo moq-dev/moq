@@ -1131,19 +1131,21 @@ impl Holdings for TrackState {
 	}
 
 	fn back(&self, latest: u64, back: u64) -> Option<u64> {
-		// A received copy counts back as its publisher did, from the latest group the publisher
-		// counted from: a newer one moved the live edge, which the copy then counts from.
-		if let Some(reported) = self.relative_starts.get(&back)
-			&& reported.latest == latest
-		{
-			return Some(reported.start);
-		}
 		let Some(back) = back.checked_sub(1) else {
 			return Some(latest);
 		};
 		// Bounded by the cache: a huge count walks it once and reaches back to the oldest.
 		let back = usize::try_from(back).ok()?;
 		self.lookup.range(..latest).rev().nth(back).map(|(&key, _)| key)
+	}
+
+	/// A received copy starts where its publisher did, counting from the same latest group: a
+	/// newer one moved the live edge, which the copy then counts from itself.
+	fn reported_start(&self, latest: u64, back: u64) -> Option<u64> {
+		self.relative_starts
+			.get(&back)
+			.filter(|reported| reported.latest == latest)
+			.map(|reported| reported.start)
 	}
 
 	fn complete(&self) -> bool {
@@ -15434,6 +15436,17 @@ mod test {
 		assert_eq!(placed(&mut reported), Some(7), "the publisher's start, not group 1");
 		let mut unreported = producer.subscribe(back(1));
 		assert_eq!(placed(&mut unreported), Some(2), "counted over the groups held");
+		// A reported start is where delivery began, which may sit past the group counted, so a
+		// relative end counts over the groups held.
+		let mut ended = producer.subscribe(
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(0),
+					end: Some(Anchor::Relative(2)),
+				}])
+				.with_delay(Delay::default().with_max(None)),
+		);
+		assert_eq!(ended.resolved()[0].and_then(|resolved| resolved.end), Some(2));
 
 		// A newer group moved the live edge, so a later reader counts back from it.
 		write_group(&producer, 10);
