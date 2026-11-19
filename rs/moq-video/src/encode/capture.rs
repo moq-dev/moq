@@ -195,7 +195,12 @@ impl Capture {
 	///
 	/// Fails when a rendition's ceiling isn't below the next one's, since the ladder could
 	/// never fund the larger without the smaller.
-	fn encoders(&self, source: Size, framerate: FrameRate, color: Option<Color>) -> Result<Vec<encoder::Config>, Error> {
+	fn encoders(
+		&self,
+		source: Size,
+		framerate: FrameRate,
+		color: Option<Color>,
+	) -> Result<Vec<encoder::Config>, Error> {
 		let mut configs = Vec::with_capacity(self.renditions.len() + 1);
 		for rendition in &self.renditions {
 			let size = rendition.size(source)?;
@@ -213,7 +218,9 @@ impl Capture {
 		configs.push(captured);
 
 		let names = self.renditions.iter().map(Rendition::track);
-		let names: Vec<_> = names.chain(std::iter::once("the captured rendition".to_string())).collect();
+		let names: Vec<_> = names
+			.chain(std::iter::once("the captured rendition".to_string()))
+			.collect();
 		for (index, pair) in configs.windows(2).enumerate() {
 			let (lower, upper) = (pair[0].resolved_bitrate(), pair[1].resolved_bitrate());
 			if lower >= upper {
@@ -306,7 +313,11 @@ pub fn publish_capture<E: CatalogExt>(
 	mut options: Capture,
 ) -> Result<(Publication, Driver<E>), Error> {
 	let mut names = std::collections::HashSet::new();
-	if let Some(repeated) = options.renditions.iter().find(|rendition| !names.insert(rendition.name())) {
+	if let Some(repeated) = options
+		.renditions
+		.iter()
+		.find(|rendition| !names.insert(rendition.name()))
+	{
 		return Err(Error::UnsupportedConfig(format!(
 			"rendition `{}` is named twice",
 			repeated.name()
@@ -583,7 +594,7 @@ fn capture_tracks<E: CatalogExt>(
 	let mut priority = hang::catalog::PRIORITY.video;
 	let names = options.renditions.iter().map(|rendition| Some(rendition.track()));
 	for name in names.chain(std::iter::once(None)) {
-		let info = catalog.track_info(priority).with_refresh(refresh.clone());
+		let info = catalog.track_info(priority).with_refresh(refresh);
 		let created = match name {
 			Some(name) => broadcast.create_track(name, info),
 			None => broadcast.unique_track(suffix(options.codec), info),
@@ -983,7 +994,14 @@ mod tests {
 	/// that is one track segment.
 	#[test]
 	fn a_rendition_refuses_what_it_cannot_publish() {
-		for (name, scale) in [("sd", 0.0), ("sd", 1.0), ("sd", -0.5), ("sd", f64::NAN), ("", 0.5), ("a/b", 0.5)] {
+		for (name, scale) in [
+			("sd", 0.0),
+			("sd", 1.0),
+			("sd", -0.5),
+			("sd", f64::NAN),
+			("", 0.5),
+			("a/b", 0.5),
+		] {
 			assert!(Rendition::new(name, scale).is_err(), "{name:?} at {scale}");
 		}
 		let parsed: Rendition = "sd=0.25".parse().unwrap();
@@ -1793,7 +1811,10 @@ mod tests {
 					kind,
 					..Capture::default()
 				};
-				let track = capture_tracks(broadcast.clone(), &catalog, &options).unwrap().pop().unwrap();
+				let track = capture_tracks(broadcast.clone(), &catalog, &options)
+					.unwrap()
+					.pop()
+					.unwrap();
 				assert_eq!(track.info().refresh.ratio, refresh);
 			}
 		}
@@ -1998,7 +2019,13 @@ mod tests {
 			};
 			let clock = catalog.clock();
 			let state = starting();
-			let mut run = std::pin::pin!(capture_loop(std::slice::from_mut(&mut producer), &mut source, &options, &clock, &state));
+			let mut run = std::pin::pin!(capture_loop(
+				std::slice::from_mut(&mut producer),
+				&mut source,
+				&options,
+				&clock,
+				&state
+			));
 			let mut micros = 0;
 
 			let viewer = watched.subscribe(None);
@@ -2118,7 +2145,9 @@ mod tests {
 				// between: the frame at six seconds went only to the captured rendition.
 				assert_eq!(starts.first(), Some(&(first + 4_000_000)), "{starts:?}");
 				assert!(
-					starts.iter().all(|start| !(first + 4_000_002..first + 8_000_000).contains(start)),
+					starts
+						.iter()
+						.all(|start| !(first + 4_000_002..first + 8_000_000).contains(start)),
 					"the scaled rendition encoded unwatched: {starts:?}"
 				);
 
@@ -2157,7 +2186,11 @@ mod tests {
 				let mut viewer = watch(&consumer, "video/sd").await;
 				camera.push_native(surface(), us(0));
 				let first = viewer.recv_group().await.unwrap().expect("a group").start;
-				assert_eq!(opens.load(Ordering::SeqCst), 2, "the scaled rendition's viewer opened the camera");
+				assert_eq!(
+					opens.load(Ordering::SeqCst),
+					2,
+					"the scaled rendition's viewer opened the camera"
+				);
 
 				// The captured rendition encoded nothing while unwatched.
 				let mut full = watch(&consumer, &captured).await;
@@ -2210,7 +2243,8 @@ mod tests {
 				probe.kind = encoder::Kind::Software;
 				let rendition = probe.probe().await.unwrap();
 				let lower = producers.last().map(Producer::rung);
-				producers.push(Producer::with_track(track, &catalog, config, rendition, bandwidth.clone(), lower).unwrap());
+				producers
+					.push(Producer::with_track(track, &catalog, config, rendition, bandwidth.clone(), lower).unwrap());
 			}
 			let ceilings: Vec<_> = ceilings.iter().map(|rate| rate.as_bps()).collect();
 
@@ -2281,7 +2315,13 @@ mod tests {
 			};
 			let clock = catalog.clock();
 			let state = starting();
-			let mut run = std::pin::pin!(capture_loop(std::slice::from_mut(&mut producer), &mut source, &options, &clock, &state));
+			let mut run = std::pin::pin!(capture_loop(
+				std::slice::from_mut(&mut producer),
+				&mut source,
+				&options,
+				&clock,
+				&state
+			));
 
 			// The probe holds its first frame back, so this one reaches the codec but not the track.
 			camera.push_native(surface(), us(0));
@@ -2326,7 +2366,13 @@ mod tests {
 			};
 			let clock = catalog.clock();
 			let state = starting();
-			let run = capture_loop(std::slice::from_mut(&mut producer), &mut source, &options, &clock, &state);
+			let run = capture_loop(
+				std::slice::from_mut(&mut producer),
+				&mut source,
+				&options,
+				&clock,
+				&state,
+			);
 
 			// Held back by one, the only frame reaches the track through the drain alone.
 			camera.push_native(surface(), us(0));

@@ -453,7 +453,6 @@ impl Producer {
 		Ok(())
 	}
 
-
 	/// Close the encoder without draining it and mark the break, for a capture that cancelled an
 	/// encode mid-call: the encoder refuses every call after that, so it cannot drain.
 	pub(crate) fn release(&mut self) -> Result<(), Error> {

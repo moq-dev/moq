@@ -1468,7 +1468,15 @@ pub(crate) mod tests {
 		assert!(capture_args(&[]).renditions.is_empty());
 
 		for bad in ["sd", "sd=1", "a/b=0.5"] {
-			let argv = ["moq", "--connect", "http://localhost", "import", "capture", "--rendition", bad];
+			let argv = [
+				"moq",
+				"--connect",
+				"http://localhost",
+				"import",
+				"capture",
+				"--rendition",
+				bad,
+			];
 			assert!(crate::args::Invocation::try_parse_from(argv).is_err(), "{bad}");
 		}
 	}
