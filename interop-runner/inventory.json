@@ -2,7 +2,7 @@
   {
     "implementation": "aiomoqt",
     "role": "client",
-    "image": "ghcr.io/gmarzot/aiomoqt:latest",
+    "image": "ghcr.io/gmarzot/aiomoqt:interop",
     "status": "selected"
   },
   {
