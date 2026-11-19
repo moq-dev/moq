@@ -198,6 +198,11 @@ pub(in crate::model) struct Window {
 	/// without a walk.
 	named: BTreeMap<u64, usize>,
 	unnamed: usize,
+	/// The spans counting back past every group held, which may ask a miss from the oldest
+	/// group held (see [`Span::reads`]), and that group as of the last time they were read:
+	/// a settle that finds it moved reads them again.
+	unfloored: Vec<usize>,
+	oldest: Option<u64>,
 }
 
 /// One non-empty range, resolved.
@@ -251,6 +256,8 @@ impl Window {
 			covered: None,
 			named: BTreeMap::new(),
 			unnamed: 0,
+			unfloored: Vec::new(),
+			oldest: None,
 		};
 		window.place(latest, holdings)?;
 		Ok(window)
@@ -304,10 +311,22 @@ impl Window {
 			}
 			moved.extend(placed..self.spans.len());
 		}
-		let shrank = !self.waiting.is_empty() && self.start_waiting(holdings, &mut moved);
-		match (moved.is_empty(), shrank) {
-			(true, _) => return false,
-			(false, true) => self.rebuild(holdings),
+		let mut shrank = !self.waiting.is_empty() && self.start_waiting(holdings, &mut moved);
+		// A span counting back past every group held asks misses from the oldest one, so it
+		// reads more once an older group arrives and less once that group leaves.
+		if !self.unfloored.is_empty() {
+			let oldest = holdings.next_start(0);
+			if oldest != self.oldest {
+				match (oldest, self.oldest) {
+					(Some(oldest), Some(was)) if oldest < was => moved.extend_from_slice(&self.unfloored),
+					_ => shrank = true,
+				}
+				self.oldest = oldest;
+			}
+		}
+		match (shrank, moved.is_empty()) {
+			(true, _) => self.rebuild(holdings),
+			(false, true) => return false,
 			(false, false) => self.grow(moved, holdings),
 		}
 		true
@@ -577,6 +596,7 @@ impl Window {
 		self.reaching.clear();
 		self.named.clear();
 		self.unnamed = 0;
+		self.unfloored.clear();
 		self.pending = false;
 		for index in 0..self.ranges.len() {
 			if !self.ranges[index].is_empty() {
@@ -666,6 +686,9 @@ impl Window {
 
 	/// Add `span`, counted in [`Self::named`] and [`Self::start`].
 	fn push(&mut self, span: Span) {
+		if span.reaches_oldest() {
+			self.unfloored.push(self.spans.len());
+		}
 		self.spans.push(span);
 		self.name(self.spans.len() - 1);
 	}
@@ -708,6 +731,7 @@ impl Window {
 	/// every span waiting on a time start from that time.
 	fn rebuild(&mut self, holdings: &impl Holdings) {
 		self.covered = None;
+		self.oldest = holdings.next_start(0);
 		self.update_settled();
 		let (mut groups, mut missable) = (Vec::new(), Vec::new());
 		for span in &self.spans {
@@ -774,6 +798,12 @@ impl Span {
 			_ => self.start,
 		};
 		(Some(self.start..=last), (reach <= last).then_some(reach..=last))
+	}
+
+	/// Whether it counts back past every group held, so what it asks follows the oldest
+	/// group held (see [`Self::reads`]).
+	fn reaches_oldest(&self) -> bool {
+		matches!((self.anchor, self.floored), (Anchor::Relative(_), false))
 	}
 }
 
@@ -1027,17 +1057,23 @@ mod tests {
 	proptest::proptest! {
 		/// A window that skips the starts its holdings can't place and grows its groups as
 		/// spans start sees what one trying every start sees, and reads what rebuilding from
-		/// its spans would, through groups arriving, drops, lookups answering, and the track
-		/// completing.
+		/// its spans would, through groups arriving and leaving, drops, lookups answering, and
+		/// the track completing.
 		#[test]
 		fn settling_by_steps_matches_a_full_settle(
-			ranges in proptest::collection::vec((0u64..40, proptest::option::of(0u64..48)), 1..12),
-			ops in proptest::collection::vec((0u8..4, 0u64..48), 0..24),
+			ranges in proptest::collection::vec((proptest::bool::weighted(0.2), 0u64..40, proptest::option::of(0u64..48)), 1..12),
+			ops in proptest::collection::vec((0u8..5, 0u64..48), 0..24),
 			looks_up: bool,
 		) {
 			let ranges: Vec<Range> = ranges
 				.into_iter()
-				.map(|(start, end)| range(time(start), end.map(time)))
+				.map(|(relative, start, end)| {
+					let start = match relative {
+						true => Anchor::Relative(start % 6),
+						false => time(start),
+					};
+					range(start, end.map(time))
+				})
 				.collect();
 			let mut keys = Keys {
 				looks_up,
@@ -1057,12 +1093,18 @@ mod tests {
 						fast.found(time, answer, &keys);
 						full.found(time, answer, &Blind(&keys));
 					}
-					_ => keys.complete = true,
+					3 => keys.complete = true,
+					// The oldest group held is evicted.
+					_ => drop(keys.held.pop_first()),
 				}
 				let latest = keys.held.last().copied();
 				fast.settle(latest, &keys);
 				full.settle(latest, &Blind(&keys));
 				proptest::prop_assert_eq!(seen(&fast), seen(&full));
+				// A window waiting on a latest group reads everything, with no spans yet.
+				if fast.is_pending() {
+					continue;
+				}
 				let (groups, missable, named) = rebuilt(&fast, &keys);
 				proptest::prop_assert!(fast.runs(0).eq(groups.iter().cloned()));
 				proptest::prop_assert!(fast.missable(0).eq(missable.iter().cloned()));

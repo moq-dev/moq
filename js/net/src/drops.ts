@@ -131,6 +131,9 @@ const LOG_SLACK = 64;
  */
 export class DropSet {
 	readonly #runs = new Runs<DropRun>(sameHole);
+	// The keys in `#runs`, whatever the reason, as coalesced runs, so whether drops cover a span is
+	// one lookup rather than a walk of every run in it. Mirrors the Rust `TrackState::dropped`.
+	readonly #keys = new Runs<Run>(() => true);
 	// Each run's last change, oldest first. An entry whose run was since replaced is dead, and
 	// the log is rebuilt once dead entries clearly outnumber live ones.
 	#log: { revision: number; run: DropRun }[] = [];
@@ -169,6 +172,16 @@ export class DropSet {
 		return this.#runs.overlapping(start, end);
 	}
 
+	/** Where the keys given up from `from` on, whatever the reason, stop: `from` when it isn't given up. */
+	coveredFrom(from: bigint): bigint {
+		return this.#keys.at(from)?.end ?? from;
+	}
+
+	/** Whether every key in `[start, end)` is given up, whatever the reason. An empty run is. */
+	covers(start: bigint, end: bigint): boolean {
+		return start >= end || this.coveredFrom(start) >= end;
+	}
+
 	/** Give up `[start, end)` as `run` says, or forget it when `run` is undefined. */
 	set(start: bigint, end: bigint, run?: Omit<DropRun, "start" | "end">): void {
 		this.#apply(this.#runs.set(start, end, run && { ...run, start, end }));
@@ -181,6 +194,9 @@ export class DropSet {
 
 	#apply({ removed, added }: { removed: DropRun[]; added: DropRun[] }): void {
 		if (removed.length === 0 && added.length === 0) return;
+		// What was replaced leaves the keys, and its replacement puts back what it still holds.
+		for (const old of removed) this.#keys.set(old.start, old.end);
+		for (const fresh of added) this.#keys.set(fresh.start, fresh.end, { start: fresh.start, end: fresh.end });
 		for (const old of removed) this.#live.delete(old);
 		for (const fresh of added) {
 			this.#live.add(fresh);
