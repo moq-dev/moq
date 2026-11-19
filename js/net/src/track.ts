@@ -1583,7 +1583,20 @@ export class Producer {
 			producer.#reportsStarts = true;
 		};
 		hooks.relativeStarts = (producer, starts) => {
-			const next = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
+			// Ranges counting back the same number of groups report together: the one from the newer
+			// latest group, and from the same one, a start over any range holding none, since a start
+			// holds for every range ending past it, or else the furthest of them. Mirrors the Rust
+			// `RelativeStart::merge`.
+			const next = new Map<bigint, { start: CountedStart; latest?: bigint }>();
+			for (const [back, start, latest] of starts) {
+				const last = next.get(back);
+				if (last === undefined || (latest ?? -1n) > (last.latest ?? -1n)) {
+					next.set(back, { start, latest });
+				} else if (latest === last.latest && last.start.at === undefined) {
+					if (start.at !== undefined || (start.past ?? 0n) > (last.start.past ?? 0n))
+						next.set(back, { start, latest });
+				}
+			}
 			const last = producer.#relativeStarts;
 			const same =
 				next.size === last.size &&
@@ -3736,9 +3749,9 @@ export class Subscriber {
 						below = run.start - 1n;
 					}
 					if (keys[keyIndex(keys, below)] !== below) {
-						// The cache may have made this gap, which no report or arrival fills, so start at
-						// the lowest group counted: whatever the publisher counted to lies below it.
-						return anchors.uncached !== undefined && below <= anchors.uncached ? { group: at } : "unknown";
+						// The cache may have made this gap, which no report or arrival fills, so count over
+						// the groups held, as a publisher that let them go does.
+						return anchors.uncached !== undefined && below <= anchors.uncached ? undefined : "unknown";
 					}
 					at = below;
 				}

@@ -623,6 +623,22 @@ struct RelativeStart {
 	latest: u64,
 }
 
+impl RelativeStart {
+	/// What two ranges counting back the same number of groups report together: the one from
+	/// the newer latest group, and from the same one, a start over any range holding none,
+	/// since a start holds for every range ending past it, or else the furthest of them.
+	fn merge(self, other: Self) -> Self {
+		if self.latest != other.latest {
+			return if self.latest > other.latest { self } else { other };
+		}
+		let start = match (self.start, other.start) {
+			(CountedStart::At(start), _) | (_, CountedStart::At(start)) => CountedStart::At(start),
+			(CountedStart::Past(a), CountedStart::Past(b)) => CountedStart::Past(a.max(b)),
+		};
+		Self { start, ..self }
+	}
+}
+
 /// Where a publisher reported starting a range counting back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CountedStart {
@@ -1222,7 +1238,7 @@ impl Holdings for TrackState {
 			})
 			.map(Containing::Group);
 		let learns = self.anchors == Anchors::Reported && !self.outcome.is_final() && !self.unfed;
-		reported.or_else(|| learns.then(|| self.counted_received(latest, back)))
+		reported.or_else(|| learns.then(|| self.counted_received(latest, back)).flatten())
 	}
 
 	fn complete(&self) -> bool {
@@ -1329,33 +1345,31 @@ impl TrackState {
 	/// The group `back` groups before `latest` on a received copy, counted only through the
 	/// groups it holds and the starts its publisher declared skipped between them: any other
 	/// gap may hold groups the copy never saw, such as one below what a first reader asked
-	/// for, so the count is [`Containing::Unknown`] there. Each step lands on a group held, so
-	/// a huge count walks the cache once.
-	fn counted_received(&self, latest: u64, back: u64) -> Containing {
+	/// for, so the count is [`Containing::Unknown`] there. A gap the cache may have made is one
+	/// no report or arrival fills, so it is `None` there, to count over the groups held as a
+	/// publisher that let them go does. Each step lands on a group held, so a huge count walks
+	/// the cache once.
+	fn counted_received(&self, latest: u64, back: u64) -> Option<Containing> {
 		let mut at = latest;
 		for _ in 0..back {
 			let Some(below) = at.checked_sub(1) else {
-				return Containing::Before;
+				return Some(Containing::Before);
 			};
 			let below = match self.drops.get_key_value(&below) {
 				Some((run, Hole::Skip)) => match run.start.checked_sub(1) {
 					Some(below) => below,
 					// Skipped down to 0: no group sits below.
-					None => return Containing::Before,
+					None => return Some(Containing::Before),
 				},
 				_ => below,
 			};
 			if !self.lookup.contains_key(&below) {
-				// The cache may have made this gap, which no report or arrival fills, so start at
-				// the lowest group counted: whatever the publisher counted to lies below it.
-				if self.uncached.is_some_and(|uncached| below <= uncached) {
-					return Containing::Group(at);
-				}
-				return Containing::Unknown;
+				let uncached = self.uncached.is_some_and(|uncached| below <= uncached);
+				return (!uncached).then_some(Containing::Unknown);
 			}
 			at = below;
 		}
-		Containing::Group(at)
+		Some(Containing::Group(at))
 	}
 
 	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
@@ -4873,10 +4887,16 @@ impl Producer {
 	/// reader's relative start counting back `back` groups from `latest` resolves to `start`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn relative_starts(&self, starts: impl IntoIterator<Item = (u64, CountedStart, u64)>) {
-		let starts: BTreeMap<u64, RelativeStart> = starts
-			.into_iter()
-			.map(|(back, start, latest)| (back, RelativeStart { start, latest }))
-			.collect();
+		let mut merged = BTreeMap::<u64, RelativeStart>::new();
+		for (back, start, latest) in starts {
+			let next = RelativeStart { start, latest };
+			let start = match merged.get(&back) {
+				Some(last) => last.merge(next),
+				None => next,
+			};
+			merged.insert(back, start);
+		}
+		let starts = merged;
 		if let Ok(mut state) = self.modify()
 			&& state.relative_starts != starts
 		{
@@ -15812,9 +15832,27 @@ mod test {
 		assert_eq!(read(&mut gap), vec![1, 2, 7, 8, 9, 10]);
 	}
 
+	/// Ranges counting back the same number of groups report together: a start holds for every
+	/// range ending past it, so it outlasts a range reporting none, whatever order they come in.
+	#[test]
+	fn relative_starts_merge_by_count() {
+		let at = |start, latest| RelativeStart {
+			start: CountedStart::At(start),
+			latest,
+		};
+		let past = |past, latest| RelativeStart {
+			start: CountedStart::Past(past),
+			latest,
+		};
+		assert_eq!(at(9, 9).merge(past(7, 9)), at(9, 9));
+		assert_eq!(past(7, 9).merge(at(9, 9)), at(9, 9));
+		assert_eq!(past(7, 9).merge(past(8, 9)), past(8, 9));
+		assert_eq!(at(9, 9).merge(past(7, 10)), past(7, 10), "a newer latest moved the count");
+	}
+
 	/// A gap the cache made in a lite-07 copy is one no report or arrival fills, so a relative
-	/// start counting into it starts at the lowest group counted, while a gap above everything
-	/// the cache let go of still waits.
+	/// start counting into it counts over the groups held, as a publisher that let them go does,
+	/// while a gap above everything the cache let go of still waits.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_received_copy_counts_a_relative_start_to_a_gap_the_cache_made() {
@@ -15842,8 +15880,8 @@ mod test {
 
 		evict(&producer, 8);
 		let mut evicted = producer.subscribe(back(1));
-		assert_eq!(placed(&mut evicted), Some(9));
-		assert_eq!(placed(&mut unknown), Some(9), "a later count passes the gap too");
+		assert_eq!(placed(&mut evicted), Some(5), "group 5 is the one held before 9");
+		assert_eq!(placed(&mut unknown), Some(0), "fewer are held than it counts");
 	}
 
 	#[test]
