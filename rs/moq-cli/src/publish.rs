@@ -4,8 +4,8 @@ use moq_mux::container::{flv, fmp4, ts};
 /// Container format read from stdin on the import (source) side.
 #[derive(Clone, Copy)]
 pub enum PublishFormat {
-	/// Raw AVC (H.264) Annex B elementary stream.
-	Avc3,
+	/// Raw H.264 Annex B elementary stream.
+	H264,
 	/// Fragmented MP4 (CMAF), republished whole as CMAF when `cmaf`.
 	Fmp4 { cmaf: bool },
 	/// MPEG-TS (transport stream), limited to one `program` of a multiplex when given.
@@ -172,7 +172,7 @@ pub struct CaptureArgs {
 }
 
 enum PublishDecoder {
-	Avc3 {
+	H264 {
 		split: Box<moq_mux::codec::h264::Split>,
 		import: Box<moq_mux::codec::h264::Import>,
 	},
@@ -196,7 +196,7 @@ impl PublishDecoder {
 	/// [`ts::Republish::decode`].
 	fn decode_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<Option<ts::Republished>> {
 		match self {
-			Self::Avc3 { split, import } => {
+			Self::H264 { split, import } => {
 				let frames = split.decode(chunk, None)?;
 				import.decode(frames)?;
 			}
@@ -215,19 +215,19 @@ impl PublishDecoder {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
-			Self::Avc3 { .. } | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+			Self::H264 { .. } | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
 		}
 	}
 
 	/// Flush any buffered trailing frame and close the tracks at end of input.
-	/// The avc3 split holds the final access unit until the next start code, so
+	/// The H.264 split holds the final access unit until the next start code, so
 	/// stdin EOF must flush it explicitly.
 	fn finish(self) -> anyhow::Result<FinishedDecoder> {
 		Ok(match self {
-			Self::Avc3 { mut split, mut import } => {
+			Self::H264 { mut split, mut import } => {
 				let tail = split.flush(None)?;
 				import.decode(tail)?;
-				FinishedDecoder::Avc3(Box::new(import.finish()?))
+				FinishedDecoder::H264(Box::new(import.finish()?))
 			}
 			Self::Fmp4(d) => FinishedDecoder::Fmp4(Box::new(d.finish()?)),
 			Self::Ts(d) => FinishedDecoder::Ts(Box::new(d.finish()?)),
@@ -241,7 +241,7 @@ impl PublishDecoder {
 	/// real cause rather than `Error::Dropped`. Consumes the decoder.
 	fn abort(self, err: moq_net::Error) {
 		match self {
-			Self::Avc3 { import, .. } => import.abort(err),
+			Self::H264 { import, .. } => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
 			Self::Ts(d) => d.abort(err),
 			Self::TsPrograms(d) => d.abort(err),
@@ -253,7 +253,7 @@ impl PublishDecoder {
 
 /// A [`PublishDecoder`] whose tracks finished, holding them so they stay servable.
 enum FinishedDecoder {
-	Avc3(Box<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>),
+	H264(Box<moq_mux::container::Finished<moq_mux::catalog::hang::Container, hang::catalog::VideoConfig>>),
 	Fmp4(Box<fmp4::Finished>),
 	Ts(Box<ts::republish::Finished>),
 	TsPrograms(Box<ts::programs::Finished>),
@@ -276,13 +276,13 @@ impl FinishedDecoder {
 		match self {
 			Self::Ts(d) => Some(d.stats()),
 			Self::TsPrograms(d) => Some(d.stats()),
-			Self::Avc3(_) | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
+			Self::H264(_) | Self::Fmp4(_) | Self::TsPassthrough(_) | Self::Flv(_) => None,
 		}
 	}
 
 	fn abort(self, err: moq_net::Error) {
 		match self {
-			Self::Avc3(import) => import.abort(err),
+			Self::H264(import) => import.abort(err),
 			Self::Fmp4(d) => d.abort(err),
 			Self::Ts(d) => d.abort(err),
 			Self::TsPrograms(d) => d.abort(err),
@@ -444,11 +444,11 @@ impl Publish {
 		}
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 		let decoder = match format {
-			PublishFormat::Avc3 => {
+			PublishFormat::H264 => {
 				let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 				let import = moq_mux::codec::h264::Import::new(track, catalog.reserve(), Default::default())?;
 				let split = Box::new(moq_mux::codec::h264::Split::new());
-				PublishDecoder::Avc3 {
+				PublishDecoder::H264 {
 					split,
 					import: Box::new(import),
 				}
@@ -2733,7 +2733,7 @@ pub(crate) mod tests {
 			(PublishFormat::Ts { program: None }, Vec::new()),
 			(PublishFormat::Ts { program: Some(1) }, tables),
 			(PublishFormat::Flv, flv_header),
-			(PublishFormat::Avc3, aud),
+			(PublishFormat::H264, aud),
 		] {
 			let origin = moq_tokio::origin::spawn();
 			let mut announced = origin.consume().announced();

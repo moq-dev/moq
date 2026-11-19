@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 				.reserve_track("video")
 				.context("the track already exists")?,
 			catalog.reserve(),
-			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::Avc3, Vec::new()),
+			moq_mux::import::VideoInit::new(moq_mux::import::VideoFormat::H264, Vec::new()),
 		)?;
 		let mut data = Vec::new();
 		stdin.read_to_end(&mut data).await?;

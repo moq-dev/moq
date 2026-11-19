@@ -73,5 +73,5 @@ moq --listen '[::]:4443' --listen-tls-generate localhost --auth-public '**' --br
 
 ### Import formats
 
-- `avc3` raw H.264 Annex-B from stdin
+- `h264` raw H.264 Annex B elementary stream from stdin
 - `fmp4` fragmented MP4 from stdin

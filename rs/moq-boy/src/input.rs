@@ -97,7 +97,7 @@ pub async fn handle_viewers(
 					let _ = cmd_tx.send(Command::Left { viewer }).await;
 				}
 			}
-			moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
+			moq_net::announce::Event::Absent(announce) => {
 				let viewer = announce.prefix.to_string();
 				// Dropping a join handle leaves its task running, so stop it here.
 				if let Some(old) = readers.remove(&viewer) {
@@ -106,8 +106,6 @@ pub async fn handle_viewers(
 				tracing::info!(%viewer, "viewer went offline");
 				let _ = cmd_tx.send(Command::Left { viewer }).await;
 			}
-			// The follower resumes on its own once the path is reachable again.
-			moq_net::announce::Event::Unavailable(_) | moq_net::announce::Event::Available(_) => {}
 		}
 	}
 	anyhow::bail!("viewer origin closed")

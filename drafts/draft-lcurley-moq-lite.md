@@ -557,7 +557,7 @@ The winning tier is the whole answer: a refusal from it never falls through to a
 Nor is a refusal retried at another claim of the same prefix.
 
 Within the tier, a claim is ineligible while another claim of the same prefix carries its Instance at a higher Epoch, however cheap it is and whether or not a route reaches it, so a request fails with UNROUTABLE while the newest Epoch is unavailable.
-Among the eligible claims, the receiver SHOULD prefer one that is not draining, then the highest priority, then the lowest cost, the claim's cost plus the cost of the route to the node announcing it, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+Among the eligible claims, the receiver SHOULD prefer one that is neither draining nor `Unavailable`, then the highest priority, then the lowest cost, the claim's cost plus the cost of the route to the node announcing it, then the lowest Rendezvous Hash, and then the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 The Rendezvous Hash is the 64-bit FNV-1a hash, with the standard offset basis `0xCBF29CE484222325` and prime, of the requested path's UTF-8 bytes followed by the claim's Instance.
 Every node that knows the same claims ranks them the same, so equal-cost Instances of one prefix share its paths and every relay sends one path to the same Instance.
 When choosing which claim to advertise for a prefix, the requested path is the prefix itself.
@@ -2299,7 +2299,7 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Replaced Warm and Cold Route Cost with one cost, which each link adds to.
 - The Cost parameter must be at least 1.
 - Added `Above` to ANNOUNCE_START and ANNOUNCE_UPDATE: how many segments broader than the requested prefix a presented claim is. A claim presented at the requested prefix from above otherwise looked exactly like a claim at the prefix, so a broadcast nested under another's path could lose to the broader claim covering it, depending on the order a relay listed them in. Receivers take a claim to cover its path less its Above.
-- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the claim's drain and priority, its cost, and a Rendezvous Hash of the requested path and the claim's Instance, a standard FNV-1a.
+- Replaced the shortest-path, Hop ID, Instance Hash, and Chain Hash tie-breaks with the claim's drain or unavailability and priority, its cost, and a Rendezvous Hash of the requested path and the claim's Instance, a standard FNV-1a.
 - Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
 
 ### Tracks {#changelog-07-tracks}
