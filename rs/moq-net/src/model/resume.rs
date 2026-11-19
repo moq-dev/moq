@@ -1005,9 +1005,11 @@ impl Subscriber {
 		self.reader().window().start()
 	}
 
-	/// The reader's range keyed `key` resolved; see [`track::Subscriber::resolved_range`].
-	pub(super) fn resolved_range(&self, key: u64) -> Option<Resolved> {
-		self.reader().window().resolved_key(key)
+	/// The reader's ranges keyed in `keys` resolved; see [`track::Subscriber::resolved_keys`].
+	pub(super) fn resolved_keys(&self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
+		let mut reader = self.reader();
+		let window = reader.window();
+		keys.into_iter().map(|key| window.resolved_key(key)).collect()
 	}
 
 	/// The lowest group at or above `from` the reader's ranges cover; see

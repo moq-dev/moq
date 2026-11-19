@@ -10618,22 +10618,29 @@ impl Subscriber {
 		Some(start?.max(self.bounds().start))
 	}
 
-	/// This subscriber's range keyed `key` as resolved here: its first group and exclusive
-	/// end, `None` while open, or `None` for one whose start still waits on the live feed or a
-	/// lookup, or that isn't held. One empty as given, or that only resolves empty, ends at or
-	/// below its start.
+	/// Each of this subscriber's ranges keyed in `keys` as resolved here, in that order: its
+	/// first group and exclusive end, `None` while open, or `None` for one whose start still
+	/// waits on the live feed or a lookup, or that isn't held. One empty as given, or that only
+	/// resolves empty, ends at or below its start.
 	///
 	/// A publisher tells its peer where a relative or time start landed, which the peer
-	/// can't work out from the groups it receives.
+	/// can't work out from the groups it receives. Settles the ranges once for the batch, so
+	/// asking for k of them costs O(k log n) past that.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn resolved_range(&mut self, key: u64) -> Option<Resolved> {
+	pub(crate) fn resolved_keys(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.resolved_key(key)
+				keys.into_iter().map(|key| cursor.filter.window.resolved_key(key)).collect()
 			}
-			Inner::Resume(resume, _) => resume.resolved_range(key),
+			Inner::Resume(resume, _) => resume.resolved_keys(keys),
 		}
+	}
+
+	/// This subscriber's range keyed `key` as resolved here; see [`Self::resolved_keys`].
+	#[cfg(test)]
+	pub(crate) fn resolved_range(&mut self, key: u64) -> Option<Resolved> {
+		self.resolved_keys([key]).pop().flatten()
 	}
 
 	/// The lowest group at or above `from` this subscriber's ranges and

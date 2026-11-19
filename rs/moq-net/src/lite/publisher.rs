@@ -4974,18 +4974,15 @@ impl Unpinned {
 /// The lowest latest group start that could resolve `range`'s next relative or time anchor:
 /// its start unless `started`, then its end. `None` once neither can move.
 ///
-/// A time start resolves to the group containing it, which no group below it can settle; a
-/// time end settles once a group starts past it; a relative anchor counts back from the
-/// first group there is.
+/// A start may resolve once any group is there, even a time start above every group, which
+/// the latest group may contain. A time end settles once a group starts past it.
 fn due(range: &crate::track::Range, started: bool) -> Option<u64> {
 	use crate::track::Anchor;
 	if range.is_empty() {
 		return None;
 	}
-	match range.start {
-		Anchor::Relative(_) if !started => return Some(0),
-		Anchor::Time(time) if !started => return Some(time),
-		_ => {}
+	if !started && matches!(range.start, Anchor::Relative(_) | Anchor::Time(_)) {
+		return Some(0);
 	}
 	match range.end {
 		Some(Anchor::Relative(_)) => Some(0),
@@ -5173,7 +5170,7 @@ impl TrackRun {
 			self.unpinned.remove(*id);
 		}
 		let pins = self.pin();
-		let mut moved = !retired.is_empty() || !added.is_empty() || !pins.is_empty();
+		let moved = !retired.is_empty() || !added.is_empty() || !pins.is_empty();
 		// A pinned range is replaced in place, keeping its Range ID.
 		let edit = crate::track::Edit {
 			retire: retired.iter().copied().chain(pins.iter().map(|(id, _)| *id)).collect(),
@@ -5192,7 +5189,9 @@ impl TrackRun {
 			// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 			self.unstarted.remove(id);
 		}
-		self.pinned(pins);
+		for (id, range) in pins {
+			self.requested.insert(id, range);
+		}
 		for (id, range) in added {
 			self.requested.insert(id, range);
 			self.unpinned.insert(id, due(&range, false));
@@ -5200,33 +5199,7 @@ impl TrackRun {
 				self.unstarted.insert(id);
 			}
 		}
-		// A range just added often resolves at once from the cache: pin it now, so the floor
-		// the caller takes from the ranges names the group it starts at, not its time.
-		let pins = self.pin();
-		if !pins.is_empty() {
-			let edit = crate::track::Edit {
-				retire: pins.iter().map(|(id, _)| *id).collect(),
-				add: pins.clone(),
-				priority,
-				delay,
-				order,
-			};
-			// Each pin names the group the model resolved the range to, which it holds.
-			if let Err(err) = self.track.edit(edit) {
-				self.refused = Some(err);
-				return false;
-			}
-			self.pinned(pins);
-			moved = true;
-		}
 		moved
-	}
-
-	/// Take the ranges [`Self::pin`] replaced, which the model took.
-	fn pinned(&mut self, pins: Vec<(u64, crate::track::Range)>) {
-		for (id, range) in pins {
-			self.requested.insert(id, range);
-		}
 	}
 
 	/// Each live range whose relative or time anchors resolved since the last update, with
@@ -5237,20 +5210,23 @@ impl TrackRun {
 	/// back to the oldest group held stays as it was, since an absolute start would turn it
 	/// into a floor the subscriber never named.
 	///
-	/// Only the ranges the latest group could have resolved are asked (see [`due`]), and each
-	/// is let go once its anchors settle, so this costs those ranges rather than every one.
+	/// Only the ranges still waiting on a start, or on an end a group passed, are asked (see
+	/// [`due`]), once for the batch, and each is let go once its anchors settle: this costs
+	/// the ranges still waiting rather than every range.
 	fn pin(&mut self) -> Vec<(u64, crate::track::Range)> {
 		use crate::track::{Anchor, Range};
 		let Some(latest) = self.track.latest_key() else {
 			return Vec::new();
 		};
 		let mut pins = Vec::new();
-		for id in self.unpinned.due(latest) {
+		let asked = self.unpinned.due(latest);
+		let resolved = self.track.resolved_keys(asked.iter().copied());
+		for (id, resolved) in asked.into_iter().zip(resolved) {
 			let Some(range) = self.requested.ranges.get(&id).copied() else {
 				self.unpinned.remove(id);
 				continue;
 			};
-			let Some(resolved) = self.track.resolved_range(id) else {
+			let Some(resolved) = resolved else {
 				continue;
 			};
 			let start = match range.start {
@@ -5324,8 +5300,10 @@ impl TrackRun {
 		}
 		let mut waiting = std::collections::BTreeSet::new();
 		let mut reported = false;
-		for id in std::mem::take(&mut self.unstarted) {
-			let start = match self.track.resolved_range(id) {
+		let unstarted = std::mem::take(&mut self.unstarted);
+		let resolved = self.track.resolved_keys(unstarted.iter().copied());
+		for (id, resolved) in unstarted.into_iter().zip(resolved) {
+			let start = match resolved {
 				Some(resolved) => {
 					let start = resolved.start.max(from);
 					resolved.end.is_none_or(|end| end > start).then_some(start)
@@ -5846,9 +5824,11 @@ impl TrackRun {
 		}
 		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
 		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
-		(0..self.initial)
-			.map(|id| {
-				let resolved = self.track.resolved_range(id)?;
+		self.track
+			.resolved_keys(0..self.initial)
+			.into_iter()
+			.map(|resolved| {
+				let resolved = resolved?;
 				let from = resolved.start.max(start);
 				resolved.end.is_none_or(|end| end > from).then_some(from)
 			})
@@ -8482,8 +8462,7 @@ mod serve_group_test {
 	}
 
 	/// A time start names the group it resolved to as the read cursor's floor, not its time,
-	/// both on the update that adds it and on later ones that leave it live: the group
-	/// containing the time starts below it.
+	/// once an update leaves it live: the group containing the time starts below it.
 	#[kio::test]
 	async fn lite07_a_time_start_floors_at_the_group_it_resolved_to() {
 		let mut track = track::Producer::new(
@@ -8510,10 +8489,9 @@ mod serve_group_test {
 			end: None,
 		};
 		run.update(lite07_add(&run, &[(0, served)], 1, &[time]));
-		assert_eq!(run.floor, 4000, "the update adding it");
 		let live = [(0, served), (1, time)];
 		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(9000), 0, None, None)]));
-		assert_eq!(run.floor, 4000, "a later update leaving it live");
+		assert_eq!(run.floor, 4000);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
 		let served: Vec<u64> = group_headers(&session, Version::Lite07)
 			.into_iter()
@@ -8626,6 +8604,39 @@ mod serve_group_test {
 			time_start_across_an_update(&[5000], 5000, 100, 6000).await,
 			[(0, false), (0, false)]
 		);
+	}
+
+	/// A time start above every group held resolves to the latest group, which contains it,
+	/// and floors there once an update leaves it live, before any group is served.
+	#[kio::test]
+	async fn lite07_a_time_start_in_the_latest_group_floors_there() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		write_group(&mut track, 4000, 4000);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_range(0..),
+		);
+		let session = Log::default();
+		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		let time = lite::Range {
+			start: Some(lite::Anchor::Time(4500)),
+			end: None,
+		};
+		run.update(lite07_add(&run, &[], 1, &[time]));
+		assert_eq!(run.track.resolved_range(1).map(|r| r.start), Some(4000));
+		run.update(lite07_add(&run, &[(1, time)], 2, &[lite::Range::span(Some(9000), 0, None, None)]));
+		assert_eq!(run.floor, 4000);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let served: Vec<u64> = group_headers(&session, Version::Lite07)
+			.into_iter()
+			.map(|(start, _)| start)
+			.collect();
+		assert!(served.contains(&4000), "served {served:?}");
 	}
 
 	/// A range retired before SUBSCRIBE_STARTED reported it gets none, and one still waiting
