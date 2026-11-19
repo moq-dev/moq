@@ -286,7 +286,9 @@ impl Recv {
 		// holds at most its window of bytes it has not taken. One waiting on a unit larger than
 		// the window gets room for the unit, which the connection window bounds.
 		let taken = self.assembler.bytes_read() - self.lease.untaken();
-		let stream_receive_window = self.window.map_or(stream_receive_window, |window| window.min(stream_receive_window));
+		let stream_receive_window = self
+			.window
+			.map_or(stream_receive_window, |window| window.min(stream_receive_window));
 		let window = stream_receive_window.max(self.lease.wanted());
 		// A window shrunk since the last announcement cannot take back credit already granted.
 		let max_stream_data = (taken + window).max(self.sent_max_stream_data);

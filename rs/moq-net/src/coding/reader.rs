@@ -1300,8 +1300,10 @@ mod tests {
 		released: usize,
 		/// The pacing window, or the cap when zero.
 		window: u64,
-		/// The taken bytes each pause reserved for.
-		paused: Vec<u64>,
+		/// The credit held at each pause.
+		paused: Vec<usize>,
+		/// The room and unsealed rest each shaping was given.
+		shaped: Vec<(Option<u64>, u64)>,
 	}
 
 	struct CreditedLease<'a>(&'a mut Credited);
@@ -1314,8 +1316,12 @@ mod tests {
 			}
 		}
 
-		fn pause(&mut self, taken: u64) -> bool {
-			self.paused.push(taken);
+		fn shape(&mut self, room: Option<u64>, unsealed: u64) {
+			self.shaped.push((room, unsealed));
+		}
+
+		fn pause(&mut self) -> bool {
+			self.paused.push(self.held);
 			true
 		}
 	}
@@ -1407,10 +1413,11 @@ mod tests {
 		assert_eq!(read, data);
 	}
 
-	/// A stream paused partway through a segment still holds the credit of what it took of
-	/// it, so the pause reserves that along with the stream window.
+	/// A stream paced partway through a segment reads on to its seal before pausing, so a
+	/// paused stream never holds the credit of a segment it has yet to seal, and its credit
+	/// stays sized to at least the rest of that segment meanwhile.
 	#[test]
-	fn a_pause_mid_segment_reserves_what_it_took() {
+	fn a_stream_reads_on_to_the_seal_before_pausing() {
 		use crate::frame::SEGMENT;
 		const CHUNK: usize = 100_000;
 
@@ -1432,14 +1439,61 @@ mod tests {
 			..Default::default()
 		};
 		let mut reader = Reader::new(stream, crate::lite::Version::Lite05);
-		for _ in 0..SEGMENT / CHUNK {
+		// One chunk straddles the seal.
+		for _ in 0..SEGMENT / CHUNK + 1 {
 			reader.stream.chunks.push_back(Bytes::from(vec![0u8; CHUNK]));
 		}
 		let noop = &kio::Waiter::noop();
-		assert!(reader.poll_read_frame(noop, &mut frame).is_pending(), "paced mid-frame");
+		assert!(
+			reader.poll_read_frame(noop, &mut frame).is_pending(),
+			"paced at the seal"
+		);
 
 		let stream = &reader.stream;
-		assert!(stream.held > 0 && stream.held < SEGMENT, "{} bytes held", stream.held);
-		assert_eq!(stream.paused, [stream.held as u64], "the pause reserves what it holds");
+		assert_eq!(stream.released, SEGMENT, "read on past the window to the seal");
+		assert_eq!(stream.paused, [0], "paused holding nothing taken");
+		let (room, unsealed) = *stream.shaped.last().expect("shaped as it read");
+		assert_eq!(room, Some(0), "no room left");
+		assert_eq!(unsealed, SEGMENT as u64, "but the next segment to seal");
+	}
+
+	/// While a reader holds the group back, ingest sizes the stream's credit to the room the
+	/// group has left, a frame short, since it pauses once the next frame does not fit.
+	#[test]
+	fn credit_is_shaped_a_frame_short_of_the_room() {
+		const FRAME: usize = 1000;
+		const WINDOW: u64 = 100_000;
+
+		let group = crate::group::Info { start: 0 }.produce();
+		let _idle = group.consume();
+		let mut group = crate::recv::Group::new(group);
+		let info = crate::frame::Info {
+			size: FRAME as u64,
+			timestamp: crate::Timestamp::ZERO,
+		};
+		let stream = Credited {
+			window: WINDOW,
+			..Default::default()
+		};
+		let mut reader = Reader::new(stream, crate::lite::Version::Lite05);
+		let noop = &kio::Waiter::noop();
+		let mut room = None;
+		for _ in 0..3 {
+			assert!(matches!(
+				reader.poll_admit(noop, &group, &info.into()),
+				Poll::Ready(Ok(()))
+			));
+			let mut frame = group.create_object(info.into()).unwrap();
+			reader.stream.chunks.push_back(Bytes::from(vec![0u8; FRAME]));
+			assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Ok(()))));
+			room = frame.room(WINDOW);
+			group.restore(frame.finish().unwrap());
+		}
+
+		let room = room.expect("a reader holds it back");
+		assert!(room <= WINDOW - 3 * FRAME as u64, "the frames took room");
+		let (shaped, unsealed) = *reader.stream.shaped.last().unwrap();
+		assert_eq!(shaped, Some(room - FRAME as u64), "a frame short");
+		assert_eq!(unsealed, 0, "between frames");
 	}
 }

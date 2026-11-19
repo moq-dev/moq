@@ -140,8 +140,8 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
 /// all of its streams, which the backends otherwise leave unlimited. It has to be at least moq-net's
 /// `transport::MIN_RECEIVE_WINDOW`, one 1 MiB segment. 4 MiB sustains about 270 Mbps at a
-/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause two group
-/// streams for slow readers (half the window, a stream window each).
+/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause about 40
+/// group streams for slow readers (half the window, about 48 KiB each).
 pub const DEFAULT_RECEIVE_WINDOW: u64 = 4 << 20;
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
@@ -149,7 +149,8 @@ const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_
 ///
 /// Stream credit returns as bytes are read, whether or not their message is complete,
 /// so this only paces one stream: enough for a single group stream to reach about
-/// 67 Mbps at a 100 ms RTT. It is also what a stream paused for a slow reader holds.
+/// 67 Mbps at a 100 ms RTT. A stream paced for a slow reader holds less: its credit
+/// shrinks to the room its group has left.
 pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 1 << 20;
 
 /// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.

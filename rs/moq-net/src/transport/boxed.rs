@@ -180,7 +180,11 @@ impl Pacing {
 	fn new(receive: Option<ReceiveWindow>) -> Self {
 		let window = crate::model::pace::window(receive);
 		let Some(receive) = receive else {
-			return Self { window, stream: 0, allowance: 0 };
+			return Self {
+				window,
+				stream: 0,
+				allowance: 0,
+			};
 		};
 		let allowance = receive
 			.connection
@@ -1187,7 +1191,7 @@ mod test {
 		recv
 	}
 
-	/// Each paused stream reserves its stream window and what it took of an unsealed segment,
+	/// On a transport that cannot shape credit, each paused stream reserves its stream window,
 	/// and the session pauses no more than fit in half the connection window; a stream
 	/// resuming or dropped returns its share.
 	#[test]
@@ -1198,31 +1202,98 @@ mod test {
 				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
 		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
-		assert!(streams[0].pause(0));
-		assert!(streams[0].pause(0), "a paused stream reserves once");
-		assert!(streams[1].pause(0));
-		assert!(!streams[2].pause(0), "a third would hold 60 of 100");
+		assert!(streams[0].pause());
+		assert!(streams[0].pause(), "a paused stream reserves once");
+		assert!(streams[1].pause());
+		assert!(!streams[2].pause(), "a third would hold 60 of 100");
 
 		streams[0].resume();
-		assert!(streams[2].pause(0), "a resumed stream returned its share");
+		assert!(streams[2].pause(), "a resumed stream returned its share");
 		drop(streams.remove(1));
-		assert!(accept(&session).pause(0), "so did a dropped one");
-
-		// A stream partway through a segment also holds the credit of what it took of it.
-		let session = Session::new(
-			SinkSession::accepted_bi(gate.consume())
-				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(100), 20)),
-		);
-		let mut first = accept(&session);
-		assert!(first.pause(25), "holds 45 of 100");
-		assert!(!accept(&session).pause(0), "a second would hold 65 of 100");
+		assert!(accept(&session).pause(), "so did a dropped one");
 
 		// Without a connection window nothing is shared, so every stream may pause.
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(None, u64::MAX)),
 		);
 		let mut streams: Vec<_> = (0..3).map(|_| accept(&session)).collect();
-		assert!(streams.iter_mut().all(|stream| stream.pause(0)));
+		assert!(streams.iter_mut().all(|stream| stream.pause()));
+	}
+
+	/// A stream that records each window it is set to, and holds `credit` once set.
+	struct Shaping {
+		windows: Arc<Mutex<Vec<u64>>>,
+		credit: u64,
+	}
+
+	impl poll::RecvStream for Shaping {
+		type Error = crate::lite::test_transport::SinkError;
+		type Lease<'a> = poll::BufferedLease<'a>;
+
+		fn poll_lease(&mut self, _: &kio::Waiter, _: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
+			Poll::Pending
+		}
+
+		fn set_priority(&mut self, _: i64) {}
+
+		fn stop(&mut self, _: u32) {}
+
+		fn set_window(&mut self, window: u64) -> Option<u64> {
+			self.windows.lock().unwrap().push(window);
+			Some(self.credit)
+		}
+	}
+
+	/// A stream on a transport that shapes credit lets the peer send what its group has room
+	/// for plus an allowance, a 128th of the connection window, and pauses holding what the
+	/// transport says it holds, so many fit where a stream window each would not.
+	#[test]
+	fn a_shaped_stream_pauses_at_the_credit_it_holds() {
+		const CONNECTION: u64 = 128 * 1024;
+		const STREAM: u64 = 64 * 1024;
+		const ALLOWANCE: u64 = CONNECTION / 128;
+
+		let gate = kio::Producer::new(true);
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume())
+				.with_receive_window(ReceiveWindow::new(std::num::NonZeroU64::new(CONNECTION), STREAM)),
+		);
+		let shaping = |credit| {
+			let windows = Arc::new(Mutex::new(Vec::new()));
+			let stream = Shaping {
+				windows: windows.clone(),
+				credit,
+			};
+			(RecvStream::budgeted(stream, session.budget()), windows)
+		};
+
+		let (mut stream, windows) = shaping(0);
+		stream.shape(None, 0);
+		assert!(windows.lock().unwrap().is_empty(), "already at its full credit");
+		stream.shape(Some(10_000), 0);
+		stream.shape(Some(9_800), 0);
+		stream.shape(Some(100), 2_000);
+		stream.shape(None, 0);
+		assert_eq!(
+			*windows.lock().unwrap(),
+			[10_000 + ALLOWANCE, 2_000 + ALLOWANCE, STREAM],
+			"skipping a move under half an allowance, and never short of the segment's rest"
+		);
+
+		// Two holding 30 KB each fit in half the window, a third does not.
+		let mut paused: Vec<_> = (0..3).map(|_| shaping(30_000)).collect();
+		assert!(paused[0].0.pause());
+		assert!(paused[1].0.pause());
+		assert!(!paused[2].0.pause(), "a third would hold 90 of 64 KiB");
+		for (_, windows) in &paused {
+			assert_eq!(
+				*windows.lock().unwrap(),
+				[ALLOWANCE],
+				"shrunk to the allowance to pause"
+			);
+		}
+		paused[0].0.resume();
+		assert!(paused[2].0.pause(), "a resumed stream returned its share");
 	}
 
 	/// A stream paces at the credit its session grants it, so a hop holds about what its
@@ -1440,7 +1511,7 @@ mod test {
 	fn an_unbounded_stream_never_pauses() {
 		let gate = kio::Producer::new(true);
 		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
-		assert!(!accept(&session).pause(0));
+		assert!(!accept(&session).pause());
 
 		let session = Session::new(
 			SinkSession::accepted_bi(gate.consume())
@@ -1448,6 +1519,6 @@ mod test {
 		);
 		let mut stream = accept(&session);
 		drop(session);
-		assert!(!stream.pause(0));
+		assert!(!stream.pause());
 	}
 }
