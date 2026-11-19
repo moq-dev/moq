@@ -4303,7 +4303,7 @@ struct Asked {
 	/// SUBSCRIBE_OK), and read the demand only then, so the readers' demand rides the
 	/// query. Kept once spliced until the last reader leaves, so the copy is never left
 	/// with nobody subscribed while readers are still subscribing to it on their own.
-	sub: Option<kio::Pending<track::Subscribing>>,
+	sub: Option<super::resume::Held>,
 	/// The copy staged for fetches while its info is in flight, withdrawn if it is never
 	/// spliced.
 	staged: super::resume::Staged,
@@ -4327,7 +4327,7 @@ struct TrackIo {
 	/// The source whose copy serves the track, the copy, and the query holding it; plus the
 	/// subscription that query made.
 	copy: Option<(u64, track::Consumer, track::Resolving)>,
-	held: Option<kio::Pending<track::Subscribing>>,
+	held: Option<super::resume::Held>,
 	/// Whether the track had a reader as of the last demand edge.
 	wanted: bool,
 }
@@ -4444,7 +4444,7 @@ struct InFlight {
 	// subscription, which follows their demand as it did while the front served it.
 	logical: Logical,
 	query: track::Resolving,
-	held: Option<kio::Pending<track::Subscribing>>,
+	held: Option<super::resume::Held>,
 }
 
 /// Keep the query's subscription on a copy following the readers' demand, and let it go
@@ -4452,7 +4452,7 @@ struct InFlight {
 /// aggregate from the copy's source: a shorter budget, or a demoted priority. With `copy`,
 /// a reader arriving subscribes it too.
 fn follow_demand(
-	held: &mut Option<kio::Pending<track::Subscribing>>,
+	held: &mut Option<super::resume::Held>,
 	copy: Option<&track::Consumer>,
 	accepted: Option<&mut track::Producer>,
 	weak: &track::TrackWeak,
@@ -4465,14 +4465,18 @@ fn follow_demand(
 	if let Some(accepted) = accepted {
 		while let Poll::Ready(Ok(_)) = accepted.poll_subscription_changed(waiter) {}
 	}
-	match (weak.subscription(), held.as_mut()) {
-		(Some((subscription, subscribers)), Some(hold)) => {
-			let _ = hold.update(routes.subscription(subscription, subscribers));
+	match held {
+		Some(hold) => {
+			if !routes.follow(hold, weak) {
+				*held = None;
+			}
 		}
-		(Some((subscription, subscribers)), None) => {
-			*held = copy.map(|copy| copy.subscribe(routes.subscription(subscription, subscribers)));
+		None => {
+			*held = weak.subscription().and_then(|(subscription, subscribers)| {
+				let sub = copy?.subscribe(routes.subscription(subscription, subscribers));
+				Some(super::resume::Held::new(sub))
+			});
 		}
-		(None, _) => *held = None,
 	}
 }
 
@@ -5171,7 +5175,9 @@ impl kio::Task for FrontServe {
 									// Subscribe before the query exposes upstream demand, and query
 									// that same instance even if the broadcast changes meanwhile.
 									let sub = io.weak.subscription().map(|(demand, subscribers)| {
-										lookup.subscribe(io.routes.subscription(demand, subscribers))
+										super::resume::Held::new(
+											lookup.subscribe(io.routes.subscription(demand, subscribers)),
+										)
 									});
 									let query = match &sub {
 										Some(sub) => sub.info(),

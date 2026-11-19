@@ -5964,6 +5964,15 @@ impl TrackWeak {
 		Demand::new(self.name.clone(), self.state.clone())
 	}
 
+	/// [`Self::subscription`] without its ranges, costing none of them.
+	pub(super) fn terms(&self) -> Option<(Subscription, usize)> {
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.demand_bound());
+		drop(state);
+		let subs = subs.lock();
+		Some((clamp_combined(subs.terms(), bound)?, subs.len()))
+	}
+
 	/// The readers' aggregate demand and contribution count, or `None` without one.
 	pub(super) fn subscription(&self) -> Option<(Subscription, usize)> {
 		let state = self.state.read();

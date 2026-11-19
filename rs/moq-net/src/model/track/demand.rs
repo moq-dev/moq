@@ -74,6 +74,18 @@ impl Subscriptions {
 		})
 	}
 
+	/// [`Self::combined`] without its ranges, costing none of them.
+	pub(super) fn terms(&self) -> Option<Subscription> {
+		let (priority, delay, order, feed) = self.scalars()?;
+		Some(Subscription {
+			priority,
+			delay,
+			ranges: Vec::new(),
+			order,
+			feed,
+		})
+	}
+
 	/// The largest delay budget without materializing the subscription's ranges.
 	pub(super) fn max_delay(&self) -> Duration {
 		self.max_delay
