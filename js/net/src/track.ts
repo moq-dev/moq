@@ -1033,11 +1033,10 @@ let answeredEmpty: (producer: Producer, time: bigint, budget: number) => boolean
 // `TrackState::landing_from` and `TrackState::landed_through`.
 let landedFrom: (producer: Producer, time: bigint, covering: bigint | undefined) => bigint | undefined;
 
-// The first run of `[start, end)` a received copy's live feed has not accounted for: not arrived,
-// not dropped, before the track's end, and in a gap whose grace has not folded. Unlike
-// {@link mayLand}, a key below where the feed starts counts. Mirrors the Rust
-// `TrackState::find_unaccounted`.
-let unaccounted: (producer: Producer, start: bigint, end: bigint) => { folds?: Instant } | undefined;
+// The lowest key of `[start, end)` a received copy's live feed has not accounted for a reader within
+// `budget`, with when its gap's grace folds; see `Producer.#unaccounted`. Unlike {@link mayLand}, a
+// key below where the feed starts counts. Mirrors the Rust `TrackState::unaccounted`.
+let unaccounted: (producer: Producer, start: bigint, end: bigint, budget: number) => { folds?: Instant } | undefined;
 
 // When a received copy's time start at `time`, waiting to be placed, next may place itself with no
 // change to wake its readers: the grace of the lowest gap {@link landedFrom} still waits on
@@ -1740,10 +1739,7 @@ export class Producer {
 			}
 		};
 		mayLand = (producer, land) => producer.#landable(land) !== undefined;
-		unaccounted = (producer, start, end) => {
-			const next = producer.#unaccounted(start, end, producer.#grace()).next();
-			return next.done ? undefined : { folds: next.value.folds };
-		};
+		unaccounted = (producer, start, end, budget) => producer.#unaccounted(start, end, budget);
 		wireFed = (producer) => producer.#wire !== undefined;
 		feedFloor = (producer) => {
 			if (!producer.#wire) return undefined;
@@ -1802,17 +1798,10 @@ export class Producer {
 		// asks the feed for the groups below it, which a fill must not duplicate.
 		const feed = this.#feedStart();
 		if (typeof feed === "bigint") start = max(start, feed);
-		yield* this.#unaccounted(start, land.end, land.grace);
-	}
-
-	// The runs of `[start, end)` the live feed has not accounted for, lowest first: not arrived, not
-	// dropped, before the track's end, and in a gap whose grace has not folded. Mirrors the Rust
-	// `TrackState::find_unaccounted`.
-	*#unaccounted(start: bigint, end: bigint, limit: Duration): Generator<Run & { folds?: Instant }> {
-		if (this.#state.closed.peek() !== undefined) return;
 		const declared = this.#state.end.peek()?.at;
-		if (declared !== undefined) end = min(end, finalKey(declared));
+		const end = declared === undefined ? land.end : min(land.end, finalKey(declared));
 		const at = now();
+		const limit = land.grace;
 		const drops = this.#state.drops;
 		for (const gap of this.#arrivals.gaps(start, end)) {
 			const folds = gap.since?.saturatingAdd(limit);
@@ -1821,6 +1810,27 @@ export class Producer {
 				yield { ...open, folds };
 			}
 		}
+	}
+
+	// The lowest key of `[start, end)` the live feed has not accounted for a reader within `budget`:
+	// not arrived, not given up for good or by a stale verdict covering that budget, before the
+	// track's end, and in a gap whose grace has not folded. Unlike #landing, a key below where the
+	// feed starts counts. Mirrors the Rust `TrackState::unaccounted`.
+	#unaccounted(start: bigint, end: bigint, budget: number): { folds?: Instant } | undefined {
+		if (this.#state.closed.peek() !== undefined) return undefined;
+		const declared = this.#state.end.peek()?.at;
+		if (declared !== undefined) end = min(end, finalKey(declared));
+		const at = now();
+		const limit = this.#grace();
+		for (const gap of this.#arrivals.gaps(start, end)) {
+			const folds = gap.since?.saturatingAdd(limit);
+			if (folds !== undefined && at.ge(folds)) continue;
+			const settled = this.#state.drops
+				.overlapping(gap.start, gap.end)
+				.filter((run) => run.stale === undefined || budget <= run.stale);
+			if (runGaps(settled, gap.start, gap.end).length > 0) return { folds };
+		}
+		return undefined;
 	}
 
 	// Record `[start, end)` given up as `hole` says, returning the runs recorded. A skip is final
@@ -5601,7 +5611,7 @@ export class Subscriber {
 			if (producer && wireFed(producer)) {
 				// With every key from the floor through the time accounted for, a group still to come
 				// containing it lies below the floor, which the read never hands out.
-				const open = unaccounted(producer, start, time + 1n);
+				const open = unaccounted(producer, start, time + 1n, drift.budget);
 				if (open === undefined) continue;
 				if (open.folds !== undefined) this.#wakeAt(open.folds.since(Instant.ZERO).asNanos());
 			}

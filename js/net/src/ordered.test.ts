@@ -545,6 +545,24 @@ test("a waiting time start holds no gap once nothing from the read's floor throu
 	expect(items(ordered())[0]).toStartWith("gap 1500..");
 });
 
+test("a stale verdict narrower than an ordered read's budget leaves its time start waiting", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	hooks.dropTrackGroups(producer, 1000n, 1500n, staleHole(100));
+	drop(producer, 1500n, 1600n);
+	const ordered = producer
+		.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] })
+		.withRange({ start: { included: 1000n }, end: { excluded: 1600n } })
+		.ordered();
+	// The group containing 1500 may still land for this budget.
+	expect(items(ordered)).toEqual([]);
+	put(producer, 1200n, false);
+	expect(items(ordered)).toEqual(["group 1200"]);
+	hooks.timeStarts(producer, [[1500n, 1200n]], NO_MAX_DELAY);
+	producer.skipGroups(1201n, 1500n);
+	expect(items(ordered)).toEqual(["gap 1500..1600 (delivery timeout)"]);
+});
+
 test("an empty answer never extends the reach of a start reported for its time", () => {
 	for (const emptyFirst of [false, true]) {
 		const producer = receivedTrack();

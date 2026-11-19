@@ -3447,25 +3447,38 @@ impl TrackState {
 		groups: ops::Range<u64>,
 		floor: bool,
 		grace: Duration,
-		f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
+		mut f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
 	) -> Option<R> {
 		let start = match floor {
 			true => groups.start,
 			false => groups.start.max(self.arrivals.first()?),
 		};
 		let start = start.max(self.start.key().unwrap_or(0));
-		self.find_unaccounted(start..groups.end, grace, f)
+		let end = groups.end.min(self.final_key().unwrap_or(u64::MAX));
+		let now = self.cache.pool().now_wall();
+		for (gap, opened) in self.arrivals.gaps(start..end) {
+			let folds = opened.and_then(|opened| opened.checked_add(grace));
+			if folds.is_some_and(|folds| now >= folds) {
+				continue;
+			}
+			if let Some(found) = self.drops.gaps(&gap).find_map(|open| f(open, folds)) {
+				return Some(found);
+			}
+		}
+		None
 	}
 
-	/// The first `f` answers of the runs of `keys` the live feed has not accounted for, lowest
-	/// first: not arrived, not dropped, before the track's end, and in a gap whose grace has not
-	/// folded. Unlike [`Self::find_landable`], a key below where the feed starts counts.
-	fn find_unaccounted<R>(
+	/// When the grace folds for the lowest key of `keys` the live feed has not accounted for
+	/// a reader within `budget`: not arrived, not given up for good or by a stale verdict
+	/// covering that budget, before the track's end, and in a gap whose grace has not folded.
+	/// `None` with none left. Unlike [`Self::find_landable`], a key below where the feed starts
+	/// counts.
+	fn unaccounted(
 		&self,
 		keys: ops::Range<u64>,
+		budget: Duration,
 		grace: Duration,
-		mut f: impl FnMut(ops::Range<u64>, Option<crate::time::Instant>) -> Option<R>,
-	) -> Option<R> {
+	) -> Option<Option<crate::time::Instant>> {
 		let end = keys.end.min(self.final_key().unwrap_or(u64::MAX));
 		let now = self.cache.pool().now_wall();
 		for (gap, opened) in self.arrivals.gaps(keys.start..end) {
@@ -3473,8 +3486,18 @@ impl TrackState {
 			if folds.is_some_and(|folds| now >= folds) {
 				continue;
 			}
-			if let Some(found) = self.drops.gaps(&gap).find_map(|open| f(open, folds)) {
-				return Some(found);
+			let mut at = gap.start;
+			for (run, hole) in self.drops.overlapping(&gap) {
+				if hole.stale_budget().is_some_and(|stale| budget > stale) {
+					continue;
+				}
+				if at < run.start {
+					return Some(folds);
+				}
+				at = at.max(run.end);
+			}
+			if at < gap.end {
+				return Some(folds);
 			}
 		}
 		None
@@ -9706,7 +9729,7 @@ impl Cursor {
 					// With every key from the floor through the time accounted for, a group still
 					// to come containing it lies below the floor, which the read never hands out.
 					let unaccounted = match state.anchors.received() {
-						true => state.find_unaccounted(floor..time.saturating_add(1), grace, |_, folds| Some(folds)),
+						true => state.unaccounted(floor..time.saturating_add(1), drift.budget, grace),
 						false => Some(None),
 					};
 					let Some(unaccounted) = unaccounted else {
@@ -16523,6 +16546,43 @@ mod test {
 		producer.drop_groups(1500..1501, StreamError::NotFound);
 		assert_eq!(next(&mut waiting).map(|gap| gap.start), Some(1500));
 		assert_eq!(next(&mut ordered(&producer)).map(|gap| gap.start), Some(1500));
+	}
+
+	/// A stale verdict under a narrower budget than an ordered read's settles none of its keys for
+	/// it, so the group containing a waiting time start may still land there, and a gap above
+	/// the time waits for it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_narrower_stale_verdict_leaves_a_time_start_waiting() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+		producer.give_up(1000..1500, Hole::stale(Duration::from_millis(100)));
+		producer.drop_groups(1500..1600, StreamError::NotFound);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Time(1500),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.with_range(1000..1600)
+			.ordered();
+		let mut next = || match ordered.next_group().now_or_never() {
+			None => None,
+			Some(Ok(Some(Item::Group(group)))) => Some(Ok(group.start)),
+			Some(Ok(Some(Item::Gap { range, .. }))) => Some(Err(range)),
+			Some(res) => panic!("ended: {:?}", res.map(|_| ())),
+		};
+		assert_eq!(next(), None, "the group containing 1500 may still land");
+		write_group(&producer, 1200);
+		assert_eq!(next(), Some(Ok(1200)));
+		// Passed as a gap, so nothing the read may still take can contain 1500.
+		assert_eq!(next(), Some(Err(1201..1500)));
+		assert_eq!(next(), Some(Err(1500..1600)));
 	}
 
 	/// A range answered empty reaches no time for the start another range asked from the same
