@@ -1953,50 +1953,60 @@ test("a fetched group continues from the next route once its own fails", async (
 // budget judges it against a reader's copy of the route, as a Rust relay judges a fetch landed in
 // that copy's cache. Nothing newer is known before a reader subscribes one, and a fetch never does.
 test.each([
-	{ budget: "500ms", maxDelay: Duration.millis(500), stale: true },
-	{ budget: "none", maxDelay: undefined, stale: false },
-])("a group fetched over a wire goes stale by the fetch's own budget ($budget)", async ({ maxDelay, stale }) => {
-	// Still, so only presentation time judges.
-	const { installed } = manual();
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const ta = copy(a);
-	ta.write(0n);
-	const { route } = counted(a, (key) => {
-		const answer = new GroupProducer(key);
-		answer.writeFrame({ payload: enc.encode(`${key}.0`), timestamp: Timestamp.unscaled(answer.start) });
-		answer.finish();
-		return answer.consume();
-	});
-	front.serve(route);
-	try {
-		const group = await front.consumer.track("seq").fetchGroup(0n, { maxDelay });
-		ta.write(1000n);
-		await settle();
-		// Fetch-only: nothing pulls the track, so nothing newer is known here.
-		expect(ta.producer.demand().wanted.peek()).toBe(false);
-		expect(group.expired.peek()).toBeUndefined();
-		// Listening before any copy exists, so a copy subscribed later has to wake it.
-		const verdict = new Promise<Error>((resolve) => void group.expired.then(resolve));
+	{ budget: "500ms", maxDelay: Duration.millis(500), stale: true, bounded: false },
+	{ budget: "none", maxDelay: undefined, stale: false, bounded: false },
+	// Judged against the whole track, as a fetch is, not the window of the reader it picked.
+	{ budget: "500ms, beside a bounded reader", maxDelay: Duration.millis(500), stale: true, bounded: true },
+])(
+	"a group fetched over a wire goes stale by the fetch's own budget ($budget)",
+	async ({ maxDelay, stale, bounded }) => {
+		// Still, so only presentation time judges.
+		const { installed } = manual();
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const ta = copy(a);
+		ta.write(0n);
+		const { route } = counted(a, (key) => {
+			const answer = new GroupProducer(key);
+			answer.writeFrame({ payload: enc.encode(`${key}.0`), timestamp: Timestamp.unscaled(answer.start) });
+			answer.finish();
+			return answer.consume();
+		});
+		front.serve(route);
+		try {
+			const group = await front.consumer.track("seq").fetchGroup(0n, { maxDelay });
+			ta.write(1000n);
+			await settle();
+			// Fetch-only: nothing pulls the track, so nothing newer is known here.
+			expect(ta.producer.demand().wanted.peek()).toBe(false);
+			expect(group.expired.peek()).toBeUndefined();
+			// Listening before any copy exists, so a copy subscribed later has to wake it.
+			const verdict = new Promise<Error>((resolve) => void group.expired.then(resolve));
 
-		// A reader whose own budget is far wider subscribes a copy.
-		const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
-		await settle();
-		expect(group.expired.peek()).toBeUndefined();
+			// A reader of group 0 alone subscribes the first copy, and a live one whose own budget is
+			// far wider the next.
+			const first = bounded
+				? front.consumer.track("seq").subscribe({ ranges: [{ start: { time: 0n }, end: { time: 0n } }] })
+				: undefined;
+			const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+			await settle();
+			expect(group.expired.peek()).toBeUndefined();
 
-		// The copy's live edge runs a second past group 0's successor.
-		ta.write(2000n);
-		if (stale) expect(await verdict).toMatchObject({ code: StreamCode.Old });
-		else expect(await isPending(verdict)).toBe(true);
+			// The copy's live edge runs a second past group 0's successor.
+			ta.write(2000n);
+			if (stale) expect(await verdict).toMatchObject({ code: StreamCode.Old });
+			else expect(await isPending(verdict)).toBe(true);
 
-		sub.close();
-		group.close();
-	} finally {
-		front.consumer.close();
-		a.close();
-		installed.close();
-	}
-});
+			first?.close();
+			sub.close();
+			group.close();
+		} finally {
+			front.consumer.close();
+			a.close();
+			installed.close();
+		}
+	},
+);
 
 test("a held fetch lets go of the route it resumed onto once its reader releases the group", async () => {
 	const front = new Front();

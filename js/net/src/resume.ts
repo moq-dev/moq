@@ -2477,7 +2477,13 @@ export class Front {
 		);
 		const expiry = (group: GroupConsumer) => hooks.groupExpiry(group) ?? judge;
 		if (!hooks.groupExpiry(fetched.group)) hooks.expireGroup(fetched.group, judge);
-		void hooks.groupReleased(fetched.group).then(() => judge.close());
+		// Watched for as long as the group is read, or until released while a held reply awaits
+		// its acknowledgement, as the fetch's own subscription is.
+		void (
+			(options as broadcast.FetchFrom | undefined)?.held
+				? hooks.groupReleased(fetched.group)
+				: hooks.groupDone(fetched.group)
+		).then(() => judge.close());
 		// Too old and evicted judge a subscription's delivery, not whether the group exists, so
 		// neither is a verdict on a fetch: one answered from a group still arriving over a
 		// subscription asks the route again for the rest when that delivery gives up on it.
