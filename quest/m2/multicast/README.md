@@ -42,10 +42,11 @@ whose fix changes the wire,
 [draining dialed links](/quest/m2/multicast/drain-dialed-links.md), and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
 the lite-06 mitigations. It does not wait on
-[warmth's port](/quest/m3/cache-routing/select.md), which has started: its
-wire joins lite-07 only if the port has landed and passed the mesh replay
-when the cut is made, and otherwise moves to the first wip version after it
-(maintainer, 2026-11-19). After the cut come
+[warmth's port](/quest/m3/cache-routing/select.md), which is measured and
+not yet built, pending the maintainer: its wire joins lite-07 only if the
+port has landed and passed the mesh replay when the cut is made, and
+otherwise moves to the first wip version after it (maintainer, 2026-11-19).
+After the cut come
 [route health](/quest/m3/route-health/README.md) and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 

@@ -63,8 +63,14 @@ reason for the change: a deployment expects warm pulls to cut what its
 backbone carries by a large part, and a release is the only way its
 production mesh gets them.
 
-Measured 2026-11-18, before building: the port stops here until the
-maintainer has run a deployment's graph (Waiting, below). `warmth.rs` reads a
+Decided 2026-11-19 (the coordinating session, to which the maintainer
+delegated the call, on
+[moq-dev/moq#9157](https://github.com/moq-dev/moq/pull/9157#issuecomment-7005346052)):
+✅ **the measurement lands as the port's first step, and the port is not
+built until the maintainer answers the item under Waiting** (rejected:
+building the port now regardless; deciding there to drop or defer it).
+
+Measured 2026-11-18, before building. `warmth.rs` reads a
 mesh from a file (relays, links with costs, marks, and a label, and where
 publishers and readers sit) and `benchmark_warmth_mesh` reports the
 link-groups ranked readers and path joins each put on it, in all, per label,
@@ -112,6 +118,16 @@ What it shows:
   41% to 72%, the whole of what item 9 of the
   [epic](/quest/m2/multicast/README.md) asked for.
 - It costs 2.6 to 6.8 times the control messages.
+
+On a deployment's graph, measured by path and not committed: under its
+hop-count link costs, ranked readers cut backbone link-groups 4% against
+path joins. With latency link costs and a warm price at a third of the cold,
+they cut 20% (39% of latency-weighted backbone cost, 46% of intercontinental
+link-groups), at +7 to 21% mean reader latency and up to 8.7x the control
+messages. With latency costs and no warm discount, 2%. Latency link costs
+alone, with path joins, remove a 5 to 12% mean reader-latency stretch over
+the shortest path, with no wire change; the relay's cluster config already
+prices each peer link (`cost`).
 
 **Why ranked readers settle.** A relay's choice reads only copies feeding
 lower ranks, and what those feed never depends on a higher rank's choice.
@@ -476,7 +492,7 @@ lite-07 freezes changes.
 
 ## Waiting
 
-- Maintainer: whether the port goes on now, after running the deployment's graph through `benchmark_warmth_mesh` with its backbone links labelled. An agent cannot: the graph is private and no session holds it. Options: (1) run it and build the port for lite-07 only if the backbone's link-groups fall there, recommended, since on the CDN shapes above they fall only where edges' uplinks are priced unequally, which pricing them equally fixes with no wire; (2) build the port now whatever it shows, for the drone meshes it does serve, at the risk of rushing an XL wire into the cut; (3) leave the port for the first wip version after the cut, as decided 2026-11-17. Done when the answer is recorded in this Plan.
+- Maintainer: whether to build the port. Its saving on the deployment's graph depends on a warm discount that trades reader latency for backbone: 20% of backbone link-groups at +7 to 21% mean reader latency with a warm price at a third of the cold, and 2% to 4% without one. Options: (1) adopt latency link costs on the deployment first, which needs no change here, and build the port after the lite-07 cut only if that latency trade is accepted, its wire then in the first wip version after the cut, recommended, since the costs alone remove a 5 to 12% reader-latency stretch and the port's saving is the trade itself; (2) build the port now for lite-07, at the risk of rushing an XL wire into the cut for a trade not yet accepted; (3) drop the port. An agent cannot take the step: it is a product trade between reader latency and backbone cost, and no check or measurement decides it. Done when the answer is recorded in this Plan.
 
 ## Related
 
