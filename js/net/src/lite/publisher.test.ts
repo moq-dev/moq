@@ -3527,7 +3527,7 @@ test("lite draft-07: a relayed fetch sent whole resets as too old when it goes s
 	const upstream = createMockTransportPair(ALPN_07_WIP);
 	const source = new OriginProducer();
 	const broadcast = publish(source, Path.from("live"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const track = defined(broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null }));
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	const whole = track.createGroup(0n);
 	whole.writeFrame(frame(0));
