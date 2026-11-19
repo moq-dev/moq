@@ -347,15 +347,7 @@ impl Producer {
 	/// resumes opens a group with a keyframe from a fresh one. Errors when the drain fails, after
 	/// the break is marked anyway: only those last frames are lost.
 	pub async fn discontinuity(&mut self) -> Result<(), Error> {
-		let drained = match std::mem::replace(&mut self.encoding, Encoding::Idle) {
-			Encoding::Open(sink) => self.drain(sink).await,
-			Encoding::Idle => Ok(()),
-			// Stays disabled, so what is written is still dropped until the grant resumes it.
-			Encoding::Disabled => {
-				self.encoding = Encoding::Disabled;
-				Ok(())
-			}
-		};
+		let drained = self.close().await;
 		self.mark()?;
 		drained
 	}
@@ -458,6 +450,17 @@ impl Producer {
 		Ok(())
 	}
 
+	/// [`discontinuity`](Self::discontinuity), for a capture whose source stopped or whose viewers
+	/// left this rendition. A failed drain only logs: it costs the last frames, and the next frame
+	/// written opens a fresh encoder, so it never takes down the renditions beside this one.
+	/// Errors only when the break cannot be marked, as the track has closed.
+	pub(crate) async fn stop(&mut self) -> Result<(), Error> {
+		if let Err(err) = self.close().await {
+			tracing::warn!(track = %self.demand.name(), error = %err, "failed to drain a stopped rendition's encoder");
+		}
+		self.mark()
+	}
+
 	/// Close the encoder without draining it and mark the break, for a capture that cancelled an
 	/// encode mid-call: the encoder refuses every call after that, so it cannot drain.
 	pub(crate) fn release(&mut self) -> Result<(), Error> {
@@ -527,6 +530,19 @@ impl Producer {
 			*marked = false;
 		}
 		Ok(())
+	}
+
+	/// Drain the encoder and close it, so the next frame written opens a fresh one. A disabled
+	/// rung stays disabled, still dropping what is written until the grant resumes it.
+	async fn close(&mut self) -> Result<(), Error> {
+		match std::mem::replace(&mut self.encoding, Encoding::Idle) {
+			Encoding::Open(sink) => self.drain(sink).await,
+			Encoding::Idle => Ok(()),
+			Encoding::Disabled => {
+				self.encoding = Encoding::Disabled;
+				Ok(())
+			}
+		}
 	}
 
 	/// Flush `sink` and publish its tail, closing it.

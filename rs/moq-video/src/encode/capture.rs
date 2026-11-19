@@ -671,18 +671,20 @@ fn log_track_ended(err: moq_net::Error) {
 ///
 /// Takes each rendition's track from [`demands`], so read them again after a write, which can
 /// move one.
-async fn until_capturing(
-	mut demands: Vec<moq_net::track::Demand>,
-	on_demand: bool,
-	run: bool,
-) -> Result<(), moq_net::Error> {
+async fn until_capturing(mut watched: Vec<Watched>, on_demand: bool, run: bool) -> Result<(), moq_net::Error> {
 	kio::wait(move |waiter| {
 		let mut wanted = false;
-		for demand in &mut demands {
+		for Watched { demand, moving } in &mut watched {
 			// Drained to pending, which arms `waiter` for this track's next change.
 			loop {
 				match demand.poll_wanted_changed(waiter) {
 					Poll::Ready(Ok(_)) => continue,
+					// The write still running may have moved it to a new track. Counted as wanted
+					// until it returns, which wakes the caller to read the track again.
+					Poll::Ready(Err(_)) if *moving => {
+						wanted = true;
+						break;
+					}
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => break,
 				}
@@ -697,17 +699,28 @@ async fn until_capturing(
 	.await
 }
 
-/// The track each rendition publishes on now.
-fn demands(producers: &[Producer]) -> Vec<moq_net::track::Demand> {
-	producers.iter().map(Producer::demand).collect()
+/// A rendition's track as the capture last read it.
+struct Watched {
+	demand: moq_net::track::Demand,
+	/// Whether a write that may move it to a new track is still running.
+	moving: bool,
 }
 
-// Race source setup or an encode against capture releasing its source, so an on-demand capture
-// its last viewer left stops waiting promptly. `None` when it released. A track that ends
-// meanwhile, such as one a write just moved off, cancels nothing: the next `until_capturing`
-// reads the current tracks and reports one that really ended.
+/// The track each rendition publishes on now.
+fn demands(producers: &[Producer]) -> Vec<Watched> {
+	producers
+		.iter()
+		.map(|producer| Watched {
+			demand: producer.demand(),
+			moving: false,
+		})
+		.collect()
+}
+
+// Race source setup against capture releasing its source, so an on-demand capture its last
+// viewer left stops waiting promptly. `None` when it released.
 async fn wait_capture<T>(
-	demands: Vec<moq_net::track::Demand>,
+	demands: Vec<Watched>,
 	on_demand: bool,
 	work: impl std::future::Future<Output = Result<T, Error>>,
 ) -> Result<Option<T>, Error> {
@@ -718,25 +731,20 @@ async fn wait_capture<T>(
 	}
 }
 
-/// Write `frame` to every producer in `producers` at once, so their encoders run side by side
-/// rather than one after another. Waits for all of them, since one cancelled mid-encode refuses
-/// every later call, and returns the first error.
-async fn write_all<'a>(
-	producers: impl Iterator<Item = &'a mut Producer>,
-	frame: &std::sync::Arc<crate::Frame>,
+/// Run `work` side by side, waiting for all of it, and return the first error.
+async fn join_all<F: std::future::Future<Output = Result<(), Error>>>(
+	work: impl IntoIterator<Item = F>,
 ) -> Result<(), Error> {
-	let mut writes: Vec<_> = producers
-		.map(|producer| Some(Box::pin(producer.write(frame.clone()))))
-		.collect();
+	let mut work: Vec<_> = work.into_iter().map(|work| Some(Box::pin(work))).collect();
 	let mut result = Ok(());
 	std::future::poll_fn(|cx| {
 		let mut pending = false;
-		for slot in &mut writes {
-			let Some(write) = slot else { continue };
-			match write.as_mut().poll(cx) {
-				Poll::Ready(written) => {
+		for slot in &mut work {
+			let Some(running) = slot else { continue };
+			match running.as_mut().poll(cx) {
+				Poll::Ready(done) => {
 					if result.is_ok() {
-						result = written;
+						result = done;
 					}
 					*slot = None;
 				}
@@ -752,15 +760,123 @@ async fn write_all<'a>(
 	result
 }
 
-/// One rendition's encoder, as the capture loop sees it between frames.
-#[derive(Default)]
-struct Live {
-	/// Whether frames are going to its encoder, so it drains once nobody watches.
+/// The first of `steps` to finish, with its index, clearing its slot. Pending while none runs.
+fn next_step<F: std::future::Future + Unpin>(
+	steps: &mut [Option<F>],
+) -> impl std::future::Future<Output = (usize, F::Output)> + '_ {
+	std::future::poll_fn(move |cx| {
+		for (index, slot) in steps.iter_mut().enumerate() {
+			if let Some(step) = slot
+				&& let Poll::Ready(done) = std::pin::Pin::new(step).poll(cx)
+			{
+				*slot = None;
+				return Poll::Ready((index, done));
+			}
+		}
+		Poll::Pending
+	})
+}
+
+/// What a rendition does with one source frame.
+enum Work {
+	/// Nobody watches it: stop its encoder if one was encoding, and follow the grant unwritten.
+	Unwatched { stop: bool },
+	/// Encode the frame, cutting a group at it first when asked.
+	Write {
+		frame: std::sync::Arc<crate::Frame>,
+		cut: bool,
+	},
+}
+
+/// Do `work` on `producer`, handing it back for the next frame.
+async fn step(producer: &mut Producer, work: Work) -> (&mut Producer, Result<(), Error>) {
+	let result = run_step(&mut *producer, work).await;
+	(producer, result)
+}
+
+async fn run_step(producer: &mut Producer, work: Work) -> Result<(), Error> {
+	match work {
+		Work::Unwatched { stop } => {
+			// Its last viewer left: drain and close its encoder, so the next opens fresh.
+			if stop {
+				producer.stop().await?;
+			}
+			// A rung disabled under congestion loses its viewers to the one below, so it follows
+			// the grant meanwhile to re-enable once funded, and they can come back.
+			producer.follow_unwritten().await;
+		}
+		Work::Write { frame, cut } => {
+			if cut {
+				producer.cut().await?;
+			}
+			producer.write(frame).await?;
+		}
+	}
+	Ok(())
+}
+
+/// One rendition as the capture loop sees it between its steps.
+struct Lane {
+	/// Whether frames are going to its encoder, so it stops once nobody watches.
 	encoding: bool,
 	/// Its keyframe asks, fresh for every encoder it opens.
 	forced: Cuts,
 	/// Whether its open encoder honors a cut, once one has opened.
 	cuts: Option<bool>,
+	/// The last source frame it took, as its place in the camera's sequence.
+	seen: Option<u64>,
+	/// Its track as of its last step.
+	demand: moq_net::track::Demand,
+	/// Whether a write was cancelled mid-call, leaving its encoder refusing every later call.
+	cancelled: bool,
+}
+
+impl Lane {
+	fn new(producer: &Producer) -> Self {
+		Self {
+			encoding: false,
+			forced: Cuts::default(),
+			cuts: None,
+			seen: None,
+			demand: producer.demand(),
+			cancelled: false,
+		}
+	}
+
+	/// What `producer` does with source frame `seq`, as its `watched` rendition or not.
+	fn take(&mut self, producer: &Producer, seq: u64, frame: &std::sync::Arc<crate::Frame>, watched: bool) -> Work {
+		let seen = self.seen.replace(seq);
+		if !watched {
+			return Work::Unwatched {
+				stop: std::mem::take(&mut self.encoding),
+			};
+		}
+		match (self.encoding, seen) {
+			// The frames between went to no encoder of its: the camera replaced them, or this
+			// rendition was still busy with an earlier one.
+			(true, Some(seen)) => producer.report_skipped(seq - seen - 1),
+			(true, None) => {}
+			(false, _) => {
+				self.encoding = true;
+				self.forced = Cuts::default();
+				self.cuts = None;
+			}
+		}
+		// A backend that cannot cut leaves every group to its cadence.
+		let wanted = self.cuts.unwrap_or(false).then(|| producer.wanted()).flatten();
+		Work::Write {
+			frame: frame.clone(),
+			cut: self.forced.due(wanted),
+		}
+	}
+}
+
+/// Why the capture loop stopped reading frames from its camera.
+enum Stopping {
+	/// The camera's stream ended, so every rendition finishes the frames already read.
+	Ended,
+	/// Nobody watches any rendition, so the writes in flight are cancelled.
+	Released,
 }
 
 /// Async capture/encode loop over `producers`, the renditions in ladder order with the captured
@@ -768,6 +884,10 @@ struct Live {
 /// while at least one viewer is watching a rendition and releases it when the last one leaves.
 /// Every scaled rendition, and the captured one on demand, encodes only while watched. It never
 /// returns on its own; dropping its future stops it.
+///
+/// Each rendition runs on its own: it takes the newest frame it hasn't seen whenever its last
+/// one is done, so an encoder that opens, drains, or encodes slowly misses frames itself rather
+/// than holding the others back. A frame it missed counts among its skipped ones.
 ///
 /// Each [`Producer`] holds its encoder, its track's claim on the connection, and rate control,
 /// so they outlive a closed camera: a reopen at another mode moves the claim's ceiling rather
@@ -832,107 +952,120 @@ async fn capture_loop<S: CaptureSource>(
 		tracing::info!(device = camera.label(), "capturing");
 		publish_status(state, Status::Live);
 
-		let mut live: Vec<Live> = producers.iter().map(|_| Live::default()).collect();
-		// The camera's skips already accounted for, from its first read on: frames it replaced
-		// while the encoders were still opening are startup, not frames they fell behind on.
-		let mut reported = None;
-		// An encode released mid-call leaves the encoder refusing every later call, so it can't drain.
-		let mut cancelled = false;
+		let mut lanes: Vec<Lane> = producers.iter().map(Lane::new).collect();
+		// The camera's skips before its first read are startup, not frames a rendition missed.
+		let mut startup = None;
+		// Frames read, and the newest of them with its place in the camera's sequence.
+		let mut reads: u64 = 0;
+		let mut latest: Option<(u64, std::sync::Arc<crate::Frame>)> = None;
+		let mut stopping = None;
 
-		loop {
-			// Race the next frame against demand, so an on-demand capture releases the
-			// camera promptly when the last viewer leaves. `biased` checks demand first
-			// so an unwatched on-demand capture stops before reading another frame.
-			let frame = tokio::select! {
-				biased;
-				released = until_capturing(demands(producers), on_demand, false) => match released {
-					Ok(()) => break, // no viewers: release the camera
-					Err(err) => {
-						log_track_ended(err);
-						return Ok(());
-					}
-				},
-				// A read error is terminal for this selection (the source is gone
-				// or was refused); `None` just ends the stream, so reopen below.
-				frame = camera.read() => frame?,
-			};
-
-			let Some(mut frame) = frame else { break };
-			// Frames the camera replaced while this loop was encoding or retuning, which only the
-			// renditions encoding then missed.
-			let skipped = camera.skipped();
-			if let Some(reported) = reported {
-				for (producer, live) in producers.iter().zip(&live) {
-					if live.encoding {
-						producer.report_skipped(skipped - reported);
+		{
+			// A rendition's producer while it waits for a frame; its step holds it meanwhile.
+			let mut idle: Vec<Option<&mut Producer>> = producers.iter_mut().map(Some).collect();
+			let mut steps: Vec<Option<std::pin::Pin<Box<_>>>> = idle.iter().map(|_| None).collect();
+			loop {
+				// Hand the newest frame to every rendition that is free and hasn't taken it.
+				if let Some((seq, frame)) = &latest
+					&& !matches!(stopping, Some(Stopping::Released))
+				{
+					for (index, (slot, lane)) in idle.iter_mut().zip(&mut lanes).enumerate() {
+						if lane.seen >= Some(*seq) {
+							continue;
+						}
+						let Some(producer) = slot.take() else { continue };
+						let watched = retained == Some(index) || producer.demand().wanted();
+						let work = lane.take(producer, *seq, frame, watched);
+						steps[index] = Some(Box::pin(step(producer, work)));
 					}
 				}
-			}
-			reported = Some(skipped);
-			let mut mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
-			// A camera never rewinds its own stream, but a reopened one maps from the shared clock,
-			// which the previous stream can lead: a device re-anchor floors just past its last
-			// timestamp, ahead of arrival. Shift the new stream past it, keeping its spacing.
-			if let Some(last) = last
-				&& mapped <= last
-			{
-				let behind = u64::try_from(last.as_micros()? - mapped.as_micros()?).unwrap_or(u64::MAX);
-				capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
-				mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
-			}
-			last = Some(mapped);
-			frame.timestamp = mapped;
-			let frame = std::sync::Arc::new(frame);
+				if stopping.is_some() && steps.iter().all(Option::is_none) {
+					break;
+				}
 
-			for (index, (producer, live)) in producers.iter_mut().zip(&mut live).enumerate() {
-				if retained != Some(index) && !producer.demand().wanted() {
-					// Its last viewer left: drain and close its encoder, so the next opens fresh.
-					if std::mem::take(&mut live.encoding) {
-						producer.discontinuity().await?;
-					}
-					// A rung disabled under congestion loses its viewers to the one below, so it
-					// follows the grant meanwhile to re-enable once funded, and they can come back.
-					producer.follow_unwritten().await;
-					continue;
-				}
-				if !live.encoding {
-					*live = Live {
-						encoding: true,
-						..Live::default()
-					};
-				}
-				// A backend that cannot cut leaves every group to its cadence.
-				let wanted = live.cuts.unwrap_or(false).then(|| producer.wanted()).flatten();
-				if live.forced.due(wanted) {
-					producer.cut().await?;
-				}
-			}
-
-			// Released mid-encode, the encoders refuse the next call, so the release below drops them.
-			let watching = demands(producers);
-			let writing = producers.iter_mut().zip(&live).filter(|(_, live)| live.encoding);
-			let written = write_all(writing.map(|(producer, _)| producer), &frame);
-			if wait_capture(watching, on_demand, written).await?.is_none() {
-				cancelled = true;
-				break;
-			}
-			for (producer, live) in producers.iter().zip(&mut live) {
-				if live.encoding && live.cuts.is_none() {
-					// A reopen can land on another backend than the probe did, so ask this one.
-					live.cuts = producer.applied().map(|applied| applied.cut);
-					if let Some(encoder) = producer.name() {
-						tracing::info!(track = %producer.demand().name(), encoder, "encoding");
-					}
+				// Race the next frame against demand, so an on-demand capture releases the
+				// camera promptly when the last viewer leaves. `biased` checks demand first so an
+				// unwatched on-demand capture stops before reading another frame, then frees a
+				// rendition whose step finished so it can take that frame.
+				let watching = lanes
+					.iter()
+					.zip(&steps)
+					.map(|(lane, step)| Watched {
+						demand: lane.demand.clone(),
+						moving: step.is_some(),
+					})
+					.collect();
+				tokio::select! {
+					biased;
+					released = until_capturing(watching, on_demand, false), if stopping.is_none() => match released {
+						Ok(()) => {
+							// A write released mid-encode leaves its encoder refusing the next call,
+							// so the release below drops it. A rendition stopping finishes.
+							for (lane, step) in lanes.iter_mut().zip(&mut steps) {
+								if lane.encoding && step.take().is_some() {
+									lane.cancelled = true;
+								}
+							}
+							stopping = Some(Stopping::Released);
+						}
+						Err(err) => {
+							log_track_ended(err);
+							return Ok(());
+						}
+					},
+					(index, (producer, result)) = next_step(&mut steps) => {
+						result?;
+						let lane = &mut lanes[index];
+						if lane.encoding && lane.cuts.is_none() {
+							// A reopen can land on another backend than the probe did, so ask this one.
+							lane.cuts = producer.applied().map(|applied| applied.cut);
+							if let Some(encoder) = producer.name() {
+								tracing::info!(track = %producer.demand().name(), encoder, "encoding");
+							}
+						}
+						// A write can move the rendition to a new track.
+						lane.demand = producer.demand();
+						idle[index] = Some(producer);
+					},
+					// A read error is terminal for this selection (the source is gone or was
+					// refused); `None` just ends the stream, so reopen below.
+					frame = camera.read(), if stopping.is_none() => match frame? {
+						None => stopping = Some(Stopping::Ended),
+						Some(mut frame) => {
+							let skipped = camera.skipped();
+							let startup = *startup.get_or_insert(skipped);
+							let seq = reads + (skipped - startup);
+							reads += 1;
+							let mut mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+							// A camera never rewinds its own stream, but a reopened one maps from the
+							// shared clock, which the previous stream can lead: a device re-anchor
+							// floors just past its last timestamp, ahead of arrival. Shift the new
+							// stream past it, keeping its spacing.
+							if let Some(last) = last
+								&& mapped <= last
+							{
+								let behind = u64::try_from(last.as_micros()? - mapped.as_micros()?).unwrap_or(u64::MAX);
+								capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
+								mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+							}
+							last = Some(mapped);
+							frame.timestamp = mapped;
+							latest = Some((seq, std::sync::Arc::new(frame)));
+						}
+					},
 				}
 			}
 		}
 
-		// Frames the camera replaced after the last read, before demand or the stream ended
-		// the loop: no read follows to report them.
-		if let Some(reported) = reported {
-			for (producer, live) in producers.iter().zip(&live) {
-				if live.encoding {
-					producer.report_skipped(camera.skipped() - reported);
+		// Frames the camera replaced or a rendition missed after the last it took: no frame
+		// follows to report them.
+		if let Some(startup) = startup {
+			let next = reads + (camera.skipped() - startup);
+			for (producer, lane) in producers.iter().zip(&lanes) {
+				if lane.encoding
+					&& let Some(seen) = lane.seen
+				{
+					producer.report_skipped(next - seen - 1);
 				}
 			}
 		}
@@ -944,20 +1077,14 @@ async fn capture_loop<S: CaptureSource>(
 		// drained frames can move a rendition to a new track, as any written frame can, which the
 		// next `until_capturing` reads.
 		drop(camera);
-		let mut stopped = Ok(());
-		for (producer, live) in producers.iter_mut().zip(live) {
-			if !live.encoding {
-				continue;
+		let stops = producers.iter_mut().zip(&lanes).map(|(producer, lane)| async move {
+			match (lane.cancelled, lane.encoding) {
+				(true, _) => producer.release(),
+				(false, true) => producer.stop().await,
+				(false, false) => Ok(()),
 			}
-			let result = match cancelled {
-				true => producer.release(),
-				false => producer.discontinuity().await,
-			};
-			if stopped.is_ok() {
-				stopped = result;
-			}
-		}
-		stopped?;
+		});
+		join_all(stops).await?;
 		tracing::info!("capture stopped; released source");
 	}
 }
@@ -2152,6 +2279,144 @@ mod tests {
 						.iter()
 						.all(|start| !(first + 4_000_002..first + 8_000_000).contains(start)),
 					"the scaled rendition encoded unwatched: {starts:?}"
+				);
+
+				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
+				run.abort();
+			})
+			.await
+		}
+
+		/// A capture publishing the captured rendition and `video/sd` from a pipelined probe, which
+		/// holds each frame back by one, so a frame reaches its track once the next is written.
+		/// Every frame opens a group starting at its pts.
+		async fn pipelined(
+			on_demand: bool,
+		) -> (
+			moq_net::broadcast::Consumer,
+			Synthetic,
+			tokio::task::JoinHandle<Result<(), Error>>,
+			String,
+		) {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut options = Capture {
+				kind: encoder::Kind::Named(probe::PIPELINED.into()),
+				on_demand,
+				renditions: vec![Rendition::new("sd", 0.25).unwrap()],
+				..Capture::default()
+			};
+			options.capture.framerate = Some(crate::FrameRate::new(1, 2).unwrap());
+			let (camera, stream) = camera();
+			let run = tokio::task::spawn_local(publish_from(broadcast, catalog, options, Streams::new([stream])));
+			let captured = renditions(&consumer, 2)
+				.await
+				.into_keys()
+				.find(|name| name != "video/sd")
+				.unwrap();
+			(consumer, camera, run, captured)
+		}
+
+		/// Push a frame at `micros` and wait for the capture `run` to read it.
+		async fn push(camera: &Synthetic, run: &tokio::task::JoinHandle<Result<(), Error>>, micros: u64) {
+			camera.push_native(surface(), us(micros));
+			until(|| {
+				assert!(!run.is_finished(), "the capture ended");
+				camera.taken()
+			})
+			.await;
+		}
+
+		/// Wait until `track` holds the group a frame at `start` opened.
+		async fn reached(track: &mut moq_net::track::Consumer, start: u64) {
+			while track.largest().await.expect("the track is live").group < start {}
+		}
+
+		/// A rendition whose encoder is slow to open, as a hardware one can be, misses frames
+		/// itself rather than holding back the rendition already encoding.
+		#[cfg(not(apple))]
+		#[tokio::test(start_paused = true)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guards only stall the process-wide probe, and this runtime has one thread, so holding them across an await blocks nothing"
+		)]
+		async fn a_slow_rendition_holds_back_only_itself() {
+			let _probe = probe::exclusive();
+			local(async {
+				let (consumer, camera, run, captured) = pipelined(false).await;
+				let mut track = consumer.track(&captured).unwrap();
+				push(&camera, &run, 0).await;
+				camera.push_native(surface(), us(2_000_000));
+				let first = track.largest().await.expect("the track is live").group;
+
+				// The scaled rendition's viewer opens its encoder on the next frame, which stalls.
+				let opening = probe::hold_opens();
+				let mut viewer = watch(&consumer, "video/sd").await;
+				push(&camera, &run, 4_000_000).await;
+				// The captured rendition still takes the frame after it, publishing the one before.
+				push(&camera, &run, 6_000_000).await;
+				reached(&mut track, first + 4_000_000).await;
+
+				// Once open, the scaled rendition encodes the frame it was opening for, then the
+				// newest, which publishes it.
+				drop(opening);
+				let start = viewer.recv_group().await.unwrap().expect("a group").start;
+				assert_eq!(start, first + 4_000_000);
+
+				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
+				run.abort();
+			})
+			.await
+		}
+
+		/// A scaled rendition whose encoder fails to drain when its viewer leaves loses only the
+		/// frame the encoder held: the captured rendition keeps encoding, and the next viewer
+		/// opens a fresh encoder.
+		#[tokio::test(start_paused = true)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests off the process-wide probe, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
+		async fn a_failed_drain_costs_only_its_rendition() {
+			let _probe = probe::exclusive();
+			local(async {
+				let (consumer, camera, run, captured) = pipelined(false).await;
+				let mut track = consumer.track(&captured).unwrap();
+				push(&camera, &run, 0).await;
+				camera.push_native(surface(), us(2_000_000));
+				let first = track.largest().await.expect("the track is live").group;
+
+				let mut viewer = watch(&consumer, "video/sd").await;
+				push(&camera, &run, 4_000_000).await;
+				push(&camera, &run, 6_000_000).await;
+				let start = viewer.recv_group().await.unwrap().expect("a group").start;
+				assert_eq!(start, first + 4_000_000);
+
+				// Its viewer gone, the scaled rendition drains on the next frame, losing the one it holds.
+				probe::lose_tail();
+				drop(viewer);
+				push(&camera, &run, 8_000_000).await;
+				push(&camera, &run, 10_000_000).await;
+				reached(&mut track, first + 8_000_000).await;
+				assert!(
+					!run.is_finished(),
+					"the failed drain ended the capture: {:?}",
+					run.await
+				);
+
+				let mut viewer = watch(&consumer, "video/sd").await;
+				push(&camera, &run, 12_000_000).await;
+				camera.push_native(surface(), us(14_000_000));
+				let mut starts = Vec::new();
+				while starts.last() != Some(&(first + 12_000_000)) {
+					starts.push(viewer.recv_group().await.unwrap().expect("a group").start);
+				}
+				assert!(
+					starts
+						.iter()
+						.all(|start| !(first + 6_000_000..first + 12_000_000).contains(start)),
+					"the lost frame or an unwatched one was published: {starts:?}"
 				);
 
 				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
