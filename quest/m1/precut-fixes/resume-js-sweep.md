@@ -2,18 +2,26 @@
 
 ## Goal
 
-`MOQ_RESUME_SEED=1 MOQ_RESUME_CASES=50000` and seed 7 pass on
-`js/net/src/resume.model.test.ts`, so Nightly's `test/resume-model.sh` passes
-on its JS side. Each defect behind a failure is fixed at its root, matching the
-Rust reader (`rs/moq-net/src/model/resume.rs`) where Rust passes the same case.
+Every swept seed, 1 to 13, passes `MOQ_RESUME_CASES=50000` on
+`js/net/src/resume.model.test.ts`. Each defect behind a failure is fixed at its
+root, matching the Rust reader (`rs/moq-net/src/model/resume.rs`) where Rust
+passes the same case.
+
+Nightly's `test/resume-model.sh` draws a fresh random seed each run at its
+default 4096 cases, so no fixed set of seeds proves Nightly passes. A clean
+sweep of seeds 1 to 13 at 50k cases is this quest's bar; a Nightly failure
+after that is a new defect for its own quest.
 
 ## Plan
 
 The fix for this sweep's `group N outside ranges` failures let it run past
 where `main` failed, uncovering the defects below. Both fail the same way on
 `main` at [f1df3c3a8e](https://github.com/moq-dev/moq/commit/f1df3c3a8e).
-Seeds 3, 10, 11 and 12 pass 50k cases; seeds 1, 2, 4, 5, 6, 7, 8, 9 and 13
-still fail. Expect more behind these: each fix so far exposed the next.
+Seeds 3, 10, 11 and 12 pass 50k cases. The rest fail with `missing groups`,
+at these case counts: 1 at 11,325; 2 at 14,386; 4 at 2,597; 5 at 12,998; 6 at
+16,450; 7 at 1,450; 8 at 29,981; 9 at 43,492; 13 at 2,623. Seeds 4, 7 and 13
+fail within Nightly's 4096 cases. Expect more behind these: each fix so far
+exposed the next.
 
 Replay a counterexample by adding it to the `regressions` test.
 
