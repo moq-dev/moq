@@ -4,6 +4,7 @@ import { Manual } from "@moq/clock/test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
+import { accept as acceptSession, connect as connectSession } from "../connection/index.ts";
 import { fromTransport, ProtocolViolation, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import { Consumer as GroupConsumer, type Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -3470,6 +3471,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 	// The FIN is never acknowledged: the close stays pending until the stream resets.
 	const inner = accepted.value.writable.getWriter();
 	let reset: unknown;
+	const { promise: closing, resolve: closed } = Promise.withResolvers<void>();
 	const writable = new WritableStream<Uint8Array>({
 		start(controller) {
 			controller.signal.addEventListener("abort", () => {
@@ -3478,7 +3480,10 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 			});
 		},
 		write: (chunk) => inner.write(chunk),
-		close: () => new Promise(() => undefined),
+		close: () => {
+			closed();
+			return new Promise(() => undefined);
+		},
 	});
 	const server = new Stream({ readable: accepted.value.readable, writable, version: Version.DRAFT_07 });
 
@@ -3492,8 +3497,7 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 		});
 		const serving = publisher.runFetch(msg, server);
 		// The whole group and its FIN go out before any successor arrives.
-		await client.reader.u8();
-		await flush();
+		await closing;
 		expect(reset).toBeUndefined();
 
 		// Then the track runs a second past its successor, with the FIN still unacknowledged.
@@ -3508,6 +3512,91 @@ test("lite draft-07: a fetch sent whole resets as too old when it goes stale una
 		publisher.close();
 		client.close();
 		broadcast.close();
+		origin.close();
+	}
+});
+
+// A relay serving a FETCH for a broadcast it consumes over the wire judges the reply by the
+// FETCH's own budget too, against a copy of the track a live reader subscribed, as a Rust relay
+// judges the fetch it landed in that copy's cache.
+test("lite draft-07: a relayed fetch sent whole resets as too old when it goes stale unacknowledged", async () => {
+	// Upstream: the broadcast's origin, consumed by the relay over a session.
+	const upstream = createMockTransportPair(ALPN_07_WIP);
+	const source = new OriginProducer();
+	const broadcast = publish(source, Path.from("live"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
+	const whole = track.createGroup(0n);
+	whole.writeFrame(frame(0));
+	whole.finish();
+	const url = new URL("https://localhost:4443/test");
+	const [session, upstreamServer] = await Promise.all([
+		connectSession({ url, transport: upstream.client }),
+		acceptSession({ transport: upstream.server, url, publish: source.consume() }),
+	]);
+	const front = new Front();
+	front.serve(wireOf(session).consume(Path.from("live")));
+
+	// Downstream: the relay's publisher, answering with the front.
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const dynamic = origin.claim(Path.from("live"));
+	void (async () => {
+		for await (const request of dynamic.requested()) request.serve(front.consumer);
+	})();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const incoming = pair.server.incomingBidirectionalStreams.getReader();
+	const accepted = await incoming.read();
+	incoming.releaseLock();
+	if (accepted.done) throw new Error("publisher never accepted the fetch stream");
+	// The FIN is never acknowledged: the close stays pending until the stream resets.
+	const inner = accepted.value.writable.getWriter();
+	let reset: unknown;
+	const { promise: closing, resolve: closed } = Promise.withResolvers<void>();
+	const writable = new WritableStream<Uint8Array>({
+		start(controller) {
+			controller.signal.addEventListener("abort", () => {
+				reset = controller.signal.reason;
+				void inner.abort(controller.signal.reason);
+			});
+		},
+		write: (chunk) => inner.write(chunk),
+		close: () => {
+			closed();
+			return new Promise(() => undefined);
+		},
+	});
+	const server = new Stream({ readable: accepted.value.readable, writable, version: Version.DRAFT_07 });
+
+	// Another downstream reader, whose own budget is far wider, keeps a copy subscribed.
+	const live = front.consumer.track("video").subscribe({ delay: { max: Duration.millis(3_600_000) } });
+	try {
+		const msg = new Fetch({ broadcast: Path.from("live"), track: "video", priority: 0, maxDelay: 500, group: 0n });
+		const serving = publisher.runFetch(msg, server);
+		// The whole group and its FIN go out before any successor arrives.
+		await closing;
+		expect(reset).toBeUndefined();
+
+		// Then the track runs a second past its successor upstream, with the FIN still unacknowledged.
+		for (const ms of [1000, 2000]) {
+			const group = track.createGroup(BigInt(ms / 1000));
+			group.writeFrame(frame(ms));
+			group.finish();
+		}
+		await serving;
+		expect(toStreamCode(fromTransport(reset))).toBe(StreamCode.Old);
+	} finally {
+		live.close();
+		publisher.close();
+		client.close();
+		dynamic.close();
+		front.consumer.close();
+		session.close();
+		upstreamServer.close();
+		broadcast.close();
+		source.close();
 		origin.close();
 	}
 });

@@ -446,11 +446,6 @@ export class LiveRanges {
 		return [...this.#live];
 	}
 
-	/** Whether the publisher reports where each range starts, which lite-07 does by Range ID. */
-	get reportsStarts(): boolean {
-		return hasRanges(this.#version);
-	}
-
 	/**
 	 * Apply a received lite-07 `update`'s edit, returning it by Range ID: the ranges retired, then
 	 * each added with the Range ID it took, costing the ranges it names. Throws

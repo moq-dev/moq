@@ -2276,7 +2276,14 @@ impl Reader {
 						if !deliverable || !self.window().contains(key) {
 							// Skipping an ordered cursor past a group the window still owes below
 							// would lose it, though it may yet land on this copy: leave it there.
+							// The peek returned the held group, so only the copy's arrivals wake
+							// the read when the owed one lands: one already landed is peeked again.
 							if ordered && deliverable && self.owes_below(floor, key, delivered) {
+								let copy = &self.copies[index];
+								if copy.track.poll_arrived(arrivals, waiter).is_ready() {
+									arrivals = copy.track.arrived();
+									continue;
+								}
 								break;
 							}
 							let Sub::Ready(sub) = &mut self.copies[index].sub else {
@@ -6503,6 +6510,50 @@ mod test {
 		b.skip_groups(6..10);
 		sub.set_range(..);
 		assert_eq!(drain(&mut sub, true), [0, 10, 11]);
+	}
+
+	/// A key-order read holding a copy's cursor on a group outside its window, for a group the
+	/// window still owes below it, wakes when that group lands on the copy.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_key_order_read_holding_a_copy_wakes_when_the_owed_group_lands() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 10);
+		routes.serve(a.consume());
+		let from_ten = track::Range {
+			start: track::Anchor::Time(10),
+			end: None,
+		};
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range::groups(0..1), from_ten]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		// a places the window at 0 and from 10; the cap holds 10 back.
+		sub.set_range(..10);
+		assert!(drain(&mut sub, true).is_empty());
+
+		// b holds 5 but not 10, so it places the second range at 5, and 0 is owed below it.
+		let b = received_copy();
+		write(&b, 5);
+		routes.serve(b.consume());
+		let wake = Arc::new(Wake::default());
+		let waiter = kio::Waiter::new(wake.clone().into());
+		assert!(sub.poll_next_group(&waiter).is_pending());
+		wake.0.store(false, std::sync::atomic::Ordering::Relaxed);
+		write(&b, 0);
+		assert!(wake.0.load(std::sync::atomic::Ordering::Relaxed));
+		// The same task's read hands it out, not the idle answer it parked with.
+		let Poll::Ready(Ok(Some(group))) = sub.poll_next_group(&waiter) else {
+			panic!("the owed group is handed out")
+		};
+		assert_eq!(group.start, 0);
 	}
 
 	#[test]
