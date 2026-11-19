@@ -12,7 +12,9 @@
 //! past the largest. The encoder's GOP stays the upper bound between keyframes.
 //!
 //! The capture loop feeds a [`Producer`], which owns the encoder and follows the grant, the same
-//! one a caller with its own frames writes to.
+//! one a caller with its own frames writes to. [`Capture::renditions`] adds one per smaller
+//! simulcast rendition, each scaling the captured frame on its encoder's thread and chained below
+//! the next larger through [`Options::lower`](super::Options::lower).
 
 use moq_mux::catalog::hang::CatalogExt;
 use std::task::Poll;
@@ -290,9 +292,9 @@ fn publish_status(state: &kio::Producer<Published>, status: Status) {
 	}
 }
 
-/// Capture a webcam and publish it as a video track.
+/// Capture a webcam and publish it as a video track, plus one per [`Capture::renditions`].
 ///
-/// Registers the track before anything about its source is known, and returns a
+/// Registers the tracks before anything about its source is known, and returns a
 /// handle that observes the publication plus the [`Driver`] that captures it. The
 /// driver opens the source to probe the mode it negotiates, so the catalog
 /// rendition is exact before a frame is published, then captures and encodes
