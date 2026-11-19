@@ -2103,7 +2103,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 
 	/// Hold back each copy standing now of the claim of `broadcast` its publisher ended,
 	/// `ended`, at no newer than `epoch`, at every path a copy is presented at: at or below
-	/// the claim's own prefix, lowered by as many segments. Returns the broadcasts where
+	/// the ended one's path, lowered by as many segments. Returns the broadcasts where
 	/// any stands. `lost` are the claims the same message lost, each with what it was a
 	/// copy of and its epoch: a copy among them ends with the claim, held back or not.
 	fn withdraw(
@@ -2119,13 +2119,15 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let Some(base) = usize::try_from(above).ok().and_then(|above| depth.checked_sub(above)) else {
 			return Vec::new();
 		};
-		let own = path.head(base).expect("a head no deeper than the path");
+		// The end reaches only where its own presentation does: a claimant, such as a scoped
+		// neighbour's adopter, may present a claim whose prefix lies outside what it may
+		// claim, so the prefix alone would let it end copies anywhere under it.
 		// A copy a neighbour gives is this node's own claim there, unless already held.
-		let mut paths: BTreeSet<Path> = below(&self.claimants, &own).map(|(path, _)| path.clone()).collect();
+		let mut paths: BTreeSet<Path> = below(&self.claimants, path).map(|(path, _)| path.clone()).collect();
 		// A copy this message lost has no claimant left to find it by.
-		let lost_at = (lost.iter()).filter(|((at, lost), ..)| lost == instance && super::prefix::within(at, &own));
+		let lost_at = (lost.iter()).filter(|((at, lost), ..)| lost == instance && super::prefix::within(at, path));
 		paths.extend(lost_at.map(|((at, _), ..)| at.clone()));
-		paths.extend([own, path.clone()]);
+		paths.insert(path.clone());
 		self.count(paths.len());
 		let mut held = Vec::new();
 		for at in paths {
@@ -4077,6 +4079,46 @@ mod tests {
 		router.recv(6, route(4, 6, 4)).unwrap();
 		router.recv(6, claims(4, chained(vec![9, 4]), 4)).unwrap();
 		assert!(shown(&router), "node 4 may have claimed it again");
+	}
+
+	/// An end reaches only where its own presentation does: a scoped neighbour that names
+	/// another announcer, with a prefix above its grant, and ends that claim, holds back no
+	/// copy outside the grant.
+	#[test]
+	fn an_end_reaches_no_copy_outside_its_presentation() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 3, Role::Scoped(vec![p("a/x")]));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		let at = |chain: Vec<Id>, above: u64| {
+			let Change::Live(claim) = chained(chain) else {
+				unreachable!("a live claim");
+			};
+			Change::Live(Claim {
+				item: Run { epoch: 0, above },
+				..claim
+			})
+		};
+		// Announcer 9's claim at `a`, presented at `a/v`.
+		let changes = vec![((p("a/v"), 7), at(vec![9, 2], 1))];
+		router
+			.recv(
+				2,
+				Msg::Claims {
+					origin: node(2),
+					changes,
+					floor: 1,
+				},
+			)
+			.unwrap();
+		assert!(router.shown().contains_key(&(7, p("a/v"))));
+
+		let given = |change| Msg::Announce {
+			changes: vec![((p("a/x/y"), 7), change)],
+		};
+		router.recv(3, given(at(vec![9], 2))).unwrap();
+		router.recv(3, given(Change::Ended)).unwrap();
+		assert!(router.shown().contains_key(&(7, p("a/v"))), "outside the grant");
 	}
 
 	/// A relay that let go of a holder it was overtaken on passes the skipped revisions on
