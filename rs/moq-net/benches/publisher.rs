@@ -7,10 +7,22 @@
 //! up as a slope over `skipped`. `adjacent` gives up the groups of one range instead, each
 //! with a different error from its neighbor, so the record holds one entry per group.
 //!
+//! `publisher_update` feeds a lite-07 subscription of `ranges` one-group ranges a stream of
+//! SUBSCRIBE_UPDATEs, each retiring the `edited` oldest ranges and adding as many, then serving
+//! until parked; `steer` moves only the priority. A cost that grows with the live ranges
+//! rather than the edit shows up as a slope over `ranges`.
+//!
+//! `publisher_drop` gives up `drops` ranges of a subscription to `ranges` ranges, plus one
+//! left open, timing each drop and every wake it causes. Each drop starts the range it gives
+//! up, so a drop costing every range shows as a slope over `ranges`, and one costing every
+//! drop before it as a slope over `drops`.
+//!
 //! Run with `cargo bench -p moq-net --features fuzz --bench publisher`.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::fuzz::CoverageBench;
+use std::time::Duration;
+
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use moq_net::fuzz::{CoverageBench, UpdateBench};
 
 /// Ranges the source gave up before the wake.
 const SKIPPED: [u64; 4] = [1, 32, 1024, 8192];
@@ -38,5 +50,60 @@ fn bench_covered_before_start(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_covered_before_start);
+/// Live ranges in the subscription, up to about the most one-group ranges a SUBSCRIBE fits.
+const LIVE: [u64; 3] = [16, 512, 8192];
+
+/// Ranges each update retires, and adds.
+const EDITED: [u64; 2] = [1, 16];
+
+fn bench_update(c: &mut Criterion) {
+	let mut group = c.benchmark_group("publisher_update");
+	group.throughput(Throughput::Elements(1));
+	for ranges in LIVE {
+		for edited in EDITED {
+			let mut run = None;
+			group.bench_function(BenchmarkId::new(format!("edit{edited}"), ranges), |b| {
+				let run = run.get_or_insert_with(|| UpdateBench::new(ranges));
+				b.iter(|| run.edit(edited));
+			});
+		}
+		let mut run = None;
+		group.bench_function(BenchmarkId::new("steer", ranges), |b| {
+			let run = run.get_or_insert_with(|| UpdateBench::new(ranges));
+			b.iter(|| run.steer());
+		});
+	}
+	group.finish();
+}
+
+/// Ranges given up per measurement, and ranges subscribed besides the open one.
+const SWEEP: [u64; 4] = [1, 32, 1024, 8192];
+
+fn bench_drop(c: &mut Criterion) {
+	let mut group = c.benchmark_group("publisher_drop");
+	// The largest cell gives up 8192 ranges per sample.
+	group.sample_size(10);
+	group.measurement_time(Duration::from_secs(2));
+	for ranges in SWEEP {
+		for drops in SWEEP.into_iter().filter(|drops| *drops <= ranges) {
+			group.throughput(Throughput::Elements(drops));
+			group.bench_function(
+				BenchmarkId::new(format!("ranges={ranges}"), format!("drops={drops}")),
+				|b| {
+					b.iter_batched(
+						|| CoverageBench::spread(ranges + 1, drops),
+						|mut run| {
+							run.give_up(drops);
+							run
+						},
+						BatchSize::PerIteration,
+					)
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_covered_before_start, bench_update, bench_drop);
 criterion_main!(benches);

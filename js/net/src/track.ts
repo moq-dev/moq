@@ -1054,6 +1054,8 @@ let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
 	starts: ReadonlyMap<bigint, TimeStart>;
 	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
+	/** Bumped whenever the others, or whether the producer is a received copy, change. */
+	placing: number;
 };
 
 /** Where a received copy's publisher started a range asked from a time, and the last time it reaches. */
@@ -1072,6 +1074,21 @@ let landedThrough: (producer: Producer, time: bigint, from: bigint | undefined) 
 // change to wake its readers: the grace of the lowest gap {@link landedThrough} still waits on
 // folds. Mirrors the Rust `TrackState::time_start_folds`.
 let timeStartFolds: (producer: Producer, time: bigint) => Instant | undefined;
+
+// The times {@link landedThrough} may place on a received copy, wherever its groups and drops leave
+// them: from the lowest time a first arrival or a reported range reaches, up to the farthest key
+// one of them may still land. Mirrors the Rust `TrackState::landing_span`.
+let landingSpan: (producer: Producer) => Run | undefined;
+
+// `runs`, sorted and disjoint, less what of them `cut` covers.
+function withoutRun(runs: readonly Run[], cut: Run): Run[] {
+	const out: Run[] = [];
+	for (const run of runs) {
+		if (run.start < cut.start) out.push({ start: run.start, end: min(run.end, cut.start) });
+		if (run.end > cut.end) out.push({ start: max(run.start, cut.end), end: run.end });
+	}
+	return out;
+}
 
 // Where a range asked from an earlier time that reaches `time` started, which upstream folded a
 // range asked from `time` into, so it reports nothing for this time itself.
@@ -1346,6 +1363,9 @@ export class Producer {
 	#timeStarts = new Map<bigint, TimeStart>();
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
+	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
+	// `#timeStarts`, and `#startsAtKeys`. Mirrors the Rust `TrackState::placing`.
+	#placing = 0;
 	// The highest-key checked start evicted. Eviction is not a key prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
@@ -1538,6 +1558,7 @@ export class Producer {
 		resubscribe = (producer) => producer.#updateSubscription();
 		hooks.cacheTrack = (producer) => {
 			producer.#wire = undefined;
+			producer.#placing++;
 			// Nothing feeds the tail anymore, so it owes nothing and readers end at the boundary.
 			for (const state of [producer.#state, ...producer.#sinks]) state.owed.set(false);
 			producer.#endLargest();
@@ -1557,6 +1578,7 @@ export class Producer {
 				: undefined;
 		hooks.receiveTrack = (producer, starts = {}) => {
 			producer.#wire = { starts, served: producer.#wire?.served };
+			producer.#placing++;
 		};
 		hooks.receiveGroup = (producer, { start: sequence, offset: start, fill }) =>
 			producer.#createGroup(sequence, start, fill);
@@ -1576,9 +1598,11 @@ export class Producer {
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
 			relative: producer.#relativeStarts,
+			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
 			producer.#startsAtKeys = true;
+			producer.#placing++;
 		};
 		hooks.timeStarts = (producer, starts) => {
 			const merged = new Map<bigint, TimeStart>();
@@ -1599,10 +1623,28 @@ export class Producer {
 				);
 			}
 			producer.#timeStarts = merged;
+			producer.#placing++;
 			// The answer may place a time start an ordered read waits at.
 			for (const state of [producer.#state, ...producer.#sinks]) state.timelineChanged.update((rev) => rev + 1);
 		};
 		landedThrough = (producer, time, from) => producer.#landingThrough(time, from) === undefined;
+		landingSpan = (producer) => {
+			const first = producer.#arrivals.first();
+			const froms = first === undefined ? [] : [first];
+			let start = first;
+			for (const [asked, reported] of producer.#timeStarts) {
+				froms.push(reported.start);
+				start = start === undefined ? asked + 1n : min(start, asked + 1n);
+			}
+			if (start === undefined) return undefined;
+			let end = start;
+			const grace = producer.#grace();
+			for (const from of froms) {
+				const landable = producer.#landing({ start: from, end: UNBOUNDED, floor: true, grace }).next();
+				end = max(end, landable.done ? UNBOUNDED : landable.value.start);
+			}
+			return end > start ? { start, end } : undefined;
+		};
 		timeStartFolds = (producer, time) => {
 			if (!producer.#wire || producer.#timeStarts.has(time)) return undefined;
 			return producer.#landingThrough(time, coveringStart(producer.#timeStarts, time))?.folds;
@@ -3652,17 +3694,16 @@ export class Subscriber {
 		const producer = state.producer;
 		if (this.#resume || !producer) return UNHELD;
 		const keys = keysOf(producer);
-		// Whether drops of a kind `kind` accepts cover every key in `[start, end)`. An empty run is.
-		const covered = (start: bigint, end: bigint, kind: (run: DropRun) => boolean) => {
-			if (start >= end) return true;
-			let at = start;
-			for (const run of state.drops.overlapping(start, end)) {
-				if (!kind(run) || run.start > at) return false;
-				at = run.end;
-			}
-			return at >= end;
-		};
+		const drops = state.drops;
 		const anchors = timeAnchors(producer);
+		// A lite-07 copy holds only part of the track: a group held before a time contains it only
+		// once nothing between them is still to arrive.
+		const wire = receivedCopy(producer) && !state.dropsAnchors.peek();
+		// The times from `from` on that the drops from there leave open.
+		const uncovered = (from: bigint): Run | undefined => {
+			const start = drops.coveredFrom(from);
+			return start < UNBOUNDED ? { start, end: UNBOUNDED } : undefined;
+		};
 		return {
 			resolves: () => true,
 			containing: (time) => {
@@ -3674,16 +3715,16 @@ export class Subscriber {
 				// A lite-07 copy holds only part of the track: a group held before `time` contains it
 				// only once nothing between them is still to arrive. Mirrors the Rust
 				// `TrackState::containing_received`.
-				if (receivedCopy(producer) && !state.dropsAnchors.peek()) {
+				if (wire) {
 					if (below === time) return { group: time };
 					const start = anchors.starts.get(time)?.start;
 					// The publisher serves nothing at or before it, as for a time older than every group.
 					if (start !== undefined) return start <= time ? { group: start } : "before";
 					const covering = coveringStart(anchors.starts, time);
-					if (below !== undefined && (covered(below + 1n, time + 1n, () => true) || index < keys.length)) {
+					if (below !== undefined && (drops.covers(below + 1n, time + 1n) || index < keys.length)) {
 						return { group: below };
 					}
-					if (below === undefined && covered(0n, time + 1n, () => true)) return "before";
+					if (below === undefined && drops.covers(0n, time + 1n)) return "before";
 					// The live feed accounted for every key it could land through the time, so the group
 					// containing it came already: the newest one held, or one since evicted.
 					if (producer && landedThrough(producer, time, covering)) {
@@ -3693,8 +3734,31 @@ export class Subscriber {
 				}
 				if (below !== undefined) return { group: below };
 				// Every key at or before it is gone, so whichever group held it will never arrive.
-				if (covered(0n, time + 1n, () => true)) return "before";
+				if (drops.covers(0n, time + 1n)) return "before";
 				return keys.length === 0 ? "unknown" : "before";
+			},
+			// The "unknown" times of `containing`, apart from those `anchors.starts` places, which the
+			// mark covers. Mirrors the Rust `Holdings::unplaced for TrackState`.
+			unplaced: () => {
+				const mark = anchors.placing * 4 + (state.dropsAnchors.peek() ? 2 : 0) + (state.fetch ? 1 : 0);
+				const runs: Run[] = [];
+				const first = keys[0];
+				const last = keys.at(-1);
+				if (anchors.atKeys || state.fetch) {
+					// Every time starts a group.
+				} else if (first === undefined || last === undefined) {
+					const open = uncovered(0n);
+					if (open) runs.push(open);
+				} else if (wire) {
+					// Below every group, up to the first, and above the last, past the drops after it.
+					const below = uncovered(0n);
+					if (below && below.start < first) runs.push({ start: below.start, end: first });
+					const above = uncovered(last + 1n);
+					if (above) runs.push(above);
+				}
+				// The times the live feed's accounting places, which no drop or group need cover.
+				const landing = wire && producer ? landingSpan(producer) : undefined;
+				return { runs: landing ? withoutRun(runs, landing) : runs, mark };
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
 			// A lite-07 copy holds only part of the track, so it starts where its publisher did,
@@ -3716,7 +3780,15 @@ export class Subscriber {
 			reachBack: (_latest, min) => this.#reachBack(min),
 			// Skip runs coalesce, so a gap between two held groups is one run unless the cache
 			// evicted a group inside it.
-			neverProduced: (start, end) => covered(start, end, (run) => run.skip === true),
+			neverProduced: (start, end) => {
+				if (start >= end) return true;
+				let at = start;
+				for (const run of drops.overlapping(start, end)) {
+					if (run.skip !== true || run.start > at) return false;
+					at = run.end;
+				}
+				return at >= end;
+			},
 		};
 	}
 
@@ -4263,6 +4335,7 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.subscriberEnd = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.end() : subscriber.#state.end.peek()?.at;
+		hooks.subscriberHoldings = (subscriber) => subscriber.#holdings();
 		hooks.subscriberEndError = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.endError() : subscriber.#state.end.peek()?.error;
 		hooks.askSubscriber = (subscriber, ask) => {
@@ -4370,6 +4443,12 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.cachedGroup(key, from);
 			const producer = subscriber.#state.producer;
 			return producer && cachedMirror(producer, key, from);
+		};
+		hooks.judgedGroup = (subscriber, key) => {
+			if (subscriber.#resume) return subscriber.#resume.judgedGroup(key);
+			const group = hooks.cachedGroup(subscriber, key);
+			if (group) hooks.expireGroup(group, hooks.staleAt(subscriber, key));
+			return group;
 		};
 		hooks.holdsGroup = (subscriber, key) => {
 			const producer = subscriber.#state.producer;

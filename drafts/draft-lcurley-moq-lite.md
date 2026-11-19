@@ -222,7 +222,7 @@ A Group can therefore be assembled from more than one publisher: each contribute
 
 A partial Group is only ever delivered to a subscriber that asked for one with FETCH.
 A publisher that holds only the later frames of a Group a subscription covers names it in a [SUBSCRIBE_DROP](#subscribe-drop) rather than deliver the part it holds.
-One that holds its earlier frames, such as a relay whose upstream closed the Group or a Group expiring as it is sent, delivers them and closes the Group Stream without a GROUP_END.
+One that holds its earlier frames, such as a relay whose upstream closed the Group, delivers them and closes the Group Stream without a GROUP_END.
 A Group is the unit of decodability: its earlier Frames may carry a keyframe or compression state the later Frames need.
 
 # Flow
@@ -838,8 +838,9 @@ A Max Age of zero follows from the same rule without a special case.
 Timestamp age means a burst of groups delivered together still reads as its true age, so catching up never resets the clock.
 Arrival age bounds what timestamps cannot: a publisher whose timestamps stop advancing, a successor that never presents a frame, and a run of empty groups.
 
-A publisher stops sending an expired group: it closes the group's open Group Stream without a GROUP_END, and names a group it opened no stream for in a [SUBSCRIBE_DROP](#subscribe-drop) with OLD.
-The subscriber keeps the frames that arrived, and a GROUP_END never claims an expired group whole.
+A publisher stops sending an expired group: it resets the group's Group Stream with OLD and names the group in a [SUBSCRIBE_DROP](#subscribe-drop) with OLD, as it does a group it opened no stream for.
+This includes a stream whose GROUP_END was sent but not yet acknowledged, whose bytes would otherwise hold flow control the streams behind it need.
+A subscriber that already read such a stream whole, through its GROUP_END and FIN, keeps the group: the OLD drop changes nothing for its readers.
 
 ## Unidirectional Streams
 Unidirectional streams are used for data transmission, the session's setup, and discovery and routing.
@@ -1996,6 +1997,7 @@ See the [Prioritization](#prioritization) section for more information.
 **Subscriber Max Age**:
 The optional maximum age in milliseconds that the subscriber accepts, encoded as the value plus one; 0 omits the reader bound.
 The publisher still applies `Publisher Max Age`, and MUST use the tighter bound while serving and while the returned group remains open.
+A response whose group expires under that bound before the subscriber acknowledges it is reset with OLD, even after its GROUP_END, as a Group Stream is (see [Expiration](#expiration)).
 
 **Group Start**:
 The start of the group to fetch.
@@ -2351,10 +2353,10 @@ A stream that FINs without a GROUP_END carries a closed Group, which may have he
 - Replaced GROUP's `Group Sequence` with `Group Start`, added `Previous Start`, the start of the Group before it, so a subscriber sees the gap before a Group without a SUBSCRIBE_SKIP, and removed `Frame Start`: a subscription reads whole Groups, so every Group Stream starts at frame 0.
 - Added GROUP_END, a `Payload Length` of 0 followed by the Group's exclusive end: a Group or Fetch Stream ends with it when its Group finished, a FIN alone ends a closed Group whose frames may not all exist, and a reset aborts. A Group's own end bounds its reach.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop.
-- A publisher closes the open Group Stream of a group that expires, without a GROUP_END, rather than resetting it, and a relay closes a Group it holds only the start of.
+- A relay closes a Group it holds only the start of, without a GROUP_END. A publisher resets the Group Stream of a group that expires with OLD, even one whose GROUP_END it sent but is not yet acknowledged, and names the group in a SUBSCRIBE_DROP with OLD.
 - FRAME leads with `Payload Length`, the payload size plus one, in place of the trailing `Message Length`; 0 is malformed.
 - A publisher SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
-- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
+- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`. A response whose group expires before it is acknowledged is reset with OLD.
 - A receiver drops a claim whose resolved path it cannot hold, such as one past the path limits once joined beneath its own root, rather than closing the session ([Announce](#announce)).
 
 ## moq-lite-06

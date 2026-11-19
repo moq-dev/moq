@@ -22,7 +22,7 @@ pub use request::request;
 pub use session::{session_ietf, session_lite};
 
 /// Lite-07 publisher run loops for the publisher bench.
-pub use crate::lite::CoverageBench;
+pub use crate::lite::{CoverageBench, UpdateBench};
 
 use bytes::Bytes;
 

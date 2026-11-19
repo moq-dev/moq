@@ -1116,7 +1116,12 @@ max_streams = 64
 		let tracked = String::from_utf8(tracked.stdout).unwrap();
 		for area in ["demo/relay", "packaging", "test"] {
 			let mut checked = 0;
-			for name in tracked.split('\0').filter(|name| name.starts_with(area)) {
+			// test/mesh-replay/ holds mesh topologies and event scripts, not relay configs; the
+			// replay writes each relay's config at run time.
+			for name in tracked
+				.split('\0')
+				.filter(|name| name.starts_with(area) && !name.starts_with("test/mesh-replay/"))
+			{
 				let path = root.join(name);
 				if path.extension().is_none_or(|ext| ext != "toml")
 					|| matches!(

@@ -23,11 +23,12 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Holdings, Layered, Runs, Window};
+use super::subscription::{Accounted, Containing, Cover, Holdings, Unplaced, Window};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
+pub(crate) use demand::Edit;
 pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
@@ -767,6 +768,9 @@ pub(crate) struct TrackState {
 	// holds only part of the track, so it can't count back over its own groups. Replaced whole
 	// as the ranges change, like `time_starts`.
 	relative_starts: BTreeMap<u64, RelativeStart>,
+	// Counts changes to how a time start is placed other than by groups arriving or drops:
+	// `time_starts`, `anchors`, and `starts_at_keys`. See [`Unplaced::mark`].
+	placing: u64,
 	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaiming a slot
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
@@ -1135,6 +1139,55 @@ impl Holdings for TrackState {
 		}
 	}
 
+	/// Exactly the times [`Self::containing`] can't place, but those `time_starts` places.
+	fn unplaced(&self) -> Option<Unplaced> {
+		let none = Unplaced::NONE;
+		// The times at or after `from` whose keys from `from` through them drops do not all
+		// cover. As in `dropped_cover`, the last time checks the keys below it only, so a run
+		// from the last key covers nothing and leaves nothing unplaced.
+		let uncovered = |from: u64| match self.dropped.get(&from) {
+			_ if from == u64::MAX => none.clone(),
+			Some(run) if run.end == u64::MAX => none.clone(),
+			Some(run) => run.end..=u64::MAX,
+			None => from..=u64::MAX,
+		};
+		let [below, above] = if self.starts_at_keys {
+			[none.clone(), none]
+		} else {
+			match (self.lookup.first_key_value(), self.lookup.last_key_value()) {
+				// Before any group, only a time whose keys down to 0 were all dropped is placed.
+				(None, _) | (_, None) => [uncovered(0), none],
+				(Some(_), Some(_)) if self.anchors != Anchors::Wire => [none.clone(), none],
+				// A copy places a time below its groups only once the keys down to 0 were
+				// dropped, and one above them only once the keys down to the newest were.
+				(Some((&first, _)), Some((&last, _))) => {
+					let below = uncovered(0);
+					let below = *below.start()..=(*below.end()).min(first.saturating_sub(1));
+					let below = match first {
+						0 => none.clone(),
+						_ => below,
+					};
+					let above = match last.checked_add(1) {
+						Some(next) => uncovered(next),
+						None => none,
+					};
+					[below, above]
+				}
+			}
+		};
+		// The times the live feed's accounting places, which no drop or group need cover.
+		let landing = match self.anchors == Anchors::Wire && !self.starts_at_keys {
+			true => self.landing_span(),
+			false => Unplaced::NONE,
+		};
+		let [below_low, below_high] = Unplaced::without(below, &landing);
+		let [above_low, above_high] = Unplaced::without(above, &landing);
+		Some(Unplaced {
+			runs: [below_low, below_high, above_low, above_high],
+			mark: self.placing,
+		})
+	}
+
 	fn next_start(&self, from: u64) -> Option<u64> {
 		self.lookup.range(from..).next().map(|(&key, _)| key)
 	}
@@ -1273,6 +1326,40 @@ impl TrackState {
 			.rev()
 			.find(|(_, reported)| reported.through.is_none_or(|through| through >= time))
 			.map(|(_, reported)| reported.start)
+	}
+
+	/// The times [`Self::landed_through`] may place, wherever the groups and drops leave them:
+	/// from the lowest time a first arrival or a reported range reaches, through the key below
+	/// the farthest one either may still land. Empty when it places none.
+	fn landing_span(&self) -> ops::RangeInclusive<u64> {
+		if !self.readable() {
+			return Unplaced::NONE;
+		}
+		let first = self.arrivals.first();
+		let reported = || {
+			self.time_starts
+				.iter()
+				.map(|(&asked, reported)| (asked, reported.start))
+		};
+		let lowest = first
+			.into_iter()
+			.chain(reported().map(|(asked, _)| asked.saturating_add(1)))
+			.min();
+		let Some(lowest) = lowest else {
+			return Unplaced::NONE;
+		};
+		let grace = self.arrival_grace();
+		let mut landable = lowest;
+		for from in first.into_iter().chain(reported().map(|(_, start)| start)) {
+			match self.find_landable(from..u64::MAX, true, grace, |open, _| Some(open.start)) {
+				Some(key) => landable = landable.max(key),
+				None => return lowest..=u64::MAX,
+			}
+		}
+		match landable.checked_sub(1) {
+			Some(last) => lowest..=last,
+			None => Unplaced::NONE,
+		}
 	}
 
 	/// When a received copy's time start at `time`, waiting to be placed, next may place
@@ -2131,9 +2218,8 @@ impl TrackState {
 	}
 
 	/// The first live-feed group at or above `from` that `servable` covers for which `f`
-	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run.
-	/// Several runs leapfrog the live groups, so a run holding none (a reader's misses, or
-	/// fetched backfill) costs one lookup rather than a walk over every run past it.
+	/// answers, lowest first or, with `rev`, highest first: one lookup for a single run, and
+	/// the reader's index of the live groups among several.
 	fn find_servable<'a, R>(
 		&'a self,
 		servable: &Servable,
@@ -2163,58 +2249,13 @@ impl TrackState {
 				if from > hi {
 					return None;
 				}
-				let groups = &several.groups;
-				// The fixed runs through the reader's index of the live groups among them, then
-				// the walks' few runs layered over them, short of what the index found.
-				let fixed = several.live.find(self, groups.fixed(), from, hi, rev, &mut f);
-				// Nothing lies past a find at the far end, so only the find answers.
-				let short = match (&fixed, rev) {
-					(None, _) => Some((from, hi)),
-					(Some((found, _)), true) => found.checked_add(1).map(|lo| (lo, hi)),
-					(Some((found, _)), false) => found.checked_sub(1).map(|hi| (from, hi)),
-				};
-				let layered = short
-					.filter(|(lo, hi)| lo <= hi)
-					.and_then(|(lo, hi)| self.leapfrog(groups.layer(), lo, hi, rev, &mut f));
-				layered.or(fixed.map(|(_, found)| found))
+				// Through the reader's index of the live groups among its runs.
+				several
+					.live
+					.find(self, &several.groups, from, hi, rev, &mut f)
+					.map(|(_, found)| found)
 			}
 		}
-	}
-
-	/// [`Self::find_servable`] over `runs` within `lo..=hi`: several runs leapfrog the live
-	/// groups, so a run holding none costs one lookup rather than a walk over every run past
-	/// it.
-	fn leapfrog<'a, R>(
-		&'a self,
-		runs: &Runs,
-		mut lo: u64,
-		mut hi: u64,
-		rev: bool,
-		f: &mut impl FnMut(&'a Slot) -> Option<R>,
-	) -> Option<R> {
-		// What is left to search, shrinking from the end the search starts at.
-		while lo <= hi {
-			let run = match rev {
-				true => runs.last(lo, hi),
-				false => runs.first(lo, hi),
-			}?;
-			let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
-			// The cache from the run on, toward the far end: one lookup either finds the run's
-			// groups or the next cached group past a run holding none.
-			let leap = match rev {
-				true => leap(self.live(lo..=end).rev(), start..=end, f),
-				false => leap(self.live(start..=hi), start..=end, f),
-			};
-			match leap {
-				Leap::Found(found) => return Some(found),
-				Leap::Empty => return None,
-				Leap::Past(key) if rev => hi = key,
-				Leap::Past(key) => lo = key,
-				Leap::Exhausted if rev => hi = start.checked_sub(1)?,
-				Leap::Exhausted => lo = end.checked_add(1)?,
-			}
-		}
-		None
 	}
 
 	/// Whether `key` still holds the servable incarnation `stamp`.
@@ -4828,6 +4869,7 @@ impl Producer {
 			&& state.anchors == Anchors::Local
 		{
 			state.anchors = Anchors::Refused;
+			state.placing += 1;
 		}
 	}
 
@@ -4837,6 +4879,7 @@ impl Producer {
 	pub(crate) fn anchored(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.anchors = Anchors::Wire;
+			state.placing += 1;
 		}
 	}
 
@@ -4872,6 +4915,7 @@ impl Producer {
 			&& state.time_starts != starts
 		{
 			state.time_starts = starts;
+			state.placing += 1;
 		}
 	}
 
@@ -4904,6 +4948,7 @@ impl Producer {
 	pub(crate) fn starts_at_keys(&self) {
 		if let Ok(mut state) = self.modify() {
 			state.starts_at_keys = true;
+			state.placing += 1;
 		}
 	}
 
@@ -7712,7 +7757,7 @@ struct Drift {
 
 /// The groups a reader reads, and the exclusive end it stops at, or `None` before its ranges
 /// resolve.
-type Coverage = Option<(Layered, Option<u64>)>;
+type Coverage = Option<(Cover, Option<u64>)>;
 
 /// Whether a reader judging under `budget` with `coverage` is settled by `hole` over a run
 /// from `start`. Any hole but a received stale one settles every reader. A stale verdict
@@ -7746,6 +7791,29 @@ fn settles(budget: Duration, coverage: &Coverage, start: u64, hole: &Hole) -> bo
 	budget <= stale && reads(above..u64::MAX)
 }
 
+/// The starts at which a received stale run settles a reader whose coverage grew from `old`
+/// to `new` under the same budget and did not before, or `None` inside for none: `None` when
+/// the coverage changed other than by growing. See [`settles`]: only an uncapped reader is
+/// settled, by a run whose next key the open run of its groups holds, and that run's start
+/// only falls as the groups grow.
+fn settling(old: &Coverage, new: &Coverage) -> Option<Option<ops::Range<u64>>> {
+	let ((old, old_cap), (new, cap)) = match (old, new) {
+		(None, None) => return Some(None),
+		(Some(old), Some(new)) => (old, new),
+		_ => return None,
+	};
+	if old_cap != cap || !old.gained(new, 0, u64::MAX).is_empty() {
+		return None;
+	}
+	if cap.is_some() {
+		return Some(None);
+	}
+	// The lowest start settled: the one just below the open run, or only the last key.
+	let settled = |groups: &Cover| groups.open_from().map_or(u64::MAX, |start| start.saturating_sub(1));
+	let run = settled(new)..settled(old);
+	Some((!run.is_empty()).then_some(run))
+}
+
 impl Drift {
 	/// Whether `hole`, over a run from `start`, settles this reader; see [`settles`].
 	fn settles(&self, start: u64, hole: &Hole) -> bool {
@@ -7760,7 +7828,7 @@ struct GroupExpiry {
 	/// locking `state`.
 	cache: Arc<cache::Track>,
 	reading: Reading,
-	subscription: kio::Consumer<Subscription>,
+	subscription: kio::Consumer<demand::Prefs>,
 	/// What the cursor can be served; see [`Cursor::published`].
 	servable: kio::Consumer<Published>,
 	key: u64,
@@ -7944,13 +8012,13 @@ struct Edge {
 	servable: Servable,
 }
 
-/// What a cursor's arrival walk reads: its window from the floor, below the cap. Holds the
-/// window's groups as they are layered, so taking it again after a time end moves costs
-/// the walks' runs, not every run of the window.
+/// What a cursor's arrival walk reads: its window from the floor, below the cap. Holds a
+/// snapshot of the window's cover, so taking it again after the window moves diffs the two
+/// snapshots and costs what moved, not every run of the window.
 #[derive(Clone, Default)]
 struct Admitted {
 	/// The window's groups, `None` while a relative anchor waits and every group is in it.
-	groups: Option<Layered>,
+	groups: Option<Cover>,
 	floor: u64,
 	cap: Option<u64>,
 }
@@ -7996,17 +8064,52 @@ impl Admitted {
 		self.overlapping(0..=u64::MAX)
 	}
 
-	/// What this admits and `old` doesn't within `lo..=hi`, when the two differ only in the
-	/// window's walks: `None` otherwise.
+	/// What this admits and `old` doesn't within `lo..=hi`, when neither waits on a relative
+	/// anchor: `None` otherwise. Costs where the window, the floor, or the cap moved between
+	/// them, never the runs that stayed.
 	fn gained(&self, old: &Self, lo: u64, hi: u64) -> Option<Vec<ops::RangeInclusive<u64>>> {
 		let (groups, old_groups) = (self.groups.as_ref()?, old.groups.as_ref()?);
-		if (self.floor, self.cap) != (old.floor, old.cap) || !groups.shares_fixed(old_groups) {
-			return None;
-		}
 		let Some(last) = self.last() else {
 			return Some(Vec::new());
 		};
-		groups.gained(old_groups, lo.max(self.floor), hi.min(last))
+		let (lo, hi) = (lo.max(self.floor), hi.min(last));
+		if lo > hi {
+			return Some(Vec::new());
+		}
+		let mut moved: RangeInclusiveSet<u64> = groups.moved(old_groups).into_iter().collect();
+		if self.floor != old.floor {
+			moved.insert(self.floor.min(old.floor)..=self.floor.max(old.floor) - 1);
+		}
+		let old_last = old.last();
+		match old_last {
+			Some(old_last) if old_last != last => {
+				moved.insert(old_last.min(last) + 1..=old_last.max(last));
+			}
+			Some(_) => {}
+			// The old admitted nothing, so all of this is new.
+			None => moved.insert(lo..=hi),
+		}
+		let mut gained = Vec::new();
+		for span in moved.overlapping(lo..=hi) {
+			for run in groups.within((*span.start()).max(lo), (*span.end()).min(hi)) {
+				let (start, end) = (*run.start(), *run.end());
+				// What lies outside the old bounds is new whatever its runs held.
+				let inside = old_last.map(|old_last| (start.max(old.floor), end.min(old_last)));
+				match inside.filter(|(from, to)| from <= to) {
+					None => gained.push(run),
+					Some((from, to)) => {
+						if start < from {
+							gained.push(start..=from - 1);
+						}
+						gained.extend(super::subscription::minus(from..=to, old_groups));
+						if to < end {
+							gained.push(to + 1..=end);
+						}
+					}
+				}
+			}
+		}
+		Some(gained)
 	}
 }
 
@@ -8096,39 +8199,6 @@ impl<T, C: DoubleEndedIterator<Item = T>, I: DoubleEndedIterator<Item = T>> Doub
 	}
 }
 
-/// What one run's lookup found, for [`TrackState::find_servable`] leapfrogging the cache.
-enum Leap<R> {
-	/// A group in the run that the search answered.
-	Found(R),
-	/// The run's groups, none answering.
-	Exhausted,
-	/// Nothing in the run: the nearest cached group past it.
-	Past(u64),
-	/// Nothing cached from the run on.
-	Empty,
-}
-
-/// Search `cached`, ordered from the run toward the far end, for a group in `run` that `f`
-/// answers.
-fn leap<'a, R>(
-	mut cached: impl Iterator<Item = (&'a u64, &'a Slot)>,
-	run: ops::RangeInclusive<u64>,
-	f: &mut impl FnMut(&'a Slot) -> Option<R>,
-) -> Leap<R> {
-	let Some((&first, slot)) = cached.next() else {
-		return Leap::Empty;
-	};
-	if !run.contains(&first) {
-		return Leap::Past(first);
-	}
-	let mut within =
-		std::iter::once(slot).chain(cached.take_while(|(key, _)| run.contains(*key)).map(|(_, slot)| slot));
-	match within.find_map(f) {
-		Some(found) => Leap::Found(found),
-		None => Leap::Exhausted,
-	}
-}
-
 /// The groups a reader can be served, the only ones its drift is measured against: one it
 /// never reads, past its cap or in a gap between its ranges, never stands in for one it does.
 #[derive(Clone, PartialEq)]
@@ -8141,13 +8211,14 @@ enum Servable {
 	Runs(Arc<Several>),
 }
 
-/// A servable window of several runs: the window's groups as it layers them, below the
-/// exclusive `cap`, with the reader's index of the live groups inside its fixed runs.
+/// A servable window of several runs: a snapshot of the window's cover, below the exclusive
+/// `cap`, with the reader's index of the live groups inside that cover.
 ///
-/// Built again whenever the window or cap moves, which a time end does on each group, so it
-/// shares the fixed runs and their index, and copies only the walks' runs.
+/// Built again whenever the window or cap moves, which a time end does on each group. The
+/// snapshot is a pointer clone, and the index is kept while the cover is unchanged
+/// (pointer-equal), so a move of only the cap rebuilds nothing.
 struct Several {
-	groups: Layered,
+	groups: Cover,
 	cap: Option<u64>,
 	live: Arc<Live>,
 }
@@ -8158,12 +8229,12 @@ impl PartialEq for Several {
 	}
 }
 
-/// A reader's index of the live feed's cached groups inside its window's fixed runs, so a
+/// A reader's index of the live feed's cached groups inside its window's cover, so a
 /// search costs the live groups it passes, never the runs between them: thousands of runs
 /// in the gaps of a sparsely numbered feed would otherwise each cost a lookup.
 ///
 /// Taken in from the arrival order, which every live group enters once, on the reader's own
-/// search: each arrival costs it one lookup in the fixed runs. A slot that leaves or is
+/// search: each arrival costs it one lookup in the cover. A slot that leaves or is
 /// replaced leaves its entry stale, dropped when a search meets it or once stale entries
 /// could outnumber the live groups.
 ///
@@ -8179,7 +8250,7 @@ struct Indexed {
 	track: Weak<cache::Track>,
 	/// How far into the arrival order this has taken in, as an absolute index.
 	taken: usize,
-	/// The stamp of each live group inside the fixed runs, by key, as it arrived.
+	/// The stamp of each live group inside the cover, by key, as it arrived.
 	groups: BTreeMap<u64, u32>,
 }
 
@@ -8194,9 +8265,9 @@ impl Indexed {
 	}
 
 	/// Take in what arrived since the last call.
-	fn catch_up(&mut self, state: &TrackState, fixed: &Runs) {
+	fn catch_up(&mut self, state: &TrackState, groups: &Cover) {
 		for entry in state.arrivals_from(self.taken) {
-			if fixed.contains(entry.key) {
+			if groups.contains(entry.key) {
 				self.groups.insert(entry.key, entry.stamp);
 			}
 		}
@@ -8236,12 +8307,12 @@ impl Live {
 		&mut indexes[position]
 	}
 
-	/// The first live group inside `fixed`, within `lo..=hi`, for which `f` answers, lowest
+	/// The first live group inside `groups`, within `lo..=hi`, for which `f` answers, lowest
 	/// first or, with `rev`, highest first, with its key.
 	fn find<'a, R>(
 		&self,
 		state: &'a TrackState,
-		fixed: &Runs,
+		groups: &Cover,
 		mut lo: u64,
 		mut hi: u64,
 		rev: bool,
@@ -8257,7 +8328,7 @@ impl Live {
 				let mut indexes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
 				let indexed = Self::index(&mut indexes, state);
 				if !caught_up {
-					indexed.catch_up(state, fixed);
+					indexed.catch_up(state, groups);
 					caught_up = true;
 				}
 				let entries = indexed.groups.range(lo..=hi).map(|(&key, &stamp)| (key, stamp));
@@ -8321,17 +8392,17 @@ impl Servable {
 	}
 
 	/// The groups `window` reads. `previous`, what the same reader was served before, lends
-	/// its index of the live groups when the fixed runs are the same.
+	/// its index of the live groups while the cover is unchanged.
 	fn of(window: &Window, previous: &Self) -> Self {
 		match window.groups() {
 			None => Self::ALL,
-			Some(groups) => Self::layered(groups.clone(), None, previous),
+			Some(groups) => Self::covering(groups.clone(), None, previous),
 		}
 	}
 
 	/// The groups in `groups` below the exclusive `cap`. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
-	fn layered(groups: Layered, cap: Option<u64>, previous: &Self) -> Self {
+	fn covering(groups: Cover, cap: Option<u64>, previous: &Self) -> Self {
 		let last = match cap {
 			Some(cap) => match cap.checked_sub(1) {
 				Some(last) => last,
@@ -8353,7 +8424,7 @@ impl Servable {
 			};
 		}
 		let live = match previous {
-			Self::Runs(several) if several.groups.shares_fixed(&groups) => several.live.clone(),
+			Self::Runs(several) if several.groups == groups => several.live.clone(),
 			_ => Arc::default(),
 		};
 		Self::Runs(Arc::new(Several { groups, cap, live }))
@@ -8377,7 +8448,7 @@ impl Servable {
 			}
 			Self::Runs(several) => {
 				let cap = several.cap.map_or(cap, |own| own.min(cap));
-				Self::layered(several.groups.clone(), Some(cap), self)
+				Self::covering(several.groups.clone(), Some(cap), self)
 			}
 		}
 	}
@@ -8522,7 +8593,7 @@ struct Within<'a> {
 
 /// The span, window revision, and the budget and coverage that settle received stale runs
 /// (see [`Drift::settles`]) a [`DropCursor`] last scanned the whole span under; between them
-/// it folds in only the runs that changed.
+/// it folds in only the runs that changed, and what the window gained.
 type Scan = (ops::Range<u64>, u64, Option<(Duration, Coverage)>);
 
 /// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
@@ -8537,6 +8608,10 @@ struct DropCursor {
 	/// The [`TrackState::drops_changes`] revision [`Record::pending`] folded in.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	seen: u64,
+	/// The window's groups as of [`Self::scanned`]'s revision, so a window that only grew
+	/// since folds in what it gained rather than rescanning the span.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	groups: Option<Cover>,
 	/// The budget and coverage of the last drift judged, which settle received stale runs
 	/// until the next: a queue-only poll judges none, and must not unsettle them.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
@@ -8551,6 +8626,7 @@ impl DropCursor {
 			cuts: state.cache.watch_cuts(),
 			scanned: None,
 			seen: 0,
+			groups: None,
 			drift: None,
 		}
 	}
@@ -8579,6 +8655,45 @@ impl DropCursor {
 		}
 	}
 
+	/// What a scan of `span` would newly find since the last, when the span is the same and
+	/// the window and the reader's coverage only grew: the runs the window gained, and each
+	/// received stale run a wider coverage now settles. `None` when anything else moved.
+	fn grown(
+		&self,
+		state: &TrackState,
+		window: &Window,
+		old_drift: Option<&(Duration, Coverage)>,
+		span: &ops::Range<u64>,
+	) -> Option<Vec<ops::Range<u64>>> {
+		let last = span.end.checked_sub(1).filter(|last| *last >= span.start);
+		let (groups, old) = (window.groups()?, self.groups.as_ref()?);
+		let mut grown: Vec<_> = match last {
+			// Losing a group of the span may leave a reported run no longer owed.
+			Some(last) if old.gained(groups, span.start, last).is_empty() => groups.gained(old, span.start, last),
+			Some(_) => return None,
+			None => Vec::new(),
+		}
+		.into_iter()
+		.map(|run| *run.start()..run.end().saturating_add(1))
+		.collect();
+		let settling = match (old_drift, &self.drift) {
+			(None, None) => None,
+			(Some((old_budget, old)), Some((budget, new))) if old_budget == budget => settling(old, new)?,
+			_ => return None,
+		};
+		// A scan judges a drop at its start within the span, so each one starting where a
+		// stale run newly settles is folded in whole.
+		if let Some(settling) = settling {
+			for (run, _) in state.drops.overlapping(&settling) {
+				let start = run.start.max(span.start);
+				if settling.contains(&start) {
+					grown.push(start..run.end);
+				}
+			}
+		}
+		Some(grown)
+	}
+
 	/// The lowest unreported run of `within` given up, now marked reported, with why.
 	fn next(
 		&mut self,
@@ -8594,18 +8709,35 @@ impl DropCursor {
 				Self::cut(record, key, slot);
 			}
 		}
-		// Rescan the span only after the window moves or what settles a stale run does, since
-		// out-of-window and unsettling runs were skipped and may be owed now; otherwise fold in
-		// only the runs that changed, so a drop costs each cursor the runs it touches.
+		// Rescan the span only after the window moves other than by growing, or what settles a
+		// stale run does, since out-of-window and unsettling runs were skipped and may be owed
+		// now; otherwise fold in only the runs that changed and what the window gained, so a
+		// drop costs each cursor the runs it touches, even one that starts a range.
 		if let Some(drift) = within.drift {
 			self.drift = Some((drift.budget, drift.coverage.clone()));
 		}
 		let scan = (span.clone(), within.revision, self.drift.clone());
-		let full = std::mem::take(&mut record.rescan) || self.scanned.as_ref() != Some(&scan);
-		let changed: Vec<ops::Range<u64>> = match full {
-			false => state.drops_changes.since(self.seen).collect(),
-			true => {
-				self.scanned = Some(scan);
+		let rescan = std::mem::take(&mut record.rescan);
+		let grown = match &self.scanned {
+			_ if rescan => None,
+			Some(scanned) if *scanned == scan => Some(Vec::new()),
+			Some((old_span, _, old_drift)) if old_span == span => self.grown(state, window, old_drift.as_ref(), span),
+			_ => None,
+		};
+		let full = grown.is_none();
+		self.scanned = Some(scan);
+		self.groups = window.groups().cloned();
+		let changed: Vec<ops::Range<u64>> = match grown {
+			Some(grown) => {
+				// What the window newly reads may hold cuts the scan skipped.
+				for run in &grown {
+					for (&key, slot) in state.lookup.range(run.clone()) {
+						Self::cut(record, key, slot);
+					}
+				}
+				state.drops_changes.since(self.seen).chain(grown).collect()
+			}
+			None => {
 				let received: Vec<_> = record
 					.pending
 					.iter()
@@ -8698,6 +8830,14 @@ impl DropCursor {
 	}
 }
 
+/// What changed in a cursor's ranges since its window resolved them.
+enum Change {
+	/// The ranges keyed so, each as it stands now: `None` for one retired.
+	Edit(Vec<(u64, Option<Range>)>),
+	/// Every range, in key order, when the changes are no longer known one by one.
+	All(Vec<(u64, Range)>),
+}
+
 /// A cursor's own ranges, resolved, and what keeps them current.
 struct Filter {
 	/// Only the groups in it are read.
@@ -8708,6 +8848,8 @@ struct Filter {
 	revision: u64,
 	/// Why the ranges can't be served here: a time anchor on an untimed track.
 	refused: Option<Error>,
+	/// The window was left as it was by a refused change, so the next one resolves every range.
+	stale: bool,
 	/// What the arrival walk reads: the window from the floor, below the cap. The walk
 	/// passes a group outside it holding nothing, so widening it re-scans the cache.
 	admitted: Admitted,
@@ -8731,20 +8873,25 @@ impl Cursor {
 		}
 		let (filter, cache) = {
 			let preferences = subscription.read();
-			let ranges_revision = subscription.ranges_revision();
+			let ranges_revision = preferences.revision;
 			let state = state.read();
-			let (window, refused) =
-				match Window::new(&preferences.ranges, preferences.delay.min, state.latest_live(), &*state) {
-					Ok(window) => (window, None),
-					Err(err) => (
-						Window::new(&[], None, None, &*state).expect("nothing to refuse"),
-						Some(err),
-					),
-				};
+			let (window, refused) = match Window::keyed(
+				preferences.ranges(),
+				preferences.delay.min,
+				state.latest_live(),
+				&*state,
+			) {
+				Ok(window) => (window, None),
+				Err(err) => (
+					Window::new(&[], None, None, &*state).expect("nothing to refuse"),
+					Some(err),
+				),
+			};
 			let filter = Filter {
 				window,
 				resolved: ranges_revision,
 				revision: 0,
+				stale: refused.is_some(),
 				refused,
 				admitted: Admitted::default(),
 				admitted_at: None,
@@ -8879,37 +9026,63 @@ impl Cursor {
 		}
 	}
 
-	/// Bring [`Self::window`] up to date: resolved again once the subscriber replaces its
-	/// ranges, counting relative anchors back from the latest group then, and settled as
-	/// the groups it waits on arrive. Returns whether the window moved.
+	/// Bring [`Self::window`] up to date: the ranges the subscriber changed resolved, counting
+	/// relative anchors back from the latest group then, and settled as the groups it waits on
+	/// arrive. Returns whether the window moved.
 	fn sync(&mut self) -> bool {
-		let (replaced, min) = {
+		let (changed, min) = {
 			let preferences = self.subscription.read();
-			let revision = self.subscription.ranges_revision();
-			let min = preferences.delay.min;
-			(
-				(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone())),
-				min,
-			)
+			let changed = (preferences.revision != self.filter.resolved).then(|| {
+				let keys = match self.filter.stale {
+					true => None,
+					false => preferences.changes(self.filter.resolved),
+				};
+				let change = match keys {
+					Some(keys) => Change::Edit(keys.into_iter().map(|key| (key, preferences.range(key))).collect()),
+					None => Change::All(preferences.ranges().collect()),
+				};
+				(preferences.revision, change)
+			});
+			(changed, preferences.delay.min)
 		};
 		// A settled window has nothing to read from the track, whose lock every subscriber
 		// of it takes.
-		if replaced.is_none() && self.filter.window.is_settled() {
+		if changed.is_none() && self.filter.window.is_settled() {
 			return false;
 		}
 		let state = self.state.read();
 		let holdings = &*state;
-		let moved = match replaced {
-			Some((revision, ranges)) => {
+		let moved = match changed {
+			Some((revision, change)) => {
 				self.filter.resolved = revision;
-				match Window::new(&ranges, min, state.latest_live(), holdings) {
-					Ok(window) => {
-						self.filter.window = window;
-						self.filter.refused = None;
-						self.filter.lookups.clear();
+				let applied = match change {
+					Change::Edit(changes) => {
+						let added: Vec<(u64, Range)> = changes
+							.iter()
+							.filter_map(|(key, range)| Some((*key, (*range)?)))
+							.collect();
+						self.filter.window.set_min(min);
+						let applied = self.filter.window.edit(
+							changes.iter().map(|(key, _)| *key),
+							&added,
+							state.latest_live(),
+							holdings,
+						);
+						// A time looked up and answered is asked again for a range that names it anew.
+						self.filter.lookups.retain(|lookup| lookup.join.is_some());
+						applied
 					}
-					Err(err) => self.filter.refused = Some(err),
-				}
+					Change::All(ranges) => Window::keyed(ranges, min, state.latest_live(), holdings).map(|window| {
+						self.filter.window = window;
+						self.filter.lookups.clear();
+					}),
+				};
+				// A refused change leaves the window as it was, which no longer matches the ranges,
+				// so the next change resolves them all.
+				(self.filter.refused, self.filter.stale) = match applied {
+					Ok(()) => (None, false),
+					Err(err) => (Some(err), true),
+				};
 				true
 			}
 			None if self.filter.window.is_settled() => false,
@@ -9407,15 +9580,22 @@ impl Cursor {
 
 	/// Look up each time start the window can't resolve from the cache, once, and take in
 	/// the answers, parking `waiter` on the lookups still out.
+	///
+	/// Indexed by time, so a pass costs O(L log L) in the lookups out rather than O(L²).
 	fn look_up(&mut self, waiter: &kio::Waiter) {
-		let lookups: Vec<(u64, u64)> = self.filter.window.lookups().collect();
+		// The first span looking a time up sets how far its lookup reaches.
+		let mut lookups = BTreeMap::new();
+		for (time, reach) in self.filter.window.lookups() {
+			lookups.entry(time).or_insert(reach);
+		}
 		if lookups.is_empty() && self.filter.lookups.iter().all(|lookup| lookup.join.is_none()) {
 			return;
 		}
 		let asking = &asking(&self.subscription);
 		let fills = self.state.read().fills.clone();
-		for (time, reach) in lookups {
-			if self.filter.lookups.iter().any(|lookup| lookup.time == time) {
+		let asked: BTreeSet<u64> = self.filter.lookups.iter().map(|lookup| lookup.time).collect();
+		for (&time, &reach) in &lookups {
+			if asked.contains(&time) {
 				continue;
 			}
 			let ask = fill::Ask {
@@ -9434,8 +9614,9 @@ impl Cursor {
 		}
 		let mut moved = false;
 		for lookup in &mut self.filter.lookups {
-			// The window stops looking once replaced; with no join, nothing can answer.
-			if !self.filter.window.lookups().any(|(time, _)| time == lookup.time) {
+			// The window stops looking once replaced; with no join, nothing can answer. An
+			// answer taken in below stops only the spans looking up that time.
+			if !lookups.contains_key(&lookup.time) {
 				lookup.join = None;
 				continue;
 			}
@@ -9745,11 +9926,13 @@ impl Cursor {
 	/// Ask a fill for the head of `key`, as a fetch from frame 0 would, taking in an
 	/// answer already at hand.
 	fn ask_head(&mut self, key: u64, waiter: &kio::Waiter) {
-		let asking = self.subscription.read().clone();
+		let asking = self.subscription.read();
+		let (priority, max_delay) = (asking.priority, asking.delay.max);
+		drop(asking);
 		let request = FetchOptions {
 			options: group::Fetch {
-				priority: asking.priority,
-				max_delay: asking.delay.max,
+				priority,
+				max_delay,
 				frame_start: 0,
 			},
 			end: None,
@@ -10129,14 +10312,18 @@ impl Republish {
 		};
 		let (ranges, min, revision) = {
 			let current = preferences.read();
-			(current.ranges.clone(), current.delay.min, preferences.ranges_revision())
+			(
+				current.ranges().collect::<Vec<_>>(),
+				current.delay.min,
+				current.revision,
+			)
 		};
 		if published.read().revision >= revision {
 			return;
 		}
 		let state = self.state.read();
 		// The update was refused before it got here if the track can't resolve it.
-		let Ok(window) = Window::new(&ranges, min, state.latest_live(), &*state) else {
+		let Ok(window) = Window::keyed(ranges, min, state.latest_live(), &*state) else {
 			return;
 		};
 		drop(state);
@@ -10152,7 +10339,7 @@ impl Republish {
 impl Control {
 	/// This subscriber's current preferences.
 	pub fn subscription(&self) -> Subscription {
-		self.subscription.read().clone()
+		self.subscription.read().subscription()
 	}
 
 	/// Replace this subscriber's preferences, updating the producer's aggregate.
@@ -10771,36 +10958,32 @@ impl Subscriber {
 		Some(start?.max(self.bounds().start))
 	}
 
-	/// Where each of this subscriber's ranges starts, by index, as resolved here and raised
-	/// to `from`, where delivery starts: `None` for one with no group there or still waiting
-	/// on the first group from the live feed.
+	/// Each of this subscriber's ranges keyed in `keys` as resolved here, in that order: its
+	/// first group and exclusive end, `None` while open, or `None` for one whose start still
+	/// waits on the live feed or a lookup, or that isn't held. One empty as given, or that only
+	/// resolves empty, ends at or below its start.
 	///
 	/// A publisher tells its peer where a relative or time start landed, which the peer
-	/// can't work out from the groups it receives.
+	/// can't work out from the groups it receives. Settles the ranges once for the batch, so
+	/// asking for k of them costs O(k log n) past that.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn starts(&mut self, from: u64) -> Vec<Option<u64>> {
+	pub(crate) fn resolved_keys(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<Resolved>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.starts(from)
+				keys.into_iter()
+					.map(|key| cursor.filter.window.resolved_key(key))
+					.collect()
 			}
-			Inner::Resume(resume, _) => resume.starts(from),
+			Inner::Resume(resume, _) => resume.resolved_keys(keys),
 		}
 	}
 
-	/// Each of this subscriber's ranges as resolved here, by index: its first group and
-	/// exclusive end, `None` while open, or `None` for one whose start still waits on the
-	/// live feed or a lookup. One empty as given, or that only resolves empty, ends at or
-	/// below its start.
+	/// This subscriber's range keyed `key` as resolved here; see [`Self::resolved_keys`].
+	#[cfg(test)]
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn resolved(&mut self) -> Vec<Option<Resolved>> {
-		match &mut self.inner {
-			Inner::Plain(cursor) => {
-				cursor.sync();
-				cursor.filter.window.resolved()
-			}
-			Inner::Resume(resume, _) => resume.resolved(),
-		}
+	pub(crate) fn resolved_range(&mut self, key: u64) -> Option<Resolved> {
+		self.resolved_keys([key]).pop().flatten()
 	}
 
 	/// The lowest group at or above `from` this subscriber's ranges and
@@ -11121,6 +11304,28 @@ impl Subscriber {
 			Inner::Resume(resume, _) => resume.mirror().sync(),
 		}
 		// A reader the pool ended reports it on its next read.
+		let _ = self.settle_record(None);
+		Ok(())
+	}
+
+	/// Apply `edit` to this subscriber's preferences, costing the ranges it names: only the
+	/// ranges it adds resolve, and every other keeps where it resolved; see [`Edit`].
+	///
+	/// The keys are the caller's. The ranges the subscription started with, or that
+	/// [`Self::update`] last gave, are keyed by position.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn edit(&mut self, edit: Edit) -> Result<()> {
+		let channel = match &self.inner {
+			Inner::Plain(cursor) => &cursor.subscription,
+			Inner::Resume(resume, _) => resume.subscription(),
+		};
+		channel.edit(edit)?;
+		match &mut self.inner {
+			Inner::Plain(cursor) => {
+				cursor.sync();
+			}
+			Inner::Resume(resume, _) => resume.mirror().sync(),
+		}
 		let _ = self.settle_record(None);
 		Ok(())
 	}
@@ -12236,6 +12441,51 @@ mod test {
 	}
 
 	proptest::proptest! {
+		/// The times a track reports unplaced are exactly those its `containing` can't place,
+		/// but for the ones a copy's reported time starts place, on its own groups or on a
+		/// lite-07 copy's, through groups arriving and every way keys are given up. A lite-07
+		/// copy leaves out what its feed's accounting may place, which the window tries each
+		/// time: every time it places that way lies there.
+		#[test]
+		fn unplaced_matches_containing(
+			ops in proptest::collection::vec((0u8..5, 0u64..40, 1u64..8), 0..24),
+			wire: bool,
+			starts in proptest::collection::vec((0u64..48, 0u64..48, proptest::option::of(0u64..56)), 0..3),
+		) {
+			let producer = track_producer("test", Info::default());
+			if wire {
+				producer.received();
+				producer.anchored();
+				producer.time_starts(starts.clone());
+			}
+			for (op, start, len) in ops {
+				let groups = start..start + len;
+				match op {
+					0 => producer.drop_groups(groups, StreamError::Cancel),
+					1 => producer.skip_groups(groups),
+					2 => drop(producer.create_group(group::Info { start })),
+					3 => producer.modify().unwrap().forget_drops(groups),
+					// A group at the last key that can start one, past every time but the last.
+					_ => drop(producer.create_group(group::Info { start: u64::MAX - 1 })),
+				}
+			}
+			let state = producer.state.read();
+			let unplaced = state.unplaced().expect("a track always tells");
+			let reported: BTreeSet<u64> = starts.iter().map(|(time, ..)| *time).collect();
+			let landing = state.landing_span();
+			for time in (0..64).chain([u64::MAX - 1, u64::MAX]) {
+				let inside = unplaced.runs.iter().any(|run| run.contains(&time));
+				let unknown = state.containing(time) == Containing::Unknown;
+				if wire && reported.contains(&time) {
+					proptest::prop_assert!(!unknown, "a reported start places {}", time);
+				} else if wire && landing.contains(&time) {
+					proptest::prop_assert!(!inside, "the runs leave {} to be tried", time);
+				} else {
+					proptest::prop_assert_eq!(inside, unknown, "at {}", time);
+				}
+			}
+		}
+
 		/// The coalesced drop set answers coverage as a walk of the drop runs would, through
 		/// every way a run is given up, split, replaced, or forgotten.
 		#[test]
@@ -12888,6 +13138,29 @@ mod test {
 		assert_eq!(read_groups(|waiter| groups_only(ordered.poll_next_group(waiter))), want);
 	}
 
+	/// A drop outside a reader's ranges is reported once a group arriving places a time start
+	/// below it, widening its range over the drop, as a scan of the whole window would.
+	#[test]
+	fn a_range_widened_by_a_group_reports_an_earlier_drop() {
+		let producer = track_producer("test", Info::default());
+		// The range at 0 keeps the floor where it is, so only the window moves.
+		let at = |time| Range {
+			start: Anchor::Time(time),
+			end: Some(Anchor::Time(time)),
+		};
+		let mut reader = producer.subscribe(replay().with_ranges([at(0), at(8)]));
+		let waiter = kio::Waiter::noop();
+		assert!(reader.poll_drop(&waiter).is_pending());
+		producer.drop_groups(5..6, StreamError::Cancel);
+		assert!(reader.poll_drop(&waiter).is_pending(), "outside the range");
+		let _group = producer.create_group(group::Info { start: 3 }).unwrap();
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((5..6, Hole::drop(StreamError::Cancel))),
+			"the group containing time 8 starts at 3"
+		);
+	}
+
 	/// A group missing its head is never served short: reading it is [`Error::Lagged`],
 	/// which a route copy recovers.
 	#[test]
@@ -13396,8 +13669,11 @@ mod test {
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_received_copy_reaches_back_only_to_groups_it_holds() {
-		let placed =
-			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber
+				.resolved_range(0)
+				.map(|resolved| (resolved.start, resolved.floored))
+		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -15480,8 +15756,11 @@ mod test {
 				}])
 				.with_delay(Delay::default().with_max(None))
 		};
-		let placed =
-			|subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| (resolved.start, resolved.floored));
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber
+				.resolved_range(0)
+				.map(|resolved| (resolved.start, resolved.floored))
+		};
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -15697,7 +15976,7 @@ mod test {
 				}])
 				.with_delay(Delay::default().with_max(None))
 		};
-		let placed = |subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| resolved.start);
+		let placed = |subscriber: &mut Subscriber| subscriber.resolved_range(0).map(|resolved| resolved.start);
 		let producer = track_producer("test", Info::timed());
 		producer.received();
 		producer.anchored();
@@ -15721,7 +16000,7 @@ mod test {
 				}])
 				.with_delay(Delay::default().with_max(None)),
 		);
-		assert_eq!(ended.resolved()[0].and_then(|resolved| resolved.end), Some(2));
+		assert_eq!(ended.resolved_range(0).and_then(|resolved| resolved.end), Some(2));
 
 		// A newer group moved the live edge, so a later reader counts back from it.
 		write_group(&producer, 10);
@@ -17454,13 +17733,13 @@ mod test {
 		}
 	}
 
-	/// A search over a layered servable window, through the reader's index of the live
-	/// groups and the layer's runs, finds what a scan of every live group would, in either
-	/// direction, as groups arrive, start, abort, leave the cache, or arrive again between
-	/// searches that keep the same index. Each window is searched on two tracks, as a
+	/// A search over a servable window of several runs, through the reader's index of the
+	/// live groups, finds what a scan of every live group would, in either direction, as
+	/// groups arrive, start, abort, leave the cache, or arrive again between searches that
+	/// keep the same index, and as the window is edited. Each window is searched on two tracks, as a
 	/// group's expiry that moved to a replacement copy searches its reader's.
 	#[test]
-	fn layered_searches_match_a_scan_of_every_live_group() {
+	fn live_index_searches_match_a_scan_of_every_live_group() {
 		// A small deterministic generator, so a failure replays.
 		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
 		let next = |bound: u64| {
@@ -17478,13 +17757,16 @@ mod test {
 				track_producer("test", Info::timed()),
 				track_producer("copy", Info::timed()),
 			];
-			let runs = |count: u64| -> Runs {
-				Runs::new((0..next(count + 1)).map(|_| {
-					let start = next(KEYS);
-					start..=start + next(5)
-				}))
+			let runs = |count: u64| -> Vec<_> {
+				(0..next(count + 1))
+					.map(|_| {
+						let start = next(KEYS);
+						start..=start + next(5)
+					})
+					.collect()
 			};
-			let fixed = Arc::new(runs(8));
+			let mut cover = Cover::new(runs(8));
+			let mut layer = Vec::new();
 			let mut groups = [Vec::new(), Vec::new()];
 			let mut servable = Servable::NONE;
 			for step in 0..30 {
@@ -17512,11 +17794,19 @@ mod test {
 					}
 					_ => {}
 				}
-				// Now and then the window's walks move, keeping the fixed runs and their index.
+				// Now and then the cap moves, keeping the runs and their index, or the runs are
+				// edited.
 				if step == 0 || next(4) == 0 {
 					let cap = (next(4) == 0).then(|| next(KEYS + 2));
-					let layered = Layered::new(fixed.clone(), runs(2));
-					servable = Servable::layered(layered, cap, &servable);
+					if next(2) == 0 {
+						for run in std::mem::replace(&mut layer, runs(2)) {
+							cover.add(run, -1);
+						}
+						for run in &layer {
+							cover.add(run.clone(), 1);
+						}
+					}
+					servable = Servable::covering(cover.clone(), cap, &servable);
 				}
 				for (track, producer) in producers.iter().enumerate() {
 					let state = producer.state.read();
@@ -17531,12 +17821,7 @@ mod test {
 							let found = state.find_servable(&servable, from, rev, shown);
 							let shape = match &servable {
 								Servable::Run { start, end } => format!("run {start}..{end:?}"),
-								Servable::Runs(several) => format!(
-									"{:?} under {:?} below {:?}",
-									several.groups.fixed(),
-									several.groups.layer(),
-									several.cap
-								),
+								Servable::Runs(several) => format!("{:?} below {:?}", several.groups, several.cap),
 							};
 							let cached: Vec<_> = state.live(..).map(|(key, slot)| (*key, slot.is_shown())).collect();
 							assert_eq!(
@@ -17559,8 +17844,8 @@ mod test {
 		let groups: Vec<_> = (0..100)
 			.map(|key| producer.create_group(group::Info { start: key }).unwrap())
 			.collect();
-		let fixed = Arc::new(Runs::new([0..=999, 1001..=u64::MAX]));
-		let servable = Servable::layered(Layered::new(fixed, Runs::default()), None, &Servable::NONE);
+		let runs = Cover::new([0..=999, 1001..=u64::MAX]);
+		let servable = Servable::covering(runs, None, &Servable::NONE);
 		let Servable::Runs(several) = &servable else {
 			panic!("several runs");
 		};
@@ -17624,13 +17909,10 @@ mod test {
 		let points = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, u64::MAX - 1, u64::MAX];
 		for bounds in windows {
 			let runs = || bounds.iter().map(|&(first, last)| first..=last);
-			// The runs fixed, and again split between fixed runs and a layer over them.
-			let layered = [
-				Layered::new(Arc::new(Runs::new(runs())), Runs::default()),
-				Layered::new(Arc::new(Runs::new(runs().skip(1))), Runs::new(runs().take(1))),
-			];
-			for groups in layered {
-				let servable = Servable::layered(groups, None, &Servable::NONE);
+			// The runs counted once, and again with the first counted twice.
+			let covers = [Cover::new(runs()), Cover::new(runs().chain(runs().take(1)))];
+			for groups in covers {
+				let servable = Servable::covering(groups, None, &Servable::NONE);
 				if let [(first, last)] = bounds {
 					assert!(
 						servable
@@ -26702,6 +26984,66 @@ mod test {
 		drop(dynamic);
 	}
 
+	/// Ranges edited one key at a time resolve and cover what the same ranges given whole do,
+	/// so an edit leaves the subscriber as a fresh subscription to the ranges it keeps would be.
+	#[test]
+	#[cfg(feature = "async")]
+	fn edited_ranges_match_the_same_ranges_given_whole() {
+		use rand::{RngExt, SeedableRng};
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x65646974);
+		let producer = track_producer("test", Info::timed());
+		for key in (0..20_000).step_by(1000) {
+			write_group(&producer, key);
+		}
+		let range = |rng: &mut rand::rngs::StdRng| {
+			let start = match rng.random_range(0..4) {
+				0 => Anchor::Relative(rng.random_range(0..5)),
+				_ => Anchor::Time(rng.random_range(0..24_000)),
+			};
+			let end = rng.random_bool(0.6).then(|| Anchor::Time(rng.random_range(0..24_000)));
+			Range { start, end }
+		};
+		// Key 0 is the default subscription's one range.
+		let mut live = BTreeMap::from([(0, Range::oldest())]);
+		let mut next = 0;
+		let mut edited = producer.subscribe(Subscription::default());
+		for step in 0..400 {
+			let retire: Vec<u64> = live.keys().copied().filter(|_| rng.random_bool(0.2)).collect();
+			let add: Vec<(u64, Range)> = (0..rng.random_range(0..3))
+				.map(|_| {
+					next += 1;
+					(next, range(&mut rng))
+				})
+				.collect();
+			for key in &retire {
+				live.remove(key);
+			}
+			live.extend(add.iter().copied());
+			edited
+				.edit(Edit {
+					retire,
+					add,
+					priority: 0,
+					delay: Delay::default(),
+					order: Order::default(),
+				})
+				.unwrap();
+			let mut whole = producer.subscribe(Subscription::default().with_ranges(live.values().copied()));
+			for (index, key) in live.keys().enumerate() {
+				assert_eq!(
+					edited.resolved_range(*key),
+					whole.resolved_range(index as u64),
+					"step {step}, key {key}"
+				);
+			}
+			assert_eq!(
+				edited.runs_in_range(0, 30_000),
+				whole.runs_in_range(0, 30_000),
+				"step {step}"
+			);
+		}
+	}
+
 	/// Write a finished one-frame group, presented at its key in milliseconds.
 	fn write_group(producer: &Producer, key: u64) {
 		let mut group = producer.create_group(group::Info { start: key }).unwrap();
@@ -27631,6 +27973,42 @@ mod test {
 			[(4..5, Hole::Skip)],
 			"the stale run is outside its range"
 		);
+	}
+
+	/// A received stale run in a reader's range settles it once a group arriving places its
+	/// open range's time start low enough to read every group above the run, so it is
+	/// reported then, as a scan of the whole window would, though the window grew only above
+	/// the run.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_stale_run_settles_once_the_open_range_reaches_it() {
+		let producer = track_producer("test", Info::timed());
+		// An unsettled run is asked of a handler rather than given up as unfillable.
+		let _dynamic = producer.requests();
+		let budget = Duration::from_millis(500);
+		// Time 0 names group 0, so the first range reads through 5 at once; the open one waits
+		// on a group to place its time start.
+		let first = Range {
+			start: Anchor::Time(0),
+			end: Some(Anchor::Time(5)),
+		};
+		let open = Range {
+			start: Anchor::Time(8),
+			end: None,
+		};
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(budget))
+				.with_ranges([first, open]),
+		);
+		producer.give_up(5..6, Hole::stale(budget));
+		let waiter = kio::Waiter::noop();
+		assert!(
+			reader.poll_drop(&waiter).is_pending(),
+			"the groups above it are not all read"
+		);
+		let _group = producer.create_group(group::Info { start: 6 }).unwrap();
+		assert_eq!(reader.poll_drop(&waiter), Poll::Ready((5..6, Hole::stale(budget))));
 	}
 
 	/// A queue-only poll, which judges no drift, still reports the received stale runs the

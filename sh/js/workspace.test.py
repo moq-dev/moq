@@ -138,6 +138,15 @@ class SelectionTest(unittest.TestCase):
                 self.assertTrue(plan["all"])
                 self.assertEqual(len(plan["packages"]), len(self.packages))
 
+    def test_shared_tooling_workspace_falls_back(self):
+        # Packages run its scripts by path, so its manifest dependents are not all its users.
+        self.packages["js/common"] = {"name": "@example/common"}
+        self.packages["demo/nested"]["devDependencies"] = {"@example/common": "workspace:*"}
+        self.write()
+        plan = self.plan(["js/common/package.ts"])
+        self.assertTrue(plan["all"])
+        self.assertEqual(len(plan["packages"]), len(self.packages))
+
     def test_optional_dependency_selects_transitive_consumers(self):
         self.assertEqual(
             set(self.plan(["js/bindings/README.md"])["packages"]), {"@example/bindings", "browser", "demo"}
