@@ -465,8 +465,8 @@ impl Lan {
 /// At the cut `lan[0]` moves onto the route through the CDN at once: its reader's
 /// announcement stays. `cdn[0]` reached the local broadcast through `lan[0]`, so it offered
 /// it nothing until the cut, and `lan[0]` shows it unavailable until that route lands, here
-/// in the same instant. The closed session still ends the subscription it carried, so a
-/// fresh one reads on through the CDN.
+/// in the same instant. The subscription the closed session carried reads on through the
+/// CDN.
 #[kio::test]
 async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 	let mut lan = Lan::new().await;
@@ -515,15 +515,6 @@ async fn a_partitioned_lan_reaches_itself_through_the_cdn_and_heals() {
 			&& moved.at.saturating_duration_since(cut_at) < DEBOUNCE,
 		"through the CDN at once: {partitioned:?}"
 	);
-	// The closed session ends the subscription it carried, and a fresh one joins at the
-	// latest group, the one already read.
-	let ended = kio::clock::timeout(Duration::from_secs(1), rx.next()).await;
-	assert!(
-		matches!(ended, Ok(Some((_, Err(_))))),
-		"the closed session ended the track: {ended:?}"
-	);
-	let (_broadcast, mut rx) = subscribe(&lan.lan[0], "local").await;
-	read_group(&mut rx, "O", 0).await;
 	local.group(1);
 	read_group(&mut rx, "O", 1).await;
 

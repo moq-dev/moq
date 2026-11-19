@@ -21,6 +21,7 @@ import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
+import { Routed } from "./lite/routed.ts";
 import { createMockTransportPair, manual, settlesWithin, textFrame, waitFor } from "./mock.ts";
 import type { Consumer as OriginConsumer } from "./origin.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -2246,17 +2247,39 @@ test("origin: a request discovers the peer cannot announce before resolving blin
 test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 	"%s: closing an announce consumer ends the peer's announce stream",
 	async (alpn) => {
+		// Counts each stream the peer gave back, and wakes the test on each.
+		let ended = 0;
+		let changed = Promise.withResolvers<void>();
+		const end = (count: number) => {
+			ended += count;
+			changed.resolve();
+			changed = Promise.withResolvers<void>();
+		};
 		// Wrap the peer's handler so the test sees when its side of the stream ends.
 		const run = LitePublisher.prototype.runAnnounce;
-		let ended = 0;
 		spyOn(LitePublisher.prototype, "runAnnounce").mockImplementation(function (this: LitePublisher, msg, stream) {
-			return run.call(this, msg, stream).finally(() => ended++);
+			return run.call(this, msg, stream).finally(() => end(1));
 		});
-		// Lite-07 has one Announce Stream, and gives a prefix back with the edit removing it.
+		// Lite-07 has one Announce Stream, and gives a prefix back with the edit removing it. The
+		// edit counts once its ANNOUNCE_OK is in: until then this side still shows the prefix's
+		// claims and holds back its next edit, so a reader opened sooner joins the stale claims and
+		// leaves without the peer ever hearing of it.
 		const request = LitePublisher.prototype.request;
+		const removing: number[] = [];
+		let pending = 0;
 		spyOn(LitePublisher.prototype, "request").mockImplementation(function (this: LitePublisher, more, remove, add) {
-			ended += remove.length;
+			pending += remove.length;
+			if (!more) {
+				removing.push(pending);
+				pending = 0;
+			}
 			request.call(this, more, remove, add);
+		});
+		const receive = Routed.prototype.receive;
+		spyOn(Routed.prototype, "receive").mockImplementation(function (this: Routed, msg) {
+			const done = receive.call(this, msg);
+			if (msg.status === "ok") end(removing.shift() ?? 0);
+			return done;
 		});
 		const pair = createMockTransportPair(alpn);
 		const serverOrigin = new OriginProducer();
@@ -2271,7 +2294,8 @@ test.each([Lite.ALPN_03, Lite.ALPN_05, Lite.ALPN_06, Lite.ALPN_07_WIP])(
 			const announced = client.routes(Path.Pattern.subtree(Path.from("room")));
 			expect((await announced.next())?.kind).toBe("start");
 			announced.close();
-			await until(() => ended === i);
+			while (ended < i) await changed.promise;
+			expect(ended).toBe(i);
 		}
 
 		broadcast.close();

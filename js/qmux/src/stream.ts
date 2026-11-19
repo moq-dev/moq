@@ -44,11 +44,4 @@ export class Id {
 		}
 		return true;
 	}
-
-	canSend(isServer: boolean): boolean {
-		if (this.dir === Dir.Uni) {
-			return this.serverInitiated === isServer;
-		}
-		return true;
-	}
 }
