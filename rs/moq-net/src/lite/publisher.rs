@@ -5892,28 +5892,19 @@ impl TrackRun {
 		if !self.ctx.version.has_ranges() {
 			return vec![Some(start)];
 		}
-		use crate::track::Anchor;
 		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
 		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
-		self.track
-			.resolved_keys(0..self.initial)
-			.into_iter()
-			.zip(0..)
-			.map(|(resolved, id)| {
+		let resolved = self.track.resolved_keys(0..self.initial);
+		(0..)
+			.zip(resolved)
+			.map(|(id, resolved)| {
 				let (from, end) = match resolved {
 					Some(resolved) => (resolved.start.max(start), resolved.end),
 					// A time start still waiting at or below the floor, as an update before the
 					// start leaves one: whichever group contains it is out of range, so the range
 					// starts where delivery does, the answer placing it would give.
-					None => match self.requested.ranges.get(&id)? {
-						crate::track::Range {
-							start: Anchor::Time(time),
-							end,
-						} if *time <= self.floor => match end {
-							None => (start, None),
-							Some(Anchor::Time(last)) => (start, Some(last.saturating_add(1))),
-							Some(_) => return None,
-						},
+					None => match self.track.waiting_key(id)? {
+						(time, end) if time <= self.floor => (start, end),
 						_ => return None,
 					},
 				};
@@ -8770,31 +8761,37 @@ mod serve_group_test {
 	/// without a start.
 	#[kio::test]
 	async fn lite07_a_floored_time_start_reports_where_delivery_starts() {
-		let mut track = track::Producer::new(
-			Arc::new(broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		track.received();
-		track.anchored();
-		write_group(&mut track, 1000, 1000);
-		let kept = lite::Range::span(Some(500), 0, None, None);
-		let (mut run, mut writer, log) =
-			lite07_run_ranges(&track, &[lite::Range::span(Some(100), 0, None, None), kept]);
-		assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
-		assert!(run.start.resolved().is_none(), "time 100 waits on the copy to place it");
+		// Open, and through the latest group, which already holds group 1000.
+		for end in [None, Some(lite::Anchor::Relative(0))] {
+			let mut track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			track.received();
+			track.anchored();
+			write_group(&mut track, 1000, 1000);
+			let kept = lite::Range {
+				end,
+				..lite::Range::span(Some(500), 0, None, None)
+			};
+			let (mut run, mut writer, log) =
+				lite07_run_ranges(&track, &[lite::Range::span(Some(100), 0, None, None), kept]);
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+			assert!(run.start.resolved().is_none(), "time 100 waits on the copy to place it");
 
-		run.update(lite07_add(&run, &[(1, kept)], 2, &[]));
-		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
-		let starts: Vec<_> = responses(&mut writer, &log)
-			.await
-			.into_iter()
-			.filter_map(|msg| match msg {
-				lite::SubscribeResponse::Start(start) => Some(start.starts),
-				_ => None,
-			})
-			.collect();
-		assert_eq!(starts, [vec![None, Some(1000)]]);
+			run.update(lite07_add(&run, &[(1, kept)], 2, &[]));
+			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+			let starts: Vec<_> = responses(&mut writer, &log)
+				.await
+				.into_iter()
+				.filter_map(|msg| match msg {
+					lite::SubscribeResponse::Start(start) => Some(start.starts),
+					_ => None,
+				})
+				.collect();
+			assert_eq!(starts, [vec![None, Some(1000)]], "ending at {end:?}");
+		}
 	}
 
 	/// A gap the publisher never declared might have existed, so the end names it with a

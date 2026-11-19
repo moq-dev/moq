@@ -474,6 +474,13 @@ impl Window {
 		})
 	}
 
+	/// The range keyed `key` while its time start waits on the groups held to place it: that
+	/// time, and the exclusive end it resolved to, `None` while it stays open.
+	pub fn waiting_key(&self, key: u64) -> Option<(u64, Option<u64>)> {
+		let span = self.spans.get(&key)?;
+		span.waits_on().map(|time| (time, span.end))
+	}
+
 	/// Each range resolved, in key order, as [`Self::resolved_key`] reads it.
 	pub fn resolved(&self) -> Vec<Option<Resolved>> {
 		self.ranges.keys().map(|key| self.resolved_key(*key)).collect()
