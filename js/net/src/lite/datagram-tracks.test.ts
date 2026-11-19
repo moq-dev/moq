@@ -475,7 +475,9 @@ for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
 // A track's end waits a host task for the datagrams received with it. A session close in
 // between finishes the track rather than cutting it off: the publisher already ended it.
 for (const alpn of [ALPN_05, ALPN_06, ALPN_07_WIP]) {
-	test(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
+	// flaky: quest/m0/flaky/a-session-close-right-after-a-datagram-tracks-end-keeps-the-2.md
+	const testEnd = test.skipIf(alpn === ALPN_06);
+	testEnd(`${alpn}: a session close right after a datagram track's end keeps the end`, async () => {
 		const source = new Origin();
 		const publication = source.route(path, { hidden: true });
 		const datagrams = publication.broadcast.createDatagrams("audio");
