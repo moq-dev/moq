@@ -606,6 +606,14 @@ impl Anchors {
 	}
 }
 
+/// Where a received copy's publisher started a range asked from a time, and the last time
+/// the range reaches, `None` while it follows the live edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimeStart {
+	start: u64,
+	through: Option<u64>,
+}
+
 /// Where a received copy's publisher started a range counting back, and the latest group it
 /// counted from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -749,10 +757,11 @@ pub(crate) struct TrackState {
 	// of the track cannot tell which earlier group contains the time.
 	starts_at_keys: bool,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the
-	// time it asked from: a copy holding part of the track cannot tell which group contains
-	// a time it holds no group at, but its publisher reports where it resolved one. Replaced
-	// whole as the ranges change, so it holds at most one entry per live range.
-	time_starts: BTreeMap<u64, u64>,
+	// time it asked from (0 for the oldest group): a copy holding part of the track cannot tell
+	// which group contains a time it holds no group at, but its publisher reports where it
+	// resolved one. Replaced whole as the ranges change, so it holds at most one entry per
+	// time asked from.
+	time_starts: BTreeMap<u64, TimeStart>,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges counting
 	// back, by how many groups each counted, with the latest group it counted from: the copy
 	// holds only part of the track, so it can't count back over its own groups. Replaced whole
@@ -1231,12 +1240,20 @@ impl TrackState {
 			return Containing::Group(time);
 		}
 		match self.time_starts.get(&time) {
-			Some(&start) if start <= time => return Containing::Group(start),
+			Some(reported) if reported.start <= time => return Containing::Group(reported.start),
 			// The publisher serves nothing at or before it, as it does for a time older than
 			// every group it holds.
 			Some(_) => return Containing::Before,
 			None => {}
 		}
+		// A range asked from an earlier time that reaches this one, which upstream folded this
+		// reader's range into, so it reports nothing for this time itself.
+		let covering = self
+			.time_starts
+			.range(..time)
+			.rev()
+			.find(|(_, reported)| reported.through.is_none_or(|through| through >= time))
+			.map(|(_, reported)| reported.start);
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _))
 				if self.dropped_cover(key.saturating_add(1)..time.saturating_add(1))
@@ -1245,8 +1262,37 @@ impl TrackState {
 				Containing::Group(key)
 			}
 			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
+			// The live feed accounted for every key it could land through the time, so the
+			// group containing it came already: the newest one held, or one since evicted, which
+			// reaches back to the oldest group as on the publisher's own track.
+			held if self.landed_through(time, covering) => {
+				held.map_or(Containing::Before, |(&key, _)| Containing::Group(key))
+			}
 			_ => Containing::Unknown,
 		}
+	}
+
+	/// Whether the live feed may land nothing more at or below `time` that could contain it:
+	/// every key from `from`, where a range covering the time started, or else from the feed's
+	/// first arrival at or below `time`, through `time` arrived, was dropped, or is no longer
+	/// waited for. A covering range that started past the time served nothing at or before
+	/// it. Either names where the feed's groups begin, so a range added below changes nothing
+	/// of the group containing the time. Arrival order is not key order, so with neither, a
+	/// lower key may still land.
+	fn landed_through(&self, time: u64, from: Option<u64>) -> bool {
+		if !self.readable() {
+			return false;
+		}
+		let Some(from) = from.or_else(|| self.arrivals.first().filter(|&first| first <= time)) else {
+			return false;
+		};
+		self.find_landable(
+			from..time.saturating_add(1),
+			true,
+			self.arrival_grace(),
+			|_, _| Some(()),
+		)
+		.is_none()
 	}
 
 	/// Whether drops, for whatever reason, cover every key in `keys`. An empty run is covered.
@@ -4789,11 +4835,24 @@ impl Producer {
 	}
 
 	/// Record where the upstream publisher started each of this lite-07 copy's live wire
-	/// ranges, as `(time, start)` pairs by the time each asked from, replacing the last set.
-	/// A reader's time start this copy cannot place among its own groups resolves to it.
+	/// ranges, as `(time, start, through)` by the time each asked from (0 for the oldest group)
+	/// and the last time it reaches (`None` while open), replacing the last set. A reader's
+	/// time start this copy cannot place among its own groups resolves to the range asked from
+	/// it, or to one reaching it that upstream folded it into.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn time_starts(&self, starts: impl IntoIterator<Item = (u64, u64)>) {
-		let starts: BTreeMap<u64, u64> = starts.into_iter().collect();
+	pub(crate) fn time_starts(&self, starts: impl IntoIterator<Item = (u64, u64, Option<u64>)>) {
+		let mut merged: BTreeMap<u64, TimeStart> = BTreeMap::new();
+		for (time, start, through) in starts {
+			// Two ranges asked from one time: the lower start and the farther reach hold for both.
+			merged
+				.entry(time)
+				.and_modify(|held| {
+					held.start = held.start.min(start);
+					held.through = held.through.zip(through).map(|(a, b)| a.max(b));
+				})
+				.or_insert(TimeStart { start, through });
+		}
+		let starts = merged;
 		if let Ok(mut state) = self.modify()
 			&& state.time_starts != starts
 		{
@@ -9896,7 +9955,7 @@ impl Cursor {
 				// landing, or the answer placing the start, wakes us. Registered before syncing
 				// again, so a change placing it meanwhile is not missed; a closed track places it.
 				if self.filter.window.waits_below(group.start) {
-					let closed = self.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
+					let closed = self.poll(waiter, |_| Poll::<Result<()>>::Pending).is_ready();
 					self.sync();
 					if !self.filter.window.waits_below(group.start) {
 						continue;
@@ -15417,7 +15476,7 @@ mod test {
 
 		// The publisher started the range asked from 1700 at 1000, and the one from 500 at 1000
 		// too, past it: nothing at or before 500 is served.
-		producer.time_starts([(1700, 1000), (500, 1000)]);
+		producer.time_starts([(1700, 1000, None), (500, 1000, None)]);
 		assert_eq!(placed(&mut answered), Some((1000, true)));
 		assert_eq!(placed(&mut before), Some((0, false)));
 		assert_eq!(placed(&mut later), None);
@@ -15464,11 +15523,94 @@ mod test {
 		assert_eq!(next(), None, "2000 waits on the start");
 		// A session's tail holds the read at the answered start's group until it lands, and
 		// says nothing lies between it and 2000.
-		producer.time_starts([(1500, 1000)]);
+		producer.time_starts([(1500, 1000, None)]);
 		write_group(&producer, 1000);
 		producer.skip_groups(1001..2000);
 		assert_eq!(next(), Some(Ok(1000)));
 		assert_eq!(next(), Some(Ok(2000)));
+	}
+
+	/// A lite-07 copy places a time start that upstream folded into an earlier range by that
+	/// range's answer, which reports nothing for the time itself: one that started past the
+	/// time served nothing at or before it, so an ordered read goes on. A range ending before
+	/// the time says nothing of it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_folded_time_start_places_from_the_range_covering_it() {
+		let ordered = |producer: &Producer| {
+			producer
+				.subscribe(
+					Subscription::default()
+						.with_ranges([Range {
+							start: Anchor::Time(1500),
+							end: None,
+						}])
+						.with_delay(Delay::default().with_max(None)),
+				)
+				.ordered()
+		};
+		let next = |ordered: &mut Ordered| match ordered.next_group().now_or_never() {
+			None => None,
+			Some(Ok(Some(Item::Group(group)))) => Some(group.start),
+			Some(res) => panic!("not a group: {:?}", res.map(|item| item.is_some())),
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+
+		// A range asked from 1000 that ends at 1200 doesn't reach the time.
+		producer.time_starts([(1000, 1000, Some(1200))]);
+		let mut bounded = ordered(&producer);
+		assert_eq!(next(&mut bounded), None, "the start still waits");
+
+		// The oldest group's range, answered at 2000, reaches it.
+		producer.time_starts([(1000, 1000, Some(1200)), (0, 2000, None)]);
+		assert_eq!(next(&mut bounded), Some(2000));
+		assert_eq!(next(&mut ordered(&producer)), Some(2000));
+	}
+
+	/// A lite-07 copy whose live feed accounted for every key through a time start's time
+	/// places it though the group containing it was since evicted, as when its range was folded
+	/// into a wider one upstream, which answers nothing for the time: an ordered read goes on
+	/// rather than wait for a group that came and went.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_start_group_still_places_a_time_start() {
+		let (mut producer, _pool) = pooled_producer(2_000);
+		producer.received();
+		producer.anchored();
+		producer.start_resolved(1000).unwrap();
+		let mut big = producer.create_group(group::Info { start: 1000 }).unwrap();
+		big.write_frame(
+			Timestamp::from_millis(1000).unwrap(),
+			bytes::Bytes::from(vec![0u8; 10_000]),
+		)
+		.unwrap();
+		big.finish().unwrap();
+		for (key, below) in [(2000, 1001), (3000, 2001)] {
+			producer.skip_groups(below..key);
+			write_group(&producer, key);
+		}
+		assert!(producer.consume().peek_group(1000).is_none(), "1000 is evicted");
+
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Time(1500),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.ordered();
+		let mut groups = Vec::new();
+		while let Some(item) = ordered.next_group().now_or_never() {
+			if let Item::Group(group) = item.unwrap().expect("an item") {
+				groups.push(group.start);
+			}
+		}
+		assert_eq!(groups.last(), Some(&3000), "the read goes on past the evicted group");
 	}
 
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its

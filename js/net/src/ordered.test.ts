@@ -418,3 +418,18 @@ test("an ordered read hands out nothing past a time start still waiting to be pl
 	producer.skipGroups(1001n, 2000n);
 	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
 });
+
+test("a time start folded upstream into an earlier range places from the range covering it", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	const subscriber = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] });
+	// A range asked from 1000 that ends at 1200 doesn't reach the time.
+	hooks.timeStarts(producer, [[1000n, 1000n, 1200n]]);
+	expect(hooks.servingResolved(subscriber)).toEqual([undefined]);
+	// The oldest group's range, answered at 2000, served nothing at or before it.
+	hooks.timeStarts(producer, [
+		[1000n, 1000n, 1200n],
+		[0n, 2000n, undefined],
+	]);
+	expect(hooks.servingResolved(subscriber)).toEqual([{ start: 0n, end: undefined, floored: false }]);
+});

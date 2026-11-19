@@ -744,7 +744,7 @@ export const hooks: {
 	 * start the copy cannot place among its own groups resolves to it. Mirrors the Rust
 	 * `track::Producer::time_starts`; assigned by `track.ts`.
 	 */
-	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint]>) => void;
+	timeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint, (bigint | undefined)?]>) => void;
 	/**
 	 * Tell a lite-07 copy where its publisher started each live range counting back, as
 	 * `[back, start, latest]` triples, replacing the last set: the copy holds only part of the

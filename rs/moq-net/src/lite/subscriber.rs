@@ -10142,9 +10142,10 @@ impl SubStream {
 	}
 
 	/// Tell the copy where the publisher started each live range: one asked from a group's
-	/// start, which a reader's time start there resolves to when the copy holds no group at
-	/// it, and one counting back, which the copy, holding only part of the track, can't count.
-	/// Lite-07 only, where each range's start is reported.
+	/// start or the oldest group, with how far it reaches, which a reader's time start there or
+	/// folded into it resolves to when the copy holds no group at it, and one counting back,
+	/// which the copy, holding only part of the track, can't count. Lite-07 only, where each
+	/// range's start is reported.
 	fn report_starts(&self, serving: &track::Producer) {
 		if !self.live.reports_starts() {
 			return;
@@ -10155,8 +10156,20 @@ impl SubStream {
 			let Some(Some(start)) = self.starts.get(&id) else {
 				continue;
 			};
+			// The last time the range reaches: an exclusive group end stops at the time before
+			// it, and a relative end, unknown here, at the range's own time.
+			let through = |asked: u64| match range.end {
+				None => None,
+				Some(lite::Anchor::Absolute(end)) if end.frame == 0 => Some(end.group.saturating_sub(1).max(asked)),
+				Some(lite::Anchor::Absolute(end)) => Some(end.group),
+				Some(lite::Anchor::Time(end)) => Some(end),
+				Some(lite::Anchor::Relative(_)) => Some(asked),
+			};
 			match range.start {
-				Some(lite::Anchor::Absolute(time)) if time.frame == 0 => times.push((time.group, *start)),
+				None => times.push((0, *start, through(0))),
+				Some(lite::Anchor::Absolute(time)) if time.frame == 0 => {
+					times.push((time.group, *start, through(time.group)))
+				}
 				Some(lite::Anchor::Relative(back)) => {
 					if let Some(Some(latest)) = self.edges.get(&id) {
 						relative.push((back, *start, *latest));

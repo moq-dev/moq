@@ -89,6 +89,7 @@ import {
 	Subscribe,
 	SubscribeUpdate,
 	toWireRanges,
+	type WireAnchor,
 	type WireRange,
 } from "./subscribe.ts";
 import { TrackInfo, Track as TrackMessage } from "./track.ts";
@@ -2871,10 +2872,10 @@ export class Subscriber {
 	// requested floor, pending, while SUBSCRIBE_START or a range's SUBSCRIBE_STARTED has yet to
 	// say where one starts. Mirrors the Rust `SubStream::declare`.
 	#declare(entry: SubscribeEntry): void {
-		// Where the publisher started each live range asked from a group's start, which a reader's
-		// time start there resolves to when the copy holds no group at it. Mirrors the Rust
-		// `report_time_starts`.
-		const times: [bigint, bigint][] = [];
+		// Where the publisher started each live range asked from a group's start or the oldest group
+		// (time 0), with the last time it reaches, which a reader's time start there or folded into it
+		// resolves to when the copy holds no group at it. Mirrors the Rust `SubStream::report_starts`.
+		const times: [bigint, bigint, bigint | undefined][] = [];
 		// And each one counting back, which the copy, holding only part of the track, can't count,
 		// with the latest group it counted back from.
 		const relative: [bigint, bigint, bigint | undefined][] = [];
@@ -2884,8 +2885,11 @@ export class Subscriber {
 			const back = range?.start?.relative;
 			const at = entry.starts.get(id);
 			if (at === undefined) continue;
-			if (time !== undefined) times.push([time, at]);
-			else if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
+			if (back !== undefined) relative.push([back, at, entry.edges.get(id)]);
+			else if (time !== undefined || range?.start === undefined) {
+				const asked = time ?? 0n;
+				times.push([asked, at, through(range?.end, asked)]);
+			}
 		}
 		hooks.timeStarts(entry.track, times);
 		hooks.relativeStarts(entry.track, relative);
@@ -3426,4 +3430,14 @@ class ConsumeBroadcast extends broadcast.Consumer {
 	override clone(): ConsumeBroadcast {
 		return new ConsumeBroadcast(this.#subscriber, this.#path, this.#consumed, this.shareState());
 	}
+}
+
+// The last time a lite-07 range ending at `end` reaches, undefined while it follows the live edge:
+// an exclusive group end stops at the time before it, and a relative end, unknown here, at the
+// range's own time `asked`. Mirrors the Rust `SubStream::report_starts`.
+function through(end: WireAnchor | undefined, asked: bigint): bigint | undefined {
+	if (end === undefined) return undefined;
+	if (end.time !== undefined) return end.time;
+	if (end.absolute !== undefined) return end.absolute > asked ? end.absolute - 1n : asked;
+	return asked;
 }

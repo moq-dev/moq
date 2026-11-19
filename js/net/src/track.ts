@@ -1052,9 +1052,21 @@ let keysOf: (producer: Producer) => readonly bigint[];
 // producer's static block. See `hooks.startsAtKeys` and `hooks.timeStarts`.
 let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
-	starts: ReadonlyMap<bigint, bigint>;
+	starts: ReadonlyMap<bigint, TimeStart>;
 	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
 };
+
+/** Where a received copy's publisher started a range asked from a time, and the last time it reaches. */
+interface TimeStart {
+	start: bigint;
+	/** Undefined while the range follows the live edge. */
+	through?: bigint;
+}
+
+// Whether a received copy's live feed may land nothing more at or below `time` that could contain
+// it, counting from `from` or its first arrival at or below `time`; assigned in the producer's
+// static block. Mirrors the Rust `TrackState::landed_through`.
+let landedThrough: (producer: Producer, time: bigint, from: bigint | undefined) => boolean;
 
 /** The groups a reader reads, and the exclusive end it stops at; undefined before its ranges resolve. */
 type Coverage = { runs: readonly Run[]; cap?: bigint } | undefined;
@@ -1315,7 +1327,7 @@ export class Producer {
 	#startsAtKeys = false;
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges, by the time
 	// it asked from. Mirrors the Rust `TrackState::time_starts`.
-	#timeStarts = new Map<bigint, bigint>();
+	#timeStarts = new Map<bigint, TimeStart>();
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
 	// The highest-key checked start evicted. Eviction is not a key prefix, so a
@@ -1553,7 +1565,31 @@ export class Producer {
 			producer.#startsAtKeys = true;
 		};
 		hooks.timeStarts = (producer, starts) => {
-			producer.#timeStarts = new Map(starts);
+			const merged = new Map<bigint, TimeStart>();
+			for (const [time, start, through] of starts) {
+				const held = merged.get(time);
+				// Two ranges asked from one time: the lower start and the farther reach hold for both.
+				merged.set(
+					time,
+					held === undefined
+						? { start, through }
+						: {
+								start: min(held.start, start),
+								through:
+									held.through === undefined || through === undefined
+										? undefined
+										: max(held.through, through),
+							},
+				);
+			}
+			producer.#timeStarts = merged;
+		};
+		landedThrough = (producer, time, from) => {
+			const first = producer.#arrivals.first();
+			const start = from ?? (first !== undefined && first <= time ? first : undefined);
+			if (start === undefined) return false;
+			const landing = producer.#landing({ start, end: time + 1n, floor: true, grace: producer.#grace() });
+			return landing.next().done === true;
 		};
 		hooks.relativeStarts = (producer, starts) => {
 			producer.#relativeStarts = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
@@ -3614,13 +3650,25 @@ export class Subscriber {
 				// `TrackState::containing_received`.
 				if (receivedCopy(producer) && !state.dropsAnchors.peek()) {
 					if (below === time) return { group: time };
-					const start = anchors.starts.get(time);
+					const start = anchors.starts.get(time)?.start;
 					// The publisher serves nothing at or before it, as for a time older than every group.
 					if (start !== undefined) return start <= time ? { group: start } : "before";
+					// A range asked from an earlier time that reaches this one, which upstream folded this
+					// reader's range into, so it reports nothing for this time itself.
+					let covering: [bigint, bigint] | undefined;
+					for (const [asked, reported] of anchors.starts) {
+						if (asked >= time || (reported.through !== undefined && reported.through < time)) continue;
+						if (covering === undefined || asked > covering[0]) covering = [asked, reported.start];
+					}
 					if (below !== undefined && (covered(below + 1n, time + 1n, () => true) || index < keys.length)) {
 						return { group: below };
 					}
 					if (below === undefined && covered(0n, time + 1n, () => true)) return "before";
+					// The live feed accounted for every key it could land through the time, so the group
+					// containing it came already: the newest one held, or one since evicted.
+					if (producer && landedThrough(producer, time, covering?.[1])) {
+						return below !== undefined ? { group: below } : "before";
+					}
 					return "unknown";
 				}
 				if (below !== undefined) return { group: below };
