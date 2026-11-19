@@ -675,7 +675,7 @@ fn quiesce(net: &mut MultiSim) {
 fn tune(arm: Arm) -> multi::Tune {
 	match arm {
 		Arm::Multi(tune) => tune,
-		Arm::Relay(_) => panic!("not the prototype"),
+		Arm::Relay(_) | Arm::Layer(_) => panic!("not the prototype"),
 	}
 }
 

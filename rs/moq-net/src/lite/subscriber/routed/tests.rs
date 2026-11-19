@@ -428,6 +428,49 @@ async fn a_closed_session_leaves_its_claims_unavailable() {
 	assert!(!cursor.expect_next_active("room").await.available);
 }
 
+/// What a closed session leaves behind holds the origin, so the origin's teardown lets go
+/// of the node holding it, or the two keep each other alive.
+#[kio::test]
+async fn a_torn_down_origin_lets_go_of_what_closed_sessions_left() {
+	let (subscriber, consumer) = subscriber();
+	let node = subscriber.origin.route_node().downgrade();
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("room")).unwrap();
+	pump(&mut routed, &subscriber);
+	drop(routed);
+	assert!(node.alive(), "the origin keeps what the session left");
+
+	drop((subscriber, consumer));
+	// The origin's driver tears it down once it sees the last owner gone.
+	kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+	assert!(!node.alive(), "the node outlived its origin");
+}
+
+/// A reader waiting on what a closed session left does not hold up an origin nothing owns:
+/// the claim goes offline, the request concludes, and the origin tears down.
+#[kio::test]
+async fn an_unowned_origin_lets_go_of_a_request_waiting_on_what_closed_sessions_left() {
+	let (subscriber, consumer) = subscriber();
+	let node = subscriber.origin.route_node().downgrade();
+	let mut routed = asking(&subscriber, &Permit::default());
+	routed.receive(start("room")).unwrap();
+	pump(&mut routed, &subscriber);
+	drop(routed);
+
+	let mut request = std::pin::pin!(consumer.request("room", None));
+	kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+	assert!(
+		futures::poll!(request.as_mut()).is_pending(),
+		"an owned origin waits for a session to serve the claim again"
+	);
+
+	drop(subscriber);
+	let resolved = kio::clock::timeout(std::time::Duration::from_secs(1), request).await;
+	assert!(matches!(resolved, Ok(Err(_))), "{:?}", resolved.map(|r| r.map(|_| ())));
+	kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+	assert!(!node.alive(), "the node outlived its origin");
+}
+
 /// Prefixes named `head/0`, `head/1`, ... each padded to about `bytes`.
 fn prefixes(head: &str, count: usize, bytes: usize) -> std::collections::BTreeSet<Path> {
 	(0..count)

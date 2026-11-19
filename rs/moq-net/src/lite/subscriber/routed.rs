@@ -438,6 +438,7 @@ impl Routed {
 		for ((origin, path, instance), mut served) in self.served.drain() {
 			let unavailable = served.route.route.clone().with_available(false);
 			served.route.update(unavailable);
+			served.route.dynamic.disown();
 			let left = Left(served.route.dynamic.clone());
 			self.stream.orphan(origin, &(path, instance), Box::new(left));
 		}

@@ -158,7 +158,7 @@ fn duplicate_packet_is_discarded() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
-	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
+	assert_eq!(chunks.try_next(usize::MAX), Poll::Pending);
 	chunks.finalize();
 }
 

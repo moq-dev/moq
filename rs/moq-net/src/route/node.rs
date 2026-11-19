@@ -279,7 +279,24 @@ impl Drop for Locked<'_> {
 	}
 }
 
+/// Whether a node still exists, without keeping it alive.
+#[cfg(test)]
+pub(crate) struct WeakNode(std::sync::Weak<Mutex<State>>);
+
+#[cfg(test)]
+impl WeakNode {
+	pub fn alive(&self) -> bool {
+		self.0.strong_count() > 0
+	}
+}
+
 impl Node {
+	/// A handle that does not keep this node alive.
+	#[cfg(test)]
+	pub fn downgrade(&self) -> WeakNode {
+		WeakNode(Arc::downgrade(&self.state))
+	}
+
 	/// A node naming itself `me`, dating what it hears by `clock`, that carries claims
 	/// between its peers when it `forwards`, as a relay does.
 	pub fn new(me: NodeId, forwards: bool, clock: Deadlines) -> Self {
@@ -426,6 +443,23 @@ impl Node {
 				false => Poll::Pending,
 			}));
 		}
+	}
+
+	/// Let go of everything closed sessions left behind, which nothing serves again once
+	/// nothing owns the origin: each claim goes offline, so no reader waits on it.
+	pub fn release_orphans(&self) {
+		let mut locked = self.lock();
+		let state = &mut *locked;
+		state.lanes.retain(|_, slots| {
+			slots.retain(|_, slot| match slot.orphan.take() {
+				Some(orphan) => {
+					state.released.push((orphan, Gone::Lost));
+					false
+				}
+				None => true,
+			});
+			!slots.is_empty()
+		});
 	}
 
 	/// Fire the router's timers due by the origin's clock.

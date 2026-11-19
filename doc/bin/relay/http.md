@@ -108,8 +108,8 @@ A few worth alerting on:
   out a release.
 - `moq_relay_stale_bytes_total` and friends: content dropped for drifting past
   a subscriber's latency budget.
-- `moq_relay_draining_sessions`: sessions sent a GOAWAY during a
-  [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
+- `moq_relay_draining_sessions`: sessions and dialed cluster links sent a GOAWAY
+  during a [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
 - `moq_relay_panics_total`: bugs that closed one session instead of the
   relay. Each logs an error with the message and the session's span. A panic
   in a long-lived task (the origin, the cache governor, the certificate reload,

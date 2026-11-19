@@ -4,6 +4,7 @@
 	"type": "module",
 	"//devDependencies": "Exact pins, so a failing night means a change here or a deliberate bump.",
 	"devDependencies": {
+		"@moq/common": "workspace:*",
 		"esbuild": "0.28.2",
 		"playwright": "1.64.1",
 		"vite": "8.3.6",

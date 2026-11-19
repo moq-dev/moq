@@ -57,8 +57,8 @@ Manifests:
   `bench/browser`, `test/audio-quality/clients/js`,
   `test/interop/clients/js`, `test/interop/clients/js-native`, and
   `test/receive-credit`, whose `check` runs `tsc`.
-- Drift: bring `demo/vr` from `vite` `^8.3.5` and `rolldown` `^1.2.16` to
-  `^8.3.6` and `^1.3.0`, as the other workspaces take. It was created after
+- Drift: bring `demo/vr` from `vite` `^8.3.5` to `^8.3.6`, as the other
+  workspaces take. It was created after
   the last dependabot group bump. `test/worklet`'s exact `vite` pin is
   deliberate (its manifest says why), so it stays. `test/smoke/clients/js`
   (`vite` `^8.1.5`) is outside the bun workspace and tests the published
@@ -71,7 +71,3 @@ Not findings, despite what skif reported: the `@moq/*` dependencies of
 points run from shell scripts), `@typescript/lib-dom` (TypeScript loads it
 by name), `webpack`/`webpack-cli` in `test/worklet` (`Bun.resolveSync`), and
 `remark-cli` (`sh/markdown.sh`).
-
-## Related
-
-- [js/common becomes a workspace](/quest/m1/js-dead-code/common-workspace.md) - declares the imports `js/common` makes, which this quest leaves to it
