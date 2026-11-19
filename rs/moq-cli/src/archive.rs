@@ -96,15 +96,12 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 							old.abort();
 						}
 					}
-					moq_net::announce::Event::Absent(announce) | moq_net::announce::Event::Offline(announce) => {
+					moq_net::announce::Event::Absent(announce) => {
 						if let Some(follower) = followers.remove(&announce.prefix) {
 							follower.abort();
 						}
 					}
-					// A follower rides out its path being held.
-					moq_net::announce::Event::Present(_)
-					| moq_net::announce::Event::Available(_)
-					| moq_net::announce::Event::Unavailable(_) => {}
+					moq_net::announce::Event::Present(_) => {}
 				}
 				continue;
 			}

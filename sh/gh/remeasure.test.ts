@@ -59,7 +59,11 @@ test("publishing attempts remeasure even after a partial publish fails", async (
 test("later publications update one PR and request landing on its new head", async () => {
 	const workflow = Bun.YAML.parse(await Bun.file(".github/workflows/release-remeasure.yml").text());
 	const propose = workflow.jobs.remeasure.steps.find((step: { id?: string }) => step.id === "pr");
-	expect(propose.with.branch).toBe("release/planned-breaks");
+	expect(propose.with.branch).toBe("release-remeasure");
+	// Git cannot hold a branch under another branch's name as a directory.
+	for (const branch of [propose.with.base, ...workflow.on.workflow_run.branches]) {
+		expect(propose.with.branch.startsWith(`${branch}/`)).toBe(false);
+	}
 	expect(propose.with["body-path"]).toBe(".tmp/remeasure/body.md");
 	const landing = workflow.jobs.remeasure.steps.at(-1);
 	expect(landing.run).toContain('quest merge "$PR_URL" --land "$PR_HEAD"');
