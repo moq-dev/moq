@@ -281,30 +281,47 @@ async fn read(
 			.track(TRACK)?
 			.subscribe(track::Subscription::default())
 			.await?;
-		while let Some(mut group) = track.recv_group().await? {
-			let Some(frame) = group.read_frame().await? else {
-				continue;
-			};
-			let sequence = <[u8; 8]>::try_from(frame.payload.as_ref())
-				.map(u64::from_be_bytes)
-				.map_err(|_| anyhow::anyhow!("a replay frame carries an 8-byte group number"))?;
-			let now = millis_wall();
-			// Each instance numbers its groups from its own start, so `missed` compares within one,
-			// and only a group past the newest shows what the publisher wrote in between.
-			let missed = newest
-				.filter(|&newest| sequence > newest)
-				.map(|newest| sequence - newest - 1);
-			let last = {
-				let mut reader = reader.lock().unwrap();
-				reader.groups += 1;
-				reader.last.replace(now)
-			};
-			if let Some(from) = last
-				&& (now.saturating_sub(from) > gap || missed.is_some_and(|missed| missed > 0))
-			{
-				out.write(&Line::Gap { path, from, missed })?;
+		// A viewer reads on past a group it cannot finish: one the publisher gave up, reset by a
+		// session that closed mid-group, or still open when a newer group arrives. The next group
+		// read counts it missed. Only the track ending ends the read.
+		let mut reading: Option<moq_net::group::Consumer> = None;
+		loop {
+			tokio::select! {
+				biased;
+				next = track.recv_group() => match next? {
+					Some(group) if reading.as_ref().is_none_or(|current| group.start > current.start) => {
+						reading = Some(group);
+					}
+					Some(_) => {}
+					None => break,
+				},
+				frame = async { reading.as_mut().expect("guarded").read_frame().await }, if reading.is_some() => {
+					reading = None;
+					let Ok(Some(frame)) = frame else {
+						continue;
+					};
+					let sequence = <[u8; 8]>::try_from(frame.payload.as_ref())
+						.map(u64::from_be_bytes)
+						.map_err(|_| anyhow::anyhow!("a replay frame carries an 8-byte group number"))?;
+					let now = millis_wall();
+					// Each instance numbers its groups from its own start, so `missed` compares within one,
+					// and only a group past the newest shows what the publisher wrote in between.
+					let missed = newest
+						.filter(|&newest| sequence > newest)
+						.map(|newest| sequence - newest - 1);
+					let last = {
+						let mut reader = reader.lock().unwrap();
+						reader.groups += 1;
+						reader.last.replace(now)
+					};
+					if let Some(from) = last
+						&& (now.saturating_sub(from) > gap || missed.is_some_and(|missed| missed > 0))
+					{
+						out.write(&Line::Gap { path, from, missed })?;
+					}
+					*newest = (*newest).max(Some(sequence));
+				}
 			}
-			*newest = (*newest).max(Some(sequence));
 		}
 		anyhow::Ok(anyhow::anyhow!("the track finished"))
 	};
