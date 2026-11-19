@@ -54,7 +54,11 @@ exclude_re = [
     # poll, so these differ only when another thread writes the route between that
     # read and this check, a window no deterministic test can stage. There the
     # original retries on the new copy and the arm prevents a lost wake.
-    'replace \|\| with && in Fetching::poll_moved$',
+    'replace \|\| with && in Fetching::(poll_moved|moved)$',
+    'replace Fetching::moved -> bool with false$',
+    # The same for `Recover::poll`'s route watch, whose generation it just read; once no
+    # front moves the copy, the read never continues on the watch.
+    ':\d+:43: replace \|\| with && in Recover::poll$',
     ':\d+:6: delete match arm Some\(Some\(Err\(err\)\)\) in <impl kio::Task for Fetching>::poll$',
     # The reader list's sweep only bounds memory: a dead entry fails every
     # `Weak::upgrade`, and `subscribe` sweeps the list again.
@@ -67,6 +71,17 @@ exclude_re = [
     # and nothing is missing.
     'replace < with <= in Copy::retains$',
     'replace < with <= in Retain<.*>::holds_window$',
+    # `Placed` only sees ranges `Reader::resolve` placed, with no latest group: each
+    # start is a time it contains or the oldest, so it never looks a start up, waits on
+    # one, or counts one back, and an `Oldest` end only reaches it from a copy that
+    # accepted one, which every copy refuses.
+    'replace <impl Holdings for Placed>::(back|next_start|complete|resolves) ',
+    'replace == with != in <impl Holdings for Placed>::back$',
+    # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
+    # only when a cap at 0 empties every range, so a waiting range stops the window too.
+    'replace && with \|\| in Reader::resolve$',
+    # `owes_below` is asked only of a key outside the window, where no run starts.
+    'replace < with <= in Reader::owes_below$',
     # Walking again before anything the read parked on fires returns the same
     # `Pending`, so the idle shortcut only saves work.
     'replace Subscriber::parked -> bool with false$',
