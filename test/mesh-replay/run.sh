@@ -56,6 +56,12 @@ while [[ $# -gt 0 ]]; do
     shift 2
 done
 ((${#MESHES[@]})) || MESHES=("$DIR/ring6.toml")
+# A cell is named for its mesh file, so two meshes of one name would share logs and a report.
+dupe=$(for mesh in "${MESHES[@]}"; do basename "$mesh" .toml; done | sort | uniq -d | head -1)
+[[ -z "$dupe" ]] || {
+    echo "error: two --mesh files are named $dupe.toml; rename one" >&2
+    exit 2
+}
 [[ "$BROADCASTS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
     echo "error: --broadcasts takes whole numbers, comma-separated (got '$BROADCASTS')" >&2
     exit 2

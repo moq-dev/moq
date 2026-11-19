@@ -15,9 +15,12 @@ replay = importlib.util.module_from_spec(spec)
 sys.modules["replay"] = replay
 spec.loader.exec_module(replay)
 
+# Removed when the tests exit, pass or fail.
+SCRATCH = tempfile.TemporaryDirectory()
+
 
 def mesh_file(body: str) -> Path:
-    f = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
+    f = tempfile.NamedTemporaryFile("w", suffix=".toml", dir=SCRATCH.name, delete=False)
     f.write(body)
     f.close()
     return Path(f.name)
@@ -79,6 +82,7 @@ class MeshTest(unittest.TestCase):
         for body, error in [
             ('relays = ["a"]', "at least two"),
             ('relays = ["a", "A"]', "lowercase"),
+            ('relays = ["a", "b-c"]', "dial-accept"),
             ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "c"', "two listed relays"),
             ('relays = ["a", "b"]\n[[links]]\ndial = "a"\naccept = "b"\n[[links]]\ndial = "b"\naccept = "a"', "twice"),
             ('relays = ["a", "b", "c"]\n[[links]]\ndial = "a"\naccept = "b"', "not connected"),
@@ -214,7 +218,7 @@ class KnownTest(unittest.TestCase):
 
 class ProcTest(unittest.TestCase):
     def test_only_an_exit_the_run_did_not_ask_for_is_a_death(self):
-        log = Path(tempfile.mkdtemp()) / "proc.log"
+        log = Path(tempfile.mkdtemp(dir=SCRATCH.name)) / "proc.log"
         proc = replay.Proc("sleeper", log)
         self.assertFalse(proc.died)
         proc.start(["sleep", "30"])

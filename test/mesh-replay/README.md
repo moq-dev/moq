@@ -72,7 +72,7 @@ The script ([`script.toml`](script.toml)) is the sequence of events:
 | `down` | How long a cut link or a crashed relay stays down. Longer than the idle timeout ends the session. |
 | `quiet` | How long no route or announce message may move for the mesh to count as quiet. |
 | `settle` | The longest an event waits for quiet and for every reader to read again. |
-| `stall` | How long a reader may read nothing and still count as fed. |
+| `stall` | How long a reader may read nothing and still count as fed, once it read since the fault ended. |
 | `[[events]]` | `roll` (`to = "new"` or `"old"`), `reopen-link` (`link = "a-b"`), `reopen-relay`, `kill`, `end-source` (each `relay = "c"`), with an optional `times`. An event naming no relay takes the one with the most links. |
 | `[[known]]` | A violation a quest already owns: `check`, its `kind`, optionally the event `kind`, and the `quest`. It is reported and does not fail the run, except at the start, before any fault. |
 
@@ -89,8 +89,9 @@ where a new relay sits between a new one and an old one.
 ## What fails a run
 
 - **unfed**: once an event settles, a reader whose relay shows its live broadcast read
-  nothing for `stall`. `stuck` means its follow holds a broadcast whose track ended and
-  never handed out another; `starved` means it holds one whose groups stopped.
+  nothing since the fault ended or for `stall`. `stuck` means its follow holds a
+  broadcast whose track ended and never handed out another; `starved` means it holds
+  one whose groups stopped.
 - **unrouted**: at the start, before any fault, a reader's relay does not show a live
   broadcast, so nothing behind it would be tested. A mesh starting on the new build with a link
   marked `upstream` may hide a route, so there it is only reported, as after every other
@@ -108,11 +109,13 @@ the next is something to look at, not a failure.
 ## The report
 
 Each run writes `report.json` and `report.md` per cell (one mesh and broadcast count)
-to its run directory or `--report`, and the nightly job adds them to its summary. For
-each event:
+to its run directory or `--report`, and the nightly job adds them to its summary. A
+passing run deletes its run directory, so keep its reports with `--report DIR`, or the
+reports and logs together with `HARNESS_KEEP=1`. For each event:
 
-- **Quiet**: seconds after the fault ended until no route or announce message moved for
-  `quiet`; **Fed**: until every reader with a route read again.
+- **Quiet**: seconds after the fault ended until the last route or announce message
+  moved, once nothing more moved for `quiet`; **Fed**: until every reader with a route
+  read a group sent after the fault ended.
 - **Announce msgs / bytes**: control messages of the `announce` class, which carries
   ROUTE, ROUTE\_END, DEAD, and DRAIN on lite-07, sent by every relay.
 - **Changed**, **Rewritten**, **DEAD**, **DRAIN**: the route counters

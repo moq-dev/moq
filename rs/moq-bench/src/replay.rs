@@ -84,7 +84,13 @@ struct Standalone {
 /// Parse the arguments after `replay`.
 pub fn parse(argv: &[&std::ffi::OsStr]) -> anyhow::Result<Args> {
 	match Standalone::parse_from(argv) {
-		Ok(standalone) => Ok(standalone.args),
+		Ok(standalone) => {
+			// Released spellings land on hidden fields nothing honors, so refuse them naming the replacement.
+			let mut deprecated = standalone.args.client.deprecated();
+			deprecated.extend(standalone.args.quic.deprecated());
+			anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+			Ok(standalone.args)
+		}
 		Err(err) => {
 			let answer = moq_tokio::cli::answer(Standalone::spec(), Standalone::command(), argv, err);
 			if answer.is_question() {
@@ -192,14 +198,14 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 	};
 
 	// A stop is a publisher leaving on purpose: finish every track before the producers go.
-	// After a failure they are dropped, which ends them as one.
-	if result.is_ok() {
-		for track in tracks.drain(..) {
-			// Fails only once the track already ended, which is what a stop wants.
-			let _ = track.finish();
-		}
+	// After a failure, abort each with its cause rather than drop it unfinished.
+	for track in tracks.drain(..) {
+		// Fails only once the track already ended, which is all either wants.
+		let _ = match &result {
+			Ok(()) => track.finish().map(drop),
+			Err(err) => track.abort(moq_net::Error::Transport(format!("{err:#}"))),
+		};
 	}
-	drop(tracks);
 	// End the session with a close rather than leaving the relay to wait out its idle
 	// timeout, so a stopped publisher is a source ending now.
 	tasks.shutdown().await;

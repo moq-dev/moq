@@ -90,7 +90,7 @@ class Mesh:
         return longest
 
 
-NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+NAME = re.compile(r"^[a-z0-9][a-z0-9_]*$")
 SHAPE_KEYS = {"delay", "rate", "queue"}
 
 
@@ -104,7 +104,9 @@ def load_mesh(path: Path) -> Mesh:
         raise ValueError(f"{path}: `relays` lists at least two relay names")
     for relay in relays:
         if not isinstance(relay, str) or not NAME.match(relay):
-            raise ValueError(f"{path}: relay name {relay!r} is not lowercase letters, digits, - or _")
+            raise ValueError(
+                f"{path}: relay name {relay!r} is not lowercase letters, digits, or _ (a link is named dial-accept)"
+            )
     if len(set(relays)) != len(relays):
         raise ValueError(f"{path}: a relay is listed twice")
     shape = doc.get("shape", {})
@@ -822,13 +824,14 @@ class Run:
         quiet_at = fed_at = None
         while True:
             now = time.time()
-            last = max(self.changed(), restored)
-            quiet_at = last if now - last >= self.script.quiet else None
-            unfed, unrouted = self.hungry(now)
+            unfed, unrouted = self.hungry(now, restored)
             if unfed or (routed and unrouted):
                 fed_at = None
             elif fed_at is None:
                 fed_at = now
+            # After reading the readers, which takes a while, so counters that moved meanwhile count.
+            last = max(self.changed(), restored)
+            quiet_at = last if time.time() - last >= self.script.quiet else None
             if (quiet_at is not None and fed_at is not None) or now >= deadline:
                 return quiet_at, fed_at, unfed, unrouted
             time.sleep(POLL * 2)
@@ -847,7 +850,7 @@ class Run:
                     {
                         "reader": relay.name,
                         "path": path,
-                        "s": round(longest, 2),
+                        "s": longest,
                         "missed": missed,
                         "withdrawn_twice": withdrawn_twice(state, start, end),
                         "bystander": source not in targets and relay.name not in targets,
@@ -859,8 +862,8 @@ class Run:
             return {
                 "readers": len(group),
                 "interrupted": len(hit),
-                "max_s": hit[0] if hit else 0.0,
-                "p50_s": hit[len(hit) // 2] if hit else 0.0,
+                "max_s": round(hit[0], 2) if hit else 0.0,
+                "p50_s": round(hit[len(hit) // 2], 2) if hit else 0.0,
                 "missed": sum(row["missed"] for row in group),
                 "withdrawn_twice": sum(row["withdrawn_twice"] for row in group),
             }
@@ -869,15 +872,15 @@ class Run:
         return {
             "all": summary(rows),
             "bystanders": summary([row for row in rows if row["bystander"]]),
-            "worst": [row for row in worst if row["s"] > gap],
+            "worst": [{**row, "s": round(row["s"], 2)} for row in worst if row["s"] > gap],
             "withdrawn_twice": [
                 {"reader": row["reader"], "path": row["path"]} for row in rows if row["withdrawn_twice"]
             ][:5],
         }
 
-    def hungry(self, now: float) -> tuple[list[dict], list[dict]]:
-        """Readers whose relay shows their live broadcast but who read nothing for `stall`, and
-        readers whose live broadcast their relay does not show."""
+    def hungry(self, now: float, restored: float) -> tuple[list[dict], list[dict]]:
+        """Readers whose relay shows their live broadcast but who read nothing since `restored` or
+        for `stall`, and readers whose live broadcast their relay does not show."""
         live = {relay.name for relay in self.relays.values() if relay.proc.alive}
         publishing = {relay.name for relay in self.relays.values() if relay.publisher.alive}
         unfed, unrouted = [], []
@@ -894,7 +897,7 @@ class Run:
                     state = relay.readout.paths.get(path) or Follow()
                     if path not in shows:
                         unrouted.append({"reader": relay.name, "path": path})
-                    elif state.last is None or now - state.last > self.script.stall:
+                    elif state.last is None or state.last < restored or now - state.last > self.script.stall:
                         unfed.append(
                             {
                                 "reader": relay.name,
@@ -1122,6 +1125,9 @@ class Run:
         if moved:
             entry = {"event": "after the script", "check": "noisy", "count": len(moved), "items": [moved]}
             self.violations.append(entry)
+        died = [proc.name for proc in self.procs() if proc.died]
+        if died:
+            self.violations.append({"event": "after the script", "check": "died", "count": len(died), "items": died})
 
     def procs(self) -> list[Proc]:
         """Every child process: relays, publishers, readers, and shapers."""
@@ -1146,7 +1152,11 @@ class Run:
         out = []
         for link in self.mesh.links:
             path = self.dir / f"shaper-{link.name}.json"
-            stats = json.loads(path.read_text()) if path.exists() else {}
+            try:
+                stats = json.loads(path.read_text()) if path.exists() else {}
+            except (OSError, ValueError) as err:
+                # Written in place, so a shaper killed mid-write leaves it torn: report that, not crash.
+                stats = {"error": f"{path.name}: {err}"}
             out.append({"link": link.name, "cost": link.cost, "upstream": link.upstream, "shaper": stats})
         return out
 
@@ -1175,9 +1185,10 @@ COLUMNS = (
 )
 
 NOTE = (
-    "Quiet is how long after the fault ended until no route or announce message moved for the "
-    "script's quiet window, and Fed until every reader whose relay shows its live broadcast read a "
-    "group; `-` never settled. Message counts are summed over every relay's sent side. Route counts "
+    "Quiet is how long after the fault ended until the last route or announce message moved, once "
+    "nothing more moved for the script's quiet window, and Fed until every reader whose relay shows "
+    "its live broadcast read a group sent after the fault; `-` never settled. Message counts are "
+    "summed over every relay's sent side. Route counts "
     "cover moq-lite-07 relays only (n/a when none). Readers hit counts reader paths that paused "
     "longer than 0.5s; bystanders are readers whose relay and broadcast source were both outside "
     "the fault. End, Start, End counts reader paths whose broadcast went offline, came back, and "
