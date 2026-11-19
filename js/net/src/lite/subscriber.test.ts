@@ -444,7 +444,8 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 
 // The peer answers a prefix wider than our grant region by region, so a region the grant gains
 // under a prefix already asked for is sent without a new prefix: the subscriber edits nothing, and
-// a reader of the region waits for that edit's answer, which follows the region's claims.
+// a reader overlapping the region, synced or not, waits for that edit's answer, which follows the
+// region's claims. A reader the region misses stays synced, and so does every reader on a narrowing.
 test("a lite-07 region granted under a wider prefix syncs at the next answer", async () => {
 	const v = Version.DRAFT_07;
 	const subscribe = (...paths: string[]): Grant => ({
@@ -454,23 +455,39 @@ test("a lite-07 region granted under a wider prefix syncs at the next answer", a
 	const grant = new Signal<Grant | undefined>(subscribe("a"));
 	const { subscriber, send, ok, settle } = announceHarness(v, 1n, grant);
 	const everything = subscriber.routes();
+	const a = subscriber.routes(Path.Pattern.subtree(Path.from("a")));
 	await settle();
 	await ok();
 	await send((w) => encodeAnnounceBroadcast(w, { status: "synced", prefix: 0n }, v));
+	await settle();
 	expect(everything.synced.peek()).toBe(true);
+	expect(a.synced.peek()).toBe(true);
 
 	grant.set(subscribe("a", "b"));
 	const b = subscriber.routes(Path.Pattern.subtree(Path.from("b")));
 	await settle();
 	expect(b.synced.peek()).toBe(false);
+	// The whole tree holds `b`, which may already be in the peer's answer; `a` cannot gain from it.
+	expect(everything.synced.peek()).toBe(false);
+	expect(a.synced.peek()).toBe(true);
 	await send((w) => claimer(v)(w, Path.from("b/x"), { instance: Instance.random(), hops: [] }));
 	await ok();
 	expect(await b.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
-	// Synced once the reader asks past the region's claim.
+	expect(await everything.next()).toMatchObject({ prefix: Path.from("b/x"), kind: "start" });
+	// Synced once each reader asks past the region's claim.
 	void b.next();
+	void everything.next();
 	await settle();
 	expect(b.synced.peek()).toBe(true);
+	expect(everything.synced.peek()).toBe(true);
 
+	// A narrowing shows nothing new: every reader stays synced.
+	grant.set(subscribe("a"));
+	await settle();
+	expect(everything.synced.peek()).toBe(true);
+	expect(a.synced.peek()).toBe(true);
+
+	a.close();
 	b.close();
 	everything.close();
 	subscriber.close();

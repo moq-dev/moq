@@ -3896,6 +3896,62 @@ mod announce_test {
 		assert!(!told.iter().any(|(path, _)| path == "a/b/x"), "{whole:?}");
 	}
 
+	/// Grant changes queued before the answer drains each move the reads they queued, in
+	/// order: one that keeps the regions keeps a mount and its claim, though a later one
+	/// replaces that mount, and the claim every grant shows is never ended.
+	#[kio::test]
+	async fn lite07_grant_changes_queued_back_to_back_apply_in_order() {
+		let path = |path: &str| crate::Path::new(path).unwrap();
+		let origin = Hop::new(1).unwrap().produce();
+		let _cam = origin.announce("src/m", origin::RouteInfo::new()).unwrap();
+		let consumer = (origin.mount("a", "src").unwrap())
+			.scope("", &crate::Patterns::from(crate::Pattern::all()))
+			.unwrap()
+			.consume();
+		let auth = crate::auth::Link::new(false);
+		let limit = |pattern: &str| crate::auth::Grant {
+			publish: crate::Patterns::default(),
+			subscribe: crate::Patterns::from(pattern.parse::<crate::Pattern>().unwrap()),
+			expires: None,
+		};
+		auth.handle().authorize(&limit("a/*"));
+		let mut answer = super::routed::Answer::alone_on(consumer, auth.clone());
+		let log = Log::default();
+		let mut wire = Wire {
+			writes: log.writes.clone(),
+			cursor: 0,
+			version: Version::Lite07,
+		};
+		let mut writer = Writer::new(
+			crate::transport::boxed::SendStream::new(SinkSend::new(log)),
+			Version::Lite07,
+		);
+		let waiter = kio::Waiter::noop();
+		let mut sent = |answer: &mut super::routed::Answer| {
+			answer.drain(&mut writer).unwrap();
+			assert!(writer.poll_flush(&waiter).is_ready());
+			wire.take_announces()
+		};
+
+		answer.request(false, Vec::new(), vec![(path(""), true)]).unwrap();
+		let first = sent(&mut answer);
+		let starts = first
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::Start { .. }));
+		assert_eq!(starts.count(), 1, "{first:?}");
+
+		// `a/**` keeps the region `a`; `a/m/**` then reads `a/m` in place of `a`.
+		auth.handle().authorize(&limit("a/**"));
+		answer.poll_permit(&waiter).unwrap();
+		auth.handle().authorize(&limit("a/m/**"));
+		answer.poll_permit(&waiter).unwrap();
+		let changed = sent(&mut answer);
+		let ends = changed
+			.iter()
+			.filter(|msg| matches!(msg, lite::AnnounceBroadcast::End { .. }));
+		assert_eq!(ends.count(), 0, "{changed:?}");
+	}
+
 	/// A lite-07 edit removing a prefix and adding it again, as a peer changing its
 	/// Hidden opt-in does, tells what a mount beneath it presents again under the new
 	/// Prefix ID: both ends dropped the claim with the prefix, so nothing ends.

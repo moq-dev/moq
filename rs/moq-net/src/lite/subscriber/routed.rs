@@ -172,9 +172,11 @@ pub(in crate::lite) struct Routed {
 	wants: BTreeMap<Path, Option<crate::model::Snapshot>>,
 	/// The prefixes asked of the peer.
 	asked: BTreeMap<u64, Asked>,
-	/// The grant changed since the last edit: the next is sent even when it changes
-	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix,
-	/// and the readers wait for it.
+	/// What a grant change newly shows within a want, relative to the root, each holding
+	/// the origin's readers there unsynced until an answer after the change is in.
+	gained: Vec<(Path, crate::model::Snapshot)>,
+	/// The grant showed more since the last edit: the next is sent even when it changes
+	/// nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix.
 	regranted: bool,
 	next_prefix: u64,
 	/// The edits the peer has yet to answer, oldest first.
@@ -341,6 +343,7 @@ impl Routed {
 			origin: subscriber.origin.clone(),
 			wants: BTreeMap::new(),
 			asked: BTreeMap::new(),
+			gained: Vec::new(),
 			regranted: false,
 			next_prefix: 0,
 			edits: VecDeque::new(),
@@ -417,27 +420,29 @@ impl Routed {
 	/// answered every request, and sent the initial set of each prefix asked for it.
 	/// The caller serves what the node queued first.
 	pub(in crate::lite) fn release(&mut self) {
-		if self.wants.values().all(|snapshot| snapshot.is_none()) {
+		if self.wants.values().all(|snapshot| snapshot.is_none()) && self.gained.is_empty() {
 			return;
 		}
 		let done = self.finished || self.silent;
 		if !done && !self.stream.answered() {
 			return;
 		}
-		for (want, snapshot) in &mut self.wants {
-			if snapshot.is_none() {
-				continue;
-			}
-			let Ok(want) = self.root.join(want) else {
-				*snapshot = None;
-				continue;
+		let (root, asked) = (&self.root, &self.asked);
+		// Whether every prefix asked that overlaps `prefix` sent its initial set.
+		let answered = |prefix: &Path| {
+			let Ok(prefix) = root.join(prefix) else {
+				return true;
 			};
-			let mut answers = (self.asked.values())
-				.filter(|asked| route::within(&asked.path, &want) || route::within(&want, &asked.path));
-			if done || answers.all(|asked| asked.synced) {
+			let mut answers = (asked.values())
+				.filter(|asked| route::within(&asked.path, &prefix) || route::within(&prefix, &asked.path));
+			done || answers.all(|asked| asked.synced)
+		};
+		for (want, snapshot) in &mut self.wants {
+			if snapshot.is_some() && answered(want) {
 				*snapshot = None;
 			}
 		}
+		self.gained.retain(|(prefix, _)| !answered(prefix));
 	}
 
 	/// The peer finished its stream: it is leaving, and answers nothing more.
@@ -795,12 +800,21 @@ impl Routed {
 			};
 		}
 		let same = permit.same_limit(&self.permit);
-		// A grant change shows more or less of the peer's answer to a prefix wider than the
-		// grant: the readers wait again, for the answer to an edit, which follows it.
-		if !permit.same_grant(&self.permit) && !self.stream.asking().is_empty() {
-			self.regranted = true;
-			for (want, snapshot) in &mut self.wants {
-				snapshot.get_or_insert_with(|| self.origin.snapshot(want.clone()));
+		// What a grant change newly shows within a want may already be in the peer's
+		// answer, unheard here: the readers there wait again, for the answer to an edit,
+		// which follows the change. Elsewhere, and on a narrowing, nothing new can arrive,
+		// and a reader stays synced.
+		if !permit.same_grant(&self.permit) {
+			for region in permit.gained(&self.permit) {
+				for want in self.wants.keys() {
+					let within = match () {
+						_ if region.has_prefix(want) => region.clone(),
+						_ if want.has_prefix(&region) => want.clone(),
+						_ => continue,
+					};
+					self.gained.push((within.clone(), self.origin.snapshot(within)));
+					self.regranted = true;
+				}
 			}
 		}
 		self.permit = permit.clone();

@@ -583,6 +583,15 @@ impl Permit {
 		}
 	}
 
+	/// A permit the peer granted `granted`, with no limit of our own.
+	#[cfg(test)]
+	pub(crate) fn granting(granted: Patterns) -> Self {
+		Self {
+			granted: Some(granted),
+			limit: None,
+		}
+	}
+
 	/// Whether both allow `path`.
 	pub(crate) fn matches(&self, path: &str) -> bool {
 		self.granted(path) && self.within_limit(path)
@@ -641,6 +650,23 @@ impl Permit {
 		both.sort();
 		both.dedup();
 		Some(both)
+	}
+
+	/// The prefixes holding what this grant shows that `before`'s did not, judged pattern
+	/// by pattern, so one may be spurious but none is missed. Empty for a narrowing.
+	#[cfg(feature = "async")]
+	pub(crate) fn gained(&self, before: &Self) -> Vec<crate::Path> {
+		let Some(before) = &before.granted else {
+			return Vec::new();
+		};
+		let Some(granted) = &self.granted else {
+			return vec![crate::Path::empty()];
+		};
+		let gained: Patterns = (granted.iter())
+			.filter(|pattern| !before.contains(pattern))
+			.cloned()
+			.collect();
+		crate::model::interest_prefixes(&gained)
 	}
 
 	/// Whether the peer granted both the same, whatever limit either set.

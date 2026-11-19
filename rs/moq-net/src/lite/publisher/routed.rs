@@ -77,8 +77,14 @@ enum Holds {
 enum Marker {
 	/// The peer's edit.
 	Request,
-	/// A grant change, which stopped reading `removed` and started reading `added` more.
-	Grant { removed: Vec<Path>, added: usize },
+	/// A grant change, which stopped reading `removed` and started reading `added` more,
+	/// to read what `regions` show. A later change may already have moved the reads on, so
+	/// each marker moves the prefixes' reads only as far as its own change did.
+	Grant {
+		removed: Vec<Path>,
+		added: usize,
+		regions: Option<Vec<Path>>,
+	},
 }
 
 /// A prefix the peer asked for.
@@ -273,7 +279,9 @@ impl Answer {
 				return Err(Error::ProtocolViolation);
 			}
 			let path = self.origin.root().join(&relative).ok();
-			let reads = path.as_ref().map(|path| self.narrow(path)).unwrap_or_default();
+			let reads = (path.as_ref())
+				.map(|path| self.narrow(self.regions.as_deref(), path))
+				.unwrap_or_default();
 			edit.add.extend(reads.iter().cloned());
 			let prefix = Prefix {
 				relative,
@@ -328,11 +336,11 @@ impl Answer {
 		)
 	}
 
-	/// What the session's key reads to answer the absolute `prefix`: the prefix itself when
-	/// a region holds it or nothing confines the peer, and otherwise each region inside it.
-	/// A routing peer's grant is whole.
-	fn narrow(&self, prefix: &Path) -> BTreeSet<Path> {
-		let Some(regions) = self.regions.as_ref().filter(|_| !self.routing) else {
+	/// What the session's key reads to answer the absolute `prefix` under `regions`: the
+	/// prefix itself when a region holds it or nothing confines the peer, and otherwise each
+	/// region inside it. A routing peer's grant is whole.
+	fn narrow(&self, regions: Option<&[Path]>, prefix: &Path) -> BTreeSet<Path> {
+		let Some(regions) = regions.filter(|_| !self.routing) else {
 			return BTreeSet::from([prefix.clone()]);
 		};
 		if regions.iter().any(|region| route::within(prefix, region)) {
@@ -376,7 +384,7 @@ impl Answer {
 					.flat_map(|request| request.add.iter().map(|(_, prefix)| prefix)),
 			);
 		let wanted: BTreeSet<Path> = (prefixes.filter_map(|prefix| prefix.path.as_ref()))
-			.flat_map(|path| self.narrow(path))
+			.flat_map(|path| self.narrow(self.regions.as_deref(), path))
 			.collect();
 		let edit = relay::Edit {
 			remove: self.reads.difference(&wanted).cloned().collect(),
@@ -384,7 +392,8 @@ impl Answer {
 		};
 		let removed = edit.remove.clone();
 		let added = edit.add.len();
-		self.ask(edit, Marker::Grant { removed, added })?;
+		let regions = self.regions.clone();
+		self.ask(edit, Marker::Grant { removed, added, regions })?;
 		// Queued for this session now, so the pass that saw the change sends it.
 		self.main.flush();
 		Ok(())
@@ -479,9 +488,9 @@ impl Answer {
 				Ok(())
 			}
 			Msg::Edited if source == MAIN => match self.markers.pop_front() {
-				Some(Marker::Grant { removed, added }) => {
+				Some(Marker::Grant { removed, added, regions }) => {
 					self.answering = false;
-					self.regranted(writer, removed, added)
+					self.regranted(writer, removed, added, regions.as_deref())
 				}
 				_ => {
 					self.answering = true;
@@ -577,8 +586,7 @@ impl Answer {
 		let mut ready = Vec::new();
 		for (id, mut prefix) in request.add {
 			// The node's own key answers each read, as the edit asked for them, and so does
-			// each mount beneath what the grant shows now.
-			prefix.reads = (prefix.path.as_ref()).map(|path| self.narrow(path)).unwrap_or_default();
+			// each mount beneath them. A grant change since moves them at its own marker.
 			for read in prefix.reads.clone() {
 				prefix.waiting += self.mount(id, read, Holds::Synced)?;
 			}
@@ -628,7 +636,13 @@ impl Answer {
 	/// node dropped what they showed, while `added` reads more send their initial sets
 	/// next. Read the mounts beneath each region the grant newly shows, and once those
 	/// initial sets are in, end what it no longer shows and start what it now does.
-	fn regranted(&mut self, writer: &mut Writer, removed: Vec<Path>, added: usize) -> Result<(), Error> {
+	fn regranted(
+		&mut self,
+		writer: &mut Writer,
+		removed: Vec<Path>,
+		added: usize,
+		regions: Option<&[Path]>,
+	) -> Result<(), Error> {
 		let mut gone: Vec<Named> = (self.told.iter())
 			.filter(|(key, (source, _))| *source == MAIN && removed.iter().any(|read| route::within(&key.0, read)))
 			.map(|(key, _)| key.clone())
@@ -636,7 +650,9 @@ impl Answer {
 		let ids: Vec<u64> = self.prefixes.keys().copied().collect();
 		for id in ids {
 			let prefix = &self.prefixes[&id];
-			let reads = (prefix.path.as_ref()).map(|path| self.narrow(path)).unwrap_or_default();
+			let reads = (prefix.path.as_ref())
+				.map(|path| self.narrow(regions, path))
+				.unwrap_or_default();
 			let dropped: Vec<Path> = prefix.reads.difference(&reads).cloned().collect();
 			let added: Vec<Path> = reads.difference(&prefix.reads).cloned().collect();
 			self.prefixes.get_mut(&id).expect("listed above").reads = reads;

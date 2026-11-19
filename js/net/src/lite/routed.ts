@@ -18,7 +18,7 @@ import type { BroadcastCache } from "../consume.ts";
 import { error, ProtocolViolation } from "../error.ts";
 import { routesEqual, WireRoute } from "../hop.ts";
 import type * as Instance from "../instance.ts";
-import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeOverlaps } from "../internal.ts";
+import { bestCandidate, coveringPrefixes, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { SlotMap, type Slots } from "../util/limits.ts";
 import {
@@ -112,8 +112,8 @@ export class Routed {
 	#finished = false;
 	/** This side finished its stream: it asks for nothing more. */
 	#silent = false;
-	/** The grant changed since the last edit: the next goes even when it changes nothing, since its
-	 * ANNOUNCE_OK follows what the change shows under a wider prefix, and new readers wait for it. */
+	/** The grant showed a reader more since the last edit: the next goes even when it changes
+	 * nothing, since its ANNOUNCE_OK follows what the change shows under a wider prefix. */
 	#regranted = false;
 	/** What our grant lets us subscribe to, as last seen. */
 	#granted?: Path.Patterns;
@@ -145,13 +145,26 @@ export class Routed {
 	}
 
 	// Note a grant change, read as it is set rather than when its listeners run, so a reader
-	// attached between the two waits too.
+	// attached between the two waits too. What it newly shows within a reader's prefix may already
+	// be in the peer's answer, unheard here: that reader waits again, for the answer to an edit,
+	// which follows the change. Elsewhere, and on a narrowing, nothing new can arrive, and a reader
+	// stays synced. Mirrors rs/moq-net.
 	#regrant(): void {
 		const next = this.#session.grant?.peek()?.subscribe;
 		const granted = this.#granted;
 		if (next === granted || (next && granted?.equals(next))) return;
 		this.#granted = next;
-		if (this.#asked.size > 0) this.#regranted = true;
+		const regions = gained(granted, next);
+		for (const reader of this.#readers) {
+			const overlaps = regions.some(
+				(region) => Path.hasPrefix(region, reader.prefix) || Path.hasPrefix(reader.prefix, region),
+			);
+			if (!overlaps) continue;
+			this.#regranted = true;
+			if (!reader.synced) continue;
+			reader.synced = false;
+			reader.announced.behind();
+		}
 	}
 
 	/** Feed `announced` what the stream carries for `request`, until its last consumer leaves. */
@@ -530,4 +543,16 @@ function visible(reader: Reader, path: Path.Valid): boolean {
 function presentedAt(reader: Reader, path: Path.Valid): Path.Valid | undefined {
 	if (Path.hasPrefix(reader.prefix, path)) return path;
 	return Path.hasPrefix(path, reader.prefix) ? reader.prefix : undefined;
+}
+
+// The prefixes holding what the grant `next` shows that `before` did not, judged pattern by
+// pattern, so one may be spurious but none is missed. Empty for a narrowing. Mirrors rs/moq-net's
+// `Permit::gained`.
+function gained(before: Path.Patterns | undefined, next: Path.Patterns | undefined): Path.Valid[] {
+	if (!before) return [];
+	if (!next) return [Path.empty()];
+	return next
+		.toArray()
+		.filter((pattern) => !before.contains(pattern))
+		.map(scopeHead);
 }

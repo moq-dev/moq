@@ -2506,6 +2506,9 @@ async fn lite_07_a_grant_too_wide_to_ask_is_answered_region_by_region() {
 		.await;
 
 		let mut everything = client.consume().routes();
+		let mut first = (client.consume().scope(&regions[0], &Patterns::from(Pattern::all())))
+			.unwrap()
+			.routes();
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let found = |routes: &mut origin::Routes| {
 			let mut found = std::collections::BTreeSet::new();
@@ -2519,15 +2522,20 @@ async fn lite_07_a_grant_too_wide_to_ask_is_answered_region_by_region() {
 		expected.insert(regions[17].clone());
 		assert_eq!(found(&mut everything), expected, "every region, and nothing outside");
 		assert!(everything.poll_synced(&kio::Waiter::noop()).is_ready());
+		assert_eq!(found(&mut first).len(), 1);
+		let synced = |routes: &origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+		assert!(synced(&first));
 
 		// The 19th region joins the grant under the root the client already asks for. The
-		// reader of the whole tree is synced again only with its broadcast.
+		// reader of the whole tree is synced again only with its broadcast; the reader of
+		// the first region, which the change cannot show anything new, stays synced.
 		let _t2 = added(&pair.client.auth(), "t2").await.expect("t2 granted");
 		kio::wait(|waiter| match everything.poll_synced(waiter) {
 			std::task::Poll::Ready(()) => std::task::Poll::Pending,
 			std::task::Poll::Pending => std::task::Poll::Ready(()),
 		})
 		.await;
+		assert!(synced(&first), "a region the change misses stays synced");
 		let mut seen = std::collections::BTreeSet::new();
 		kio::wait(|waiter| {
 			seen.extend(found(&mut everything));

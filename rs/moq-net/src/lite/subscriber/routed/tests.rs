@@ -273,6 +273,42 @@ async fn the_limit_admits_each_claim() {
 	assert_eq!(served(&routed), ["live/a/public/x"]);
 }
 
+/// A grant change holds unsynced only the readers whose prefix it newly shows something
+/// in, until an answer after it is in; a reader it misses, and every reader on a
+/// narrowing, stays synced, since nothing new can arrive there.
+#[kio::test]
+async fn a_grant_change_unsyncs_only_the_readers_it_can_show_more() {
+	let (subscriber, consumer) = subscriber();
+	let granting = |paths: &[&str]| {
+		Permit::granting(paths.iter().map(|path| crate::Pattern::subtree(path).unwrap()).collect())
+	};
+	let all = crate::Patterns::from(crate::Pattern::all());
+	let everything = consumer.routes();
+	let a = consumer.scope("a", &all).unwrap().routes();
+	let synced = |routes: &crate::origin::Routes| routes.poll_synced(&kio::Waiter::noop()).is_ready();
+	let answer = |routed: &mut Routed, prefix: u64| {
+		pump(routed, &subscriber);
+		routed.receive(Wire::Synced { prefix }).unwrap();
+		routed.release();
+	};
+
+	let mut routed = Routed::new(&subscriber, 1, &granting(&["a"]), None, None).unwrap();
+	routed.want(Path::empty(), subscriber.origin.snapshot(""));
+	answer(&mut routed, 0);
+	assert!(synced(&everything) && synced(&a));
+
+	// `b` joins the grant: the whole tree waits for it, and `a` cannot gain from it.
+	routed.limit(&granting(&["a", "b"])).unwrap();
+	assert!(!synced(&everything), "the whole tree holds the new region");
+	assert!(synced(&a), "a region the change misses stays synced");
+	answer(&mut routed, 1);
+	assert!(synced(&everything));
+
+	// A narrowing shows nothing new.
+	routed.limit(&granting(&["a"])).unwrap();
+	assert!(synced(&everything) && synced(&a), "a narrowing keeps every reader synced");
+}
+
 /// A forwarding neighbour's claims wait for the floor that closes their batch, and are
 /// served under the route the floor names.
 #[kio::test]
