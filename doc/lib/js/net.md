@@ -32,6 +32,8 @@ const connection = await Moq.Connection.connect({
 // Hidden until its first track exists, then announced.
 const route = origin.route(Moq.Path.from("chat.room"), { hidden: true });
 const track = route.broadcast.createTrack("messages", { timescale: Moq.Time.Timescale.MILLI });
+// Undefined while a live track already holds the name.
+if (!track) throw new Error("track name taken");
 const now = Moq.Time.Timestamp.now();
 const group = track.appendGroup(now);
 group.writeFrame({ payload: new TextEncoder().encode("hello"), timestamp: now });

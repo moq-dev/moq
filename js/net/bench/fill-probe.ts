@@ -4,6 +4,7 @@
  */
 import { Duration } from "@moq/clock";
 import { Producer as BroadcastProducer } from "../src/broadcast.ts";
+import { defined } from "../src/defined.test-util.ts";
 import { hooks, staleHole } from "../src/internal.ts";
 import { Timestamp } from "../src/time.ts";
 
@@ -12,7 +13,7 @@ console.log("runs,readers,step_us");
 for (const runs of [250, 1000, 4000, 16000]) {
 	for (const readers of [1, 8]) {
 		const broadcast = new BroadcastProducer();
-		const track = broadcast.createTrack("video", { maxAge: null });
+		const track = defined(broadcast.createTrack("video", { maxAge: null }));
 		// 2 and 3 are read up front, so the only gaps any fill is asked for are the drops below.
 		for (const sequence of [2n, 3n]) {
 			const live = track.createGroup(sequence);

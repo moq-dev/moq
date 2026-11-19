@@ -2176,7 +2176,7 @@ impl RangeFills {
 					continue;
 				};
 				while let Some(key) = fill.wanted() {
-					let mut group = fill.accept(key, None).unwrap();
+					let mut group = fill.accept(key, None).unwrap().expect("a fresh group");
 					group
 						.write_frame(Timestamp::from_millis(key).unwrap(), Bytes::from_static(b"x"))
 						.unwrap();

@@ -79,8 +79,11 @@ try {
 	if (mode === "publish") {
 		const route = origin.route(Moq.Path.from("dg"), { hidden: true });
 		const audio = route.broadcast.createDatagrams("audio", { timescale: Moq.Time.Timescale.MICRO, priority: -7 });
+		if (!audio) throw new Error("the track already exists");
 		const events = route.broadcast.createDatagrams("events");
+		if (!events) throw new Error("the track already exists");
 		const track = route.broadcast.createTrack("audio", { timescale: Moq.Time.Timescale.MILLI });
+		if (!track) throw new Error("the track already exists");
 		route.announce();
 		console.log("ready");
 

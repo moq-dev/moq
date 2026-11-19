@@ -12,6 +12,7 @@ async function poster(audio: boolean, buffered: boolean) {
 	const producerRoute = origin.route(name, { hidden: true });
 	const producer = producerRoute.broadcast;
 	const track = producer.createTrack("video");
+	if (!track) throw new Error("the track already exists");
 	const group = track.appendGroup(Time.Timestamp.unscaled(0n));
 	const audioTrack = audio ? producer.createTrack("audio") : undefined;
 	const audioGroup = audioTrack?.appendGroup(Time.Timestamp.unscaled(0n));

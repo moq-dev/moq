@@ -197,7 +197,7 @@ while let Some(request) = claim.requested().await {
     // Takes the claim's instance, so readers resolved through the claim continue.
     // Hidden until its tracks exist.
     let job = request.route(RouteOptions::hidden())?;
-    let video = job.broadcast().create_track("video", info.clone())?;
+    let video = job.broadcast().create_track("video", info.clone()).context("video exists")?;
     // Announces the exact path under that instance and answers the waiting request.
     job.announce()?;
     spawn(run_job(video, job));

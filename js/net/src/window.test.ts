@@ -629,3 +629,50 @@ test("window: settling by steps matches trying every start and rebuilding from t
 		}
 	}
 });
+
+test("window: an edit by key matches building the edited ranges afresh", () => {
+	let seed = 23;
+	const random = (below: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		// The high bits: an LCG's low bits cycle.
+		return (seed >>> 16) % below;
+	};
+	const any = (): Range => {
+		const kind = random(6);
+		const start = kind === 0 ? relative(BigInt(random(6))) : kind === 1 ? undefined : time(BigInt(random(40)));
+		const end =
+			random(3) === 0 ? undefined : random(5) === 0 ? relative(BigInt(random(4))) : time(BigInt(random(48)));
+		return range(start, end);
+	};
+	const seen = (window: Window) => ({
+		ranges: window.ranges,
+		runs: window.runs(),
+		missable: window.missable(),
+		bounds: [window.floor(), window.start(), window.end()],
+		resolved: window.resolved(),
+		lookups: window.lookups().map((lookup) => lookup.time),
+		state: [window.settled, window.pending, window.wired],
+	});
+	for (let round = 0; round < 2000; round++) {
+		// Fixed holdings, so ranges left alone resolve as a fresh build resolves them.
+		const keys = new Keys(Array.from({ length: random(8) }, () => BigInt(random(48))));
+		keys.looks = random(2) === 0;
+		const latest = [...keys.held].sort(ascending).at(-1);
+		const held = new Map<bigint, Range>();
+		let next = 0n;
+		for (let count = random(8); count > 0; count--) held.set(next++, any());
+		const window = Window.keyed(held, latest, keys);
+		for (let step = random(16); step > 0; step--) {
+			const retire: bigint[] = [];
+			const add: [bigint, Range][] = [];
+			for (const key of held.keys()) if (random(4) === 0) retire.push(key);
+			for (const key of held.keys()) if (random(6) === 0) add.push([key, any()]);
+			for (let count = random(3); count > 0; count--) add.push([next++, any()]);
+			const readded = new Set(add.map(([key]) => key));
+			for (const key of retire) if (!readded.has(key)) held.delete(key);
+			for (const [key, range] of add) held.set(key, range);
+			window.edit(retire, add, latest, keys);
+			expect(seen(window)).toEqual(seen(Window.keyed(held, latest, keys)));
+		}
+	}
+});

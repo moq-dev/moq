@@ -42,10 +42,10 @@ waits on this epic's children, the other flaw,
 whose fix changes the wire,
 and two flaws the mesh replay found,
 [feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
-and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
+and [a lite-07 front that stops delivering after it switches copies](/quest/m2/multicast/splice-stall.md);
 and on
-[route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
-the lite-06 mitigations. It does not wait on
+[route layer acceptance](/quest/m2/cluster-routes/acceptance.md)'s
+scoped subscriber whose grant is too wide to ask for. It does not wait on
 [warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
 only if the port has landed and passed the mesh replay when the cut is made,
 and otherwise moves to the first wip version after it (maintainer,

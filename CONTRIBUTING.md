@@ -46,6 +46,8 @@ Repository tooling tests run whole files in `just gh test`, listed explicitly in
 `just gh test-integration` runs those files and selector timing nightly.
 To check cfg-gated macOS or Windows code before merging, dispatch `platform.yml` on the branch; never dispatch the full Nightly.
 
+`quest review` records each PR's risk tier, which [RISK.md](RISK.md) sets from its diff, in the body's `## Review` section.
+
 A PR the queue drops for a failing build or a conflict gets a fixer, which hands the PR back, with its diagnosis, when the fix needs a decision or stops making progress. `quest status` shows why a PR left the queue under `landing-stopped`.
 
 Never bypass the queue, with one exception: the maintainer's pre-release merge of `release` into `main`, since the queue would squash it.

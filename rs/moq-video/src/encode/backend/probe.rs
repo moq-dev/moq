@@ -80,7 +80,7 @@ static OPEN_GATE: Mutex<()> = Mutex::new(());
 
 /// Stall every open until the returned guard drops, standing in for a hardware encoder that
 /// takes longer than a frame to open, while the encoders already open keep encoding.
-#[cfg(all(not(apple), feature = "openh264"))]
+#[cfg(all(not(apple), feature = "openh264", feature = "capture"))]
 pub(crate) fn hold_opens() -> std::sync::MutexGuard<'static, ()> {
 	OPEN_GATE.lock().unwrap_or_else(|err| err.into_inner())
 }
