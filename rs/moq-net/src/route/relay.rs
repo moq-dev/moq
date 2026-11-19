@@ -1980,7 +1980,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						}),
 				);
 				visited = heard.items.len() + known.items.len();
-				lagged = true;
+				// An end and the same claim announced again take two revisions.
+				lagged = floor.saturating_sub(known.floor) >= 2;
 				diff
 			}
 		};
@@ -1988,8 +1989,8 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let known = self.known.get_mut(&origin).expect("known");
 		known.floor = known.floor.max(floor);
 		self.publish(origin, changes);
-		// The revisions a lagging copy skipped can hide an end and the same claim announced
-		// again, which differ in nothing: `origin` holds no copy it held before them.
+		// Two or more revisions a lagging copy skipped can hide an end and the same claim
+		// announced again, which differ in nothing: `origin` holds no copy it held before.
 		if lagged {
 			self.unhold_origin(origin);
 		}
@@ -4019,9 +4020,16 @@ mod tests {
 		let shown = |router: &Router<usize, u64, Run>| router.shown().contains_key(&(7, p("live")));
 		assert!(!shown(&router), "node 4's copy is of the ended claim");
 
-		// Node 4 ended its copy at 2 and claimed it again at 3; the route through 5 brings 3
-		// before the route through 4 brings 2.
-		router.recv(5, claims(4, chained(vec![9, 4]), 3)).unwrap();
+		// One skipped revision changes each claim once at most: an unchanged copy is still
+		// the one held.
+		router.recv(5, claims(4, chained(vec![9, 4]), 2)).unwrap();
+		assert!(!shown(&router), "one revision cannot end and claim again");
+
+		// Node 4 ended its copy at 3 and claimed it again at 4; the route through 6 brings 4
+		// before the route through 4 brings 3.
+		open(&mut router, 6, Role::Routing(node(6)));
+		router.recv(6, route(4, 6, 4)).unwrap();
+		router.recv(6, claims(4, chained(vec![9, 4]), 4)).unwrap();
 		assert!(shown(&router), "node 4 may have claimed it again");
 	}
 
