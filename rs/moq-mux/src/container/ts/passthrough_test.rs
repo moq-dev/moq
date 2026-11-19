@@ -30,8 +30,8 @@ struct Object {
 struct Imported {
 	catalog: hang::catalog::Catalog<Ext>,
 	objects: Vec<Object>,
-	/// The start of each break marker: a group of one object with no bytes.
-	markers: Vec<u64>,
+	/// Where each group ended whole short of the next group's start, in micros: a break.
+	breaks: Vec<u64>,
 	/// The runs between consecutive groups that the publisher did not declare skipped, where a
 	/// reader can't tell that no group lies.
 	holes: Vec<std::ops::Range<u64>>,
@@ -108,18 +108,14 @@ async fn import_onto(
 		)
 		.await?;
 	let mut objects = Vec::new();
-	let mut markers = Vec::new();
 	let mut starts = Vec::new();
+	let mut ends = Vec::new();
 	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
 		.await
 		.expect("the track stalled")?
 	{
 		starts.push(group.start);
 		while let Some(frame) = group.read_frame().await? {
-			if frame.payload.is_empty() {
-				markers.push(group.start);
-				continue;
-			}
 			let frame = hang::container::Frame::decode(frame.payload)?;
 			objects.push(Object {
 				group: group.start,
@@ -127,8 +123,22 @@ async fn import_onto(
 				payload: frame.payload,
 			});
 		}
+		if let (Some(end), Some(scale)) = (group.end(), group.timescale()) {
+			ends.push((group.start, moq_net::Timestamp::new(end, scale)?.as_micros()? as u64));
+		}
 	}
 	starts.sort_unstable();
+	// A reader reads an end as a break once the next group starts more than a millisecond past it.
+	let breaks = ends
+		.into_iter()
+		.filter(|&(start, end)| {
+			starts
+				.iter()
+				.find(|&&next| next > start)
+				.is_some_and(|&next| next > end + 1_000)
+		})
+		.map(|(_, end)| end)
+		.collect();
 	let holes = starts
 		.windows(2)
 		.map(|pair| pair[0] + 1..pair[1])
@@ -137,7 +147,7 @@ async fn import_onto(
 	Ok(Imported {
 		catalog: catalog.snapshot(),
 		objects,
-		markers,
+		breaks,
 		holes,
 	})
 }
@@ -579,9 +589,10 @@ async fn the_pcr_wrap_continues_the_timeline() {
 	assert!(imported.section().random_access, "a wrap is not a discontinuity");
 }
 
-/// A flagged jump forward starts a group behind a break marker, and the count carries on by the
-/// jump, so the timeline never steps back. The break is marked whether or not the splice is also a
-/// random access point, and only a group started by the break alone gives up random access.
+/// A flagged jump forward starts a group behind a break, the group before it ending whole where
+/// its content stops, and the count carries on by the jump, so the timeline never steps back. The
+/// break is declared whether or not the splice is also a random access point, and only a group
+/// started by the break alone gives up random access.
 #[tokio::test(start_paused = true)]
 async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 	for random_access in [false, true] {
@@ -610,19 +621,14 @@ async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 		let after = groups[jump][0].micros;
 		assert!((11_959_000..11_960_000).contains(&before), "{before}");
 		assert!((29_999_000..30_000_000).contains(&after), "{after}");
-		// Starts are micros, like the objects' timestamps. The marker lies between the two groups,
-		// not below the last object it ends, and the publisher declared every other start between
-		// them skipped.
-		let [marker] = imported.markers[..] else {
-			panic!("one marker, random access {random_access}: {:?}", imported.markers);
+		// Starts are micros, like the objects' timestamps. The group before the jump ends at its
+		// last object, not below it, and far short of the group after.
+		let [end] = imported.breaks[..] else {
+			panic!("one break, random access {random_access}: {:?}", imported.breaks);
 		};
 		assert!(
-			groups[jump - 1][0].group < marker && marker < groups[jump][0].group,
-			"a marker group between them declares the break, random access {random_access}"
-		);
-		assert!(
-			marker >= before,
-			"the marker ends the content before it: {marker} {before}"
+			before <= end && end < before + 1_000,
+			"the break ends the content before it: {end} {before}, random access {random_access}"
 		);
 		assert_eq!(imported.holes, [], "random access {random_access}");
 		assert_eq!(imported.section().random_access, random_access);
@@ -675,13 +681,13 @@ async fn an_import_shifts_onto_a_clock_already_in_use() {
 			"one offset for every object and its group"
 		);
 	}
-	let markers: Vec<i64> = shifted
-		.markers
+	let breaks: Vec<i64> = shifted
+		.breaks
 		.iter()
-		.zip(&verbatim.markers)
+		.zip(&verbatim.breaks)
 		.map(|(shifted, verbatim)| *shifted as i64 - *verbatim as i64)
 		.collect();
-	assert_eq!(markers, [offset], "the break moves with the timeline");
+	assert_eq!(breaks, [offset], "the break moves with the timeline");
 }
 
 /// A flagged step back is a restart: new content, which a timeline cannot step back into.
@@ -752,7 +758,7 @@ async fn a_retransmitted_break_declares_one_jump() {
 		.filter(|group| header(&group[0].payload).discontinuity)
 		.count();
 	assert_eq!(breaks, 1);
-	assert_eq!(imported.markers.len(), 1, "one marker for the one jump");
+	assert_eq!(imported.breaks.len(), 1, "one break for the one jump");
 	assert_suffix(&data, &imported);
 }
 

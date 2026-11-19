@@ -513,9 +513,7 @@ async fn record(profile: Profile) -> Recording {
 		[true, false],
 		"the clip publishes a video and an audio track"
 	);
-	let pictures = (tracks[0].groups.iter().flat_map(|(_, frames)| frames))
-		.filter(|frame| !decoded(frame).1)
-		.count();
+	let pictures = (tracks[0].groups.iter().flat_map(|(_, frames)| frames)).count();
 	assert_eq!(pictures, profile.seconds() * 25, "the import publishes every picture");
 	Recording {
 		profile,
@@ -535,16 +533,10 @@ fn skips(starts: impl IntoIterator<Item = u64>) -> Vec<std::ops::Range<u64>> {
 	runs
 }
 
-/// The presentation time of a published frame, in microseconds on the catalog clock, and
-/// whether it is the marker of a declared discontinuity.
-fn decoded(frame: &moq_net::frame::Frame) -> (u64, bool) {
-	let frame = hang::container::Frame::decode(frame.payload.clone()).unwrap();
-	(frame.timestamp.as_micros().unwrap() as u64, frame.payload.is_empty())
-}
-
 /// The presentation time of a published frame, in microseconds on the catalog clock.
 fn micros(frame: &moq_net::frame::Frame) -> u64 {
-	decoded(frame).0
+	let frame = hang::container::Frame::decode(frame.payload.clone()).unwrap();
+	frame.timestamp.as_micros().unwrap() as u64
 }
 
 /// The 90 kHz presentation time a microsecond timestamp goes out at, wrapped.
@@ -561,8 +553,6 @@ struct Slot {
 	/// Index into the group's frames.
 	frame: usize,
 	nominal: Duration,
-	/// The marker of a declared discontinuity, not media.
-	marker: bool,
 	/// Its payload's size in bytes.
 	size: usize,
 }
@@ -677,8 +667,6 @@ struct Unit {
 	nominal: Duration,
 	/// Presented before its group's keyframe.
 	leading: bool,
-	/// A declared discontinuity's marker, which carries no media.
-	marker: bool,
 	delivered: bool,
 	/// Whether it arrived inside both the source's age budget and its deadline, `None` when
 	/// too close to call.
@@ -699,9 +687,9 @@ struct Ledger {
 }
 
 impl Ledger {
-	/// The units that carry media.
+	/// The units, with their index.
 	fn media(&self) -> impl Iterator<Item = (usize, &Unit)> {
-		self.units.iter().enumerate().filter(|(_, unit)| !unit.marker)
+		self.units.iter().enumerate()
 	}
 }
 
@@ -747,12 +735,19 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		.min()
 		.unwrap();
 	// How far a declared break moved the clock, from the video's last picture before it to its
-	// first after, a frame on; and where the frames after it start.
-	let video = &recording.tracks[0].groups;
-	let (jumped, jump) = match video.iter().position(|(_, frames)| decoded(&frames[0]).1) {
-		Some(marker) => {
-			let before = micros(&video[marker].1[0]) + FRAME.as_micros() as u64;
-			let jump = micros(&video[marker + 1].1[0]) - before;
+	// first after, a frame on; and where the frames after it start. The break is the group that
+	// ended whole more than a millisecond short of the next.
+	let video = &recording.tracks[0];
+	let short = |g: usize| {
+		let scale = video.groups[g].1[0].timestamp.scale()?;
+		let end = moq_net::Timestamp::new(video.ends[g]?, scale).ok()?.as_micros().ok()? as u64;
+		let next = micros(&video.groups.get(g + 1)?.1[0]);
+		(next > end + 1_000).then_some(g)
+	};
+	let (jumped, jump) = match (0..video.groups.len()).find_map(short) {
+		Some(g) => {
+			let before = video.groups[g].1.iter().map(micros).max().unwrap() + FRAME.as_micros() as u64;
+			let jump = micros(&video.groups[g + 1].1[0]) - before;
 			(before + jump / 2, Duration::from_micros(jump))
 		}
 		None => (u64::MAX, Duration::ZERO),
@@ -761,23 +756,19 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 	// Every frame's slot, in recorded order, and where the schedule puts it.
 	let mut slots: Vec<(usize, Slot)> = Vec::new();
 	for (t, track) in recording.tracks.iter().enumerate() {
-		let mut last = Duration::ZERO;
 		for (g, (_, frames)) in track.groups.iter().enumerate() {
 			let keyframe = micros(&frames[0]);
 			for (f, frame) in frames.iter().enumerate() {
-				let (at, marker) = decoded(frame);
+				let at = micros(frame);
 				let since = |micros: u64| match micros >= jumped {
 					true => Duration::from_micros(micros - origin) - jump,
 					false => Duration::from_micros(micros - origin),
 				};
-				let nominal = match (marker, track.video) {
-					// Written at the break, right behind what came before it.
-					(true, _) => last,
+				let nominal = match track.video {
 					// A group's pictures go out in decode order, a frame apart.
-					(false, true) => since(keyframe) + FRAME * f as u32,
-					(false, false) => since(at),
+					true => since(keyframe) + FRAME * f as u32,
+					false => since(at),
 				};
-				last = nominal;
 				let size = frame.payload.len();
 				let video = track.video;
 				let slot = Slot {
@@ -785,7 +776,6 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 					group: g,
 					frame: f,
 					nominal,
-					marker,
 					size,
 				};
 				slots.push((t, slot));
@@ -844,7 +834,6 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 					pts: ticks(at),
 					nominal: slot.nominal,
 					leading: track.video && at < keyframe,
-					marker: slot.marker,
 					delivered: delivery != Delivery::Omitted,
 					on_time,
 					output: false,
@@ -1055,10 +1044,6 @@ fn chain(ledger: &Ledger) -> Result<Vec<bool>, String> {
 		let group = units[i].group;
 		let (mut alive, mut broken) = (true, false);
 		let mut complete = true;
-		if units[i].marker {
-			i += 1;
-			continue;
-		}
 		while i < units.len() && units[i].group == group {
 			let unit = &units[i];
 			if unit.leading && ledger.orphans && !whole {
@@ -1336,9 +1321,6 @@ fn segments<'a>(ts: &[u8], video: &'a Ledger, pids: (u16, u16)) -> Result<Vec<Se
 	let mut cuts: Vec<(usize, Vec<&Unit>)> = Vec::new();
 	let mut whole = false;
 	for group in video.units.chunk_by(|a, b| a.group == b.group) {
-		if group[0].marker {
-			continue;
-		}
 		let emitted: Vec<&Unit> = group.iter().filter(|unit| unit.output).collect();
 		match emitted.first() {
 			Some(first) if !whole => {
@@ -1781,14 +1763,15 @@ async fn a_skip_across_a_resolution_change_takes_the_new_parameters() {
 	assert_eq!((run.stats.release.dropped, run.stats.release.gaps), (0, 1));
 }
 
-/// The clock jumps 20 s at a declared discontinuity, and the path loses the group before the
-/// break and the one after it: the output signals only the declared break
-/// on the PCR, and resumes on the keyframe after.
+/// The clock jumps 20 s at a declared discontinuity, the group before it ending whole where its
+/// pictures stop, and the path loses the tail of the group before that one and the whole group
+/// after the break: the output signals only the declared break on the PCR, and resumes on the
+/// keyframe after.
 #[tokio::test(start_paused = true)]
 async fn a_declared_discontinuity_survives_loss_either_side() {
 	let run = recover(
 		arm(Profile::Spliced, |slot| {
-			match slot.video && (slot.group == 7 || (slot.group == 5 && slot.frame >= 4)) {
+			match slot.video && (slot.group == 6 || (slot.group == 4 && slot.frame >= 4)) {
 				true => Delivery::Omitted,
 				false => clean(slot),
 			}
@@ -1799,12 +1782,12 @@ async fn a_declared_discontinuity_survives_loss_either_side() {
 	assert_eq!(run.stats.release.dropped, 0);
 }
 
-/// The path loses the marker that declares the break, and every frame on either side arrives:
-/// the export marks the recovered clock jump once.
+/// The path loses the tail of the group whose end declares the break, so the end goes with it,
+/// and every frame after arrives: the export marks the recovered clock jump once.
 #[tokio::test(start_paused = true)]
-async fn a_lost_discontinuity_marker_still_breaks_the_clock() {
+async fn a_lost_declared_end_still_breaks_the_clock() {
 	let run = recover(
-		arm(Profile::Spliced, |slot| match slot.marker {
+		arm(Profile::Spliced, |slot| match slot.video && slot.group == 5 && slot.frame >= 4 {
 			true => Delivery::Omitted,
 			false => clean(slot),
 		})
@@ -1862,7 +1845,6 @@ fn the_bottleneck_admits_only_what_fits() {
 		group,
 		frame: 0,
 		nominal: Duration::ZERO,
-		marker: false,
 		size,
 	};
 	let slots = [(0, slot(0, 1000)), (0, slot(1, 1))];

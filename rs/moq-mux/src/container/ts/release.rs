@@ -26,8 +26,8 @@ use crate::jitter::{self, Arrival, Push};
 /// releases fed the same objects write the same bytes. An object that arrives past its
 /// deadline is dropped and counted; the output shows a continuity error there, since nothing
 /// is rewritten, and carries on with the next object. A flagged forward jump, which the
-/// importer declares with a discontinuity marker, opens a new clock, so the output does not
-/// wait it out; the bytes carry the jump.
+/// importer declares by ending the group before it where its content stops, opens a new clock,
+/// so the output does not wait it out; the bytes carry the jump.
 pub struct Release {
 	source: crate::Source,
 	catalog: Option<crate::catalog::Consumer<super::Ext>>,
