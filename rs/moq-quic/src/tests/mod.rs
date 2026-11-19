@@ -7221,6 +7221,49 @@ fn a_smaller_window_limits_the_next_grant() {
 	);
 }
 
+/// A window set on a bidirectional stream this side opened, before anything arrived on it,
+/// holds once the first grant is spent.
+#[test]
+fn a_window_holds_on_a_stream_opened_locally() {
+	const STREAM: usize = 1000;
+	let _guard = subscribe();
+	let mut client = client_config();
+	client.transport.limits.stream_receive_window = NonZeroU64::new(STREAM as u64);
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect_with(client);
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Bi, Default::default())
+		.unwrap();
+	assert_eq!(
+		pair.client_recv(client_ch, s).set_window(200),
+		STREAM as u64,
+		"the first stream window stays granted"
+	);
+
+	pair.client_send(client_ch, s).write(&mut &b"x"[..]).unwrap();
+	pair.drive();
+	assert_matches!(pair.server_streams(server_ch).accept(Dir::Bi), Some(stream) if stream == s);
+	let msg = vec![0xAB; 2 * STREAM];
+	let mut sent = 0;
+	let mut send = |pair: &mut Pair| {
+		let before = sent;
+		while let Poll::Ready(Ok(n)) = pair.server_send(server_ch, s).try_write(&mut &msg[sent..]) {
+			sent += n;
+		}
+		pair.drive();
+		sent - before
+	};
+	assert_eq!(send(&mut pair), STREAM);
+
+	let mut recv = pair.client_recv(client_ch, s);
+	let mut lease = recv.lease(0).unwrap();
+	lease.advance(lease.remaining());
+	recv.release(lease);
+	pair.drive();
+	assert_eq!(send(&mut pair), 200, "only the smaller window");
+}
+
 /// Lease `want` bytes of `s` once they arrive, driving the pair until they do, and hand them
 /// back unread.
 fn await_unit(

@@ -509,9 +509,11 @@ impl Stream<'_> {
 	/// gets room for it.
 	pub fn set_window(&mut self, window: u64) -> u64 {
 		let stream_receive_window = self.state.stream_receive_window;
-		let Some(recv) = self.state.recv_mut(self.id) else {
+		let Some(slot) = self.state.recv.get_mut(&self.id) else {
 			return 0;
 		};
+		// A stream this side opened has no receive state until something arrives or reads it.
+		let recv = get_or_insert_recv(slot, self.state.initial_stream_receive_window);
 		recv.set_window(window);
 		let credit = recv.credit(stream_receive_window);
 		let transmit = self.queue_max_stream_data();
