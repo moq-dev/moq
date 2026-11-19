@@ -648,6 +648,7 @@ pub(crate) enum CountedStart {
 	At(u64),
 	/// At or past this exclusive end, holding no group of the range there: it says nothing of
 	/// a range ending later.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	Past(u64),
 }
 
