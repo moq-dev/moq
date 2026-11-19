@@ -83,11 +83,12 @@ The maintainer's requirements, which every child is judged against:
     bake-off ([moq-dev/moq#9149](https://github.com/moq-dev/moq/pull/9149))
     kept the path vector: link state sent more route messages on every
     failure that moves routes but a 12-relay partition (up to 60 times at 32
-    relays) and left fewer readers unfed only on a hub dying slowly, though
-    it held fewer copies of each claim. A flat domain over a network that
-    routes underneath sends nothing for link events that network absorbs,
-    but notices a partition only by keep-alives and fans out only with warm
-    routes across every pair of relays.
+    relays), with fewer readers unfed after a partition or a hub dying
+    slowly but more after a transit dies, and held fewer copies of each
+    claim. A flat domain over a network that routes underneath sends nothing
+    for link events that network absorbs, but notices a partition only by
+    keep-alives and fans out only with warm routes across every pair of
+    relays.
 13. A secondary route may carry metadata only, so a stalled primary is found
     without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.
