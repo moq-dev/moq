@@ -21,6 +21,8 @@ pub(super) enum Arm {
 	/// [`relay::Router`]: the rule [`Self::KEPT`] measures, as it ships, its readers
 	/// showing a lost claim unavailable for this long before offline.
 	Relay(Duration),
+	/// A node layer under MoQ ([`super::node_layer`]).
+	Layer(super::node_layer::Layer),
 }
 
 impl Arm {
@@ -86,6 +88,8 @@ impl Arm {
 			Self::Multi(tune) => tune,
 			Self::Relay(debounce) if debounce.is_zero() => return "relay-undebounced".into(),
 			Self::Relay(_) => return "relay".into(),
+			Self::Layer(super::node_layer::Layer::LinkState) => return "link-state".into(),
+			Self::Layer(super::node_layer::Layer::Flat) => return "flat".into(),
 		};
 		let parts = [
 			(tune.suspect == Suspect::Flagged, "+suspect"),
@@ -105,6 +109,7 @@ impl Arm {
 		match self {
 			Self::Multi(tune) => Box::new(MultiSim::new(tune, nodes)),
 			Self::Relay(debounce) => Box::new(RelaySim::new(nodes, debounce)),
+			Self::Layer(layer) => Box::new(super::node_layer::LayerSim::new(layer, nodes)),
 		}
 	}
 }
@@ -207,6 +212,11 @@ pub(super) trait Net {
 	/// ended at the publisher: `None` with no route. A chain longer than the network
 	/// loops.
 	fn chase(&self, from: Node, id: Id) -> Option<(Vec<Node>, bool)>;
+	/// The nodes a pull from `from` for publisher `id` takes its data from, in [`Self::chase`]'s
+	/// form: every hop where each relay carries what it forwards.
+	fn pulls(&self, from: Node, id: Id) -> Option<(Vec<Node>, bool)> {
+		self.chase(from, id)
+	}
 	fn showing(&self, node: Node, id: Id, claim: &str) -> Option<bool>;
 	fn sent(&self) -> Sent;
 	fn held(&self) -> Held;

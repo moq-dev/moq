@@ -5,7 +5,7 @@
 Before lite-07 freezes, show that two relays of one trusted domain can
 exchange claims over lite-07 without either sending ROUTE, DEAD, or DRAIN,
 so a domain whose reachability comes from a node layer underneath (see
-[the node layer](/quest/m3/node-layer.md)) still interoperates on the frozen
+the node layer ([moq-dev/moq#9149](https://github.com/moq-dev/moq/pull/9149))) still interoperates on the frozen
 wire. Either a test on real sessions shows it as shipped, or the PR names
 the smallest wire change that would make it possible.
 
@@ -41,6 +41,5 @@ cut for it is theirs.
 
 ## Related
 
-- [The node layer](/quest/m3/node-layer.md) - the exploration this keeps open
 - [Finalize moq-lite-07](/quest/m2/lite07-finalize.md) - the cut this must precede
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the route layer as shipped

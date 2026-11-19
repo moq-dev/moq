@@ -22,3 +22,5 @@ MOQ_BAKEOFF_RELAYS=12 just rs test --profile=sweep -p moq-net --release --run-ig
 just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::multicast(_search|_cost)?::/)'
 # Warmth: path joins, asking, advertising, and ranked readers over fixed shapes, 400 churned meshes per arm on three kinds of mesh, and growth over cores, edges per core, drones, and up to 4096 broadcasts, about 10 minutes.
 just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(/^route::tests::warmth::benchmark_/)'
+# Node layers under MoQ: link state and a flat domain against the router on every single-domain shape, at 12 and 32 relays, about a minute.
+MOQ_BAKEOFF_RELAYS=12,32 just rs test --profile=sweep -p moq-net --release --run-ignored only -E 'test(=route::tests::node_layer::benchmark_node_layer)'
