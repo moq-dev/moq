@@ -12,12 +12,16 @@
 //! past the largest. The encoder's GOP stays the upper bound between keyframes.
 //!
 //! The capture loop feeds a [`Producer`], which owns the encoder and follows the grant, the same
-//! one a caller with its own frames writes to.
+//! one a caller with its own frames writes to. [`Capture::renditions`] adds one per smaller
+//! simulcast rendition, each scaling the captured frame on its encoder's thread and chained below
+//! the next larger through [`Options::lower`](super::Options::lower).
 
 use moq_mux::catalog::hang::CatalogExt;
+use std::task::Poll;
+
 use moq_net::Timestamp;
 
-use crate::{Error, FrameRate, capture};
+use crate::{Color, Error, FrameRate, Size, capture};
 
 use super::cuts::Cuts;
 use super::encoder::{self, Codec};
@@ -87,6 +91,92 @@ pub struct Capture {
 	pub on_demand: bool,
 	/// The hardware the encoder opens; see [`Config::device`](encoder::Config::device).
 	pub device: crate::Device,
+	/// Smaller renditions published beside the captured one, each scaled from the captured frame.
+	///
+	/// They form a simulcast ladder on [`bandwidth`](Self::bandwidth): the smallest is funded
+	/// first, and a larger one, the captured rendition included, stops encoding while the grant
+	/// can't fund it. Each encodes only while someone watches it, whatever
+	/// [`on_demand`](Self::on_demand) says, and with `on_demand` the source stays open while any
+	/// rendition is watched. A name that repeats fails [`publish_capture`].
+	pub renditions: Vec<Rendition>,
+}
+
+/// A smaller rendition a [`Capture`] scales from its frames, published as `video/<name>`.
+///
+/// Its bitrate is the default for its size, frame rate, and codec, which must come out below
+/// the next larger rendition's, or the capture fails once it learns the source's size.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rendition {
+	name: String,
+	scale: f64,
+}
+
+impl Rendition {
+	/// A rendition named `name` holding `scale` of the captured pixels, such as 0.25 for half
+	/// the width and half the height.
+	///
+	/// Refuses a scale outside (0, 1), and a name that is empty or holds a `/`.
+	pub fn new(name: impl Into<String>, scale: f64) -> Result<Self, Error> {
+		let name = name.into();
+		if name.is_empty() || name.contains('/') {
+			return Err(Error::UnsupportedConfig(format!(
+				"rendition name `{name}` must be non-empty without a `/`"
+			)));
+		}
+		// Written so NaN fails too.
+		if !(scale > 0.0 && scale < 1.0) {
+			return Err(Error::UnsupportedConfig(format!(
+				"rendition `{name}` scale {scale} is not between 0 and 1"
+			)));
+		}
+		Ok(Self { name, scale })
+	}
+
+	/// The name, which publishes as `video/<name>`.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// The fraction of the captured pixels it holds.
+	pub fn scale(&self) -> f64 {
+		self.scale
+	}
+
+	/// The track it publishes on.
+	fn track(&self) -> String {
+		format!("video/{}", self.name)
+	}
+
+	/// Its size for a `source` frame: each side scaled by the square root, rounded down to even
+	/// for 4:2:0 chroma.
+	fn size(&self, source: Size) -> Result<Size, Error> {
+		let ratio = self.scale.sqrt();
+		// Truncating is the rounding down; the product never exceeds the source side.
+		let side = |pixels: u32| (f64::from(pixels) * ratio) as u32 & !1;
+		let size = Size::new(side(source.width), side(source.height));
+		if size.width == 0 || size.height == 0 {
+			return Err(Error::UnsupportedConfig(format!(
+				"rendition `{}` scales a {source} source to nothing",
+				self.name
+			)));
+		}
+		Ok(size)
+	}
+}
+
+/// Parses `name=scale`, as the `moq` CLI's `--rendition` takes it.
+impl std::str::FromStr for Rendition {
+	type Err = Error;
+
+	fn from_str(arg: &str) -> Result<Self, Error> {
+		let (name, scale) = arg
+			.split_once('=')
+			.ok_or_else(|| Error::UnsupportedConfig(format!("expected NAME=SCALE, got `{arg}`")))?;
+		let scale = scale
+			.parse()
+			.map_err(|err| Error::UnsupportedConfig(format!("invalid rendition scale `{scale}`: {err}")))?;
+		Self::new(name, scale)
+	}
 }
 
 impl Capture {
@@ -98,6 +188,54 @@ impl Capture {
 		config.kind = self.kind.clone();
 		config.device = self.device.clone();
 		config
+	}
+
+	/// The encoders for a `source` camera at `framerate` whose frames are in `color`, one per
+	/// rendition in ladder order: the scaled ones smallest first, then the captured size.
+	///
+	/// Fails when a rendition's ceiling isn't below the next one's, since the ladder could
+	/// never fund the larger without the smaller.
+	fn encoders(
+		&self,
+		source: Size,
+		framerate: FrameRate,
+		color: Option<Color>,
+	) -> Result<Vec<encoder::Config>, Error> {
+		let mut configs = Vec::with_capacity(self.renditions.len() + 1);
+		for rendition in &self.renditions {
+			let size = rendition.size(source)?;
+			let mut config = self.encoder(size.width, size.height, framerate);
+			// Derived from the scaled size: the caller's bitrate is the captured rendition's.
+			config.bitrate = None;
+			// The encoder scales each frame on its own thread or device.
+			config.resize = Some(crate::resize::Config::default());
+			// A scaled frame keeps its source's space, which the scaled size could infer otherwise.
+			config.color = Some(color.unwrap_or_else(|| Color::infer(source)));
+			configs.push(config);
+		}
+		let mut captured = self.encoder(source.width, source.height, framerate);
+		captured.color = color;
+		configs.push(captured);
+
+		let names = self.renditions.iter().map(Rendition::track);
+		let names: Vec<_> = names
+			.chain(std::iter::once("the captured rendition".to_string()))
+			.collect();
+		for (index, pair) in configs.windows(2).enumerate() {
+			let (lower, upper) = (pair[0].resolved_bitrate(), pair[1].resolved_bitrate());
+			if lower >= upper {
+				return Err(Error::UnsupportedConfig(format!(
+					"{}'s {} bps at {} is not below {}'s {} bps at {}",
+					names[index],
+					lower.as_bps(),
+					pair[0].size(),
+					names[index + 1],
+					upper.as_bps(),
+					pair[1].size(),
+				)));
+			}
+		}
+		Ok(configs)
 	}
 }
 
@@ -161,9 +299,9 @@ fn publish_status(state: &kio::Producer<Published>, status: Status) {
 	}
 }
 
-/// Capture a webcam and publish it as a video track.
+/// Capture a webcam and publish it as a video track, plus one per [`Capture::renditions`].
 ///
-/// Registers the track before anything about its source is known, and returns a
+/// Registers the tracks before anything about its source is known, and returns a
 /// handle that observes the publication plus the [`Driver`] that captures it. The
 /// driver opens the source to probe the mode it negotiates, so the catalog
 /// rendition is exact before a frame is published, then captures and encodes
@@ -172,16 +310,29 @@ fn publish_status(state: &kio::Producer<Published>, status: Status) {
 pub fn publish_capture<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
-	options: Capture,
+	mut options: Capture,
 ) -> Result<(Publication, Driver<E>), Error> {
-	let track = capture_track(broadcast, &catalog, &options)?;
+	let mut names = std::collections::HashSet::new();
+	if let Some(repeated) = options
+		.renditions
+		.iter()
+		.find(|rendition| !names.insert(rendition.name()))
+	{
+		return Err(Error::UnsupportedConfig(format!(
+			"rendition `{}` is named twice",
+			repeated.name()
+		)));
+	}
+	// Ladder order, which every later step follows.
+	options.renditions.sort_by(|a, b| a.scale.total_cmp(&b.scale));
+	let tracks = capture_tracks(broadcast, &catalog, &options)?;
 	let state = starting();
 	let publication = Publication {
 		state: state.consume(),
 		observed: 0,
 	};
 	let driver = Driver {
-		owned: Owned::Track(track),
+		owned: Owned::Tracks(tracks),
 		catalog,
 		options,
 		state,
@@ -256,43 +407,59 @@ pub struct Driver<E: CatalogExt = ()> {
 	state: kio::Producer<Published>,
 }
 
-/// What a [`Driver`] owns of its track, one phase at a time, held in the driver so a
-/// dropped [`run`](Driver::run) future still cancels it.
+/// What a [`Driver`] owns of its tracks, one phase at a time, held in the driver so a
+/// dropped [`run`](Driver::run) future still cancels them. Each phase holds one per rendition, in
+/// ladder order.
 enum Owned {
-	/// Registered, until the probe knows its rendition.
-	Track(moq_net::track::Producer),
-	/// Probed, and wrapped in the producer that encodes and publishes it.
-	Producer(Box<Producer>),
+	/// Registered, until the probe knows their renditions.
+	Tracks(Vec<moq_net::track::Producer>),
+	/// Probed, and wrapped in the producers that encode and publish them.
+	Producers(Vec<Producer>),
 	/// Ended or cancelled, so nothing is left to end.
 	Done,
 }
 
 impl Owned {
-	/// End the track cleanly, best effort: it is usually already going away.
+	/// End the tracks cleanly, best effort: they are usually already going away.
 	async fn finish(self) {
-		let ended = match self {
-			// The caller is done with the track, so the finished handle goes with it.
-			Self::Track(track) => track.finish().map(drop).map_err(Error::from),
-			// The capture is gone, so its encoder's tail has nothing to follow. Released, the encoder
-			// leaves nothing to drain, so the finish completes without waiting on it.
-			Self::Producer(mut producer) => match producer.release() {
-				Ok(()) => producer.finish().await.map(drop),
-				Err(err) => Err(err),
-			},
-			Self::Done => Ok(()),
+		let ended: Vec<Result<(), Error>> = match self {
+			// The caller is done with the tracks, so the finished handles go with them.
+			Self::Tracks(tracks) => tracks
+				.into_iter()
+				.map(|track| track.finish().map(drop).map_err(Error::from))
+				.collect(),
+			// The capture is gone, so its encoders' tails have nothing to follow. Released, an
+			// encoder leaves nothing to drain, so the finish completes without waiting on it.
+			Self::Producers(producers) => {
+				let mut ended = Vec::with_capacity(producers.len());
+				for mut producer in producers {
+					ended.push(match producer.release() {
+						Ok(()) => producer.finish().await.map(drop),
+						Err(err) => Err(err),
+					});
+				}
+				ended
+			}
+			Self::Done => Vec::new(),
 		};
-		if let Err(err) = ended {
+		for err in ended.into_iter().filter_map(Result::err) {
 			tracing::debug!(error = %err, "video track finish after capture ended");
 		}
 	}
 
-	/// End the track with `err`. A track that already ended has nobody left to tell.
+	/// End the tracks with `err`. A track that already ended has nobody left to tell.
 	fn abort(self, err: moq_net::Error) {
 		match self {
-			Self::Track(track) => {
-				let _ = track.abort(err);
+			Self::Tracks(tracks) => {
+				for track in tracks {
+					let _ = track.abort(err.clone());
+				}
 			}
-			Self::Producer(producer) => producer.abort(err),
+			Self::Producers(producers) => {
+				for producer in producers {
+					producer.abort(err.clone());
+				}
+			}
 			Self::Done => {}
 		}
 	}
@@ -347,50 +514,55 @@ impl<E: CatalogExt> Driver<E> {
 		result
 	}
 
-	/// Probe `source`, wrap the track in a producer for its rendition, then run the capture loop.
+	/// Probe `source`, wrap each track in a producer for its rendition, then run the capture loop.
 	async fn capture<S: CaptureSource>(&mut self, mut source: S) -> Result<(), Error> {
 		let clock = self.catalog.clock();
 		let options = &self.options;
 
 		// Open the camera to find out what it actually negotiated, since a requested size is only a
-		// hint (macOS ignores it outright) and the encoder is built from the mode, not the request.
-		// This buys a rendition that says exactly what the stream will carry, rather than one every
-		// consumer has to treat as provisional, and lets a consumer size itself against it without
+		// hint (macOS ignores it outright) and the encoders are built from the mode, not the request.
+		// This buys renditions that say exactly what the streams will carry, rather than ones every
+		// consumer has to treat as provisional, and lets a consumer size itself against them without
 		// waiting for an encoder that may not run yet.
-		let (rendition, config, camera) = async {
+		let (renditions, configs, camera) = async {
 			let camera = source.open(&options.capture).await?;
-			let mut probe_config = options.encoder(
-				camera.width(),
-				camera.height(),
-				options
-					.capture
-					.framerate
-					.or_else(|| camera.framerate())
-					.unwrap_or(DEFAULT_FRAMERATE),
-			);
-			probe_config.color = camera.color();
-			let rendition = probe_config.probe().await?;
-			// The encoder is built from the same defaults, so the probe's join is the one it emits,
-			// and its ceiling the one the track first claims.
-			Ok::<_, Error>((rendition, probe_config, camera))
+			let framerate = options
+				.capture
+				.framerate
+				.or_else(|| camera.framerate())
+				.unwrap_or(DEFAULT_FRAMERATE);
+			let configs = options.encoders(Size::new(camera.width(), camera.height()), framerate, camera.color())?;
+			// One at a time, so only one probe holds a codec session.
+			let mut renditions = Vec::with_capacity(configs.len());
+			for config in &configs {
+				renditions.push(config.probe().await?);
+			}
+			// The encoders are built from the same defaults, so each probe's join is the one its
+			// encoder emits, and its ceiling the one its track first claims.
+			Ok::<_, Error>((renditions, configs, camera))
 		}
 		.await?;
 
-		// The producer takes a clone, so a setup failure leaves the registered track for `run`
-		// to abort, and success drops ours so it never outlives the producer's.
-		let Owned::Track(track) = &self.owned else {
+		// Each producer takes a clone, so a setup failure leaves the registered tracks for `run`
+		// to abort, and success drops ours so they never outlive the producers'.
+		let Owned::Tracks(tracks) = &self.owned else {
 			unreachable!("a driver runs once")
 		};
-		let producer = Producer::with_track(
-			track.clone(),
-			&self.catalog,
-			config,
-			rendition,
-			options.bandwidth.clone(),
-			None,
-		)?;
-		self.owned = Owned::Producer(Box::new(producer));
-		let Owned::Producer(producer) = &mut self.owned else {
+		let mut producers: Vec<Producer> = Vec::with_capacity(tracks.len());
+		for ((track, config), rendition) in tracks.iter().zip(configs).zip(renditions) {
+			// Each rendition is the next rung up from the one before it.
+			let lower = producers.last().map(Producer::rung);
+			producers.push(Producer::with_track(
+				track.clone(),
+				&self.catalog,
+				config,
+				rendition,
+				options.bandwidth.clone(),
+				lower,
+			)?);
+		}
+		self.owned = Owned::Producers(producers);
+		let Owned::Producers(producers) = &mut self.owned else {
 			unreachable!("just set")
 		};
 		// Capturing from the start, the loop keeps the probe's camera rather than reopening it,
@@ -399,24 +571,47 @@ impl<E: CatalogExt> Driver<E> {
 			stream: (!options.on_demand).then_some(camera),
 			source,
 		};
-		capture_loop(producer, &mut source, options, &clock, &self.state).await
+		capture_loop(producers, &mut source, options, &clock, &self.state).await
 	}
 }
 
-/// Register the capture's video track, before anything about its source is known.
+/// Register the capture's video tracks in ladder order, before anything about its source is known:
+/// one per scaled rendition, then the captured one.
 ///
-/// Takes `broadcast` only to mint the track, which outlives it.
-fn capture_track<E: CatalogExt>(
+/// Takes `broadcast` only to mint the tracks, which outlive it.
+fn capture_tracks<E: CatalogExt>(
 	broadcast: moq_net::broadcast::Producer,
 	catalog: &moq_mux::catalog::Producer<E>,
 	options: &Capture,
-) -> Result<moq_net::track::Producer, Error> {
+) -> Result<Vec<moq_net::track::Producer>, Error> {
 	// Advertised only when every backend the encoder may open honors a cut, since the info
 	// is fixed before the capture learns which one it got.
 	let ratio = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
 	let refresh = moq_net::track::Refresh::default().with_ratio(ratio);
-	let info = catalog.track_info(hang::catalog::PRIORITY.video).with_refresh(refresh);
-	Ok(broadcast.unique_track(suffix(options.codec), info)?)
+	let mut tracks: Vec<moq_net::track::Producer> = Vec::with_capacity(options.renditions.len() + 1);
+	// Each rung takes the priority one below the rendition under it, as `Options::lower` does,
+	// so the allocator funds the smallest first.
+	let mut priority = hang::catalog::PRIORITY.video;
+	let names = options.renditions.iter().map(|rendition| Some(rendition.track()));
+	for name in names.chain(std::iter::once(None)) {
+		let info = catalog.track_info(priority).with_refresh(refresh);
+		let created = match name {
+			Some(name) => broadcast.create_track(name, info),
+			None => broadcast.unique_track(suffix(options.codec), info),
+		};
+		match created {
+			Ok(track) => tracks.push(track),
+			Err(err) => {
+				// Nobody can have subscribed yet, but say why rather than drop them unfinished.
+				for track in tracks {
+					let _ = track.abort(err.clone());
+				}
+				return Err(err.into());
+			}
+		}
+		priority = priority.saturating_sub(1);
+	}
+	Ok(tracks)
 }
 
 /// Off macOS and iOS, [`Driver::run`]'s future must stay `Send` so a server can
@@ -471,50 +666,241 @@ fn log_track_ended(err: moq_net::Error) {
 }
 
 /// Wait until capture should run (`run`) or release its source (`!run`). On demand it runs
-/// while some viewer wants the track; otherwise it runs, and never releases, while the track
-/// is open. Errors once the track closes.
-async fn until_capturing(demand: &moq_net::track::Demand, on_demand: bool, run: bool) -> Result<(), moq_net::Error> {
-	let mut demand = demand.clone();
-	loop {
-		let wanted = demand.wanted_changed().await?;
-		if (wanted || !on_demand) == run {
-			return Ok(());
+/// while some viewer wants any rendition; otherwise it runs, and never releases, while the tracks
+/// are open. Errors once a rendition's track closes.
+///
+/// Takes each rendition's track from [`demands`], so read them again after a write, which can
+/// move one.
+async fn until_capturing(mut watched: Vec<Watched>, on_demand: bool, run: bool) -> Result<(), moq_net::Error> {
+	kio::wait(move |waiter| {
+		let mut wanted = false;
+		for Watched { demand, moving } in &mut watched {
+			// Drained to pending, which arms `waiter` for this track's next change.
+			loop {
+				match demand.poll_wanted_changed(waiter) {
+					Poll::Ready(Ok(_)) => continue,
+					// The write still running may have moved it to a new track. Counted as wanted
+					// until it returns, which wakes the caller to read the track again.
+					Poll::Ready(Err(_)) if *moving => {
+						wanted = true;
+						break;
+					}
+					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+					Poll::Pending => break,
+				}
+			}
+			wanted |= demand.wanted();
 		}
-	}
+		match (wanted || !on_demand) == run {
+			true => Poll::Ready(Ok(())),
+			false => Poll::Pending,
+		}
+	})
+	.await
 }
 
-// Race source setup or an encode against capture releasing its source, so an on-demand track
-// its last viewer left, or a track that ended, stops waiting promptly. `None` when it released;
-// the next `until_capturing` reports a track that ended.
+/// A rendition's track as the capture last read it.
+struct Watched {
+	demand: moq_net::track::Demand,
+	/// Whether a write that may move it to a new track is still running.
+	moving: bool,
+}
+
+/// The track each rendition publishes on now.
+fn demands(producers: &[Producer]) -> Vec<Watched> {
+	producers
+		.iter()
+		.map(|producer| Watched {
+			demand: producer.demand(),
+			moving: false,
+		})
+		.collect()
+}
+
+// Race source setup against capture releasing its source, so an on-demand capture its last
+// viewer left stops waiting promptly. `None` when it released.
 async fn wait_capture<T>(
-	demand: &moq_net::track::Demand,
+	demands: Vec<Watched>,
 	on_demand: bool,
 	work: impl std::future::Future<Output = Result<T, Error>>,
 ) -> Result<Option<T>, Error> {
 	tokio::select! {
 		biased;
-		_ = until_capturing(demand, on_demand, false) => Ok(None),
+		Ok(()) = until_capturing(demands, on_demand, false) => Ok(None),
 		res = work => res.map(Some),
 	}
 }
 
-/// Async capture/encode loop. Opens the camera and keeps it open, or
-/// [`on_demand`](Capture::on_demand), opens it while at least one viewer is
-/// watching and releases it when the last one leaves. It never returns on its
-/// own; dropping its future stops it.
+/// Run `work` side by side, waiting for all of it, and return the first error.
+async fn join_all<F: std::future::Future<Output = Result<(), Error>>>(
+	work: impl IntoIterator<Item = F>,
+) -> Result<(), Error> {
+	let mut work: Vec<_> = work.into_iter().map(|work| Some(Box::pin(work))).collect();
+	let mut result = Ok(());
+	std::future::poll_fn(|cx| {
+		let mut pending = false;
+		for slot in &mut work {
+			let Some(running) = slot else { continue };
+			match running.as_mut().poll(cx) {
+				Poll::Ready(done) => {
+					if result.is_ok() {
+						result = done;
+					}
+					*slot = None;
+				}
+				Poll::Pending => pending = true,
+			}
+		}
+		match pending {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}
+	})
+	.await;
+	result
+}
+
+/// The first of `steps` to finish, with its index, clearing its slot. Pending while none runs.
+fn next_step<F: std::future::Future + Unpin>(
+	steps: &mut [Option<F>],
+) -> impl std::future::Future<Output = (usize, F::Output)> + '_ {
+	std::future::poll_fn(move |cx| {
+		for (index, slot) in steps.iter_mut().enumerate() {
+			if let Some(step) = slot
+				&& let Poll::Ready(done) = std::pin::Pin::new(step).poll(cx)
+			{
+				*slot = None;
+				return Poll::Ready((index, done));
+			}
+		}
+		Poll::Pending
+	})
+}
+
+/// What a rendition does with one source frame.
+enum Work {
+	/// Nobody watches it: stop its encoder if one was encoding, and follow the grant unwritten.
+	Unwatched { stop: bool },
+	/// Encode the frame, cutting a group at it first when asked.
+	Write {
+		frame: std::sync::Arc<crate::Frame>,
+		cut: bool,
+	},
+}
+
+/// Do `work` on `producer`, handing it back for the next frame.
+async fn step(producer: &mut Producer, work: Work) -> (&mut Producer, Result<(), Error>) {
+	let result = run_step(&mut *producer, work).await;
+	(producer, result)
+}
+
+async fn run_step(producer: &mut Producer, work: Work) -> Result<(), Error> {
+	match work {
+		Work::Unwatched { stop } => {
+			// Its last viewer left: drain and close its encoder, so the next opens fresh.
+			if stop {
+				producer.stop().await?;
+			}
+			// A rung disabled under congestion loses its viewers to the one below, so it follows
+			// the grant meanwhile to re-enable once funded, and they can come back.
+			producer.follow_unwritten().await;
+		}
+		Work::Write { frame, cut } => {
+			if cut {
+				producer.cut().await?;
+			}
+			producer.write(frame).await?;
+		}
+	}
+	Ok(())
+}
+
+/// One rendition as the capture loop sees it between its steps.
+struct Lane {
+	/// Whether frames are going to its encoder, so it stops once nobody watches.
+	encoding: bool,
+	/// Its keyframe asks, fresh for every encoder it opens.
+	forced: Cuts,
+	/// Whether its open encoder honors a cut, once one has opened.
+	cuts: Option<bool>,
+	/// The last source frame it took, as its place in the camera's sequence.
+	seen: Option<u64>,
+	/// Its track as of its last step.
+	demand: moq_net::track::Demand,
+	/// Whether a write was cancelled mid-call, leaving its encoder refusing every later call.
+	cancelled: bool,
+}
+
+impl Lane {
+	fn new(producer: &Producer) -> Self {
+		Self {
+			encoding: false,
+			forced: Cuts::default(),
+			cuts: None,
+			seen: None,
+			demand: producer.demand(),
+			cancelled: false,
+		}
+	}
+
+	/// What `producer` does with source frame `seq`, as its `watched` rendition or not.
+	fn take(&mut self, producer: &Producer, seq: u64, frame: &std::sync::Arc<crate::Frame>, watched: bool) -> Work {
+		let seen = self.seen.replace(seq);
+		if !watched {
+			return Work::Unwatched {
+				stop: std::mem::take(&mut self.encoding),
+			};
+		}
+		match (self.encoding, seen) {
+			// The frames between went to no encoder of its: the camera replaced them, or this
+			// rendition was still busy with an earlier one.
+			(true, Some(seen)) => producer.report_skipped(seq - seen - 1),
+			(true, None) => {}
+			(false, _) => {
+				self.encoding = true;
+				self.forced = Cuts::default();
+				self.cuts = None;
+			}
+		}
+		// A backend that cannot cut leaves every group to its cadence.
+		let wanted = self.cuts.unwrap_or(false).then(|| producer.wanted()).flatten();
+		Work::Write {
+			frame: frame.clone(),
+			cut: self.forced.due(wanted),
+		}
+	}
+}
+
+/// Why the capture loop stopped reading frames from its camera.
+enum Stopping {
+	/// The camera's stream ended, so every rendition finishes the frames already read.
+	Ended,
+	/// Nobody watches any rendition, so the writes in flight are cancelled.
+	Released,
+}
+
+/// Async capture/encode loop over `producers`, the renditions in ladder order with the captured
+/// one last. Opens the camera and keeps it open, or [`on_demand`](Capture::on_demand), opens it
+/// while at least one viewer is watching a rendition and releases it when the last one leaves.
+/// Every scaled rendition, and the captured one on demand, encodes only while watched. It never
+/// returns on its own; dropping its future stops it.
 ///
-/// The [`Producer`] holds the encoder, the track's claim on the connection, and
-/// rate control, so they outlive a closed camera: a reopen at another mode moves
-/// the claim's ceiling rather than lapsing it.
+/// Each rendition runs on its own: it takes the newest frame it hasn't seen whenever its last
+/// one is done, so an encoder that opens, drains, or encodes slowly misses frames itself rather
+/// than holding the others back. A frame it missed counts among its skipped ones.
+///
+/// Each [`Producer`] holds its encoder, its track's claim on the connection, and rate control,
+/// so they outlive a closed camera: a reopen at another mode moves the claim's ceiling rather
+/// than lapsing it.
 ///
 /// Cancel safety: every wait here is a real `.await` (a frame read, a demand
 /// transition, or an encode), so dropping this future (e.g. on Ctrl+C) drops
-/// `camera`, which releases the device (LED off); the encode thread is joined
-/// once the producer goes. Both the capture and encode threads sit idle between
+/// `camera`, which releases the device (LED off); the encode threads are joined
+/// once the producers go. Both the capture and encode threads sit idle between
 /// frames, so their joins return promptly unless the underlying device or encoder
 /// is itself wedged.
 async fn capture_loop<S: CaptureSource>(
-	producer: &mut Producer,
+	producers: &mut [Producer],
 	source: &mut S,
 	options: &Capture,
 	clock: &moq_mux::Clock,
@@ -522,26 +908,26 @@ async fn capture_loop<S: CaptureSource>(
 ) -> Result<(), Error> {
 	let capture = &options.capture;
 	let on_demand = options.on_demand;
-	// The published track's demand, followed onto the next track when a frame moves the rendition.
-	let mut demand = producer.demand();
+	// Off demand the captured rendition encodes unwatched, so a late viewer finds the recent past.
+	let retained = (!on_demand).then(|| producers.len() - 1);
 	// The last timestamp sent to an encoder, which a reopened camera's frames must exceed.
 	let mut last: Option<Timestamp> = None;
 
 	loop {
-		// On demand, idle until a viewer subscribes. The catalog rendition was published when
-		// the track was created, so a subscriber can get here without a frame ever having been
-		// encoded. Either way the track ending is a clean exit.
+		// On demand, idle until a viewer subscribes. The catalog renditions were published when
+		// the tracks were created, so a subscriber can get here without a frame ever having been
+		// encoded. Either way a track ending is a clean exit.
 		if on_demand {
 			publish_status(state, Status::Waiting);
 		}
-		if let Err(err) = until_capturing(&demand, on_demand, true).await {
+		if let Err(err) = until_capturing(demands(producers), on_demand, true).await {
 			log_track_ended(err);
 			return Ok(());
 		}
 		publish_status(state, Status::Starting);
 
-		// Open the camera and an encoder sized to its negotiated mode.
-		let Some(mut camera) = wait_capture(&demand, on_demand, source.open(capture)).await? else {
+		// Open the camera, and size every encoder to its negotiated mode.
+		let Some(mut camera) = wait_capture(demands(producers), on_demand, source.open(capture)).await? else {
 			continue;
 		};
 		// The broadcast clock's lead over this stream's timeline, in microseconds, sampled per frame.
@@ -554,137 +940,172 @@ async fn capture_loop<S: CaptureSource>(
 			.framerate
 			.or_else(|| camera.framerate())
 			.unwrap_or(DEFAULT_FRAMERATE);
-		let mut encoder_config = options.encoder(camera.width(), camera.height(), framerate);
-		encoder_config.color = camera.color();
-		// Off macOS and iOS this opens the encoder on a dedicated thread; see `sink`.
-		// No cut on reopen: a fresh encoder opens with a keyframe on every backend,
-		// so the viewer whose subscription reopened the camera can decode from the
-		// first frame regardless, and a backend that cannot cut still captures.
-		if wait_capture(&demand, on_demand, producer.open(encoder_config))
-			.await?
-			.is_none()
-		{
-			continue;
+		let configs = options.encoders(Size::new(camera.width(), camera.height()), framerate, camera.color())?;
+		// Smallest first, so each rung's ceiling moves before the one above reads it. No encoder
+		// opens until a frame is written: a fresh one opens with a keyframe on every backend, so
+		// the viewer whose subscription reopened the camera can decode from its first frame, and a
+		// backend that cannot cut still captures.
+		for (producer, config) in producers.iter_mut().zip(configs) {
+			producer.configure(config)?;
 		}
-		// A reopen can land on another backend than the probe did, so ask this one.
-		let cuts = producer.applied().is_some_and(|applied| applied.cut);
-		tracing::info!(encoder = producer.name(), device = camera.label(), "capturing");
+		tracing::info!(device = camera.label(), "capturing");
 		publish_status(state, Status::Live);
 
-		// Per encoder, since a fresh one opens with a keyframe that serves every earlier ask.
-		let mut forced = Cuts::default();
-		let mut watch = demand.clone();
-		// The camera's skips already accounted for, from its first read on: frames it replaced
-		// while this encoder was still opening are startup, not frames the encoder fell behind on.
-		let mut reported = None;
-		// An encode released mid-call leaves the encoder refusing every later call, so it can't drain.
-		let mut cancelled = false;
+		let mut lanes: Vec<Lane> = producers.iter().map(Lane::new).collect();
+		// The camera's skips before its first read are startup, not frames a rendition missed.
+		let mut startup = None;
+		// Frames read, and the newest of them with its place in the camera's sequence.
+		let mut reads: u64 = 0;
+		let mut latest: Option<(u64, std::sync::Arc<crate::Frame>)> = None;
+		let mut stopping = None;
 
-		loop {
-			// Race the next frame against demand, so an on-demand capture releases the
-			// camera promptly when the last viewer leaves. `biased` checks demand first
-			// so an unwatched on-demand track stops before reading another frame.
-			let frame = tokio::select! {
-				biased;
-				wanted = watch.wanted_changed() => match wanted {
-					Ok(wanted) if on_demand && !wanted => break, // no viewers: release the camera
-					Ok(_) => continue,
-					Err(err) => {
-						log_track_ended(err);
-						return Ok(());
+		{
+			// A rendition's producer while it waits for a frame; its step holds it meanwhile.
+			let mut idle: Vec<Option<&mut Producer>> = producers.iter_mut().map(Some).collect();
+			let mut steps: Vec<Option<std::pin::Pin<Box<_>>>> = idle.iter().map(|_| None).collect();
+			loop {
+				// Hand the newest frame to every rendition that is free and hasn't taken it.
+				if let Some((seq, frame)) = &latest
+					&& !matches!(stopping, Some(Stopping::Released))
+				{
+					for (index, (slot, lane)) in idle.iter_mut().zip(&mut lanes).enumerate() {
+						if lane.seen >= Some(*seq) {
+							continue;
+						}
+						let Some(producer) = slot.take() else { continue };
+						let watched = retained == Some(index) || producer.demand().wanted();
+						let work = lane.take(producer, *seq, frame, watched);
+						steps[index] = Some(Box::pin(step(producer, work)));
 					}
-				},
-				// A read error is terminal for this selection (the source is gone
-				// or was refused); `None` just ends the stream, so reopen below.
-				frame = camera.read() => frame?,
-			};
+				}
+				if stopping.is_some() && steps.iter().all(Option::is_none) {
+					break;
+				}
 
-			let Some(mut frame) = frame else { break };
-			// Frames the camera replaced while this loop was encoding or retuning.
-			let skipped = camera.skipped();
-			if let Some(reported) = reported {
-				producer.report_skipped(skipped - reported);
-			}
-			reported = Some(skipped);
-			// Capture timestamps use a private monotonic timeline. The offset to the broadcast clock is
-			// sampled per frame, so each queued frame maps by acquisition, not dequeue, time, and the
-			// stream follows the clock's slew toward the wall clock and its jump across a suspend.
-			// Reads straddling a stall would skew it, so those keep the last offset. The first after
-			// an open has none to keep and fixes the reopen lead, so it reads again instead.
-			let mut sample = clock_offset(clock, &camera)?;
-			for _ in 0..RESAMPLES {
-				if sample.is_some() || offset.is_some() {
-					break;
+				// Race the next frame against demand, so an on-demand capture releases the
+				// camera promptly when the last viewer leaves. `biased` checks demand first so an
+				// unwatched on-demand capture stops before reading another frame, then frees a
+				// rendition whose step finished so it can take that frame.
+				let watching = lanes
+					.iter()
+					.zip(&steps)
+					.map(|(lane, step)| Watched {
+						demand: lane.demand.clone(),
+						moving: step.is_some(),
+					})
+					.collect();
+				tokio::select! {
+					biased;
+					released = until_capturing(watching, on_demand, false), if stopping.is_none() => match released {
+						Ok(()) => {
+							// A write released mid-encode leaves its encoder refusing the next call,
+							// so the release below drops it. A rendition stopping finishes.
+							for (lane, step) in lanes.iter_mut().zip(&mut steps) {
+								if lane.encoding && step.take().is_some() {
+									lane.cancelled = true;
+								}
+							}
+							stopping = Some(Stopping::Released);
+						}
+						Err(err) => {
+							log_track_ended(err);
+							return Ok(());
+						}
+					},
+					(index, (producer, result)) = next_step(&mut steps) => {
+						result?;
+						let lane = &mut lanes[index];
+						if lane.encoding && lane.cuts.is_none() {
+							// A reopen can land on another backend than the probe did, so ask this one.
+							lane.cuts = producer.applied().map(|applied| applied.cut);
+							if let Some(encoder) = producer.name() {
+								tracing::info!(track = %producer.demand().name(), encoder, "encoding");
+							}
+						}
+						// A write can move the rendition to a new track.
+						lane.demand = producer.demand();
+						idle[index] = Some(producer);
+					},
+					// A read error is terminal for this selection (the source is gone or was
+					// refused); `None` just ends the stream, so reopen below.
+					frame = camera.read(), if stopping.is_none() => match frame? {
+						None => stopping = Some(Stopping::Ended),
+						Some(mut frame) => {
+							let skipped = camera.skipped();
+							let startup = *startup.get_or_insert(skipped);
+							let seq = reads + (skipped - startup);
+							reads += 1;
+							// Capture timestamps use a private monotonic timeline. The offset to the
+							// broadcast clock is sampled per frame, so each queued frame maps by
+							// acquisition, not dequeue, time, and the stream follows the clock's slew
+							// toward the wall clock and its jump across a suspend. Reads straddling a
+							// stall would skew it, so those keep the last offset. The first after an
+							// open has none to keep and fixes the reopen lead, so it reads again instead.
+							let mut sample = clock_offset(clock, &camera)?;
+							for _ in 0..RESAMPLES {
+								if sample.is_some() || offset.is_some() {
+									break;
+								}
+								sample = clock_offset(clock, &camera)?;
+							}
+							if let Some(sample) = sample {
+								offset = Some(sample);
+							} else if offset.is_none() {
+								offset = Some(clock_offset_unchecked(clock, &camera)?);
+							}
+							let mut micros = frame.timestamp.as_micros()? as i128 + offset.unwrap_or_default();
+							// A camera never rewinds its own stream, but a reopened one maps from the
+							// shared clock, which the previous stream can lead: a device re-anchor
+							// floors just past its last timestamp, ahead of arrival. Shift the new
+							// stream past it, keeping its spacing.
+							let last_micros = last.map(|last| last.as_micros()).transpose()?.map(|last| last as i128);
+							let lead = *lead.get_or_insert_with(|| match last_micros {
+								Some(last) if micros <= last => last - micros + 1,
+								_ => 0,
+							});
+							micros += lead;
+							// Nor does a frame land at or below the last, which only that frame is held to.
+							if let Some(last) = last_micros {
+								micros = micros.max(last + 1);
+							}
+							let mapped = map_capture_timestamp(micros)?;
+							last = Some(mapped);
+							frame.timestamp = mapped;
+							latest = Some((seq, std::sync::Arc::new(frame)));
+						}
+					},
 				}
-				sample = clock_offset(clock, &camera)?;
-			}
-			if let Some(sample) = sample {
-				offset = Some(sample);
-			} else if offset.is_none() {
-				offset = Some(clock_offset_unchecked(clock, &camera)?);
-			}
-			let mut micros = frame.timestamp.as_micros()? as i128 + offset.unwrap_or_default();
-			// A camera never rewinds its own stream, but a reopened one maps from the shared clock,
-			// which the previous stream can lead: a device re-anchor floors just past its last
-			// timestamp, ahead of arrival. Shift the new stream past it, keeping its spacing.
-			let last_micros = last.map(|last| last.as_micros()).transpose()?.map(|last| last as i128);
-			let lead = *lead.get_or_insert_with(|| match last_micros {
-				Some(last) if micros <= last => last - micros + 1,
-				_ => 0,
-			});
-			micros += lead;
-			// Nor does a frame land at or below the last, which only that frame is held to.
-			if let Some(last) = last_micros {
-				micros = micros.max(last + 1);
-			}
-			let mapped = map_capture_timestamp(micros)?;
-			last = Some(mapped);
-			frame.timestamp = mapped;
-			// A backend that cannot cut leaves every group to its cadence.
-			let wanted = cuts.then(|| producer.wanted()).flatten();
-			if forced.due(wanted) {
-				producer.cut().await?;
-			}
-			// Released mid-encode, the encoder refuses the next call, so the release below drops it.
-			if wait_capture(&demand, on_demand, producer.write(frame)).await?.is_none() {
-				cancelled = true;
-				break;
-			}
-			// A frame whose decoder identity differs from the probed one (a reopen onto another
-			// mode or backend) publishes under a new name and ends this track, and the producer's
-			// claim follows it there. Nobody watches the new track yet: its viewers find it in the
-			// catalog, so on demand the camera closes until one subscribes there.
-			if producer.demand().name() != demand.name() {
-				demand = producer.demand();
-				tracing::info!(track = %demand.name(), "capture moved to a new track");
-				if on_demand {
-					break;
-				}
-				watch = demand.clone();
 			}
 		}
 
-		// Frames the camera replaced after the last read, before demand or the stream ended
-		// the loop: no read follows to report them.
-		if let Some(reported) = reported {
-			producer.report_skipped(camera.skipped() - reported);
+		// Frames the camera replaced or a rendition missed after the last it took: no frame
+		// follows to report them.
+		if let Some(startup) = startup {
+			let next = reads + (camera.skipped() - startup);
+			for (producer, lane) in producers.iter().zip(&lanes) {
+				if lane.encoding
+					&& let Some(seen) = lane.seen
+				{
+					producer.report_skipped(next - seen - 1);
+				}
+			}
 		}
-		// Drop the camera (LED off) and encoder before opening another. The shared clock keeps
+		// Drop the camera (LED off) and encoders before opening another. The shared clock keeps
 		// advancing while capture is stopped, so mark the break before waiting for demand again,
 		// so the next timestamp does not stretch the previous frame across the gap. A backend
 		// that pipelines (Media Foundation, MediaCodec) still holds the last frames, so drain them
-		// into the track first, unless a cancelled encode left the encoder refusing calls.
+		// into the track first, unless a cancelled encode left the encoder refusing calls. The
+		// drained frames can move a rendition to a new track, as any written frame can, which the
+		// next `until_capturing` reads.
 		drop(camera);
-		let stopped = match cancelled {
-			true => producer.release(),
-			false => producer.discontinuity().await,
-		};
-		// The drained frames can move the rendition to a new track, as any written frame can.
-		if producer.demand().name() != demand.name() {
-			demand = producer.demand();
-			tracing::info!(track = %demand.name(), "capture moved to a new track");
-		}
-		stopped?;
+		let stops = producers.iter_mut().zip(&lanes).map(|(producer, lane)| async move {
+			match (lane.cancelled, lane.encoding) {
+				(true, _) => producer.release(),
+				(false, true) => producer.stop().await,
+				(false, false) => Ok(()),
+			}
+		});
+		join_all(stops).await?;
 		tracing::info!("capture stopped; released source");
 	}
 }
@@ -740,6 +1161,100 @@ mod tests {
 		probe.kind = encoder::Kind::Software;
 		let rendition = probe.probe().await.unwrap();
 		Producer::with_track(track, catalog, config, rendition, bandwidth, None).unwrap()
+	}
+
+	/// A rendition takes a fraction strictly between nothing and the whole picture, under a name
+	/// that is one track segment.
+	#[test]
+	fn a_rendition_refuses_what_it_cannot_publish() {
+		for (name, scale) in [
+			("sd", 0.0),
+			("sd", 1.0),
+			("sd", -0.5),
+			("sd", f64::NAN),
+			("", 0.5),
+			("a/b", 0.5),
+		] {
+			assert!(Rendition::new(name, scale).is_err(), "{name:?} at {scale}");
+		}
+		let parsed: Rendition = "sd=0.25".parse().unwrap();
+		assert_eq!(parsed, Rendition::new("sd", 0.25).unwrap());
+		assert_eq!(parsed.track(), "video/sd");
+		for arg in ["sd", "sd=", "sd=quarter", "=0.25", "sd=2"] {
+			assert!(arg.parse::<Rendition>().is_err(), "{arg}");
+		}
+	}
+
+	/// A scale is a fraction of the pixels, so each side takes its square root, rounded down to
+	/// even, and a source too small to scale is refused rather than encoded at nothing.
+	#[test]
+	fn a_rendition_scales_its_pixels() {
+		let quarter = Rendition::new("sd", 0.25).unwrap();
+		assert_eq!(quarter.size(Size::new(1920, 1080)).unwrap(), Size::new(960, 540));
+		assert_eq!(quarter.size(Size::new(1279, 721)).unwrap(), Size::new(638, 360));
+		let half = Rendition::new("hd", 0.5).unwrap();
+		assert_eq!(half.size(Size::new(1920, 1080)).unwrap(), Size::new(1356, 762));
+		assert!(Rendition::new("tiny", 0.01).unwrap().size(Size::new(10, 10)).is_err());
+	}
+
+	/// The ladder's encoders run smallest first with the captured size last, each scaled one at
+	/// its own default bitrate in the source's color space, and a captured ceiling that a scaled
+	/// one reaches is refused.
+	#[test]
+	fn the_ladder_derives_each_rung() {
+		let framerate = crate::FrameRate::new(30, 1).unwrap();
+		let source = Size::new(1920, 1080);
+		let mut options = Capture {
+			bitrate: Some(moq_net::bandwidth::Rate::from_mbps(5)),
+			renditions: vec![Rendition::new("ld", 0.1).unwrap(), Rendition::new("sd", 0.25).unwrap()],
+			..Capture::default()
+		};
+		let configs = options.encoders(source, framerate, None).unwrap();
+		let sizes: Vec<_> = configs.iter().map(encoder::Config::size).collect();
+		assert_eq!(sizes, [Size::new(606, 340), Size::new(960, 540), source]);
+		let sd = &configs[1];
+		assert_eq!(sd.bitrate, None);
+		assert!(sd.resize.is_some());
+		// 540 lines would infer standard definition, but the pixels are the HD source's.
+		assert_eq!(sd.color, Some(Color::infer(source)));
+		assert_eq!(configs[2].resolved_bitrate(), moq_net::bandwidth::Rate::from_mbps(5));
+
+		// The quarter's default at 540p30 tops this ceiling.
+		options.bitrate = Some(moq_net::bandwidth::Rate::from_kbps(500));
+		let err = options.encoders(source, framerate, None).unwrap_err();
+		assert!(format!("{err}").contains("video/sd"), "{err}");
+	}
+
+	/// Two renditions under one name would publish one track twice.
+	#[test]
+	fn a_repeated_rendition_name_is_refused() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Capture {
+			renditions: vec![Rendition::new("sd", 0.25).unwrap(), Rendition::new("sd", 0.5).unwrap()],
+			..Capture::default()
+		};
+		assert!(publish_capture(broadcast, catalog, options).is_err());
+	}
+
+	/// The ladder registers in order: each scaled track at `video/<name>`, smallest first and
+	/// funded first, then the captured one.
+	#[test]
+	fn the_ladder_registers_smallest_first() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut options = Capture {
+			renditions: vec![Rendition::new("sd", 0.25).unwrap(), Rendition::new("ld", 0.1).unwrap()],
+			..Capture::default()
+		};
+		options.renditions.sort_by(|a, b| a.scale.total_cmp(&b.scale));
+		let tracks = capture_tracks(broadcast, &catalog, &options).unwrap();
+		let names: Vec<_> = tracks.iter().map(|track| track.name().to_string()).collect();
+		assert_eq!(&names[..2], ["video/ld", "video/sd"]);
+		assert!(names[2].ends_with(".avc3"), "{names:?}");
+		let priorities: Vec<_> = tracks.iter().map(|track| track.info().priority).collect();
+		let video = hang::catalog::PRIORITY.video;
+		assert_eq!(priorities, [video, video - 1, video - 2]);
 	}
 
 	#[test]
@@ -842,7 +1357,7 @@ mod tests {
 					};
 					let state = starting();
 					tokio::select! {
-						res = capture_loop(&mut producer, &mut source, &options, &capturing, &state) => res?,
+						res = capture_loop(std::slice::from_mut(&mut producer), &mut source, &options, &capturing, &state) => res?,
 						_ = stopped => {}
 					}
 					producer.finish().await.map(drop)
@@ -1495,7 +2010,10 @@ mod tests {
 					kind,
 					..Capture::default()
 				};
-				let track = capture_track(broadcast.clone(), &catalog, &options).unwrap();
+				let track = capture_tracks(broadcast.clone(), &catalog, &options)
+					.unwrap()
+					.pop()
+					.unwrap();
 				assert_eq!(track.info().refresh.ratio, refresh);
 			}
 		}
@@ -1700,7 +2218,13 @@ mod tests {
 			};
 			let clock = catalog.clock();
 			let state = starting();
-			let mut run = std::pin::pin!(capture_loop(&mut producer, &mut source, &options, &clock, &state));
+			let mut run = std::pin::pin!(capture_loop(
+				std::slice::from_mut(&mut producer),
+				&mut source,
+				&options,
+				&clock,
+				&state
+			));
 			let mut micros = 0;
 
 			let viewer = watched.subscribe(None);
@@ -1732,6 +2256,376 @@ mod tests {
 			assert!(resumed.iter().all(|&bps| bps <= 500_000), "{resumed:?}");
 		}
 
+		/// The catalog's video renditions once it lists `count` of them.
+		async fn renditions(
+			consumer: &moq_net::broadcast::Consumer,
+			count: usize,
+		) -> std::collections::BTreeMap<String, hang::catalog::VideoConfig> {
+			let mut catalog = moq_mux::catalog::Consumer::<()>::new(consumer, moq_mux::catalog::CatalogFormat::Hang)
+				.await
+				.unwrap();
+			loop {
+				let snapshot = catalog.next().await.unwrap().expect("a catalog");
+				if snapshot.video.renditions.len() == count {
+					return snapshot.video.renditions.into_iter().collect();
+				}
+			}
+		}
+
+		/// Subscribe to `name` with room to replay what it holds.
+		async fn watch(consumer: &moq_net::broadcast::Consumer, name: &str) -> moq_net::track::Subscriber {
+			consumer
+				.track(name)
+				.unwrap()
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+				)
+				.await
+				.unwrap()
+		}
+
+		/// A scaled rendition publishes beside the captured one at its fraction of the pixels, and
+		/// encodes only while watched: the captured one keeps its past, the scaled one holds only
+		/// what was written while someone watched it.
+		#[tokio::test(start_paused = true)]
+		async fn a_scaled_rendition_encodes_only_while_watched() {
+			local(async {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let consumer = broadcast.consume();
+				let catalog =
+					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+				let mut options = Capture {
+					kind: encoder::Kind::Software,
+					renditions: vec![Rendition::new("sd", 0.25).unwrap()],
+					..Capture::default()
+				};
+				// Half a frame per second rounds the default two-second GOP down to one frame, so
+				// every frame opens a group starting at its pts.
+				options.capture.framerate = Some(crate::FrameRate::new(1, 2).unwrap());
+				let (camera, stream) = camera();
+				let run = tokio::task::spawn_local(publish_from(
+					broadcast.clone(),
+					catalog,
+					options,
+					Streams::new([stream]),
+				));
+
+				let renditions = renditions(&consumer, 2).await;
+				let sd = &renditions["video/sd"];
+				assert_eq!((sd.coded_width, sd.coded_height), (Some(160), Some(120)));
+				let (captured, full) = renditions.iter().find(|(name, _)| *name != "video/sd").unwrap();
+				assert_eq!((full.coded_width, full.coded_height), (Some(320), Some(240)));
+				assert!(sd.bitrate < full.bitrate, "{:?} vs {:?}", sd.bitrate, full.bitrate);
+
+				// Unwatched, only the captured rendition encodes.
+				let mut track = consumer.track(captured).unwrap();
+				camera.push_native(surface(), us(0));
+				let first = track.largest().await.expect("the track is live").group;
+				camera.push_native(surface(), us(2_000_000));
+				while track.largest().await.expect("the track is live").group < first + 2_000_000 {}
+
+				let mut viewer = watch(&consumer, "video/sd").await;
+				camera.push_native(surface(), us(4_000_000));
+				let watched = viewer.recv_group().await.unwrap().expect("a group").start;
+				assert_eq!(watched, first + 4_000_000, "the scaled rendition encoded unwatched");
+				drop(viewer);
+
+				// Its viewer gone, it stops again while the captured one goes on.
+				camera.push_native(surface(), us(6_000_000));
+				while track.largest().await.expect("the track is live").group < first + 6_000_000 {}
+				let mut viewer = watch(&consumer, "video/sd").await;
+				camera.push_native(surface(), us(8_000_000));
+				let mut starts = Vec::new();
+				while starts.last() != Some(&(first + 8_000_000)) {
+					starts.push(viewer.recv_group().await.unwrap().expect("a group").start);
+				}
+				// The break marked when its viewer left sits just past the frame before it, and nothing
+				// between: the frame at six seconds went only to the captured rendition.
+				assert_eq!(starts.first(), Some(&(first + 4_000_000)), "{starts:?}");
+				assert!(
+					starts
+						.iter()
+						.all(|start| !(first + 4_000_002..first + 8_000_000).contains(start)),
+					"the scaled rendition encoded unwatched: {starts:?}"
+				);
+
+				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
+				run.abort();
+			})
+			.await
+		}
+
+		/// A capture publishing the captured rendition and `video/sd` from a pipelined probe, which
+		/// holds each frame back by one, so a frame reaches its track once the next is written.
+		/// Every frame opens a group starting at its pts.
+		async fn pipelined(
+			on_demand: bool,
+		) -> (
+			moq_net::broadcast::Consumer,
+			Synthetic,
+			tokio::task::JoinHandle<Result<(), Error>>,
+			String,
+		) {
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut options = Capture {
+				kind: encoder::Kind::Named(probe::PIPELINED.into()),
+				on_demand,
+				renditions: vec![Rendition::new("sd", 0.25).unwrap()],
+				..Capture::default()
+			};
+			options.capture.framerate = Some(crate::FrameRate::new(1, 2).unwrap());
+			let (camera, stream) = camera();
+			let run = tokio::task::spawn_local(publish_from(broadcast, catalog, options, Streams::new([stream])));
+			let captured = renditions(&consumer, 2)
+				.await
+				.into_keys()
+				.find(|name| name != "video/sd")
+				.unwrap();
+			(consumer, camera, run, captured)
+		}
+
+		/// Push a frame at `micros` and wait for the capture `run` to read it.
+		async fn push(camera: &Synthetic, run: &tokio::task::JoinHandle<Result<(), Error>>, micros: u64) {
+			camera.push_native(surface(), us(micros));
+			until(|| {
+				assert!(!run.is_finished(), "the capture ended");
+				camera.taken()
+			})
+			.await;
+		}
+
+		/// Wait until `track` holds the group a frame at `start` opened.
+		async fn reached(track: &mut moq_net::track::Consumer, start: u64) {
+			while track.largest().await.expect("the track is live").group < start {}
+		}
+
+		/// A rendition whose encoder is slow to open, as a hardware one can be, misses frames
+		/// itself rather than holding back the rendition already encoding.
+		#[cfg(not(apple))]
+		#[tokio::test(start_paused = true)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guards only stall the process-wide probe, and this runtime has one thread, so holding them across an await blocks nothing"
+		)]
+		async fn a_slow_rendition_holds_back_only_itself() {
+			let _probe = probe::exclusive();
+			local(async {
+				let (consumer, camera, run, captured) = pipelined(false).await;
+				let mut track = consumer.track(&captured).unwrap();
+				push(&camera, &run, 0).await;
+				camera.push_native(surface(), us(2_000_000));
+				let first = track.largest().await.expect("the track is live").group;
+
+				// The scaled rendition's viewer opens its encoder on the next frame, which stalls.
+				let opening = probe::hold_opens();
+				let mut viewer = watch(&consumer, "video/sd").await;
+				push(&camera, &run, 4_000_000).await;
+				// The captured rendition still takes the frame after it, publishing the one before.
+				push(&camera, &run, 6_000_000).await;
+				reached(&mut track, first + 4_000_000).await;
+
+				// Once open, the scaled rendition encodes the frame it was opening for, then the
+				// newest, which publishes it.
+				drop(opening);
+				let start = viewer.recv_group().await.unwrap().expect("a group").start;
+				assert_eq!(start, first + 4_000_000);
+
+				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
+				run.abort();
+			})
+			.await
+		}
+
+		/// A scaled rendition whose encoder fails to drain when its viewer leaves loses only the
+		/// frame the encoder held: the captured rendition keeps encoding, and the next viewer
+		/// opens a fresh encoder.
+		#[tokio::test(start_paused = true)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests off the process-wide probe, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
+		async fn a_failed_drain_costs_only_its_rendition() {
+			let _probe = probe::exclusive();
+			local(async {
+				let (consumer, camera, run, captured) = pipelined(false).await;
+				let mut track = consumer.track(&captured).unwrap();
+				push(&camera, &run, 0).await;
+				camera.push_native(surface(), us(2_000_000));
+				let first = track.largest().await.expect("the track is live").group;
+
+				let mut viewer = watch(&consumer, "video/sd").await;
+				push(&camera, &run, 4_000_000).await;
+				push(&camera, &run, 6_000_000).await;
+				let start = viewer.recv_group().await.unwrap().expect("a group").start;
+				assert_eq!(start, first + 4_000_000);
+
+				// Its viewer gone, the scaled rendition drains on the next frame, losing the one it holds.
+				probe::lose_tail();
+				drop(viewer);
+				push(&camera, &run, 8_000_000).await;
+				push(&camera, &run, 10_000_000).await;
+				reached(&mut track, first + 8_000_000).await;
+				assert!(
+					!run.is_finished(),
+					"the failed drain ended the capture: {:?}",
+					run.await
+				);
+
+				let mut viewer = watch(&consumer, "video/sd").await;
+				push(&camera, &run, 12_000_000).await;
+				camera.push_native(surface(), us(14_000_000));
+				let mut starts = Vec::new();
+				while starts.last() != Some(&(first + 12_000_000)) {
+					starts.push(viewer.recv_group().await.unwrap().expect("a group").start);
+				}
+				assert!(
+					starts
+						.iter()
+						.all(|start| !(first + 6_000_000..first + 12_000_000).contains(start)),
+					"the lost frame or an unwatched one was published: {starts:?}"
+				);
+
+				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
+				run.abort();
+			})
+			.await
+		}
+
+		/// On demand, a viewer of any rendition opens the camera, and only the renditions someone
+		/// watches encode.
+		#[tokio::test(start_paused = true)]
+		async fn on_demand_opens_the_camera_for_any_rendition() {
+			local(async {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let consumer = broadcast.consume();
+				let catalog =
+					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+				let mut options = Capture {
+					kind: encoder::Kind::Software,
+					on_demand: true,
+					renditions: vec![Rendition::new("sd", 0.25).unwrap()],
+					..Capture::default()
+				};
+				options.capture.framerate = Some(crate::FrameRate::new(1, 2).unwrap());
+				let (probed, probe) = camera();
+				let (camera, stream) = camera();
+				let source = Streams::new([probe, stream]);
+				let opens = source.opens.clone();
+				let run = tokio::task::spawn_local(publish_from(broadcast.clone(), catalog, options, source));
+
+				let renditions = renditions(&consumer, 2).await;
+				let captured = renditions.keys().find(|name| *name != "video/sd").unwrap().clone();
+				until(|| probed.released()).await;
+
+				let mut viewer = watch(&consumer, "video/sd").await;
+				camera.push_native(surface(), us(0));
+				let first = viewer.recv_group().await.unwrap().expect("a group").start;
+				assert_eq!(
+					opens.load(Ordering::SeqCst),
+					2,
+					"the scaled rendition's viewer opened the camera"
+				);
+
+				// The captured rendition encoded nothing while unwatched.
+				let mut full = watch(&consumer, &captured).await;
+				camera.push_native(surface(), us(2_000_000));
+				let joined = full.recv_group().await.unwrap().expect("a group").start;
+				assert_eq!(joined, first + 2_000_000);
+
+				drop((viewer, full));
+				until(|| camera.released()).await;
+				assert!(!run.is_finished(), "the capture ended early: {:?}", run.await);
+				run.abort();
+			})
+			.await
+		}
+
+		/// The ladder funds the scaled rendition first: under a tight grant the captured one above
+		/// it takes only what is left, and climbs back to its ceiling once the link recovers.
+		/// Disabling it needs a probed connection, which `rate`'s and the producer's tests cover.
+		#[tokio::test(start_paused = true)]
+		#[expect(
+			clippy::await_holding_lock,
+			reason = "the guard only keeps other tests out of the process-wide probe log, and this runtime has one thread, so holding it across an await blocks nothing"
+		)]
+		async fn the_scaled_rendition_is_funded_first() {
+			use moq_net::bandwidth::Rate;
+
+			let _probe = probe::exclusive();
+			let estimate = moq_net::bandwidth::Producer::new();
+			estimate.set(Some(Rate::from_mbps(4))).unwrap();
+			let bandwidth = moq_net::bandwidth::Allocator::new(estimate.consume());
+
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let options = Capture {
+				kind: encoder::Kind::Named(probe::NAME.into()),
+				bandwidth: bandwidth.clone(),
+				renditions: vec![Rendition::new("sd", 0.25).unwrap()],
+				..Capture::default()
+			};
+			let framerate = crate::FrameRate::new(30, 1).unwrap();
+			let configs = options.encoders(Size::new(320, 240), framerate, None).unwrap();
+			let ceilings: Vec<_> = configs.iter().map(encoder::Config::resolved_bitrate).collect();
+			let mut producers: Vec<Producer> = Vec::new();
+			let mut viewers = Vec::new();
+			for (name, config) in ["video/sd", "video"].into_iter().zip(configs) {
+				let priority = hang::catalog::PRIORITY.video - i8::try_from(producers.len()).unwrap();
+				let track = broadcast.create_track(name, catalog.track_info(priority)).unwrap();
+				viewers.push(track.subscribe(None));
+				let mut probe = config.clone();
+				probe.kind = encoder::Kind::Software;
+				let rendition = probe.probe().await.unwrap();
+				let lower = producers.last().map(Producer::rung);
+				producers
+					.push(Producer::with_track(track, &catalog, config, rendition, bandwidth.clone(), lower).unwrap());
+			}
+			let ceilings: Vec<_> = ceilings.iter().map(|rate| rate.as_bps()).collect();
+
+			let (camera, stream) = camera();
+			let mut source = Streams::new([stream]);
+			let clock = catalog.clock();
+			let state = starting();
+			let mut run = std::pin::pin!(capture_loop(&mut producers, &mut source, &options, &clock, &state));
+			let mut micros = 0;
+			let mut accepted = Vec::new();
+			let mut until_accepted = async |want: u64| {
+				// A minute of frames is far past anything the grant's ramp needs.
+				for _ in 0..600 {
+					accepted.extend(probe::bitrates());
+					if accepted.last() == Some(&want) {
+						return std::mem::take(&mut accepted);
+					}
+					tokio::time::advance(Duration::from_millis(100)).await;
+					camera.push_native(surface(), us(micros));
+					micros += 100_000;
+					// The encoders answer on their own threads, so wait for one to take the frame.
+					let mut encodes = 0;
+					while encodes == 0 {
+						tokio::select! {
+							res = &mut run => panic!("the capture ended: {res:?}"),
+							() = tokio::task::yield_now() => {}
+						}
+						encodes += probe::take().iter().filter(|(event, _)| *event == "encode").count();
+					}
+				}
+				panic!("the encoders never settled at {want}: {accepted:?}");
+			};
+
+			let tight = 300_000;
+			estimate.set(Some(Rate::from_bps(tight))).unwrap();
+			// Only the captured rendition retunes: the scaled one keeps its whole ceiling.
+			let squeezed = until_accepted(tight - ceilings[0]).await;
+			assert_eq!(squeezed, [tight - ceilings[0]]);
+			estimate.set(Some(Rate::from_mbps(4))).unwrap();
+			let recovered = until_accepted(ceilings[1]).await;
+			assert!(recovered.iter().all(|&bps| bps > tight - ceilings[0]), "{recovered:?}");
+			drop(viewers);
+		}
+
 		/// A backend that cannot cut still captures, leaving every group to its cadence.
 		#[tokio::test]
 		#[expect(
@@ -1758,7 +2652,13 @@ mod tests {
 			};
 			let clock = catalog.clock();
 			let state = starting();
-			let mut run = std::pin::pin!(capture_loop(&mut producer, &mut source, &options, &clock, &state));
+			let mut run = std::pin::pin!(capture_loop(
+				std::slice::from_mut(&mut producer),
+				&mut source,
+				&options,
+				&clock,
+				&state
+			));
 
 			// The probe holds its first frame back, so this one reaches the codec but not the track.
 			camera.push_native(surface(), us(0));
@@ -1803,7 +2703,13 @@ mod tests {
 			};
 			let clock = catalog.clock();
 			let state = starting();
-			let run = capture_loop(&mut producer, &mut source, &options, &clock, &state);
+			let run = capture_loop(
+				std::slice::from_mut(&mut producer),
+				&mut source,
+				&options,
+				&clock,
+				&state,
+			);
 
 			// Held back by one, the only frame reaches the track through the drain alone.
 			camera.push_native(surface(), us(0));
