@@ -28,6 +28,10 @@ pub struct Reader<S: RecvStream, V> {
 	scratch: Vec<u8>,
 	/// Bytes taken into a frame's unsealed segment, whose receive credit returns once it seals.
 	unreleased: u64,
+	/// The declared size of the last frame admitted. A group pauses when its next frame does
+	/// not fit, up to a frame short of its window, so the stream's credit stops that short
+	/// too, judging the next frame by this one.
+	frame: u64,
 	stats: crate::stats::Session,
 }
 
@@ -137,6 +141,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			want: 0,
 			scratch: Vec::new(),
 			unreleased: 0,
+			frame: 0,
 			stats: Default::default(),
 		}
 	}
@@ -534,7 +539,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 				// The transport grants credit from what was taken when it next sends, so the
 				// room is measured from here, the chunk taken.
 				let window = self.stream.window();
-				self.stream.shape(frame.room(window), frame.unsealed() as u64);
+				let room = frame.room(window).map(|room| room.saturating_sub(self.frame));
+				self.stream.shape(room, frame.unsealed() as u64);
 			}
 			if complete {
 				break Ok(());
@@ -563,6 +569,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	where
 		S: Pause,
 	{
+		self.frame = header.info.size;
 		let window = self.stream.window();
 		let paced = group.poll_admit(waiter, header, window);
 		self.poll_pace(waiter, paced, || group.room(window), 0)
@@ -588,7 +595,8 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		match paced {
 			Poll::Ready(()) => {
 				self.stream.resume();
-				self.stream.shape(room(), unsealed);
+				let room = room().map(|room| room.saturating_sub(self.frame));
+				self.stream.shape(room, unsealed);
 				Poll::Ready(Ok(()))
 			}
 			Poll::Pending if self.stream.pause() => {
@@ -661,6 +669,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			want: self.want,
 			scratch: self.scratch,
 			unreleased: self.unreleased,
+			frame: self.frame,
 			stats: self.stats,
 		}
 	}
