@@ -1421,7 +1421,7 @@ mod tests {
 						.await
 						.unwrap()
 						.ordered();
-					let mut group = track.next_group().await.unwrap().unwrap().group().unwrap();
+					let mut group = track.next_group().await.unwrap().unwrap();
 					group.read_frame().await.unwrap().unwrap().payload
 				})
 				.await

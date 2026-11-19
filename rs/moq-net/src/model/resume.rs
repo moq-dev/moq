@@ -5366,7 +5366,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let read = |sub: &mut track::Ordered| -> Vec<String> {
 			let mut items = Vec::new();
-			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
 					track::Item::Group(group) => format!("group {}", group.start),
 					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
@@ -5397,7 +5397,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let read = |sub: &mut track::Ordered| -> Vec<String> {
 			let mut items = Vec::new();
-			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
 					track::Item::Group(group) => format!("group {}", group.start),
 					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),
@@ -5424,7 +5424,7 @@ mod test {
 		let waiter = kio::Waiter::noop();
 		let read = |sub: &mut track::Ordered| -> Vec<String> {
 			let mut items = Vec::new();
-			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_group(&waiter) {
+			while let Poll::Ready(Ok(Some(item))) = sub.poll_next_item(&waiter) {
 				items.push(match item {
 					track::Item::Group(group) => format!("group {}", group.start),
 					track::Item::Gap { range, error } => format!("gap {range:?} ({error})"),

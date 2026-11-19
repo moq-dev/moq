@@ -2231,11 +2231,7 @@ mod timebase_tests {
 				.await
 				.unwrap()
 				.ordered();
-			let mut group = loop {
-				if let Some(group) = catalogs.next_group().await.unwrap().unwrap().group() {
-					break group;
-				}
-			};
+			let mut group = catalogs.next_group().await.unwrap().unwrap();
 			let stamp = group.read_frame().await.unwrap().unwrap().timestamp;
 			// Catalogs published in the same millisecond, such as a rendition and its first estimate,
 			// start a unit apart, since each starts its own group.

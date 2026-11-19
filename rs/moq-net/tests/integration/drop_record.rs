@@ -506,7 +506,7 @@ async fn an_ordered_reader_is_told_of_every_group_the_origin_evicted() {
 
 			let mut got = BTreeSet::new();
 			let mut told = BTreeSet::new();
-			while let Some(item) = kio::clock::timeout(TIMEOUT, reader.next_group())
+			while let Some(item) = kio::clock::timeout(TIMEOUT, reader.next_item())
 				.await
 				.expect("the reader stalled on a group that will not come")
 				.expect("the reader runs on")

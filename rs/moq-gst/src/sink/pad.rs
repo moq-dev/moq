@@ -2072,12 +2072,7 @@ mod tests {
 			.expect("subscribe to the opaque track")
 			.ordered();
 
-		let mut group = subscriber
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a first group");
+		let mut group = subscriber.next_group().await.unwrap().expect("a first group");
 		let frame = group.read_frame().await.unwrap().expect("a frame in the first group");
 		assert_eq!(
 			frame.payload.as_ref(),
@@ -2094,12 +2089,7 @@ mod tests {
 			"one buffer produces one group with one frame"
 		);
 
-		let mut group = subscriber
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a second group");
+		let mut group = subscriber.next_group().await.unwrap().expect("a second group");
 		let frame = group.read_frame().await.unwrap().expect("a frame in the second group");
 		assert_eq!(frame.payload.as_ref(), b"second");
 		assert_eq!(
@@ -2205,12 +2195,7 @@ mod tests {
 			.await
 			.expect("subscribe to the opaque track")
 			.ordered();
-		let mut group = subscriber
-			.next_group()
-			.await
-			.unwrap()
-			.and_then(moq_net::track::Item::group)
-			.expect("a group");
+		let mut group = subscriber.next_group().await.unwrap().expect("a group");
 		let frame = group.read_frame().await.unwrap().expect("a frame");
 		assert_eq!(frame.payload.as_ref(), b"no pts", "the unstamped buffer was published");
 		assert_eq!(
