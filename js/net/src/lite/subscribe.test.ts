@@ -285,6 +285,8 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 	]);
 	const overlapping = [{ start: { absolute: 7n, frame: 4 } }, { start: { absolute: 9n, frame: 2 } }];
 	expect([...positionFrames(overlapping)]).toEqual([[7n, 4]]);
+	// A Position range ending before its group covers nothing, so the group goes whole.
+	expect([...positionFrames([{ start: { absolute: 7n, frame: 4 }, end: { time: 6n } }, {}])]).toEqual([]);
 
 	// The sorted sweep keeps exactly what a scan of every range per Position keeps.
 	let seed = 0x6672616d;
@@ -307,6 +309,8 @@ test("a lite-07 range may start partway through a group, which the span keeps", 
 		for (const range of ranges) {
 			const start = range.start;
 			if (start?.absolute === undefined || !start.frame) continue;
+			const own = range.end?.absolute ?? (range.end?.time === undefined ? undefined : range.end.time + 1n);
+			if (own !== undefined && own <= start.absolute) continue;
 			let covering = 0;
 			for (const other of ranges) {
 				const from = other.start?.absolute ?? other.start?.time;

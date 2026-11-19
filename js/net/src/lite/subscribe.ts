@@ -351,8 +351,12 @@ export function spanBetween(
 export function positionFrames(ranges: readonly WireRange[]): Map<bigint, number> {
 	const frames = new Map<bigint, number>();
 	const positions: [bigint, number][] = [];
-	for (const { start } of ranges) {
-		if (start?.absolute !== undefined && start.frame) positions.push([start.absolute, start.frame]);
+	for (const range of ranges) {
+		const start = range.start;
+		// One ending at or before the group it starts partway through covers nothing.
+		const [, to] = rangeBounds(range);
+		if (start?.absolute !== undefined && start.frame && (to === undefined || to > start.absolute))
+			positions.push([start.absolute, start.frame]);
 	}
 	if (positions.length === 0) return frames;
 	// A range may cover a group unless it starts past it or ends at or before it. One that

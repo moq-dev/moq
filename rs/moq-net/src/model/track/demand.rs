@@ -25,6 +25,8 @@ pub(super) struct Subscriptions {
 	feed: usize,
 	/// Where resuming subscribers resume; see [`Subscription::resume`].
 	resumes: BTreeMap<Position, usize>,
+	/// How many subscribers resume, so the aggregate asks without summing [`Self::resumes`].
+	resuming: usize,
 	/// The lowest group consumers want while no refresh is pending, never lowered.
 	wanted: u64,
 	/// A request for a group past every key written, until a group answers it or its
@@ -113,7 +115,7 @@ impl Subscriptions {
 				},
 				self.feed != 0,
 				// A subscriber asking for the whole group outweighs any resuming one.
-				match self.resumes.values().sum::<usize>() == self.count {
+				match self.resuming == self.count {
 					true => self.resumes.first_key_value().map(|(resume, _)| *resume),
 					false => None,
 				},
@@ -287,6 +289,7 @@ impl Subscriptions {
 			self.feed += usize::from(new.feed);
 			if let Some(resume) = new.resume {
 				add(&mut self.resumes, resume);
+				self.resuming += 1;
 			}
 			self.count += 1;
 		}
@@ -303,6 +306,7 @@ impl Subscriptions {
 			self.feed -= usize::from(old.feed);
 			if let Some(resume) = old.resume {
 				remove(&mut self.resumes, resume);
+				self.resuming -= 1;
 			}
 			self.count -= 1;
 		}

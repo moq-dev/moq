@@ -4659,12 +4659,10 @@ impl Bounds {
 			if legacy && let Some(lite::Anchor::Absolute(start)) = range.start {
 				bounds.frames.floor = bounds.frames.floor.max(start.group);
 			}
-			if let Some(lite::Anchor::Absolute(start)) = range.start
-				&& start.frame != 0
-			{
-				let index = bounds.ranges.len() as u64;
-				bounds.positions.insert(index, (start.group, start.frame));
-			}
+			let position = match range.start {
+				Some(lite::Anchor::Absolute(start)) if start.frame != 0 => Some((start.group, start.frame)),
+				_ => None,
+			};
 			let end = match range.end {
 				None => None,
 				// A mid-group end includes its group, up to the frame before it.
@@ -4684,6 +4682,13 @@ impl Bounds {
 				},
 				Some(end) => Some(anchor(end)),
 			};
+			// One ending before the group it starts partway through covers nothing, so it starts
+			// no group partway.
+			if let Some((group, frame)) = position
+				&& !matches!(end, Some(Anchor::Time(end)) if end < group)
+			{
+				bounds.positions.insert(bounds.ranges.len() as u64, (group, frame));
+			}
 			bounds.ranges.push(Range { start, end });
 		}
 		bounds.frames.first = first_frames(bounds.positions.values(), &bounds.ranges);
@@ -7183,6 +7188,20 @@ mod serve_group_test {
 		);
 		assert_eq!((disjoint.frames.start(7), disjoint.frames.start(9)), (4, 2));
 		assert_eq!(disjoint.frames.start(8), 0);
+
+		// A range ending before the group it starts partway through covers nothing, so another
+		// range covering that group asks for it whole.
+		let empty = Bounds::new(
+			&[
+				lite::Range {
+					start: at(7, 4),
+					end: time(6),
+				},
+				lite::Range { start: None, end: None },
+			],
+			false,
+		);
+		assert_eq!(empty.frames.start(7), 0);
 
 		let overlapping = Bounds::new(
 			&[
