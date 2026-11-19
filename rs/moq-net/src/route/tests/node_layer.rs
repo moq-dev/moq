@@ -173,6 +173,8 @@ pub(super) struct LayerSim {
 	queues: BTreeMap<Chan, VecDeque<(u64, Msg)>>,
 	/// Flat: the links of the network's path between two relays, while one exists.
 	paths: std::cell::RefCell<BTreeMap<(Node, Node), Option<usize>>>,
+	/// A queue is delivering this round, so what it sends moves next round at the earliest.
+	stepping: bool,
 	held: BTreeSet<Chan>,
 	lives: BTreeMap<Broadcast, u64>,
 	stats: Stats,
@@ -270,6 +272,7 @@ impl LayerSim {
 			built: false,
 			queues: BTreeMap::new(),
 			paths: std::cell::RefCell::new(BTreeMap::new()),
+			stepping: false,
 			held: BTreeSet::new(),
 			lives: BTreeMap::new(),
 			stats: Stats::default(),
@@ -316,7 +319,10 @@ impl LayerSim {
 				self.stats.claim_items += 1;
 			}
 		}
-		let due = self.now + self.links_between(from, to).unwrap_or(1).max(1) as u64 - 1;
+		// A message sent while this round delivers can move no earlier than the next,
+		// so it waits one round more than one sent between rounds.
+		let links = self.links_between(from, to).unwrap_or(1).max(1) as u64;
+		let due = self.now + links - 1 + u64::from(self.stepping);
 		self.queues.entry((from, to)).or_default().push_back((due, msg));
 	}
 
@@ -374,11 +380,12 @@ impl LayerSim {
 		if self.layer != Layer::Flat || !self.is_relay(from) || !self.is_relay(to) {
 			return Some(1);
 		}
-		let key = pair(from, to);
+		// Ordered: ties break by the source's first hop, so the way back can differ.
+		let key = (from, to);
 		if let Some(&known) = self.paths.borrow().get(&key) {
 			return known;
 		}
-		let found = self.underlay(key.0, key.1).map(|path| path.len());
+		let found = self.underlay(from, to).map(|path| path.len());
 		self.paths.borrow_mut().insert(key, found);
 		found
 	}
@@ -1075,7 +1082,9 @@ impl Net for LayerSim {
 	}
 
 	fn step(&mut self, (from, to): Chan) {
+		self.stepping = true;
 		self.deliver(from, to);
+		self.stepping = false;
 	}
 
 	fn tick(&mut self) -> bool {
@@ -1260,10 +1269,16 @@ fn path(lab: &Lab, from: Node, to: Node) -> (Metric, Vec<(Node, Node)>) {
 	(*cost, links)
 }
 
-fn tally_copies(lab: &Lab, pulls: &BTreeSet<(Node, Node)>) -> Copies {
+/// Copies per link for `pulls`, each relay from its source: over the link between them
+/// where the arm routes hop by hop, or the network's path where a session spans it.
+fn tally_copies(lab: &Lab, pulls: &BTreeSet<(Node, Node)>, spans: bool) -> Copies {
 	let mut load: BTreeMap<(Node, Node), usize> = BTreeMap::new();
 	for &(source, relay) in pulls {
-		for link in path(lab, source, relay).1 {
+		let links = match spans {
+			true => path(lab, source, relay).1,
+			false => vec![pair(source, relay)],
+		};
+		for link in links {
 			*load.entry(link).or_default() += 1;
 		}
 	}
@@ -1273,8 +1288,9 @@ fn tally_copies(lab: &Lab, pulls: &BTreeSet<(Node, Node)>) -> Copies {
 	}
 }
 
-/// [`Copies`] as `lab`'s arm pulls: each relay from the first node its pull names.
-pub(super) fn copies(lab: &Lab) -> Copies {
+/// [`Copies`] as `lab`'s arm pulls: each relay from the first node its pull names,
+/// which is a neighbour unless the arm's sessions `span` the network.
+pub(super) fn copies(lab: &Lab, spans: bool) -> Copies {
 	let (_, id) = lab.mesh.publisher(0);
 	let mut pulls = BTreeSet::new();
 	for relay in 0..lab.mesh.relays {
@@ -1285,7 +1301,7 @@ pub(super) fn copies(lab: &Lab) -> Copies {
 			pulls.insert((hops[0], relay));
 		}
 	}
-	tally_copies(lab, &pulls)
+	tally_copies(lab, &pulls, spans)
 }
 
 /// [`Copies`] for flat if every relay pulled from the cheapest relay already carrying
@@ -1306,7 +1322,7 @@ pub(super) fn warm_bound(lab: &Lab) -> Copies {
 		pulls.insert((source, relay));
 		carrying.push(relay);
 	}
-	tally_copies(lab, &pulls)
+	tally_copies(lab, &pulls, true)
 }
 
 /// Every failure on every single-domain shape: each layer settles, every relay with a
@@ -1359,8 +1375,8 @@ fn a_flat_domain_rides_out_a_link_closing() {
 fn a_flat_domain_needs_warm_routes_to_fan_out() {
 	let mesh = super::bakeoff::tiers(3, 3, true, 1);
 	let lab = Lab::new(Arm::Layer(Layer::Flat), &mesh);
-	let flat = copies(&lab);
-	let ls = copies(&Lab::new(Arm::Layer(Layer::LinkState), &mesh));
+	let flat = copies(&lab, true);
+	let ls = copies(&Lab::new(Arm::Layer(Layer::LinkState), &mesh), false);
 	assert_eq!(ls.busiest, 1, "{ls:?}");
 	assert!(flat.busiest > 3 * ls.busiest, "flat {flat:?} against link state {ls:?}");
 	assert!(warm_bound(&lab).busiest < flat.busiest);
@@ -1397,7 +1413,7 @@ fn benchmark_node_layer() {
 			for arm in LAYERS {
 				let lab = Lab::new(arm, &shape.mesh);
 				let (sent, held) = (lab.net.sent(), lab.net.held());
-				let carry = copies(&lab);
+				let carry = copies(&lab, arm == Arm::Layer(Layer::Flat));
 				println!(
 					"{},{},{},{},{},{},{},{},{}",
 					shape.name,
