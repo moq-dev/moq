@@ -3788,7 +3788,10 @@ mod announce_test {
 	async fn a_lite07_prefix_wider_than_the_grant_is_answered_region_by_region() {
 		let path = |path: &str| crate::Path::new(path).unwrap();
 		let subtrees = |paths: &[&str]| -> crate::Patterns {
-			paths.iter().map(|path| crate::Pattern::subtree(path).unwrap()).collect()
+			paths
+				.iter()
+				.map(|path| crate::Pattern::subtree(path).unwrap())
+				.collect()
 		};
 		let origin = Hop::new(1).unwrap().produce();
 		let _above = origin.announce("a", origin::RouteInfo::new()).unwrap();
@@ -3860,7 +3863,11 @@ mod announce_test {
 		let ok = widened.iter().position(|msg| *msg == lite::AnnounceBroadcast::Ok);
 		assert_eq!(ok, Some(widened.len() - 1), "{widened:?}");
 		let told = started(&widened);
-		assert_eq!(told, [("c/y".to_string(), 0), ("e/m/cam".to_string(), 0)], "{widened:?}");
+		assert_eq!(
+			told,
+			[("c/y".to_string(), 0), ("e/m/cam".to_string(), 0)],
+			"{widened:?}"
+		);
 
 		// Narrowed back, what it no longer shows is lost.
 		auth.handle().authorize(&limit(&["a/b"]));

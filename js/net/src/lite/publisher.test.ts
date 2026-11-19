@@ -4131,21 +4131,18 @@ test("a lite-07 prefix wider than the grant is answered region by region", async
 		}
 	};
 	const started = (msgs: AnnounceBroadcast[]) =>
-		msgs.flatMap((msg) => (msg.status === "start" ? [[msg.suffix, msg.claim.above]] : [])).sort();
+		msgs.flatMap((msg) => (msg.status === "start" ? [`${msg.suffix} above ${msg.claim.above}`] : [])).sort();
 	try {
 		await ok();
 		const first = await until("synced");
 		// `a` covers the region from one segment above it; `c/y` and `d/z` lie outside.
-		expect(started(first)).toEqual([
-			["a/b", 1n],
-			["a/b/x", 0n],
-		]);
+		expect(started(first)).toEqual(["a/b above 1", "a/b/x above 0"]);
 
 		// The grant widens to `c`; the edit after it changes nothing, and its answer follows `c/y`.
 		grant.set(regions("a/b", "c"));
 		request([], []);
 		const widened = await until("ok");
-		expect(started(widened)).toEqual([["c/y", 0n]]);
+		expect(started(widened)).toEqual(["c/y above 0"]);
 	} finally {
 		for (const broadcast of broadcasts) broadcast.close();
 		close();

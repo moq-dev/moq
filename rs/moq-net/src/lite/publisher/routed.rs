@@ -316,7 +316,12 @@ impl Answer {
 	/// The absolute regions `permit` and the handle's root confine the peer to, or `None`.
 	fn confined(origin: &origin::Consumer, permit: &crate::auth::Permit) -> Option<Vec<Path>> {
 		let regions = permit.regions()?;
-		Some(regions.iter().filter_map(|region| origin.root().join(region).ok()).collect())
+		Some(
+			regions
+				.iter()
+				.filter_map(|region| origin.root().join(region).ok())
+				.collect(),
+		)
 	}
 
 	/// What the session's key reads to answer the absolute `prefix`: the prefix itself when
@@ -361,7 +366,11 @@ impl Answer {
 		let prefixes = (self.prefixes.iter())
 			.filter(|(id, _)| !removed(id))
 			.map(|(_, prefix)| prefix)
-			.chain(pending.into_iter().flat_map(|request| request.add.iter().map(|(_, prefix)| prefix)));
+			.chain(
+				pending
+					.into_iter()
+					.flat_map(|request| request.add.iter().map(|(_, prefix)| prefix)),
+			);
 		let wanted: BTreeSet<Path> = (prefixes.filter_map(|prefix| prefix.path.as_ref()))
 			.flat_map(|path| self.narrow(path))
 			.collect();

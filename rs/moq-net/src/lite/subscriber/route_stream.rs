@@ -372,10 +372,12 @@ impl Running {
 			let holding = self.answer.holding();
 			let main = self.streams.len() - 1;
 			let streams = self.streams.iter().enumerate().filter(|(i, _)| !holding || *i != main);
-			let ready = streams.map(|(_, stream)| stream).find_map(|stream| match stream.poll_wire(waiter) {
-				Poll::Ready(msg) => Some(msg),
-				Poll::Pending => None,
-			});
+			let ready = streams
+				.map(|(_, stream)| stream)
+				.find_map(|stream| match stream.poll_wire(waiter) {
+					Poll::Ready(msg) => Some(msg),
+					Poll::Pending => None,
+				});
 			if let Some(msg) = ready {
 				match msg {
 					node::Msg::Ask(edit) => {

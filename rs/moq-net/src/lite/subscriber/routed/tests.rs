@@ -531,8 +531,12 @@ fn a_set_past_one_request_is_asked_for_more_coarsely() {
 	let mut expected = lone;
 	expected.extend([path("g/h"), path("k")]);
 	assert_eq!(super::coarsen(regions.clone(), &regions), expected);
-	let regions: std::collections::BTreeSet<Path> = (0..17).map(|i| path(&format!("r{i}/{}", "x".repeat(4000)))).collect();
-	assert_eq!(super::coarsen(regions.clone(), &regions), [Path::empty()].into_iter().collect());
+	let regions: std::collections::BTreeSet<Path> =
+		(0..17).map(|i| path(&format!("r{i}/{}", "x".repeat(4000)))).collect();
+	assert_eq!(
+		super::coarsen(regions.clone(), &regions),
+		[Path::empty()].into_iter().collect()
+	);
 }
 
 /// A claim whose path this node cannot resolve lies in a prefix it cannot name, so
