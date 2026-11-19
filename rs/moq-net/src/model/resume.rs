@@ -1747,8 +1747,8 @@ impl Reader {
 		&self.window
 	}
 
-	/// Place the unsettled [`Self::window`] ranges where a copy resolved them, unless one it
-	/// leaves unresolved, or a relative anchor, still waits there too.
+	/// Place each unsettled [`Self::window`] range where a copy resolved it, on its own: one
+	/// whose anchors still wait leaves the rest placed, so a publisher names their starts.
 	fn resolve(&mut self, resolved: &BTreeMap<u64, Resolved>) {
 		let mut placed = Vec::new();
 		for key in self.window.unsettled() {
@@ -1761,7 +1761,7 @@ impl Reader {
 					&& (matches!(range.start, Anchor::Relative(_) | Anchor::Time(1..))
 						|| matches!(range.end, Some(Anchor::Relative(_))))
 				{
-					return;
+					continue;
 				}
 				// Placed as it is: nothing of it waits on a copy.
 				placed.push((key, range));
@@ -1783,13 +1783,15 @@ impl Reader {
 				Anchor::Relative(_) | Anchor::Time(_) => Anchor::Oldest,
 				start => start,
 			};
-			placed.push((key, track::Range { start, end }));
+			let range = track::Range { start, end };
+			// A relative end still open would leave it waiting on a first group it never gets.
+			if !range.is_empty() && matches!(range.end, Some(Anchor::Relative(_))) {
+				continue;
+			}
+			placed.push((key, range));
 		}
-		// A relative end still open leaves the window waiting on a first group it never gets.
-		if placed.iter().any(|(_, range)| {
-			!range.is_empty()
-				&& (matches!(range.start, Anchor::Relative(_)) || matches!(range.end, Some(Anchor::Relative(_))))
-		}) {
+		// An edit restarts the window's coverage check, so one that places nothing is skipped.
+		if placed.is_empty() {
 			return;
 		}
 		self.window
@@ -4150,6 +4152,51 @@ mod test {
 		assert!(floored.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(floored.resolved_range(0), None);
 		assert_eq!(floored.waiting_keys([0]), [Some((500, None))]);
+	}
+
+	/// A routed reader places each range its copy resolved, even while an earlier one waits on
+	/// a time start: a floor at that time lets the start go out, and the later range names its
+	/// group rather than none.
+	#[kio::test]
+	async fn a_routed_reader_places_a_range_past_one_still_waiting() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let serving = received_copy();
+		serving.anchored();
+		routes.serve(serving.consume());
+		write(&serving, 1000);
+		let ranges = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_ranges([
+				track::Range {
+					start: Anchor::Time(500),
+					end: None,
+				},
+				track::Range {
+					start: Anchor::Time(1000),
+					end: None,
+				},
+			]);
+		let mut floored = logical
+			.consume()
+			.subscribe(ranges)
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.with_range(500..);
+		assert!(floored.poll_start(&kio::Waiter::noop()).is_ready());
+		assert_eq!(floored.waiting_keys([0, 1]), [Some((500, None)), None]);
+		assert_eq!(
+			floored.resolved_keys([0, 1]),
+			[
+				None,
+				Some(Resolved {
+					start: 1000,
+					end: None,
+					floored: true,
+				})
+			]
+		);
 	}
 
 	/// As [`an_ended_copy_leaves_a_time_start_to_the_serving_copy`], for a reader that replaces

@@ -8838,6 +8838,59 @@ mod serve_group_test {
 		}
 	}
 
+	/// As [`lite07_a_floored_time_start_reports_where_delivery_starts`], on a relay's front
+	/// whose copy already resolved a later range: that range names the group it resolved to,
+	/// whatever the floored one still waits on.
+	#[kio::test]
+	async fn lite07_a_routed_range_past_a_floored_time_start_reports_its_start() {
+		let mut routed = track::Routed::new("test", crate::track::Info::timed());
+		routed.copy.received();
+		routed.copy.anchored();
+		write_group(&mut routed.copy, 1000, 1000);
+		let initial = [
+			lite::Range::span(Some(100), 0, None, None),
+			lite::Range::span(Some(500), 0, None, None),
+			lite::Range::span(Some(1000), 0, None, None),
+		];
+		let bounds = Bounds::new(&initial, false);
+		let subscriber = routed
+			.logical
+			.consume()
+			.subscribe(
+				track::Subscription::default()
+					.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+					.with_ranges(bounds.ranges.iter().copied()),
+			)
+			.now_or_never()
+			.expect("an accepted logical track answers at once")
+			.unwrap();
+		let (mut run, mut writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		run.initial = bounds.ranges.len() as u64;
+		run.requested = Requested::new((0..).zip(bounds.ranges.iter().copied()));
+		assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		assert!(run.start.resolved().is_none(), "time 100 waits on the copy to place it");
+
+		let live = [(1, initial[1]), (2, initial[2])];
+		run.update(lite07_add(&run, &live, 3, &[]));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		// A range an update adds afterwards is told where it starts too.
+		run.update(lite07_add(&run, &live, 3, &[initial[2]]));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let answers: Vec<_> = responses(&mut writer, &log)
+			.await
+			.into_iter()
+			.filter_map(|msg| match msg {
+				lite::SubscribeResponse::Start(start) => Some((None, start.starts)),
+				lite::SubscribeResponse::Started(started) => Some((Some(started.id), vec![started.start])),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			answers,
+			[(None, vec![None, Some(1000), Some(1000)]), (Some(3), vec![Some(1000)])]
+		);
+	}
+
 	/// A gap the publisher never declared might have existed, so the end names it with a
 	/// DROP rather than a SKIP: here the reader passed it, so it is stale.
 	#[kio::test]
