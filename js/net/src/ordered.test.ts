@@ -405,3 +405,16 @@ test("a read returning only gaps keeps its handed-out record compact", () => {
 	}
 	expect(hooks.deliveredRuns(sub)).toBe(1);
 });
+
+test("an ordered read hands out nothing past a time start still waiting to be placed", () => {
+	const producer = receivedTrack();
+	put(producer, 2000n, false);
+	const ordered = producer.subscribe({ delay: { max: null }, ranges: [{ start: { time: 1500n } }] }).ordered();
+	expect(items(ordered)).toEqual([]);
+	// A session's tail holds the read at the answered start's group until it lands, and says
+	// nothing lies between it and 2000.
+	hooks.timeStarts(producer, [[1500n, 1000n]]);
+	put(producer, 1000n, false);
+	producer.skipGroups(1001n, 2000n);
+	expect(items(ordered)).toEqual(["group 1000", "group 2000"]);
+});

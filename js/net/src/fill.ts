@@ -692,8 +692,8 @@ export class FillGroups {
 
 	/**
 	 * Insert group `key` into the track's cache, handing it to the readers waiting on it,
-	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
-	 * if it has none yet. A cached copy missing its first frames, which a reader asked whole, is
+	 * and return the producer to write its frames into. A live subscription covering it receives
+	 * it too. `info` commits the track's {@link Info} if it has none yet. A cached copy missing its first frames, which a reader asked whole, is
 	 * replaced. Throws a `RangeError` outside the fill, and an error if the group was already
 	 * answered or cached whole, or the track is closed.
 	 */

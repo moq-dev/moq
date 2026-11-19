@@ -255,6 +255,14 @@ impl Window {
 		!self.waiting.is_empty()
 	}
 
+	/// Whether a time start still waiting on the groups held may resolve below `key`: the
+	/// group containing its time starts at or before it, so it may still land below `key`.
+	pub fn waits_below(&self, key: u64) -> bool {
+		self.waiting
+			.iter()
+			.any(|&position| matches!(self.spans[position].anchor, Anchor::Time(time) if time < key))
+	}
+
 	/// Resolve what the groups now held settle: relative anchors once `latest` exists, and
 	/// time starts once a group arrives. Returns whether the groups in range moved.
 	pub fn settle(&mut self, latest: Option<u64>, holdings: &impl Holdings) -> bool {

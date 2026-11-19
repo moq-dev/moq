@@ -3948,9 +3948,20 @@ impl TrackState {
 				// A head holding frame 0 gives a group received past it a start.
 				self.fetched += 1;
 			}
-			// Invisible to arrival-order subscribers: fetched on demand, not produced
-			// live by the publisher.
-			None => self.insert_group(&group.handle(), false),
+			// Below the live edge, history: invisible to arrival-order subscribers, served by
+			// key to whoever misses it. A whole group past every one the live publisher
+			// produced is the live feed, which a subscription delivers like any group it
+			// produces. A received copy's feed is its upstream's subscription, which delivers
+			// the group itself, and a track nobody accepted has no live feed yet.
+			None => {
+				let live = !self.anchors.received()
+					&& self.minted()
+					&& self.feed.is_live()
+					&& frames.start == 0
+					&& frames.end.is_none()
+					&& self.newest_produced.is_none_or(|newest| key > newest);
+				self.insert_group(&group.handle(), live)
+			}
 		}
 		self.evict_expired();
 		Ok(group)
@@ -9880,6 +9891,20 @@ impl Cursor {
 					floor = floor.max(self.floor()).max(group.start.saturating_add(1));
 					continue;
 				}
+				// In order means the group a waiting time start resolves to comes first: it
+				// starts at or before that time, below this group, and may still land. Its
+				// landing, or the answer placing the start, wakes us. Registered before syncing
+				// again, so a change placing it meanwhile is not missed; a closed track places it.
+				if self.filter.window.waits_below(group.start) {
+					let closed = self.state.poll(waiter, |_| Poll::<()>::Pending).is_ready();
+					self.sync();
+					if !self.filter.window.waits_below(group.start) {
+						continue;
+					}
+					if !closed {
+						return Poll::Pending;
+					}
+				}
 			}
 
 			// Skip a group the budget has given up on and keep scanning, so one poll
@@ -15410,6 +15435,42 @@ mod test {
 		assert_eq!(drain(&mut past), vec![1000, 3000]);
 	}
 
+	/// An ordered read of a lite-07 copy hands out no group past a time start still waiting to
+	/// be placed, since the group containing the time may still land below it: it reads that
+	/// group first, with no gap, once the publisher's answer and the group arrive.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_ordered_read_waits_for_its_time_start_to_be_placed() {
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+		let mut ordered = producer
+			.subscribe(
+				Subscription::default()
+					.with_ranges([Range {
+						start: Anchor::Time(1500),
+						end: None,
+					}])
+					.with_delay(Delay::default().with_max(None)),
+			)
+			.ordered();
+		let mut next = || match ordered.next_group().now_or_never() {
+			None => None,
+			Some(Ok(Some(Item::Group(group)))) => Some(Ok(group.start)),
+			Some(Ok(Some(Item::Gap { range, .. }))) => Some(Err(range)),
+			Some(res) => panic!("ended: {:?}", res.map(|_| ())),
+		};
+		assert_eq!(next(), None, "2000 waits on the start");
+		// A session's tail holds the read at the answered start's group until it lands, and
+		// says nothing lies between it and 2000.
+		producer.time_starts([(1500, 1000)]);
+		write_group(&producer, 1000);
+		producer.skip_groups(1001..2000);
+		assert_eq!(next(), Some(Ok(1000)));
+		assert_eq!(next(), Some(Ok(2000)));
+	}
+
 	/// A lite-07 copy holds only part of the track, so a relative start counts back as its
 	/// publisher reported, not over the groups the copy holds, until a group past the latest
 	/// the publisher counted from moves the live edge.
@@ -16852,12 +16913,14 @@ mod test {
 		assert!(!consumer.is_live(), "a track whose producer left is not live");
 	}
 
-	/// A one-shot fetch populates the shared cache but never the live arrival cursor,
-	/// so it cannot make content available to a subscription look stale.
+	/// A received copy's one-shot fetch populates the shared cache but never the live arrival
+	/// cursor, which only its upstream's subscription feeds, so it cannot make content available
+	/// to a subscription look stale.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn fetched_group_is_not_a_live_drift_edge() {
 		let mut producer = track_producer("test", Info::timed());
+		producer.received();
 		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		append_at(&mut producer, 0);
@@ -16881,6 +16944,45 @@ mod test {
 		let mut groups = producer.subscribe(None);
 		assert_eq!(groups.assert_group().start, 0);
 		groups.assert_no_group();
+	}
+
+	/// A publisher's fill answer past every group it produced is its live feed: a subscription
+	/// delivers it in arrival order, as a group the publisher produces. One below the live edge
+	/// stays history, served by key to whoever misses it.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_fill_past_the_live_edge_is_the_live_feed() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut subscriber = producer.subscribe(replay());
+		for key in [0, 1] {
+			producer
+				.create_group(group::Info { start: key })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		assert_eq!(drain(&mut subscriber), vec![0, 1]);
+
+		let fill = |key: u64| {
+			let pending = consumer.fetch_group(key, None);
+			let fill = dynamic
+				.requested_fill_group()
+				.now_or_never()
+				.expect("the fetch asks at once")
+				.unwrap();
+			let mut group = fill.accept(None).unwrap();
+			group
+				.write_frame(Timestamp::from_millis(key).unwrap(), b"x".as_slice())
+				.unwrap();
+			group.finish().unwrap();
+			pending
+		};
+		fill(3).await.unwrap();
+		assert_eq!(drain(&mut subscriber), vec![3], "past the edge, live");
+		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
+		assert_eq!(drain(&mut live), vec![3], "the live edge");
 	}
 
 	/// A failed fill answer is no verdict on a gap the feed owes: an ordered reader neither takes
@@ -23954,6 +24056,7 @@ mod test {
 	#[cfg(feature = "async")]
 	async fn the_feed_takes_a_group_a_fetch_cached_first() {
 		let (producer, _pool) = pooled_producer(1 << 40);
+		producer.received();
 		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut subscriber = producer.subscribe(replay());
@@ -26727,12 +26830,13 @@ mod test {
 		assert_eq!(drain(&mut live), vec![0, 1]);
 	}
 
-	/// Fetched backfill past the newest produced group moves no relative start, whether the
-	/// track had a produced group at subscribe or not.
+	/// A received copy's fetched backfill past the newest group its feed delivered moves no
+	/// relative start, whether the copy had a group at subscribe or not.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_live_range_ignores_a_fetched_group_past_the_newest_group() {
 		let producer = track_producer("test", Info::timed());
+		producer.received();
 		let dynamic = producer.requests();
 		let consumer = producer.consume();
 		let mut early = producer.subscribe(replay().with_ranges([Range::live()]));
