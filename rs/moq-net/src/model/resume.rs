@@ -5675,6 +5675,48 @@ mod test {
 		}
 	}
 
+	/// A switch backfills the reader's gaps from where its ranges start, not from where the
+	/// copy it replaced was raised to: a group still missing below that copy's resume point
+	/// is asked of the next route too.
+	#[test]
+	fn a_second_switch_backfills_below_the_replaced_copys_resume_point() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		routes.serve(a.consume());
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range {
+				start: track::Anchor::Time(3),
+				end: None,
+			}]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		write(&a, 3);
+		write(&a, 7);
+		assert_eq!(drain(&mut sub, false), [3, 7], "5 is missing");
+
+		// b resumes at 7, placing the range's start there, and lacks 5 too.
+		let b = received_copy();
+		write(&b, 7);
+		write(&b, 8);
+		routes.serve(b.consume());
+		assert_eq!(drain(&mut sub, false), [8]);
+
+		let c = received_copy();
+		routes.serve(c.consume());
+		assert!(drain(&mut sub, false).is_empty());
+		write(&c, 5);
+		write(&c, 9);
+		let mut rest = drain(&mut sub, false);
+		rest.sort();
+		assert_eq!(rest, [5, 9]);
+	}
+
 	/// A key-order read keeps its cursor below a group outside its window while the window
 	/// still owes a group below it, which may yet land on that copy, and moves past it once
 	/// nothing below is owed.
