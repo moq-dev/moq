@@ -1025,21 +1025,30 @@ impl Subscriber {
 		keys.into_iter().map(|key| window.resolved_key(key)).collect()
 	}
 
-	/// The reader's range keyed `key` while its time start waits; see
-	/// [`track::Subscriber::waiting_key`].
+	/// The reader's ranges keyed in `keys` while their time starts wait; see
+	/// [`track::Subscriber::waiting_keys`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(super) fn waiting_key(&self, key: u64) -> Option<(u64, Option<u64>)> {
+	pub(super) fn waiting_keys(&self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<(u64, Option<u64>)>> {
 		let mut reader = self.reader();
-		if reader.window().resolved_key(key).is_some() {
-			return None;
-		}
-		// Only the serving copy places it: the reader's own window holds no groups. Its
+		reader.window();
+		let reader = &mut *reader;
+		// Only the serving copy places one: the reader's own window holds no groups. Its
 		// subscription mirrors the reader's ranges in key order.
-		let index = reader.keys.iter().position(|&mirrored| mirrored == key)?;
-		match &mut reader.copies.last_mut()?.sub {
-			Sub::Ready(sub) => sub.waiting_key(index as u64),
-			Sub::Pending(_) => None,
-		}
+		let indices: Vec<Option<u64>> = keys
+			.into_iter()
+			.map(|key| match reader.window.resolved_key(key) {
+				Some(_) => None,
+				None => reader.keys.binary_search(&key).ok().map(|index| index as u64),
+			})
+			.collect();
+		let mut found = match reader.copies.last_mut().map(|copy| &mut copy.sub) {
+			Some(Sub::Ready(sub)) => sub.waiting_keys(indices.iter().flatten().copied()).into_iter(),
+			_ => Vec::new().into_iter(),
+		};
+		indices
+			.into_iter()
+			.map(|index| index.and_then(|_| found.next().flatten()))
+			.collect()
 	}
 
 	/// The lowest group at or above `from` the reader's ranges cover; see
@@ -3632,7 +3641,7 @@ mod test {
 			.unwrap();
 		assert!(open.poll_start(&kio::Waiter::noop()).is_pending());
 		assert_eq!(open.resolved_range(0), None);
-		assert_eq!(open.waiting_key(0), Some((500, None)));
+		assert_eq!(open.waiting_keys([0]), [Some((500, None))]);
 
 		// A floor at the time keeps out whichever group contains it: the start waits on nothing.
 		let mut floored = logical
@@ -3644,7 +3653,7 @@ mod test {
 			.with_range(500..);
 		assert!(floored.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(floored.resolved_range(0), None);
-		assert_eq!(floored.waiting_key(0), Some((500, None)));
+		assert_eq!(floored.waiting_keys([0]), [Some((500, None))]);
 	}
 
 	/// As [`an_ended_copy_leaves_a_time_start_to_the_serving_copy`], for a reader that replaces

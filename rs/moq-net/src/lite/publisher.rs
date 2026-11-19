@@ -5895,15 +5895,20 @@ impl TrackRun {
 		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
 		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
 		let resolved = self.track.resolved_keys(0..self.initial);
-		(0..)
-			.zip(resolved)
-			.map(|(id, resolved)| {
+		let unresolved = (0..)
+			.zip(&resolved)
+			.filter(|(_, resolved)| resolved.is_none())
+			.map(|(id, _)| id);
+		let mut waiting = self.track.waiting_keys(unresolved).into_iter();
+		resolved
+			.into_iter()
+			.map(|resolved| {
 				let (from, end) = match resolved {
 					Some(resolved) => (resolved.start.max(start), resolved.end),
 					// A time start still waiting at or below the floor, as an update before the
 					// start leaves one: whichever group contains it is out of range, so the range
 					// starts where delivery does, the answer placing it would give.
-					None => match self.track.waiting_key(id)? {
+					None => match waiting.next().flatten()? {
 						(time, end) if time <= self.floor => (start, end),
 						_ => return None,
 					},

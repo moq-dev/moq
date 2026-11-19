@@ -10861,17 +10861,19 @@ impl Subscriber {
 		}
 	}
 
-	/// This subscriber's range keyed `key` while its time start waits on the groups held to
-	/// place it, or on its route copies for a reader following them: that time, and the
-	/// exclusive end it resolved to. `None` once it resolved.
+	/// This subscriber's ranges keyed in `keys` while their time starts wait on the groups
+	/// held to place them, or on its route copies for a reader following them: each one's
+	/// time, and the exclusive end it resolved to. `None` for one that resolved.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn waiting_key(&mut self, key: u64) -> Option<(u64, Option<u64>)> {
+	pub(crate) fn waiting_keys(&mut self, keys: impl IntoIterator<Item = u64>) -> Vec<Option<(u64, Option<u64>)>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
 				cursor.sync();
-				cursor.filter.window.waiting_key(key)
+				keys.into_iter()
+					.map(|key| cursor.filter.window.waiting_key(key))
+					.collect()
 			}
-			Inner::Resume(resume, _) => resume.waiting_key(key),
+			Inner::Resume(resume, _) => resume.waiting_keys(keys),
 		}
 	}
 
