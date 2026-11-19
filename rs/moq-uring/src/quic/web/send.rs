@@ -313,7 +313,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 		&self,
 		waiter: &kio::Waiter,
 		offset: &send::Offset,
-	) -> Poll<Result<moq_net::transport::poll::Acked, Self::Error>> {
+	) -> Poll<Result<(), Self::Error>> {
 		let acked = match &self.state {
 			State::Open(stream) => stream.poll_acked(waiter, *offset),
 			State::Finished(stream) => stream.poll_acked(waiter, *offset),
@@ -323,7 +323,7 @@ impl moq_net::transport::poll::SendStream for Stream {
 			},
 		};
 		match std::task::ready!(acked) {
-			Ok(()) => Poll::Ready(Ok(moq_net::transport::poll::Acked::Delivered)),
+			Ok(()) => Poll::Ready(Ok(())),
 			Err(err) => poll_error(&self.close, waiter, err).map(Err),
 		}
 	}

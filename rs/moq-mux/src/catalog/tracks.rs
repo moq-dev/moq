@@ -610,7 +610,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		info: moq_net::track::Info,
 		interval: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<super::hang::Container, C>> {
-		let track = self.catalog.fresh_track(&self.name, info)?;
+		let track = self.catalog.fresh_track(&self.name, info);
 		let rendition = self.catalog.rendition(track.name())?;
 		self.catalog.media(track, container, rendition, None, interval)
 	}

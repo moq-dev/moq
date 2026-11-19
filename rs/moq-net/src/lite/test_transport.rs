@@ -330,15 +330,15 @@ impl poll::SendStream for SinkSend {
 		self.written
 	}
 
-	/// Unsupported until the test acknowledges a prefix with [`Log::ack`].
-	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<poll::Acked, Self::Error>> {
+	/// Ready at once, as a transport without acknowledgments, until the test acknowledges a
+	/// prefix with [`Log::ack`].
+	fn poll_acked(&self, waiter: &kio::Waiter, offset: &u64) -> Poll<Result<(), Self::Error>> {
 		let answer = |acked: Option<u64>| match acked {
-			None => Poll::Ready(poll::Acked::Unsupported),
-			Some(acked) if acked >= *offset => Poll::Ready(poll::Acked::Delivered),
-			Some(_) => Poll::Pending,
+			Some(acked) if acked < *offset => Poll::Pending,
+			_ => Poll::Ready(()),
 		};
-		match self.log.acked.poll(waiter, |acked| answer(**acked).map(drop)) {
-			Poll::Ready(acked) => answer(*acked).map(Ok),
+		match self.log.acked.poll(waiter, |acked| answer(**acked)) {
+			Poll::Ready(_) => Poll::Ready(Ok(())),
 			Poll::Pending => Poll::Pending,
 		}
 	}

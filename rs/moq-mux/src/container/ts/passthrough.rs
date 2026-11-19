@@ -304,7 +304,7 @@ impl<E: super::Catalog> Passthrough<E> {
 		// replaces, or clears it.
 		let measured = mpegts.mux_rate;
 		catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
-		let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video))?;
+		let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video));
 		let media = catalog.media_raw(
 			track,
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),

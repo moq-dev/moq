@@ -739,7 +739,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		Ok(self
 			.broadcast
-			.unique_track(".flv-v", self.catalog.track_info(hang::catalog::PRIORITY.video))?)
+			.unique_track(".flv-v", self.catalog.track_info(hang::catalog::PRIORITY.video)))
 	}
 
 	/// Retire any existing audio track `track_id` and allocate a fresh one.
@@ -749,7 +749,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		Ok(self
 			.broadcast
-			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio))?)
+			.unique_track(".flv-a", self.catalog.track_info(hang::catalog::PRIORITY.audio)))
 	}
 
 	/// Close the current group on every track and reopen at `start`.

@@ -162,7 +162,8 @@ async fn relay(version: Version) -> anyhow::Result<()> {
 	let track = broadcast.broadcast().create_track(
 		"video",
 		Info::default().with_timescale(Timescale::MILLI).with_max_age(None),
-	)?;
+	)
+	.expect("a free name");
 	for sequence in 0..GROUPS {
 		let mut group = track.create_group(moq_net::group::Info { start: sequence })?;
 		group.write_frame(

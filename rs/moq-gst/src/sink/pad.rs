@@ -688,7 +688,9 @@ impl Pad {
 		name: String,
 		structure: &gst::StructureRef,
 	) -> Result<Text> {
-		let request = broadcast.reserve_track(name.clone())?;
+		let request = broadcast
+			.reserve_track(name.clone())
+			.ok_or_else(|| anyhow::anyhow!("the track {name} already exists"))?;
 		let producer = request.accept(hang::container::track_info(hang::catalog::PRIORITY.text));
 
 		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);

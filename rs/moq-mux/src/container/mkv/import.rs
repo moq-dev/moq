@@ -655,10 +655,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			return Err(Error::StreamedCmaf.into());
 		}
 
-		let track = self.broadcast.create_track(
-			self.broadcast.unique_name(suffix),
-			self.catalog.track_info(kind.priority()),
-		)?;
+		let track = self.broadcast.unique_track(suffix,
+			self.catalog.track_info(kind.priority()));
 		// Build the media producer before publishing the rendition. It is fallible (its
 		// timeline track can collide), and a rendition published for a track we then fail
 		// to produce would be advertised to consumers but never served.

@@ -515,13 +515,17 @@ impl<E: CatalogExt> Producer<E> {
 		// Compressed, as `default_track_info` sets: catalog JSON is small and repetitive. Fresh as
 		// long as the media, so a reader as far behind holds each update until its timestamp.
 		let info = hang::Catalog::default_track_info().with_max_age(config.max_age);
-		let hang_track = broadcast.create_track(hang::Catalog::DEFAULT_NAME, info.clone())?;
+		let hang_track = broadcast
+			.create_track(hang::Catalog::DEFAULT_NAME, info.clone())
+			.ok_or_else(|| hang::Error::Duplicate(hang::Catalog::DEFAULT_NAME.to_string()))?;
 		// The MSF track is the same catalog in another encoding, so it takes the same
 		// priority. Leaving it at the default would rank a subscriber reading MSF
 		// below every media track on a relay's upstream leg. It stays uncompressed: MSF is
 		// read by other implementations, which hang's compression decisions don't cover.
 		let msf_info = info.with_compression(moq_net::track::Compression::None);
-		let msf_track = broadcast.create_track(moq_msf::DEFAULT_NAME, msf_info)?;
+		let msf_track = broadcast
+			.create_track(moq_msf::DEFAULT_NAME, msf_info)
+			.ok_or_else(|| hang::Error::Duplicate(moq_msf::DEFAULT_NAME.to_string()))?;
 
 		// Disable deltas for now to stay byte-compatible with consumers that only read snapshots.
 		let json_config = moq_json::snapshot::Config::default().with_deltas(false);
@@ -889,7 +893,7 @@ impl<E: CatalogExt> Producer<E> {
 		&self,
 		name: &str,
 		info: moq_net::track::Info,
-	) -> crate::Result<moq_net::track::Producer> {
+	) -> moq_net::track::Producer {
 		let mut state = take(&self.current);
 		let base = match name.rsplit_once('/') {
 			Some((base, n)) if n.parse::<u64>().is_ok() && state.revisions.contains_key(base) => base,
@@ -898,14 +902,13 @@ impl<E: CatalogExt> Producer<E> {
 		let revision = state.revisions.entry(base.to_string()).or_default();
 		loop {
 			*revision += 1;
-			match self
+			// None when someone else published that name explicitly; try the next.
+			if let Some(track) = self
 				.outputs
 				.broadcast
 				.create_track(format!("{base}/{revision}"), info.clone())
 			{
-				// Someone else published that name explicitly; try the next.
-				Err(moq_net::Error::Duplicate) => continue,
-				track => return Ok(track?),
+				return track;
 			}
 		}
 	}

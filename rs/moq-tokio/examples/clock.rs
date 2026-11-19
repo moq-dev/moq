@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
 				.route(&config.broadcast, moq_net::origin::RouteOptions::hidden())
 				.context("failed to create broadcast")?;
 			let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
-			let track = route.broadcast().create_track(track, info)?;
+			let track = route.broadcast().create_track(track, info).context("the track already exists")?;
 			route.announce().context("failed to announce broadcast")?;
 			let clock = Publisher::new(track);
 

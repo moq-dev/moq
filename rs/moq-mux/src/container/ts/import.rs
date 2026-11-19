@@ -1013,7 +1013,7 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(StreamType::H264) => {
 				let track = self
 					.broadcast
-					.unique_track(".avc3", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
+					.unique_track(".avc3", self.catalog.track_info(hang::catalog::PRIORITY.video));
 				Stream::H264 {
 					split: h264::Split::new(),
 					assembly: {
@@ -1027,7 +1027,7 @@ impl<E: catalog::Catalog> Import<E> {
 			Some(StreamType::H265) => {
 				let track = self
 					.broadcast
-					.unique_track(".hev1", self.catalog.track_info(hang::catalog::PRIORITY.video))?;
+					.unique_track(".hev1", self.catalog.track_info(hang::catalog::PRIORITY.video));
 				Stream::H265 {
 					split: h265::Split::new(),
 					assembly: video::Assembly::new(video::Codec::Hevc),
@@ -1068,7 +1068,7 @@ impl<E: catalog::Catalog> Import<E> {
 					Ok(config) => {
 						let track = self
 							.broadcast
-							.unique_track(".opus", self.catalog.track_info(hang::catalog::PRIORITY.audio))?;
+							.unique_track(".opus", self.catalog.track_info(hang::catalog::PRIORITY.audio));
 						let mut config: hang::catalog::AudioConfig = config.into();
 						config.container = self.container.clone();
 						Stream::Opus(Box::new(OpusStream {
@@ -2251,7 +2251,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	// stream (SCTE-35 cues, teletext, DVB subtitles) is tiny and timing-critical, so
 	// it should never queue behind a media backlog, and it's too small to starve
 	// anything by sitting above one.
-	let track = broadcast.unique_track(".ts", catalog.track_info(hang::catalog::PRIORITY.text))?;
+	let track = broadcast.unique_track(".ts", catalog.track_info(hang::catalog::PRIORITY.text));
 	let name = track.name().to_string();
 
 	// Build the media producer before advertising the track. It is fallible (its
@@ -4106,7 +4106,7 @@ impl<E: CatalogExt> AacStream<E> {
 					let reserved = self.reserved.take().unwrap_or_else(|| self.timebase.reserve());
 					let track = self
 						.broadcast
-						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio))?;
+						.unique_track(".aac", reserved.track_info(hang::catalog::PRIORITY.audio));
 					let aac = aac::Import::new(track, reserved, config)?;
 					self.asc = asc;
 					self.format = format;
@@ -4726,7 +4726,7 @@ impl<E: CatalogExt> LegacyStream<E> {
 					let track = self.broadcast.unique_track(
 						self.descriptor.track_suffix,
 						reserved.track_info(hang::catalog::PRIORITY.audio),
-					)?;
+					);
 					let legacy = legacy::Import::new(self.descriptor, track, reserved, config)?;
 					self.format = format;
 					self.import.insert(legacy)

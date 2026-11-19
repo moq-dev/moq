@@ -416,7 +416,7 @@ fn capture_track<E: CatalogExt>(
 	let ratio = super::backend::always_cuts(options.codec, &options.kind).then_some(REFRESH);
 	let refresh = moq_net::track::Refresh::default().with_ratio(ratio);
 	let info = catalog.track_info(hang::catalog::PRIORITY.video).with_refresh(refresh);
-	Ok(broadcast.unique_track(suffix(options.codec), info)?)
+	Ok(broadcast.unique_track(suffix(options.codec), info))
 }
 
 /// Off macOS and iOS, [`Driver::run`]'s future must stay `Send` so a server can

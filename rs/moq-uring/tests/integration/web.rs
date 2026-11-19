@@ -289,7 +289,7 @@ fn a_clean_finish_closes_a_stream() {
 /// acknowledgment fail.
 #[test]
 fn an_offset_stays_acknowledged_through_a_reset() {
-	use moq_net::transport::poll::{Acked, SendStream};
+	use moq_net::transport::poll::SendStream;
 
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
@@ -327,7 +327,7 @@ fn an_offset_stays_acknowledged_through_a_reset() {
 				kio::wait(|waiter| send.poll_acked(waiter, &payload)),
 			)
 			.await;
-			assert!(matches!(acked, Ok(Acked::Delivered)), "{acked:?}");
+			assert!(matches!(acked, Ok(())), "{acked:?}");
 
 			// The connection is driven on this thread, so nothing acknowledges this before the reset.
 			let written = SendStream::poll_write(&mut send, &kio::Waiter::noop(), b"more");
@@ -336,7 +336,7 @@ fn an_offset_stays_acknowledged_through_a_reset() {
 			SendStream::reset(&mut send, 1);
 			let acked = |offset| SendStream::poll_acked(&send, &kio::Waiter::noop(), offset);
 			assert!(
-				matches!(acked(&payload), Poll::Ready(Ok(Acked::Delivered))),
+				matches!(acked(&payload), Poll::Ready(Ok(()))),
 				"the reset forgot it"
 			);
 			assert!(matches!(acked(&cut), Poll::Ready(Err(_))), "the reset cut it");

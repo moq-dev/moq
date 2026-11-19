@@ -456,8 +456,7 @@ mod tests {
 		selected.preference = -1;
 
 		let track = broadcast
-			.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))
-			.unwrap();
+			.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 		let _producer = Publisher::new(track, catalog.reserve(), selected).unwrap();
 
 		let (_, published) = rendition(&catalog).expect("the rendition publishes before any frame");
@@ -659,8 +658,7 @@ mod finished {
 			let finished: Vec<_> = (0..sources)
 				.map(|_| {
 					let track = broadcast
-						.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))
-						.unwrap();
+						.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 					let mut producer = Publisher::new(track, catalog.reserve(), rendition.clone()).unwrap();
 					for pts in [0, 33_333] {
 						let pts = moq_net::Timestamp::from_micros(pts).unwrap();

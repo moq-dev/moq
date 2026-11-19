@@ -47,7 +47,8 @@ impl StatusPublisher {
 				.with_timescale(moq_net::Timescale::MILLI)
 				// A joiner asks for a fresh snapshot once the deltas outweigh eight of them.
 				.with_refresh(moq_net::track::Refresh::default().with_ratio(8)),
-		)?;
+		)
+		.ok_or_else(|| anyhow::anyhow!("the status track already exists"))?;
 
 		Ok(Self {
 			producer: moq_json::snapshot::Producer::new(producer, moq_json::snapshot::Config::default()),

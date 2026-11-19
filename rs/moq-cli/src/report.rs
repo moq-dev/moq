@@ -54,7 +54,9 @@ impl<T: serde::Serialize> ReportTrack<T> {
 			.with_priority(PRIORITY)
 			.with_compression(moq_net::track::Compression::Deflate)
 			.with_refresh(moq_net::track::Refresh::default().with_ratio(8));
-		let track = broadcast.create_track(name, info)?;
+		let track = broadcast
+			.create_track(name, info)
+			.ok_or_else(|| anyhow::anyhow!("the track {name} already exists"))?;
 		Ok(Self {
 			track: Some(moq_json::snapshot::Producer::new(track.clone(), Default::default())),
 			inner: track,

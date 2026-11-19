@@ -175,7 +175,7 @@ impl Client {
 				let track = match kind {
 					Kind::H264 => {
 						let track =
-							broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
+							broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video));
 						Track::Video(Box::new(Video::H264 {
 							split: h264::Split::new(),
 							import: h264::Import::new(track, reserved.clone(), Default::default())?,
@@ -183,7 +183,7 @@ impl Client {
 					}
 					Kind::H265 => {
 						let track =
-							broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
+							broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video));
 						Track::Video(Box::new(Video::H265 {
 							split: h265::Split::new(),
 							import: h265::Import::new(track, reserved.clone(), Default::default())?,
@@ -195,7 +195,7 @@ impl Client {
 						};
 						let config = aac::config(params.extra_data())?;
 						let track =
-							broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+							broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio));
 						Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
 					}
 				};

@@ -88,13 +88,12 @@ async fn the_connect_count_advances_on_reconnect() {
 	kio::clock::host_time(); // real TCP sockets
 	let (port, mut sessions, _task) = spawn_server().await;
 	let url: url::Url = format!("tcp://localhost:{port}/").parse().expect("parse url");
-	let mut connection = quick_client(Default::default()).connect(url);
+	let connection = quick_client(Default::default()).connect(url);
 
-	let status = kio::clock::timeout(Duration::from_secs(10), connection.status())
+	let connection = kio::clock::timeout(Duration::from_secs(10), connection.established())
 		.await
-		.expect("status timed out")
-		.expect("status failed");
-	assert_eq!(status, moq_tokio::Status::Connected);
+		.expect("connect timed out")
+		.expect("connect failed");
 	assert_eq!(connection.connects(), 1, "the first connect counts 1");
 
 	// Dropping the server's handle closes the session once it was healthy, so the loop redials.
@@ -180,12 +179,12 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 async fn a_protocol_violation_reconnects() {
 	kio::clock::host_time(); // real TCP sockets
 	let (port, mut sessions, task) = spawn_server().await;
-	let mut connection =
+	let connection =
 		quick_client(Default::default()).connect(format!("tcp://127.0.0.1:{port}/").parse::<url::Url>().unwrap());
-	let status = kio::clock::timeout(Duration::from_secs(10), connection.status())
+	let connection = kio::clock::timeout(Duration::from_secs(10), connection.established())
 		.await
+		.unwrap()
 		.unwrap();
-	assert_eq!(status.unwrap(), moq_tokio::Status::Connected);
 	let first = sessions.recv().await.unwrap();
 	kio::clock::sleep(HEALTHY).await;
 	first.abort(moq_net::Error::ProtocolViolation);

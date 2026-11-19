@@ -178,7 +178,7 @@ async fn read_exact(recv: &mut RecvStream, want: usize) -> Result<Bytes, Error> 
 }
 
 /// What `send` answers about the bytes below `offset`, without waiting.
-fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<poll::Acked, Error>> {
+fn acked(send: &SendStream, offset: &moq_quic::send::Offset) -> Poll<Result<(), Error>> {
 	send.poll_acked(&kio::Waiter::noop(), offset)
 }
 
@@ -198,7 +198,7 @@ async fn bytes_count_as_sent_once_the_link_takes_them() {
 		assert_eq!(read_exact(&mut recv, first.len()).await.unwrap(), first, "{version:?}");
 		let went_out = send.offset();
 		assert!(
-			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
 			"{version:?}: the link took it"
 		);
 
@@ -210,7 +210,7 @@ async fn bytes_count_as_sent_once_the_link_takes_them() {
 
 		send.reset(1);
 		assert!(
-			matches!(acked(&send, &went_out), Poll::Ready(Ok(poll::Acked::Sent))),
+			matches!(acked(&send, &went_out), Poll::Ready(Ok(()))),
 			"{version:?}: what went out stays sent"
 		);
 		assert!(

@@ -1657,7 +1657,8 @@ impl Serving {
 									track::Info::default()
 										.with_timescale(info.timescale)
 										.with_priority(info.priority),
-								)?;
+								)
+								.expect("a fresh broadcast holds no track");
 								let cache = producer.consume();
 								let mut serve = TrackServe::new(
 									request.publisher.session.clone(),
@@ -7292,7 +7293,7 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		&self,
 		waiter: &kio::Waiter,
 		offset: &Self::Offset,
-	) -> Poll<Result<crate::transport::poll::Acked, Self::Error>> {
+	) -> Poll<Result<(), Self::Error>> {
 		self.inner.lock().unwrap().stream.poll_acked(waiter, offset)
 	}
 
@@ -15174,7 +15175,7 @@ mod serve_tests {
 		let request = h._broadcast.broadcast().reserve_track("cam").unwrap();
 		let dynamic = request.requests();
 		let fetching = request.consume().fetch_group(4, None);
-		let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
+		let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap().expect("a fresh group");
 		for object in 0..2 {
 			fetched
 				.write_frame(

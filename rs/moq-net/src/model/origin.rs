@@ -10115,7 +10115,7 @@ mod tests {
 
 		let fetch = track.consume().fetch_group(0, None);
 		let fill = requests.requested_fill_group().await.unwrap();
-		let mut fetched = fill.accept(crate::track::Info::timed()).unwrap();
+		let mut fetched = fill.accept(crate::track::Info::timed()).unwrap().expect("a fresh group");
 		fetched
 			.write_frame(crate::Timestamp::ZERO, b"fetched".as_ref())
 			.unwrap();
@@ -12240,7 +12240,7 @@ mod tests {
 		let serving = fetched.clone();
 		let _fetching = kio::clock::sim::spawn(async move {
 			while let Ok(request) = fetches.requested_fill_group().await {
-				let mut group = request.accept(crate::track::Info::timed()).unwrap();
+				let mut group = request.accept(crate::track::Info::timed()).unwrap().expect("a fresh group");
 				for frame in [b"a", b"b", b"c"] {
 					group.write_frame(group.key_time(), frame.as_ref()).unwrap();
 				}

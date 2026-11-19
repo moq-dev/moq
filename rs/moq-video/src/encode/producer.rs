@@ -187,8 +187,8 @@ impl Producer {
 			.map_or(hang::catalog::PRIORITY.video, |lower| lower.priority.saturating_sub(1));
 		let info = catalog.track_info(priority);
 		let track = match track {
-			Some(name) => broadcast.create_track(name, info)?,
-			None => broadcast.unique_track(suffix(config.codec), info)?,
+			Some(name) => broadcast.create_track(name, info).ok_or(moq_net::Error::Duplicate)?,
+			None => broadcast.unique_track(suffix(config.codec), info),
 		};
 		let mut producer = Self::with_track(track, &catalog, config, rendition, bandwidth, lower)?;
 		producer.encoding = Encoding::Open(sink);

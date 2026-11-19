@@ -249,20 +249,12 @@ impl Relay {
 			false => server_config.init()?,
 		};
 
-		// `None` for a stream-only server (no QUIC); any other error is real.
+		// `None` for a stream-only server (no QUIC).
 		#[cfg(uring)]
 		let uring_addr = uring.as_ref().map(crate::uring::Workers::local_addr);
 		#[cfg(not(uring))]
 		let uring_addr: Option<std::net::SocketAddr> = None;
-		let addr = match (workers_addr, uring_addr) {
-			(Some(addr), _) => Some(addr),
-			(None, Some(addr)) => Some(addr),
-			(None, None) => match server.local_addr() {
-				Ok(addr) => Some(addr),
-				Err(moq_tokio::Error::NoBackend(_)) => None,
-				Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
-			},
-		};
+		let addr = workers_addr.or(uring_addr).or_else(|| server.local_addr());
 
 		// The io_uring workers serve QUIC without the demux, and a stream-only relay
 		// has no UDP port at all.

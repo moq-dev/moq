@@ -252,22 +252,6 @@ impl Backoff {
 	}
 }
 
-/// A connection lifecycle transition reported by [`Connection::status`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Status {
-	/// A session connected and its peer accepted the connection credential (the first
-	/// connect, or a reconnect after a drop). On moq-lite 03/04, which never answer the
-	/// credential, the session must stay up past [`Backoff::healthy`] instead. A session the
-	/// peer refuses never reports it.
-	Connected,
-	/// An established session dropped; a reconnect attempt follows.
-	Disconnected,
-	/// The peer sent a GOAWAY; a replacement session is coming up while the old one
-	/// keeps serving.
-	Migrating,
-}
-
 /// What to do with the URI a peer names in its GOAWAY, as `--connect-goaway-redirect`
 /// spells it. See [`moq_net::reconnect::Redirect`] for what each one risks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, usage_rs::ValueEnum, serde::Serialize, serde::Deserialize)]
@@ -463,16 +447,6 @@ struct Draining {
 }
 
 impl Lifecycle {
-	/// What [`Connection::status`] reports: `None` before the first connect and once closed.
-	fn status(&self) -> Option<Status> {
-		match self {
-			Self::Live(live) if live.migrating.is_some() => Some(Status::Migrating),
-			Self::Live(_) => Some(Status::Connected),
-			Self::Offline { .. } => Some(Status::Disconnected),
-			Self::Connecting { .. } | Self::Closed(_) => None,
-		}
-	}
-
 	fn live(&self) -> Option<&Live> {
 		match self {
 			Self::Live(live) => Some(live),
@@ -860,8 +834,8 @@ impl Monitor {
 
 	/// Wait until either presence counter moves past what this handle last reported.
 	///
-	/// Unlike [`Connection::status`], a connect and disconnect that both land before the caller polls
-	/// are not coalesced away: the counters still moved.
+	/// Unlike [`Self::state_changed`], a connect and disconnect that both land before the caller
+	/// polls are not coalesced away: the counters still moved.
 	pub async fn presence_changed(&mut self) -> crate::Result<moq_net::stats::Presence> {
 		kio::wait(|waiter| self.poll_presence(waiter)).await
 	}
@@ -874,8 +848,8 @@ impl Monitor {
 	/// Why the loop is retrying: the error that ended the last session or failed the
 	/// latest dial, or `None` once a session connects.
 	///
-	/// Read it while [`Connection::status`] reports [`Status::Disconnected`]: a redial
-	/// that keeps failing never changes the status, so this is where its reason shows.
+	/// Read it while the phase is [`Phase::Disconnected`]: a redial that keeps failing
+	/// never changes the phase, so this is where its reason shows.
 	/// The loop giving up reports through [`Connection::closed`] instead.
 	pub fn failure(&self) -> Option<Error> {
 		self.state.read().lifecycle.failure().cloned()
@@ -934,9 +908,6 @@ pub struct Connection {
 	recv_bandwidth: moq_net::bandwidth::Weak,
 	/// Divides `recv_bandwidth`, and every session the loop dials sends its viewers' target.
 	viewers: moq_net::bandwidth::Viewers,
-	/// The last status returned by [`status`](Self::status), for change detection.
-	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
-	last_reported: Option<Status>,
 }
 
 /// The connection loop, shared by every [`Connection`] clone and aborted when the
@@ -1034,7 +1005,6 @@ impl Connection {
 			recv_bandwidth,
 			bandwidth,
 			viewers,
-			last_reported: None,
 		}
 	}
 
@@ -1291,7 +1261,7 @@ impl Connection {
 
 	/// Wait until a session is established, handing the connection back.
 	///
-	/// Returns once a session reports [`Status::Connected`], so the first call waits out the
+	/// Returns once a session reports [`Phase::Connected`], so the first call waits out the
 	/// initial dial and the peer's answer to its credential. If the loop gives up before any
 	/// session did, as when the peer refuses the credential, it returns that error instead.
 	/// Useful when a caller wants dial errors up front rather than through
@@ -1306,43 +1276,18 @@ impl Connection {
 		Ok(self)
 	}
 
-	/// The connection status, once it changes from what this handle last reported, or the error
-	/// once the loop has stopped (the give-up error, or a generic one when the handle is dropped).
-	/// The error comes next once the loop stops, even if a status change went unreported.
+	/// Whether a session is serving and no GOAWAY is migrating it, as [`Phase::Connected`].
 	///
-	/// The loop moves between `Connected`, `Disconnected`, and `Migrating` (a GOAWAY handover, where
-	/// the old session is still serving), so successive calls report changes rather than a fixed
-	/// alternation; a status that flips and flips back before the caller polls is reported once.
-	/// This tracks the *current* state, not every edge.
-	#[kio::wrapper]
-	pub fn poll_status(&mut self, waiter: &kio::Waiter) -> Poll<crate::Result<Status>> {
-		let last = self.last_reported;
-		let status = match ready!(self.state.poll(waiter, |state| match state.lifecycle.status() {
-			_ if state.lifecycle.is_closed() => Poll::Ready(Err(terminal(state))),
-			Some(status) if Some(status) != last => Poll::Ready(Ok(status)),
-			_ => Poll::Pending,
-		})) {
-			Ok(res) => res?,
-			Err(state) => return Poll::Ready(Err(terminal(&state))),
-		};
-
-		self.last_reported = Some(status);
-		Poll::Ready(Ok(status))
-	}
-
-	/// Whether a session is currently connected.
-	///
-	/// The synchronous read behind [`status`](Self::status), for callers that just want the current
-	/// state rather than the next change.
+	/// [`Monitor::state_changed`] waits for the next change instead.
 	pub fn connected(&self) -> bool {
-		self.state.read().lifecycle.status() == Some(Status::Connected)
+		matches!(&self.state.read().lifecycle, Lifecycle::Live(live) if live.migrating.is_none())
 	}
 
 	/// How many sessions have been live on this handle: 1 after the first connect,
 	/// one more per reconnect (and per GOAWAY migration, which is a new session too).
 	///
-	/// Advanced in the same write that publishes [`Status::Connected`], so reading
-	/// after a `Connected` status never returns a stale count. Zero only if no
+	/// Advanced in the same write that publishes [`Phase::Connected`], so reading
+	/// after a `Connected` phase never returns a stale count. Zero only if no
 	/// session has connected yet, which [`established`](Self::established) rules out.
 	pub fn connects(&self) -> u64 {
 		self.state.read().connects
@@ -1366,7 +1311,7 @@ impl Connection {
 	/// Observe a GOAWAY from the peer, or `None` while between sessions.
 	///
 	/// The reconnect loop reads the same GOAWAY to drive migration, reported as
-	/// [`Status::Migrating`], and a GOAWAY is a latch rather than a queue, so watching
+	/// [`Phase::Migrating`], and a GOAWAY is a latch rather than a queue, so watching
 	/// it here doesn't take it from the loop. Reach for this when you need the message
 	/// itself: its redirect URI and deadline, or (in one-shot mode, where the loop
 	/// ignores GOAWAY entirely) the fact that one arrived at all.
@@ -1606,6 +1551,24 @@ fn terminal(state: &State) -> Error {
 mod tests {
 	use super::*;
 	use url::Url;
+
+	/// Wait until the connection's phase matches `want`, or the error once the loop stops.
+	async fn reaches(connection: &Connection, want: fn(&Phase) -> bool) -> crate::Result<Phase> {
+		let monitor = connection.monitor();
+		let mut seen = monitor.state();
+		while !want(&seen.phase) {
+			seen = monitor.state_changed(seen.revision).await?;
+		}
+		Ok(seen.phase)
+	}
+
+	fn connected(phase: &Phase) -> bool {
+		matches!(phase, Phase::Connected { .. })
+	}
+
+	fn disconnected(phase: &Phase) -> bool {
+		matches!(phase, Phase::Disconnected { .. })
+	}
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -2229,7 +2192,7 @@ mod tests {
 	/// A first walk that fails ends the loop rather than retrying, so a test of the retry
 	/// loop starts from a healthy session: this serves one past a [`FAST`] healthy bar,
 	/// repoints `host` at a dead address, and ends the session from the server. Returns the connection, already reporting
-	/// [`Status::Disconnected`], the live server's address and its later sessions, and the
+	/// [`Phase::Disconnected`], the live server's address and its later sessions, and the
 	/// server task.
 	async fn redialing(
 		host: &str,
@@ -2243,11 +2206,11 @@ mod tests {
 		let (live, mut accepted, task) = serve(crate::origin::spawn()).await;
 		crate::resolve::hosts::point(host, [live]);
 		config.backoff.healthy = Some((FAST).into());
-		let mut connection = config
+		let connection = config
 			.init(Default::default())
 			.unwrap()
 			.connect(url(&format!("tcp://{host}:1/")));
-		assert_eq!(connection.status().await.unwrap(), Status::Connected);
+		reaches(&connection, connected).await.unwrap();
 		let session = accepted.recv().await.unwrap();
 
 		// Hold the failing listener until the runtime ends: a released port can
@@ -2260,7 +2223,7 @@ mod tests {
 		crate::resolve::hosts::point(host, failing);
 		outlast_fast().await;
 		drop(session);
-		assert_eq!(connection.status().await.unwrap(), Status::Disconnected);
+		reaches(&connection, disconnected).await.unwrap();
 		(connection, live, accepted, task)
 	}
 
@@ -2276,7 +2239,7 @@ mod tests {
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
 		config.backoff.timeout = Some(crate::cli::Bound::NONE);
-		let (mut connection, live, mut accepted, _task) = redialing(HOST, config).await;
+		let (connection, live, mut accepted, _task) = redialing(HOST, config).await;
 		let monitor = connection.monitor();
 
 		// The session's end may be reported first; wait for a failed redial's reason.
@@ -2299,11 +2262,13 @@ mod tests {
 			matches!(&failure, Error::Tcp(err) if matches!(err.as_ref(), crate::tcp::Error::Connect(reason) if !reason.is_empty())),
 			"{failure}"
 		);
-		let transition = futures::FutureExt::now_or_never(connection.status());
-		assert!(transition.is_none(), "a failed redial is no status transition");
+		assert!(
+			disconnected(&connection.monitor().state().phase),
+			"a failed redial changes no phase"
+		);
 
 		crate::resolve::hosts::point(HOST, [live]);
-		assert_eq!(connection.status().await.unwrap(), Status::Connected);
+		reaches(&connection, connected).await.unwrap();
 		assert!(monitor.failure().is_none(), "the connect must clear the failure");
 		let _session = accepted.recv().await.unwrap();
 	}
@@ -2424,14 +2389,16 @@ mod tests {
 		config.backoff.initial = Some((FAST).into());
 		config.backoff.max = Some((FAST).into());
 		config.backoff.healthy = Some((FAST).into());
-		let mut connection = config
+		let connection = config
 			.init(Default::default())
 			.unwrap()
 			.connect(url(&format!("tcp://{addr}/")));
 
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Connected);
+		kio::clock::timeout(WAIT, reaches(&connection, connected))
+			.await
+			.unwrap()
+			.unwrap();
 		outlast_fast().await;
 		connection.auth().abort(moq_net::Error::App(9));
 		session.abort(moq_net::Error::Cancel);
@@ -2491,19 +2458,21 @@ mod tests {
 		};
 
 		// The only dial fails, which ends the loop before anything connected.
-		let mut connection = once().connect(dead().await);
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert!(status.is_err(), "{status:?}");
+		let connection = once().connect(dead().await);
+		let closed = kio::clock::timeout(WAIT, connection.closed()).await.unwrap();
+		assert!(closed.is_err(), "{closed:?}");
 
 		// The session ending in one-shot mode ends the loop.
 		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
-		let mut connection = once().connect(url(&format!("tcp://{addr}/")));
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Connected);
+		let connection = once().connect(url(&format!("tcp://{addr}/")));
+		kio::clock::timeout(WAIT, reaches(&connection, connected))
+			.await
+			.unwrap()
+			.unwrap();
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 		session.abort(moq_net::Error::App(7));
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert!(status.is_err(), "{status:?}");
+		let closed = kio::clock::timeout(WAIT, connection.closed()).await.unwrap();
+		assert!(closed.is_err(), "{closed:?}");
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.
@@ -2963,7 +2932,6 @@ mod tests {
 	/// Its close then reconnects like any drop.
 	#[tokio::test]
 	async fn a_handoff_restart_of_a_young_session_redials_only_once_it_closes() {
-		use futures::FutureExt;
 		const WAIT: Duration = Duration::from_secs(10);
 
 		let origin = crate::origin::spawn();
@@ -2978,9 +2946,11 @@ mod tests {
 			.unwrap()
 			.with_subscriber(subscriber.clone())
 			.with_restart(Restart::Handoff);
-		let mut connection = client.connect(url(&format!("tcp://{addr}/")));
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Connected);
+		let connection = client.connect(url(&format!("tcp://{addr}/")));
+		kio::clock::timeout(WAIT, reaches(&connection, connected))
+			.await
+			.unwrap()
+			.unwrap();
 		let session = kio::clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 
 		session.goaway(moq_net::goaway::Goaway::new()).unwrap();
@@ -2998,19 +2968,19 @@ mod tests {
 				.is_some_and(|goaway| matches!(goaway.poll(&kio::Waiter::noop()), Poll::Ready(Ok(_)))),
 			"the GOAWAY never arrived"
 		);
-		assert_eq!(
-			connection.status().now_or_never().transpose().unwrap(),
-			None,
-			"the loop left the session"
-		);
+		assert!(connection.connected(), "the loop left the session");
 		assert!(accepted.try_recv().is_err(), "redialed while the session served");
 
 		outlast_fast().await;
 		session.abort(moq_net::Error::GoawayTimeout);
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Disconnected);
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Connected);
+		kio::clock::timeout(WAIT, reaches(&connection, disconnected))
+			.await
+			.unwrap()
+			.unwrap();
+		kio::clock::timeout(WAIT, reaches(&connection, connected))
+			.await
+			.unwrap()
+			.unwrap();
 		kio::clock::timeout(WAIT, accepted.recv())
 			.await
 			.expect("never redialed after the close")
@@ -3210,7 +3180,7 @@ mod tests {
 		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 		let client = fallback_client(crate::origin::spawn(), blocked, accepted);
 		let url = url("https://fallback-ends.test/");
-		let mut connection = kio::clock::timeout(WAIT, client.connect(url.clone()).established())
+		let connection = kio::clock::timeout(WAIT, client.connect(url.clone()).established())
 			.await
 			.unwrap()
 			.unwrap();
@@ -3220,10 +3190,10 @@ mod tests {
 		// Past the default healthy bar, so the end redials rather than ending the loop.
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		server.abort(moq_net::Error::Cancel);
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Connected);
-		let status = kio::clock::timeout(WAIT, connection.status()).await.unwrap();
-		assert_eq!(status.unwrap(), Status::Disconnected);
+		kio::clock::timeout(WAIT, reaches(&connection, disconnected))
+			.await
+			.unwrap()
+			.unwrap();
 		assert!(!crate::websocket::won(&url), "the redial would skip QUIC's head start");
 	}
 

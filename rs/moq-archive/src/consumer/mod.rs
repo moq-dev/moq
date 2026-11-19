@@ -242,7 +242,7 @@ impl<S: ObjectStore> Consumer<S> {
 
 	fn apply(&mut self, refreshed: Refreshed) -> Result<()> {
 		for (name, info, index) in refreshed.added {
-			let producer = self.broadcast.create_track(name.as_str(), info)?;
+			let producer = self.broadcast.create_track(name.as_str(), info).ok_or(moq_net::Error::Duplicate)?;
 			let dynamic = producer.requests();
 			self.tracks.insert(
 				name,

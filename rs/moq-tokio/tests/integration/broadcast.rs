@@ -3548,9 +3548,11 @@ async fn reconnect_retries_a_rejection_after_a_healthy_session() {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	config.backoff.healthy = Some(HEALTHY.into());
-	let mut connection = config.init(Default::default()).unwrap().connect(url);
-	let status = kio::clock::timeout(TIMEOUT, connection.status()).await.unwrap();
-	assert_eq!(status.unwrap(), moq_tokio::Status::Connected);
+	let connection = config.init(Default::default()).unwrap().connect(url);
+	let connection = kio::clock::timeout(TIMEOUT, connection.established())
+		.await
+		.unwrap()
+		.unwrap();
 	kio::clock::timeout(TIMEOUT, accepts.recv()).await.unwrap().unwrap();
 	kio::clock::sleep(HEALTHY).await;
 	end_first.send(()).unwrap();

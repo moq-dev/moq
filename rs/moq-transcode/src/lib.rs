@@ -949,7 +949,7 @@ mod tests {
 			.await
 			.map(groups)
 			.expect("the source track closed");
-		let mut group = request.accept(7, None).unwrap();
+		let mut group = request.accept(7, None).unwrap().expect("a fresh group");
 		write_keyframe(&mut group);
 		group.finish().unwrap();
 
@@ -1013,7 +1013,7 @@ mod tests {
 
 		tokio::spawn(async move {
 			while let Ok(request) = source_fetches.requested_fill().await.map(groups) {
-				let mut group = request.accept(request.start().group, None).unwrap();
+				let mut group = request.accept(request.start().group, None).unwrap().expect("a fresh group");
 				write_keyframe(&mut group);
 				group.finish().unwrap();
 			}
@@ -1661,7 +1661,7 @@ mod tests {
 
 		// Release the fetch: it opens its decoder and only now claims output group
 		// 7, which retirement had to leave writable.
-		let mut group = request.accept(7, None).unwrap();
+		let mut group = request.accept(7, None).unwrap().expect("a fresh group");
 		write_keyframe(&mut group);
 		group.finish().unwrap();
 
@@ -1747,7 +1747,8 @@ mod tests {
 
 		let mut group = fresh
 			.accept(7, None)
-			.expect("the fresh request lost to the abandoned encode");
+			.expect("the fresh request lost to the abandoned encode")
+			.expect("a fresh group");
 		write_keyframe(&mut group);
 		group.finish().unwrap();
 

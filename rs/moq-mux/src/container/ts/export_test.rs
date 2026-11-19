@@ -1768,8 +1768,7 @@ async fn export_scte35_roundtrip() {
 	// `Import` (which consumes it); the producer stays alive so the exporter can
 	// subscribe to the retained track.
 	let scte = broadcast
-		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
+		.unique_track(".scte35", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let scte_name = scte.name().to_string();
 	{
 		let track = tscat::Track {
@@ -1909,8 +1908,7 @@ async fn assert_unknown_stream_type(pes: bool) {
 	.unwrap();
 	let reserved = catalog.reserve();
 	let track = broadcast
-		.unique_track(".opaque", hang::container::track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
+		.unique_track(".opaque", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let mut entry = tscat::Track::new(PID);
 	let payload = match pes {
 		true => {
@@ -2013,8 +2011,7 @@ async fn export_pes_packet_roundtrip() {
 	// Build the PES track BEFORE moving `broadcast` into `Import`; the
 	// producer stays alive so the exporter can subscribe to the retained track.
 	let data_track = broadcast
-		.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.video))
-		.unwrap();
+		.unique_track(".data", hang::container::track_info(hang::catalog::PRIORITY.video));
 	let data_name = data_track.name().to_string();
 	{
 		let mut track = tscat::Track::new(DATA_PID);
