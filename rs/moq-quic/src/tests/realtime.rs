@@ -199,7 +199,10 @@ fn run(preset: &Preset, candidate: &Candidate, seed: u64, competing: bool) -> Ou
 			steps.pop();
 		}
 		for flow in &flows {
-			while pair.client_send(flow.client, flow.send).write(&mut &CHUNK[..]).is_ok() {}
+			while matches!(
+				pair.client_send(flow.client, flow.send).try_write(&mut &CHUNK[..]),
+				Poll::Ready(Ok(_))
+			) {}
 		}
 
 		pair.drive_client();
@@ -224,7 +227,7 @@ fn run(preset: &Preset, candidate: &Candidate, seed: u64, competing: bool) -> Ou
 			}
 			let mut stream = pair.server_recv(flow.server, id);
 			let mut chunks = stream.read().unwrap();
-			while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+			while let Poll::Ready(Ok(Some(chunk))) = chunks.try_next(usize::MAX) {
 				flow.read[bin] += chunk.bytes.len() as u64;
 			}
 			chunks.finalize();

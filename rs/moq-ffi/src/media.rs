@@ -328,19 +328,19 @@ pub enum MoqAudioFormat {
 
 /// A single video codec an importer can parse.
 ///
-/// H.264 and H.265 appear twice each because the framing differs, not just the codec: `Avc1`/`Hvc1`
-/// are length-prefixed with an out-of-band config record, while `Avc3`/`Hev1` are Annex-B with the
-/// parameter sets inline.
+/// H.264 and H.265 appear twice each because the input framing differs: `Avc1`/`Hvc1` are
+/// length-prefixed with an out-of-band config record, while `H264`/`H265` are a raw Annex B
+/// elementary stream with the parameter sets inline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum MoqVideoFormat {
 	/// H.264, length-prefixed NALUs with an out-of-band avcC.
 	Avc1,
-	/// H.264, Annex-B with inline SPS/PPS.
-	Avc3,
+	/// H.264, a raw Annex B elementary stream with inline SPS/PPS.
+	H264,
 	/// H.265, length-prefixed NALUs with an out-of-band hvcC.
 	Hvc1,
-	/// H.265, Annex-B with inline parameter sets.
-	Hev1,
+	/// H.265, a raw Annex B elementary stream with inline parameter sets.
+	H265,
 	/// AV1.
 	Av01,
 	/// VP8.
@@ -570,9 +570,9 @@ impl From<MoqVideoFormat> for moq_mux::import::VideoFormat {
 	fn from(format: MoqVideoFormat) -> Self {
 		match format {
 			MoqVideoFormat::Avc1 => Self::Avc1,
-			MoqVideoFormat::Avc3 => Self::Avc3,
+			MoqVideoFormat::H264 => Self::H264,
 			MoqVideoFormat::Hvc1 => Self::Hvc1,
-			MoqVideoFormat::Hev1 => Self::Hev1,
+			MoqVideoFormat::H265 => Self::H265,
 			MoqVideoFormat::Av01 => Self::Av01,
 			MoqVideoFormat::Vp8 => Self::Vp8,
 			MoqVideoFormat::Vp9 => Self::Vp9,
@@ -803,11 +803,11 @@ impl MoqMediaTarget {
 	fn import<R>(
 		self,
 		broadcast: &moq_net::broadcast::Producer,
-		format: impl std::fmt::Display,
+		suffix: &str,
 		import: impl FnOnce(moq_net::track::Request) -> Result<R, MoqError>,
 	) -> Result<R, MoqError> {
 		match self {
-			Self::Named { name } => import(reserve_track(broadcast, name, &format)?),
+			Self::Named { name } => import(reserve_track(broadcast, name, suffix)?),
 			Self::Requested { request } => request.answer(import),
 		}
 	}
@@ -1030,7 +1030,7 @@ impl MoqMediaTrackProducer {
 		let _guard = crate::ffi::enter();
 		broadcast.with_state(|state| {
 			let init: moq_mux::import::AudioInit = init.into();
-			target.import(&state.broadcast, init.format, |request| {
+			target.import(&state.broadcast, init.format.track_suffix(), |request| {
 				let import = moq_mux::import::Track::audio(request, state.catalog.reserve(), init).map_err(|err| {
 					MoqError::Codec {
 						reason: format!("init failed: {err}"),
@@ -1058,7 +1058,7 @@ impl MoqMediaTrackProducer {
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
 			let priority = init.priority;
-			target.import(&state.broadcast, init.format, |request| {
+			target.import(&state.broadcast, init.format.track_suffix(), |request| {
 				let import = moq_mux::import::Track::video(request, state.catalog.reserve(), init).map_err(|err| {
 					MoqError::Codec {
 						reason: format!("init failed: {err}"),
@@ -1099,7 +1099,7 @@ impl MoqMediaContainerProducer {
 impl MoqMediaTrackStreamProducer {
 	/// Import a video byte stream, inferring frame boundaries.
 	///
-	/// Only the self-delimiting formats work here (`Avc3`, `Hev1`, `Av01`); the rest need length
+	/// Only the self-delimiting formats work here (`H264`, `H265`, `Av01`); the rest need length
 	/// prefixes or an out-of-band config record. There is no audio counterpart for the same reason.
 	#[uniffi::constructor]
 	pub fn video(
@@ -1111,7 +1111,7 @@ impl MoqMediaTrackStreamProducer {
 		let init = init.resolve()?;
 		broadcast.with_state(|state| {
 			let priority = init.priority;
-			target.import(&state.broadcast, init.format, |request| {
+			target.import(&state.broadcast, init.format.track_suffix(), |request| {
 				let import =
 					moq_mux::import::TrackStream::video(request, state.catalog.reserve(), init).map_err(|err| {
 						MoqError::Codec {
@@ -1450,13 +1450,13 @@ impl MoqMediaTrackStreamProducer {
 	}
 }
 
-/// Reserve the named track, or a unique one named after the format.
+/// Reserve the named track, or a unique one ending in the format's `suffix`.
 fn reserve_track(
 	broadcast: &moq_net::broadcast::Producer,
 	track: Option<String>,
-	format: &impl std::fmt::Display,
+	suffix: &str,
 ) -> Result<moq_net::track::Request, MoqError> {
-	let name = track.unwrap_or_else(|| broadcast.unique_name(&format!(".{format}")));
+	let name = track.unwrap_or_else(|| broadcast.unique_name(suffix));
 	broadcast.reserve_track(name).map_err(|err| MoqError::Codec {
 		reason: format!("init failed: {err}"),
 	})

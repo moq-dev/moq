@@ -70,6 +70,13 @@ try {
 		assert.equal(frame.group, sequence);
 		assert.equal(new TextDecoder().decode(frame.payload), String(sequence));
 	};
+	// A time start begins at the group containing it: until the replacement's group reaches the
+	// relay, that is the newest older group it still holds, so at most that one comes first.
+	const reach = async (ordered: Moq.Track.Ordered, sequence: bigint) => {
+		let frame = await ordered.readFrame();
+		if (frame && frame.group < sequence) frame = await ordered.readFrame();
+		check(frame, sequence);
+	};
 	write(0n);
 	ordered = subscribe(0, 0n);
 	check(await ordered.readFrame(), 0n);
@@ -91,39 +98,47 @@ try {
 		track = broadcast.createTrack("value", { maxAge: null });
 		const requests = track.requests();
 		write(sequence);
+		const future = sequence + 1n;
+		// Serve every request until the round ends, not only the fill asserted here: a relay
+		// moving its range below the replacement's first group asks where that time starts,
+		// and an unanswered lookup holds back the subscription that asked.
+		const filled = Promise.withResolvers<void>();
+		const serving = (async () => {
+			for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
+				try {
+					if (fill.kind === "lookup") continue; // closed unanswered: no time lookups here
+					if (fill.start < sequence) continue; // history the replacement no longer holds
+					assert.equal(fill.start, future);
+					assert.equal(fill.end, future + 1n);
+					assert.equal(fill.maxDelay, null);
+					const group = fill.accept(future);
+					group.writeFrame({
+						payload: new TextEncoder().encode(String(future)),
+						timestamp: Moq.Time.Timestamp.unscaled(future),
+					});
+					group.finish();
+					filled.resolve();
+				} finally {
+					fill.close();
+				}
+			}
+		})();
+		serving.then(() => filled.reject(new Error("replacement stopped serving its missing group")), filled.reject);
 		const next: Moq.Track.Ordered = subscribe(index + 1, sequence);
 		try {
 			// Explicitly fetch the next group so this always crosses FETCH in both directions.
 			// The live subscription may also ask for the old group's tail, but its fill alone
 			// could be served by SUBSCRIBE, hiding a broken FETCH decoder.
-			const future = sequence + 1n;
 			const fetching: Promise<Moq.Group.Consumer> = active[index + 1]
 				.track("value")
 				.fetchGroup(future, { maxDelay: Duration.millis(Number.MAX_SAFE_INTEGER) });
-			const filling = (async () => {
-				for (let fill = await requests.requestedFill(); fill; fill = await requests.requestedFill()) {
-					try {
-						if (fill.kind === "lookup") continue; // no time lookups here
-						if (fill.start < sequence) continue; // history the replacement no longer holds
-						assert.equal(fill.start, future);
-						assert.equal(fill.end, future + 1n);
-						assert.equal(fill.maxDelay, null);
-						const group = fill.accept(future);
-						group.writeFrame({
-							payload: new TextEncoder().encode(String(future)),
-							timestamp: Moq.Time.Timestamp.unscaled(future),
-						});
-						group.finish();
-						return;
-					} finally {
-						fill.close();
-					}
-				}
-				throw new Error("replacement stopped serving its missing group");
-			})();
-			const [resumed, immediate, fetched] = await Promise.all([continued, next.readFrame(), fetching, filling]);
+			const [resumed, , fetched] = await Promise.all([
+				continued,
+				reach(next, sequence),
+				fetching,
+				filled.promise,
+			]);
 			check(resumed, sequence);
-			check(immediate, sequence);
 			try {
 				assert.equal(fetched.start, future);
 				assert.equal(await fetched.readString(), String(future));
@@ -136,6 +151,7 @@ try {
 			throw err;
 		} finally {
 			requests.close();
+			await serving;
 		}
 		ordered.close();
 		ordered = next;

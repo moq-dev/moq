@@ -38,15 +38,19 @@ children, the two flaws it found,
 [a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md)
 and [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
 whose fix changes the wire,
-[draining dialed links](/quest/m2/multicast/drain-dialed-links.md),
 and two flaws the mesh replay found,
 [feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
 and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
 and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
-the lite-06 mitigations. After the cut come warmth's wire
-([cache-aware routing](/quest/m3/cache-routing/README.md)),
-[route health](/quest/m3/route-health/README.md), and
+the lite-06 mitigations. It does not wait on
+[warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
+only if the port has landed and passed the mesh replay when the cut is made,
+and otherwise moves to the first wip version after it (maintainer,
+2026-11-19). The port is measured and not yet built, pending the maintainer
+(the coordinating session, under the maintainer's delegation, 2026-11-19).
+After the cut come
+[route health](/quest/m3/route-health/README.md) and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 
 Decided 2026-11-15 (maintainer, /quest-plan), after an audit of the lite-07

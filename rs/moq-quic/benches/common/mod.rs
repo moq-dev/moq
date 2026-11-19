@@ -304,14 +304,33 @@ impl Peer {
 	}
 }
 
+/// Writing on a stream without waiting
+pub(crate) trait WriteNow {
+	/// Queue what fits now, returning how many bytes.
+	///
+	/// # Panics
+	/// - when nothing fits, or the write fails
+	fn write_now(&mut self, data: &mut impl Buf) -> usize;
+}
+
+impl WriteNow for send::Stream<'_> {
+	fn write_now(&mut self, data: &mut impl Buf) -> usize {
+		match self.poll_write(&kio::Waiter::noop(), data) {
+			Poll::Ready(Ok(written)) => written,
+			Poll::Ready(Err(err)) => panic!("write failed: {err}"),
+			Poll::Pending => panic!("write blocked"),
+		}
+	}
+}
+
 /// Runs one woken task, forgetting it once it will not wait again.
 fn run(conn: &mut Connection, task: Task, sink: Sink, received: &mut Received, tasks: &mut Tasks) {
 	let done = match task {
 		Task::Read(_, id) => drain(conn, id, sink, received, tasks.waiter(task)),
 		// The application answers STOP_SENDING the way a writer does: it gives up.
-		Task::End(_, id) => match conn.send_stream(id).poll_end(tasks.waiter(task)) {
+		Task::End(_, id) => match conn.send_stream(id).poll_stopped(tasks.waiter(task)) {
 			Poll::Pending => false,
-			Poll::Ready(Ok(send::End::Stopped(code))) => {
+			Poll::Ready(Ok(Some(code))) => {
 				let _ = conn.send_stream(id).reset(code);
 				true
 			}
@@ -343,6 +362,7 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 	let Ok(mut chunks) = stream.read() else {
 		return true;
 	};
+	let mut reset = false;
 	let done = loop {
 		match chunks.poll_next(waiter, usize::MAX) {
 			Poll::Ready(Ok(Some(chunk))) => received.bytes += chunk.bytes.len() as u64,
@@ -351,8 +371,9 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 				break true;
 			}
 			Poll::Pending => break false,
-			Poll::Ready(Err(recv::Error::Reset(_))) => {
+			Poll::Ready(Err(recv::Error::Reset)) => {
 				received.reset += 1;
+				reset = true;
 				break true;
 			}
 			#[allow(
@@ -363,6 +384,10 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 		}
 	};
 	chunks.finalize();
+	// Asking for the reset's code frees the stream.
+	if reset {
+		let _ = stream.received_reset();
+	}
 	done
 }
 
@@ -380,7 +405,7 @@ fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Receiv
 			Poll::Ready(Err(recv::Error::Closed)) => return true,
 			Poll::Ready(Err(err)) => {
 				match err {
-					recv::Error::Reset(_) => received.reset += 1,
+					recv::Error::Reset => received.reset += 1,
 					recv::Error::Evicted => received.evicted += 1,
 					err => panic!("lease failed: {err}"),
 				}
@@ -511,7 +536,7 @@ impl Pair {
 		let client = &mut self.clients[0];
 		let (&ch, conn) = client.conns.iter_mut().next().expect("client has a connection");
 		let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-		assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), data.len());
+		assert_eq!(conn.send_stream(id).write_now(&mut data.clone()), data.len());
 		client.tasks.start(Task::End(ch, id));
 		id
 	}

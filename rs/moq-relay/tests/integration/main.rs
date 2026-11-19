@@ -22,6 +22,7 @@ mod cluster_unknown;
 mod connection;
 #[cfg(feature = "test-support")]
 mod drain;
+mod drain_dialed;
 mod embed;
 #[cfg(feature = "test-support")]
 mod goaway_cluster;

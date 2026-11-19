@@ -152,7 +152,10 @@ fn send(
 			pair.to_server.bottleneck.as_mut().unwrap().set_rate(rate);
 			step = None;
 		}
-		while pair.client_send(client_ch, id).write(&mut &CHUNK[..]).is_ok() {}
+		while matches!(
+			pair.client_send(client_ch, id).try_write(&mut &CHUNK[..]),
+			Poll::Ready(Ok(_))
+		) {}
 
 		pair.drive_client();
 		pair.drive_server();
@@ -163,7 +166,7 @@ fn send(
 		if let Some(recv) = recv {
 			let mut stream = pair.server_recv(server_ch, recv);
 			let mut chunks = stream.read().unwrap();
-			while let Ok(Some(_)) = chunks.next(usize::MAX) {}
+			while let Poll::Ready(Ok(Some(_))) = chunks.try_next(usize::MAX) {}
 			chunks.finalize();
 		}
 

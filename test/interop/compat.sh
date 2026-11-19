@@ -164,8 +164,15 @@ cell() {
 fetch() {
     local relay="$1" pub="$2" sub="$3" js="$4" version="$5"
     RELAY_BIN="$relay" CLI_BIN="$pub" INTEROP_SUB_MOQ="$sub" INTEROP_VERSION="$version" \
-        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 \
+        INTEROP_COMPAT_CLIENT="$js" INTEROP_FETCH_TRACK=1 INTEROP_PUB_ANNEXB="$(annexb_import "$pub")" \
         bash "$DIR/interop.sh" --publishers rust --subscribers rust
+}
+
+# TEMPORARY migration, delete once the released CLI names it `h264`: releases before
+# it name the Annex-B import `avc3`. Probed once, so a release with the rename needs no edit.
+if "$RELEASED" import h264 --help >/dev/null 2>&1; then released_annexb=h264; else released_annexb=avc3; fi
+annexb_import() {
+    [[ "$1" == "$RELEASED" ]] && echo "$released_annexb" || echo h264
 }
 
 # The released CLI's fMP4 import restamps media on its arrival clock, so its tone

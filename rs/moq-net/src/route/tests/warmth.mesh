@@ -1,0 +1,26 @@
+# An example mesh for `benchmark_warmth_mesh` in `warmth.rs`, which documents the format.
+
+relay origin near middle far pop edge-a edge-b
+
+# Cores on a line, with long links from the origin that pass over the cores between,
+# labelled so the report totals them.
+link origin near 6 1 peer
+link near middle 4 1 peer
+link middle far 4 1 peer
+link origin middle 6 6 peer backbone
+link origin far 8 8 peer backbone
+
+# A pop beside the far core, with its own long link.
+link far pop 2 1 peer
+link origin pop 9 4 peer backbone
+
+# Edges mark their cores upstream.
+link edge-a far 1 1 up
+link edge-a middle 2 1 up
+link edge-b pop 1 1 up
+
+publish live origin
+publish back edge-b
+
+read live far near middle pop edge-a edge-b
+read back origin edge-a near

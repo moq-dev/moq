@@ -222,7 +222,7 @@ final class Moq {
   MoqRoute route(String path, {RouteOptions? options}) =>
       session.publish().route(path: path, options: options ?? RouteOptions());
 
-  /// List the paths matching [options] as each becomes present, absent, or offline, or changes availability;
+  /// List the paths matching [options] as each becomes present or absent;
   /// prefixes stay relative to the origin.
   ///
   /// Listen to `announced(...).updates()` for a [Stream] of [AnnounceEvent]
@@ -348,7 +348,7 @@ final class _Grants extends NativeStream<Grant?> {
 
   @override
   bool ended(Object error) =>
-      error is CancelledMoqException || error is ClosedMoqException;
+      error is MoqException && moqErrorIsShutdown(err: error);
 
   @override
   void release() {

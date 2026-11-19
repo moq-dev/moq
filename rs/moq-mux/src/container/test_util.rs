@@ -72,7 +72,7 @@ impl Live {
 		Self::new(".avc3", Self::insert_avc3)
 	}
 
-	fn insert_avc3(catalog: &mut crate::catalog::Producer, name: String) {
+	pub(crate) fn insert_avc3(catalog: &mut crate::catalog::Producer, name: String) {
 		let mut config = VideoConfig::new(H264 {
 			profile: 0x42,
 			constraints: 0xc0,
@@ -588,5 +588,21 @@ impl moq_net::transport::poll::Session for Gated {
 
 	fn metrics(&self) -> impl moq_net::transport::Metrics {
 		self.inner.metrics()
+	}
+}
+
+/// Records whether it was woken since last asked.
+#[derive(Default)]
+pub(crate) struct Woken(std::sync::atomic::AtomicBool);
+
+impl Woken {
+	pub(crate) fn take(&self) -> bool {
+		self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+	}
+}
+
+impl std::task::Wake for Woken {
+	fn wake(self: std::sync::Arc<Self>) {
+		self.0.store(true, std::sync::atomic::Ordering::SeqCst);
 	}
 }

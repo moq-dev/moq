@@ -4,20 +4,23 @@ use super::*;
 
 const CODE: VarInt = VarInt(7);
 
-/// Every chunk a server stream yields, and how it ended
-fn read_all(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, recv::Error) {
+/// Every chunk a server stream yields up to its reset, and the reset's code
+fn read_all(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> (Vec<u8>, VarInt) {
 	let mut recv = pair.server_recv(ch, s);
 	let mut chunks = recv.read().unwrap();
 	let mut data = Vec::new();
-	let end = loop {
+	loop {
 		match chunks.next(usize::MAX) {
 			Ok(Some(chunk)) => data.extend_from_slice(&chunk.bytes),
 			Ok(None) => panic!("stream finished"),
-			Err(e) => break e,
+			Err(e) => {
+				assert_eq!(e, recv::Error::Reset);
+				break;
+			}
 		}
-	};
+	}
 	chunks.finalize();
-	(data, end)
+	(data, recv.received_reset().unwrap().expect("reset"))
 }
 
 /// Opens a client uni stream carrying `data`, delivered and accepted by the server
@@ -99,10 +102,13 @@ fn chunks_end_in_reset() {
 
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
-	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset(CODE)));
-	// The end repeats until the chunks are finalized
-	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset(CODE)));
+	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset));
+	// The end repeats, even after the chunks are finalized
+	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Reset));
 	chunks.finalize();
+	assert_eq!(recv.read().unwrap().next(usize::MAX), Err(recv::Error::Reset));
+	// Until the code is asked for, which frees the stream
+	assert_eq!(recv.received_reset(), Ok(Some(CODE)));
 	assert_eq!(pair.server_recv(server_ch, s).read().err(), Some(recv::Error::Closed));
 }
 
@@ -132,18 +138,16 @@ fn reset_codes() {
 		let s = open(&mut pair, client_ch, server_ch, b"x");
 		pair.client_send(client_ch, s).reset(code).unwrap();
 		pair.drive();
-		assert_eq!(
-			read_all(&mut pair, server_ch, s),
-			(Vec::new(), recv::Error::Reset(code))
-		);
+		assert_eq!(read_all(&mut pair, server_ch, s), (Vec::new(), code));
 
 		let s = open(&mut pair, client_ch, server_ch, b"x");
 		pair.server_recv(server_ch, s).stop(code).unwrap();
 		pair.drive();
 		assert_eq!(
 			pair.client_send(client_ch, s).write(&mut &b"y"[..]),
-			Err(send::Error::Stopped(code))
+			Err(send::Error::Stopped)
 		);
+		assert_eq!(pair.client_send(client_ch, s).stopped(), Ok(Some(code)));
 	}
 }
 
@@ -157,7 +161,12 @@ fn reset_returns_stream_credit_once_observed() {
 	pair.drive();
 	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
 
-	assert_eq!(read_all(&mut pair, server_ch, s).1, recv::Error::Reset(CODE));
+	// Reading up to the reset is not enough: asking for its code frees the stream
+	let mut recv = pair.server_recv(server_ch, s);
+	assert_eq!(recv.read().unwrap().next(usize::MAX), Err(recv::Error::Reset));
+	pair.drive();
+	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
+	assert_eq!(read_all(&mut pair, server_ch, s).1, CODE);
 	pair.drive();
 	assert!(
 		pair.client_streams(client_ch)
@@ -180,8 +189,8 @@ fn blocked() -> (Pair, ConnectionHandle, ConnectionHandle, StreamId) {
 		.open(Dir::Uni, Default::default())
 		.unwrap();
 	assert_eq!(
-		pair.client_send(client_ch, other).write(&mut &b"x"[..]),
-		Err(send::Error::Blocked)
+		pair.client_send(client_ch, other).try_write(&mut &b"x"[..]),
+		Poll::Pending
 	);
 	(pair, client_ch, server_ch, s)
 }
@@ -189,9 +198,10 @@ fn blocked() -> (Pair, ConnectionHandle, ConnectionHandle, StreamId) {
 /// How many bytes a fresh client stream can write
 fn writable(pair: &mut Pair, ch: ConnectionHandle) -> usize {
 	let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
-	pair.client_send(ch, s)
-		.write(&mut &[0; 2 * WINDOW as usize][..])
-		.unwrap_or(0)
+	match pair.client_send(ch, s).try_write(&mut &[0; 2 * WINDOW as usize][..]) {
+		Poll::Ready(Ok(n)) => n,
+		_ => 0,
+	}
 }
 
 #[test]

@@ -22,8 +22,8 @@ The crate splits along two axes:
 - `codec::*` parses each codec's configuration record and provides an
   importer that publishes a raw bitstream into a broadcast.
 
-For format-string dispatch (e.g. `--format avc3`), use `import::Framed` or
-`import::Stream`. For lower-level control, instantiate a codec/container
+For format-string dispatch (e.g. `--format h264`), parse an `import::Format` and use
+`import::Track`, `import::TrackStream`, or `import::Container`. For lower-level control, instantiate a codec/container
 importer directly.
 
 See the [API docs](https://docs.rs/moq-mux/) for the full module map.

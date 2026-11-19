@@ -61,9 +61,34 @@ moq-net):
    boundaries all 14 stand (rejected: all 14 as written, which rules
    link-state out before it is measured, against requirement 14; relaxing 6
    too, which the controller write-up may argue for on evidence).
-5. ✅ **The lite-07 cut does not wait**: the
-   [route-free domain check](/quest/m2/lite07-routeless-domain.md) runs
+5. ✅ **The lite-07 cut does not wait**: a route-free domain check ran
    before it so the frozen wire commits to nothing, and this runs after.
+
+What that check found (2026-11-18, `rs/moq-net/tests/integration/routeless_domain.rs`):
+the frozen lite-07 wire already carries a domain that routes below MoQ, with
+no change. A session declares a Node ID, and so exchanges ROUTE, DEAD, and
+DRAIN, only when it wires both directions with whole grants and proxy on
+(`origin::Producer::node_id`); otherwise each end files the other as scoped
+and claims cross as route-free announces with a chain, drain, and the
+`lost` flag that tells an end from a loss. Two results bind the design:
+
+- Claims inside such a domain need split horizon, as iBGP does: marking
+  every in-domain link `upstream`, so no relay passes one in-domain peer's
+  claim to another, ends a claim everywhere at once on a full mesh, with
+  relays still serving their own clients. That fits the flat dialable arm,
+  with claims sent from the announcer to every relay directly.
+- Without the marks, a cycle echoes: when the publisher ends a claim, each
+  relay holds its neighbour's copy, which no route or revision orders, and
+  shows it unavailable until the debounce lets it go, as offline rather
+  than ended in the implementation as checked. Nothing loops or revives,
+  but readers lose the end's cause.
+  Route-free claims carry no announcer revision or floor (`Msg::Claims` from
+  a peer with no route is refused), so a design that wants cycles inside a
+  domain needs a wire change in a later version.
+- Today a relay leaves routes off by wiring each direction as its own
+  session, or on a two-way session whose grants are not whole or whose
+  proxy is off. A knob that keeps a two-way session with whole grants and
+  proxy on route-free is API for the implementation quest, not this one.
 
 Recommendations:
 
@@ -92,7 +117,6 @@ Recommendations:
 
 ## Related
 
-- [The route-free domain check](/quest/m2/lite07-routeless-domain.md) - keeps lite-07 open to a node layer
 - [Cache-aware multicast](/quest/m2/multicast/README.md) - the requirements and the shipped rule this measures against
 - [Cluster routing](/quest/m3/cluster-routing/README.md) - the node routes warm routes rank against
 - [Cache-aware routing](/quest/m3/cache-routing/README.md) - warm routes, which stay MoQ's either way

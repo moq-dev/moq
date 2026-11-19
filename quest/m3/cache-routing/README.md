@@ -36,10 +36,11 @@ a node that says it carries a broadcast). What stands and what goes:
 - ✅ A pull moves to a cheaper warm copy only from a reader ranked below its
   own: ranked readers, which a TLA+ model shows settle (maintainer,
   2026-11-17, [moq-dev/moq#8986](https://github.com/moq-dev/moq/pull/8986);
-  rejected: settled pulls). Its port started 2026-11-19, and its wire
-  joins lite-07 only if the port is ready when the cut's other blockers
-  clear (maintainer, 2026-11-19); otherwise it lands in the first wip
-  version after the cut.
+  rejected: settled pulls). Its wire joins lite-07 only if the port is
+  ready when the cut's other blockers clear (maintainer, 2026-11-19);
+  otherwise it lands in the first wip version after the cut. The port is
+  measured and not yet built, pending the maintainer (the coordinating
+  session, under the maintainer's delegation, 2026-11-19).
 - The non-goal of "one copy across a multi-hop sparse overlay rather than
   among direct neighbors" is dropped: a mesh is the product this serves.
 

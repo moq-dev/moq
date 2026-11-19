@@ -129,7 +129,8 @@ reports and logs together with `HARNESS_KEEP=1`. For each event:
 For a roll it also reports, per link of the drained relay, whether the neighbour heard a
 GOAWAY before the link closed (DRAIN) or only saw it close (DEAD), read from the
 neighbour's log and, on the new build, its GOAWAY counter. A link the drained relay
-dialed is starred: a relay drains only the sessions it accepted until
-[that is fixed](/quest/m2/multicast/drain-dialed-links.md).
+dialed is starred: a release that predates
+[moq-dev/moq#9158](https://github.com/moq-dev/moq/pull/9158) drains only the sessions it
+accepted, so its starred links read DEAD.
 
 `report.json` holds the same per relay, the worst readers, and every violation.
