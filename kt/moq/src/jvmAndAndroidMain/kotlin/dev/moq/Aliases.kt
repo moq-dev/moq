@@ -222,8 +222,8 @@ fun uniffi.moq.MoqSubscription.Companion.default(): Subscription =
     uniffi.moq.moqSubscriptionDefaults()
 
 /**
- * A span of a track to deliver: from `start` through `end`, or onward when `end` is null. Every
- * end includes its whole group.
+ * A span of a track to deliver: from `start` through `end`, or onward when `end` is null. Every end
+ * includes its whole group.
  */
 typealias Range = uniffi.moq.MoqRange
 
