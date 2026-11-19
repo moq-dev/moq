@@ -22,6 +22,9 @@ pub struct GroupConsumer<F: Container> {
 
 	// How many media frames we have returned, so the first one can be marked a keyframe.
 	index: u64,
+
+	// The latest timestamp decoded, to tell a reordered tail.
+	latest: Option<moq_net::Timestamp>,
 }
 
 impl<F: Container> GroupConsumer<F> {
@@ -32,6 +35,7 @@ impl<F: Container> GroupConsumer<F> {
 			format,
 			pending: VecDeque::new(),
 			index: 0,
+			latest: None,
 		}
 	}
 
@@ -64,14 +68,19 @@ impl<F: Container> GroupConsumer<F> {
 								super::close_duration(last, bound);
 							}
 						} else {
+							self.latest = Some(self.latest.map_or(frame.timestamp, |latest| {
+								super::later(latest, frame.timestamp)
+							}));
 							self.pending.push_back(frame);
 						}
 					}
 				}
-				// A group finished whole times its last frame up to its end.
+				// A group finished whole times its last frame up to its end, when that frame presents
+				// last: the end bounds no reordered tail.
 				None => {
 					if self.format.kind() == super::Kind::Video
 						&& let Some(last) = self.pending.back_mut()
+						&& self.latest.is_none_or(|latest| latest <= last.timestamp)
 						&& let Some(end) = self
 							.group
 							.end()

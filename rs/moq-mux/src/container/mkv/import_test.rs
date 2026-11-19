@@ -1294,14 +1294,17 @@ async fn unlaced_block_duration_does_not_use_track_default() {
 	let snapshot = catalog.snapshot();
 	let name = snapshot.video.renditions.keys().next().unwrap();
 	let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
-	let mut last = None;
+	let (mut last, mut end) = (None, None);
 	while let Some(mut group) = track.recv_group().await.unwrap() {
 		while let Some(frame) = group.read_frame().await.unwrap() {
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
-			last = Some((frame.timestamp.as_micros().unwrap(), frame.payload.len()));
+			last = Some(frame.timestamp.as_micros().unwrap());
 		}
+		end = group.end().zip(group.timescale());
 	}
-	assert_eq!(last, Some((80_000, 0)));
+	assert_eq!(last, Some(40_000));
+	let (end, scale) = end.expect("the group ends whole");
+	assert_eq!(moq_net::Timestamp::new(end, scale).unwrap().as_micros().unwrap(), 80_000);
 }
 
 /// The SPS outranks the Colour element, which still fills what the SPS leaves unsaid: here the

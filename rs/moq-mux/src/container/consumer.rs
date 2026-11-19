@@ -246,7 +246,8 @@ struct Declared {
 	group: u64,
 	/// Where it ended, in its track's timescale.
 	end: Timestamp,
-	/// When the reader finished it, which the wait for a continuing group runs from.
+	/// When the next group is due: its newest frame's arrival plus the media left past that
+	/// frame. The wait for a continuing group runs from here.
 	since: Instant,
 }
 
@@ -844,22 +845,39 @@ impl<F: Container> Consumer<F> {
 							.zip(group.group.timescale())
 							.and_then(|(end, scale)| Timestamp::new(end, scale).ok())
 							.and_then(time);
-						if let Some(end) = group.max_end.max(whole) {
-							self.presented_end = Some(end);
-						}
-						// Media ending whole stops at its end unless the next group continues it.
 						let seq = group.group.start;
-						self.declared = group
+						let declared = group
 							.group
 							.end()
 							.zip(group.group.timescale())
 							.and_then(|(end, scale)| Timestamp::new(end, scale).ok())
-							.filter(|_| matches!(group.content, Content::Media) && self.marked != Some(seq))
-							.map(|end| Declared {
-								group: seq,
-								end,
-								since: kio::clock::now(),
-							});
+							.filter(|_| matches!(group.content, Content::Media));
+						// The group's end times its last frame, as a duration marker did, unless one
+						// already has. A reordered tail does not present last, so the end bounds it not.
+						if let Some(end) = declared
+							&& group.last.is_some_and(|last| Some(last) == group.max_timestamp)
+							&& !std::mem::replace(&mut group.timed, true)
+						{
+							self.group = seq;
+							self.advance(time(end).ok_or(moq_net::Error::TimestampMismatch)?);
+							return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens: false })));
+						}
+						if let Some(end) = group.max_end.max(whole) {
+							self.presented_end = Some(end);
+						}
+						// Media ending whole stops at its end unless the next group continues it, which
+						// is due once the media left past its newest frame has played since that landed.
+						let left = declared
+							.and_then(time)
+							.zip(group.max_timestamp.and_then(time))
+							.map(|(end, newest)| end.saturating_sub(newest))
+							.unwrap_or_default();
+						let since = group.landed.unwrap_or_else(kio::clock::now);
+						self.declared = declared.filter(|_| self.marked != Some(seq)).map(|end| Declared {
+							group: seq,
+							end,
+							since: since.checked_add(left).unwrap_or(since),
+						});
 						self.pending.pop_front();
 						self.current += 1;
 						self.note_group_edge();
@@ -1035,13 +1053,15 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 
-			// No group continued a declared end in time: the media stopped there. A finished track
-			// says so itself, and an export waits for the next group rather than guess.
+			// No group continued a declared end in time: the media stopped there. That is once the
+			// playout clock reaches it, or once a continuing group would be a whole max delay late,
+			// past which the reader would give it up as stale anyway. A finished track says so
+			// itself, and an export waits for the next group rather than guess.
 			if let Some(declared) = &self.declared
 				&& self.prompt
 				&& !(finished && self.pending.is_empty())
 			{
-				let expires = declared.since.checked_add(self.hole_wait());
+				let expires = declared.since.checked_add(self.max_delay);
 				let due = self.playhead.as_ref().and_then(|playhead| playhead.due(declared.end));
 				let now = kio::clock::now();
 				if expires.is_some_and(|at| at <= now) || due.is_some_and(|at| at <= now) {
@@ -1610,6 +1630,15 @@ struct GroupBuffer<F: Container> {
 	markers: VecDeque<(usize, Timestamp)>,
 	delivered: usize,
 
+	// A marker or the group's own end has timed its last frame.
+	timed: bool,
+
+	// The timestamp of the last frame decoded, in decode order.
+	last: Option<Timestamp>,
+
+	// When the newest frame decoded landed.
+	landed: Option<Instant>,
+
 	// The consumer's max buffer, and how much of it this group holds, refunded when it drops.
 	memory: Memory,
 	charged: usize,
@@ -1651,6 +1680,9 @@ impl<F: Container> GroupBuffer<F> {
 			buffered: VecDeque::new(),
 			markers: VecDeque::new(),
 			delivered: 0,
+			timed: false,
+			last: None,
+			landed: None,
 			max_timestamp: None,
 			min_timestamp: None,
 			max_end: None,
@@ -1673,6 +1705,7 @@ impl<F: Container> GroupBuffer<F> {
 			if self.markers.front().is_some_and(|(index, _)| *index <= self.delivered) {
 				let (index, end) = self.markers.pop_front().unwrap();
 				self.refund(MARKER_COST);
+				self.timed = true;
 				return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens: index == 0 })));
 			}
 			if let Some((frame, arrived, cost)) = self.buffered.pop_front() {
@@ -1745,10 +1778,14 @@ impl<F: Container> GroupBuffer<F> {
 				_ => frame.timestamp,
 			});
 
+			if self.max_timestamp.is_none_or(|existing| existing <= frame.timestamp) {
+				self.landed = Some(arrived);
+			}
 			self.max_timestamp = Some(match self.max_timestamp {
 				Some(existing) if existing > frame.timestamp => existing,
 				_ => frame.timestamp,
 			});
+			self.last = Some(frame.timestamp);
 
 			// Furthest presentation point, in wall-clock terms so timestamp and
 			// duration can be at different scales without extra conversions. A frame
@@ -3171,24 +3208,25 @@ mod tests {
 		assert_eq!(items(&mut reader).await, ["0", "20000", "40000"]);
 	}
 
-	/// A push-to-talk stop: the group ends whole and nothing follows. A player reads the end once
-	/// the wait a missing group gets has passed, with no marker on the wire.
+	/// A push-to-talk stop: the group ends whole and nothing follows. A reader reads the end once a
+	/// continuing group would be a whole max delay late, with no marker on the wire. The next group
+	/// was due when the media past the newest frame had played, 20ms after it landed.
 	#[kio::test]
 	async fn a_stop_with_nothing_after_it_reads_as_an_end() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
-		let wait = Duration::from_millis(100);
-		let mut reader = audio_reader(&track, Delay::default().with_min(wait).with_max(Duration::from_secs(2)));
+		let max = Duration::from_millis(100);
+		let mut reader = audio_reader(&track, Delay::default().with_min(Duration::ZERO).with_max(max));
+		let landed = kio::clock::now();
 		write_whole(&mut track, &[0, 20_000], 40_000);
 
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
 		assert!(matches!(reader.read().await.unwrap(), Some(Read::Frame { .. })));
-		let finished = kio::clock::now();
 		let read = reader.read().await.unwrap();
 		assert!(
 			matches!(read, Some(Read::End { group: 0, end }) if end == ts(40_000)),
 			"{read:?}"
 		);
-		assert!(finished.elapsed() >= wait, "the end waits out a continuing group");
+		assert_eq!(landed.elapsed(), Duration::from_millis(20) + max, "due, then a max delay late");
 
 		// The talker resumes later: a fresh group, no gap.
 		write_whole(&mut track, &[5_000_000], 5_020_000);

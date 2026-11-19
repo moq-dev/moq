@@ -193,6 +193,20 @@ impl Muxer {
 			}
 		}
 		let mut out = std::mem::take(out);
+		// A group finished whole times its last sample up to its end, when that sample presents last:
+		// the end bounds no reordered tail.
+		if matches!(self.kind, Kind::Video(_))
+			&& let Some(end) = group
+				.end()
+				.zip(group.timescale())
+				.and_then(|(end, scale)| Timestamp::new(end, scale).ok())
+			&& let Some(latest) = out.iter().map(|frame| frame.timestamp).reduce(crate::container::later)
+			&& let Some(last) = out.last_mut()
+			&& last.duration.is_none()
+			&& latest <= last.timestamp
+		{
+			last.duration = super::export::timestamp_gap(last.timestamp, end, self.timescale)?;
+		}
 		if let Some(first) = out.first_mut() {
 			first.keyframe = true;
 		}
@@ -417,10 +431,10 @@ mod tests {
 		assert_eq!(decoded[1].timestamp.as_micros().unwrap(), 10_033_000);
 	}
 
-	/// A duration marker times the group's last sample through fmp4 (and HLS, which
-	/// uses the same [`Muxer::read`] / [`Muxer::fragment`] path).
+	/// A group's end times its last sample through fmp4 (and HLS, which uses the same
+	/// [`Muxer::read`] / [`Muxer::fragment`] path).
 	#[tokio::test]
-	async fn a_duration_marker_times_the_trailing_sample() {
+	async fn a_group_end_times_the_trailing_sample() {
 		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("v", timed())
@@ -440,7 +454,7 @@ mod tests {
 			.expect("a group");
 		let mut muxer = video_muxer();
 		let frames = muxer.read(&mut group).await.unwrap();
-		assert_eq!(frames.len(), 2, "the marker is not a sample");
+		assert_eq!(frames.len(), 2);
 		assert_eq!(frames[1].duration.unwrap().as_micros().unwrap(), 33_000);
 
 		let fragment = muxer.fragment(0, &frames, None).unwrap();

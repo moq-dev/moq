@@ -1287,8 +1287,8 @@ mod tests {
 				.unwrap();
 		}
 		let _finished = import.finish().unwrap();
-		// The middle group is the established empty-payload discontinuity marker.
-		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 2]);
+		// The break is the first group's end, below where the second starts.
+		assert_eq!(collect_groups(subscriber).await, vec![2, 2]);
 	}
 
 	/// Cutting after every frame is still available, and is what a caller wanting the lowest
@@ -2004,10 +2004,9 @@ mod tests {
 		assert!(enabled());
 		let _finished = import.finish().unwrap();
 
-		// The first group loses the access units still in the splitter at the disable, the
-		// marker breaks the timeline, and the resumed group opens on the keyframe: three
-		// access units and the end marker `finish` bounds the last one with.
-		assert_eq!(collect_groups(subscriber).await, vec![2, 1, 4]);
+		// The first group loses the access units still in the splitter at the disable and ends
+		// there, and the resumed group opens on the keyframe: three access units.
+		assert_eq!(collect_groups(subscriber).await, vec![2, 3]);
 	}
 
 	/// A keyframe dropped while disabled still configures the importer: an AV1 stream may send

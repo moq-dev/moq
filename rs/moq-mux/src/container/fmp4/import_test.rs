@@ -2059,11 +2059,9 @@ async fn segmented_source_groups_per_segment_in(passthrough: bool) {
 	}
 	let _finished = fmp4.finish().unwrap();
 
-	// An unwrapped video group also ends on a Legacy duration marker.
-	let marker = usize::from(!passthrough);
 	assert_eq!(
 		drain_group_frames(&mut video_track),
-		vec![2 + marker; 3],
+		vec![2; 3],
 		"one video group per segment, each carrying its two fragments"
 	);
 	assert_eq!(
@@ -2263,11 +2261,9 @@ async fn a_single_leading_styp_still_segments_on_keyframes_in(passthrough: bool)
 	}
 	let _finished = fmp4.finish().unwrap();
 
-	// An unwrapped video group also ends on a Legacy duration marker.
-	let marker = usize::from(!passthrough);
 	assert_eq!(
 		drain_group_frames(&mut video_track),
-		vec![1 + marker; 4],
+		vec![1; 4],
 		"each keyframe fragment opens its own segment"
 	);
 	assert_eq!(
@@ -2990,14 +2986,11 @@ async fn imports_the_sample_defaults_fixtures_in(passthrough: bool) {
 				let mut index = 0;
 				while let Some(frame) = group.read_frame().await.unwrap() {
 					let frame = hang::container::Frame::decode(frame.payload).unwrap();
-					// The duration marker closing a video group is no sample.
-					if !frame.payload.is_empty() {
-						samples.push((
-							frame.timestamp.as_micros().unwrap() as u64,
-							index == 0,
-							frame.payload.to_vec(),
-						));
-					}
+					samples.push((
+						frame.timestamp.as_micros().unwrap() as u64,
+						index == 0,
+						frame.payload.to_vec(),
+					));
 					index += 1;
 				}
 			}
@@ -3849,10 +3842,9 @@ async fn declared_boundaries_wait_for_sync_samples() {
 				import.decode(&fragment).unwrap();
 			}
 			let _finished = import.finish().unwrap();
-			let marker = usize::from(!passthrough);
 			assert_eq!(
 				drain_group_frames(&mut track),
-				vec![3 + marker, 2 + marker, 1 + marker],
+				vec![3, 2, 1],
 				"passthrough {passthrough}, explicit {explicit}"
 			);
 		}
@@ -3894,7 +3886,7 @@ async fn declared_boundaries_do_not_split_passthrough_fragments() {
 		let _finished = import.finish().unwrap();
 		assert_eq!(
 			drain_group_frames(&mut track),
-			if passthrough { vec![3, 1] } else { vec![3, 3, 2] }
+			if passthrough { vec![3, 1] } else { vec![2, 2, 1] }
 		);
 	}
 }
