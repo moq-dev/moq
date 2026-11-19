@@ -165,6 +165,7 @@ export class Device<Kind extends "audio" | "video"> {
 	}
 
 	/** Manually request permission for the device, ignoring the result. */
+	// fallow-ignore-next-line unused-class-member
 	requestPermission() {
 		if (this.out.permission.peek()) return;
 

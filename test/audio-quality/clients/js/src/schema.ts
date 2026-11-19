@@ -34,8 +34,8 @@ export type Ms = number;
  * - `publisher`, `relay`: other processes, often other machines. A timestamp taken there is reduced
  *   to `viewer` by an offset measured over the same session, NTP style: the offset at the midpoint of
  *   a round trip, with half the round trip as its uncertainty. A stage whose uncertainty exceeds
- *   {@link identityTolerance} is reported unmeasured rather than guessed. The browser lane carries no
- *   such timestamp yet, so every stage that needs one is null here.
+ *   the identity tolerance (see {@link STAGES}) is reported unmeasured rather than guessed. The
+ *   browser lane carries no such timestamp yet, so every stage that needs one is null here.
  */
 export type Clock = "viewer" | "render" | "media" | "publisher" | "relay";
 
@@ -174,9 +174,6 @@ export const METRICS = {
 	},
 } as const satisfies Record<string, MetricSpec>;
 
-/** One of the {@link METRICS} names. */
-export type Metric = keyof typeof METRICS;
-
 /** Every `<metric>_<aggregation>` key, in schema order, so tables read the same every run. */
 export const METRIC_KEYS: string[] = Object.entries(METRICS).flatMap(([name, spec]) =>
 	spec.aggregations.map((aggregation) => `${name}_${aggregation}`),
@@ -220,7 +217,8 @@ export const MAX_RENDER_DRIFT = 0.01;
  * - `device`: leaving the graph to the speaker (`outputLatency` plus `baseLatency`).
  * - `unaccounted`: end-to-end minus the sum of the rest. Named because a large one is the finding.
  *
- * The identity is `sum(stages) == end-to-end`, within {@link identityTolerance}.
+ * The identity is `sum(stages) == end-to-end`, within the identity tolerance: 2 ms or 2% of the
+ * total, whichever is larger.
  */
 export const STAGES = [
 	"capture",
@@ -244,9 +242,6 @@ export type StageSpan = {
 	/** `measured` on the viewer clock, `declared` by the publisher, or `unmeasured`. */
 	source: "measured" | "declared" | "unmeasured";
 };
-
-/** The tolerance on the sum-to-end-to-end identity: the larger of 2 ms or 2% of the total. */
-export const identityTolerance = (endToEnd: Ms): Ms => Math.max(2, endToEnd * 0.02);
 
 /** What reducing one clock to `viewer` took. */
 export type Drift = {

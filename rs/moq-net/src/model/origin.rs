@@ -4793,11 +4793,13 @@ impl FrontServe {
 			route: entry.id,
 			local: entry.local,
 			carried: !entry.instance.is_minted(),
+			claim: entry.node.is_some(),
 		});
-		// No candidate irreversibly ends this front. Leave the cache under the same lock
-		// a lookup takes, before a route can return and a newcomer join the broadcast the
-		// end actions are about to close. Existing requesters keep their original verdict.
-		if best.is_none() {
+		// No candidate irreversibly ends this front, unless it waits on a claim. Leave the
+		// cache under the same lock a lookup takes, before a route can return and a newcomer
+		// join the broadcast the end actions are about to close. Existing requesters keep
+		// their original verdict.
+		if best.is_none() && !self.front.waiting() {
 			table
 				.fronts
 				.remove_if(&(self.path.clone(), self.horizon, self.pin.clone()), |front| {

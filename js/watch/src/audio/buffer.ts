@@ -4,7 +4,7 @@ import { Peak, ringHold, ringSamples } from "./latency";
 import type { Clock, Data, End, Init, Latency, Playing, Reading, Received, Reset, State, Truncate } from "./render";
 
 // The stretch's 30 ms processing window, in microseconds. @internal
-export const WINDOW = 30_000;
+const WINDOW = 30_000;
 
 /**
  * How long an ordered reader waits for a missing group before giving it up as a gap: what the ring

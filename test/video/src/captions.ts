@@ -9,7 +9,7 @@ import { Renderer } from "../../../js/watch/src/text/renderer";
 import { Source } from "../../../js/watch/src/text/source";
 
 /** Caption selection controls exercised by the browser harness. */
-export function captions() {
+function captions() {
 	const origin = new Origin.Producer();
 	const producerRoute = origin.route(Path.from("captions"), { hidden: true });
 	const producer = producerRoute.broadcast;

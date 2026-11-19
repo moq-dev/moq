@@ -874,8 +874,11 @@ export const hooks: {
 	 * subscriber's own record. Mirrors the Rust crate-private `track::Subscriber::record_mut`.
 	 */
 	wire: (subscriber: Subscriber) => WireRecord;
-	/** Whether this subscriber's budget gives up on `key`, judged by its successor; see {@link expireGroup}. */
-	staleAt: (subscriber: Subscriber, key: bigint) => Expiry;
+	/**
+	 * Whether this subscriber's budget, or `budget` in milliseconds when given, gives up on `key`,
+	 * judged by its successor; see {@link expireGroup}.
+	 */
+	staleAt: (subscriber: Subscriber, key: bigint, budget?: number) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
 	cachedGroup: (subscriber: Subscriber, key: bigint, from?: number) => GroupConsumer | undefined;
 	/**
@@ -1011,6 +1014,8 @@ export const hooks: {
 	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
+	/** The drift policy a group carries, if any; see {@link expireGroup}. */
+	groupExpiry: (group: GroupConsumer) => Expiry | undefined;
 	/** The failure that ends a group's reader, as its `closed` would settle, without building that handle. */
 	groupFailed: (group: GroupConsumer) => Error | undefined;
 	/**
@@ -1421,6 +1426,9 @@ export const hooks: {
 	expireGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupExpiry: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupFailed: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -1502,7 +1510,7 @@ export function spreadHash(path: string, instance: string): bigint {
  * spreads a pool's lite-07 claims across paths the same on every node. Mirrors `rendezvous` in
  * `rs/moq-net`.
  */
-export function rendezvousHash(path: string, instance: string): bigint {
+function rendezvousHash(path: string, instance: string): bigint {
 	return fnv(path, new TextEncoder().encode(instance), 0xcbf29ce484222325n);
 }
 
