@@ -606,6 +606,14 @@ impl Anchors {
 	}
 }
 
+/// Where a received copy's publisher started a range counting back, and the latest group it
+/// counted from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RelativeStart {
+	start: u64,
+	latest: u64,
+}
+
 #[derive(Default)]
 pub(crate) struct TrackState {
 	// Ingress stats scope, inherited from a tagged [`broadcast::Producer`] or [`Request`].
@@ -745,6 +753,11 @@ pub(crate) struct TrackState {
 	// a time it holds no group at, but its publisher reports where it resolved one. Replaced
 	// whole as the ranges change, so it holds at most one entry per live range.
 	time_starts: BTreeMap<u64, u64>,
+	// Where the upstream publisher started each of a lite-07 copy's live wire ranges counting
+	// back, by how many groups each counted, with the latest group it counted from: the copy
+	// holds only part of the track, so it can't count back over its own groups. Replaced whole
+	// as the ranges change, like `time_starts`.
+	relative_starts: BTreeMap<u64, RelativeStart>,
 	// Keys the upstream publisher gave up, with why: an incoming SUBSCRIBE_SKIP or
 	// SUBSCRIBE_DROP, or a producer cut. Kept apart from the cache so reclaiming a slot
 	// cannot erase a disposition a relay must forward, and as ranges so a wide one costs
@@ -1118,6 +1131,13 @@ impl Holdings for TrackState {
 	}
 
 	fn back(&self, latest: u64, back: u64) -> Option<u64> {
+		// A received copy counts back as its publisher did, from the latest group the publisher
+		// counted from: a newer one moved the live edge, which the copy then counts from.
+		if let Some(reported) = self.relative_starts.get(&back)
+			&& reported.latest == latest
+		{
+			return Some(reported.start);
+		}
 		let Some(back) = back.checked_sub(1) else {
 			return Some(latest);
 		};
@@ -4766,6 +4786,29 @@ impl Producer {
 		{
 			state.time_starts = starts;
 		}
+	}
+
+	/// Record where the upstream publisher started each of this lite-07 copy's live wire
+	/// ranges counting back, as `(back, start, latest)` triples, replacing the last set. A
+	/// reader's relative anchor counting back `back` groups from `latest` resolves to `start`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn relative_starts(&self, starts: impl IntoIterator<Item = (u64, u64, u64)>) {
+		let starts: BTreeMap<u64, RelativeStart> = starts
+			.into_iter()
+			.map(|(back, start, latest)| (back, RelativeStart { start, latest }))
+			.collect();
+		if let Ok(mut state) = self.modify()
+			&& state.relative_starts != starts
+		{
+			state.relative_starts = starts;
+		}
+	}
+
+	/// Where this copy's readers count a relative start back from now (see
+	/// [`TrackState::latest_live`]).
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn latest_live(&self) -> Option<u64> {
+		self.state.read().latest_live()
 	}
 
 	/// Have this received copy's readers start a time anchor at the group starting there,
@@ -15361,6 +15404,46 @@ mod test {
 		write_group(&producer, 3000);
 		assert_eq!(placed(&mut past), Some((1000, true)));
 		assert_eq!(drain(&mut past), vec![1000, 3000]);
+	}
+
+	/// A lite-07 copy holds only part of the track, so a relative start counts back as its
+	/// publisher reported, not over the groups the copy holds, until a group past the latest
+	/// the publisher counted from moves the live edge.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_counts_a_relative_start_back_as_its_publisher_did() {
+		let back = |back| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Relative(back),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| subscriber.resolved()[0].map(|resolved| resolved.start);
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		for key in [1, 2, 9] {
+			write_group(&producer, key);
+		}
+		producer.report_edge(9);
+		producer.relative_starts([(2, 7, 9)]);
+
+		let mut reported = producer.subscribe(back(2));
+		assert_eq!(placed(&mut reported), Some(7), "the publisher's start, not group 1");
+		let mut unreported = producer.subscribe(back(1));
+		assert_eq!(placed(&mut unreported), Some(2), "counted over the groups held");
+
+		// A newer group moved the live edge, so a later reader counts back from it.
+		write_group(&producer, 10);
+		let mut later = producer.subscribe(back(2));
+		assert_eq!(placed(&mut later), Some(2));
+		assert_eq!(
+			placed(&mut reported),
+			Some(7),
+			"an earlier reader stays where it started"
+		);
 	}
 
 	#[test]
