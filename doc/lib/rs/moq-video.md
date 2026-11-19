@@ -41,6 +41,10 @@ GOP, whichever encoder it lands on, since a V4L2 driver may refuse the request.
 Backends that can
 change bitrate live follow the connection's send estimate while someone
 watches, and return to the configured bitrate while nobody does.
+`encode::Capture::renditions` adds smaller simulcast renditions, each an
+`encode::Rendition` named `video/<name>` and scaled from the captured frame,
+chained through `Options::lower` below the captured one and encoded only while
+watched.
 
 To publish frames from your own source, `encode::Producer` takes raw frames,
 owns the encoder, and follows the same send estimate between frames, like

@@ -485,6 +485,11 @@ impl Synthetic {
 		self.chan.push_native(surface, source);
 	}
 
+	/// Whether the stream read the last frame delivered.
+	pub(crate) fn taken(&self) -> bool {
+		self.chan.taken()
+	}
+
 	/// End the stream, as a device that stops delivering does.
 	pub(crate) fn close(&self) {
 		self.chan.close();
