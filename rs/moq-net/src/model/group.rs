@@ -401,6 +401,11 @@ impl Handoff {
 }
 
 impl Head {
+	/// How many frames it holds from the group's first, or `None` when it starts later.
+	pub(super) fn from_first(&self) -> Option<u64> {
+		(self.start == 0 && !self.entries.is_empty()).then_some(self.entries.len() as u64)
+	}
+
 	/// Roughly what holding it costs: payloads, fields, and their slots.
 	fn bytes(&self) -> u64 {
 		let payload: u64 = self.entries.iter().map(|entry| entry.frame.payload.len() as u64).sum();
@@ -4617,17 +4622,6 @@ impl Consumer {
 	/// One past the last frame the copy read committed.
 	pub(super) fn committed(&self) -> usize {
 		self.cursor.state.read().committed()
-	}
-
-	/// The frames committed to the copy this reads, from the index it started at: what a route
-	/// switch need not ask for again. `None` once aborted, or on a sparse wire, whose object
-	/// IDs are not frame indices.
-	pub(super) fn committed_span(&self) -> Option<std::ops::Range<u64>> {
-		let state = self.cursor.state.read();
-		if state.outcome.error().is_some() || state.sparse() {
-			return None;
-		}
-		Some(state.offset as u64..state.committed() as u64)
 	}
 
 	fn poll_read_frame_copy<T>(

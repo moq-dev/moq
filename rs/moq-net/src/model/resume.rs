@@ -209,7 +209,7 @@ impl Producer {
 				_ => Vec::new(),
 			};
 			ranges.extend(preferences.clamped(reader.newest, None, &resolved).ranges);
-			resumes.push(reader.resume_at(reader.newest));
+			resumes.push(reader.resume_at(reader.newest).map(|(resume, _)| resume));
 		}
 		demand.ranges = ranges;
 		// As in a track's own demand, only when every reader resumes.
@@ -609,6 +609,9 @@ struct Copy {
 	/// The frames of the group at `floor` the reader already held when this copy was asked,
 	/// so it asks for that group from the next frame; see [`Reader::resume_at`].
 	resume: Option<Position>,
+	/// Those frames, lent to this copy once the rest of their group lands here, so it holds
+	/// the group whole for a reader that joins later; see [`Reader::lend_heads`].
+	head: Option<Arc<group::Head>>,
 	/// The reader's ranges [`Self::resolved`] are for.
 	from: Vec<track::Range>,
 	/// Each of those ranges resolved, by index, so clamping never widens one: as the
@@ -1472,7 +1475,7 @@ impl Reader {
 			// Resume where a fresh copy would: a group it buffered while replaced, below the
 			// newest another route handed out, is not handed out.
 			copy.floor = copy.floor.max(self.newest);
-			copy.resume = self.resume_at(copy.floor);
+			(copy.resume, copy.head) = self.resume_at(copy.floor).unzip();
 			let start = copy.start(self.groups.0);
 			if let (Sub::Ready(sub), Some(_)) = (&mut copy.sub, copy.floor) {
 				sub.set_range((
@@ -1488,7 +1491,7 @@ impl Reader {
 			return;
 		}
 		let floor = self.newest;
-		let resume = self.resume_at(floor);
+		let (resume, head) = self.resume_at(floor).unzip();
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
 		let mut wire = self.mirrored.clamped(floor, None, &resolved);
@@ -1499,6 +1502,7 @@ impl Reader {
 			track,
 			floor,
 			resume,
+			head,
 			from: self.mirrored.ranges.clone(),
 			resolved,
 			replaced: false,
@@ -1511,21 +1515,36 @@ impl Reader {
 		self.learn_end(None);
 	}
 
-	/// Where a new copy asked from group `key` resumes it: past the frames of it the copies
-	/// hold from its first, joined across copies, which the reader already has or reads
-	/// locally. A route switch behind the same next hop then sends none of them again, only
-	/// the rest of a group still arriving, and nothing of a finished one. `None` while no
-	/// copy holds its first frame.
-	fn resume_at(&self, key: Option<u64>) -> Option<Position> {
+	/// Where a new copy asked from group `key` resumes it: past the most frames of it a copy
+	/// holds from its first, which the reader already has or reads locally, and those frames.
+	/// A route switch behind the same next hop then sends none of them again, only the rest of
+	/// a group still arriving, and nothing of a finished one. `None` while no copy holds its
+	/// first frame.
+	fn resume_at(&self, key: Option<u64>) -> Option<(Position, Arc<group::Head>)> {
 		let key = key?;
-		let mut spans: Vec<_> = (self.copies.iter())
-			.filter_map(|copy| copy.track.peek_group(key)?.committed_span())
-			.collect();
-		spans.sort_unstable_by_key(|span| span.start);
-		let held = spans
-			.into_iter()
-			.fold(0, |held, span| if span.start <= held { held.max(span.end) } else { held });
-		(held > 0).then_some(Position::new(key, held))
+		(self.copies.iter())
+			.filter_map(|copy| copy.track.peek_group(key)?.handoff().head())
+			.filter_map(|head| Some((head.from_first()?, head)))
+			.max_by_key(|(frames, _)| *frames)
+			.map(|(frames, head)| (Position::new(key, frames), head))
+	}
+
+	/// Lend each copy asked to resume a group the frames it was asked past, once the rest of
+	/// that group lands there, so it holds the group whole for a reader that joins later
+	/// after the copies holding them are gone.
+	fn lend_heads(&mut self) {
+		for copy in &mut self.copies {
+			let (Some(resume), Some(head)) = (copy.resume, &copy.head) else {
+				continue;
+			};
+			let Some(group) = copy.track.peek_group(resume.group) else {
+				continue;
+			};
+			if group.first_frame() > 0 {
+				copy.track.adopt_head(resume.group, head);
+			}
+			copy.head = None;
+		}
 	}
 
 	/// One logical track has one end, whichever route first reports it.
@@ -1740,6 +1759,7 @@ impl Reader {
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<Candidate>>>> {
 		self.sync(waiter);
+		self.lend_heads();
 		if let Some(err) = self.refusal() {
 			return Some(Poll::Ready(Err(err)));
 		}
@@ -2245,6 +2265,7 @@ impl Reader {
 			floor,
 			// Below every group handed out, so the reader holds none of the first.
 			resume: None,
+			head: None,
 			from: self.mirrored.ranges.clone(),
 			resolved,
 			// Bounded from the start: everything it may deliver is older than what the reader
@@ -4093,6 +4114,35 @@ mod test {
 		assert_eq!(routes.subscription(demand.clone(), 2).resume, None);
 		assert_eq!(recv(&mut second).start, 5);
 		assert_eq!(routes.subscription(demand, 2).resume, Some(Position::new(5, 1)));
+	}
+
+	/// A copy asked past the frames a reader held of a group adopts them once the rest lands,
+	/// so a reader joining after the copy that held them is gone reads the group whole.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_resumed_copy_holds_the_group_whole_for_a_later_reader() {
+		let routes = Producer::new();
+		let track = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut holder = subscribe(&track, HOUR);
+		write(&a, 0);
+		assert_eq!(recv(&mut holder).start, 0);
+
+		let b = copy();
+		routes.serve(b.consume());
+		assert_eq!(b.subscription().unwrap().resume, Some(Position::new(0, 1)));
+		let mut rest = b.create_group(group::Info { start: 0 }).unwrap();
+		rest.start_at(1).unwrap();
+		rest.finish().unwrap();
+		assert!(holder.recv_group().now_or_never().is_none(), "handed out twice");
+		drop(a);
+
+		let mut late = subscribe(&track, HOUR);
+		let mut group = recv(&mut late);
+		assert_eq!(group.start, 0);
+		assert_eq!(read(&mut group), Some(b"x".to_vec()));
+		assert_eq!(read(&mut group), None);
 	}
 
 	/// Routes that close without concluding read like a conclusion: a reader stalled
