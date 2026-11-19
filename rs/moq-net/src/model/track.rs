@@ -10864,6 +10864,7 @@ impl Subscriber {
 	/// This subscriber's range keyed `key` while its time start waits on the groups held to
 	/// place it: that time, and the exclusive end it resolved to. `None` once it resolved, or
 	/// for a reader following route copies, which resolve its ranges for it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn waiting_key(&mut self, key: u64) -> Option<(u64, Option<u64>)> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {

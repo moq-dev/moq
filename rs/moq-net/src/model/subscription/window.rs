@@ -476,6 +476,7 @@ impl Window {
 
 	/// The range keyed `key` while its time start waits on the groups held to place it: that
 	/// time, and the exclusive end it resolved to, `None` while it stays open.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub fn waiting_key(&self, key: u64) -> Option<(u64, Option<u64>)> {
 		let span = self.spans.get(&key)?;
 		span.waits_on().map(|time| (time, span.end))
