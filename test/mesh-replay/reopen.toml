@@ -1,0 +1,17 @@
+# The nightly script's faults with every relay on the new build and no roll: a reader behind a
+# reopened link or a crashed relay reads again once its route returns. Lists nothing known.
+start = "new"
+down = "15s"
+quiet = "3s"
+settle = "60s"
+stall = "3s"
+
+[[events]]
+kind = "reopen-link"
+
+[[events]]
+kind = "reopen-relay"
+times = 2
+
+[[events]]
+kind = "kill"

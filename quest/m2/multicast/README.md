@@ -38,12 +38,19 @@ children, the two flaws it found,
 [a reader resuming on a detour learned after its session closed](/quest/m2/multicast/detour-resume.md)
 and [a route moving behind one next hop resending a group](/quest/m2/multicast/resend.md),
 whose fix changes the wire,
-[the mesh replay](/quest/m2/multicast/mesh-replay.md), and
-[draining dialed links](/quest/m2/multicast/drain-dialed-links.md), and on
+and two flaws the mesh replay found,
+[feeding an old relay's subscription mid-roll](/quest/m2/multicast/roll-echo-stall.md)
+and [a reader starving after a lite-07 link reopens](/quest/m2/multicast/reopen-starve.md);
+and on
 [route layer acceptance](/quest/m2/cluster-routes/acceptance.md) retiring
-the lite-06 mitigations. After the cut come warmth's wire
-([cache-aware routing](/quest/m3/cache-routing/README.md)),
-[route health](/quest/m3/route-health/README.md), and
+the lite-06 mitigations. It does not wait on
+[warmth's port](/quest/m3/cache-routing/select.md): its wire joins lite-07
+only if the port has landed and passed the mesh replay when the cut is made,
+and otherwise moves to the first wip version after it (maintainer,
+2026-11-19). The port is measured and not yet built, pending the maintainer
+(the coordinating session, under the maintainer's delegation, 2026-11-19).
+After the cut come
+[route health](/quest/m3/route-health/README.md) and
 [outbound federation](/quest/m3/cluster-routing/federation.md).
 
 Decided 2026-11-15 (maintainer, /quest-plan), after an audit of the lite-07
@@ -77,10 +84,18 @@ The maintainer's requirements, which every child is judged against:
     moq-transport node is always an endpoint.
 12. No global view. With competing claims each node uses its closest, and
     nothing elects a leader.
-    Narrowed 2026-11-18 inside one trusted domain, for judging
-    [the node layer](/quest/m3/node-layer.md): a node may know its domain's
-    topology, but nothing elects a leader and competing claims resolve to
-    the closest.
+    Narrowed 2026-11-18 inside one trusted domain, for judging node layers
+    under MoQ: a node may know its domain's topology, but nothing elects a
+    leader and competing claims resolve to the closest. The node-layer
+    bake-off ([moq-dev/moq#9149](https://github.com/moq-dev/moq/pull/9149))
+    kept the path vector: link state sent more route messages on every link
+    or relay failure but a 12-relay partition (up to 60 times at 32 relays;
+    a publisher moving costs it claim floods, not route messages), with fewer readers unfed after a partition or a hub dying
+    slowly but more after a transit dies, and held fewer copies of each
+    claim. A flat domain over a network that routes underneath sends nothing
+    for link events that network absorbs, but notices a partition only by
+    keep-alives and fans out only with warm routes across every pair of
+    relays.
 13. A secondary route may carry metadata only, so a stalled primary is found
     without waiting on QUIC keep-alives, where a node opts in.
 14. No approach is assumed: earlier attempts are evidence, not constraints.
