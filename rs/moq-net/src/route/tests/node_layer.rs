@@ -411,24 +411,28 @@ impl LayerSim {
 	}
 
 	/// The network changed: forget every path worked out on it. A flat message whose
-	/// path is gone waits, and one waiting sets out on the path that came back, as
-	/// if sent now: no hop moves while the network has no path.
+	/// path is gone waits, and one waiting or whose path changed length sets out on
+	/// the new path as if sent now: no hop moves while the network has no path, and
+	/// none counts toward a path it never crossed.
 	fn reroute(&mut self) {
+		// Every queued channel's path is cached: `send` worked it out, and so did the
+		// last reroute.
+		let chans: Vec<(Chan, Option<usize>)> = (self.queues.iter())
+			.filter(|(_, queue)| !queue.is_empty())
+			.map(|(&chan, _)| (chan, self.paths.get_mut().get(&chan).copied().flatten()))
+			.collect();
 		self.paths.get_mut().clear();
 		if self.layer != Layer::Flat {
 			return;
 		}
 		let now = self.now;
-		let chans: Vec<Chan> = (self.queues.iter())
-			.filter(|(_, queue)| !queue.is_empty())
-			.map(|(&chan, _)| chan)
-			.collect();
-		for (from, to) in chans {
+		for ((from, to), was) in chans {
 			let links = self.links_between(from, to);
 			for (due, _) in self.queues.get_mut(&(from, to)).expect("a queue") {
-				*due = match links {
-					None => None,
-					Some(links) => due.or(Some(now + links.max(1) as u64 - 1)),
+				let fresh = links.map(|links| now + links.max(1) as u64 - 1);
+				*due = match links == was {
+					true => due.or(fresh),
+					false => fresh,
 				};
 			}
 		}
@@ -594,7 +598,15 @@ impl LayerSim {
 				.collect();
 			let live = copies.iter().any(|(_, state)| *state == State::Live);
 			let reachable = self.pick(node, &broadcast).is_some();
-			let ended = !live && copies.iter().all(|(_, state)| *state == State::Ended);
+			// Flat: a copy from an identity its relay restarted past never comes back,
+			// so only the current identities' copies decide an end.
+			let current: Vec<State> = (copies.iter())
+				.filter(|(announcer, _)| {
+					(relay.sessions.get(&node_of(*announcer))).is_none_or(|held| held == announcer)
+				})
+				.map(|&(_, state)| state)
+				.collect();
+			let ended = !live && !current.is_empty() && current.iter().all(|state| *state == State::Ended);
 			let was = relay.shown.get(&broadcast).copied();
 			let kind = match (was, reachable) {
 				(None, true) => Some((Kind::Start, Some(true))),
@@ -1278,6 +1290,9 @@ impl Net for LayerSim {
 			Layer::LinkState => self.chase(from, id),
 			Layer::Flat => {
 				let home = node_of(announcer);
+				if self.underlay(from, home).is_none() {
+					return Some((Vec::new(), false));
+				}
 				let mut hops = if home == from { Vec::new() } else { vec![home] };
 				let done = self
 					.served(home, announcer, &broadcast)
@@ -1401,8 +1416,10 @@ fn tally_copies(lab: &Lab, pulls: &BTreeSet<(Node, Node)>, spans: bool) -> Copie
 	}
 }
 
-/// [`Copies`] as `lab`'s arm pulls: each relay from the first node its pull names,
-/// which is a neighbour unless the arm's sessions `span` the network.
+/// [`Copies`] as `lab`'s arm pulls. Where the arm's sessions `span` the network, each
+/// relay pulls from the first node its pull names; hop by hop, every relay on the way
+/// pulls from the next, since a request a relay forwards by the marks it arrived with
+/// may take another link than the relay's own.
 pub(super) fn copies(lab: &Lab, spans: bool) -> Copies {
 	let (_, id) = lab.mesh.publisher(0);
 	let mut pulls = BTreeSet::new();
@@ -1411,7 +1428,16 @@ pub(super) fn copies(lab: &Lab, spans: bool) -> Copies {
 		if let Some((hops, true)) = lab.net.pulls(relay, id)
 			&& hops.len() >= 2
 		{
-			pulls.insert((hops[0], relay));
+			let relays = &hops[..hops.len() - 1];
+			match spans {
+				true => {
+					pulls.insert((hops[0], relay));
+				}
+				false => {
+					let chain: Vec<Node> = std::iter::once(relay).chain(relays.iter().copied()).collect();
+					pulls.extend(chain.windows(2).map(|pull| (pull[1], pull[0])));
+				}
+			}
 		}
 	}
 	tally_copies(lab, &pulls, spans)
@@ -1516,6 +1542,8 @@ fn link_state_forwards_by_the_marks_a_request_arrived_with() {
 	let (publisher, id) = mesh.publisher(0);
 	assert_eq!(lab.net.chase(r, id), Some((vec![x, y, h, publisher], true)));
 	assert_eq!(lab.net.chase(x, id), Some((vec![h, publisher], true)));
+	// r's copy crosses x to y, beside x's own from h: every link carries one.
+	assert_eq!(copies(&lab, false), Copies { busiest: 1, total: 4 });
 }
 
 /// A flat home that restarts before the feed's news of its death arrives still ends
@@ -1528,6 +1556,25 @@ fn a_flat_home_restarting_reopens_every_session() {
 	lab.restart(mesh.homes[0]);
 	assert!(lab.settle());
 	assert_eq!(lab.check(), Ok(()));
+}
+
+/// A publisher withdrawing after its flat home restarted ends every reader: the old
+/// identity's lost copy never comes back, so it holds no reader on unavailable.
+#[test]
+fn a_flat_end_skips_a_restarted_identity() {
+	let mesh = super::bakeoff::tiers(3, 3, true, 1);
+	let mut lab = Lab::new(Arm::Layer(Layer::Flat), &mesh);
+	lab.restart(mesh.homes[0]);
+	assert!(lab.settle());
+	let (publisher, id) = mesh.publisher(0);
+	let before = lab.net.sent();
+	lab.net.claim(publisher, &Mesh::claim(0), false);
+	assert!(lab.settle());
+	let after = lab.net.sent();
+	assert_eq!((after.unavailable, after.offline), (before.unavailable, before.offline));
+	for relay in 0..mesh.relays {
+		assert_eq!(lab.net.showing(relay, id, &Mesh::claim(0)), None, "relay {relay}");
+	}
 }
 
 /// A flat domain without warm routes pulls every relay's copy from the announcer, so
