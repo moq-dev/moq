@@ -1584,17 +1584,19 @@ export class Producer {
 		};
 		hooks.relativeStarts = (producer, starts) => {
 			// Ranges counting back the same number of groups report together: the one from the newer
-			// latest group, and from the same one, a start over any range holding none, since a start
-			// holds for every range ending past it, or else the furthest of them. Mirrors the Rust
-			// `RelativeStart::merge`.
+			// latest group, and from the same one, the lower start, nearer the group both counted to,
+			// over any range holding none, since a start holds for every range ending past it, or else
+			// the furthest of those. Mirrors the Rust `RelativeStart::merge`.
 			const next = new Map<bigint, { start: CountedStart; latest?: bigint }>();
 			for (const [back, start, latest] of starts) {
 				const last = next.get(back);
 				if (last === undefined || (latest ?? -1n) > (last.latest ?? -1n)) {
 					next.set(back, { start, latest });
-				} else if (latest === last.latest && last.start.at === undefined) {
-					if (start.at !== undefined || (start.past ?? 0n) > (last.start.past ?? 0n))
-						next.set(back, { start, latest });
+				} else if (latest === last.latest) {
+					const lower = start.at !== undefined && (last.start.at === undefined || start.at < last.start.at);
+					const further =
+						last.start.at === undefined && start.past !== undefined && start.past > (last.start.past ?? 0n);
+					if (lower || further) next.set(back, { start, latest });
 				}
 			}
 			const last = producer.#relativeStarts;

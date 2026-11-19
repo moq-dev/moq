@@ -625,13 +625,15 @@ struct RelativeStart {
 
 impl RelativeStart {
 	/// What two ranges counting back the same number of groups report together: the one from
-	/// the newer latest group, and from the same one, a start over any range holding none,
-	/// since a start holds for every range ending past it, or else the furthest of them.
+	/// the newer latest group, and from the same one, the lower start, nearer the group both
+	/// counted to, over any range holding none, since a start holds for every range ending past
+	/// it, or else the furthest of those.
 	fn merge(self, other: Self) -> Self {
 		if self.latest != other.latest {
 			return if self.latest > other.latest { self } else { other };
 		}
 		let start = match (self.start, other.start) {
+			(CountedStart::At(a), CountedStart::At(b)) => CountedStart::At(a.min(b)),
 			(CountedStart::At(start), _) | (_, CountedStart::At(start)) => CountedStart::At(start),
 			(CountedStart::Past(a), CountedStart::Past(b)) => CountedStart::Past(a.max(b)),
 		};
@@ -15847,6 +15849,7 @@ mod test {
 		assert_eq!(at(9, 9).merge(past(7, 9)), at(9, 9));
 		assert_eq!(past(7, 9).merge(at(9, 9)), at(9, 9));
 		assert_eq!(past(7, 9).merge(past(8, 9)), past(8, 9));
+		assert_eq!(at(9, 9).merge(at(7, 9)), at(7, 9), "a wider budget delivered from lower");
 		assert_eq!(at(9, 9).merge(past(7, 10)), past(7, 10), "a newer latest moved the count");
 	}
 
