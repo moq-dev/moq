@@ -9,7 +9,8 @@
 //!
 //! `publisher_update` feeds a lite-07 subscription of `ranges` one-group ranges a stream of
 //! SUBSCRIBE_UPDATEs, each retiring the `edited` oldest ranges and adding as many, then serving
-//! until parked; `steer` moves only the priority. A cost that grows with the live ranges
+//! until parked; `steer` moves only the priority, and `routed_edit` edits on a relay's front,
+//! which mirrors each update into its route's copy. A cost that grows with the live ranges
 //! rather than the edit shows up as a slope over `ranges`.
 //!
 //! `publisher_drop` gives up `drops` ranges of a subscription to `ranges` ranges, plus one
@@ -72,6 +73,14 @@ fn bench_update(c: &mut Criterion) {
 			let run = run.get_or_insert_with(|| UpdateBench::new(ranges));
 			b.iter(|| run.steer());
 		});
+		// The same on a relay's front, which mirrors each update into its route's copy.
+		for edited in EDITED {
+			let mut run = None;
+			group.bench_function(BenchmarkId::new(format!("routed_edit{edited}"), ranges), |b| {
+				let run = run.get_or_insert_with(|| UpdateBench::routed(ranges));
+				b.iter(|| run.edit(edited));
+			});
+		}
 	}
 	group.finish();
 }

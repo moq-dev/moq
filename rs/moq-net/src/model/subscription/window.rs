@@ -476,6 +476,24 @@ impl Window {
 		self.ranges.keys().map(|key| self.resolved_key(*key)).collect()
 	}
 
+	/// Each range resolved, by key, leaving out those [`Self::resolved_key`] can't place.
+	pub fn resolved_by_key(&self) -> BTreeMap<u64, Resolved> {
+		self.ranges
+			.keys()
+			.filter_map(|key| Some((*key, self.resolved_key(*key)?)))
+			.collect()
+	}
+
+	/// The keys of the ranges not yet settled, which keep [`Self::is_settled`] false: waiting
+	/// on a first group, on the groups held to place a start, or on a lookup. Costs those.
+	pub fn unsettled(&self) -> BTreeSet<u64> {
+		let mut keys = self.pending.clone();
+		keys.extend(self.reaching.iter().copied());
+		keys.extend(self.waiting.iter().map(|(_, key)| *key));
+		keys.extend(self.looking.iter().map(|(_, key)| *key));
+		keys
+	}
+
 	/// The exclusive end past every group in range, `None` when one stays open or an anchor
 	/// waits.
 	pub fn end(&self) -> Option<u64> {

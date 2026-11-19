@@ -74,6 +74,18 @@ impl Subscriptions {
 		})
 	}
 
+	/// [`Self::combined`] without its ranges, costing none of them.
+	pub(super) fn terms(&self) -> Option<Subscription> {
+		let (priority, delay, order, feed) = self.scalars()?;
+		Some(Subscription {
+			priority,
+			delay,
+			ranges: Vec::new(),
+			order,
+			feed,
+		})
+	}
+
 	/// The largest delay budget without materializing the subscription's ranges.
 	pub(super) fn max_delay(&self) -> Duration {
 		self.max_delay
@@ -473,6 +485,18 @@ impl Prefs {
 		}
 	}
 
+	/// Key the ranges by `keys`, one per range in the order held, keeping each range: every
+	/// reader resolves them all again.
+	fn rekey(&mut self, keys: impl IntoIterator<Item = u64>) {
+		let ranges = std::mem::take(&mut self.ranges);
+		let count = ranges.len();
+		self.ranges = keys.into_iter().zip(ranges.into_values()).collect();
+		debug_assert_eq!(self.ranges.len(), count, "one key per range");
+		self.revision += 1;
+		self.log.clear();
+		self.base = self.revision;
+	}
+
 	/// Replace every preference, rekeying the ranges by position when they change: every
 	/// reader resolves them all again.
 	fn replace(&mut self, next: Subscription) {
@@ -599,6 +623,14 @@ impl Preferences {
 }
 
 impl Preferences {
+	/// Key the ranges by `keys`, one per range in the order held, as [`Edit`]s then name
+	/// them. The ranges stay as they are, so the aggregate does too.
+	pub(in crate::model) fn rekey(&self, keys: impl IntoIterator<Item = u64>) -> crate::Result<()> {
+		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
+		value.rekey(keys);
+		Ok(())
+	}
+
 	pub(in crate::model) fn same_channel(&self, other: &Self) -> bool {
 		self.0.value.same_channel(&other.0.value)
 	}
