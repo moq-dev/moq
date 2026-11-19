@@ -4205,8 +4205,7 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	let before = drain_frames(&mut export).await;
 	assert_eq!(export.discontinuity(), 0, "no rewind yet");
 	// Ten on the media's 500ms cadence, and the grid's copy in the 100ms periods between.
-	let pats = count_pid(&before, 0x0000);
-	assert!((50..=60).contains(&pats), "PAT {pats} times in 5s");
+	assert_eq!(count_pid(&before, 0x0000), 59, "PAT on its cadence and the grid's");
 	assert_eq!(count_pid(&before, 0x0011), 5, "SDT every second, half its 2s limit");
 
 	// A forward marker must flush the last old frame instead of discarding it.
@@ -4273,12 +4272,12 @@ async fn reordered_video_keeps_the_table_cadence() {
 	let (out, discontinuities) = export_reordered_with_sdt().await;
 
 	// 125 frames span 0..4.96s: ten 500ms slots and five 1s SDT slots, one emission each, and
-	// the grid's copy of the PAT in at most each of its fifty 100ms periods.
+	// the grid's copy of the PAT in the 100ms periods between the slots' copies.
 	assert_eq!(discontinuities, 0, "a reorder is not a rewind");
-	let pats = count_pid(&out, 0x0000);
-	assert!(
-		pats <= 10 + 50,
-		"PAT {pats} times: once per slot and period, not per reorder"
+	assert_eq!(
+		count_pid(&out, 0x0000),
+		48,
+		"PAT once per slot and period, not per reorder"
 	);
 	assert_eq!(count_pid(&out, 0x0011), 5, "SDT once per 1s slot, not per reorder");
 	// The SPS declares no reorder depth, so the first B-frame grows the reorder delay. It is
@@ -4302,8 +4301,9 @@ async fn table_repeats_keep_inside_their_limits_on_the_wire() {
 	}
 }
 
-/// The longest gap on the wire between two sections starting on `pid`, each packet timed by
-/// the PCRs either side of it, as an analyser reads arrival on a PCR-paced stream.
+/// The longest gap on the wire between two sections starting on `pid`, or from the last to the
+/// last PCR, each packet timed by the PCRs either side of it, as an analyser reads arrival on a
+/// PCR-paced stream.
 fn longest_wire_gap(frames: &[Frame], pid: u16) -> Duration {
 	let ts: Vec<u8> = frames.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
 	let pcrs = pcr_positions(&ts);
@@ -4313,13 +4313,14 @@ fn longest_wire_gap(frames: &[Frame], pid: u16) -> Duration {
 		let ticks = p0 as f64 + (p1 - p0) as f64 * (index as f64 - i0 as f64) / (i1 - i0) as f64;
 		Duration::from_secs_f64(ticks / 27_000_000.0)
 	};
-	let starts: Vec<Duration> = ts
+	let mut starts: Vec<Duration> = ts
 		.chunks(188)
 		.enumerate()
 		.filter(|(_, p)| p[1] & 0x40 != 0 && ((((p[1] & 0x1f) as u16) << 8) | p[2] as u16) == pid)
 		.map(|(index, _)| at(index))
 		.collect();
 	assert!(starts.len() > 1, "PID {pid:#06x} repeats");
+	starts.push(at(pcrs.last().unwrap().0));
 	starts.windows(2).map(|pair| pair[1] - pair[0]).max().unwrap()
 }
 

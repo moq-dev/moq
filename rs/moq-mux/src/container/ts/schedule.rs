@@ -875,14 +875,22 @@ impl Schedule {
 	/// Set the program tables as they stand. Every unit of them still to begin lays them, and
 	/// takes over their clock PID, so a change reaches each copy not yet on its way.
 	pub fn set_psi(&mut self, psi: Psi) {
-		if self.psi.as_ref() != Some(&psi) {
-			self.psi = Some(psi);
+		if self.psi.as_ref() == Some(&psi) {
+			return;
+		}
+		// Dropping the break flag once its copy is on its way revises nothing on the wire.
+		let revised = self
+			.psi
+			.as_ref()
+			.is_none_or(|old| old.packets != psi.packets || old.clock != psi.clock);
+		self.psi = Some(psi);
+		if revised {
 			self.stated += 1;
 			self.revising = true;
 			// A repeat not yet begun would follow the new tables out with the old.
 			self.units.retain(|unit| !unit.repeat || unit.sent > 0);
-			self.retable();
 		}
+		self.retable();
 	}
 
 	/// Lay the tables as they stand in each unit of them still to begin, the first flagging
@@ -2316,6 +2324,46 @@ mod tests {
 				*pats.last().unwrap() <= last,
 				"{rate:?}: the clock runs on with no tables"
 			);
+		}
+	}
+
+	/// Dropping the break flag once the flagged copy is on its way, as the export does, is no
+	/// revision: the grid repeats the tables from the next period.
+	#[test]
+	fn the_grid_repeats_on_after_the_flagged_copy() {
+		let mut schedule = Schedule::new(Duration::ZERO);
+		schedule.set_rate(Some(RATE));
+		schedule.set_tables(100);
+		schedule.set_clock(1);
+		schedule.set_buffer(1, VIDEO);
+		let psi = |flagged: bool| Psi {
+			packets: marked_tables(1, 1),
+			flagged: flagged.then(|| marked_tables(2, 1)),
+			clock: 1,
+		};
+		schedule.set_psi(psi(true));
+		for ms in (0..2_000).step_by(40) {
+			if ms % 1_000 == 0 {
+				schedule.lead(Tables {
+					rate: Some(RATE),
+					added: Vec::new(),
+				});
+			}
+			schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
+		}
+		let mut pats = Vec::new();
+		while let Some(slot) = schedule.next(Some(slot(ms(4_000)))).unwrap() {
+			if slot.begun > 0 && pats.is_empty() {
+				schedule.set_psi(psi(false));
+			}
+			let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
+			if packets.iter().any(|packet| pid(packet) == 0) {
+				pats.push(slot.index);
+			}
+		}
+		assert!(pats.len() > 2, "the grid repeats the tables");
+		for pair in pats.windows(2) {
+			assert!(pair[1] - pair[0] <= REPEAT_SLOTS, "tables {pair:?} slots apart");
 		}
 	}
 
