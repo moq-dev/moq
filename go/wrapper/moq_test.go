@@ -1375,21 +1375,31 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if string(frame.Payload) != string(payload) || durationOf(t, frame.Timestamp) != 20*time.Millisecond {
 		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
 	}
-	// The explicit pause marker is an encoder end even while the track stays open. The marker
-	// is a group of its own, and group starts strictly increase, so it ends one microsecond past
-	// the frame's group: the producer doesn't parse how long the packet runs.
+	// A discontinuity ends the frame's group whole where its media does, so a frame a second later
+	// resumes after a pause: the reader reads an encoder end between them, even while the track
+	// stays open.
 	if err := media.Discontinuity(); err != nil {
 		t.Fatal(err)
 	}
-	if err := media.Finish(); err != nil {
+	if err := media.WriteFrame(moq.Frame{Payload: payload, Timestamp: ts(1_000_000)}); err != nil {
 		t.Fatal(err)
 	}
 	end, err := mediaConsumer.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value, ok := end.(moqmedia.ReadEnd); !ok || durationOf(t, value.End) != 20*time.Millisecond+time.Microsecond {
-		t.Fatalf("expected encoder end at 20001us, got %T %+v", end, end)
+	if value, ok := end.(moqmedia.ReadEnd); !ok || durationOf(t, value.End) <= 20*time.Millisecond || durationOf(t, value.End) >= time.Second {
+		t.Fatalf("expected an encoder end between the frames, got %T %+v", end, end)
+	}
+	resumed, err := mediaConsumer.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, ok := resumed.(moqmedia.ReadFrame); !ok || durationOf(t, value.Frame.Timestamp) != time.Second {
+		t.Fatalf("expected the resumed frame at 1s, got %T %+v", resumed, resumed)
+	}
+	if err := media.Finish(); err != nil {
+		t.Fatal(err)
 	}
 	if next, err := mediaConsumer.Next(ctx); next != nil || err != nil {
 		t.Fatalf("after finish: %v %v", next, err)

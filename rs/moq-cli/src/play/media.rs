@@ -1729,8 +1729,14 @@ mod tests {
 			keyframe,
 			payload: Bytes::from_static(b"picture"),
 		};
+		// Each packet states its duration, as an encoder's does, so a track's end is where its media
+		// stops: the resume starts there on both tracks, which continues them in step.
+		let timed = |mut pcm: moq_mux::container::Frame| {
+			pcm.duration = Some(moq_net::Timestamp::from_scale(PACKET, SAMPLE_RATE as u64).unwrap());
+			pcm
+		};
 		for index in 0..3 {
-			let mut pcm = packet(index, 0.25);
+			let mut pcm = timed(packet(index, 0.25));
 			pcm.keyframe = index == 0;
 			audio.write(pcm).unwrap();
 			video.write(picture(index, index == 0)).unwrap();
@@ -1743,7 +1749,7 @@ mod tests {
 			video.discontinuity().unwrap();
 		}
 		for index in 0..3 {
-			let mut pcm = packet(index + 3, 0.5);
+			let mut pcm = timed(packet(index + 3, 0.5));
 			pcm.keyframe = index == 0;
 			audio.write(pcm).unwrap();
 			video.write(picture(index + 3, video_end && index == 0)).unwrap();
