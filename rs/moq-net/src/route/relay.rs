@@ -2146,8 +2146,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			record.epoch = record.epoch.max(epoch);
 			record.origins.extend(origins);
 			record.peers.extend(peers);
-			// Its publisher ended it, wherever a copy was presented.
-			self.ended.insert(here.clone());
+			// The reader there ends at once only if it shows a copy of the ended claim: one
+			// showing another claim that went too, such as an exact one lost, waits out the
+			// debounce.
+			if (self.reader.get(instance.clone(), &here.0)).is_some_and(|shown| shown.item.above() == of.1) {
+				self.ended.insert(here.clone());
+			}
 			self.dirty.insert(here.clone());
 			held.push(here);
 		}
@@ -4124,6 +4128,40 @@ mod tests {
 		router.recv(2, ended).unwrap();
 		assert!(!shown(&router, "live/hd"), "node 4's copy is of the ended claim");
 		assert!(shown(&router, "live/hd/a"), "node 4's own claim there is no copy");
+	}
+
+	/// A reader below an ended claim that shows another claim there, lost in the same
+	/// message, shows it unavailable for the debounce rather than ending it, while the
+	/// ended claim's copy there stays held back.
+	#[test]
+	fn a_claim_lost_beside_an_ended_one_waits_out_the_debounce() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		router.recv(4, route(4, 4, 2)).unwrap();
+		let live = |path: &str, chain: Vec<Id>, above: u64| {
+			let Change::Live(claim) = chained(chain) else {
+				unreachable!("a live claim");
+			};
+			let item = Run { epoch: 0, above };
+			((p(path), 7), Change::Live(Claim { item, ..claim }))
+		};
+		let claims = |origin: Id, changes, floor: Rev| Msg::Claims {
+			origin: node(origin),
+			changes,
+			floor,
+		};
+		let changes = vec![live("live", vec![9, 2], 0), live("live/hd", vec![8, 2], 0)];
+		router.recv(2, claims(2, changes, 1)).unwrap();
+		router.recv(4, claims(4, vec![live("live/hd", vec![9, 4], 1)], 1)).unwrap();
+		let shown = |router: &Router<usize, u64, Run>| router.shown().get(&(7, p("live/hd"))).cloned();
+		assert_eq!(shown(&router).map(|shown| shown.item.above), Some(0));
+
+		let changes = vec![((p("live"), 7), Change::Ended), ((p("live/hd"), 7), Change::Lost)];
+		router.recv(2, claims(2, changes, 2)).unwrap();
+		let shown = shown(&router).expect("the lost claim shows for the debounce");
+		assert_eq!((shown.item.above, shown.available), (0, false));
 	}
 
 	/// A publisher that withdraws its claim and announces it again at the same epoch, as
