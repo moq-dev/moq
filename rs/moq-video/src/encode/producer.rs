@@ -417,16 +417,16 @@ impl Producer {
 	}
 }
 
-/// What the capture driver needs beyond the public API: it opens and releases the encoder with
-/// its camera rather than on the first frame and on a drain.
+/// What the capture driver needs beyond the public API: it sizes the encoder to each camera it
+/// opens, and releases the encoder with its camera rather than on a drain.
 #[cfg(feature = "capture")]
 impl Producer {
-	/// Open an encoder for `config`, a capture's source reopened at whatever mode it negotiated.
+	/// Encode at `config` from the next frame written, for a capture's source reopened at
+	/// whatever mode it negotiated. Call it once the encoder stopped: the next write opens one.
 	///
 	/// The ceiling and its claim follow the mode, and rate control starts over from the ceiling,
-	/// since what the link did while the source was closed says little about now.
-	pub(crate) async fn open(&mut self, mut config: Config) -> Result<(), Error> {
-		let sink = Sink::open(&config).await?;
+	/// enabled, since what the link did while the source was closed says little about now.
+	pub(crate) fn configure(&mut self, mut config: Config) -> Result<(), Error> {
 		let ceiling = config.resolved_bitrate();
 		config.bitrate = Some(ceiling);
 		self.config = config;
@@ -440,12 +440,19 @@ impl Producer {
 				policy(ceiling, self.lower.as_ref()),
 			));
 		}
+		if let Encoding::Disabled = self.encoding {
+			self.publisher.set_enabled(true)?;
+		}
+		self.encoding = Encoding::Idle;
 		self.target = rate::Target::Enabled(ceiling);
 		self.watched = false;
+		// Another mode can land on another backend, which may retune where this one refused.
+		self.ceiling_only = false;
+		self.resume_retry = None;
 		self.publisher.report_bitrate(ceiling);
-		self.encoding = Encoding::Open(sink);
 		Ok(())
 	}
+
 
 	/// Close the encoder without draining it and mark the break, for a capture that cancelled an
 	/// encode mid-call: the encoder refuses every call after that, so it cannot drain.
