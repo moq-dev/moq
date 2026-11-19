@@ -5754,7 +5754,11 @@ mod test {
 			.with_range(60..);
 		// The window resolves before any group is read.
 		assert_eq!(peek(&mut sub, true).key(), 100);
-		let starts: Vec<_> = sub.resolved().into_iter().map(|at| at.map(|at| at.start)).collect();
+		let starts: Vec<_> = sub
+			.resolved_keys([0, 1])
+			.into_iter()
+			.map(|at| at.map(|at| at.start))
+			.collect();
 		assert_eq!(starts, [Some(10), Some(100)]);
 
 		// The replacement places time 100 at group 80, the newest it holds at or before it, which
