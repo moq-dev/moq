@@ -142,9 +142,9 @@ Timestamps are the page's media clock, `MediaClock.now()`, a `Duration` since
 `@moq/clock`'s origin, so every source shares one timeline. The catalog's `sync.clock` maps it to
 wall time. The media clock runs at the wall clock's rate, slewing toward it by at most 500 ppm and
 jumping forward across a suspend, so camera and screen video wall times stay on UTC however long
-the page publishes. Microphone audio counts its own samples from a media clock start, taking the
-same suspend jumps but not the slew, so over hours it drifts against video by the microphone
-clock's error against UTC. A file is placed on the media clock where it starts, keeps its own spacing
+the page publishes. Microphone audio counts its own samples, taking the same suspend jumps, and
+resamples by up to 2000 ppm to keep that count on the media clock, so it stays within a frame of
+its video over hours. A file is placed on the media clock where it starts, keeps its own spacing
 after that, and jumps with a suspend. Stamp your own tracks (e.g. text cues) with
 `MediaClock.now()` to stay in sync.
 

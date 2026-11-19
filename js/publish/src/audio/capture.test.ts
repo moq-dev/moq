@@ -295,18 +295,14 @@ function installGatedWebAudio(addModule: () => Promise<void> = () => Promise.res
 
 	class GatedWorklet {
 		port = Object.assign(new EventTarget(), { start: () => {} });
-		zero: number;
-		constructor(_context: unknown, _name: string, options?: AudioWorkletNodeOptions) {
-			this.zero = options?.processorOptions?.zero;
+		constructor() {
 			worklets.push(this);
 		}
 		connect(): void {}
 		disconnect(): void {}
 		// What the processor posts once the graph renders a quantum.
-		render(timestamp = 0): void {
-			this.port.dispatchEvent(
-				new MessageEvent("message", { data: { timestamp, channels: [new Float32Array(128)] } }),
-			);
+		render(): void {
+			this.port.dispatchEvent(new MessageEvent("message", { data: { channels: [new Float32Array(128)] } }));
 		}
 	}
 
@@ -389,12 +385,16 @@ test("captures once a gesture resumes a context built before one", async () => {
 	expect(capture.blocked.peek()).toBe(false);
 	expect(webaudio.worklets.length).toBe(1);
 
-	// The worklet is anchored when the graph starts, not when the source appeared, so audio stays on
-	// the same media clock as video however long the page waited for the click.
-	expect(webaudio.worklets[0].zero).toBeGreaterThanOrEqual(before);
-
+	const effect = new Effect();
+	const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
 	webaudio.worklets[0].render();
 	expect(capture.out.format.peek()).toEqual({ sampleRate: 48_000, channelCount: 1 });
+
+	// Audio is stamped when it arrives, not when the source appeared, so it stays on the same media
+	// clock as video however long the page waited for the click.
+	const quantum = (128 / 48_000) * 1_000_000;
+	expect((await reader?.read())?.value?.timestamp.asMicros()).toBeGreaterThanOrEqual(before - quantum);
+	effect.close();
 
 	capture.close();
 	await settle();
@@ -660,18 +660,20 @@ test("microphone audio takes the media clock's suspend jumps", async () => {
 		if (!frames) throw new Error("no capture frames");
 		const reader = frames.getReader();
 		const worklet = webaudio.worklets[0];
-		const quantum = (128 / 48_000) * 1_000_000;
 
-		worklet.render(worklet.zero);
-		expect((await reader.read()).value?.timestamp.asMicros()).toBe(worklet.zero);
+		worklet.render();
+		const first = await reader.read();
+		const before = first.value?.timestamp.asMicros() ?? 0;
+		// The resampler holds the last sample back to interpolate toward.
+		const stamped = ((first.value?.channels[0].length ?? 0) / 48_000) * 1_000_000;
 
 		// An hour asleep: the wall clock moved on while the monotonic clock and the sample count stood.
 		const asleep = 3_600_000;
 		spyOn(host, "now").mockImplementation(() => wall() + asleep);
-		worklet.render(worklet.zero + quantum);
+		worklet.render();
 		const after = (await reader.read()).value?.timestamp.asMicros() ?? 0;
 		// Date.now() reads whole milliseconds, so the jump is the sleep within a couple of them.
-		expect(Math.abs(after - (worklet.zero + quantum) - asleep * 1_000)).toBeLessThan(3_000);
+		expect(Math.abs(after - (before + stamped) - asleep * 1_000)).toBeLessThan(3_000);
 		expect(Math.abs(after - MediaClock.now().asMicros())).toBeLessThan(1_000_000);
 	} finally {
 		mock.restore();
