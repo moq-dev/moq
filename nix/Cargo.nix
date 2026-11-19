@@ -16193,6 +16193,17 @@ rec {
             optional = true;
           }
           {
+            name = "libc";
+            packageId = "libc";
+            target =
+              { target, features }:
+              (
+                ("linux" == target."os" or null)
+                || ("android" == target."os" or null)
+                || ("apple" == target."vendor" or null)
+              );
+          }
+          {
             name = "rand";
             packageId = "rand 0.10.3";
           }

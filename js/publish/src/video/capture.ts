@@ -1,6 +1,7 @@
 import { Duration, Instant, now, sleepUntil } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, race, readonlys, Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
+import * as MediaClock from "../media-clock";
 import { TrackProcessor } from "./processor";
 import { normalizeSource, type Source } from "./types";
 
@@ -148,7 +149,7 @@ class Frames extends Fanout<VideoFrame> {
 				throw error;
 			}
 		};
-		const held: Held = { at: Instant.ZERO, replayed: 0 };
+		const held: Held = { at: Instant.ZERO, media: 0, replayed: 0 };
 		// A stopped track is no longer live, so its last picture stops repeating. Stopping fires no
 		// event, and the <video> fallback never ends the read it has pending, so check before each repeat.
 		const ended = () => !("frames" in source) && normalizeSource(source).track.readyState === "ended";
@@ -163,6 +164,7 @@ class Frames extends Fanout<VideoFrame> {
 			held.frame?.close();
 			held.frame = frame.clone();
 			held.at = now();
+			held.media = MediaClock.capture(held.at).asMicros();
 			controller.enqueue(frame);
 		};
 		const demand = new ReadableStream<VideoFrame>(
@@ -190,12 +192,11 @@ class Frames extends Fanout<VideoFrame> {
 								// Stamped on the source's own timeline, which can run ahead of the clock, but never
 								// below the clock or a replay: a frame that resolved while capture was parked is held
 								// with its old stamp, and a reader that attached since drops anything not past its own.
-								const clock = now();
-								const elapsed = clock.since(held.at).asMicros();
+								// Held time is measured on the media clock, so repeats follow its slew.
+								const clock = MediaClock.capture(now()).asMicros();
+								const elapsed = Math.max(clock - held.media, 0);
 								const timestamp = Math.max(
-									Math.round(
-										Math.max(last.timestamp + elapsed, clock.since(Instant.ZERO).asMicros()),
-									),
+									Math.round(Math.max(last.timestamp + elapsed, clock)),
 									last.timestamp + 1,
 									held.replayed + 1,
 								);
@@ -261,11 +262,9 @@ class Frames extends Fanout<VideoFrame> {
 		// Capture stamps can run ahead of the clock (the first frame's arrival anchors them), so now
 		// alone could fall below frames an earlier reader published, rewinding a track resumed after a
 		// gap. Never stamp below the held stamp plus how long it was held, nor below an earlier replay.
-		const clock = now();
-		const elapsed = clock.since(this.#held.at).asMicros();
-		const at = Math.round(
-			Math.max(held ? held.timestamp + elapsed : 0, clock.since(Instant.ZERO).asMicros(), this.#held.replayed),
-		);
+		const clock = MediaClock.now().asMicros();
+		const elapsed = Math.max(clock - this.#held.media, 0);
+		const at = Math.round(Math.max(held ? held.timestamp + elapsed : 0, clock, this.#held.replayed));
 		this.#held.replayed = at;
 		let first = held ? new VideoFrame(held, { timestamp: at }) : undefined;
 		if (first) this.#unread.add(first);
@@ -339,4 +338,5 @@ class Frames extends Fanout<VideoFrame> {
 
 // The newest frame and when it came through, and the latest stamp handed to a new reader. Live frames
 // follow the source's order, but a replay is stamped at the clock, and a later frame can be held below it.
-type Held = { frame?: VideoFrame; at: Instant; replayed: number };
+// `at` is when the frame was held, and `media` the media clock then, in microseconds.
+type Held = { frame?: VideoFrame; at: Instant; media: number; replayed: number };
