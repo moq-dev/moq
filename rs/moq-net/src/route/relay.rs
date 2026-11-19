@@ -1953,7 +1953,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			return Ok(());
 		}
 		let mut visited = 0;
-		let mut lagged = false;
+		// Two or more revisions skipped, here or by a relay that passed them on as one, can
+		// hide an end and the same claim announced again, which differ in nothing.
+		let lagged = floor.saturating_sub(known.floor) >= 2;
 		let changes = match was == known.floor || mutated!(self, Lagging) {
 			// The copy matched this node's at the same revision, so the message's changes
 			// bring it to the new one.
@@ -1980,8 +1982,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 						}),
 				);
 				visited = heard.items.len() + known.items.len();
-				// An end and the same claim announced again take two revisions.
-				lagged = floor.saturating_sub(known.floor) >= 2;
 				diff
 			}
 		};
@@ -1989,8 +1989,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let known = self.known.get_mut(&origin).expect("known");
 		known.floor = known.floor.max(floor);
 		self.publish(origin, changes);
-		// Two or more revisions a lagging copy skipped can hide an end and the same claim
-		// announced again, which differ in nothing: `origin` holds no copy it held before.
+		// `origin` holds no copy it held before.
 		if lagged {
 			self.unhold_origin(origin);
 		}
@@ -4077,6 +4076,41 @@ mod tests {
 		open(&mut router, 6, Role::Routing(node(6)));
 		router.recv(6, route(4, 6, 4)).unwrap();
 		router.recv(6, claims(4, chained(vec![9, 4]), 4)).unwrap();
+		assert!(shown(&router), "node 4 may have claimed it again");
+	}
+
+	/// A relay that let go of a holder it was overtaken on passes the skipped revisions on
+	/// as one: a neighbour whose copy was in step lets go of that holder too, rather than
+	/// hold back for good a claim the relay shows.
+	#[test]
+	fn a_holder_overtaken_upstream_claims_again_downstream() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		open(&mut router, 4, Role::Routing(node(4)));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		router.recv(4, route(4, 4, 2)).unwrap();
+		let live = (p("live"), 7);
+		let claims = |origin: Id, changes, floor: Rev| Msg::Claims {
+			origin: node(origin),
+			changes,
+			floor,
+		};
+		router
+			.recv(2, claims(2, vec![(live.clone(), chained(vec![9, 2]))], 1))
+			.unwrap();
+		router
+			.recv(4, claims(4, vec![(live.clone(), chained(vec![9, 4]))], 1))
+			.unwrap();
+		router
+			.recv(2, claims(2, vec![(live.clone(), Change::Ended)], 2))
+			.unwrap();
+		let shown = |router: &Router<usize, u64, Run>| router.shown().contains_key(&(7, p("live")));
+		assert!(!shown(&router), "node 4's copy is of the ended claim");
+
+		// The neighbour skipped node 4's end at 2 and its claim again at 3, and passes on
+		// what differs at 4: only another broadcast.
+		let other = vec![((p("other"), 7), chained(vec![8, 4]))];
+		router.recv(4, claims(4, other, 4)).unwrap();
 		assert!(shown(&router), "node 4 may have claimed it again");
 	}
 
