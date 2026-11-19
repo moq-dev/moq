@@ -20,7 +20,7 @@
 //!   holding many announce prefixes does, closes them all at once. Swept over the
 //!   prefixes followed and the claims each holds: both axes are expected to grow, no
 //!   faster than the claims held.
-//! - refollow: the same node closes one prefix's stream and opens it again. The claims
+//! - refollow: the same node stops asking for one prefix and asks for it again. The claims
 //!   axis is expected to grow, since the stream hears its prefix's claims again; the
 //!   prefixes axis no faster than the prefixes held.
 //!
@@ -123,8 +123,8 @@ fn bench_received(c: &mut Criterion) {
 		let mut fixture = None;
 		group.bench_function(id, |b| {
 			let relay = fixture.get_or_insert_with(|| fuzz::RouteRelay::heard(claims));
-			// One serving change per claim changed, and one forwarded batch.
-			b.iter(|| assert_eq!(relay.change(changes), changes + 1));
+			// Each claim changed is served into the origin and forwarded on its own.
+			b.iter(|| assert_eq!(relay.change(changes), 2 * changes));
 		});
 	}
 	group.finish();
@@ -181,8 +181,8 @@ fn bench_refollow(c: &mut Criterion) {
 		let mut fixture = None;
 		group.bench_function(id, |b| {
 			let follower = fixture.get_or_insert_with(|| fuzz::RouteFollower::new(prefixes, claims));
-			// The reopened stream serves its prefix's claims into the origin again.
-			b.iter(|| assert_eq!(follower.refollow(), claims));
+			// Both edits go to the peer, and the prefix's claims leave the origin and return.
+			b.iter(|| assert_eq!(follower.refollow(), 2 + 2 * claims));
 		});
 	}
 	group.finish();
