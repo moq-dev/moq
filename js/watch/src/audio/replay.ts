@@ -39,7 +39,7 @@ export const QUANTUM = 128;
  */
 const WIRE_MAX_DELAY = null;
 
-/** How far apart, in ms, two groups' media may be and still read as back to back, as the consumer allows. */
+/** How far, in ms, a group may start past the end of the one below and still read as back to back, as the consumer allows. */
 const CONTIGUOUS = 1;
 
 /** Any non-empty payload: an empty one is the legacy container's end marker. */
@@ -229,7 +229,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 		const below = keys[i - 1];
 		if (below === undefined || below + 1 === key) return;
 		const end = spans.get(below)?.end ?? 0;
-		if (Math.abs((spans.get(key)?.start ?? 0) - end) <= CONTIGUOUS) skipped.set(key, below + 1);
+		if ((spans.get(key)?.start ?? 0) <= end + CONTIGUOUS) skipped.set(key, below + 1);
 	});
 
 	const lookahead = Duration.millis(options.lookahead ?? 0);
