@@ -5822,7 +5822,7 @@ fn clamp_combined(combined: Option<Subscription>, bound: Option<Duration>) -> Op
 }
 
 /// A front's logical track served from one route's copy, for benches.
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(any(feature = "fuzz", all(test, feature = "async")))]
 pub(crate) struct Routed {
 	/// The logical track readers subscribe to.
 	pub logical: Producer,
@@ -5832,7 +5832,7 @@ pub(crate) struct Routed {
 	_routes: super::resume::Producer,
 }
 
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(any(feature = "fuzz", all(test, feature = "async")))]
 impl Routed {
 	/// A logical track named `name`, and a copy of it serving it, both with `info`.
 	pub(crate) fn new(name: &str, info: Info) -> Self {
