@@ -759,7 +759,10 @@ impl Copy {
 				// Replaced ranges resolve against this copy's cache now, as any subscriber's
 				// do, and the copy resolves them all again too.
 				self.resolved = match &mut self.sub {
-					Sub::Ready(sub) => keyed_resolution(reader.ranges.keys().copied(), sub.resolve_ranges(&reader.subscription())),
+					Sub::Ready(sub) => keyed_resolution(
+						reader.ranges.keys().copied(),
+						sub.resolve_ranges(&reader.subscription()),
+					),
 					Sub::Pending(_) => BTreeMap::new(),
 				};
 				let wire = reader.wire(self.floor, self.end(), &self.resolved);
@@ -768,7 +771,12 @@ impl Copy {
 					Sub::Ready(sub) => sub.update(wire),
 				};
 				// Keyed by position as replaced: the reader's own keys from then on.
-				let keyed = self.preferences().read().ranges().map(|(key, _)| key).eq(reader.ranges.keys().copied());
+				let keyed = self
+					.preferences()
+					.read()
+					.ranges()
+					.map(|(key, _)| key)
+					.eq(reader.ranges.keys().copied());
 				if !keyed {
 					let _ = self.preferences().rekey(reader.ranges.keys().copied());
 				}
@@ -2315,7 +2323,8 @@ impl Reader {
 			// a backfill that already ran out was let go: ask its route again.
 			let copy = &self.copies[index];
 			if late && !copy.replaced && copy.floor.is_some() && Some(copy.generation) == self.generation {
-				self.resumed.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
+				self.resumed
+					.get_or_insert_with(|| Resumed::Route(None, BTreeMap::new()));
 			}
 		}
 		// A later copy placed the window this pass: a group held back above may now be the lowest.
@@ -7980,9 +7989,16 @@ mod test {
 				for copy in &reader.copies {
 					let held = copy.preferences().read();
 					let keys: Vec<u64> = held.ranges().map(|(key, _)| key).collect();
-					assert!(keys.iter().eq(live.keys()), "step {step}: the copy keys as the reader does");
+					assert!(
+						keys.iter().eq(live.keys()),
+						"step {step}: the copy keys as the reader does"
+					);
 					for key in keys {
-						assert_eq!(held.range(key), copy.wire(&reader.mirrored, key), "step {step}, key {key}");
+						assert_eq!(
+							held.range(key),
+							copy.wire(&reader.mirrored, key),
+							"step {step}, key {key}"
+						);
 					}
 				}
 			}
