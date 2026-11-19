@@ -86,7 +86,7 @@ Decided 2026-11-18 (maintainer, /quest-plan), from the triage of runs
 [44342367698](https://github.com/moq-dev/moq/actions/runs/44342367698): four
 more children (JS resume window, audio-quality p50 ceilings, publisher drop
 cost, resume mutants). Owned elsewhere: the firefox player by
-[media resume delay](/quest/m0/interop-green/media-resume-delay.md), OBS by
+[moq-dev/moq#9141](https://github.com/moq-dev/moq/pull/9141), OBS by
 [moq-dev/moq#9016](https://github.com/moq-dev/moq/pull/9016), and fixes in PRs
 from the same triage: benches
 ([moq-dev/moq#9089](https://github.com/moq-dev/moq/pull/9089),
