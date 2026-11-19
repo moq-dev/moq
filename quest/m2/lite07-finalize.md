@@ -59,7 +59,7 @@ The cut:
 
 - Every quest under Required has landed.
 - [The warmth port](/quest/m3/cache-routing/select.md) has either landed and
-  passed [the mesh replay](/quest/m2/multicast/mesh-replay.md), or moved its
+  passed the mesh replay (`just test mesh-replay --new <its relay>`), or moved its
   wire to the next wip version: no open PR still adds warm fields to
   lite-07-wip, and no warm field is on main that the replay has not run.
 - The identifier becomes `moq-lite-07` in `rs/moq-net` and `js/net`, in the

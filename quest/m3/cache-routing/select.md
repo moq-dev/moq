@@ -54,8 +54,7 @@ is the first item after the cut.
 Decided 2026-11-19 (maintainer, in the coordinating session): ✅ **the port
 starts now, and the cut does not wait for it** (rejected: blocking the cut
 on warmth; starting only after the cut, as decided 2026-11-17). The cut now
-waits on [the mesh replay](/quest/m2/multicast/mesh-replay.md) and the
-flaws the audit found, so the port has that long. If it has landed and been
+waits on the mesh replay (`test/mesh-replay/`) and the flaws the audit found, so the port has that long. If it has landed and been
 through the mesh replay when the cut is made, its wire is in lite-07; if
 not, lite-07 freezes without it and the wire moves to the next wip version.
 [The cut](/quest/m2/lite07-finalize.md) checks it as one of its steps. The
@@ -496,5 +495,5 @@ lite-07 freezes changes.
 
 ## Related
 
-- [Real relays replay a mesh and its faults](/quest/m2/multicast/mesh-replay.md) - the port runs through it before its wire may join lite-07
+- `test/mesh-replay/` - the port runs through it (`just test mesh-replay --new <its relay>`) before its wire may join lite-07
 - [Route health](/quest/m3/route-health/README.md) - its metadata-only subscription answers the same way
