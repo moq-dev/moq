@@ -5892,15 +5892,32 @@ impl TrackRun {
 		if !self.ctx.version.has_ranges() {
 			return vec![Some(start)];
 		}
+		use crate::track::Anchor;
 		// SUBSCRIBE_START answers the SUBSCRIBE's ranges, by Range ID: none for one an update
 		// retired already, and SUBSCRIBE_STARTED answers each one an update added.
 		self.track
 			.resolved_keys(0..self.initial)
 			.into_iter()
-			.map(|resolved| {
-				let resolved = resolved?;
-				let from = resolved.start.max(start);
-				resolved.end.is_none_or(|end| end > from).then_some(from)
+			.zip(0..)
+			.map(|(resolved, id)| {
+				let (from, end) = match resolved {
+					Some(resolved) => (resolved.start.max(start), resolved.end),
+					// A time start still waiting at or below the floor, as an update before the
+					// start leaves one: whichever group contains it is out of range, so the range
+					// starts where delivery does, the answer placing it would give.
+					None => match self.requested.ranges.get(&id)? {
+						crate::track::Range {
+							start: Anchor::Time(time),
+							end,
+						} if *time <= self.floor => match end {
+							None => (start, None),
+							Some(Anchor::Time(last)) => (start, Some(last.saturating_add(1))),
+							Some(_) => return None,
+						},
+						_ => return None,
+					},
+				};
+				end.is_none_or(|end| end > from).then_some(from)
 			})
 			.collect()
 	}
@@ -8067,6 +8084,23 @@ mod serve_group_test {
 		(TrackRun::new(ctx, track, bounds, 0, steer), writer, log)
 	}
 
+	/// [`lite07_run`] with the SUBSCRIBE asking for `ranges` on `track`.
+	fn lite07_run_ranges(
+		track: &track::Producer,
+		ranges: &[lite::Range],
+	) -> (TrackRun, Writer<crate::transport::boxed::SendStream, Version>, Log) {
+		let bounds = Bounds::new(ranges, false);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_ranges(bounds.ranges.iter().copied()),
+		);
+		let (mut run, writer, log) = lite07_run(SinkSession::new(Log::default()), subscriber);
+		run.initial = bounds.ranges.len() as u64;
+		run.requested = Requested::new((0..).zip(bounds.ranges.iter().copied()));
+		(run, writer, log)
+	}
+
 	/// [`lite_run`] with the SUBSCRIBE naming group `start`.
 	fn lite_run_from(
 		version: Version,
@@ -8728,6 +8762,39 @@ mod serve_group_test {
 				.any(|msg| matches!(msg, lite::SubscribeResponse::Started(_))),
 			"a retired range was reported"
 		);
+	}
+
+	/// An update before SUBSCRIBE_START that leaves only a time start a lite-07 copy can't
+	/// place yet floors the cursor at that time, so the group containing it is out of range
+	/// whichever it is: the range starts where delivery does, reported rather than left
+	/// without a start.
+	#[kio::test]
+	async fn lite07_a_floored_time_start_reports_where_delivery_starts() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		track.anchored();
+		write_group(&mut track, 1000, 1000);
+		let kept = lite::Range::span(Some(500), 0, None, None);
+		let (mut run, mut writer, log) =
+			lite07_run_ranges(&track, &[lite::Range::span(Some(100), 0, None, None), kept]);
+		assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		assert!(run.start.resolved().is_none(), "time 100 waits on the copy to place it");
+
+		run.update(lite07_add(&run, &[(1, kept)], 2, &[]));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let starts: Vec<_> = responses(&mut writer, &log)
+			.await
+			.into_iter()
+			.filter_map(|msg| match msg {
+				lite::SubscribeResponse::Start(start) => Some(start.starts),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(starts, [vec![None, Some(1000)]]);
 	}
 
 	/// A gap the publisher never declared might have existed, so the end names it with a

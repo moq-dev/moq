@@ -754,6 +754,9 @@ pub(crate) struct TrackState {
 	// a time it holds no group at, but its publisher reports where it resolved one. Replaced
 	// whole as the ranges change, so it holds at most one entry per live range.
 	time_starts: BTreeMap<u64, u64>,
+	// The newest start in `time_starts` past the time its range asked from, kept as it is
+	// replaced: [`Holdings::unplaced`] reads it on every settle of every reader.
+	starts_past: Option<u64>,
 	// Where the upstream publisher started each of a lite-07 copy's live wire ranges counting
 	// back, by how many groups each counted, with the latest group it counted from: the copy
 	// holds only part of the track, so it can't count back over its own groups. Replaced whole
@@ -1138,15 +1141,7 @@ impl Holdings for TrackState {
 	/// unknown times do.
 	fn unplaced(&self) -> Option<Unplaced> {
 		let none = Unplaced::NONE;
-		let past = match self.anchors {
-			Anchors::Wire => self
-				.time_starts
-				.iter()
-				.filter(|&(asked, start)| asked < start)
-				.map(|(_, &start)| start)
-				.max(),
-			_ => None,
-		};
+		let past = self.starts_past.filter(|_| self.anchors == Anchors::Wire);
 		// The times below every held group that no inference from an earlier range places.
 		let unheld = |run: ops::RangeInclusive<u64>| match past {
 			Some(past) => (*run.start()).max(past)..=*run.end(),
@@ -1318,7 +1313,8 @@ impl TrackState {
 				Containing::Group(key)
 			}
 			None if self.dropped_cover(0..time.saturating_add(1))
-				|| self.time_starts.range(..time).any(|(_, &start)| start > time) =>
+				|| (self.starts_past.is_some_and(|past| past > time)
+					&& self.time_starts.range(..time).any(|(_, &start)| start > time)) =>
 			{
 				Containing::Before
 			}
@@ -4819,6 +4815,11 @@ impl Producer {
 		if let Ok(mut state) = self.modify()
 			&& state.time_starts != starts
 		{
+			state.starts_past = starts
+				.iter()
+				.filter(|&(asked, start)| asked < start)
+				.map(|(_, &start)| start)
+				.max();
 			state.time_starts = starts;
 			state.placing += 1;
 		}
