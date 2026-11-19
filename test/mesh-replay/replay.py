@@ -392,9 +392,12 @@ class Proc:
         self.name = name
         self.log = log
         self.proc: subprocess.Popen | None = None
+        # Whether the run means it to be running: set by start, cleared by `end` and `stop`.
+        self.wanted = False
 
     def start(self, argv: list[str], env: dict | None = None) -> None:
         assert self.proc is None or self.proc.poll() is not None, f"{self.name} is already running"
+        self.wanted = True
         with self.log.open("ab") as out:
             out.write(f"\n==== {time.strftime('%H:%M:%S')} start {' '.join(argv)}\n".encode())
             self.proc = subprocess.Popen(argv, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
@@ -402,6 +405,16 @@ class Proc:
     @property
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+    @property
+    def died(self) -> bool:
+        """Exited while the run meant it to be running."""
+        return self.wanted and not self.alive
+
+    def end(self, sig: int) -> None:
+        """Signal the process to exit, as the run means it to."""
+        self.wanted = False
+        self.send(sig)
 
     def send(self, sig: int) -> None:
         if self.alive:
@@ -417,6 +430,7 @@ class Proc:
             return None
 
     def stop(self, sig: int = signal.SIGINT, timeout: float = 10.0) -> None:
+        self.wanted = False
         if not self.alive:
             return
         self.send(sig)
@@ -567,7 +581,10 @@ connect = [{", ".join(peers)}]
         path = self.run.dir / f"relay-{self.name}-{build.name}.toml"
         path.write_text(self.config(build))
         self.build = build
-        self.totals.restart()
+        # Under the poller's lock, so a scrape of the process this replaces is never counted
+        # again against the cleared counters.
+        with self.run.lock:
+            self.totals.restart()
         self.proc.start([build.binary, str(path)])
         deadline = time.time() + 30
         while time.time() < deadline:
@@ -849,24 +866,26 @@ class Run:
             shows = relay.announced() if relay.name in live else None
             if shows is None:
                 continue
-            for path, state in relay.readout.paths.items():
-                source = path.split("/")[1]
-                if source not in publishing or source not in live:
+            # Every path the reader was told to follow, so one it never reported counts too.
+            for other in self.relays.values():
+                if other is relay or other.name not in publishing or other.name not in live:
                     continue
-                if path not in shows:
-                    unrouted.append({"reader": relay.name, "path": path})
-                elif state.last is None or now - state.last > self.script.stall:
-                    unfed.append(
-                        {
-                            "reader": relay.name,
-                            "path": path,
-                            "since_s": None if state.last is None else round(now - state.last, 1),
-                            # Stuck: the track of the broadcast it holds ended and the follow never
-                            # handed out another. Starved: it holds one whose groups stopped.
-                            "kind": "stuck" if state.ended is not None else "starved",
-                            "ended": state.ended,
-                        }
-                    )
+                for path in other.paths():
+                    state = relay.readout.paths.get(path) or Follow()
+                    if path not in shows:
+                        unrouted.append({"reader": relay.name, "path": path})
+                    elif state.last is None or now - state.last > self.script.stall:
+                        unfed.append(
+                            {
+                                "reader": relay.name,
+                                "path": path,
+                                "since_s": None if state.last is None else round(now - state.last, 1),
+                                # Stuck: the track of the broadcast it holds ended and the follow
+                                # never handed out another. Starved: it holds one whose groups stopped.
+                                "kind": "stuck" if state.ended is not None else "starved",
+                                "ended": state.ended,
+                            }
+                        )
         return unfed, unrouted
 
     def check(self, report: dict, unfed: list[dict], unrouted: list[dict]) -> None:
@@ -887,6 +906,9 @@ class Run:
                 self.violation(report, "unfed", items, kind)
         if shown:
             self.violation(report, "shown", shown)
+        died = [proc.name for proc in self.procs() if proc.died]
+        if died:
+            self.violation(report, "died", died)
 
     def violation(self, report: dict, check: str, items: list, kind: str | None = None) -> None:
         known = next(
@@ -918,7 +940,7 @@ class Run:
             before = self.snapshot()
 
             def apply(relay=relay) -> float:
-                relay.proc.send(signal.SIGTERM)
+                relay.proc.end(signal.SIGTERM)
                 # Keep polling while it drains, so its last counts are kept.
                 while relay.proc.wait(POLL) is None:
                     pass
@@ -1006,7 +1028,7 @@ class Run:
 
                 def apply() -> float:
                     build = relay.build
-                    relay.proc.send(signal.SIGKILL)
+                    relay.proc.end(signal.SIGKILL)
                     relay.proc.wait(5)
                     time.sleep(self.script.down)
                     assert build is not None
@@ -1065,6 +1087,11 @@ class Run:
         if moved:
             entry = {"event": "after the script", "check": "noisy", "count": len(moved), "items": [moved]}
             self.violations.append(entry)
+
+    def procs(self) -> list[Proc]:
+        """Every child process: relays, publishers, readers, and shapers."""
+        out = [proc for relay in self.relays.values() for proc in (relay.proc, relay.publisher, relay.reader)]
+        return out + list(self.shapers.values())
 
     def teardown(self) -> None:
         self.stop.set()

@@ -175,5 +175,20 @@ class ReaderTest(unittest.TestCase):
         self.assertIsNone(reader.paths["p"].ended)
 
 
+class ProcTest(unittest.TestCase):
+    def test_only_an_exit_the_run_did_not_ask_for_is_a_death(self):
+        log = Path(tempfile.mkdtemp()) / "proc.log"
+        proc = replay.Proc("sleeper", log)
+        self.assertFalse(proc.died)
+        proc.start(["sleep", "30"])
+        self.assertFalse(proc.died)
+        proc.end(replay.signal.SIGKILL)
+        proc.wait(5)
+        self.assertFalse(proc.died)
+        proc.start(["true"])
+        proc.wait(5)
+        self.assertTrue(proc.died)
+
+
 if __name__ == "__main__":
     unittest.main()

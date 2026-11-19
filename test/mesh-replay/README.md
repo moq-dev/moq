@@ -91,6 +91,8 @@ mid-roll mesh: two relays rolled, a new relay between a new one and an old one.
   nothing for `stall`. `stuck` means its follow holds a broadcast whose track ended and
   never handed out another; `starved` means it holds one whose groups stopped.
 - **shown**: once an event settles, a relay still shows a broadcast whose publisher stopped.
+- **died**: once an event settles, a relay, publisher, reader, or shaper the run meant to
+  be running has exited.
 - **noisy**: once every publisher stopped and the mesh settled, a route or announce
   counter still moves within twice the quiet window.
 
