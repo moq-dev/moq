@@ -131,29 +131,39 @@ impl Transcoder {
 		// and for its track's timescale, which a newer snapshot supersedes.
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(source.track(hang::Catalog::DEFAULT_NAME)?);
 		let mut decoders = catalog::Decoders::new(config.decoder());
-		let mut next = catalogs.next().await?;
-		let (source_name, source_config, scale, snapshot) = loop {
-			let Some(snapshot) = next else {
-				return Err(Error::NoSource);
-			};
-			match catalog::choose_source(&snapshot.video, &mut decoders).await {
-				Ok((name, config)) => {
-					let resolving = pipeline::timescale(source, hang::catalog::Reference::track(&config, &name));
-					tokio::select! {
-						scale = resolving => match scale {
-							Ok(scale) => break (name, config, scale, snapshot),
-							Err(err) => tracing::debug!(%err, source = %name, "no timescale for the source yet; waiting for a catalog update"),
-						},
-						update = catalogs.next() => {
-							next = update?;
-							continue;
+		let prologue = async {
+			let mut next = catalogs.next().await?;
+			loop {
+				let Some(snapshot) = next else {
+					return Err(Error::NoSource);
+				};
+				match catalog::choose_source(&snapshot.video, &mut decoders).await {
+					Ok((name, config)) => {
+						let resolving = pipeline::timescale(source, hang::catalog::Reference::track(&config, &name));
+						tokio::select! {
+							scale = resolving => match scale {
+								Ok(scale) => return Ok((name, config, scale, snapshot)),
+								Err(err) => tracing::debug!(%err, source = %name, "no timescale for the source yet; waiting for a catalog update"),
+							},
+							update = catalogs.next() => {
+								next = update?;
+								continue;
+							}
 						}
 					}
+					Err(Error::NoSource) => {
+						tracing::debug!("no transcodable rendition yet; waiting for a catalog update")
+					}
+					Err(err) => return Err(err),
 				}
-				Err(Error::NoSource) => tracing::debug!("no transcodable rendition yet; waiting for a catalog update"),
-				Err(err) => return Err(err),
+				next = catalogs.next().await?;
 			}
-			next = catalogs.next().await?;
+		};
+		// A closed source may keep its catalog open, so neither a snapshot nor the timescale ends the
+		// wait on their own.
+		let (source_name, source_config, scale, snapshot) = tokio::select! {
+			result = prologue => result?,
+			() = source.closed() => return Err(moq_net::Error::Cancel.into()),
 		};
 		// The ladder, the shared decode behind it, and the rungs serving off it.
 		// Resolved again on every source catalog snapshot, so a source that resizes
@@ -2256,6 +2266,46 @@ mod tests {
 			.expect("a newer snapshot drops the move");
 
 		transcoder.abort();
+	}
+
+	/// A source that closes while the transcoder waits on its track's timescale ends the
+	/// transcoder, even though its catalog track stays open.
+	#[tokio::test]
+	async fn a_source_closed_before_its_timescale_ends_the_transcoder() {
+		let mut source = source_catalog(320, 240);
+		let mut withheld = source.broadcast.requests();
+		let mut moved = source.catalog.snapshot().video.renditions["video"].clone();
+		moved.track = Some("withheld".into());
+		source
+			.catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert("video".into(), moved);
+		let config = Config {
+			ladder: Ladder::new([Rung::new(120, moq_net::bandwidth::Rate::from_bps(100_000))]).unwrap(),
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			source: None,
+			..Default::default()
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let transcoder = tokio::spawn(run(source.broadcast.consume(), output, config));
+
+		let wait = std::time::Duration::from_secs(5);
+		let request = kio::clock::timeout(wait, withheld.requested_track())
+			.await
+			.expect("the transcoder asks for the source track")
+			.unwrap();
+		assert_eq!(request.name(), "withheld");
+		source.broadcast.close();
+		let result = kio::clock::timeout(wait, transcoder)
+			.await
+			.expect("closing the source ends the transcoder")
+			.unwrap();
+		assert!(result.is_err(), "a source gone before its ladder is no clean end");
+		drop(request);
 	}
 
 	/// A source whose codec description changes rebuilds the shared decode, so
