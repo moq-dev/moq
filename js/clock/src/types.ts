@@ -195,6 +195,7 @@ export class Duration {
 	}
 
 	/** The distance between both durations, whichever is longer. */
+	// fallow-ignore-next-line unused-class-member
 	absDiff(other: Duration): Duration {
 		return this.ge(other) ? this.sub(other) : other.sub(this);
 	}
@@ -241,6 +242,7 @@ export class Duration {
 	}
 
 	/** This duration limited to `[lo, hi]`. */
+	// fallow-ignore-next-line unused-class-member
 	clamp(lo: Duration, hi: Duration): Duration {
 		return this.max(lo).min(hi);
 	}
@@ -352,6 +354,7 @@ export class Instant {
 	}
 
 	/** The earlier of both instants. */
+	// fallow-ignore-next-line unused-class-member
 	min(other: Instant): Instant {
 		return other[VALUE] < this[VALUE] ? other : this;
 	}
@@ -445,6 +448,7 @@ export class Wall {
 	}
 
 	/** Whether this time is at or before `other`. */
+	// fallow-ignore-next-line unused-class-member
 	le(other: Wall): boolean {
 		return this[VALUE] <= other[VALUE];
 	}

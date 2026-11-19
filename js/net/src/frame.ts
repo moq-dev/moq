@@ -205,6 +205,7 @@ export class Producer {
 	}
 
 	/** Fail the frame and its group with `error`. A no-op once the frame finished or aborted. */
+	// fallow-ignore-next-line unused-class-member
 	abort(error: Error): void {
 		if (this.#done) return;
 		this.#done = true;

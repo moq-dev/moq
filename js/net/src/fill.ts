@@ -540,6 +540,7 @@ export class Requests {
 	}
 
 	/** The track's name, unique within its broadcast. */
+	// fallow-ignore-next-line unused-class-member
 	get name(): string {
 		return fillOps.name(this.#state);
 	}
@@ -768,6 +769,7 @@ export class FillLookup {
 	}
 
 	/** The most urgent delivery priority among the readers waiting on it now. */
+	// fallow-ignore-next-line unused-class-member
 	get priority(): number {
 		return priorityOf(this.#pending);
 	}

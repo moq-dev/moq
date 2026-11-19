@@ -5695,6 +5695,7 @@ export class Ordered {
 	}
 
 	/** Resolve this track's immutable publisher properties; see {@link Subscriber.info}. */
+	// fallow-ignore-next-line unused-class-member
 	info(): Promise<Info> {
 		return this.#subscriber.info();
 	}
@@ -5720,6 +5721,7 @@ export class Ordered {
 	}
 
 	/** Whether the publisher declared every start in `[start, end)` skipped; see {@link Subscriber.isSkipped}. */
+	// fallow-ignore-next-line unused-class-member
 	isSkipped(start: bigint, end: bigint): boolean {
 		return this.#subscriber.isSkipped(start, end);
 	}

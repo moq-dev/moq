@@ -192,6 +192,7 @@ export class Encoder {
 	 * A snapshot, for reaching the shared capture format knobs (`audio.capture?.sampleRate`). Read
 	 * {@link in}.capture through an effect instead when you need to react to it being swapped.
 	 */
+	// fallow-ignore-next-line unused-class-member
 	get capture(): Capture | undefined {
 		return this.in.capture.peek();
 	}
