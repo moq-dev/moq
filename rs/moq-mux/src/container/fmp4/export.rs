@@ -85,6 +85,14 @@ pub struct Export<S: Stream> {
 	/// so a publisher cycling names holds only what it recorded.
 	departed: HashMap<String, Fmp4Track>,
 
+	/// Renditions that joined after the init while a declared track of their medium still
+	/// reads: each waits to continue a declared track of its medium that fails
+	/// ([`Phase::Lost`]), and fails the export once none is left that could.
+	spares: HashMap<String, Rendition>,
+
+	/// Renditions a spare replaced after their track failed, ignored while still listed.
+	replaced: HashSet<String>,
+
 	init: Init,
 
 	/// Keep a rendition that joins after the init segment instead of failing, for a writer
@@ -298,6 +306,9 @@ enum Phase {
 	Reading(Subscription),
 	/// The subscription ended while the rendition stays in the catalog.
 	Ended(Subscription),
+	/// The track failed while the rendition stays in the catalog. A rendition of its medium
+	/// that joins later continues it, as a publisher lists a reopened source.
+	Lost(Subscription),
 	/// The rendition left the catalog after the init. One that returns resumes here.
 	Departed(Resume),
 	/// [`Export::stop`] ended the read.
@@ -479,14 +490,14 @@ impl Fmp4Track {
 	/// The subscription, while the rendition is in the catalog.
 	fn subscription(&self) -> Option<&Subscription> {
 		match &self.phase {
-			Phase::Reading(subscription) | Phase::Ended(subscription) => Some(subscription),
+			Phase::Reading(subscription) | Phase::Ended(subscription) | Phase::Lost(subscription) => Some(subscription),
 			Phase::Departed(_) | Phase::Stopped => None,
 		}
 	}
 
 	fn subscription_mut(&mut self) -> Option<&mut Subscription> {
 		match &mut self.phase {
-			Phase::Reading(subscription) | Phase::Ended(subscription) => Some(subscription),
+			Phase::Reading(subscription) | Phase::Ended(subscription) | Phase::Lost(subscription) => Some(subscription),
 			Phase::Departed(_) | Phase::Stopped => None,
 		}
 	}
@@ -506,6 +517,18 @@ impl Fmp4Track {
 			Phase::Reading(subscription) => Phase::Ended(subscription),
 			phase => phase,
 		};
+	}
+
+	/// The track failed: its rendition reads no more, unless a later one of its medium continues it.
+	fn lose(&mut self) {
+		self.phase = match std::mem::replace(&mut self.phase, Phase::Stopped) {
+			Phase::Reading(subscription) => Phase::Lost(subscription),
+			phase => phase,
+		};
+	}
+
+	fn lost(&self) -> bool {
+		matches!(self.phase, Phase::Lost(_))
 	}
 
 	/// The rendition left the catalog after the init: end the subscription, keeping where
@@ -698,6 +721,8 @@ impl<S: Stream> Export<S> {
 			fragment_duration: None,
 			tracks: HashMap::new(),
 			departed: HashMap::new(),
+			spares: HashMap::new(),
+			replaced: HashSet::new(),
 			init: Init::Waiting {
 				queued: VecDeque::new(),
 				deadline: None,
@@ -826,12 +851,21 @@ impl<S: Stream> Export<S> {
 			// polling for the SPS/PPS-bearing keyframe instead of parking. Before the init, a
 			// track that holds its share parks instead.
 			let waiting = !self.init.written();
+			let mut lost = Vec::new();
 			for (name, track) in &mut self.tracks {
 				if track.pending.is_some() || track.buffer.is_closed() || (waiting && track.held >= INIT_SHARE) {
 					continue;
 				}
 				while let Phase::Reading(subscription) = &mut track.phase {
-					match subscription.source.poll_event(waiter)? {
+					let event = match subscription.source.poll_event(waiter) {
+						Poll::Ready(Err(err)) if subscription.source.lost() => {
+							track.lose();
+							lost.push((name.clone(), err));
+							break;
+						}
+						event => event?,
+					};
+					match event {
 						Poll::Ready(Some(Event::Frame { frame, .. })) => {
 							// A keyframe may carry new parameter sets, so check it still matches.
 							if !track.described() || frame.keyframe {
@@ -875,6 +909,11 @@ impl<S: Stream> Export<S> {
 					}
 				}
 			}
+			for (name, err) in lost {
+				self.survive(&name, err)?;
+			}
+			// A track that ended may have been the last a spare could continue.
+			self.settle_spares()?;
 
 			// 3. Emit the init segment once every track can be described, then the
 			// fragments queued while it waited.
@@ -1076,9 +1115,18 @@ impl<S: Stream> Export<S> {
 			.map(|(name, config)| (name, Rendition::Audio(config)));
 
 		let mut active = HashSet::new();
+		let mut listed = HashSet::new();
+		let mut spares = HashMap::new();
 		for (name, config) in video.chain(audio) {
 			// A name used by both a video and an audio rendition is the video one.
-			if active.contains(&name) {
+			if active.contains(&name) || !listed.insert(name.clone()) || self.replaced.contains(&name) {
+				continue;
+			}
+			if !self.tracks.contains_key(&name) && !self.departed.contains_key(&name) && self.init.written() && !self.late {
+				if !self.spares.contains_key(&name) {
+					tracing::warn!(track = %name, "rendition joined after the init; it waits to continue a failed one");
+				}
+				spares.insert(name, config);
 				continue;
 			}
 			if !self.tracks.contains_key(&name)
@@ -1106,7 +1154,7 @@ impl<S: Stream> Export<S> {
 					// subscription would start at, so resume after what was read. A move is new
 					// content, which continues past what was read under the declared track.
 					let source = match std::mem::replace(&mut track.phase, Phase::Stopped) {
-						Phase::Reading(previous) | Phase::Ended(previous) => {
+						Phase::Reading(previous) | Phase::Ended(previous) | Phase::Lost(previous) => {
 							track.moved();
 							source.continuing(&previous.source)
 						}
@@ -1121,9 +1169,6 @@ impl<S: Stream> Export<S> {
 					let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
 						continue;
 					};
-					if self.init.written() && !self.late {
-						return Err(Error::TrackAdded(name).into());
-					}
 					let mut track = Fmp4Track::new(source, config, self.next_track_id)?;
 					self.next_track_id += 1;
 					track.describe(&name)?;
@@ -1136,9 +1181,10 @@ impl<S: Stream> Export<S> {
 		match &mut self.init {
 			Init::Written { first_late, .. } => {
 				// The init declared these tracks, so keep them for a rendition that returns.
-				// Ending the subscription writes out what was already read.
+				// Ending the subscription writes out what was already read. A failed track stays
+				// for a spare to continue, which may join as its rendition leaves.
 				for (name, track) in &mut self.tracks {
-					if !active.contains(name) {
+					if !active.contains(name) && !track.lost() {
 						track.depart();
 					}
 				}
@@ -1157,7 +1203,73 @@ impl<S: Stream> Export<S> {
 				queued.retain(|(name, _)| active.contains(name));
 			}
 		}
+		self.replaced.retain(|name| listed.contains(name));
+		self.spares = spares;
+		self.settle_spares()
+	}
 
+	/// Whether the export outlives the failure of track `name`, which ended it.
+	///
+	/// A spare of its medium continues it at once. Otherwise, while another track still reads,
+	/// only that rendition ends: a publisher that loses a source, such as a microphone, may list
+	/// a replacement, which continues it then. With nothing left reading, the failure is the
+	/// export's, as before.
+	fn survive(&mut self, name: &str, err: crate::Error) -> Result<()> {
+		// Before the init a track that could not be described declares nothing.
+		if !self.init.written()
+			&& let Some(track) = self.tracks.get(name)
+			&& !track.described()
+		{
+			self.tracks.remove(name);
+		}
+		self.settle_spares()?;
+		if !self.tracks.values().any(|track| matches!(track.phase, Phase::Reading(_))) {
+			return Err(err);
+		}
+		if self.tracks.get(name).is_some_and(Fmp4Track::lost) {
+			tracing::warn!(track = name, %err, "rendition failed; the export keeps its other media");
+		}
+		Ok(())
+	}
+
+	/// Continue each failed track with a spare of its medium, holding the other spares while a
+	/// track of their medium still reads. A spare with neither is a new rendition the init never
+	/// declared, which fails the export.
+	fn settle_spares(&mut self) -> Result<()> {
+		let mut names: Vec<String> = self.spares.keys().cloned().collect();
+		names.sort();
+		for name in names {
+			let is_video = self.spares[&name].is_video();
+			let failed = self
+				.tracks
+				.iter()
+				.filter(|(_, track)| track.is_video == is_video && track.lost())
+				.map(|(failed, track)| (track.track_id, failed.clone()))
+				.min();
+			if let Some((_, failed)) = failed {
+				let config = self.spares.remove(&name).expect("a listed spare");
+				let Some(source) = config.subscribe(&self.source, &name, self.delay)? else {
+					continue;
+				};
+				let mut track = self.tracks.remove(&failed).expect("a failed track");
+				let Phase::Lost(previous) = std::mem::replace(&mut track.phase, Phase::Stopped) else {
+					unreachable!("picked a lost track");
+				};
+				tracing::info!(track = %name, replaces = %failed, "continuing a failed rendition");
+				track.moved();
+				track.rejoin(&name, config, source.continuing(&previous.source))?;
+				self.tracks.insert(name.clone(), track);
+				self.replaced.insert(failed);
+				continue;
+			}
+			let reading = self
+				.tracks
+				.values()
+				.any(|track| track.is_video == is_video && matches!(track.phase, Phase::Reading(_)));
+			if !reading {
+				return Err(Error::TrackAdded(name).into());
+			}
+		}
 		Ok(())
 	}
 

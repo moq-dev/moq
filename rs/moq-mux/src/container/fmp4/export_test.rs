@@ -1544,6 +1544,82 @@ async fn a_rendition_joining_after_the_init_fails() {
 	);
 }
 
+/// A capture that loses its microphone fails the audio track, keeps it listed while it drains,
+/// and lists the reopened one under a new name, either before or after a reader sees the failure.
+/// The replacement continues the declared audio track while the video plays on.
+#[tokio::test(start_paused = true)]
+async fn a_failed_rendition_continues_on_its_replacement() {
+	for listed_first in [false, true] {
+		let (mut live, audio) = live_av();
+		let failed = audio.name().to_string();
+		let mut audio = audio;
+		live.track.write(video_frame(0, true)).unwrap();
+		write_audio(&mut audio, 0, 6);
+		let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
+			.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_DELAY));
+		let ids = track_ids(&chunk_now(&mut exporter).await.init().expect("init"));
+		let mut fragments = drain_now(&mut exporter).await;
+
+		let mut replacement = None;
+		if listed_first {
+			replacement = Some(add_opus(&mut live).0);
+			fragments.extend(drain_now(&mut exporter).await);
+		}
+		audio.abort(moq_net::Error::Transport("audio device lost".into()));
+		live.track.write(video_frame(100_000, true)).unwrap();
+		fragments.extend(drain_now(&mut exporter).await);
+		let mut replacement = replacement.unwrap_or_else(|| add_opus(&mut live).0);
+		// A replacement is new content, read from its live edge, as a moved rendition is.
+		fragments.extend(drain_now(&mut exporter).await);
+		write_audio(&mut replacement, 1_000_000, 5);
+		fragments.extend(drain_now(&mut exporter).await);
+		write_audio(&mut replacement, 1_100_000, 1);
+		live.track.write(video_frame(1_100_000, true)).unwrap();
+		live.catalog.modify().unwrap().audio.renditions.remove(&failed);
+		live.track.write(video_frame(1_200_000, true)).unwrap();
+		let _finished = replacement.finish().unwrap();
+		fragments.extend(drain_now(&mut exporter).await);
+
+		let samples = samples_per_track(&fragments);
+		assert_eq!(samples.get(&ids.1), Some(&12), "listed first: {listed_first}: {samples:?}");
+		assert!(samples[&ids.0] >= 3, "the video played on: {samples:?}");
+		assert_eq!(samples.len(), 2, "no track beyond the init's: {samples:?}");
+	}
+}
+
+/// A rendition that joins after the init waits only while a declared track of its medium could
+/// still fail: once that one ends cleanly, it is a track the init never declared.
+#[tokio::test(start_paused = true)]
+async fn a_spare_rendition_fails_once_its_medium_ends_cleanly() {
+	let (mut live, mut audio) = live_av();
+	live.track.write(video_frame(0, true)).unwrap();
+	write_audio(&mut audio, 0, 6);
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+	drain_now(&mut exporter).await;
+
+	let (_spare, name) = add_opus(&mut live);
+	drain_now(&mut exporter).await;
+	let _finished = audio.finish().unwrap();
+	let err = error_now(&mut exporter).await;
+	assert!(
+		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackAdded(added)) if *added == name),
+		"{err:?}"
+	);
+}
+
+/// With nothing else reading, a failed track still fails the export.
+#[tokio::test(start_paused = true)]
+async fn the_last_failed_track_fails_the_export() {
+	let mut live = Live::avc3();
+	live.track.write(video_frame(0, true)).unwrap();
+	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
+	chunk_now(&mut exporter).await.init().expect("init");
+	live.track.abort(moq_net::Error::Transport("camera lost".into()));
+	let err = error_now(&mut exporter).await;
+	assert!(err.to_string().contains("camera lost"), "{err:?}");
+}
+
 /// Catalog hints that don't reach the sample entry may churn; a change that does fails
 /// the export instead of writing samples the moov misdescribes.
 #[tokio::test(start_paused = true)]
