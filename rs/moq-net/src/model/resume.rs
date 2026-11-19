@@ -5717,50 +5717,46 @@ mod test {
 		assert_eq!(rest, [5, 9]);
 	}
 
-	/// A key-order read keeps its cursor below a group outside its window while the window
-	/// still owes a group below it, which may yet land on that copy, and moves past it once
-	/// nothing below is owed.
+	/// A copy that resolves a time start below where the reader's window placed it offers
+	/// a key-order read a group outside that window. The read leaves the copy's cursor
+	/// below it while the window still owes a group under it, which may yet land on that
+	/// copy, and moves past it once nothing under it is owed.
 	#[test]
 	fn a_key_order_read_waits_below_a_group_outside_its_window_only_while_one_is_owed() {
-		let read = |ranges: Vec<track::Range>, held: &[u64]| {
-			let routes = Producer::new();
-			let logical = logical(&routes);
-			let a = received_copy();
-			for key in held {
-				write(&a, *key);
-			}
-			routes.serve(a.consume());
-			let subscription = Subscription::default()
-				.with_delay(Delay::default().with_max(HOUR))
-				.with_ranges(ranges);
-			let sub = logical
-				.consume()
-				.subscribe(subscription)
-				.now_or_never()
-				.unwrap()
-				.unwrap();
-			(routes, a, sub)
-		};
-
-		// Group 0 is owed below 3, and lands there later.
-		let (_routes, a, mut sub) = read(vec![track::Range::groups(0..1)], &[]);
-		write(&a, 3);
-		assert!(drain(&mut sub, true).is_empty());
-		write(&a, 0);
-		assert_eq!(drain(&mut sub, true), [0]);
-
-		// Nothing is owed below 3, so the read moves past it to 10 once its cap allows.
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = received_copy();
+		write(&a, 10);
+		routes.serve(a.consume());
 		let from_ten = track::Range {
 			start: track::Anchor::Time(10),
 			end: None,
 		};
-		let (_routes, a, mut sub) = read(vec![track::Range::groups(0..1), from_ten], &[0, 10]);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(HOUR))
+			.with_ranges([track::Range::groups(0..1), from_ten]);
+		let mut sub = logical
+			.consume()
+			.subscribe(subscription)
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		// a places the window at 0 and from 10; the cap holds 10 back.
 		sub.set_range(..10);
-		assert_eq!(drain(&mut sub, true), [0]);
-		write(&a, 3);
 		assert!(drain(&mut sub, true).is_empty());
+
+		// b holds 5 but not 10, so it places the second range at 5.
+		let b = received_copy();
+		write(&b, 5);
+		routes.serve(b.consume());
+		assert!(drain(&mut sub, true).is_empty(), "0 is owed below 5");
+		for key in [0, 10, 11] {
+			write(&b, key);
+		}
+		// Its own range from 5 waits for the keys up to 10 unless they were never produced.
+		b.skip_groups(6..10);
 		sub.set_range(..);
-		assert_eq!(drain(&mut sub, true), [10]);
+		assert_eq!(drain(&mut sub, true), [0, 10, 11]);
 	}
 
 	#[test]

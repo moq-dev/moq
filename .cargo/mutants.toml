@@ -76,6 +76,8 @@ exclude_re = [
     # A copy leaves a non-empty range starting at the oldest group or time 0 unresolved
     # only when a cap at 0 empties every range, so a waiting range stops the window too.
     'replace && with \|\| in Reader::resolve$',
+    # `owes_below` is asked only of a key outside the window, where no run starts.
+    'replace < with <= in Reader::owes_below$',
     # Walking again before anything the read parked on fires returns the same
     # `Pending`, so the idle shortcut only saves work.
     'replace Subscriber::parked -> bool with false$',
