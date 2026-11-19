@@ -4394,3 +4394,35 @@ test("a failed copy hands out its buffered group under ranges no copy places", a
 		a.close();
 	}
 });
+
+// A failed copy holding a group back for a placement still reports its failure: a route still
+// serving is asked afresh, and that copy places the start, rather than the read waiting on a copy
+// that can deliver nothing more. It got a group, so its route did not refuse the track.
+test("a failed copy holding a group back is still subscribed afresh", async () => {
+	const { a, active, close } = await setup();
+	const ta = copy(a);
+	hooks.receiveTrack(ta.producer);
+	ta.write(64n);
+	const sub = active.track("seq").subscribe({ delay: { max: null }, ranges: [{ start: { time: 66n } }] });
+	await settle();
+	expect(sub.tryRecvGroup()).toBeUndefined();
+
+	ta.producer.abort(new StreamError(StreamCode.Internal));
+	const again = copy(a);
+	hooks.receiveTrack(again.producer);
+	again.write(66n);
+	again.write(67n);
+	const read: bigint[] = [];
+	for (let attempt = 0; attempt < 10 && read.length < 2; attempt++) {
+		await settle();
+		for (let group = sub.tryRecvGroup(); group; group = sub.tryRecvGroup()) {
+			read.push(group.start);
+			group.close();
+		}
+	}
+	expect(read).toEqual([66n, 67n]);
+	expect(sub.closed.peek()).toBeUndefined();
+
+	sub.close();
+	close();
+});

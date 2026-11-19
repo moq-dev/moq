@@ -364,7 +364,10 @@ interface Copy {
 	since?: Instant;
 	/** Groups still read that came from this copy, which keep a replaced copy subscribed. */
 	lease: number;
-	/** It handed out a group, so a failure is its route failing mid-serve rather than refusing. */
+	/**
+	 * It handed out a group, or got one it holds back for a placement, so a failure is its route
+	 * failing mid-serve rather than refusing.
+	 */
 	delivered?: boolean;
 }
 
@@ -876,14 +879,21 @@ class Reader implements ResumeSource {
 			// A newer copy must not pass it and permanently discard it from sequence order.
 			if (ordered && recv.kind === "idle") return recv;
 		}
+		// A failed copy holding a group back for a placement, which still reports its failure.
+		let held: Copy | undefined;
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
 				const newest = this.#newest === undefined ? undefined : this.#newest + 1n;
-				// Its group stays there until placed; a drained copy still reports how it ran out.
-				if (this.#waits(copy) && hooks.peekGroup(copy.sub, ordered, newest) !== undefined) break;
+				// Its group stays there until placed, but how it ran out is still judged below. It got
+				// a group, so its route did not refuse the track.
+				if (this.#waits(copy) && hooks.peekGroup(copy.sub, ordered, newest) !== undefined) {
+					copy.delivered = true;
+					held = copy;
+					break;
+				}
 				const recv = take(copy, ordered, newest);
 				if (recv.kind === "group") {
 					if (!this.#deliverable(copy, recv.group.start, delivered)) {
@@ -910,7 +920,11 @@ class Reader implements ResumeSource {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
 		}
-		return this.#end((copy) => (typeof copy.done === "number" ? null : copy.done));
+		return this.#end((copy) => {
+			if (typeof copy.done === "number") return null;
+			const failed = copy === held ? copy.sub.closed.peek() : undefined;
+			return copy.done ?? (failed instanceof Error ? failed : undefined);
+		});
 	}
 
 	/**
