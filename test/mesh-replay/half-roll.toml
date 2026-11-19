@@ -1,0 +1,8 @@
+# Rolls relays a and b onto the new build and stops there, so a
+# new relay's route crosses lite-07 then lite-06 to an old one: the middle of a roll.
+start = "old"
+
+[[events]]
+kind = "roll"
+to = "new"
+relays = ["a", "b"]

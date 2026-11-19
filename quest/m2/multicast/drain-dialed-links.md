@@ -23,8 +23,9 @@ the lite-07 cut waits on it (rejected: m3, as the implementer recommended;
 dropping it). A deployment that rolls one relay at a time restarts every
 relay on purpose, and until this lands each of those restarts is a crash to
 the neighbours the relay dialed.
-[The mesh replay](/quest/m2/multicast/mesh-replay.md) measures a roll, and
-without this it measures crashes.
+The mesh replay (`just test mesh-replay`) measures a roll, and without this
+it measures crashes: its roll table reads DEAD on every link the drained
+relay dialed (starred), and this fix moves each to DRAIN.
 
 - Hand the shutdown observer to the cluster dial loop, so it sends GOAWAY on
   its live session, stops redialing, and holds the drain open until the session
@@ -39,4 +40,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Real relays replay a mesh and its faults](/quest/m2/multicast/mesh-replay.md) - its roll drains each relay with GOAWAY
+- `test/mesh-replay/` - its roll drains each relay with GOAWAY and reports DRAIN or DEAD per link

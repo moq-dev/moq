@@ -13,14 +13,14 @@ source "$DIR/../lib/harness.sh"
 # shellcheck source-path=SCRIPTDIR source=../lib/release.sh
 source "$DIR/../lib/release.sh"
 
-RERUN="$(harness_env)just test mesh-replay$(harness_argv "$@")"
+RERUN="$(harness_env MESH_REPLAY_LOG)just test mesh-replay$(harness_argv "$@")"
 
 usage() {
     cat >&2 <<'USAGE'
 usage: just test mesh-replay [--mesh FILE]... [--script FILE] [--broadcasts N[,N...]]
                              [--new RELAY] [--old RELAY | --old-release VERSION] [--report DIR]
 
-  --mesh FILE         relays and links (default: test/mesh-replay/mesh.toml); repeat to sweep
+  --mesh FILE         relays and links (default: test/mesh-replay/ring6.toml); repeat to sweep
   --script FILE       the faults to play (default: test/mesh-replay/script.toml)
   --broadcasts LIST   broadcasts each relay publishes, comma-separated to sweep (default: 4)
   --new RELAY         the relay rolled onto (default: this checkout's build)
@@ -55,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     esac
     shift 2
 done
-((${#MESHES[@]})) || MESHES=("$DIR/mesh.toml")
+((${#MESHES[@]})) || MESHES=("$DIR/ring6.toml")
 [[ "$BROADCASTS" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
     echo "error: --broadcasts takes whole numbers, comma-separated (got '$BROADCASTS')" >&2
     exit 2
@@ -77,8 +77,10 @@ for binary in moq-relay moq-bench moq-shaper; do
 done
 if [[ -n "$NEW" ]]; then
     harness_stage new/relay "$NEW"
+    NEW_LABEL="$NEW"
 else
     harness_stage new/relay "$HARNESS_RUN/new/moq-relay"
+    NEW_LABEL="$(git rev-parse --short HEAD)$(git diff --quiet HEAD || echo +dirty)"
 fi
 if [[ -n "$OLD" ]]; then
     harness_stage old/bin/moq-relay "$OLD"
@@ -95,12 +97,15 @@ for mesh in "${MESHES[@]}"; do
     n=$(python3 "$DIR/replay.py" ports "$mesh")
     ((n > needed)) && needed=$n
 done
-ports=()
+reserved=()
 for ((i = 0; i < needed; i++)); do
     harness_port "mesh-$i"
-    ports+=("$HARNESS_PORT")
+    reserved+=("$HARNESS_PORT")
 done
-ports=$(IFS=,; echo "${ports[*]}")
+ports=$(
+    IFS=,
+    echo "${reserved[*]}"
+)
 
 status=0
 summary="$HARNESS_RUN/summary.md"
@@ -113,8 +118,8 @@ for mesh in "${MESHES[@]}"; do
         args=(
             run --mesh "$mesh" --script "$SCRIPT" --broadcasts "$count"
             --dir "$HARNESS_RUN/$cell" --ports "$ports" --report "$REPORT/$cell"
-            --bench "$HARNESS_RUN/new/moq-bench" --shaper "$HARNESS_RUN/new/moq-shaper"
-            --new "$HARNESS_RUN/new/relay" --old "$HARNESS_RUN/old/bin/moq-relay" --old-versions "$OLD_VERSIONS"
+            --log "${MESH_REPLAY_LOG:-info}" --bench "$HARNESS_RUN/new/moq-bench" --shaper "$HARNESS_RUN/new/moq-shaper"
+            --new "$HARNESS_RUN/new/relay" --new-label "$NEW_LABEL" --old "$HARNESS_RUN/old/bin/moq-relay" --old-versions "$OLD_VERSIONS"
         )
         harness_spawn "replay $cell" - python3 "$DIR/replay.py" "${args[@]}"
         if harness_wait "$HARNESS_PID"; then

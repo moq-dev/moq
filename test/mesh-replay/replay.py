@@ -14,20 +14,20 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import os
 import re
 import signal
 import subprocess
 import sys
 import threading
 import time
-import tomllib
 import urllib.error
 import urllib.request
 import zlib
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import tomllib
 
 PREFIX = "replay"
 POLL = 0.25
@@ -111,7 +111,9 @@ def load_mesh(path: Path) -> Mesh:
     pairs = set()
     for raw in doc.get("links", []):
         if set(raw) - {"dial", "accept", "cost", "upstream", "shape"}:
-            raise ValueError(f"{path}: unknown link keys {sorted(set(raw) - {'dial', 'accept', 'cost', 'upstream', 'shape'})}")
+            raise ValueError(
+                f"{path}: unknown link keys {sorted(set(raw) - {'dial', 'accept', 'cost', 'upstream', 'shape'})}"
+            )
         dial, accept = raw.get("dial"), raw.get("accept")
         if dial not in relays or accept not in relays or dial == accept:
             raise ValueError(f"{path}: link {dial!r} -> {accept!r} must join two listed relays")
@@ -172,6 +174,9 @@ def load_script(path: Path, mesh: Mesh) -> Script:
         if kind == "roll":
             if raw.get("to") not in ("new", "old"):
                 raise ValueError(f"{path}: a roll goes `to` new or old")
+            event["relays"] = raw.get("relays", mesh.relays)
+            if not event["relays"] or set(event["relays"]) - set(mesh.relays):
+                raise ValueError(f"{path}: a roll's `relays` lists relays of the mesh")
         if kind in ("reopen-relay", "kill", "end-source", "reopen-link"):
             relay = raw.get("relay", mesh.busiest())
             if relay not in mesh.relays:
@@ -184,7 +189,9 @@ def load_script(path: Path, mesh: Mesh) -> Script:
             else:
                 link = next((link for link in mesh.links if link.name == name), None)
                 if link is None:
-                    raise ValueError(f"{path}: reopen-link names {name!r}; links are {[l.name for l in mesh.links]}")
+                    raise ValueError(
+                        f"{path}: reopen-link names {name!r}; links are {[other.name for other in mesh.links]}"
+                    )
             event["link"] = link.name
         event["times"] = int(raw.get("times", 1))
         events.append(event)
@@ -299,6 +306,8 @@ class Follow:
     gaps: list[tuple[float, float, int | None]] = field(default_factory=list)
     # Why the track of the broadcast handed out last ended, while nothing replaced it yet.
     ended: str | None = None
+    # Each online (True) or offline (False) the follow reported, with when.
+    changes: list[tuple[float, bool]] = field(default_factory=list)
 
 
 class ReaderLog:
@@ -343,6 +352,19 @@ class ReaderLog:
         elif event in ("online", "offline"):
             path.online = event == "online"
             path.ended = None
+            path.changes.append((ms, path.online))
+
+
+def withdrawn_twice(path: Follow, start: float, end: float) -> bool:
+    """Whether the follow went offline, came back, and went offline again within [start, end]:
+    a withdrawal that stepped through End, Start, End instead of ending once."""
+    want = [False, True, False]
+    for at, online in path.changes:
+        if start <= at <= end and online == want[0]:
+            want.pop(0)
+            if not want:
+                return True
+    return False
 
 
 def interruption(path: Follow, start: float, end: float, gap: float) -> tuple[float, int]:
@@ -513,7 +535,7 @@ class Relay:
 drain_timeout = "10s"
 
 [log]
-level = "info"
+level = "{run.log}"
 
 [listen]
 bind = "127.0.0.1:{self.port}"
@@ -600,6 +622,7 @@ class Run:
         self.mesh = mesh
         self.script = script
         self.broadcasts = args.broadcasts
+        self.log = args.log
         self.bench = args.bench
         self.shaper = args.shaper
         self.builds = {
@@ -612,7 +635,9 @@ class Run:
         self.auth_port = ports.pop()
         self.shaper_port = {link.name: ports.pop() for link in mesh.links}
         self.relays = {name: Relay(self, name, ports.pop(), ports.pop()) for name in mesh.relays}
-        self.shapers = {link.name: Proc(f"shaper {link.name}", self.dir / f"shaper-{link.name}.log") for link in mesh.links}
+        self.shapers = {
+            link.name: Proc(f"shaper {link.name}", self.dir / f"shaper-{link.name}.log") for link in mesh.links
+        }
         self.auth = Auth(self.auth_port, self.dir / "auth.jsonl")
         self.events: list[dict] = []
         self.violations: list[dict] = []
@@ -649,27 +674,39 @@ class Run:
             direction.append(f'delay = "{shape["delay"]}"')
         rate = ""
         if "rate" in shape:
-            rate = f"bits_per_second = {int(shape['rate'])}\nburst = 12500\nqueue = \"{shape.get('queue', '100ms')}\"\n"
+            rate = f'bits_per_second = {int(shape["rate"])}\nburst = 12500\nqueue = "{shape.get("queue", "100ms")}"\n'
         body = f'name = "{link.name}"\nseed = {zlib.crc32(link.name.encode()) % 1000}\n'
         for side in ("up", "down"):
             body += f"\n[{side}]\n" + "\n".join(direction) + "\n"
             if rate:
                 body += f"\n[{side}.rate]\n{rate}"
         profile.write_text(body)
-        self.shapers[link.name].start([
-            self.shaper,
-            "--listen", f"127.0.0.1:{self.shaper_port[link.name]}",
-            "--target", f"127.0.0.1:{accept.port}",
-            "--profile", str(profile),
-            "--report", str(self.dir / f"shaper-{link.name}.json"),
-        ])
+        self.shapers[link.name].start(
+            [
+                self.shaper,
+                "--listen",
+                f"127.0.0.1:{self.shaper_port[link.name]}",
+                "--target",
+                f"127.0.0.1:{accept.port}",
+                "--profile",
+                str(profile),
+                "--report",
+                str(self.dir / f"shaper-{link.name}.json"),
+            ]
+        )
         time.sleep(0.2)
         if not self.shapers[link.name].alive:
             raise RuntimeError(f"shaper {link.name} exited on start; see {self.shapers[link.name].log}")
 
     def lite07(self, link: Link) -> bool:
         a, b = self.relays[link.dial].build, self.relays[link.accept].build
-        return a is not None and b is not None and bool(a.versions) and a.versions == b.versions and "moq-lite-07-wip" in a.versions
+        return (
+            a is not None
+            and b is not None
+            and bool(a.versions)
+            and a.versions == b.versions
+            and "moq-lite-07-wip" in a.versions
+        )
 
     def readers(self) -> None:
         for relay in self.relays.values():
@@ -716,10 +753,24 @@ class Run:
             "routes": {
                 "changed": pick(total, "moq_relay_route_changes_total"),
                 "rewritten": pick(total, "moq_relay_route_rewrites_total"),
-                "sent": {k: pick(total, "moq_relay_route_withdrawals_total", direction="sent", kind=k) for k in ("dead", "drain")},
-                "received": {k: pick(total, "moq_relay_route_withdrawals_total", direction="received", kind=k) for k in ("dead", "drain")},
-                "refused": {k: v for k in ("path", "scope", "looped") if (v := pick(total, "moq_relay_route_refusals_total", reason=k))},
-                "closed": {k: v for k in ("stalled", "overrun", "malformed", "role", "unasked", "regressed", "other") if (v := pick(total, "moq_relay_route_sessions_closed_total", kind=k))},
+                "sent": {
+                    k: pick(total, "moq_relay_route_withdrawals_total", direction="sent", kind=k)
+                    for k in ("dead", "drain")
+                },
+                "received": {
+                    k: pick(total, "moq_relay_route_withdrawals_total", direction="received", kind=k)
+                    for k in ("dead", "drain")
+                },
+                "refused": {
+                    k: v
+                    for k in ("path", "scope", "looped")
+                    if (v := pick(total, "moq_relay_route_refusals_total", reason=k))
+                },
+                "closed": {
+                    k: v
+                    for k in ("stalled", "overrun", "malformed", "role", "unasked", "regressed", "other")
+                    if (v := pick(total, "moq_relay_route_sessions_closed_total", kind=k))
+                },
                 "relays": sorted(on07),
                 "unavailable": sorted(set(self.relays) - on07),
             },
@@ -755,13 +806,16 @@ class Run:
             for path, state in relay.readout.paths.items():
                 source = path.split("/")[1]
                 longest, missed = interruption(state, start, end, gap)
-                rows.append({
-                    "reader": relay.name,
-                    "path": path,
-                    "s": round(longest, 2),
-                    "missed": missed,
-                    "bystander": source not in targets and relay.name not in targets,
-                })
+                rows.append(
+                    {
+                        "reader": relay.name,
+                        "path": path,
+                        "s": round(longest, 2),
+                        "missed": missed,
+                        "withdrawn_twice": withdrawn_twice(state, start, end),
+                        "bystander": source not in targets and relay.name not in targets,
+                    }
+                )
 
         def summary(group: list[dict]) -> dict:
             hit = sorted((row["s"] for row in group if row["s"] > gap), reverse=True)
@@ -771,6 +825,7 @@ class Run:
                 "max_s": hit[0] if hit else 0.0,
                 "p50_s": hit[len(hit) // 2] if hit else 0.0,
                 "missed": sum(row["missed"] for row in group),
+                "withdrawn_twice": sum(row["withdrawn_twice"] for row in group),
             }
 
         worst = sorted(rows, key=lambda row: -row["s"])[:5]
@@ -778,6 +833,9 @@ class Run:
             "all": summary(rows),
             "bystanders": summary([row for row in rows if row["bystander"]]),
             "worst": [row for row in worst if row["s"] > gap],
+            "withdrawn_twice": [
+                {"reader": row["reader"], "path": row["path"]} for row in rows if row["withdrawn_twice"]
+            ][:5],
         }
 
     def hungry(self, now: float) -> tuple[list[dict], list[dict]]:
@@ -798,15 +856,17 @@ class Run:
                 if path not in shows:
                     unrouted.append({"reader": relay.name, "path": path})
                 elif state.last is None or now - state.last > self.script.stall:
-                    unfed.append({
-                        "reader": relay.name,
-                        "path": path,
-                        "since_s": None if state.last is None else round(now - state.last, 1),
-                        # Stuck: the track of the broadcast it holds ended and the follow never
-                        # handed out another. Starved: it holds one whose groups stopped.
-                        "kind": "stuck" if state.ended is not None else "starved",
-                        "ended": state.ended,
-                    })
+                    unfed.append(
+                        {
+                            "reader": relay.name,
+                            "path": path,
+                            "since_s": None if state.last is None else round(now - state.last, 1),
+                            # Stuck: the track of the broadcast it holds ended and the follow never
+                            # handed out another. Starved: it holds one whose groups stopped.
+                            "kind": "stuck" if state.ended is not None else "starved",
+                            "ended": state.ended,
+                        }
+                    )
         return unfed, unrouted
 
     def check(self, report: dict, unfed: list[dict], unrouted: list[dict]) -> None:
@@ -833,7 +893,9 @@ class Run:
             (
                 k
                 for k in self.script.known
-                if k["check"] == check and k.get("kind", kind) == kind and k.get("event", report["kind"]) == report["kind"]
+                if k["check"] == check
+                and k.get("kind", kind) == kind
+                and k.get("event", report["kind"]) == report["kind"]
             ),
             None,
         )
@@ -847,9 +909,9 @@ class Run:
 
     # ── faults ──
 
-    def roll(self, to: str) -> None:
+    def roll(self, to: str, relays: list[str]) -> None:
         build = self.builds[to]
-        for name in self.mesh.relays:
+        for name in relays:
             relay = self.relays[name]
             neighbours = self.mesh.neighbours(name)
             offsets = {n: self.relays[n].proc.log.stat().st_size for n in neighbours}
@@ -870,14 +932,19 @@ class Run:
     def drained(self, draining: str, neighbour: str, offset: int, before: dict, after: dict) -> dict:
         """Whether `neighbour` heard a GOAWAY from `draining` on their link, read from its log, and
         from its GOAWAY counter where its build has one."""
-        link = next(l for l in self.mesh.links if l.touches(draining) and l.touches(neighbour))
+        link = next(x for x in self.mesh.links if x.touches(draining) and x.touches(neighbour))
         with self.relays[neighbour].proc.log.open("rb") as f:
             f.seek(offset)
             text = ANSI.sub("", f.read().decode(errors="replace"))
         if link.dial == neighbour:
-            # The neighbour dialed: its reconnect loop logs the GOAWAY with the peer's URL.
+            # The neighbour dialed: its reconnect loop logs the GOAWAY with the peer's URL, and
+            # a release's dial logs it on a session with no span. Only `draining` drains now,
+            # so a GOAWAY on a session the neighbour dialed is its.
             url = f"127.0.0.1:{self.shaper_port[link.name]}"
-            logged = any(url in line for line in text.splitlines() if "upstream GOAWAY" in line)
+            logged = any(
+                ("upstream GOAWAY" in line and url in line) or (GOAWAY.search(line) and not SESSION.search(line))
+                for line in text.splitlines()
+            )
         else:
             # The draining relay dialed: the neighbour logs it on the session the auth server
             # admitted for that dialer.
@@ -912,18 +979,31 @@ class Run:
     def run_event(self, event: dict) -> None:
         kind = event["kind"]
         if kind == "roll":
-            self.roll(event["to"])
+            self.roll(event["to"], event["relays"])
             return
         relay = self.relays[event["relay"]]
         for attempt in range(event["times"]):
             suffix = f" ({attempt + 1}/{event['times']})" if event["times"] > 1 else ""
             if kind == "reopen-link":
-                link = next(l for l in self.mesh.links if l.name == event["link"])
-                self.measure(f"reopen link {link.name}{suffix}", kind, lambda: self.reopen([link]), {link.dial, link.accept}, link=link.name)
+                link = next(x for x in self.mesh.links if x.name == event["link"])
+                self.measure(
+                    f"reopen link {link.name}{suffix}",
+                    kind,
+                    lambda: self.reopen([link]),
+                    {link.dial, link.accept},
+                    link=link.name,
+                )
             elif kind == "reopen-relay":
-                links = [l for l in self.mesh.links if l.touches(relay.name)]
-                self.measure(f"reopen every link of {relay.name}{suffix}", kind, lambda: self.reopen(links), {relay.name}, relay=relay.name)
+                links = [x for x in self.mesh.links if x.touches(relay.name)]
+                self.measure(
+                    f"reopen every link of {relay.name}{suffix}",
+                    kind,
+                    lambda: self.reopen(links),
+                    {relay.name},
+                    relay=relay.name,
+                )
             elif kind == "kill":
+
                 def apply() -> float:
                     build = relay.build
                     relay.proc.send(signal.SIGKILL)
@@ -935,6 +1015,7 @@ class Run:
 
                 self.measure(f"kill and restart {relay.name}{suffix}", kind, apply, {relay.name}, relay=relay.name)
             elif kind == "end-source":
+
                 def end() -> float:
                     relay.publisher.stop()
                     return time.time()
@@ -945,7 +1026,13 @@ class Run:
                     relay.start_publisher()
                     return time.time()
 
-                self.measure(f"restart {relay.name}'s broadcasts{suffix}", "restart-source", restart, {relay.name}, relay=relay.name)
+                self.measure(
+                    f"restart {relay.name}'s broadcasts{suffix}",
+                    "restart-source",
+                    restart,
+                    {relay.name},
+                    relay=relay.name,
+                )
 
     def execute(self) -> None:
         self.poller.start()
@@ -1005,48 +1092,108 @@ class Run:
 # ── report ──────────────────────────────────────────────────────────────────
 
 
+def star(link: dict, event: dict) -> str:
+    """A rolled relay's link, starred when the rolled relay dialed it."""
+    return link["link"] + ("*" if link["dialed_by"] == event["relay"] else "")
+
+
+COLUMNS = (
+    "Event",
+    "Quiet (s)",
+    "Fed (s)",
+    "Announce msgs / bytes",
+    "Changed",
+    "Rewritten",
+    "DEAD sent/recv",
+    "DRAIN sent/recv",
+    "Readers hit (bystanders)",
+    "Longest (s)",
+    "Missed",
+    "End, Start, End",
+)
+
+NOTE = (
+    "Quiet is how long after the fault ended until no route or announce message moved for the "
+    "script's quiet window, and Fed until every reader whose relay shows its live broadcast read a "
+    "group; `-` never settled. Message counts are summed over every relay's sent side. Route counts "
+    "cover moq-lite-07 relays only (n/a when none). Readers hit counts reader paths that paused "
+    "longer than 0.5s; bystanders are readers whose relay and broadcast source were both outside "
+    "the fault. End, Start, End counts reader paths whose broadcast went offline, came back, and "
+    "went offline again within the event, a withdrawal that did not end once."
+)
+
+
+def row(cells) -> str:
+    return "| " + " | ".join(str(cell) for cell in cells) + " |"
+
+
+def seconds_cell(value: float | None) -> str:
+    return "-" if value is None else f"{value:.1f}"
+
+
+def event_row(event: dict) -> str:
+    routes, readers, announce = event["routes"], event["readers"], event["announce"]
+
+    def route(*keys: str) -> str:
+        if not routes["relays"]:
+            return "n/a"
+        value = routes
+        for key in keys:
+            value = value[key]
+        return str(value)
+
+    return row(
+        [
+            event["name"],
+            seconds_cell(event["quiet_s"]),
+            seconds_cell(event["fed_s"]),
+            f"{announce['tx_messages']} / {announce['tx_bytes']}",
+            route("changed"),
+            route("rewritten"),
+            f"{route('sent', 'dead')}/{route('received', 'dead')}",
+            f"{route('sent', 'drain')}/{route('received', 'drain')}",
+            f"{readers['all']['interrupted']} ({readers['bystanders']['interrupted']})",
+            f"{readers['all']['max_s']:.1f}",
+            readers["all"]["missed"],
+            readers["all"]["withdrawn_twice"],
+        ]
+    )
+
+
 def markdown(report: dict) -> str:
-    mesh = report["mesh"]
+    mesh, builds = report["mesh"], report["builds"]
+    result = "passed" if report["passed"] else "failed"
+    if report["known"]:
+        result += f", {len(report['known'])} known"
     lines = [
         f"## Mesh replay: {mesh['name']}, {len(mesh['relays'])} relays, {report['broadcasts']} broadcasts each",
         "",
-        f"Diameter {mesh['diameter']} links. New build `{report['builds']['new']}`, old build `{report['builds']['old']}`.",
-        f"Result: **{'passed' if report['passed'] else 'failed'}**"
-        + (f", {len(report['known'])} known" if report["known"] else ""),
+        f"Diameter {mesh['diameter']} links. New build `{builds['new']}`, old build `{builds['old']}`.",
+        f"Result: **{result}**",
         "",
-        "| Event | Quiet (s) | Fed (s) | Announce msgs / bytes | Changed | Rewritten | DEAD sent/recv | DRAIN sent/recv | Readers hit (bystanders) | Longest (s) | Missed |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        row(COLUMNS),
+        row(["---"] * len(COLUMNS)),
+        *(event_row(event) for event in report["events"]),
     ]
-    for event in report["events"]:
-        routes = event["routes"]
-        readers = event["readers"]
-        quiet = "-" if event["quiet_s"] is None else f"{event['quiet_s']:.1f}"
-        fed = "-" if event["fed_s"] is None else f"{event['fed_s']:.1f}"
-        na = not routes["relays"]
-        route = lambda v: "n/a" if na else str(v)  # noqa: E731
-        lines.append(
-            f"| {event['name']} | {quiet} | {fed} | {event['announce']['tx_messages']} / {event['announce']['tx_bytes']} "
-            f"| {route(routes['changed'])} | {route(routes['rewritten'])} "
-            f"| {route(routes['sent']['dead'])}/{route(routes['received']['dead'])} "
-            f"| {route(routes['sent']['drain'])}/{route(routes['received']['drain'])} "
-            f"| {readers['all']['interrupted']} ({readers['bystanders']['interrupted']}) "
-            f"| {readers['all']['max_s']:.1f} | {readers['all']['missed']} |"
-        )
+    if report.get("error"):
+        lines += ["", f"The run stopped early: {report['error']}"]
     rolls = [event for event in report["events"] if event.get("links")]
     if rolls:
-        lines += ["", "Links of each rolled relay, as its neighbour saw the drain (`*` dialed by the rolled relay):", ""]
-        lines += ["| Roll | GOAWAY heard (DRAIN) | Closed only (DEAD) |", "| --- | --- | --- |"]
+        lines += [
+            "",
+            "Links of each rolled relay, as its neighbour saw the drain (`*` dialed by the rolled relay):",
+            "",
+        ]
+        lines += [row(["Roll", "GOAWAY heard (DRAIN)", "Closed only (DEAD)"]), row(["---"] * 3)]
         for event in rolls:
-            by = {
-                kind: [l["link"] + ("*" if l["dialed_by"] == event["relay"] else "") for l in event["links"] if l["saw"] == kind]
-                for kind in ("drain", "dead")
-            }
-            lines.append(f"| {event['name']} | {', '.join(by['drain']) or '-'} | {', '.join(by['dead']) or '-'} |")
+            heard = [star(link, event) for link in event["links"] if link["saw"] == "drain"]
+            closed = [star(link, event) for link in event["links"] if link["saw"] == "dead"]
+            lines.append(row([event["name"], ", ".join(heard) or "-", ", ".join(closed) or "-"]))
         disagree = [
-            f"{event['name']}: {l['link']}"
+            f"{event['name']}: {link['link']}"
             for event in rolls
-            for l in event["links"]
-            if l["counted"] is not None and l["counted"] != (l["saw"] == "drain")
+            for link in event["links"]
+            if link["counted"] is not None and link["counted"] != (link["saw"] == "drain")
         ]
         if disagree:
             lines += ["", f"The GOAWAY counter disagrees with the log on: {', '.join(disagree)}."]
@@ -1056,14 +1203,7 @@ def markdown(report: dict) -> str:
             tag = f" (known: {entry['known']})" if "known" in entry else ""
             check = entry["check"] + (f" ({entry['kind']})" if entry.get("kind") else "")
             lines.append(f"- {entry['event']}: {check} x{entry['count']}{tag}: `{json.dumps(entry['items'][:3])}`")
-    lines += [
-        "",
-        "Quiet is how long after the fault ended until no route or announce message moved for the script's quiet window, "
-        "and Fed until every reader whose relay shows its live broadcast read a group; `-` never settled. Message counts are summed over every relay's sent side. Route counts cover moq-lite-07 relays only "
-        "(n/a when none). Readers hit counts reader paths that paused longer than 0.5s; bystanders are readers whose relay and "
-        "broadcast source were both outside the fault.",
-        "",
-    ]
+    lines += ["", NOTE, ""]
     return "\n".join(lines)
 
 
@@ -1081,10 +1221,12 @@ def main() -> int:
     run.add_argument("--bench", required=True)
     run.add_argument("--shaper", required=True)
     run.add_argument("--new", required=True)
+    run.add_argument("--new-label", default="", help="what the new build is, such as a commit")
     run.add_argument("--new-versions", default="moq-lite-07-wip,moq-lite-06")
     run.add_argument("--old", default="")
     run.add_argument("--old-versions", default="")
     run.add_argument("--report", type=Path, required=True)
+    run.add_argument("--log", default="info", help="the relays' log level")
     args = parser.parse_args()
 
     if args.command == "ports":
@@ -1099,6 +1241,8 @@ def main() -> int:
     for build in run.builds.values():
         out = subprocess.run([build.binary, "--version"], capture_output=True, text=True, check=True)
         build.version = out.stdout.strip()
+    if args.new_label:
+        run.builds["new"].version += f" ({args.new_label})"
 
     def interrupted(signum, frame):
         raise KeyboardInterrupt
@@ -1107,7 +1251,7 @@ def main() -> int:
     error = None
     try:
         run.execute()
-    except Exception as err:  # noqa: BLE001 - a failed run still writes what it measured
+    except Exception as err:
         error = f"{type(err).__name__}: {err}"
         print(f"error: {error}", file=sys.stderr)
     finally:

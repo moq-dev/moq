@@ -16,7 +16,7 @@ speak moq-lite-07 to each other and lite-06 to an old one, so one route crosses 
 ```bash
 just test mesh-replay                          # the nightly mesh and script, 4 broadcasts per relay
 just test mesh-replay --broadcasts 4,32        # sweep broadcasts per relay
-just test mesh-replay --mesh ring4.toml --mesh mesh.toml   # sweep meshes
+just test mesh-replay --mesh test/mesh-replay/ring4.toml --mesh test/mesh-replay/ring6.toml   # sweep relays
 just test mesh-replay --mesh ~/our-mesh.toml   # a deployment's own graph
 just test mesh-replay --new ./moq-relay-from-a-branch      # roll onto another build
 ```
@@ -57,10 +57,12 @@ upstream = true  # optional: `dial` marks `accept` upstream
 shape = { delay = "40ms" }   # optional, over [shape]
 ```
 
-[`mesh.toml`](mesh.toml), the nightly mesh, is a ring of six with one chord: its
-longest route crosses three links, every cut leaves a detour, and every relay both
-dials and accepts. A deployment replays its own graph by passing its own file. Keep
-real topologies out of this repository.
+[`ring6.toml`](ring6.toml), the default and nightly mesh, is a ring of six with one
+chord: its longest route crosses three links, every cut leaves a detour, and every
+relay both dials and accepts. Nightly also runs [`ring4.toml`](ring4.toml), so the
+report sweeps relays in the mesh as well as broadcasts per relay. A deployment
+replays its own graph by passing its own file. Keep real topologies out of this
+repository.
 
 The script ([`script.toml`](script.toml)) is the sequence of events:
 
@@ -79,6 +81,9 @@ build on its port once it exits. Reopening a link pauses its shaper for `down`, 
 resumes it; reopening a relay pauses all of its shapers at once. A kill is SIGKILL,
 then the same build after `down`. Ending a source stops one relay's publisher,
 settles, then starts it again. After the script every publisher stops.
+
+[`chain3.toml`](chain3.toml) with [`half-roll.toml`](half-roll.toml) is the smallest
+mid-roll mesh: two relays rolled, a new relay between a new one and an old one.
 
 ## What fails a run
 

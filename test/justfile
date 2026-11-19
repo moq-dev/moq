@@ -203,7 +203,7 @@ drill-sensitivity *args:
 # release and this checkout, reporting what each costs. See mesh-replay/README.md.
 [positional-arguments]
 mesh-replay *args:
-    ./mesh-replay/run.sh "$@"
+    cd {{ quote(invocation_directory()) }} && {{ quote(source_directory() / "mesh-replay" / "run.sh") }} "$@"
 
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR

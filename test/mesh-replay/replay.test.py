@@ -42,7 +42,7 @@ cost = 2
 
 class MeshTest(unittest.TestCase):
     def test_nightly_mesh_crosses_three_links(self):
-        mesh = replay.load_mesh(HERE / "mesh.toml")
+        mesh = replay.load_mesh(HERE / "ring6.toml")
         self.assertEqual(mesh.diameter(), 3)
         script = replay.load_script(HERE / "script.toml", mesh)
         self.assertEqual(script.start, "old")
@@ -50,6 +50,15 @@ class MeshTest(unittest.TestCase):
         for relay in mesh.relays:
             self.assertTrue(any(link.dial == relay for link in mesh.links), relay)
             self.assertTrue(any(link.accept == relay for link in mesh.links), relay)
+
+    def test_nightly_sweep_meshes(self):
+        self.assertEqual(replay.load_mesh(HERE / "ring4.toml").diameter(), 2)
+
+    def test_half_roll_stops_mid_roll(self):
+        mesh = replay.load_mesh(HERE / "chain3.toml")
+        script = replay.load_script(HERE / "half-roll.toml", mesh)
+        self.assertEqual([event["relays"] for event in script.events], [["a", "b"]])
+        self.assertEqual(script.known, [])
 
     def test_ring(self):
         mesh = replay.load_mesh(mesh_file(RING))
@@ -73,9 +82,7 @@ class MeshTest(unittest.TestCase):
 
     def test_script_defaults_to_the_busiest_relay(self):
         mesh = replay.load_mesh(mesh_file(RING + '[[links]]\ndial = "a"\naccept = "c"\n'))
-        script = replay.load_script(
-            mesh_file('[[events]]\nkind = "kill"\n[[events]]\nkind = "reopen-link"\n'), mesh
-        )
+        script = replay.load_script(mesh_file('[[events]]\nkind = "kill"\n[[events]]\nkind = "reopen-link"\n'), mesh)
         self.assertEqual(script.events[0]["relay"], "a")
         self.assertEqual(script.events[1]["link"], "a-b")
         with self.assertRaisesRegex(ValueError, "not in the mesh"):
@@ -127,11 +134,13 @@ class ReaderTest(unittest.TestCase):
         return reader
 
     def test_interruption_counts_gaps_and_a_pause_still_going(self):
-        reader = self.log([
-            {"ms": 1000, "event": "online", "path": "replay/a/0"},
-            {"ms": 5000, "event": "gap", "path": "replay/a/0", "from": 2000, "missed": 3},
-            {"ms": 6000, "event": "status", "paths": {"replay/a/0": {"online": True, "groups": 9, "last": 6000}}},
-        ])
+        reader = self.log(
+            [
+                {"ms": 1000, "event": "online", "path": "replay/a/0"},
+                {"ms": 5000, "event": "gap", "path": "replay/a/0", "from": 2000, "missed": 3},
+                {"ms": 6000, "event": "status", "paths": {"replay/a/0": {"online": True, "groups": 9, "last": 6000}}},
+            ]
+        )
         path = reader.paths["replay/a/0"]
         self.assertEqual(replay.interruption(path, 1.0, 6.2, 0.5), (3.0, 3))
         # Outside the window, the gap does not count, but a pause running to its end does.
@@ -139,11 +148,28 @@ class ReaderTest(unittest.TestCase):
         never = replay.Follow()
         self.assertEqual(replay.interruption(never, 1.0, 4.0, 0.5), (3.0, 0))
 
+    def test_a_withdrawal_stepping_through_end_start_end(self):
+        reader = self.log(
+            [
+                {"ms": 1000, "event": "online", "path": "p"},
+                {"ms": 2000, "event": "offline", "path": "p"},
+                {"ms": 2100, "event": "online", "path": "p"},
+                {"ms": 2200, "event": "offline", "path": "p"},
+            ]
+        )
+        path = reader.paths["p"]
+        self.assertTrue(replay.withdrawn_twice(path, 1.5, 3.0))
+        # Ending once, or coming back for good, is not.
+        self.assertFalse(replay.withdrawn_twice(path, 2.15, 3.0))
+        self.assertFalse(replay.withdrawn_twice(path, 0.0, 2.15))
+
     def test_a_follow_holding_an_ended_track_is_stuck_until_it_changes(self):
-        reader = self.log([
-            {"ms": 1000, "event": "online", "path": "p"},
-            {"ms": 2000, "event": "ended", "path": "p", "error": "no error"},
-        ])
+        reader = self.log(
+            [
+                {"ms": 1000, "event": "online", "path": "p"},
+                {"ms": 2000, "event": "ended", "path": "p", "error": "no error"},
+            ]
+        )
         self.assertEqual(reader.paths["p"].ended, "no error")
         reader.apply({"ms": 3000, "event": "offline", "path": "p"})
         self.assertIsNone(reader.paths["p"].ended)

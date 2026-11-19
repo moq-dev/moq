@@ -27,6 +27,11 @@ name: Nightly
 # exception: deterministic and seconds long, so `just ci` gates every diff that
 # can move them, and audio-quality.yml reruns them here.
 #
+# `Mesh replay` runs real relays meshed over shaped links through link reopens, a
+# crash, and a roll between the newest release and this commit, about ten minutes a
+# cell. It reports what each fault cost rather than gating on it, so it belongs where
+# a number moving overnight is read, not where a merge waits.
+#
 # `mutants` edits the route and resume code one change at a time and fails on an
 # edit no test notices; each edit rebuilds moq-net's tests, about 27 runner-hours
 # for the full set, so it rotates (see sh/rs/mutants.sh).
@@ -239,11 +244,16 @@ jobs:
             recipe: obs test
           - name: libmoq C fixtures
             recipe: rs c-tests
-          # Reports what each fault costs a six-relay mesh; fails only on an unfed reader,
-          # a broadcast shown after its source ended, or a mesh that never goes quiet.
-          - name: Mesh replay
-            recipe: test mesh-replay --broadcasts 4,32 --report target/bench/nightly/mesh-replay
-            artifact: mesh-replay
+          # Reports what each fault costs a mesh of real relays, swept over relays and
+          # broadcasts per relay; fails only on an unfed reader, a broadcast shown after its
+          # source ended, or a mesh that never goes quiet. About 10 minutes a cell.
+          - name: Mesh replay (4 relays)
+            recipe: test mesh-replay --mesh test/mesh-replay/ring4.toml --broadcasts 4,32 --report target/bench/nightly/mesh-replay
+            artifact: mesh-replay-ring4
+            artifact-path: target/bench/nightly/mesh-replay
+          - name: Mesh replay (6 relays)
+            recipe: test mesh-replay --mesh test/mesh-replay/ring6.toml --broadcasts 4,32 --report target/bench/nightly/mesh-replay
+            artifact: mesh-replay-ring6
             artifact-path: target/bench/nightly/mesh-replay
 
     steps:

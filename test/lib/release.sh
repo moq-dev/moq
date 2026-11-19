@@ -28,7 +28,7 @@ release_binary() {
             echo "error: $tag lists a malformed checksum for $asset" >&2
             return 1
         }
-        curl -fLS "https://github.com/moq-dev/moq/releases/download/$tag/$asset" -o "$root/bin/$binary"
+        curl -fLsS "https://github.com/moq-dev/moq/releases/download/$tag/$asset" -o "$root/bin/$binary"
         printf '%s  %s\n' "$digest" "$root/bin/$binary" | sha256sum -c - >&2
         chmod +x "$root/bin/$binary"
     else
