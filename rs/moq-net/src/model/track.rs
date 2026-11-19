@@ -8203,7 +8203,11 @@ impl Indexed {
 
 	/// Take in what arrived since the last call, under `groups`.
 	fn catch_up(&mut self, state: &TrackState, groups: &Cover) {
-		if self.cover != *groups {
+		if self.taken == 0 {
+			// Nothing taken in yet: every live group has an arrival entry, so the walk below
+			// takes in all of them under `groups`.
+			self.cover = groups.clone();
+		} else if self.cover != *groups {
 			self.recover(state, groups);
 		}
 		for entry in state.arrivals_from(self.taken) {

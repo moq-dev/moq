@@ -1394,7 +1394,9 @@ struct Fold {
 }
 
 struct Folded {
-	reader: Weak<Mutex<Reader>>,
+	/// Keeps the reader's allocation, so no other reader takes its address, the entry's key,
+	/// until the entry leaves.
+	_reader: Weak<Mutex<Reader>>,
 	revision: u64,
 	/// The held key of each of the reader's ranges, by the reader's key.
 	keys: BTreeMap<u64, u64>,
@@ -1422,7 +1424,7 @@ impl Fold {
 			.readers
 			.entry(Arc::as_ptr(reader) as usize)
 			.or_insert_with(|| Folded {
-				reader: Arc::downgrade(reader),
+				_reader: Arc::downgrade(reader),
 				revision,
 				keys: BTreeMap::new(),
 			});
@@ -1442,16 +1444,6 @@ impl Fold {
 	/// retired or replaced, and the ranges it added, under new held keys.
 	fn refold(&mut self, reader: &Arc<Mutex<Reader>>) -> (Vec<u64>, Vec<(u64, track::Range)>) {
 		let id = Arc::as_ptr(reader) as usize;
-		// Another reader at the address of one that left starts over.
-		if self
-			.readers
-			.get(&id)
-			.is_some_and(|folded| !Weak::ptr_eq(&folded.reader, &Arc::downgrade(reader)))
-		{
-			let gone = self.readers.remove(&id).expect("checked above");
-			let add = self.fold(reader, None);
-			return (gone.keys.into_values().collect(), add);
-		}
 		let Some(folded) = self.readers.get_mut(&id) else {
 			return (Vec::new(), self.fold(reader, None));
 		};
@@ -8082,7 +8074,8 @@ mod test {
 	}
 
 	/// A held subscription following its readers' demand asks, edit by edit, for the ranges
-	/// the whole fold does, as readers edit their ranges, arrive, and leave.
+	/// the whole fold does, as readers edit their ranges, arrive, and leave, and keeps an
+	/// entry only for each reader still here.
 	#[test]
 	fn a_held_subscription_follows_each_edit_as_the_whole_fold() {
 		use rand::{RngExt, SeedableRng};
@@ -8152,6 +8145,9 @@ mod test {
 			let asked = held.sub.preferences().read().subscription();
 			assert_eq!(sorted(asked.ranges), sorted(whole.ranges), "step {step}");
 			assert_eq!(asked.priority, demand.priority, "step {step}");
+			// A reader that left takes its entry, and the allocation that entry kept, with it.
+			let folded = held.fold.as_ref().map_or(0, |fold| fold.readers.len());
+			assert_eq!(folded, readers.len(), "step {step}");
 		}
 		readers.clear();
 		assert!(!routes.follow(&mut held, &weak), "the last reader lets it go");
