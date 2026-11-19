@@ -579,6 +579,13 @@ export interface StagedTrack {
 }
 
 /**
+ * Where a publisher reported starting a range counting back: at a group, or at or past an exclusive
+ * end where the range held no group, which says nothing of a range ending later. Mirrors the Rust
+ * `track::CountedStart`.
+ */
+export type CountedStart = { at: bigint; past?: never } | { past: bigint; at?: never };
+
+/**
  * How a received copy's start bounds the fills its readers ask below it. Mirrors the Rust
  * `Start::Resolved` and `Producer::fills_from_start`.
  *
@@ -589,13 +596,6 @@ export interface StagedTrack {
  * widened budget reaches lower groups through the feed's re-offer. Anywhere else, a reader fills
  * below the start only the groups its ranges name.
  */
-/**
- * Where a publisher reported starting a range counting back: at a group, or at or past an exclusive
- * end where the range held no group, which says nothing of a range ending later. Mirrors the Rust
- * `track::CountedStart`.
- */
-export type CountedStart = { at: bigint; past?: never } | { past: bigint; at?: never };
-
 export interface FillStarts {
 	/** The wire's start is resolved from the subscriber's budget: lite SUBSCRIBE_START from lite-06. */
 	resolvesStart?: boolean;

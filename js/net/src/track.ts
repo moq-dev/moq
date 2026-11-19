@@ -1284,9 +1284,9 @@ export class Producer {
 	#timeStarts = new Map<bigint, bigint>();
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: CountedStart; latest?: bigint }>();
-	// The highest key of any group that left the cache: a received copy counting a relative start
-	// back can't tell a gap at or below it from one it never held. Mirrors the Rust
-	// `TrackState::uncached`.
+	// The highest key of any group the cache evicted, rather than one a new copy replaced: a received
+	// copy counting a relative start back can't tell a gap at or below it from one it never held.
+	// Mirrors the Rust `TrackState::uncached`.
 	#uncached?: bigint;
 	// Whether a copy's publisher reports where each range starts, so a relative start the copy
 	// can't count back over its own groups waits for that. Mirrors the Rust `Anchors::Reported`.
@@ -1389,6 +1389,8 @@ export class Producer {
 			evict: (entry) => {
 				this.#evict(entry);
 				this.#uncache(entry, true);
+				// Gone for good, unlike a group a new copy replaces at once.
+				this.#uncached = max(this.#uncached ?? entry.group.start, entry.group.start);
 			},
 			settle: () => this.#settle(),
 			expireDrops: (now) => this.#expireDrops(now),
@@ -2175,7 +2177,6 @@ export class Producer {
 		if (this.#cached.get(entry.group.start) === entry) {
 			this.#cached.delete(entry.group.start);
 			removeKey(this.#keys, entry.group.start);
-			this.#uncached = max(this.#uncached ?? entry.group.start, entry.group.start);
 		}
 		this.#unbound(entry, evicted);
 		this.#account.remove(entry);
@@ -3717,13 +3718,22 @@ export class Subscriber {
 			// feeds it, over the groups held. Mirrors the Rust `TrackState::counted_start`.
 			countedStart: (latest, back, end) => {
 				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
-				if (reported !== undefined && reported.latest === latest) {
+				if (reported?.latest !== undefined && reported.latest <= latest) {
 					const { at, past } = reported.start;
-					if (at !== undefined) return { group: at };
+					if (at !== undefined && reported.latest === latest) return { group: at };
 					// Past a range ending no earlier than this one, so this one holds no group either.
-					if (end <= past) return { group: end };
+					// Counting from a newer latest group only starts later, so it holds there too.
+					if (past !== undefined && end <= past) return { group: end };
 				}
-				if (!anchors.reported || !receivedCopy(producer) || state.closed.peek() !== undefined) return undefined;
+				// Nothing more arrives once the copy closes or completes, so no report can settle it
+				// either.
+				if (
+					!anchors.reported ||
+					!receivedCopy(producer) ||
+					state.closed.peek() !== undefined ||
+					this.#complete()
+				)
+					return undefined;
 				// Each step lands on a group held, so a huge count walks the cache once.
 				let at = latest;
 				for (let step = 0n; step < back; step++) {

@@ -675,8 +675,7 @@ export class Window {
 	 * anchor waits.
 	 */
 	start(): bigint | undefined {
-		if (this.pending || this.#reaching.size > 0 || this.#counting.size > 0 || this.#unnamed > 0)
-			return undefined;
+		if (this.pending || this.#reaching.size > 0 || this.#counting.size > 0 || this.#unnamed > 0) return undefined;
 		return this.#named.first();
 	}
 

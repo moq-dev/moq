@@ -5788,3 +5788,55 @@ test("the counted aggregates match a full fold of every subscriber", async () =>
 		producer.close();
 	}
 });
+
+// A lite-07 copy holding part of the track counts a relative start back only through the groups it
+// holds, or as its publisher reported, and reads nothing at a gap until one of those can count it,
+// or nothing more arrives. Mirrors the Rust `a_received_copy_counts_a_relative_start_back_as_its_publisher_did`.
+test("a received copy counts a relative start back as its publisher did", async () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.reportsStarts(producer);
+	for (const key of [1n, 2n, 7n, 8n, 9n, 10n]) putGroup(producer, key, Number(key));
+	producer.skipGroups(3n, 7n);
+	// Counting 4 back from 10, the publisher had no group to deliver before 11.
+	hooks.relativeStarts(producer, [[4n, { past: 11n }, 10n]]);
+	putGroup(producer, 11n, 11);
+	const subscribe = (start: bigint, end?: bigint) =>
+		producer.subscribe({
+			delay: { max: null },
+			ranges: [{ start: { relative: start }, end: end === undefined ? undefined : { time: end } }],
+		});
+
+	// Counting from a newer latest group only starts later, so the empty report still holds, where
+	// the groups held would count back to group 7.
+	const empty = subscribe(4n, 8n);
+	expect(drain(empty)).toEqual([]);
+	expect(await empty.recvGroup()).toBeUndefined();
+
+	// Through the starts skipped, group 0 may sit below 1, so it reads nothing meanwhile.
+	const gap = subscribe(7n);
+	expect(drain(gap)).toEqual([]);
+	// Once the copy reaches its end, nothing more can arrive, so it counts over the groups held.
+	hooks.endTrack(producer, { group: 12n, frame: 0 });
+	await settle();
+	expect(drain(gap)).toEqual([1n, 2n, 7n, 8n, 9n, 10n, 11n]);
+	expect(await gap.recvGroup()).toBeUndefined();
+});
+
+// A failed group a new copy replaces leaves no gap the cache made, so a relative start counting into
+// the gap below it still waits. Mirrors the Rust `a_received_copy_waits_on_a_gap_a_displaced_group_left`.
+test("a received copy waits on a gap a replaced group left", () => {
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	hooks.reportsStarts(producer);
+	for (const key of [1n, 2n]) putGroup(producer, key, Number(key));
+	const failed = producer.createGroup(9n);
+	failed.writeFrame(textFrame("x", Timestamp.fromMillis(9)));
+	failed.abort(new Error("reset"));
+	putGroup(producer, 9n, 9);
+
+	const reader = producer.subscribe({
+		delay: { max: null },
+		ranges: [{ start: { relative: 2n }, end: { time: 8n } }],
+	});
+	expect(drain(reader)).toEqual([]);
+	expect(reader.floor()).toBeUndefined();
+});

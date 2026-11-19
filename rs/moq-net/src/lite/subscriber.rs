@@ -253,7 +253,7 @@ struct Duplicate {
 	/// The copy still arriving, whose readers wait while this holds it.
 	arriving: track::Hold,
 	track: track::Producer,
-	/// CountedStart already, and kept open while held, since the stream may still carry the group.
+	/// Counted already, and kept open while held, since the stream may still carry the group.
 	reading: Reading,
 }
 
@@ -411,7 +411,7 @@ impl TrackEntry {
 				);
 			}
 		}
-		// The subscription's end waits until this stream is read. CountedStart
+		// The subscription's end waits until this stream is read. Counted
 		// whatever the cache said, since the publisher counts every stream it
 		// opens (a resubscribe resends a cached group), and only after the
 		// cache holds the group, so a fetch held for the feed that sees it
@@ -5133,7 +5133,7 @@ mod tests {
 			let waiter = kio::Waiter::noop();
 			assert!(duplicate.poll_serve(&waiter).is_pending(), "first fails: {first_fails}");
 			assert_eq!(duplicate.state.name(), "Hold", "first fails: {first_fails}");
-			// CountedStart and holding the end open while it waits, since it may carry the group.
+			// Counted and holding the end open while it waits, since it may carry the group.
 			assert_eq!(tail.read().streams(), 1);
 
 			let mut original = reader.assert_group();

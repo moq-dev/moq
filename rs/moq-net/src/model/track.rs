@@ -745,7 +745,8 @@ pub(crate) struct TrackState {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	evicted: Option<(u64, Timestamp)>,
-	// The highest key of any group that left the cache, checked start or not: a received copy
+	// The highest key of any group that left the cache for good (evicted or reclaimed, not
+	// displaced by a copy that holds or sends it again), checked start or not: a received copy
 	// counting a relative start back can't tell a gap at or below it from one it never held.
 	uncached: Option<u64>,
 
@@ -1233,14 +1234,16 @@ impl Holdings for TrackState {
 		let reported = self
 			.relative_starts
 			.get(&back)
-			.filter(|reported| reported.latest == latest)
 			.and_then(|reported| match reported.start {
-				CountedStart::At(start) => Some(start),
+				CountedStart::At(start) => (reported.latest == latest).then_some(start),
 				// Past a range ending no earlier than this one, so this one holds no group either.
-				CountedStart::Past(past) => end.filter(|end| *end <= past),
+				// Counting from a newer latest group only starts later, so it holds there too.
+				CountedStart::Past(past) => end.filter(|end| reported.latest <= latest && *end <= past),
 			})
 			.map(Containing::Group);
-		let learns = self.anchors == Anchors::Reported && !self.outcome.is_final() && !self.unfed;
+		// Nothing more arrives once the copy is released, complete, or unfed, so no report can
+		// settle it either.
+		let learns = self.anchors == Anchors::Reported && !self.outcome.is_released() && !self.nothing_arrives();
 		reported.or_else(|| learns.then(|| self.counted_received(latest, back)).flatten())
 	}
 
@@ -1526,7 +1529,6 @@ impl TrackState {
 	/// Take group `key` out of the cache, raising the eviction watermark to its start.
 	fn uncache(&mut self, key: u64) -> Option<Slot> {
 		let slot = self.remove_slot(key)?;
-		self.uncached = self.uncached.max(Some(key));
 		if let Some(start) = slot.bound()
 			&& self.evicted.is_none_or(|(evicted, _)| key > evicted)
 		{
@@ -1539,6 +1541,7 @@ impl TrackState {
 	/// it for the readers that judged it cached to judge again.
 	fn evict_group(&mut self, key: u64, err: Error) {
 		let slot = self.uncache(key).expect("a cached group");
+		self.let_go(key);
 		slot.abort(err);
 		let landed = self
 			.inboxes
@@ -1548,6 +1551,12 @@ impl TrackState {
 		if landed {
 			self.evictions += 1;
 		}
+	}
+
+	/// Record that group `key` left the cache for good, with nothing holding or sending it
+	/// again: a gap at or below it may be one the cache made.
+	fn let_go(&mut self, key: u64) {
+		self.uncached = self.uncached.max(Some(key));
 	}
 
 	/// [`Self::uncache`] a group that another copy displaces rather than one that ends, so a
@@ -1868,7 +1877,11 @@ impl TrackState {
 	/// Remove an aborted slot, keeping a cut as a drop: reclaiming it must not erase a
 	/// disposition a relay still has to forward.
 	fn reclaim_aborted(&mut self, key: u64) {
-		if let Some(slot) = self.uncache(key)
+		let slot = self.uncache(key);
+		if slot.is_some() {
+			self.let_go(key);
+		}
+		if let Some(slot) = slot
 			&& slot.visible
 			&& let Some(err) = slot.verdict()
 			&& let Some(end) = key.checked_add(1)
@@ -15952,11 +15965,57 @@ mod test {
 		let mut longer = producer.subscribe(until(10));
 		assert_eq!(placed(&mut longer), Some(1), "counted through the groups held instead");
 
-		// Nothing more can arrive, so it counts over the groups held, fewer than it asks: it
-		// reaches back to the oldest.
-		drop(producer.finish().unwrap());
-		assert_eq!(placed(&mut gap), Some(0));
-		assert_eq!(read(&mut gap), vec![1, 2, 7, 8, 9, 10]);
+		// Counting from a newer latest group only starts later, so the empty report still holds,
+		// where the groups held would count back to group 2.
+		write_group(&producer, 11);
+		let mut newer = producer.subscribe(until(8));
+		assert_eq!(
+			newer.resolved_range(0).map(|resolved| (resolved.start, resolved.end)),
+			Some((9, Some(9)))
+		);
+		assert_eq!(placed(&mut gap), Some(1), "counted from 11 through the groups held");
+		let mut deeper = producer.subscribe(back(7));
+		assert_eq!(placed(&mut deeper), None, "group 0 may sit below 1");
+
+		// Nothing more can arrive once the copy reaches its end, though its producer is still
+		// held, so it counts over the groups held, fewer than it asks: it reaches back to the
+		// oldest.
+		let _finished = producer.finish().unwrap();
+		assert_eq!(placed(&mut deeper), Some(0));
+		assert_eq!(read(&mut deeper), vec![1, 2, 7, 8, 9, 10, 11]);
+	}
+
+	/// A group an idle copy displaces is sent again by the next feed, so the gap it leaves is
+	/// not one the cache made: a relative start counting into it still waits.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_waits_on_a_gap_a_displaced_group_left() {
+		let mut producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.reported();
+		for key in [1, 2] {
+			write_group(&producer, key);
+		}
+		let mut open = producer.create_group(group::Info { start: 9 }).unwrap();
+		open.write_frame(Timestamp::from_millis(9).unwrap(), &b"x"[..]).unwrap();
+		producer.report_edge(9);
+		producer.set_idle();
+		producer.set_live(Some(Position::group(9)), None).unwrap();
+		write_group(&producer, 9);
+
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Relative(2),
+					end: Some(Anchor::Time(8)),
+				}])
+				.with_delay(Delay::default().with_max(None)),
+		);
+		assert_eq!(
+			reader.resolved_range(0).map(|resolved| resolved.start),
+			None,
+			"group 8 may sit below 9"
+		);
 	}
 
 	/// Ranges counting back the same number of groups report together: a start holds for every
