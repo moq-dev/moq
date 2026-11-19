@@ -159,6 +159,11 @@ export * as Hang from "@moq/hang";
 
 export type Kind = "video" | "audio" | "text";
 
+export namespace MediaClock {
+	export function capture(at: Clock.Instant): Clock.Duration;
+	export function now(): Clock.Duration;
+}
+
 export * as Net from "@moq/net";
 
 export type OnDemand = "off" | "retain" | "all";

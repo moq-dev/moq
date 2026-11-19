@@ -1,5 +1,7 @@
 //! The ambient clock, captured so it reads the same from anywhere.
 
+use std::time::Duration;
+
 use crate::clock::{Instant, Wall};
 
 /// The ambient clock as it was when [`current`](Self::current) captured it.
@@ -83,14 +85,39 @@ impl Clock {
 	/// reads before 1970.
 	pub fn wall(&self) -> Wall {
 		match &self.0 {
-			// Paused tokio does not pause wall time.
 			Source::Host => super::runtime::wall(),
 			#[cfg(feature = "runtime")]
-			Source::Runtime(_) => super::runtime::wall(),
+			Source::Runtime(runtime) => {
+				let _entered = runtime.enter();
+				super::runtime::runtime_wall()
+			}
 			#[cfg(feature = "manual")]
 			Source::Installed(clock) => clock.wall(),
 			#[cfg(feature = "sim")]
 			Source::Sim(id) => super::sim::wall_in(*id),
+		}
+	}
+
+	/// How long the host has spent suspended, which [`now`](Self::now) does not count.
+	///
+	/// Its growth between two reads is how long the host slept between them, so adding it to the
+	/// instants' difference measures time as the wall clock does across a suspend. The host's reads
+	/// the platform where its monotonic clock stops while asleep (Linux, Android, Apple) and is zero
+	/// elsewhere, as on Windows, whose monotonic clock already counts sleep. A paused runtime reads
+	/// the host's too. Two reads taken within nanoseconds of each other can differ by that much.
+	///
+	/// # Panics
+	///
+	/// When captured inside a simulator run and read outside it.
+	pub fn suspended(&self) -> Duration {
+		match &self.0 {
+			Source::Host => super::runtime::suspended(),
+			#[cfg(feature = "runtime")]
+			Source::Runtime(_) => super::runtime::suspended(),
+			#[cfg(feature = "manual")]
+			Source::Installed(clock) => clock.suspended(),
+			#[cfg(feature = "sim")]
+			Source::Sim(id) => super::sim::suspended_in(*id),
 		}
 	}
 }
@@ -201,6 +228,27 @@ mod tests {
 			assert_eq!(sim.wall(), crate::clock::Manual::WALL_START + Duration::from_secs(10));
 			assert!(host.now() > crate::clock::Instant::ZERO.saturating_add(Duration::from_secs(1 << 31)));
 			assert_ne!(sim, host);
+		});
+	}
+
+	/// A simulated suspend counts as suspended without moving the instant, and the host's reads.
+	#[test]
+	fn a_suspend_is_counted_apart_from_the_instant() {
+		// The host's clocks read, and its sleep never shrinks beyond the gap between two reads.
+		let host = Clock::current();
+		let slept = host.suspended();
+		assert!(host.suspended() + Duration::from_micros(100) >= slept);
+
+		crate::clock::sim::run(async {
+			let clock = Clock::current();
+			let start = clock.now();
+			crate::clock::sim::suspend(Duration::from_secs(3600));
+			assert_eq!(clock.now(), start);
+			assert_eq!(clock.suspended(), Duration::from_secs(3600));
+			assert_eq!(
+				clock.wall(),
+				crate::clock::Manual::WALL_START + Duration::from_secs(3600)
+			);
 		});
 	}
 

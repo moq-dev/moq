@@ -930,11 +930,10 @@ async fn capture_loop<S: CaptureSource>(
 		let Some(mut camera) = wait_capture(demands(producers), on_demand, source.open(capture)).await? else {
 			continue;
 		};
-		// Capture timestamps use a private monotonic timeline. Sample both clocks
-		// once at open so every queued frame maps to the shared broadcast epoch
-		// without mistaking dequeue time for acquisition time.
-		let mut capture_epoch =
-			u64::try_from(clock.now().as_micros()?.saturating_sub(camera.now().as_micros()?)).unwrap_or(u64::MAX);
+		// The broadcast clock's lead over this stream's timeline, in microseconds, sampled per frame.
+		let mut offset: Option<i128> = None;
+		// How far this stream is shifted past the previous one's last timestamp, set by its first frame.
+		let mut lead: Option<i128> = None;
 		// Prefer an explicit --fps, otherwise the camera's reported rate, falling
 		// back only if the backend doesn't expose one.
 		let framerate = capture
@@ -1036,18 +1035,40 @@ async fn capture_loop<S: CaptureSource>(
 							let startup = *startup.get_or_insert(skipped);
 							let seq = reads + (skipped - startup);
 							reads += 1;
-							let mut mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+							// Capture timestamps use a private monotonic timeline. The offset to the
+							// broadcast clock is sampled per frame, so each queued frame maps by
+							// acquisition, not dequeue, time, and the stream follows the clock's slew
+							// toward the wall clock and its jump across a suspend. Reads straddling a
+							// stall would skew it, so those keep the last offset. The first after an
+							// open has none to keep and fixes the reopen lead, so it reads again instead.
+							let mut sample = clock_offset(clock, &camera)?;
+							for _ in 0..RESAMPLES {
+								if sample.is_some() || offset.is_some() {
+									break;
+								}
+								sample = clock_offset(clock, &camera)?;
+							}
+							if let Some(sample) = sample {
+								offset = Some(sample);
+							} else if offset.is_none() {
+								offset = Some(clock_offset_unchecked(clock, &camera)?);
+							}
+							let mut micros = frame.timestamp.as_micros()? as i128 + offset.unwrap_or_default();
 							// A camera never rewinds its own stream, but a reopened one maps from the
 							// shared clock, which the previous stream can lead: a device re-anchor
 							// floors just past its last timestamp, ahead of arrival. Shift the new
 							// stream past it, keeping its spacing.
-							if let Some(last) = last
-								&& mapped <= last
-							{
-								let behind = u64::try_from(last.as_micros()? - mapped.as_micros()?).unwrap_or(u64::MAX);
-								capture_epoch = capture_epoch.saturating_add(behind).saturating_add(1);
-								mapped = map_capture_timestamp(capture_epoch, frame.timestamp)?;
+							let last_micros = last.map(|last| last.as_micros()).transpose()?.map(|last| last as i128);
+							let lead = *lead.get_or_insert_with(|| match last_micros {
+								Some(last) if micros <= last => last - micros + 1,
+								_ => 0,
+							});
+							micros += lead;
+							// Nor does a frame land at or below the last, which only that frame is held to.
+							if let Some(last) = last_micros {
+								micros = micros.max(last + 1);
 							}
+							let mapped = map_capture_timestamp(micros)?;
 							last = Some(mapped);
 							frame.timestamp = mapped;
 							latest = Some((seq, std::sync::Arc::new(frame)));
@@ -1089,9 +1110,31 @@ async fn capture_loop<S: CaptureSource>(
 	}
 }
 
-fn map_capture_timestamp(epoch_micros: u64, timestamp: Timestamp) -> Result<Timestamp, Error> {
-	let capture_micros = u64::try_from(timestamp.as_micros()?).unwrap_or(u64::MAX);
-	Ok(Timestamp::from_micros(epoch_micros.saturating_add(capture_micros))?)
+/// The most two camera readings may straddle for the broadcast clock read between them to place it.
+const STALL: i128 = 1_000;
+
+/// How many more times a stream's first offset is read while every read straddles a stall.
+const RESAMPLES: usize = 8;
+
+/// The broadcast clock's lead over `camera`'s timeline in microseconds, read between two camera
+/// readings, or `None` when they straddle a stall.
+fn clock_offset(clock: &moq_mux::Clock, camera: &capture::Stream) -> Result<Option<i128>, Error> {
+	let before = camera.now().as_micros()? as i128;
+	let media = clock.now().as_micros()? as i128;
+	let after = camera.now().as_micros()? as i128;
+	Ok((after - before <= STALL).then_some(media - (before + after) / 2))
+}
+
+/// [`clock_offset`] however long its reads straddle, for a host that never reads cleanly.
+fn clock_offset_unchecked(clock: &moq_mux::Clock, camera: &capture::Stream) -> Result<i128, Error> {
+	Ok(clock.now().as_micros()? as i128 - camera.now().as_micros()? as i128)
+}
+
+/// A broadcast clock reading in microseconds, zero before PTS zero.
+fn map_capture_timestamp(micros: i128) -> Result<Timestamp, Error> {
+	Ok(Timestamp::from_micros(
+		u64::try_from(micros.max(0)).unwrap_or(u64::MAX),
+	)?)
 }
 
 #[cfg(test)]
@@ -1215,10 +1258,8 @@ mod tests {
 	}
 
 	#[test]
-	fn capture_clock_mapping_is_monotonic() {
-		let first = map_capture_timestamp(10_000, Timestamp::from_micros(2_000).unwrap()).unwrap();
-		let second = map_capture_timestamp(10_000, Timestamp::from_micros(2_001).unwrap()).unwrap();
-		assert!(second > first);
+	fn a_capture_before_pts_zero_maps_to_zero() {
+		assert_eq!(map_capture_timestamp(-5).unwrap().as_micros().unwrap(), 0);
 	}
 
 	/// Clock fixtures: the real capture loop, fed by a synthetic camera against a pinned
@@ -1227,8 +1268,8 @@ mod tests {
 	/// time passes only where a test advances it, so a slow runner moves nothing.
 	///
 	/// Each expectation is the acquisition instant measured on the broadcast clock. The loop
-	/// samples the broadcast clock and then the camera's timeline when it opens a camera, so a
-	/// published timestamp may land up to `SAMPLING` early, never late.
+	/// samples the broadcast clock and then the camera's timeline for each frame, so a published
+	/// timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(feature = "openh264")]
 	mod clock {
 		use kio::clock::Wall;
@@ -1426,6 +1467,34 @@ mod tests {
 					return timestamp;
 				}
 			}
+		}
+
+		/// Each frame maps onto the broadcast clock as it reads then, so a stream follows the clock's
+		/// slew toward a stepped wall clock rather than the offset it had when the camera opened.
+		#[tokio::test]
+		async fn frames_follow_the_broadcast_clocks_slew() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall()).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					camera.push_at(surface(), Instant::now());
+					let first = read(&mut track).await;
+
+					// Ten seconds of wall step, slewed at 500 ppm: 50 ms over the next 100 s.
+					fixture.time.step_wall(fixture.time.wall() + Duration::from_secs(10));
+					fixture.time.advance(Duration::from_secs(100)).unwrap();
+					camera.push_at(surface(), Instant::now());
+					let published = read(&mut track).await;
+
+					assert!(
+						(published - first).abs_diff(100_050_000) <= ROUNDING,
+						"{}us apart",
+						published - first
+					);
+					fixture.finish().await;
+				})
+				.await
 		}
 
 		/// A camera whose first frame arrives long after the broadcast began stamps it at its

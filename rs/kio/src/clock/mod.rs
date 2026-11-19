@@ -85,7 +85,8 @@ pub fn now() -> Instant {
 
 /// The current wall time on the ambient clock.
 ///
-/// Paused tokio does not pause wall time; use the simulator to control both.
+/// A paused tokio runtime's wall time moves with its instants, from the host's wall time when it
+/// paused; use the simulator to step or drift it.
 ///
 /// # Panics
 ///
@@ -103,7 +104,7 @@ pub fn wall() -> Wall {
 	if let Some(clock) = installed::current() {
 		return clock.wall();
 	}
-	runtime::wall()
+	runtime::runtime_wall()
 }
 
 /// The ambient clock's origin: an instant and its wall time, fixed at the first read.

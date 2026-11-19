@@ -245,8 +245,6 @@ export const VideoSchema = z.object({
 	flip: z.optional(z.boolean()),
 });
 
-/** The catalog video section: renditions keyed by track name plus display options. */
-export type Video = z.infer<typeof VideoSchema>;
 /** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
 

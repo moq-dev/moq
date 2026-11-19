@@ -31,6 +31,7 @@
       },
       "devDependencies": {
         "playwright": "1.64.1",
+        "typescript": "7.0.2",
       },
     },
     "demo/boy": {
@@ -80,7 +81,7 @@
         "@moq/common": "workspace:*",
         "@types/three": "^0.187.0",
         "typescript": "7.0.2",
-        "vite": "^8.3.5",
+        "vite": "^8.3.6",
       },
     },
     "demo/web": {
@@ -118,6 +119,7 @@
         "typescript": "7.0.2",
         "vitepress": "^1.6.4",
         "vitepress-plugin-llms": "^1.14.0",
+        "vue": "^3.5.44",
         "wrangler": "^4.158.0",
         "yaml": "^2.9.1",
       },
@@ -216,6 +218,7 @@
         "@types/bun": "^1.4.4",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "typescript": "7.0.2",
+        "vite": "^8.3.6",
       },
     },
     "js/json": {
@@ -285,6 +288,7 @@
         "@types/node": "^26.6.6",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "fast-check": "^4.10.2",
+        "playwright": "1.64.1",
         "typescript": "7.0.2",
       },
       "peerDependencies": {
@@ -331,6 +335,7 @@
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.4",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
+        "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.6",
       },
@@ -453,6 +458,7 @@
         "@types/audioworklet": "^0.0.100",
         "@types/bun": "^1.4.4",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
+        "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.6",
       },
@@ -471,6 +477,7 @@
         "@moq/common": "workspace:*",
         "@types/audioworklet": "^0.0.100",
         "playwright": "1.64.1",
+        "typescript": "7.0.2",
         "vite": "^8.3.6",
       },
     },
@@ -494,6 +501,7 @@
       "devDependencies": {
         "@moq/common": "workspace:*",
         "playwright": "1.64.1",
+        "typescript": "7.0.2",
         "vite": "^8.3.6",
       },
     },
@@ -505,10 +513,10 @@
         "@moq/json": "workspace:*",
         "@moq/net": "workspace:*",
         "@moq/web-transport": "^0.1.6",
-        "zod": "^4.6.7",
       },
       "devDependencies": {
         "tsx": "^4.23.15",
+        "typescript": "7.0.2",
       },
     },
     "test/qmux": {
@@ -528,17 +536,18 @@
         "@moq/net": "workspace:*",
         "@moq/web-transport": "^0.1.6",
       },
+      "devDependencies": {
+        "typescript": "7.0.2",
+      },
     },
     "test/stream-credit": {
       "name": "@moq/stream-credit-test",
       "dependencies": {
-        "@moq/clock": "workspace:*",
         "@moq/net": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "^1.4.4",
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
-        "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.6",
       },

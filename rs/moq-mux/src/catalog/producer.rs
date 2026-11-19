@@ -2576,7 +2576,9 @@ mod test {
 				.unwrap()
 		);
 
+		// The faked host wall clock moves with time, as a real one does.
 		tokio::time::advance(std::time::Duration::from_secs(3)).await;
+		crate::clock::fake_host_wall(kio::clock::Wall::MOQ_EPOCH + std::time::Duration::from_secs(86_403));
 		assert_eq!(
 			catalog.timestamp(None).unwrap(),
 			moq_net::Timestamp::from_micros(3_603_000_000).unwrap()
