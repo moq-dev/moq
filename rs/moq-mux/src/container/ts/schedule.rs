@@ -1314,7 +1314,15 @@ impl Schedule {
 		let mut keyframe = false;
 		let mut units = Vec::new();
 		let mut begun = 0;
-		for (unit, take) in self.units.iter_mut().zip(take) {
+		// Tables already on their way finish ahead of any copy forced out beside them, as the
+		// padded layout's `held_back` keeps them.
+		let mut order: Vec<usize> = (0..self.units.len()).collect();
+		order.sort_by_key(|&i| {
+			let unit = &self.units[i];
+			unit.sent == 0 || (unit.tables.is_none() && !unit.repeat)
+		});
+		for i in order {
+			let (unit, take) = (&mut self.units[i], take[i]);
 			if take == 0 {
 				continue;
 			}
@@ -2375,42 +2383,49 @@ mod tests {
 	}
 
 	/// Unpadded too, a revision waits for a repeat already on its way, so no table of the old
-	/// version follows one of the new.
+	/// version follows one of the new: whether a media-led copy shares every slot with it, or
+	/// one falls due beside its remainder and is forced out with it.
 	#[test]
 	fn a_revision_waits_for_a_begun_repeat_unpadded() {
-		let mut schedule = Schedule::new(Duration::ZERO);
-		schedule.set_tables(100);
-		schedule.set_clock(1);
-		schedule.set_buffer(1, VIDEO);
-		let psi = |mark: u8| Psi {
-			packets: marked_tables(mark, 11),
-			flagged: None,
-			clock: 1,
-		};
-		schedule.set_psi(psi(1));
-		for ms in (0..2_000).step_by(40) {
-			schedule.lead(Tables {
-				rate: None,
-				added: Vec::new(),
-			});
-			schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
-		}
-		let mut marks = Vec::new();
-		let mut revised = false;
-		while let Some(slot) = schedule.next(Some(slot(ms(4_000)))).unwrap() {
-			marks.extend(table_marks(&slot));
-			let begun = schedule.units.iter().any(|unit| unit.repeat && unit.sent > 0);
-			if !revised && begun {
-				schedule.set_psi(psi(2));
-				revised = true;
+		let every: Vec<u128> = (0..2_000).step_by(40).collect();
+		let due: Vec<u128> = [0, 40, 50].into_iter().chain((80..2_000).step_by(40)).collect();
+		for (frames, leads) in [(every.clone(), every), (due, vec![0, 40, 50])] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			let psi = |mark: u8| Psi {
+				packets: marked_tables(mark, 11),
+				flagged: None,
+				clock: 1,
+			};
+			schedule.set_psi(psi(1));
+			for &ms in &frames {
+				if leads.contains(&ms) {
+					schedule.lead(Tables {
+						rate: None,
+						added: Vec::new(),
+					});
+				}
+				schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
 			}
+			let mut marks = Vec::new();
+			let mut revised = false;
+			while let Some(slot) = schedule.next(Some(slot(ms(4_000)))).unwrap() {
+				marks.extend(table_marks(&slot));
+				let begun = schedule.units.iter().any(|unit| unit.repeat && unit.sent > 0);
+				if !revised && begun {
+					schedule.set_psi(psi(2));
+					revised = true;
+				}
+			}
+			assert!(revised, "{leads:?}: a repeat began");
+			let first = marks.iter().position(|&mark| mark == 2).expect("the revision goes out");
+			assert!(
+				marks[first..].iter().all(|&mark| mark == 2),
+				"{leads:?}: an old table follows the new: {marks:?}"
+			);
 		}
-		assert!(revised, "a repeat began");
-		let first = marks.iter().position(|&mark| mark == 2).expect("the revision goes out");
-		assert!(
-			marks[first..].iter().all(|&mark| mark == 2),
-			"an old table follows the new: {marks:?}"
-		);
 	}
 
 	/// Only the first copy of the tables to go out after a switch flags the break.
