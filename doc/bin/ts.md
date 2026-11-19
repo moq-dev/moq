@@ -112,8 +112,9 @@ wrap (every 26.5 hours), so a jump of more than half a wrap reads as a rewind.
 ### Export
 
 The export rebuilds PES headers, packets, the PCR (on the first video PID, else
-audio, else a PCR-only PID), and PAT/PMT, every 500 ms and at each keyframe,
-with SI at the DVB maxima. It pads to the source's constant mux rate when the
+audio, else a PCR-only PID), and PAT/PMT, every 100 ms while media flows and at
+each keyframe, with each SI table at half its DVB maximum, so the gaps an analyser
+measures stay inside TR 101 290's limits. It pads to the source's constant mux rate when the
 catalog recorded one, or to `--mux-rate`, on a schedule an IRD or groomer can
 lock to, with each PCR within 500 ns of its byte position. A variable-rate
 source exports unpadded, with no mux-rate or system-buffer claim.

@@ -56,6 +56,13 @@ const _: () = assert!(
 		.as_nanos()
 		.is_multiple_of(PCR_INTERVAL.as_nanos())
 );
+/// How often the grid repeats the program tables on its own ([`Schedule::repeat`]): a fifth of
+/// the 500 ms within which TR 101 290 wants each PAT and PMT section, so neither a busy slot
+/// nor a lull in the copies the media leads stretches the gap past it.
+const TABLE_REPEAT: Duration = Duration::from_millis(100);
+/// [`TABLE_REPEAT`] in grid slots.
+const REPEAT_SLOTS: u128 = TABLE_REPEAT.as_nanos() / PCR_INTERVAL.as_nanos();
+const _: () = assert!(TABLE_REPEAT.as_nanos().is_multiple_of(PCR_INTERVAL.as_nanos()));
 /// One packet in bits per second of slots: `rate` bits per second fills slot `index` up to
 /// `index * rate / PACKET` packets since the start of the timeline, so no slot rounds on
 /// its own.
@@ -247,6 +254,9 @@ struct Unit {
 	runs: Vec<Run>,
 	/// For a unit of program tables, what they put in force and the PIDs they hold back.
 	tables: Option<Program>,
+	/// A copy of the tables in force that the grid repeats ([`Schedule::repeat`]): no access
+	/// unit, and nothing to put in force.
+	repeat: bool,
 	/// The payload of the frames it carries, counted once it has gone out.
 	charges: Vec<Charge>,
 }
@@ -261,11 +271,19 @@ struct Program {
 	holds: Vec<u16>,
 	/// The PID of the unit they lead, which they go out as far ahead of as it may.
 	leads: u16,
+	/// The [`Schedule::set_psi`] they lay, counted from the first.
+	laid: u64,
 }
 
 impl Unit {
 	fn count(&self) -> usize {
 		self.packets.len() / TsPacket::SIZE
+	}
+
+	/// A repeat not yet begun, which goes out in whichever slot is laid next and so keeps no
+	/// slot going on its own.
+	fn idle(&self) -> bool {
+		self.repeat && self.sent == 0
 	}
 
 	/// When its last bytes leave the decoder buffer.
@@ -330,6 +348,10 @@ impl Run {
 /// the same tables may go first, as its unit may be due sooner. The unit going out is never
 /// held back, nor, while none is, the first holding tables.
 fn held_back(units: &VecDeque<Unit>, i: usize) -> bool {
+	// Tables begun finish, whatever a revision restated ahead of them since.
+	if units[i].runs.iter().any(|run| run.sent(units[i].sent) > 0) {
+		return false;
+	}
 	units.iter().enumerate().any(|(j, unit)| {
 		let mut pending = unit
 			.runs
@@ -657,6 +679,13 @@ pub(super) struct Schedule {
 	seq: u64,
 	/// The program tables as they stand, from [`Self::set_psi`].
 	psi: Option<Psi>,
+	/// How many times [`Self::set_psi`] changed the tables.
+	stated: u64,
+	/// The tables as they stand have yet to go out in a unit that puts them in force, so the
+	/// grid repeats none: a copy would announce them, and the clock PID they name, early.
+	revising: bool,
+	/// The [`TABLE_REPEAT`] period of the grid's last copy of the tables.
+	repeated: Option<u128>,
 	/// Tables to go out ahead of the next unit pushed.
 	lead: Option<Tables>,
 	/// The timeline opens ([`Self::open`]) and its first tables are still to go out.
@@ -694,6 +723,9 @@ impl Schedule {
 			ended: false,
 			seq: 0,
 			psi: None,
+			stated: 0,
+			revising: false,
+			repeated: None,
 			lead: None,
 			opening: false,
 			clocked: 0,
@@ -845,6 +877,10 @@ impl Schedule {
 	pub fn set_psi(&mut self, psi: Psi) {
 		if self.psi.as_ref() != Some(&psi) {
 			self.psi = Some(psi);
+			self.stated += 1;
+			self.revising = true;
+			// A repeat not yet begun would follow the new tables out with the old.
+			self.units.retain(|unit| !unit.repeat || unit.sent > 0);
 			self.retable();
 		}
 	}
@@ -862,6 +898,7 @@ impl Schedule {
 				continue;
 			};
 			program.clock = psi.clock;
+			program.laid = self.stated;
 			let packets = flagged.take().unwrap_or(&psi.packets);
 			if unit.packets != *packets {
 				unit.packets.clone_from(packets);
@@ -950,6 +987,7 @@ impl Schedule {
 				rate: tables.rate,
 				holds,
 				leads: pid,
+				laid: self.stated,
 			};
 			// They go out ahead of the first byte of a placed unit, which a decode time well past
 			// its placement would otherwise let them hold the lane until, past later tables' due.
@@ -1047,6 +1085,7 @@ impl Schedule {
 			frames: Vec::new(),
 			runs,
 			tables,
+			repeat: false,
 			charges: Vec::new(),
 		});
 		self.units.back_mut().expect("the unit just pushed")
@@ -1074,7 +1113,8 @@ impl Schedule {
 		let Some(program) = &self.units[i].tables else {
 			return false;
 		};
-		let (clock, rate) = (program.clock, program.rate);
+		let (clock, rate, laid) = (program.clock, program.rate, program.laid);
+		self.revising &= laid != self.stated;
 		self.clock = Some(clock);
 		self.set_rate(rate);
 		if std::mem::take(&mut self.opening) {
@@ -1086,13 +1126,13 @@ impl Schedule {
 	/// Whether a unit, or packets held for the opening's clock, are still to go out.
 	#[cfg(test)]
 	pub fn queued(&self) -> bool {
-		!self.units.is_empty() || !self.unclocked.is_empty()
+		!self.units.iter().all(Unit::idle) || !self.unclocked.is_empty()
 	}
 
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
 		// Packets held for the clock count once a slot has gone out, so slots run on to it.
-		self.units.is_empty()
+		self.units.iter().all(Unit::idle)
 			&& (self.unclocked.is_empty() || self.next.is_none())
 			&& self
 				.horizon
@@ -1125,6 +1165,9 @@ impl Schedule {
 		self.last = None;
 		self.ended = false;
 		self.lead = None;
+		// The tables go out again before the grid repeats them.
+		self.repeated = None;
+		self.revising = true;
 		// An opening still pending stays: its tables never went out, so the reader has no clock
 		// for the next timeline to continue.
 		self.clocked = 0;
@@ -1159,7 +1202,12 @@ impl Schedule {
 
 	/// The slot [`Self::next`] lays out next, with `known` as it would be given.
 	fn index(&self, known: Option<u128>) -> Option<u128> {
-		let first = self.units.iter().map(|unit| self.release(unit)).min();
+		let first = self
+			.units
+			.iter()
+			.filter(|unit| !unit.idle())
+			.map(|unit| self.release(unit))
+			.min();
 		match (self.next, first) {
 			(None, None) => None,
 			(None, Some(first)) => Some(first),
@@ -1214,6 +1262,10 @@ impl Schedule {
 			self.deferred = Some(unit.seq);
 			self.last = last;
 		}
+		// A tail running out, such as the old program's ahead of a switch, carries only its clock.
+		if known.is_some() {
+			self.repeat(index);
+		}
 		// A long outage jumps to the start of its backfill. Flag that first PCR, not a
 		// still-queued slot on the old clock, nor the media slot after the backfill.
 		let discontinuity = self.next.is_some_and(|next| index > next);
@@ -1264,8 +1316,9 @@ impl Schedule {
 			if unit.sent == 0 {
 				keyframe |= unit.keyframe;
 				begun += usize::from(unit.tables.is_some());
-				// Only the tables muxed ahead of a frame that wrote nothing are no access unit.
-				if unit.tables.is_none() && unit.packets_on(0..unit.count(), unit.pid) > 0 {
+				// Only the tables muxed ahead of a frame that wrote nothing, or repeated, are no
+				// access unit.
+				if unit.tables.is_none() && !unit.repeat && unit.packets_on(0..unit.count(), unit.pid) > 0 {
 					units.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
 				}
 			}
@@ -1292,6 +1345,39 @@ impl Schedule {
 			begun,
 			charges,
 		}))
+	}
+
+	/// Queue a copy of the tables in force as slot `index` opens a [`TABLE_REPEAT`] period.
+	///
+	/// The tables otherwise go out only ahead of the media they were muxed with, as far ahead
+	/// of its deadline as its buffers let it go, so their spacing on the wire follows that
+	/// media's send-ahead rather than any clock. The copy is due in its slot and goes out as
+	/// soon as TBsys and Bsys take it, past the copies the media leads when it matches them,
+	/// never past a different version. Periods are absolute on the grid, so two exporters of a
+	/// broadcast repeat in the same slots.
+	fn repeat(&mut self, index: u128) {
+		let period = index / REPEAT_SLOTS;
+		// Tables too large for Bsys to take each period repeat as fast as it takes them.
+		let pending = self.units.iter().any(|unit| unit.repeat);
+		// Only media still to go out is repeated around: a clock running on without it, through
+		// a stall or as a tail ahead of a switch, carries only the clock.
+		let flowing = self.units.iter().any(|unit| unit.tables.is_none() && !unit.repeat);
+		if self.opening || self.revising || pending || !flowing || self.repeated.is_some_and(|last| period <= last) {
+			return;
+		}
+		let Some(psi) = &self.psi else {
+			return;
+		};
+		self.repeated = Some(period);
+		let packets = psi.packets.clone();
+		let by = (index + 1) * PCR_INTERVAL.as_nanos();
+		// On the PAT's lane of its own, so it waits on no copy the media leads; it follows no
+		// unit, so the next one pushed keeps its own start.
+		let last = self.last;
+		let unit = self.enqueue(0, Timing { by, decode: by }, packets, None);
+		unit.late = true;
+		unit.repeat = true;
+		self.last = last;
 	}
 
 	/// Plan the packets and null positions together, against the actual transport clock.
@@ -1581,7 +1667,7 @@ impl Schedule {
 				if unit.sent == 0 {
 					out.keyframe |= unit.keyframe;
 					out.begun += usize::from(unit.tables.is_some());
-					if unit.tables.is_none() && unit.packets_on(0..unit.count(), unit.pid) > 0 {
+					if unit.tables.is_none() && !unit.repeat && unit.packets_on(0..unit.count(), unit.pid) > 0 {
 						out.units
 							.extend(std::iter::repeat_n(unit.pid, unit.frames.len().max(1)));
 					}
@@ -2186,6 +2272,51 @@ mod tests {
 		}
 		assert_eq!(begun, 2);
 		assert_eq!(marks, [[2; 13], [3; 13]].concat());
+	}
+
+	/// With the clock running, the grid repeats the tables in force every [`TABLE_REPEAT`]
+	/// between the copies the media leads, and only while media is still to go out.
+	#[test]
+	fn the_grid_repeats_the_tables_while_media_flows() {
+		for rate in [None, Some(RATE)] {
+			let mut schedule = Schedule::new(Duration::ZERO);
+			schedule.set_rate(rate);
+			schedule.set_tables(100);
+			schedule.set_clock(1);
+			schedule.set_buffer(1, VIDEO);
+			set_psi(&mut schedule);
+			for ms in (0..2_000).step_by(40) {
+				if ms % 1_000 == 0 {
+					schedule.lead(Tables {
+						rate,
+						added: Vec::new(),
+					});
+				}
+				schedule.push(1, timing(ms), unit(1, 1), ms % 1_000 == 0).unwrap();
+			}
+			let mut pats = Vec::new();
+			let mut last = 0;
+			while let Some(slot) = schedule.next(Some(slot(ms(4_000)))).unwrap() {
+				let packets = slot.packets.as_chunks::<{ TsPacket::SIZE }>().0;
+				if packets.iter().any(|packet| pid(packet) == 0) {
+					pats.push(slot.index);
+				}
+				if packets.iter().any(|packet| pid(packet) == 1) {
+					last = slot.index;
+				}
+			}
+			assert!(pats.len() > 2, "{rate:?}: the grid repeats the tables");
+			for pair in pats.windows(2) {
+				assert!(
+					pair[1] - pair[0] <= REPEAT_SLOTS,
+					"{rate:?}: tables {pair:?} slots apart"
+				);
+			}
+			assert!(
+				*pats.last().unwrap() <= last,
+				"{rate:?}: the clock runs on with no tables"
+			);
+		}
 	}
 
 	/// Only the first copy of the tables to go out after a switch flags the break.
