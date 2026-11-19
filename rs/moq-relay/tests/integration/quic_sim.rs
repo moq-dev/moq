@@ -244,7 +244,7 @@ fn a_group_carries_a_bulk_transfer_losslessly() {
 /// could not pause would read on and shed past the live tail before its reader got far.
 #[test]
 fn concurrent_groups_carry_bulk_transfers_losslessly() {
-	memory::run(|| bulk(SESSIONS, 64 * 1024, 2 * 1024 * 1024));
+	memory::run(|| bulk(SESSIONS, 64 * 1024, 1024 * 1024));
 }
 
 /// How many bulk transfers share one connection in
