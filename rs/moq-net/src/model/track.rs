@@ -1262,32 +1262,40 @@ impl Holdings for TrackState {
 /// The heads lent to a copy for the groups its readers resumed it at, by key, each held as a
 /// failed copy's head is (see [`group::Handoff::lent`]); see [`Consumer::lend_head`].
 #[derive(Default)]
-struct Lent(BTreeMap<u64, Arc<group::Handoff>>);
+struct Lent {
+	loans: BTreeMap<u64, Arc<group::Handoff>>,
+	/// How many loans it holds before it next forgets those the pool reclaimed: twice what
+	/// the last pass kept, so a pass costs no more than the loans added since.
+	prune_at: usize,
+}
 
 impl Lent {
 	/// Hold `head` for group `key`, billed to `cache`. Of two loans for one group the longer
 	/// stands.
 	fn lend(&mut self, key: u64, head: &Arc<group::Head>, cache: &Arc<cache::Track>) {
 		let held = |head: &group::Head| head.frames_from_first().unwrap_or_default();
-		let standing = self.0.get(&key).and_then(|loan| loan.head());
+		let standing = self.loans.get(&key).and_then(|loan| loan.head());
 		if standing.is_some_and(|slot| held(&slot) >= held(head)) {
 			return;
 		}
-		// Forget the loans the pool reclaimed, so the map grows no further than the loans it
-		// bills, however many groups readers resume a copy at that never arrive.
-		self.0.retain(|_, loan| loan.head().is_some());
+		// Forget the loans the pool reclaimed, so the map grows no further than twice the loans
+		// it bills, however many groups readers resume a copy at that never arrive.
+		if self.loans.len() >= self.prune_at {
+			self.loans.retain(|_, loan| loan.head().is_some());
+			self.prune_at = 2 * self.loans.len() + 1;
+		}
 		if let Some(loan) = group::Handoff::lent(head.clone(), cache) {
-			self.0.insert(key, loan);
+			self.loans.insert(key, loan);
 		}
 	}
 
 	/// The head lent for group `key`, unless its pool reclaimed it.
 	fn take(&mut self, key: u64) -> Option<Arc<group::Head>> {
-		self.0.remove(&key)?.head()
+		self.loans.remove(&key)?.head()
 	}
 
 	fn retain(&mut self, keep: impl Fn(u64) -> bool) {
-		self.0.retain(|key, _| keep(*key));
+		self.loans.retain(|key, _| keep(*key));
 	}
 }
 
@@ -16090,8 +16098,8 @@ mod test {
 		edge.finish().unwrap();
 	}
 
-	/// A copy whose readers keep resuming it at groups that never arrive keeps no more loans
-	/// than its pool bills: one the pool reclaimed is forgotten at the next loan.
+	/// A copy whose readers keep resuming it at groups that never arrive keeps no more than
+	/// twice the loans its pool bills: those the pool reclaimed are forgotten as loans grow.
 	#[test]
 	#[cfg(feature = "async")]
 	fn reclaimed_loans_leave_the_copy() {
@@ -16112,7 +16120,7 @@ mod test {
 				.lent
 				.lock()
 				.unwrap()
-				.0
+				.loans
 				.keys()
 				.copied()
 				.collect::<Vec<_>>()
@@ -16123,8 +16131,10 @@ mod test {
 		pool.step(Duration::from_secs(2));
 		pool.sweep();
 		assert_eq!(pool.used(), 0, "the sweep reclaimed both");
+		// Forgotten once the loans double since the last pass, so a pass costs what was added.
 		consumer.lend_head(3, head(3));
-		assert_eq!(lent(&producer), [3]);
+		consumer.lend_head(4, head(4));
+		assert_eq!(lent(&producer), [3, 4]);
 	}
 
 	/// A copy lent the heads of two groups its readers resumed it at holds each whole as it
@@ -16150,13 +16160,22 @@ mod test {
 		// A group given up drops its loan.
 		consumer.lend_head(8, head(8, 1));
 		producer.skip_groups(8..9);
-		assert!(!producer.modify().unwrap().lent.get_mut().unwrap().0.contains_key(&8));
+		assert!(
+			!producer
+				.modify()
+				.unwrap()
+				.lent
+				.get_mut()
+				.unwrap()
+				.loans
+				.contains_key(&8)
+		);
 		// So does every one still waiting once the copy tears down.
 		let aborted = track_producer("aborted", Info::timed());
 		let reader = aborted.consume();
 		reader.lend_head(3, head(3, 1));
 		aborted.abort(Error::Cancel).unwrap();
-		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().0.is_empty()));
+		assert!(reader.with_state(|state| state.unwrap().read().lent.lock().unwrap().loans.is_empty()));
 		for (key, at) in [(7, 2), (9, 1)] {
 			let Received::Group(group) = producer.create_group_at(group::Info { start: key }, at).unwrap() else {
 				panic!("nothing else holds group {key}");
