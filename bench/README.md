@@ -823,8 +823,9 @@ filter. A series with fewer than 8 points is grey.
 A failed or cancelled source records no point, so its section is grey and
 marked stale with the date and commit of its last measurement; it is never
 flagged as tonight's result. Staleness is judged against the source's own
-publisher: gate cost runs on its own schedule, so a Nightly without it, or a
-gate cost run without the Nightly sources, stales neither. A series missing from its source's newest run was
+publisher, whose latest run `bench/publishers.json` records: gate cost runs on
+its own schedule, so a Nightly without it, or a gate cost run without the
+Nightly sources, stales neither, and each keeps the other's failures stale. A series missing from its source's newest run was
 retired and leaves the table. Re-runs of the same commit collapse to the latest
 point.
 

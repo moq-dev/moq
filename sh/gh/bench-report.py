@@ -524,10 +524,13 @@ def regressions(directory, commit=None, now=None, publisher="nightly"):
     if not series:
         raise ValueError("no benchmark history to publish")
     now = time.time() if now is None else now
-    # Each publisher's latest commit: the publishing run's own, else its newest point.
+    # Each publisher's latest commit: the publishing run's own, else the one its last run recorded,
+    # else its newest point, so one publisher's render keeps another's failures stale.
     latest = {}
     for point in sorted((point for points in series.values() for point in points), key=lambda point: point["order"]):
         latest[point["publisher"]] = point["commit"]
+    if (runs := directory / "bench" / "publishers.json").exists():
+        latest.update(json.loads(runs.read_text()))
     if commit is not None:
         latest[publisher] = commit
     # A source records every series or none, so a series missing from its source's newest run was retired.
@@ -607,6 +610,10 @@ def index(directory, commit=None, paired_path=None, publisher="nightly"):
     if paired_path is not None:
         (destination / "paired.json").write_text(paired_path.read_text())
     (destination / "index.html").write_text(regressions(directory, commit, publisher=publisher))
+    if commit is not None:
+        runs = destination / "publishers.json"
+        recorded = json.loads(runs.read_text()) if runs.exists() else {}
+        runs.write_text(json.dumps({**recorded, publisher: commit}, indent=2, sort_keys=True) + "\n")
     # The table replaces the action's chart pages, which it only writes when missing.
     for kind in HISTORY:
         if (destination / kind).is_dir():

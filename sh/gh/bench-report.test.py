@@ -596,6 +596,11 @@ class ReportTest(unittest.TestCase):
         page = report.regressions(self.root, "g5", now=START + 31 * DAY, publisher="gate-cost")
         self.assertNotIn("bench-a (1) <span", page)
         self.assertIn("bench-gate-cost (1) <span", page)
+        # Nightly's next render keeps that failure stale, from the run gate cost recorded.
+        report.index(self.root, "g5", publisher="gate-cost")
+        page = report.regressions(self.root, "c2", now=START + 31 * DAY)
+        self.assertNotIn("bench-a (1) <span", page)
+        self.assertIn("bench-gate-cost (1) <span", page)
 
     def test_table_replaces_charts_and_keeps_history(self):
         with self.assertRaises(ValueError):
@@ -674,10 +679,13 @@ class ReportTest(unittest.TestCase):
             )
             self.assertFalse((site / "source").exists())
             self.assertEqual((site / "bench/costs/data.js").read_text(), stored)
-            # The source checkout's commit has no point, so Nightly's only source is stale, but
-            # only to Nightly: gate cost's run reads Nightly's newest point as its latest.
-            page = (site / "bench/index.html").read_text()
-            self.assertEqual("stale: last measured" in page, iteration == 1)
+            # The source checkout's commit has no point, so Nightly's only source is stale, and
+            # stays stale on gate cost's run, which reads the commit Nightly's run recorded.
+            self.assertIn("stale: last measured", (site / "bench/index.html").read_text())
+            self.assertEqual(
+                set(json.loads((site / "bench/publishers.json").read_text())),
+                {"nightly"} if iteration == 1 else {"nightly", "gate-cost"},
+            )
             self.assertEqual(json.loads((site / "bench/paired.json").read_text()), {"sources": {}})
             git("worktree", "remove", str(site), cwd=checkout)
             git("branch", "-D", "gh-pages", cwd=checkout)
