@@ -1976,7 +1976,8 @@ test.each([
 		// Fetch-only: nothing pulls the track, so nothing newer is known here.
 		expect(ta.producer.demand().wanted.peek()).toBe(false);
 		expect(group.expired.peek()).toBeUndefined();
-		const verdict = group.expired.then((err) => err);
+		// Listening before any copy exists, so a copy subscribed later has to wake it.
+		const verdict = new Promise<Error>((resolve) => void group.expired.then(resolve));
 
 		// A reader whose own budget is far wider subscribes a copy.
 		const sub = front.consumer.track("seq").subscribe({ delay: { max: Duration.millis(3_600_000) } });
