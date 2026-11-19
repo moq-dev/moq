@@ -4928,6 +4928,9 @@ struct TrackRun {
 	/// Lite-07: the ranges an update added whose start no SUBSCRIBE_STARTED reported yet, by
 	/// Range ID.
 	unstarted: std::collections::BTreeSet<u64>,
+	/// Lite-07: the ranges whose relative or time anchors may still resolve; see
+	/// [`Self::pin`].
+	unpinned: Unpinned,
 	/// Lite-07: the skipped runs not sent as SUBSCRIBE_SKIP, each by the start of the cached
 	/// group just above it, whose GROUP's Previous Start passes over the run instead. Each
 	/// waits for that group to be served, when its stream carries the run, or given up, when
@@ -4936,6 +4939,59 @@ struct TrackRun {
 	/// Lite-07: an update moved the ranges, so a run elided for a group they no longer name
 	/// goes out as SUBSCRIBE_SKIP after all.
 	recheck_elided: bool,
+}
+
+/// Lite-07 ranges whose relative or time anchors may still resolve, by Range ID, each due
+/// once the latest group reaches the lowest start that could resolve it; see [`TrackRun::pin`].
+#[derive(Debug, Default)]
+struct Unpinned {
+	due: std::collections::BTreeMap<u64, u64>,
+	by_due: std::collections::BTreeSet<(u64, u64)>,
+}
+
+impl Unpinned {
+	/// Hold range `id` until `due`, or let it go for `None`.
+	fn insert(&mut self, id: u64, due: Option<u64>) {
+		self.remove(id);
+		if let Some(due) = due {
+			self.due.insert(id, due);
+			self.by_due.insert((due, id));
+		}
+	}
+
+	fn remove(&mut self, id: u64) {
+		if let Some(due) = self.due.remove(&id) {
+			self.by_due.remove(&(due, id));
+		}
+	}
+
+	/// The ranges due once the latest group starts at `latest`.
+	fn due(&self, latest: u64) -> Vec<u64> {
+		self.by_due.range(..=(latest, u64::MAX)).map(|(_, id)| *id).collect()
+	}
+}
+
+/// The lowest latest group start that could resolve `range`'s next relative or time anchor:
+/// its start unless `started`, then its end. `None` once neither can move.
+///
+/// A time start resolves to the group containing it, which no group below it can settle; a
+/// time end settles once a group starts past it; a relative anchor counts back from the
+/// first group there is.
+fn due(range: &crate::track::Range, started: bool) -> Option<u64> {
+	use crate::track::Anchor;
+	if range.is_empty() {
+		return None;
+	}
+	match range.start {
+		Anchor::Relative(_) if !started => return Some(0),
+		Anchor::Time(time) if !started => return Some(time),
+		_ => {}
+	}
+	match range.end {
+		Some(Anchor::Relative(_)) => Some(0),
+		Some(Anchor::Time(last)) => Some(last.saturating_add(1)),
+		_ => None,
+	}
 }
 
 impl TrackRun {
@@ -4964,9 +5020,16 @@ impl TrackRun {
 		let bounded = bounds.ends(ctx.version);
 		let initial = bounds.ranges.len() as u64;
 
+		let mut unpinned = Unpinned::default();
+		if ctx.version.has_ranges() {
+			for (id, range) in (0..).zip(&bounds.ranges) {
+				unpinned.insert(id, due(range, false));
+			}
+		}
 		Self {
 			initial,
 			unstarted: Default::default(),
+			unpinned,
 			elided: Default::default(),
 			recheck_elided: false,
 			bounded,
@@ -5106,10 +5169,15 @@ impl TrackRun {
 			.into_iter()
 			.map(|(id, range)| (id, Bounds::new(std::slice::from_ref(&range), false).ranges[0]))
 			.collect();
-		let moved = !retired.is_empty() || !added.is_empty();
+		for id in &retired {
+			self.unpinned.remove(*id);
+		}
+		let pins = self.pin();
+		let mut moved = !retired.is_empty() || !added.is_empty() || !pins.is_empty();
+		// A pinned range is replaced in place, keeping its Range ID.
 		let edit = crate::track::Edit {
-			retire: retired.clone(),
-			add: added.clone(),
+			retire: retired.iter().copied().chain(pins.iter().map(|(id, _)| *id)).collect(),
+			add: pins.iter().chain(&added).copied().collect(),
 			priority,
 			delay,
 			order,
@@ -5124,13 +5192,94 @@ impl TrackRun {
 			// A range retired before its start resolved is owed no SUBSCRIBE_STARTED.
 			self.unstarted.remove(id);
 		}
+		self.pinned(pins);
 		for (id, range) in added {
 			self.requested.insert(id, range);
+			self.unpinned.insert(id, due(&range, false));
 			if id >= self.initial {
 				self.unstarted.insert(id);
 			}
 		}
+		// A range just added often resolves at once from the cache: pin it now, so the floor
+		// the caller takes from the ranges names the group it starts at, not its time.
+		let pins = self.pin();
+		if !pins.is_empty() {
+			let edit = crate::track::Edit {
+				retire: pins.iter().map(|(id, _)| *id).collect(),
+				add: pins.clone(),
+				priority,
+				delay,
+				order,
+			};
+			// Each pin names the group the model resolved the range to, which it holds.
+			if let Err(err) = self.track.edit(edit) {
+				self.refused = Some(err);
+				return false;
+			}
+			self.pinned(pins);
+			moved = true;
+		}
 		moved
+	}
+
+	/// Take the ranges [`Self::pin`] replaced, which the model took.
+	fn pinned(&mut self, pins: Vec<(u64, crate::track::Range)>) {
+		for (id, range) in pins {
+			self.requested.insert(id, range);
+		}
+	}
+
+	/// Each live range whose relative or time anchors resolved since the last update, with
+	/// them replaced by the groups they resolved to: a range resolves once, so an update that
+	/// leaves it live never counts its relative anchors back from a newer latest group, nor
+	/// looks a time start up again in newer groups, here or on a relay's copies, and its
+	/// start names the group it resolved to for the read cursor's floor. A start reaching
+	/// back to the oldest group held stays as it was, since an absolute start would turn it
+	/// into a floor the subscriber never named.
+	///
+	/// Only the ranges the latest group could have resolved are asked (see [`due`]), and each
+	/// is let go once its anchors settle, so this costs those ranges rather than every one.
+	fn pin(&mut self) -> Vec<(u64, crate::track::Range)> {
+		use crate::track::{Anchor, Range};
+		let Some(latest) = self.track.latest_key() else {
+			return Vec::new();
+		};
+		let mut pins = Vec::new();
+		for id in self.unpinned.due(latest) {
+			let Some(range) = self.requested.ranges.get(&id).copied() else {
+				self.unpinned.remove(id);
+				continue;
+			};
+			let Some(resolved) = self.track.resolved_range(id) else {
+				continue;
+			};
+			let start = match range.start {
+				Anchor::Relative(_) | Anchor::Time(_) if resolved.floored => Anchor::Time(resolved.start),
+				start => start,
+			};
+			// An end resolves once it settles; until then it stays as given. One settled at
+			// group 0 holds nothing.
+			let pinned = match (range.end, resolved.end) {
+				(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => match end.checked_sub(1) {
+					Some(last) => Range {
+						start,
+						end: Some(Anchor::Time(last)),
+					},
+					None => Range::EMPTY,
+				},
+				(end, _) => Range { start, end },
+			};
+			// The start settled; the end is due again once it may settle.
+			let next = match resolved.end {
+				Some(_) => None,
+				None => due(&pinned, true),
+			};
+			self.unpinned.insert(id, next);
+			if pinned != range {
+				pins.push((id, pinned));
+			}
+		}
+		pins
 	}
 
 	/// Before lite-07: replace every range, as an update there does. Returns whether it applied.
@@ -8321,6 +8470,56 @@ mod serve_group_test {
 		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(9), 0, None, None)]));
 		let resolved = run.track.resolved_range(1).map(|r| (r.start, r.end));
 		assert_eq!(resolved, Some((2, None)), "the update kept where it started");
+		// The model holds it pinned to that group, so a relay's copies, which take the whole
+		// preferences, resolve it there too.
+		assert_eq!(
+			run.track.subscription().ranges[1],
+			track::Range {
+				start: track::Anchor::Time(2),
+				end: None,
+			}
+		);
+	}
+
+	/// A time start names the group it resolved to as the read cursor's floor, not its time,
+	/// both on the update that adds it and on later ones that leave it live: the group
+	/// containing the time starts below it.
+	#[kio::test]
+	async fn lite07_a_time_start_floors_at_the_group_it_resolved_to() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		write_group(&mut track, 4000, 4000);
+		write_group(&mut track, 6000, 6000);
+		let served = lite::Range::span(Some(6000), 0, Some(6000), None);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
+				.with_range(6000..6001),
+		);
+		let session = Log::default();
+		let (mut run, mut writer, _log) = lite07_run(SinkSession::new(session.clone()), subscriber);
+		while run.start.resolved().is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+		// 4.5 s falls in the group at 4 s.
+		let time = lite::Range {
+			start: Some(lite::Anchor::Time(4500)),
+			end: None,
+		};
+		run.update(lite07_add(&run, &[(0, served)], 1, &[time]));
+		assert_eq!(run.floor, 4000, "the update adding it");
+		let live = [(0, served), (1, time)];
+		run.update(lite07_add(&run, &live, 2, &[lite::Range::span(Some(9000), 0, None, None)]));
+		assert_eq!(run.floor, 4000, "a later update leaving it live");
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		let served: Vec<u64> = group_headers(&session, Version::Lite07)
+			.into_iter()
+			.map(|(start, _)| start)
+			.collect();
+		assert!(served.contains(&4000), "served {served:?}");
 	}
 
 	/// An update the model refuses, here a relative start that a group-only copy's cache
