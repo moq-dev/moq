@@ -90,25 +90,14 @@ impl Stream<'_> {
 	/// [`Error::Evicted`] until the application stops it, so a reader that watches for a reset
 	/// instead of reading learns it too: bytes it took hold further eviction off until then.
 	pub fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		let hash_map::Entry::Occupied(entry) = self.state.recv.entry(self.id) else {
-			return Err(Error::Closed);
-		};
-		let Some(s) = entry.get().as_deref() else {
-			return Ok(None);
-		};
-		match s.reader {
-			Reader::Reading => {}
-			Reader::Evicted => return Err(Error::Evicted),
-			Reader::Stopped => return Err(Error::Closed),
-		}
-		let Some(code) = s.reset_code() else {
+		let Some(code) = self.reset_code()? else {
 			return Ok(None);
 		};
 
 		// Clean up state after application observes the reset, since there's no reason for the
 		// application to attempt to read or stop the stream once it knows it's reset. A lease still
 		// holding credit returns it here, since nothing is left to release or stop it.
-		let (_, recv) = entry.remove_entry();
+		let recv = self.state.recv.remove(&self.id).flatten();
 		let transmit = self
 			.state
 			.stream_recv_freed(self.id, recv.expect("must have recv on reset"));
@@ -119,6 +108,24 @@ impl Stream<'_> {
 		self.state.waits.wake_transmit();
 
 		Ok(Some(code))
+	}
+
+	/// The peer's reset code, as [`Self::received_reset`] reports it, but keeping the stream
+	///
+	/// A lease that failed with [`Error::Reset`] may still have reliable bytes for a smaller
+	/// `want`, which asking for the code this way leaves leasable.
+	pub fn reset_code(&self) -> Result<Option<VarInt>, Error> {
+		let Some(slot) = self.state.recv.get(&self.id) else {
+			return Err(Error::Closed);
+		};
+		let Some(s) = slot.as_deref() else {
+			return Ok(None);
+		};
+		match s.reader {
+			Reader::Reading => Ok(s.reset_code()),
+			Reader::Evicted => Err(Error::Evicted),
+			Reader::Stopped => Err(Error::Closed),
+		}
 	}
 
 	/// [`Self::received_reset`], or wait for the peer to reset the stream

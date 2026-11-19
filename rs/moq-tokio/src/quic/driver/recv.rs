@@ -255,7 +255,7 @@ impl Reader {
 	/// Take the connection's lease, which [`Lease`] wraps once this returns: the borrow of `self`
 	/// it holds cannot start inside a poll that may return `Pending`.
 	fn poll_take(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<moq_quic::recv::Lease, Error>> {
-		// moq-quic freed the stream once it gave the reset's code.
+		// moq-quic freed the stream once it gave the reset's code to a read.
 		if let End::Reset(code) = self.end {
 			return Poll::Ready(Err(Error::Reset(code)));
 		}
@@ -268,7 +268,11 @@ impl Reader {
 		Poll::Ready(Err(match err {
 			moq_quic::recv::Error::Evicted => Error::Evicted,
 			moq_quic::recv::Error::TooLarge => Error::TooLarge,
-			err => read_error(conn, self.id, &mut self.end, err),
+			// The stream stays: a smaller lease may still take its reliable bytes.
+			err => match conn.inner.recv_stream(self.id).reset_code() {
+				Ok(Some(code)) => Error::Reset(code),
+				_ => lost(conn, err),
+			},
 		}))
 	}
 
@@ -343,6 +347,11 @@ fn read_error(mut conn: MutexGuard<'_, State>, id: stream::Id, end: &mut End, er
 		*end = End::Reset(code);
 		return Error::Reset(code);
 	}
+	lost(conn, err)
+}
+
+/// The connection's loss, which is the only other way a held receive stream fails.
+fn lost(conn: MutexGuard<'_, State>, err: moq_quic::recv::Error) -> Error {
 	let closed = conn.error();
 	// Panicking under the lock would poison it for every handle.
 	drop(conn);
