@@ -1682,7 +1682,9 @@ export class Subscriber {
 		});
 		// A new upstream subscription: stale runs an earlier one reported were judged under other terms.
 		hooks.supersedeStale(producer);
-		if (!hasRanges(this.version)) {
+		// Lite-07 reports where each range starts.
+		if (hasRanges(this.version)) hooks.reportsStarts(producer);
+		else {
 			hooks.dropAnchors(producer);
 			// A wire without ranges starts a time anchor at the first group at or after it, so its
 			// readers do too, rather than at an earlier group the copy happens to hold.

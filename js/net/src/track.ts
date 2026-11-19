@@ -1054,6 +1054,8 @@ let timeAnchors: (producer: Producer) => {
 	atKeys: boolean;
 	starts: ReadonlyMap<bigint, bigint>;
 	relative: ReadonlyMap<bigint, { start: bigint; latest?: bigint }>;
+	/** Whether its publisher reports where each range starts (lite-07), which `relative` holds. */
+	reported: boolean;
 	/** Bumped whenever the others, or whether the producer is a received copy, change. */
 	placing: number;
 };
@@ -1320,6 +1322,9 @@ export class Producer {
 	#timeStarts = new Map<bigint, bigint>();
 	// On a lite-07 copy, where the publisher started each live range counting back, by its count.
 	#relativeStarts = new Map<bigint, { start: bigint; latest?: bigint }>();
+	// Whether a copy's publisher reports where each range starts, so a relative start the copy
+	// can't count back over its own groups waits for that. Mirrors the Rust `Anchors::Reported`.
+	#reportsStarts = false;
 	// Counts changes to how a time start is placed other than by groups arriving or drops: the wire,
 	// `#timeStarts`, and `#startsAtKeys`. Mirrors the Rust `TrackState::placing`.
 	#placing = 0;
@@ -1555,6 +1560,7 @@ export class Producer {
 			atKeys: producer.#startsAtKeys,
 			starts: producer.#timeStarts,
 			relative: producer.#relativeStarts,
+			reported: producer.#reportsStarts,
 			placing: producer.#placing,
 		});
 		hooks.startsAtKeys = (producer) => {
@@ -1565,8 +1571,19 @@ export class Producer {
 			producer.#timeStarts = new Map(starts);
 			producer.#placing++;
 		};
+		hooks.reportsStarts = (producer) => {
+			producer.#reportsStarts = true;
+		};
 		hooks.relativeStarts = (producer, starts) => {
-			producer.#relativeStarts = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
+			const next = new Map([...starts].map(([back, start, latest]) => [back, { start, latest }]));
+			const last = producer.#relativeStarts;
+			const same =
+				next.size === last.size &&
+				[...next].every(([back, at]) => last.get(back)?.start === at.start && last.get(back)?.latest === at.latest);
+			if (same) return;
+			producer.#relativeStarts = next;
+			// A reader whose relative start waits on the report reads again.
+			for (const state of [producer.#state, ...producer.#sinks]) state.startChanged.update((rev) => rev + 1);
 		};
 		hooks.producerLargest = (producer) => producer.#state.largest;
 		hooks.askProducer = (producer, ask) => producer.#ask(ask);
@@ -3680,10 +3697,29 @@ export class Subscriber {
 			},
 			nextStart: (from) => keys[keyIndex(keys, from)],
 			// A lite-07 copy holds only part of the track, so it starts where its publisher did,
-			// counting from the same latest group: a newer one moved the live edge.
-			reportedStart: (latest, back) => {
+			// counting from the same latest group: a newer one moved the live edge. One its wire still
+			// feeds counts only through the groups it holds and the starts skipped between them, since
+			// any other gap may hold groups it never saw, and waits on the report there; once nothing
+			// feeds it, over the groups held. Mirrors the Rust `TrackState::counted_start`.
+			countedStart: (latest, back) => {
 				const reported = receivedCopy(producer) ? anchors.relative.get(back) : undefined;
-				return reported !== undefined && reported.latest === latest ? reported.start : undefined;
+				if (reported !== undefined && reported.latest === latest) return { group: reported.start };
+				if (!anchors.reported || !receivedCopy(producer) || state.closed.peek() !== undefined) return undefined;
+				// Each step lands on a group held, so a huge count walks the cache once.
+				let at = latest;
+				for (let step = 0n; step < back; step++) {
+					if (at === 0n) return "before";
+					let below = at - 1n;
+					const run = drops.at(below);
+					if (run?.skip === true) {
+						// Skipped down to 0: no group sits below.
+						if (run.start === 0n) return "before";
+						below = run.start - 1n;
+					}
+					if (keys[keyIndex(keys, below)] !== below) return "unknown";
+					at = below;
+				}
+				return { group: at };
 			},
 			back: (latest, back) => {
 				if (back === 0n) return latest;

@@ -756,6 +756,12 @@ export const hooks: {
 	 * the `latest` it counted from moves the live edge. Assigned by `track.ts`.
 	 */
 	relativeStarts: (producer: Producer, starts: Iterable<readonly [bigint, bigint, bigint | undefined]>) => void;
+	/**
+	 * Mark a received copy whose publisher reports where each range starts (lite-07), so a reader's
+	 * relative start the copy can't count back over its own groups waits for {@link relativeStarts}.
+	 * Mirrors the Rust `Producer::reported`; assigned by `track.ts`.
+	 */
+	reportsStarts: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -1154,6 +1160,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	timeStarts: () => {
+		throw new Error("track.ts not loaded");
+	},
+	reportsStarts: () => {
 		throw new Error("track.ts not loaded");
 	},
 	relativeStarts: () => {

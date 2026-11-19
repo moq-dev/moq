@@ -180,12 +180,46 @@ describe("Window", () => {
 			containing: (at) => held.containing(at),
 			nextStart: (from) => held.nextStart(from),
 			back: (latest, back) => held.back(latest, back),
-			reportedStart: (latest, back) => (latest === 9n && back === 2n ? 8n : undefined),
+			countedStart: (latest, back) => (latest === 9n && back === 2n ? { group: 8n } : undefined),
 			complete: () => false,
 		};
 		expect(new Window([range(relative(2n))], 9n, reported).start()).toBe(8n);
 		const ended = new Window([range(time(0n), relative(2n))], 9n, reported);
 		expect(covered(ended, held.held)).toEqual(keys(0n, 8n));
+	});
+
+	test("a relative start the groups held can't count yet reads nothing until counted", () => {
+		const held = new Keys([1n, 2n, 9n]);
+		let counted: Containing = "unknown";
+		const counting: Holdings = {
+			resolves: () => true,
+			containing: (at) => held.containing(at),
+			nextStart: (from) => held.nextStart(from),
+			back: (latest, back) => held.back(latest, back),
+			countedStart: () => counted,
+			complete: () => false,
+		};
+		const window = new Window([range(relative(2n), time(8n)), range(time(1n), time(1n))], 9n, counting);
+		expect(window.pending).toBe(false);
+		expect(window.settled).toBe(false);
+		expect(covered(window, keys(0n, 10n))).toEqual([1n]);
+		expect([window.floor(), window.start(), window.end()]).toEqual([undefined, undefined, undefined]);
+		expect(window.resolved()[0]).toBeUndefined();
+
+		// Nothing to count from while the latest group is unknown.
+		counted = { group: 7n };
+		expect(window.settle(undefined, counting)).toBe(false);
+		expect(window.settled).toBe(false);
+
+		expect(window.settle(9n, counting)).toBe(true);
+		expect(window.settled).toBe(true);
+		expect(covered(window, keys(0n, 10n))).toEqual([1n, 7n, 8n]);
+		expect([window.start(), window.end()]).toEqual([1n, 9n]);
+
+		// Counting back past every group the track holds reaches back to the oldest.
+		counted = "before";
+		const oldest = new Window([range(relative(5n))], 9n, counting);
+		expect([oldest.floor(), oldest.start()]).toEqual([0n, undefined]);
 	});
 
 	test("a relative start past every group asks from the oldest group held when placed", () => {

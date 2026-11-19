@@ -12324,8 +12324,9 @@ impl ServeLoop {
 		// Marked received before any reader sees it, so none resolves an anchor this wire dropped.
 		let serving = request.stage(info);
 		serving.received();
+		// Every version that resolves them also reports where each range starts.
 		if serve.subscriber.version.resolves_anchors() {
-			serving.anchored();
+			serving.reported();
 		}
 		// A wire without ranges starts a time anchor at the first group at or after it, so
 		// its readers do too, rather than at an earlier group the copy happens to hold.

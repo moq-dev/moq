@@ -28,7 +28,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream } from "./stream.ts";
 import { Timescale, Timestamp } from "./time.ts";
-import type { Position, Producer as TrackProducer } from "./track.ts";
+import type { Position, Range as TrackRange, Producer as TrackProducer } from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
@@ -475,6 +475,49 @@ test("integration: lite-07 serves sparse and relative ranges", async () => {
 		expect(got).toEqual([1n, 2n, 7n, 8n]);
 		expect(await reader.nextGroup()).toBeUndefined();
 		reader.close();
+	} finally {
+		remote.close();
+		broadcast.close();
+		client.abort();
+		server.abort();
+	}
+});
+
+// A later reader's relative start on a lite-07 copy already holding part of the track counts back as
+// the publisher did, not over the groups the copy happens to hold: over a copy holding groups 1 and
+// 2 of 0 to 9, it reads only the groups its range names. Mirrors the Rust
+// `a_later_relative_start_on_a_partial_copy_reads_only_its_groups`.
+test("integration: lite-07 starts a later reader's relative range where the publisher did", async () => {
+	const pair = createMockTransportPair(Lite.ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const [client, server] = await Promise.all([
+		connect(url, { transport: pair.client }),
+		accept(pair.server, url, { publish: origin.consume() }),
+	]);
+
+	const broadcast = publish(origin, Path.from("test"));
+	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: null });
+	for (let key = 0; key < 10; key++) hooks.appendNext(producer).finish();
+
+	const remote = wireOf(client).consume(Path.from("test"));
+	const subscribe = (ranges: TrackRange[]) =>
+		remote.track("video").subscribe({ delay: { max: null }, order: "ascending", ranges }).ordered();
+	const read = async (reader: ReturnType<typeof subscribe>) => {
+		const got: (bigint | undefined)[] = [];
+		for (;;) {
+			const group = await reader.nextGroup();
+			got.push(group?.start);
+			if (!group) return got;
+		}
+	};
+	try {
+		const first = subscribe([{ start: { time: 1n }, end: { time: 2n } }]);
+		expect(await read(first)).toEqual([1n, 2n, undefined]);
+
+		const second = subscribe([{ start: { relative: 2n }, end: { time: 8n } }]);
+		expect(await read(second)).toEqual([7n, 8n, undefined]);
+		first.close();
+		second.close();
 	} finally {
 		remote.close();
 		broadcast.close();

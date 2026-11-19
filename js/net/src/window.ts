@@ -305,13 +305,13 @@ export function clamped(
 	});
 }
 
-/** Where a time falls among the groups a hop holds. Mirrors the Rust `Containing`. */
+/** Where a time, or a count back from the latest group, falls among the groups a hop holds. Mirrors the Rust `Containing`. */
 export type Containing =
-	/** The newest group starting at or before it. */
+	/** The newest group starting at or before it, or the group counted back to. */
 	| { group: bigint }
 	/** Every group held starts after it. */
 	| "before"
-	/** No group is held. */
+	/** The groups held can't place it yet. */
 	| "unknown";
 
 /**
@@ -334,12 +334,13 @@ export interface Holdings {
 	 */
 	back(latest: bigint, back: bigint): bigint | undefined;
 	/**
-	 * Where the publisher reported starting a range counting `back` groups before `latest`, which a
-	 * relative start, but never an end, takes over {@link back}: a delivery start may sit past the
-	 * group counted, such as above groups too stale for the budget. Absent for none. Mirrors the
-	 * Rust `Holdings::reported_start`.
+	 * Where a range counting `back` groups before `latest` starts, which a relative start, but never
+	 * an end, takes over {@link back}: where the publisher reported starting it, since a delivery
+	 * start may sit past the group counted, such as above groups too stale for the budget, or
+	 * `"unknown"` while a received copy can count it neither that way nor over its own groups yet.
+	 * Undefined, or absent, counts it with {@link back}. Mirrors the Rust `Holdings::counted_start`.
 	 */
-	reportedStart?(latest: bigint, back: bigint): bigint | undefined;
+	countedStart?(latest: bigint, back: bigint): Containing | undefined;
 	/** Whether nothing more can arrive here, so a time start nothing contains reaches back to the oldest group rather than wait. */
 	complete(): boolean;
 	/**
@@ -463,6 +464,12 @@ export class Window {
 	 * live edge, so they read nothing yet: a group held is no reason to start at it.
 	 */
 	#reaching: number[] = [];
+	/**
+	 * The ranges, by index, whose relative start the groups held can't count back to yet (see
+	 * {@link Holdings.countedStart}), so they read nothing yet: a group held may sit below where the
+	 * publisher counted to.
+	 */
+	#counting: number[] = [];
 	/** Nothing is left to resolve as groups arrive. */
 	#settled = false;
 	/**
@@ -515,6 +522,15 @@ export class Window {
 			const reaching = this.#reaching;
 			this.#reaching = [];
 			for (const index of reaching) this.#placeRange(index, latest, holdings);
+			for (let position = placed; position < this.#spans.length; position++) moved.push(position);
+		}
+		// Counted from the latest group now, as the publisher counts from its own latest when the
+		// range reaches it.
+		if (this.#counting.length > 0 && latest !== undefined) {
+			const placed = this.#spans.length;
+			const counting = this.#counting;
+			this.#counting = [];
+			for (const index of counting) this.#placeRange(index, latest, holdings);
 			for (let position = placed; position < this.#spans.length; position++) moved.push(position);
 		}
 		const shrank = this.#waiting.size > 0 && this.#startWaiting(holdings, moved);
@@ -606,7 +622,7 @@ export class Window {
 	 * anchor waits.
 	 */
 	start(): bigint | undefined {
-		if (this.#pending || this.#reaching.length > 0 || this.#unnamed > 0) return undefined;
+		if (this.#pending || this.#reaching.length > 0 || this.#counting.length > 0 || this.#unnamed > 0) return undefined;
 		return this.#named[0]?.start;
 	}
 
@@ -727,9 +743,10 @@ export class Window {
 		return this.#named[0]?.start;
 	}
 
-	// Whether a time start or a join's reach back waits on the groups held to place it.
+	// Whether a time start, a join's reach back, or a relative start waits on the groups held to
+	// place it.
 	#unplaced(): boolean {
-		return this.#waiting.size > 0 || this.#reaching.length > 0;
+		return this.#waiting.size > 0 || this.#reaching.length > 0 || this.#counting.length > 0;
 	}
 
 	// The first run ending past `key`.
@@ -743,6 +760,7 @@ export class Window {
 		this.#waiting = new ByTime();
 		this.#looking = new ByTime();
 		this.#reaching = [];
+		this.#counting = [];
 		this.#named = [];
 		this.#unnamed = 0;
 		for (let index = 0; index < this.ranges.length; index++) {
@@ -777,6 +795,10 @@ export class Window {
 		const start = startOf(anchor, latest, holdings);
 		if (start === "pending") {
 			this.#pending = true;
+			return;
+		}
+		if (start === "counting") {
+			this.#counting.push(index);
 			return;
 		}
 		if (start === "waiting") {
@@ -1028,20 +1050,24 @@ function joins(range: Range, min: Duration | undefined, holdings: Holdings): Dur
 
 /**
  * The first group a range starts at, and whether it names that group rather than reaching back to
- * the oldest one. `"pending"` while it waits on a latest group, reading everything meanwhile, and
- * `"waiting"` for a time start the groups held can't place yet. Mirrors the Rust `start`.
+ * the oldest one. `"pending"` while it waits on a latest group, reading everything meanwhile,
+ * `"waiting"` for a time start the groups held can't place yet, and `"counting"` for a relative
+ * start they can't count back to yet, reading nothing meanwhile. Mirrors the Rust `start`.
  */
 function startOf(
 	anchor: Anchor | undefined,
 	latest: bigint | undefined,
 	holdings: Holdings,
-): { group: bigint; floored: boolean } | "waiting" | "pending" {
+): { group: bigint; floored: boolean } | "waiting" | "pending" | "counting" {
 	// Nothing sits below group 0, so the oldest start needs no latest group.
 	if (anchor === undefined) return { group: 0n, floored: false };
 	if (anchor.relative !== undefined) {
 		if (latest === undefined) return "pending";
-		const group = holdings.reportedStart?.(latest, anchor.relative) ?? holdings.back(latest, anchor.relative);
+		const counted = holdings.countedStart?.(latest, anchor.relative);
+		if (counted === "unknown") return "counting";
 		// Fewer groups are held than it counts back, so reach back to the oldest.
+		if (counted === "before") return { group: 0n, floored: false };
+		const group = counted?.group ?? holdings.back(latest, anchor.relative);
 		return group === undefined ? { group: 0n, floored: false } : { group, floored: true };
 	}
 	// No group starts before 0, so time 0 names group 0 whatever is held.

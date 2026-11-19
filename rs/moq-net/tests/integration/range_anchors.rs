@@ -301,3 +301,76 @@ async fn a_sparse_request_counts_its_relative_start_back_as_the_publisher_did() 
 	assert_eq!(end.map(|group| group.start), None, "the ranges are covered");
 	let _track = track.finish().unwrap();
 }
+
+/// A later reader's relative start on a lite-07 copy already holding part of the track counts
+/// back as the publisher did, not over the groups the copy happens to hold: over a copy
+/// holding groups 1 and 2 of 0 to 9, it reads only the groups its range names. Mirrors the
+/// `@moq/net` `integration: lite-07 starts a later reader's relative range where the
+/// publisher did`.
+#[kio::test]
+async fn a_later_relative_start_on_a_partial_copy_reads_only_its_groups() {
+	let publisher = produce_origin(1);
+	let broadcast = publisher
+		.route("room", moq_net::origin::RouteOptions::hidden())
+		.unwrap();
+	let track = broadcast
+		.broadcast()
+		.create_track(
+			"data",
+			Info::default().with_timescale(Timescale::MILLI).with_max_age(FOREVER),
+		)
+		.unwrap();
+	broadcast.announce().unwrap();
+	for key in 0..10 {
+		let mut group = track.create_group(moq_net::group::Info { start: key }).unwrap();
+		group.write_frame(millis(key), &b"x"[..]).unwrap();
+		group.finish().unwrap();
+	}
+
+	let subscriber = produce_origin(2);
+	let _pair = peer("moq-lite-07-wip".parse::<Version>().unwrap(), &publisher, &subscriber).await;
+	let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("room", None).unwrap().available())
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves")
+		.unwrap();
+	let subscribe = |ranges: Vec<Range>| {
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(FOREVER))
+			.with_order(Order::Ascending)
+			.with_ranges(ranges);
+		remote.track("data").unwrap().subscribe(subscription)
+	};
+	let read = async |reader: &mut moq_net::track::Subscriber, count: usize| {
+		let mut read = Vec::new();
+		for _ in 0..count {
+			let group = kio::clock::timeout(TIMEOUT, reader.recv_group())
+				.await
+				.expect("group timeout")
+				.unwrap();
+			read.push(group.map(|group| group.start));
+		}
+		read
+	};
+
+	let mut first = kio::clock::timeout(TIMEOUT, subscribe(vec![range(Anchor::Time(1), Some(Anchor::Time(2)))]))
+		.await
+		.expect("subscribe timeout")
+		.unwrap();
+	assert_eq!(read(&mut first, 3).await, [Some(1), Some(2), None]);
+
+	let mut second = kio::clock::timeout(
+		TIMEOUT,
+		subscribe(vec![range(Anchor::Relative(2), Some(Anchor::Time(8)))]),
+	)
+	.await
+	.expect("subscribe timeout")
+	.unwrap();
+	assert_eq!(
+		read(&mut second, 3).await,
+		[Some(7), Some(8), None],
+		"only the groups the publisher counts back to"
+	);
+	drop(first);
+	let _track = track.finish().unwrap();
+}
