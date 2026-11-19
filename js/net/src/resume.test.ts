@@ -2193,6 +2193,49 @@ test("an ordered resumed reader does not hold a failed copy for a group it can n
 	}
 });
 
+// A read holding the replacement's ordered cursor on a group the window leaves out, for a lower
+// window group it still owes, wakes when that group lands on the copy. Mirrors the Rust
+// `a_key_order_read_holding_a_copy_wakes_when_the_owed_group_lands`.
+test("an ordered resumed reader holding a copy wakes when the owed group lands", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	ta.write(10n);
+	ta.write(100n, 1, false);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({
+		delay: { max: null },
+		ranges: [
+			{ start: { time: 10n }, end: { time: 30n } },
+			{ start: { time: 100n }, end: { time: 200n } },
+		],
+	});
+	const ordered = sub.ordered();
+	try {
+		await settle();
+		expect(ordered.tryNextGroup()?.start).toBe(10n);
+		// The replacement places time 100 at group 80, which the window leaves out, while the window
+		// still owes the rest of the first range: the read holds its cursor on 80.
+		ta.producer.abort(new StreamError(StreamCode.SessionClosed));
+		tb.write(80n);
+		tb.write(120n);
+		front.serve(b.consume());
+		await settle();
+		const next = ordered.nextGroup();
+		expect(await isPending(next)).toBe(true);
+		tb.write(20n);
+		expect(await isPending(next)).toBe(false);
+		expect((await next)?.start).toBe(20n);
+	} finally {
+		ordered.close();
+		front.consumer.close();
+		a.close();
+		b.close();
+	}
+});
+
 // A copy's take may pass the group it offered, such as one missing its head, and return a later one:
 // the reader judges the group it got against its window, not the one offered.
 test("a resumed reader drops a taken group outside its window when the offered one was passed", async () => {

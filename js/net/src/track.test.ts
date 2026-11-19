@@ -5624,3 +5624,36 @@ test("finishing returns handles that write nothing new but fill a late group", a
 	expect(hooks.tryRecvGroup(subscriber, false)).toEqual({ kind: "done" });
 	finished.close();
 });
+
+test("track: a reader's unplaced times are the times its holdings can't place", () => {
+	let seed = 5;
+	const random = (below: number) => {
+		seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+		// The high bits: an LCG's low bits cycle.
+		return (seed >>> 16) % below;
+	};
+	const errors = [new StreamError(StreamCode.NotFound), new StreamError(StreamCode.Cancel)];
+	for (let round = 0; round < 400; round++) {
+		const received = random(2) === 0;
+		const producer = received ? receivedTrack() : new TrackProducer("test").accept({ maxAge: null });
+		const reader = producer.subscribe();
+		for (let step = random(16); step >= 0; step--) {
+			const holdings = hooks.subscriberHoldings(reader);
+			const unplaced = holdings.unplaced?.();
+			expect(unplaced).toBeDefined();
+			for (let at = 0n; at < 64n; at++) {
+				const open = unplaced?.runs.some((run) => run.start <= at && at < run.end) ?? false;
+				expect([received, at, holdings.containing(at) === "unknown"]).toEqual([received, at, open]);
+			}
+			const key = BigInt(random(48));
+			if (random(2) === 0) {
+				try {
+					putGroup(producer, key);
+				} catch {
+					// A key this copy refuses, such as one a skip covers.
+				}
+			} else hooks.dropTrackGroups(producer, key, key + BigInt(1 + random(4)), { error: errors[random(2)] });
+		}
+		producer.close();
+	}
+});
