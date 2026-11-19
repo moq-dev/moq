@@ -4075,6 +4075,60 @@ mod tests {
 		);
 	}
 
+	/// A claim lost while it waits out its debounce keeps the mark of the route it came on:
+	/// a marked neighbour is never shown it unavailable when it came over a marked link,
+	/// and is shown it when it came over a plain one.
+	#[test]
+	fn a_lost_claim_keeps_the_mark_of_its_route() {
+		for marked in [false, true] {
+			let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+			let port = |role, upstream| Port {
+				upstream,
+				..port(role)
+			};
+			router.connect(2, port(Role::Routing(node(2)), marked)).unwrap();
+			router.recv(2, Msg::Edited).unwrap();
+			router.recv(2, route(5, 2, 1)).unwrap();
+			let claims = Msg::Claims {
+				origin: node(5),
+				changes: vec![((p("room"), 7), claim(run(1), 0))],
+				floor: 1,
+			};
+			router.recv(2, claims).unwrap();
+			let ask = |router: &mut Router<usize, u64, Run>, peer| {
+				router.recv(peer, Msg::Edited).unwrap();
+				let edit = Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				};
+				router.edit(peer, edit).unwrap();
+			};
+			router.connect(3, port(Role::Endpoint, false)).unwrap();
+			ask(&mut router, 3);
+			router.connect(4, port(Role::Scoped(vec![p(ROOT)]), true)).unwrap();
+			ask(&mut router, 4);
+			router.drain();
+
+			router.disconnect(2);
+			let told = |out: &[(usize, Msg<u64, Run>)], peer| {
+				(out.iter())
+					.filter(|(to, _)| *to == peer)
+					.filter_map(|(_, msg)| match msg {
+						Msg::Announce { changes } => Some(changes.clone()),
+						_ => None,
+					})
+					.flatten()
+					.collect::<Vec<_>>()
+			};
+			let out = router.drain();
+			let unavailable = |told: &[(Broadcast<u64>, Change<Run>)]| {
+				matches!(told, [(_, Change::Live(claim))] if claim.unavailable)
+			};
+			assert!(unavailable(&told(&out, 3)), "marked={marked}: {out:?}");
+			assert_eq!(unavailable(&told(&out, 4)), !marked, "marked={marked}: {out:?}");
+		}
+	}
+
 	/// A claim outside what this node asked a scoped neighbour for is refused whole.
 	#[test]
 	fn a_claim_outside_the_grant_is_refused() {
@@ -4811,7 +4865,8 @@ mod tests {
 	}
 
 	/// A marked route that stops reaching its node leaves the node's claims marked, so an
-	/// upstream is not told them, even unavailable.
+	/// upstream is not told them, even unavailable, and a plain neighbour is told them
+	/// unavailable and marked. While the route reaches them, each way to them is marked.
 	#[test]
 	fn claims_keep_their_mark_once_no_route_reaches_them() {
 		let mut router = relay(1);
@@ -4826,6 +4881,16 @@ mod tests {
 		router
 			.edit(
 				6,
+				Edit {
+					remove: Vec::new(),
+					add: vec![p(ROOT)],
+				},
+			)
+			.unwrap();
+		open(&mut router, 7, Role::Scoped(vec![p(ROOT)]));
+		router
+			.edit(
+				7,
 				Edit {
 					remove: Vec::new(),
 					add: vec![p(ROOT)],
@@ -4862,6 +4927,8 @@ mod tests {
 			floor: 1,
 		};
 		router.recv(4, claims).unwrap();
+		let ways = router.ways(&(p("live"), 7));
+		assert!(!ways.is_empty() && ways.iter().all(|way| way.claim.marked), "{ways:?}");
 		router
 			.recv(
 				4,
@@ -4876,6 +4943,18 @@ mod tests {
 			.filter(|(to, msg)| *to == 6 && matches!(msg, Msg::Announce { changes } if !changes.is_empty()))
 			.collect();
 		assert!(told.is_empty(), "the upstream was told the claim: {told:?}");
+		let plain: Vec<_> = (out.iter())
+			.filter(|(to, _)| *to == 7)
+			.filter_map(|(_, msg)| match msg {
+				Msg::Announce { changes } => Some(changes),
+				_ => None,
+			})
+			.flatten()
+			.collect();
+		assert!(
+			matches!(plain.last(), Some((_, Change::Live(claim))) if claim.unavailable && claim.marked),
+			"{plain:?}"
+		);
 	}
 
 	/// A path names a marked Node ID only as the node it leads to, followed by that node
@@ -4925,6 +5004,22 @@ mod tests {
 		);
 		send(&mut router, marked, vec![hop(marked, 0), hop(node(5), 0), sender]).unwrap();
 		assert!(router.best(marked).is_some());
+
+		// A marked identity holds no session, so a neighbour naming itself by one is refused
+		// the route to itself, the marked hop alone.
+		let named = NodeId {
+			marked: true,
+			..node(3)
+		};
+		open(&mut router, 3, Role::Routing(named));
+		let own = Msg::Route {
+			origin: named,
+			offer: Some(Offer {
+				cost: 0,
+				..offer(vec![hop(named, 0)])
+			}),
+		};
+		assert_eq!(router.recv(3, own), Err(Error::Malformed));
 
 		// Through relays 10 and up, as long as the path may be, the marked hop included,
 		// it is heard and never used, as any route at the longest path.

@@ -1281,8 +1281,6 @@ impl Reader {
 	/// Resolve unsettled [`Self::window`] anchors with a copy's resolution of the reader's ranges,
 	/// unless a relative anchor still waits there too.
 	fn resolve(&mut self, resolved: &[Option<Resolved>]) {
-		// Once placed, relative/time starts stay pinned even while a time end settles.
-		let placed = (!self.window.is_pending()).then(|| self.window.resolved());
 		// A range the copy left unresolved keeps its anchors, which only a copy can place.
 		let mut unplaced = false;
 		let ranges: Vec<_> = self
@@ -1297,19 +1295,14 @@ impl Reader {
 							|| matches!(range.end, Some(Anchor::Relative(_))));
 					return *range;
 				};
-				let previous = placed.as_ref().and_then(|placed| placed[index]);
-				let (start, floored) = previous.map_or((resolved.start, resolved.floored), |previous| {
-					(previous.start, previous.floored)
-				});
-				let end = previous.and_then(|previous| previous.end).or(resolved.end);
 				track::Range {
 					start: match range.start {
-						Anchor::Relative(_) | Anchor::Time(_) if floored => Anchor::Time(start),
+						Anchor::Relative(_) | Anchor::Time(_) if resolved.floored => Anchor::Time(resolved.start),
 						// One that reached back to the oldest group still does, as on a plain reader.
 						Anchor::Relative(_) | Anchor::Time(_) => Anchor::Oldest,
 						start => start,
 					},
-					end: match (range.end, end) {
+					end: match (range.end, resolved.end) {
 						(Some(Anchor::Relative(_) | Anchor::Time(_)), Some(end)) => match end.checked_sub(1) {
 							Some(last) => Some(Anchor::Time(last)),
 							None => return track::Range::EMPTY,
@@ -4441,6 +4434,57 @@ mod test {
 		);
 	}
 
+	/// A finished track answers from the copy it ended on until that copy loses its route,
+	/// and from the copy the front serves after the end from then on.
+	#[test]
+	fn a_finished_track_answers_from_its_last_copy_until_it_fails() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		routes.end(Ok(()));
+		let b = copy();
+		routes.serve(b.consume());
+		let consumer = routes.consume();
+		assert!(consumer.serving().is_some_and(|copy| copy.same_channel(&a.consume())));
+		a.abort(Error::Cancel).unwrap();
+		assert!(consumer.serving().is_some_and(|copy| copy.same_channel(&b.consume())));
+	}
+
+	/// A reader asked about the track's cache answers for the serving copy, which a replaced
+	/// copy's groups and skips do not change; the run of skips just below a group counts
+	/// from any copy.
+	#[test]
+	fn a_reader_answers_cache_queries_for_the_serving_copy() {
+		let routes = Producer::new();
+		let a = copy();
+		write(&a, 1);
+		write(&a, 2);
+		a.skip_groups(3..5);
+		routes.serve(a.consume());
+		let sub = routes
+			.consume()
+			.subscribe(kio::Producer::new(Subscription::default()).into());
+		let b = copy();
+		write(&b, 4);
+		write(&b, 5);
+		b.skip_groups(6..8);
+		b.report_largest(Position::group(5), true);
+		routes.serve(b.consume());
+		assert_eq!(sub.reader().copies.len(), 2, "the read follows the route to b");
+
+		assert!(sub.holds(5));
+		assert!(!sub.holds(2), "only the replaced copy holds 2");
+		assert_eq!(sub.previous_start(5), Some(4), "the replaced copy would name 2");
+		assert_eq!(sub.skipped_below(5), 2, "the replaced copy knows 3 and 4 were skipped");
+		assert!(sub.is_skipped([6..=7].into_iter()));
+		assert!(!sub.is_skipped([3..=4].into_iter()), "only the replaced copy skipped 3 and 4");
+		assert!(sub.largest_finished(Position::group(5)));
+		assert!(!sub.largest_finished(Position::group(4)));
+		let consumer = routes.consume();
+		assert!(consumer.largest_finished(Position::group(5)));
+		assert!(!consumer.largest_finished(Position::group(4)));
+	}
+
 	/// A copy the front serves after the clean end only continues group reads and fetches: a
 	/// reader still draining the copy the track ended on stays there, rather than losing what
 	/// only that copy holds (`ResumeReader.tla`'s `CleanEndIsComplete`).
@@ -5629,6 +5673,52 @@ mod test {
 				"ordered={ordered}: the window was handed out"
 			);
 		}
+	}
+
+	/// A key-order read keeps its cursor below a group outside its window while the window
+	/// still owes a group below it, which may yet land on that copy, and moves past it once
+	/// nothing below is owed.
+	#[test]
+	fn a_key_order_read_waits_below_a_group_outside_its_window_only_while_one_is_owed() {
+		let read = |ranges: Vec<track::Range>, held: &[u64]| {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = received_copy();
+			for key in held {
+				write(&a, *key);
+			}
+			routes.serve(a.consume());
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges(ranges);
+			let sub = logical
+				.consume()
+				.subscribe(subscription)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			(routes, a, sub)
+		};
+
+		// Group 0 is owed below 3, and lands there later.
+		let (_routes, a, mut sub) = read(vec![track::Range::groups(0..1)], &[]);
+		write(&a, 3);
+		assert!(drain(&mut sub, true).is_empty());
+		write(&a, 0);
+		assert_eq!(drain(&mut sub, true), [0]);
+
+		// Nothing is owed below 3, so the read moves past it to 10 once its cap allows.
+		let from_ten = track::Range {
+			start: track::Anchor::Time(10),
+			end: None,
+		};
+		let (_routes, a, mut sub) = read(vec![track::Range::groups(0..1), from_ten], &[0, 10]);
+		sub.set_range(..10);
+		assert_eq!(drain(&mut sub, true), [0]);
+		write(&a, 3);
+		assert!(drain(&mut sub, true).is_empty());
+		sub.set_range(..);
+		assert_eq!(drain(&mut sub, true), [10]);
 	}
 
 	#[test]
@@ -7457,6 +7547,48 @@ mod test {
 			read.push(group.start);
 		}
 		assert_eq!(read, vec![3000]);
+	}
+
+	/// A replaced copy capped at or below where a range starts says nothing of that range, and
+	/// one capped at or below where it ends says nothing of its end; a cap past either lets
+	/// the copy place it. A window only a capped copy can place waits instead of taking a
+	/// range the cap cut short.
+	#[test]
+	fn a_capped_copy_places_only_what_its_cap_leaves_whole() {
+		let time_end = Some(track::Anchor::Time(3500));
+		let relative_end = Some(track::Anchor::Relative(0));
+		// Groups 3000 and 3600: the time range ends at 3501, the relative one past 3600.
+		for (end, cap, placed) in [
+			(time_end, 2999, None),
+			(time_end, 3000, None),
+			(time_end, 3001, Some(3501)),
+			(relative_end, 3600, None),
+			(relative_end, 3601, None),
+			(relative_end, 3602, Some(3601)),
+		] {
+			let routes = Producer::new();
+			let a = copy();
+			write(&a, 3000);
+			write(&a, 3600);
+			routes.serve(a.consume());
+			let range = track::Range {
+				start: track::Anchor::Time(3000),
+				end,
+			};
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(HOUR))
+				.with_ranges([range]);
+			let sub = routes.consume().subscribe(kio::Producer::new(subscription).into());
+			let mut reader = sub.reader.lock().unwrap();
+			let (groups, mirrored) = (reader.groups, reader.mirrored.clone());
+			let old = &mut reader.copies[0];
+			old.replaced = true;
+			assert!(old.poll_ready(groups, &kio::Waiter::noop()).is_ready());
+			old.bound(Some(cap - 1), &mirrored);
+			let window = reader.window();
+			assert_eq!(window.is_settled(), placed.is_some(), "{end:?} capped at {cap}");
+			assert_eq!(window.end(), placed, "{end:?} capped at {cap}");
+		}
 	}
 
 	/// Bounding a replaced copy keeps its relative start where the copy resolved it, though
