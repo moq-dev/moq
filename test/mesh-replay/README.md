@@ -53,7 +53,7 @@ queue = "250ms"  # how long a datagram waits behind the rate limit before it is 
 dial = "a"
 accept = "b"
 cost = 2         # optional, ?cost on the dialer's peer URL
-upstream = true  # optional: `dial` marks `accept` upstream
+upstream = true  # optional: `dial` marks `accept` upstream, on the new build only
 shape = { delay = "40ms" }   # optional, over [shape]
 ```
 

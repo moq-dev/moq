@@ -227,5 +227,46 @@ class ProcTest(unittest.TestCase):
         self.assertTrue(proc.died)
 
 
+class BuildTest(unittest.TestCase):
+    def fake_run(self, dial, accept):
+        from types import SimpleNamespace
+
+        link = replay.Link("a", "b", None, True, {})
+        run = SimpleNamespace(
+            relays={"a": SimpleNamespace(build=dial), "b": SimpleNamespace(build=accept)},
+            mesh=SimpleNamespace(links=[link]),
+            shaper_port={link.name: 1},
+            auth_port=4,
+            log="info",
+        )
+        return run, link
+
+    def test_a_link_is_lite07_when_the_dialer_offers_it_first(self):
+        new = replay.Build("new", "relay", ["moq-lite-07-wip", "moq-lite-06"])
+        only07 = replay.Build("old", "relay", ["moq-lite-07-wip"])
+        prefers06 = replay.Build("old", "relay", ["moq-lite-06", "moq-lite-07-wip"])
+        release = replay.Build("old", "relay", [])
+        cases = [
+            (new, only07, True),
+            (only07, new, True),
+            (prefers06, new, False),
+            (new, prefers06, True),
+            (new, release, False),
+            (new, None, False),
+        ]
+        for dial, accept, want in cases:
+            run, link = self.fake_run(dial, accept)
+            self.assertEqual(replay.Run.lite07(run, link), want)
+
+    def test_only_the_new_build_marks_a_link_upstream(self):
+        run, _ = self.fake_run(None, None)
+        relay = replay.Relay.__new__(replay.Relay)
+        relay.run, relay.name, relay.port, relay.internal = run, "a", 2, 3
+        new = replay.Build("new", "relay", [])
+        old = replay.Build("old", "relay", [])
+        self.assertIn("upstream = true", relay.config(new))
+        self.assertNotIn("upstream", relay.config(old))
+
+
 if __name__ == "__main__":
     unittest.main()

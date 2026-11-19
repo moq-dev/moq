@@ -545,7 +545,9 @@ class Relay:
             entry = f'url = "https://127.0.0.1:{run.shaper_port[link.name]}/", token = "peer.{self.name}"'
             if link.cost is not None:
                 entry += f", cost = {link.cost}"
-            if link.upstream:
+            # The mark is the new build's config: a release before it rejects the field, so the old
+            # build's link is unmarked, as a deployment rolling off that release configures it.
+            if link.upstream and build.name == "new":
                 entry += ", upstream = true"
             peers.append("{ " + entry + " }")
         versions = ""
@@ -726,13 +728,11 @@ class Run:
 
     def lite07(self, link: Link) -> bool:
         a, b = self.relays[link.dial].build, self.relays[link.accept].build
-        return (
-            a is not None
-            and b is not None
-            and bool(a.versions)
-            and a.versions == b.versions
-            and "moq-lite-07-wip" in a.versions
-        )
+        # The acceptor takes the first version in the dialer's offer it also lists. A build's
+        # default list is unknown here, so a link with one counts as not lite-07.
+        if a is None or b is None:
+            return False
+        return next((v for v in a.versions if v in b.versions), None) == "moq-lite-07-wip"
 
     def readers(self) -> None:
         for relay in self.relays.values():
