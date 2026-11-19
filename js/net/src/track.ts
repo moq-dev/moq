@@ -4299,19 +4299,22 @@ export class Subscriber {
 			subscriber.#settle();
 			return subscriber.#window.resolved();
 		};
-		hooks.servingResolvedKey = (subscriber, key) => {
+		hooks.servingResolvedKeys = (subscriber, keys) => {
+			if (keys.length === 0) return [];
 			const resumed = subscriber.#resume?.resolved();
 			if (resumed) {
-				// A reader following route copies resolves its ranges by position, in key order.
+				// A reader following route copies resolves its ranges by position, in key order, so
+				// they are built and walked once for every key asked.
+				const at = new Map<bigint, number>();
 				let index = 0;
-				for (const [held] of subscriber.#state.update.entries()) {
-					if (held === key) return resumed[index];
-					index++;
-				}
-				return undefined;
+				for (const [held] of subscriber.#state.update.entries()) at.set(held, index++);
+				return keys.map((key) => {
+					const index = at.get(key);
+					return index === undefined ? undefined : resumed[index];
+				});
 			}
 			subscriber.#settle();
-			return subscriber.#window.resolvedKey(key);
+			return keys.map((key) => subscriber.#window.resolvedKey(key));
 		};
 		hooks.editSubscriber = (subscriber, edit) => subscriber.#edit(edit);
 		hooks.preferences = (subscriber) => subscriber.#state.update;

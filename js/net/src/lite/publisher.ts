@@ -1230,13 +1230,18 @@ export class Publisher {
 				const latest = hooks.latestKey(track);
 				if (latest === undefined) return [];
 				const pins: [bigint, WireRange][] = [];
+				const asking: [bigint, WireRange][] = [];
 				for (const id of unpinned.due(latest)) {
 					const range = requested.get(id);
-					if (range === undefined) {
-						unpinned.remove(id);
-						continue;
-					}
-					const resolved = hooks.servingResolvedKey(track, id);
+					if (range === undefined) unpinned.remove(id);
+					else asking.push([id, range]);
+				}
+				const resolution = hooks.servingResolvedKeys(
+					track,
+					asking.map(([id]) => id),
+				);
+				for (const [index, [id, range]] of asking.entries()) {
+					const resolved = resolution[index];
 					if (!resolved) continue;
 					const pinned = pin(range, resolved);
 					// The start settled; the end is due again once it may settle.
@@ -1542,10 +1547,13 @@ export class Publisher {
 		// nothing can resolve it (`finished`). SUBSCRIBE_START goes first.
 		const reportStarted = async (finished: boolean): Promise<boolean> => {
 			if (startKey === undefined || unstarted.size === 0) return true;
-			for (const id of [...unstarted]) {
-				// An update not taken yet retired it, and taking that update forgets it.
+			// An update not taken yet retired one, and taking that update forgets it.
+			const held = [...unstarted].filter((id) => controls.holds(id));
+			const resolution = hooks.servingResolvedKeys(track, held);
+			for (const [index, id] of held.entries()) {
+				// Or one taken while an earlier start went out.
 				if (!controls.holds(id)) continue;
-				const range = hooks.servingResolvedKey(track, id);
+				const range = resolution[index];
 				if (!range && !finished) continue;
 				let start: bigint | undefined;
 				if (range) {

@@ -833,10 +833,12 @@ export const hooks: {
 	 */
 	servingResolved: (subscriber: Subscriber) => (Resolved | undefined)[];
 	/**
-	 * A subscriber's range keyed `key` as resolved where it is served, as {@link servingResolved}
-	 * reads it, undefined for one not held. Assigned by `track.ts`.
+	 * A subscriber's ranges keyed `keys` as resolved where they are served, as
+	 * {@link servingResolved} reads them, undefined for one not held. Asked together, so a reader
+	 * resolving by position on route copies builds its ranges once for them all. Assigned by
+	 * `track.ts`.
 	 */
-	servingResolvedKey: (subscriber: Subscriber, key: bigint) => Resolved | undefined;
+	servingResolvedKeys: (subscriber: Subscriber, keys: readonly bigint[]) => (Resolved | undefined)[];
 	/**
 	 * Edit a subscriber's preferences by key, costing the ranges the edit names rather than every
 	 * range: lite-07's SUBSCRIBE_UPDATE, by Range ID. Mirrors the Rust `Subscriber::edit`. Assigned
@@ -1188,7 +1190,7 @@ export const hooks: {
 	servingResolved: () => {
 		throw new Error("track.ts not loaded");
 	},
-	servingResolvedKey: () => {
+	servingResolvedKeys: () => {
 		throw new Error("track.ts not loaded");
 	},
 	editSubscriber: () => {
