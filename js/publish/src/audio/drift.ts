@@ -147,14 +147,18 @@ export class Stamper {
 		}
 		const { resampler } = this.#resampler;
 
+		// The resampler holds back its kernel's lookahead, so this quantum's first sample comes out
+		// that many samples after the next one stamped.
+		const pending = resampler.pending;
 		if (this.#anchor !== undefined) {
-			const steer = this.#drift.observe(captured, this.#at(this.#stamped), (samples / this.#rate) * 1_000_000);
+			const pts = this.#at(this.#stamped + pending);
+			const steer = this.#drift.observe(captured, pts, (samples / this.#rate) * 1_000_000);
 			if (steer.kind === "drop") return undefined;
 			if (steer.kind === "ratio") resampler.adjust(steer.ratio);
 			if (steer.kind === "resync") this.#anchor = undefined;
 		}
 		if (this.#anchor === undefined) {
-			this.#anchor = Math.max(captured, this.#end);
+			this.#anchor = Math.max(captured - (pending / this.#rate) * 1_000_000, this.#end);
 			this.#stamped = 0;
 		}
 

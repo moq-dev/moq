@@ -172,7 +172,7 @@ function stamp(
 		if (!frame) continue;
 		const timestamp = frame.timestamp.asMicros();
 		stamps.push(timestamp);
-		// The first sample out interpolates up to one sample back into the previous quantum.
+		// The first sample out sits the resampler's 12-sample lookahead back in the previous quantum.
 		errors.push([host, timestamp / 1e6 - captured]);
 	}
 	return { errors, stamps };
