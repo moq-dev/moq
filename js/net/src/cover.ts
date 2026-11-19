@@ -219,11 +219,6 @@ export class Cover {
 		if (end < UNBOUNDED) this.#root = shift(this.#root, end, -delta);
 	}
 
-	/** Whether no run is counted. */
-	get empty(): boolean {
-		return this.#root === undefined;
-	}
-
 	/** Whether any run covers `key`. */
 	contains(key: bigint): boolean {
 		return count(this.#root, key) > 0;
