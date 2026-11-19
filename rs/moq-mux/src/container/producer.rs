@@ -1,5 +1,3 @@
-use bytes::Bytes;
-
 use super::{Container, Frame, Kind};
 
 fn add_micros(timestamp: moq_net::Timestamp, extra: moq_net::Timestamp) -> Option<moq_net::Timestamp> {
@@ -43,7 +41,7 @@ fn timed(timestamp: moq_net::Timestamp, duration: Option<moq_net::Timestamp>) ->
 /// [`cut`](Self::cut) closes the current group early, ideally saying where its content
 /// ends; the next write must be a keyframe. Reach for it when the following keyframe won't
 /// supply that boundary in time, or to bound each group of an accumulating audio track.
-/// [`discontinuity`](Self::discontinuity) publishes a marker group with no media, for
+/// [`discontinuity`](Self::discontinuity) ends the group where its media does, for
 /// when the timeline is about to jump rather than merely continue. Timestamps never fall
 /// below the live edge earlier groups reached.
 ///
@@ -73,15 +71,12 @@ pub struct Producer<C: Container, R = ()> {
 	member: Option<crate::catalog::interval::Member>,
 
 	/// The furthest presentation point written, i.e. `max(timestamp + duration)`: the base for a
-	/// duration marker when the caller does not pass a bound.
+	/// group's end when the caller does not pass a bound.
 	end: Option<moq_net::Timestamp>,
 
 	/// Exclusive presentation end of finished groups, where a payload with no timestamp of its
 	/// own lands. Not a floor: a group may start below it.
 	live_edge: Option<moq_net::Timestamp>,
-	/// The latest frame timestamp written, which a discontinuity marker never falls below: a frame
-	/// without a duration reaches only its own timestamp, so the live edge can sit right on it.
-	newest: Option<moq_net::Timestamp>,
 
 	/// The keyframe timestamp that opened the latest group. The next group may not start below it.
 	start: Option<moq_net::Timestamp>,
@@ -268,7 +263,6 @@ impl<C: Container> Producer<C> {
 			member: None,
 			end: None,
 			live_edge: None,
-			newest: None,
 			start: None,
 			floor: None,
 			last_duration: None,
@@ -307,7 +301,6 @@ where
 			member: None,
 			end: None,
 			live_edge: None,
-			newest: None,
 			start: None,
 			floor: None,
 			last_duration: None,
@@ -729,27 +722,26 @@ where
 
 	/// Cut the current group, flushing buffered frames and closing it.
 	///
-	/// `end` bounds the final buffered frame when the publisher knows where the
-	/// group's content stops. A video track that writes duration markers appends an
-	/// empty frame at that bound, or at the last timestamp plus its estimated
-	/// duration. Reordered groups omit this marker because their presentation end
-	/// does not bound the last frame in decode order. The next [`write`](Self::write)
-	/// must be a keyframe. An explicit bound before the last ordered video frame
-	/// returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
+	/// `end` bounds the final buffered frame when the publisher knows where the group's content
+	/// stops, such as the next keyframe; without it, an audio or video group ends where its last
+	/// frame's duration, or the observed cadence, says. The group ends whole there, so a reader
+	/// learns where its media stops from the group itself. A reordered group's presentation end
+	/// bounds no frame in decode order, so only an explicit `end` closes it whole. The next
+	/// [`write`](Self::write) must be a keyframe. An explicit bound before the last ordered video
+	/// frame returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
-		let marker_at = end.or_else(|| self.estimated_end());
-		self.close(end, marker_at, None)
+		let estimate = end.or_else(|| self.estimated_end());
+		self.close(end, estimate, None)
 	}
 
-	/// Close the current group, ending a video track's group with a duration marker at `marker_at`.
+	/// Close the current group, timing its last buffered frame to `estimate`.
 	///
-	/// The group ends whole at `whole`, else at a bound `end` the caller knows, such as the next
-	/// keyframe, else where a media track's duration marker goes, so a reader can tell the group
-	/// starting there continues it.
+	/// The group ends whole at `whole`, else at a bound `end` the caller knows, else at a media
+	/// track's `estimate`, so a reader can tell whether the group starting there continues it.
 	fn close(
 		&mut self,
 		end: Option<moq_net::Timestamp>,
-		marker_at: Option<moq_net::Timestamp>,
+		estimate: Option<moq_net::Timestamp>,
 		whole: Option<moq_net::Timestamp>,
 	) -> crate::Result<()> {
 		if self.container.kind() == Kind::Video
@@ -767,20 +759,19 @@ where
 
 		// The group's own state ends with it, whether or not closing it succeeds.
 		let reordered = std::mem::take(&mut self.reordered);
-		// Where this group's content stops: the duration marker when we write one, else the
-		// caller's bound, else the furthest point we wrote.
-		let reached = match (marker_at.or(end), self.end.take()) {
+		// Where this group's content stops: where it ends whole, else the caller's bound or the
+		// estimate, else the furthest point we wrote.
+		let reached = match (whole.or(estimate).or(end), self.end.take()) {
 			(Some(bound), Some(written)) => Some(super::later(written, bound)),
 			(bound, written) => bound.or(written),
 		};
 		self.last_duration = None;
 		self.previous_timestamp = None;
 
-		let tail_end = marker_at.filter(|_| !reordered);
-		// Media ends whole where its last frame does, as the duration marker says. A data track's
-		// items have no cadence to estimate that from.
-		let estimated = tail_end.filter(|_| self.container.kind() != Kind::Data);
-		if let Err(err) = self.close_group(whole.or(end).or(estimated), tail_end, reached) {
+		let estimate = estimate.filter(|_| !reordered);
+		// A data track's items have no cadence to estimate an end from.
+		let estimated = estimate.filter(|_| self.container.kind() != Kind::Data);
+		if let Err(err) = self.close_group(whole.or(end).or(estimated), estimate, reached) {
 			// A group that fails to close fails with the cause, rather than staying open for the next
 			// write to continue.
 			self.buffer.clear();
@@ -792,18 +783,16 @@ where
 		self.publish_estimate()
 	}
 
-	/// Flush the buffer into the open group and finish it, raising the live edge to `reached`. With
-	/// a `bound`, the group ends whole there rather than only closing.
+	/// Flush the buffer into the open group, timing its last frame to `tail`, and finish it,
+	/// raising the live edge to `reached`. With a `bound`, the group ends whole there rather than
+	/// only closing.
 	fn close_group(
 		&mut self,
 		bound: Option<moq_net::Timestamp>,
-		tail_end: Option<moq_net::Timestamp>,
+		tail: Option<moq_net::Timestamp>,
 		reached: Option<moq_net::Timestamp>,
 	) -> crate::Result<()> {
-		self.flush_buffer(tail_end)?;
-		if let Some(group) = self.group.as_mut() {
-			self.container.finish_group(group, tail_end)?;
-		}
+		self.flush_buffer(tail)?;
 		if let Some(group) = self.group.take() {
 			match bound.and_then(|bound| crate::start::end(&self.inner, group.start, bound)) {
 				Some(end) => group.finish_at(end)?,
@@ -833,9 +822,6 @@ where
 			self.cadence = Some(delta);
 		}
 		self.previous_timestamp = Some(timestamp);
-		if self.newest.is_none_or(|newest| timestamp_lt(newest, timestamp)) {
-			self.newest = Some(timestamp);
-		}
 
 		// Timestamp and duration can be at different scales, so add them in micros; the
 		// sub-microsecond rounding that costs is far below a segment boundary.
@@ -878,95 +864,38 @@ where
 		Ok(())
 	}
 
-	/// Publish a marker group standing for a break in the timeline: content stopped, and
-	/// whatever comes next does not continue it.
+	/// Declare a break in the timeline: content stopped, and whatever comes next does not
+	/// continue it.
 	///
-	/// Call this whenever the timeline is about to jump -- pausing an encoder, switching
-	/// source, resuming on a re-anchored clock. Without it a break is invisible: the next
-	/// group looks exactly like the one that would have followed, and a consumer bounding a
-	/// sample by the next group's first frame hands it the entire gap as its duration. That
-	/// produced a 2405 second video sample out of a publisher that had been paused 40 minutes.
-	/// Group starts alone can't rule a pause out, so this
-	/// marker is the only thing that can say one happened.
+	/// Call this whenever the timeline is about to jump: pausing an encoder, switching source,
+	/// resuming on a re-anchored clock. It ends the open group whole where the furthest frame
+	/// written does, rather than where the cadence would put the next frame: what resumes may land
+	/// sooner than one estimated frame later (a capture that reopens at once). A lone frame without
+	/// a duration reaches only its own start, so its group ends one unit of the track's timescale
+	/// past it. A reader learns the media stops at that end once no group continues it, and the
+	/// next [`write`](Self::write) opens a group that starts later. To bound the final frame
+	/// yourself, [`cut(end)`](Self::cut) before calling this, which then has nothing left to end.
 	///
-	/// It also fixes what a subscriber joining mid-break sees. A subscription starts at the
-	/// track's latest group, and creating this one advances that -- so a late joiner lands on
-	/// the marker and waits for real media, instead of being served the group from *before*
-	/// the break as though it were live.
-	///
-	/// Audio and video write one empty frame one unit of the track's timescale before the exclusive
-	/// end of the previous epoch, so what resumes at that end starts after it, but never below the
-	/// latest frame written: a frame without a duration ends where it starts, so what resumes then
-	/// has to start after that frame. That object exists on moq-transport, so the live edge moves immediately; a consumer
-	/// MUST NOT submit it to a decoder. An empty payload is data on a data track, so its
-	/// marker is one object with no bytes at all, not even the container's timestamp. The
-	/// next [`write`](Self::write) opens the group after the marker, which it has to start after:
-	/// group starts strictly increase.
-	///
-	/// Before anything is written there is no timeline to break, so it publishes nothing.
-	///
-	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this.
-	/// Otherwise the open group closes without a duration marker: what resumes may land sooner
-	/// than one estimated frame later (a capture that reopens at once), and a guessed end past
-	/// it would read as a rewind to every consumer.
+	/// Without it a break is invisible: a group closed without an end, followed by one that
+	/// resumes later, reads like a continuation, and a consumer bounding a sample by the next
+	/// group's first frame hands it the entire gap as its duration.
 	pub fn discontinuity(&mut self) -> crate::Result<()> {
-		// The live edge once the open group closes, which raises it to the furthest point written.
-		let edge = match (&self.group, self.end) {
-			(Some(_), Some(end)) if self.live_edge.is_none_or(|edge| !timestamp_lt(end, edge)) => Some(end),
-			_ => self.live_edge,
+		let whole = match (&self.group, self.end) {
+			(Some(group), Some(end)) => match crate::start::end(&self.inner, group.start, end) {
+				Some(_) => Some(end),
+				None => self
+					.inner
+					.info()
+					.timescale
+					.and_then(|scale| moq_net::Timestamp::new(group.start.checked_add(1)?, scale).ok()),
+			},
+			_ => None,
 		};
-		// The marker starts one unit of the track's timescale before the live edge, so media
-		// resuming right at the edge still starts after it, but not below the latest frame, which
-		// it would otherwise claim to end before. Or one unit past the newest group when that
-		// doesn't pass the group's start. The open group ends whole there, so a reader can tell
-		// the marker follows it.
-		let marker = match (self.pending_start, edge) {
-			// A seek keyed the next group. Its marker is stamped at the live edge, or one unit past
-			// the newest group when the edge is unknown or doesn't pass it, since starts strictly
-			// increase.
-			(Some(start), edge) => {
-				let edge = edge.unwrap_or(moq_net::Timestamp::ZERO);
-				let timestamp = match self.inner.info().timescale {
-					Some(_) => crate::start::next(&self.inner, edge)?.1,
-					None => edge,
-				};
-				Some((start, timestamp, false))
-			}
-			// Nothing was written, so there is no timeline to break.
-			(None, None) => None,
-			(None, Some(edge)) => {
-				let newest = self.newest.unwrap_or(moq_net::Timestamp::ZERO);
-				let (start, timestamp) = crate::start::before(&self.inner, edge, newest)?;
-				Some((start, timestamp, true))
-			}
-		};
-		let whole = marker.and_then(|(_, timestamp, appended)| appended.then_some(timestamp));
 		self.close(None, None, whole)?;
 		// Nothing is measured across the break: the frames still open on this side have no end, and
 		// the gap to the far side is not a frame duration.
 		self.estimator.discontinuity();
 		self.cadence = None;
-		let Some((start, timestamp, appended)) = marker else {
-			return Ok(());
-		};
-		self.pending_start = None;
-		let mut group = match appended {
-			true => self.inner.append_group(timestamp)?,
-			false => self.inner.create_group(moq_net::group::Info { start })?,
-		};
-		match self.container.kind() {
-			Kind::Data => group.write_frame(timestamp, Bytes::new())?,
-			Kind::Audio | Kind::Video => self.container.write(
-				&mut group,
-				&[Frame {
-					timestamp,
-					payload: Bytes::new(),
-					keyframe: false,
-					duration: None,
-				}],
-			)?,
-		}
-		group.finish()?;
 		Ok(())
 	}
 
@@ -1200,6 +1129,7 @@ mod tests {
 	use super::*;
 	use crate::catalog::hang::Container;
 	use moq_net::Timestamp;
+	use bytes::Bytes;
 
 	/// Mint a standalone track for tests via a throwaway broadcast, since tracks are
 	/// born from their broadcast (no public `track::Producer::new`).

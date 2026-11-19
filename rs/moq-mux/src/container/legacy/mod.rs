@@ -36,23 +36,6 @@ impl Container for Wire {
 		self.0
 	}
 
-	fn finish_group(
-		&self,
-		group: &mut moq_net::group::Producer,
-		end: Option<moq_net::Timestamp>,
-	) -> Result<(), Self::Error> {
-		if self.0 == Kind::Video
-			&& let Some(timestamp) = end
-		{
-			hang::container::Frame {
-				timestamp,
-				payload: bytes::Bytes::new(),
-			}
-			.write_to(group)?;
-		}
-		Ok(())
-	}
-
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		for frame in frames {
 			let hang_frame = hang::container::Frame {

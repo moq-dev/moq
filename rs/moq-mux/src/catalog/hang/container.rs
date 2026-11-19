@@ -101,19 +101,6 @@ impl ContainerTrait for Container {
 		}
 	}
 
-	fn finish_group(
-		&self,
-		group: &mut moq_net::group::Producer,
-		end: Option<moq_net::Timestamp>,
-	) -> Result<(), Self::Error> {
-		match self {
-			Self::Legacy(kind) => legacy::Wire(*kind).finish_group(group, end),
-			Self::LegacyAudio(_) => legacy::Wire(Kind::Audio).finish_group(group, end),
-			Self::Cmaf(wire) => wire.finish_group(group, end).map_err(Into::into),
-			Self::Loc(kind) => loc::Wire(*kind).finish_group(group, end),
-		}
-	}
-
 	fn write(&self, group: &mut moq_net::group::Producer, frames: &[Frame]) -> Result<(), Self::Error> {
 		match self {
 			Self::Legacy(kind) => legacy::Wire(*kind).write(group, frames),

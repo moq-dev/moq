@@ -43,8 +43,9 @@ impl<F: Container> GroupConsumer<F> {
 	/// Read the next frame, or `None` once the group ends.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Frame>, F::Error>> {
-		// Peek past an untimed video frame for a marker or successor that times it, but only
-		// at what has already landed: a live group returns the frame now rather than waiting.
+		// Peek past an untimed video frame for a successor, a group end, or an older publisher's
+		// marker that times it, but only at what has already landed: a live group returns the
+		// frame now rather than waiting.
 		while self.pending.front().is_none_or(|frame| {
 			self.format.kind() == super::Kind::Video && frame.duration.is_none() && self.pending.len() < 2
 		}) {
@@ -67,7 +68,20 @@ impl<F: Container> GroupConsumer<F> {
 						}
 					}
 				}
-				None => return Poll::Ready(Ok(self.pop_media())),
+				// A group finished whole times its last frame up to its end.
+				None => {
+					if self.format.kind() == super::Kind::Video
+						&& let Some(last) = self.pending.back_mut()
+						&& let Some(end) = self
+							.group
+							.end()
+							.zip(self.group.timescale())
+							.and_then(|(end, scale)| moq_net::Timestamp::new(end, scale).ok())
+					{
+						super::close_duration(last, end);
+					}
+					return Poll::Ready(Ok(self.pop_media()));
+				}
 			}
 		}
 		Poll::Ready(Ok(self.pop_media()))

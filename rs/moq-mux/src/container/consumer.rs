@@ -206,6 +206,20 @@ pub struct Consumer<F: Container> {
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	gap: bool,
 
+	// The end the last group read was finished whole at, which reads as an end unless the next
+	// group continues it.
+	declared: Option<Declared>,
+
+	// Wakes the reader once a declared end waited out its successor.
+	end_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
+
+	// The group whose end a marker already read as one, so its whole end is not read again.
+	marked: Option<u64>,
+
+	// A declared end with no group after it reads as one once the hole wait passes, as a player
+	// needs, rather than only once the next group starts later, as an export does.
+	prompt: bool,
+
 	// The item a gap was returned ahead of.
 	next: Option<Item>,
 
@@ -224,6 +238,16 @@ pub struct Consumer<F: Container> {
 
 	// When the latest backlog group dropped without delivering all of it landed.
 	backlog: Option<Instant>,
+}
+
+/// A group's whole end, read as [`Read::End`] unless the group after it starts there.
+struct Declared {
+	/// The group that ended.
+	group: u64,
+	/// Where it ended, in its track's timescale.
+	end: Timestamp,
+	/// When the reader finished it, which the wait for a continuing group runs from.
+	since: Instant,
 }
 
 /// Whether a [`Consumer`] still reads its subscription.
@@ -451,6 +475,10 @@ impl<F: Container> Consumer<F> {
 			floor: None,
 			presented_end: None,
 			gap: false,
+			declared: None,
+			end_timer: None,
+			marked: None,
+			prompt: false,
 			next: None,
 			group: 0,
 			arrived: None,
@@ -523,6 +551,7 @@ impl<F: Container> Consumer<F> {
 	/// an undeclared forward timestamp jump is not a gap, since nothing says media is missing.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_read(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Read>, F::Error>> {
+		self.prompt = true;
 		loop {
 			let read = match ready!(self.poll_item(waiter))? {
 				Some(Item::Frame { group, frame, arrived }) => {
@@ -711,6 +740,20 @@ impl<F: Container> Consumer<F> {
 			if let Some(group) = self.pending.front_mut()
 				&& group.start <= self.current
 			{
+				// The group after a declared end has started: one starting at the end continues the
+				// media, and a later one resumes it after a pause the end declared. A loss reads as
+				// the gap instead.
+				if let Some(declared) = self.declared.take()
+					&& !self.gap
+					&& !group
+						.group
+						.timescale()
+						.and_then(|scale| Timestamp::new(group.start, scale).ok())
+						.and_then(time)
+						.is_some_and(|start| pts_contiguous(time(declared.end), start))
+				{
+					return Poll::Ready(self.declare(declared));
+				}
 				match group.poll_read(waiter, &self.format) {
 					Poll::Ready(Ok(Some(Event::Frame { frame, arrived }))) => {
 						let seq = group.group.start;
@@ -734,6 +777,9 @@ impl<F: Container> Consumer<F> {
 					}
 					Poll::Ready(Ok(Some(Event::FrameEnd { end, opens }))) => {
 						self.group = group.group.start;
+						if opens {
+							self.marked = Some(self.group);
+						}
 						self.advance(time(end).ok_or(moq_net::Error::TimestampMismatch)?);
 						return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens })));
 					}
@@ -800,6 +846,19 @@ impl<F: Container> Consumer<F> {
 						if let Some(end) = group.max_end.max(whole) {
 							self.presented_end = Some(end);
 						}
+						// Media ending whole stops at its end unless the next group continues it.
+						let seq = group.group.start;
+						self.declared = group
+							.group
+							.end()
+							.zip(group.group.timescale())
+							.and_then(|(end, scale)| Timestamp::new(end, scale).ok())
+							.filter(|_| matches!(group.content, Content::Media) && self.marked != Some(seq))
+							.map(|end| Declared {
+								group: seq,
+								end,
+								since: kio::clock::now(),
+							});
 						self.pending.pop_front();
 						self.current += 1;
 						self.note_group_edge();
@@ -975,7 +1034,31 @@ impl<F: Container> Consumer<F> {
 				continue;
 			}
 
+			// No group continued a declared end in time: the media stopped there. A finished track
+			// says so itself, and an export waits for the next group rather than guess.
+			if let Some(declared) = &self.declared
+				&& self.prompt
+				&& !(finished && self.pending.is_empty())
+			{
+				let expires = declared.since.checked_add(self.hole_wait());
+				let due = self.playhead.as_ref().and_then(|playhead| playhead.due(declared.end));
+				let now = kio::clock::now();
+				if expires.is_some_and(|at| at <= now) || due.is_some_and(|at| at <= now) {
+					let declared = self.declared.take().unwrap();
+					self.end_timer = None;
+					return Poll::Ready(self.declare(declared));
+				}
+				if let Some(wake) = expires.into_iter().chain(due).min() {
+					let timer = self
+						.end_timer
+						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
+					timer.as_mut().reset(wake);
+					let _ = waiter.poll_future(timer.as_mut());
+				}
+			}
+
 			if finished && self.pending.is_empty() {
+				self.declared = None;
 				if let Reader::Failed(..) = self.reader
 					&& let Reader::Failed(_, err) = std::mem::replace(&mut self.reader, Reader::Lost)
 				{
@@ -1193,6 +1276,17 @@ impl<F: Container> Consumer<F> {
 	// Media this reader will never deliver: the next item is preceded by a gap.
 	fn lose(&mut self) {
 		self.gap = true;
+	}
+
+	// Read a declared end as the end of its group's media.
+	fn declare(&mut self, declared: Declared) -> Result<Option<Event>, F::Error> {
+		self.end_timer = None;
+		self.group = declared.group;
+		self.advance(time(declared.end).ok_or(moq_net::Error::TimestampMismatch)?);
+		Ok(Some(Event::FrameEnd {
+			end: declared.end,
+			opens: true,
+		}))
 	}
 
 	fn advance(&mut self, end: std::time::Duration) {

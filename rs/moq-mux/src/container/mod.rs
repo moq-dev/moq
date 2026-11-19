@@ -44,7 +44,7 @@ pub(crate) use source::{ExportSource, Resume};
 pub enum Kind {
 	/// Audio packets carry codec-defined durations.
 	Audio,
-	/// Video frames can need a duration marker at group end.
+	/// Video frames, whose last duration in a group its end gives.
 	Video,
 	/// Opaque data has no sample-duration semantics.
 	Data,
@@ -73,13 +73,15 @@ pub enum Read {
 		duration: moq_net::Timestamp,
 	},
 	/// The publisher declared that its media stops at `end`: it paused, switched source, or
-	/// finished. Frames that follow from the same `group` are the stopped encoder's final
-	/// packets (an audio codec's drain), whose output at or past `end` is padding. The next
-	/// group starts fresh.
+	/// finished. A group ending whole reads as one once the next group starts later, or once no
+	/// group continues it within the wait a missing group gets (see [`Consumer`]); a next group
+	/// starting at the end continues the media instead. An audio terminal marker reads as one
+	/// ahead of its group's frames, which are then the stopped encoder's final packets (a codec's
+	/// drain), whose output at or past `end` is padding. The next group starts fresh.
 	End {
-		/// The group's sequence number. Only equality means anything: numbers may skip.
+		/// The group's start. Only equality means anything.
 		group: u64,
-		/// Where the media stops, at the scale the marker was encoded with.
+		/// Where the media stops, in the track's timescale, or the marker's for one.
 		end: moq_net::Timestamp,
 	},
 }
@@ -238,11 +240,12 @@ pub trait Container {
 	/// other object that decodes to no frames.
 	fn decode(&self, frame: moq_net::frame::Frame) -> Result<Vec<Frame>, Self::Error>;
 
-	/// Return the endpoint timestamp when `frame` carries empty-payload metadata.
+	/// Return the endpoint timestamp when `frame` is an empty-payload marker.
 	///
-	/// For video this bounds the preceding frame; for audio it bounds source samples
-	/// before terminal codec packets. A consumer never submits the marker to a decoder.
-	/// Formats without endpoint metadata use the default.
+	/// An audio track's terminal marker opens its group ahead of the codec's final packets,
+	/// bounding the source samples they carry. A publisher on a version before lite-07, which has
+	/// no group end, also bounds a video group's last frame or declares a stop with one. A consumer
+	/// never submits a marker to a decoder. Formats without endpoint metadata use the default.
 	fn end(&self, _frame: &Frame) -> Option<moq_net::Timestamp> {
 		None
 	}
@@ -250,14 +253,5 @@ pub trait Container {
 	/// The media role, when this format represents an audio or video track.
 	fn kind(&self) -> Kind {
 		Kind::Data
-	}
-
-	/// Write any format-specific endpoint before the producer closes the group.
-	fn finish_group(
-		&self,
-		_group: &mut moq_net::group::Producer,
-		_end: Option<moq_net::Timestamp>,
-	) -> Result<(), Self::Error> {
-		Ok(())
 	}
 }
