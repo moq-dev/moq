@@ -184,19 +184,18 @@ export class DropSet {
 
 	/** Give up `[start, end)` as `run` says, or forget it when `run` is undefined. */
 	set(start: bigint, end: bigint, run?: Omit<DropRun, "start" | "end">): void {
+		this.#keys.set(start, end, run && { start, end });
 		this.#apply(this.#runs.set(start, end, run && { ...run, start, end }));
 	}
 
 	/** Forget each of `ranges`, sorted and disjoint, in one pass. */
 	clear(ranges: readonly Run[]): void {
+		this.#keys.clear(ranges);
 		this.#apply(this.#runs.clear(ranges));
 	}
 
 	#apply({ removed, added }: { removed: DropRun[]; added: DropRun[] }): void {
 		if (removed.length === 0 && added.length === 0) return;
-		// What was replaced leaves the keys, and its replacement puts back what it still holds.
-		for (const old of removed) this.#keys.set(old.start, old.end);
-		for (const fresh of added) this.#keys.set(fresh.start, fresh.end, { start: fresh.start, end: fresh.end });
 		for (const old of removed) this.#live.delete(old);
 		for (const fresh of added) {
 			this.#live.add(fresh);
