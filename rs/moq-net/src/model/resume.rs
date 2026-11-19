@@ -4516,8 +4516,11 @@ mod test {
 		assert!(!sub.holds(2), "only the replaced copy holds 2");
 		assert_eq!(sub.previous_start(5), Some(4), "the replaced copy would name 2");
 		assert_eq!(sub.skipped_below(5), 2, "the replaced copy knows 3 and 4 were skipped");
-		assert!(sub.is_skipped([6..=7].into_iter()));
-		assert!(!sub.is_skipped([3..=4].into_iter()), "only the replaced copy skipped 3 and 4");
+		assert!(sub.is_skipped(std::iter::once(6..=7)));
+		assert!(
+			!sub.is_skipped(std::iter::once(3..=4)),
+			"only the replaced copy skipped 3 and 4"
+		);
 		assert!(sub.largest_finished(Position::group(5)));
 		assert!(!sub.largest_finished(Position::group(4)));
 		let consumer = routes.consume();

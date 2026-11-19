@@ -61,8 +61,11 @@ jobs:
       # times out before the job, so an overrun still keeps its outcomes.
       - name: Mutate
         timeout-minutes: 140
-        run: nix develop --command just rs mutants ${{ matrix.mode }} ${{ matrix.shard }} ${{ matrix.shards }}
+        run: nix develop --command just rs mutants "$MODE" "$SHARD" "$SHARDS"
         env:
+          MODE: ${{ matrix.mode }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
           MUTANTS_BASE: ${{ needs.plan.outputs.base }}
       - name: Keep the outcomes
         if: ${{ !cancelled() }}

@@ -4113,10 +4113,7 @@ mod tests {
 	fn a_lost_claim_keeps_the_mark_of_its_route() {
 		for marked in [false, true] {
 			let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
-			let port = |role, upstream| Port {
-				upstream,
-				..port(role)
-			};
+			let port = |role, upstream| Port { upstream, ..port(role) };
 			router.connect(2, port(Role::Routing(node(2)), marked)).unwrap();
 			router.recv(2, Msg::Edited).unwrap();
 			router.recv(2, route(5, 2, 1)).unwrap();
@@ -4152,9 +4149,7 @@ mod tests {
 					.collect::<Vec<_>>()
 			};
 			let out = router.drain();
-			let unavailable = |told: &[(Broadcast<u64>, Change<Run>)]| {
-				matches!(told, [(_, Change::Live(claim))] if claim.unavailable)
-			};
+			let unavailable = |told: &[(Broadcast<u64>, Change<Run>)]| matches!(told, [(_, Change::Live(claim))] if claim.unavailable);
 			assert!(unavailable(&told(&out, 3)), "marked={marked}: {out:?}");
 			assert_eq!(unavailable(&told(&out, 4)), !marked, "marked={marked}: {out:?}");
 		}

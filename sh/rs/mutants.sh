@@ -77,9 +77,10 @@ case $mode in
         for ((i = 0; i < n; i++)); do
             jobs+=("{\"mode\":\"changed\",\"shard\":$i,\"shards\":$n}")
         done
+        joined=$(printf '%s,' "${jobs[@]}")
         {
             echo "base=$base"
-            echo "matrix={\"include\":[$(IFS=,; echo "${jobs[*]}")]}"
+            echo "matrix={\"include\":[${joined%,}]}"
         } >>"${GITHUB_OUTPUT:-/dev/stdout}"
         exit 0
         ;;
