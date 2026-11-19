@@ -3620,7 +3620,14 @@ export class Subscriber {
 					if (below !== undefined && (covered(below + 1n, time + 1n, () => true) || index < keys.length)) {
 						return { group: below };
 					}
-					if (below === undefined && covered(0n, time + 1n, () => true)) return "before";
+					if (below === undefined) {
+						if (covered(0n, time + 1n, () => true)) return "before";
+						// A range asked from an earlier time, or from the oldest group (as 0), that the
+						// publisher started past it says the same, while the copy holds no group there.
+						for (const [asked, start] of anchors.starts) {
+							if (asked < time && start > time) return "before";
+						}
+					}
 					return "unknown";
 				}
 				if (below !== undefined) return { group: below };

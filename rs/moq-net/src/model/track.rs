@@ -1228,23 +1228,23 @@ impl TrackState {
 	/// it says the feed went by: one between still in flight, a stream overtaken, would
 	/// only add that group to the reader's range.
 	///
-	/// A range asked from an earlier time, or from the oldest group (reported as time 0),
-	/// that the publisher started past `time` says the same: no group starts at or before
-	/// it. A reader joining a copy that another reader already asks from further back adds
-	/// no range of its own, so that is the only report its time start gets.
+	/// With no group held at or before `time`, a range asked from an earlier time, or from
+	/// the oldest group (reported as time 0), that the publisher started past `time` says
+	/// the same: no group starts at or before it. A reader joining a copy that another
+	/// reader already asks from further back adds no range of its own, so that is the only
+	/// report its time start gets. A group the copy still holds there is a group the
+	/// publisher has since expired, so it wins: the time still waits to learn whether it
+	/// contains it.
 	fn containing_received(&self, time: u64) -> Containing {
 		if self.lookup.contains_key(&time) {
 			return Containing::Group(time);
 		}
-		if let Some(&start) = self.time_starts.get(&time)
-			&& start <= time
-		{
-			return Containing::Group(start);
-		}
-		// The publisher serves nothing at or before it, as it does for a time older than
-		// every group it holds. Bounded by the copy's live wire ranges.
-		if self.time_starts.range(..=time).any(|(_, &start)| start > time) {
-			return Containing::Before;
+		match self.time_starts.get(&time) {
+			Some(&start) if start <= time => return Containing::Group(start),
+			// The publisher serves nothing at or before it, as it does for a time older than
+			// every group it holds.
+			Some(_) => return Containing::Before,
+			None => {}
 		}
 		match self.lookup.range(..=time).next_back() {
 			Some((&key, _))
@@ -1253,7 +1253,11 @@ impl TrackState {
 			{
 				Containing::Group(key)
 			}
-			None if self.dropped_cover(0..time.saturating_add(1)) => Containing::Before,
+			None if self.dropped_cover(0..time.saturating_add(1))
+				|| self.time_starts.range(..time).any(|(_, &start)| start > time) =>
+			{
+				Containing::Before
+			}
 			_ => Containing::Unknown,
 		}
 	}
@@ -15495,6 +15499,36 @@ mod test {
 		assert!(before.poll_start(&kio::Waiter::noop()).is_ready());
 		assert_eq!(drain(&mut before), vec![1000]);
 		assert_eq!(placed(&mut after), None, "a group past 1000 may still arrive");
+	}
+
+	/// A group the copy still holds at or before a time start outranks a start reported for an
+	/// earlier range: the publisher expiring it says nothing of whether it contains the time.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_received_copy_keeps_a_held_group_over_an_earlier_range() {
+		let from = |time| {
+			Subscription::default()
+				.with_ranges([Range {
+					start: Anchor::Time(time),
+					end: None,
+				}])
+				.with_delay(Delay::default().with_max(None))
+		};
+		let placed = |subscriber: &mut Subscriber| {
+			subscriber.resolved_ranges()[0].map(|resolved| (resolved.start, resolved.floored))
+		};
+		let producer = track_producer("test", Info::timed());
+		producer.received();
+		producer.anchored();
+		write_group(&producer, 2000);
+
+		let mut reader = producer.subscribe(from(2500));
+		producer.time_starts([(0, 3000)]);
+		assert_eq!(placed(&mut reader), None, "the held 2000 may contain 2500");
+
+		write_group(&producer, 3000);
+		assert_eq!(placed(&mut reader), Some((2000, true)));
+		assert_eq!(drain(&mut reader), vec![2000, 3000]);
 	}
 
 	/// A floor at or past a time start, as a pre-lite-07 wire's start sets, keeps out the group
