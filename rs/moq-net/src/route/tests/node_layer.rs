@@ -497,6 +497,15 @@ impl LayerSim {
 		self.review(node);
 	}
 
+	/// Link state: every relay whose links changed floods them, once per burst as the
+	/// router batches: what a change from outside did floods before the next round
+	/// delivers, and what a round's deliveries did floods as it ends.
+	fn flood_dirty(&mut self) {
+		for node in std::mem::take(&mut self.dirty) {
+			self.flood(node);
+		}
+	}
+
 	/// Link state: `node` floods its links, numbered anew.
 	fn flood(&mut self, node: Node) {
 		let ports = &self.ports;
@@ -1173,6 +1182,10 @@ impl Net for LayerSim {
 			.collect()
 	}
 
+	fn flush(&mut self) {
+		self.flood_dirty();
+	}
+
 	fn step(&mut self, (from, to): Chan) {
 		self.stepping = true;
 		self.deliver(from, to);
@@ -1180,9 +1193,7 @@ impl Net for LayerSim {
 	}
 
 	fn tick(&mut self) -> bool {
-		for node in std::mem::take(&mut self.dirty) {
-			self.flood(node);
-		}
+		self.flood_dirty();
 		self.now += 1;
 		let now = self.now;
 		// Flat: a session whose path the network lost ends when its keep-alives run out.

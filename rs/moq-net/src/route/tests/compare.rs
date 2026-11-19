@@ -204,6 +204,9 @@ pub(super) trait Net {
 	/// The queues with something to deliver, and how much.
 	fn ready(&self) -> Vec<(Chan, usize)>;
 	fn step(&mut self, chan: Chan);
+	/// Send what the changes since the last round left batched, before the next
+	/// round delivers.
+	fn flush(&mut self) {}
 	/// One hop of delay passes. Whether a timer still runs.
 	fn tick(&mut self) -> bool {
 		false
@@ -643,6 +646,7 @@ impl Lab {
 	/// Deliver everything queued now: one hop of delay. False if nothing was and no
 	/// timer runs.
 	pub fn round(&mut self) -> bool {
+		self.net.flush();
 		let mut ready = self.net.ready();
 		if ready.is_empty() && !self.net.tick() && self.net.ready().is_empty() {
 			return false;
