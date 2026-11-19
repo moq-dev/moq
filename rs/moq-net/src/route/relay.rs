@@ -2106,7 +2106,7 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 	/// `ended`, at no newer than `epoch`, at every path a copy is presented at: at or below
 	/// the claim's own prefix, lowered by as many segments. Returns the broadcasts where
 	/// any stands. `lost` are the claims the same message lost, each with what it was a
-	/// copy of and its epoch.
+	/// copy of and its epoch: a copy among them ends with the claim, held back or not.
 	fn withdraw(
 		&mut self,
 		broadcast: &Broadcast<I>,
@@ -2123,6 +2123,9 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 		let own = path.head(base).expect("a head no deeper than the path");
 		// A copy a neighbour gives is this node's own claim there, unless already held.
 		let mut paths: BTreeSet<Path> = below(&self.claimants, &own).map(|(path, _)| path.clone()).collect();
+		// A copy this message lost has no claimant left to find it by.
+		let lost_at = (lost.iter()).filter(|((at, lost), ..)| lost == instance && super::prefix::within(at, &own));
+		paths.extend(lost_at.map(|((at, _), ..)| at.clone()));
 		paths.extend([own, path.clone()]);
 		self.count(paths.len());
 		let mut held = Vec::new();
@@ -2130,6 +2133,12 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			let of = (announcer, (at.parts().count() - base) as u64);
 			let copy = |by: Of, claim: &Claim<A>| by == of && claim.item.epoch() <= epoch;
 			let here = (at, instance.clone());
+			// The reader there showed a copy, a claim that stands, or one that went with this
+			// end: a lost claim that was no copy of the ended one waits out the debounce.
+			let other =
+				|(at, by, at_epoch): &(Broadcast<I>, Of, u64)| *at == here && !(*by == of && *at_epoch <= epoch);
+			let lost_copy =
+				|(at, by, at_epoch): &(Broadcast<I>, Of, u64)| *at == here && *by == of && *at_epoch <= epoch;
 			let origins: BTreeSet<NodeId> = (self.claimants.get(&here.0).and_then(|claims| claims.get(instance)))
 				.into_iter()
 				.flatten()
@@ -2145,6 +2154,11 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 				.collect();
 			self.count(origins.len() + peers.len());
 			if origins.is_empty() && peers.is_empty() {
+				// Nothing left to hold back, but the copy lost here ends with its claim.
+				if lost.iter().any(lost_copy) && !lost.iter().any(other) {
+					self.ended.insert(here.clone());
+					self.dirty.insert(here);
+				}
 				continue;
 			}
 			let record = self.withdrawn.entry(here.clone()).or_default();
@@ -2156,10 +2170,6 @@ impl<N: Key, I: Ord + Clone + fmt::Debug, A: Item> Router<N, I, A> {
 			record.epoch = record.epoch.max(epoch);
 			record.origins.extend(origins);
 			record.peers.extend(peers);
-			// The reader there showed a copy, a claim that stands, or one that went with this
-			// end: a lost claim that was no copy of the ended one waits out the debounce.
-			let other =
-				|(at, by, at_epoch): &(Broadcast<I>, Of, u64)| *at == here && !(*by == of && *at_epoch <= epoch);
 			if !lost.iter().any(other) {
 				self.ended.insert(here.clone());
 			}
@@ -4242,6 +4252,35 @@ mod tests {
 
 		let changes = vec![((p("live"), 7), Change::Ended), ((p("live/hd"), 7), Change::Lost)];
 		router.recv(2, claims(2, changes, 2)).unwrap();
+		assert!(!router.shown().contains_key(&(7, p("live/hd"))), "ended, not lost");
+	}
+
+	/// As [`Self::a_copy_lost_beside_its_ended_claim_ends`], with no other holder of the
+	/// copy: nothing is left to hold back, and the reader still ends.
+	#[test]
+	fn a_copy_lost_beside_its_ended_claim_ends_with_no_other_holder() {
+		let mut router = Router::<usize, u64, Run>::new(node(1), debounce(HOP));
+		open(&mut router, 2, Role::Routing(node(2)));
+		router.recv(2, route(2, 2, 1)).unwrap();
+		let live = |path: &str, above: u64| {
+			let Change::Live(claim) = chained(vec![9, 2]) else {
+				unreachable!("a live claim");
+			};
+			let item = Run { epoch: 0, above };
+			((p(path), 7), Change::Live(Claim { item, ..claim }))
+		};
+		let claims = |changes, floor: Rev| Msg::Claims {
+			origin: node(2),
+			changes,
+			floor,
+		};
+		router
+			.recv(2, claims(vec![live("live", 0), live("live/hd", 1)], 1))
+			.unwrap();
+		assert!(router.shown().contains_key(&(7, p("live/hd"))));
+
+		let changes = vec![((p("live"), 7), Change::Ended), ((p("live/hd"), 7), Change::Lost)];
+		router.recv(2, claims(changes, 2)).unwrap();
 		assert!(!router.shown().contains_key(&(7, p("live/hd"))), "ended, not lost");
 	}
 
