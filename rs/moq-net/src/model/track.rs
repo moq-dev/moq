@@ -23,7 +23,7 @@ use super::record::{Pending, Record, Report};
 use crate::ledger::{self, Ledger};
 
 pub(crate) use super::subscription::Resolved;
-use super::subscription::{Accounted, Containing, Cover, Holdings, Unplaced, Window};
+use super::subscription::{Accounted, Containing, Cover, Holdings, Unplaced, Window, minus};
 pub use super::subscription::{Anchor, Delay, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
@@ -8089,8 +8089,8 @@ enum Servable {
 /// `cap`, with the reader's index of the live groups inside that cover.
 ///
 /// Built again whenever the window or cap moves, which a time end does on each group. The
-/// snapshot is a pointer clone, and the index is kept while the cover is unchanged
-/// (pointer-equal), so a move of only the cap rebuilds nothing.
+/// snapshot is a pointer clone, and the index carries over: a move of only the cap changes
+/// nothing in it, and a move of the cover costs the runs that moved.
 struct Several {
 	groups: Cover,
 	cap: Option<u64>,
@@ -8115,6 +8115,9 @@ impl PartialEq for Several {
 /// One index per track searched: a group's expiry that moved to a replacement copy (see
 /// [`GroupExpiry::for_track`]) searches its reader's servable on that copy's track, whose
 /// arrival order and stamps are its own.
+///
+/// Each index is for the cover it last searched: a search under an edited cover moves only
+/// the runs the edit moved, so a SUBSCRIBE_UPDATE costs its own ranges, never the cache.
 #[derive(Default)]
 struct Live(Mutex<Vec<Indexed>>);
 
@@ -8122,6 +8125,8 @@ struct Indexed {
 	/// The track indexed, by its cache account. Held weakly, so a track that went away
 	/// leaves an entry another track's can't be mistaken for.
 	track: Weak<cache::Track>,
+	/// The cover the entries were taken in for.
+	cover: Cover,
 	/// How far into the arrival order this has taken in, as an absolute index.
 	taken: usize,
 	/// The stamp of each live group inside the cover, by key, as it arrived.
@@ -8138,8 +8143,11 @@ impl Indexed {
 		std::ptr::eq(self.track.as_ptr(), Arc::as_ptr(&state.cache))
 	}
 
-	/// Take in what arrived since the last call.
+	/// Take in what arrived since the last call, under `groups`.
 	fn catch_up(&mut self, state: &TrackState, groups: &Cover) {
+		if self.cover != *groups {
+			self.recover(state, groups);
+		}
 		for entry in state.arrivals_from(self.taken) {
 			if groups.contains(entry.key) {
 				self.groups.insert(entry.key, entry.stamp);
@@ -8150,6 +8158,31 @@ impl Indexed {
 		// and a prune costs each entry it drops one lookup.
 		if self.groups.len() > 2 * state.visible.len().max(LIVE_BATCH) {
 			self.groups.retain(|key, stamp| current(state, *key, *stamp).is_some());
+		}
+	}
+
+	/// Move the entries to `groups` from the cover they were taken in for: only where the
+	/// two differ, which for an edited copy costs the runs the edit moved and the live groups
+	/// in them. A group not yet taken in from the arrival order still is, as an entry again.
+	fn recover(&mut self, state: &TrackState, groups: &Cover) {
+		let old = std::mem::replace(&mut self.cover, groups.clone());
+		for span in groups.moved(&old) {
+			let (lo, hi) = (*span.start(), *span.end());
+			for run in old.within(lo, hi) {
+				for lost in minus(run, groups) {
+					let keys: Vec<u64> = self.groups.range(lost).map(|(key, _)| *key).collect();
+					for key in keys {
+						self.groups.remove(&key);
+					}
+				}
+			}
+			for run in groups.within(lo, hi) {
+				for gained in minus(run, &old) {
+					for (key, slot) in state.live(gained) {
+						self.groups.insert(*key, slot.stamp);
+					}
+				}
+			}
 		}
 	}
 }
@@ -8172,6 +8205,7 @@ impl Live {
 				indexes.retain(|indexed| indexed.track.strong_count() > 0);
 				indexes.push(Indexed {
 					track: Arc::downgrade(&state.cache),
+					cover: Cover::default(),
 					taken: 0,
 					groups: BTreeMap::new(),
 				});
@@ -8265,18 +8299,18 @@ impl Servable {
 		}
 	}
 
-	/// The groups `window` reads. `previous`, what the same reader was served before, lends
-	/// its index of the live groups while the cover is unchanged.
-	fn of(window: &Window, previous: &Self) -> Self {
+	/// The groups `window` reads, searched through `live`, the reader's index of the live
+	/// groups, which follows the cover it is searched under.
+	fn of(window: &Window, live: &Arc<Live>) -> Self {
 		match window.groups() {
 			None => Self::ALL,
-			Some(groups) => Self::covering(groups.clone(), None, previous),
+			Some(groups) => Self::covering(groups.clone(), None, live),
 		}
 	}
 
 	/// The groups in `groups` below the exclusive `cap`. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
-	fn covering(groups: Cover, cap: Option<u64>, previous: &Self) -> Self {
+	fn covering(groups: Cover, cap: Option<u64>, live: &Arc<Live>) -> Self {
 		let last = match cap {
 			Some(cap) => match cap.checked_sub(1) {
 				Some(last) => last,
@@ -8297,11 +8331,11 @@ impl Servable {
 				end: (*first.end()).min(last).checked_add(1),
 			};
 		}
-		let live = match previous {
-			Self::Runs(several) if several.groups == groups => several.live.clone(),
-			_ => Arc::default(),
-		};
-		Self::Runs(Arc::new(Several { groups, cap, live }))
+		Self::Runs(Arc::new(Several {
+			groups,
+			cap,
+			live: live.clone(),
+		}))
 	}
 
 	/// These groups below the exclusive `cap`.
@@ -8322,7 +8356,7 @@ impl Servable {
 			}
 			Self::Runs(several) => {
 				let cap = several.cap.map_or(cap, |own| own.min(cap));
-				Self::covering(several.groups.clone(), Some(cap), self)
+				Self::covering(several.groups.clone(), Some(cap), &several.live)
 			}
 		}
 	}
@@ -8394,6 +8428,9 @@ struct Cursor {
 	/// measures drift against the same groups after the cap or ranges move, and with its
 	/// [`Control`]s, which republish it when they replace the ranges.
 	published: kio::Producer<Published>,
+	/// This cursor's index of the live groups its servable window covers, kept across every
+	/// move of the window, so an edit to the ranges costs the runs it moved.
+	live: Arc<Live>,
 	/// Groups the drift budget skipped since the count was last drained. Accumulated
 	/// here rather than metered in place because the stats scope lives on the owning
 	/// [`Subscriber`], which drains this after every read.
@@ -8774,7 +8811,8 @@ impl Cursor {
 			};
 			(filter, state.cache.clone())
 		};
-		let published = Published::new(Servable::of(&filter.window, &Servable::NONE), filter.resolved, None);
+		let live = Arc::<Live>::default();
+		let published = Published::new(Servable::of(&filter.window, &live), filter.resolved, None);
 		Self {
 			state,
 			cache,
@@ -8788,6 +8826,7 @@ impl Cursor {
 			// Uncapped, the servable groups are the window's.
 			servable: published.servable.clone(),
 			published: kio::Producer::new(published),
+			live,
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
 			record: Record::default(),
@@ -8876,7 +8915,7 @@ impl Cursor {
 	fn update_servable(&mut self) {
 		// A moved window or cap notifies nothing this cursor parked on.
 		idle::Idle::disarm(&mut self.idle);
-		let runs = Servable::of(&self.filter.window, &self.published.read().runs);
+		let runs = Servable::of(&self.filter.window, &self.live);
 		let (revision, cap) = (self.filter.resolved, self.end_key);
 		self.servable = runs.below(cap);
 		let next = |current: &Published| {
@@ -10176,7 +10215,7 @@ impl Republish {
 			return;
 		};
 		drop(state);
-		let runs = Servable::of(&window, &Servable::NONE);
+		let runs = Servable::of(&window, &Arc::default());
 		if let Ok(mut current) = published.write()
 			&& current.revision < revision
 		{
@@ -17374,7 +17413,7 @@ mod test {
 	/// A search over a servable window of several runs, through the reader's index of the
 	/// live groups, finds what a scan of every live group would, in either direction, as
 	/// groups arrive, start, abort, leave the cache, or arrive again between searches that
-	/// keep the same index, and as the window is edited. Each window is searched on two tracks, as a
+	/// keep the same index, and as the window is edited or replaced. Each window is searched on two tracks, as a
 	/// group's expiry that moved to a replacement copy searches its reader's.
 	#[test]
 	fn live_index_searches_match_a_scan_of_every_live_group() {
@@ -17407,6 +17446,7 @@ mod test {
 			let mut layer = Vec::new();
 			let mut groups = [Vec::new(), Vec::new()];
 			let mut servable = Servable::NONE;
+			let live = Arc::<Live>::default();
 			for step in 0..30 {
 				let key = next(KEYS);
 				let track = next(2) as usize;
@@ -17443,8 +17483,12 @@ mod test {
 						for run in &layer {
 							cover.add(run.clone(), 1);
 						}
+					} else if next(8) == 0 {
+						// Ranges replaced whole: a cover of another lineage.
+						layer.clear();
+						cover = Cover::new(runs(8));
 					}
-					servable = Servable::covering(cover.clone(), cap, &servable);
+					servable = Servable::covering(cover.clone(), cap, &live);
 				}
 				for (track, producer) in producers.iter().enumerate() {
 					let state = producer.state.read();
@@ -17483,7 +17527,7 @@ mod test {
 			.map(|key| producer.create_group(group::Info { start: key }).unwrap())
 			.collect();
 		let runs = Cover::new([0..=999, 1001..=u64::MAX]);
-		let servable = Servable::covering(runs, None, &Servable::NONE);
+		let servable = Servable::covering(runs, None, &Arc::default());
 		let Servable::Runs(several) = &servable else {
 			panic!("several runs");
 		};
@@ -17550,7 +17594,7 @@ mod test {
 			// The runs counted once, and again with the first counted twice.
 			let covers = [Cover::new(runs()), Cover::new(runs().chain(runs().take(1)))];
 			for groups in covers {
-				let servable = Servable::covering(groups, None, &Servable::NONE);
+				let servable = Servable::covering(groups, None, &Arc::default());
 				if let [(first, last)] = bounds {
 					assert!(
 						servable
