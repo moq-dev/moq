@@ -265,3 +265,22 @@ test("a loss past a declared skip reads the end ahead of the gap", async () => {
 		await reader.done;
 	}
 });
+
+// An empty group says nothing, so one between a declared end and the media resuming leaves the end
+// declared.
+test("an empty group leaves a declared end pending", async () => {
+	const track = micro();
+	const reader = collect(track.subscribe({ delay: { max: Duration.millis(30_000) } }), DELAY);
+	const first = track.appendGroup(Time.Timestamp.fromMicros(0));
+	frame(first, 0);
+	first.finishAt(20_000n);
+	track.appendGroup(Time.Timestamp.fromMicros(20_000)).finish();
+	const resumed = track.appendGroup(Time.Timestamp.fromMicros(1_000_000));
+	frame(resumed, 1_000_000);
+	resumed.finish();
+	track.finish();
+	track.close();
+	await reader.done;
+	expect(reader.items).toEqual(["0", "end 20000", "1000000"]);
+	reader.consumer.close();
+});

@@ -1188,9 +1188,10 @@ export class Consumer {
 				const seq = head.consumer.start;
 				// The group after a declared end has started: one starting at the end continues the media,
 				// and a later one resumes it after a pause the end declared. A loss that could have continued
-				// it already dropped it, and one past it already read it.
-				const declared = this.#ending;
-				this.#ending = undefined;
+				// it already dropped it, and one past it already read it. An empty group says nothing, so the
+				// end stays pending past it.
+				const declared = head.empty ? undefined : this.#ending;
+				if (!head.empty) this.#ending = undefined;
 				if (declared && !this.#lost && !ptsContiguous(declared.end, keyMicros(seq, declared.scale))) {
 					return this.#declare(declared);
 				}
@@ -1250,7 +1251,8 @@ export class Consumer {
 					}
 					// Media ending whole stops at its end unless the next group continues it, which is due
 					// once the media left past its newest frame has played since that landed.
-					this.#ending = undefined;
+					// Only media declares an end; a group with none leaves an end still pending.
+					if (head.media) this.#ending = undefined;
 					if (declared !== undefined && scale !== undefined && this.#marked !== seq) {
 						const left = Duration.micros(Math.max(0, declared - (head.newest ?? declared)));
 						const since = (head.landed ?? now()).saturatingAdd(left);

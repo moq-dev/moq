@@ -763,8 +763,8 @@ impl<F: Container> Consumer<F> {
 				// The group after a declared end shows where it starts with its first media frame:
 				// one starting at the end continues the media, and a later one resumes it after a
 				// pause the end declared, read ahead of any gap a loss after it left. Nothing of the
-				// group is read before that. A marker group with no media says so itself, and an
-				// empty group says nothing.
+				// group is read before that. A marker, such as an audio terminal opening the group ahead
+				// of its drain packets, says so itself, and an empty group says nothing.
 				let undecided = match &self.declared {
 					Some(_) => {
 						let polled = group.poll_min_timestamp(waiter, &self.format, true);
@@ -774,6 +774,11 @@ impl<F: Container> Consumer<F> {
 								if !pts_contiguous(time(declared.end), first) {
 									return Poll::Ready(self.declare(declared));
 								}
+								false
+							}
+							// A marker reached ahead of any media declares the stop itself, read at once.
+							None if group.ready() => {
+								self.declared = None;
 								false
 							}
 							None if polled.is_pending() => true,
@@ -908,11 +913,15 @@ impl<F: Container> Consumer<F> {
 							.map(|(end, newest)| end.saturating_sub(newest))
 							.unwrap_or_default();
 						let since = group.landed.unwrap_or_else(kio::clock::now);
-						self.declared = declared.filter(|_| self.marked != Some(seq)).map(|end| Declared {
-							group: seq,
-							end,
-							since: since.checked_add(left).unwrap_or(since),
-						});
+						// Only media declares an end; a group with none, such as an empty one, says nothing
+						// and leaves an end still pending.
+						if matches!(group.content, Content::Media) {
+							self.declared = declared.filter(|_| self.marked != Some(seq)).map(|end| Declared {
+								group: seq,
+								end,
+								since: since.checked_add(left).unwrap_or(since),
+							});
+						}
 						self.pending.pop_front();
 						self.current += 1;
 						self.note_group_edge();
@@ -1106,7 +1115,8 @@ impl<F: Container> Consumer<F> {
 				&& !(finished && self.pending.is_empty())
 			{
 				let expires = declared.since.checked_add(self.max_delay);
-				let due = self.playhead.as_ref().and_then(|playhead| playhead.due(declared.end));
+				let schedule = self.playhead.as_ref().map(|playhead| playhead.schedule());
+				let due = schedule.and_then(|schedule| schedule.due(declared.end));
 				let now = kio::clock::now();
 				if expires.is_some_and(|at| at <= now) || due.is_some_and(|at| at <= now) {
 					let declared = self.declared.take().unwrap();
@@ -1119,6 +1129,12 @@ impl<F: Container> Consumer<F> {
 						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
 					timer.as_mut().reset(wake);
 					let _ = waiter.poll_future(timer.as_mut());
+				}
+				// A clock that anchors or jumps moves when the end is due.
+				if let Some((playhead, schedule)) = self.playhead.as_ref().zip(schedule)
+					&& playhead.poll_changed(waiter, schedule).is_ready()
+				{
+					continue;
 				}
 			}
 
@@ -3390,6 +3406,55 @@ mod tests {
 			items(&mut reader).await,
 			["0", "end 25000", "10000", "20000", "30000", "1000000"]
 		);
+	}
+
+	/// An audio terminal marker that lands ahead of its drain packets, after a group ended whole,
+	/// reads as the end at once rather than waiting on the media it opens.
+	#[tokio::test(start_paused = true)]
+	async fn a_terminal_marker_ahead_of_its_packets_reads_at_once() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut reader = audio_reader(&track, Delay::default().with_max(Duration::from_secs(2)));
+		write_whole(&mut track, &[0], 10_000);
+		let mut terminal = track.append_group(ts(10_000)).unwrap();
+		write_marker(&mut terminal, ts(25_000));
+		let waiter = kio::Waiter::noop();
+		assert_eq!(drain_with(&mut reader, &waiter), ["frame 0", "end"]);
+		drop(terminal);
+	}
+
+	/// An empty group says nothing, so one between a whole end and the media resuming a second
+	/// later leaves the end declared.
+	#[kio::test]
+	async fn an_empty_group_leaves_an_end_declared() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut reader = audio_reader(&track, Delay::default().with_max(Duration::from_secs(2)));
+		write_whole(&mut track, &[0], 10_000);
+		track.append_group(ts(10_000)).unwrap().finish().unwrap();
+		write_whole(&mut track, &[1_000_000], 1_020_000);
+		let _track = track.finish().unwrap();
+		assert_eq!(items(&mut reader).await, ["0", "end 10000", "1000000"]);
+	}
+
+	/// A whole end with no group after it and no max delay to wait out reads once the playout clock
+	/// reaches it, even when the clock anchors only after the reader started waiting.
+	#[tokio::test(start_paused = true)]
+	async fn a_clock_anchored_late_still_reads_a_declared_end() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let clock = crate::sync::Producer::new(Duration::ZERO);
+		let audio = clock.track(crate::container::Kind::Audio);
+		let mut reader = audio_reader(&track, Delay::default().with_max(None));
+		reader.set_playhead(clock.consume());
+		write_whole(&mut track, &[0], 10_000);
+		let woken = Arc::new(Woken::default());
+		let waiter = woken.waiter();
+		assert_eq!(drain_with(&mut reader, &waiter), ["frame 0"]);
+		woken.take();
+		// The clock anchors now, so the end is due 10 ms on.
+		audio.received(ts(0), kio::clock::now());
+		assert!(woken.take(), "anchoring the clock did not wake the reader");
+		assert!(drain_with(&mut reader, &waiter).is_empty());
+		tokio::time::advance(Duration::from_millis(10)).await;
+		assert_eq!(drain_with(&mut reader, &waiter), ["end"]);
 	}
 
 	/// Missing media reads as a gap; only the publisher can declare an end.
